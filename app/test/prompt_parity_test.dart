@@ -6,6 +6,7 @@ import 'package:bond_inbox/services/context/context_retriever.dart';
 import 'package:bond_inbox/services/llm/attachment_digest_task.dart';
 import 'package:bond_inbox/services/llm/context_brief_task.dart';
 import 'package:bond_inbox/services/llm/context_digest_task.dart';
+import 'package:bond_inbox/services/llm/context_select_task.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
@@ -39,6 +40,7 @@ void main() {
   const attachmentDigest = AttachmentDigestTask();
   const contextDigest = ContextDigestTask();
   const contextBrief = ContextBriefTask();
+  const contextSelect = ContextSelectTask();
 
   final emailMessage = Message(
     id: 'm1',
@@ -75,6 +77,22 @@ void main() {
     displayName: 'atlas',
     claudeMd: '# Atlas\n\nReplies here stay short.\n',
     fileMap: 'analysis/pricing.md · What the renewal costs · How much?',
+    now: now,
+  );
+
+  final contextSelectInput = ContextSelectInput(
+    message: 'Renewal quote\nWhat does the renewal come to?',
+    pointers: const [(topic: 'renewal rates', path: 'analysis/pricing.md')],
+    skills: const [
+      (name: 'vendor-replies', description: 'Quote a renewal rate.'),
+    ],
+    candidates: const [
+      (
+        path: 'analysis/pricing.md',
+        locator: 'Pricing > Q4 rates',
+        preview: 'The renewal is 2,600 a month.',
+      ),
+    ],
     now: now,
   );
 
@@ -255,6 +273,14 @@ void main() {
       final briefBefore = contextBrief.systemPrompt;
       contextBrief.buildUserMessage(contextBriefInput);
       expect(identical(contextBrief.systemPrompt, briefBefore), isTrue);
+
+      // And the third, which is the one whose input changes on every single
+      // draft: a different message, a different page of passages, a different
+      // set of skills. All of it in the user message, so one prefix serves
+      // every directory-fed draft the app ever writes.
+      final selectBefore = contextSelect.systemPrompt;
+      contextSelect.buildUserMessage(contextSelectInput);
+      expect(identical(contextSelect.systemPrompt, selectBefore), isTrue);
     });
 
     test('the attachment digest hands back the identical string across both',
@@ -375,6 +401,16 @@ void main() {
       expect(prompt, isNot(contains('chat')));
     });
 
+    test('the section-pick prompt does not name a channel at all', () {
+      // The STRICT form. It chooses between the owner's own FILES; which
+      // connector the message it is choosing for arrived through cannot make
+      // one section of a project more worth reading than another.
+      final prompt = contextSelect.systemPrompt.toLowerCase();
+      expect(prompt, isNot(contains('email')));
+      expect(prompt, isNot(contains('mail')));
+      expect(prompt, isNot(contains('chat')));
+    });
+
     test('no prompt names a connector', () {
       // "teams" is not on this list on purpose: the extraction prompt asks for
       // "companies, schools, teams, or vendors", which is a kind of
@@ -388,6 +424,7 @@ void main() {
         attachmentDigest.systemPrompt,
         contextDigest.systemPrompt,
         contextBrief.systemPrompt,
+        contextSelect.systemPrompt,
       ]) {
         expect(prompt.toLowerCase(), isNot(contains('microsoft')));
         expect(prompt.toLowerCase(), isNot(contains('outlook')));

@@ -278,6 +278,158 @@ Reach for this before quoting a Halcyon Freight lane.
     }
   });
 
+  group('contextSection', () {
+    /// A section with a nested one under it, a sibling that is not, and a
+    /// fenced heading that is neither.
+    const manual = """
+Rates are reviewed each quarter.
+
+## Pricing
+
+The desk publishes one sheet.
+
+### Q4 rates
+
+Standard freight is 41 credits per pallet.
+
+## Terms
+
+Net thirty.
+""";
+
+    test('a section carries the sections nested under it', () {
+      final section = contextSection('docs/pricing.md', manual, 'Pricing');
+
+      // The whole of `## Pricing` is `## Pricing` AND its `### Q4 rates`:
+      // the question the caller is asking is "what does this section say",
+      // and a section stops at its next SIBLING.
+      expect(section, isNotNull);
+      expect(section, contains('The desk publishes one sheet.'));
+      expect(section, contains('### Q4 rates'));
+      expect(section, contains('41 credits per pallet'));
+      // And stops there. `## Terms` is the next section, not part of this one.
+      expect(section, isNot(contains('Net thirty')));
+    });
+
+    test('a nested section is just itself', () {
+      final section =
+          contextSection('docs/pricing.md', manual, 'Pricing > Q4 rates');
+
+      expect(section, contains('41 credits per pallet'));
+      expect(section, isNot(contains('The desk publishes one sheet.')));
+      expect(section, isNot(contains('Net thirty')));
+    });
+
+    test('a part suffix names the whole section it is part of', () {
+      // `Pricing · part 2` is one passage of a section; the section is what
+      // was asked for.
+      expect(
+        contextSection('docs/pricing.md', manual, 'Pricing · part 2'),
+        contextSection('docs/pricing.md', manual, 'Pricing'),
+      );
+    });
+
+    test('a heading inside a code fence is not a section', () {
+      const fenced = """
+## Setup
+
+```sh
+# Install
+brew install ripgrep
+```
+
+Then run it.
+""";
+
+      expect(contextSection('README.md', fenced, 'Install'), isNull);
+      final setup = contextSection('README.md', fenced, 'Setup');
+      expect(setup, contains('brew install ripgrep'));
+      expect(setup, contains('Then run it.'));
+    });
+
+    test('an empty locator is the whole file', () {
+      expect(contextSection('docs/pricing.md', manual, ''), manual);
+    });
+
+    test('a breadcrumb this file does not have answers null', () {
+      expect(contextSection('docs/pricing.md', manual, 'Renewals'), isNull);
+      // And a guess about a section that only LOOKS like one is still null.
+      expect(contextSection('docs/pricing.md', manual, 'Q4 rates'), isNull);
+    });
+
+    test('a line window reaches two windows on', () {
+      final code = [for (var i = 1; i <= 200; i++) 'line $i'].join('\n');
+
+      final section = contextSection('lib/rate.dart', code, 'lines 61–120');
+
+      // A function rarely ends where the sixty-line window it was cut at
+      // did, so the reader gets the next one too.
+      expect(section, isNotNull);
+      expect(section!.split('\n').first, 'line 61');
+      expect(section.split('\n').last, 'line 180');
+      // The hyphen a model types back is the same range.
+      expect(contextSection('lib/rate.dart', code, 'lines 61-120'), section);
+    });
+
+    test('a line window that runs off the end stops at the end', () {
+      final code = [for (var i = 1; i <= 80; i++) 'line $i'].join('\n');
+
+      final section = contextSection('lib/rate.dart', code, 'lines 61–80');
+
+      expect(section!.split('\n').last, 'line 80');
+      // Past the file entirely is nothing, not an empty string.
+      expect(contextSection('lib/rate.dart', code, 'lines 900–960'), isNull);
+      expect(contextSection('lib/rate.dart', code, 'lines wat'), isNull);
+    });
+
+    test('every other locator is the whole text, for the caller to clamp', () {
+      const notes = 'Devi owns the sheet.\n\nThe rung is settled.';
+
+      for (final locator in ['part 2', 'digest', '']) {
+        expect(contextSection('notes.txt', notes, locator), notes,
+            reason: locator);
+      }
+    });
+
+    test("a chunker's own locators all read back", () {
+      // The property that matters: every locator this file writes is one
+      // this function can find again.
+      for (final chunk in chunkContextText('docs/pricing.md', priceSheet)) {
+        expect(
+          contextSection('docs/pricing.md', priceSheet, chunk.locator),
+          isNotNull,
+          reason: chunk.locator,
+        );
+      }
+    });
+
+    test("a long preamble's own locators read back too", () {
+      // A file whose intro runs past the prose packer's thousand characters
+      // before its first heading. The preamble has no breadcrumb, so the
+      // chunker locates its passages `part 1` and `part 2` with no section
+      // in front — and those are exactly the locators the selector can name.
+      final intro = List.filled(
+        30,
+        'The desk reviews every rate before the quarter closes, and the '
+                'sheet below is what it publishes.',
+      ).join(' ');
+      final long = '$intro\n\n## Pricing\n\nStandard freight is 41 credits.\n';
+
+      final chunks = chunkContextText('docs/intro.md', long);
+      expect(
+        chunks.map((chunk) => chunk.locator),
+        containsAll(<String>['part 1', 'part 2']),
+      );
+      for (final chunk in chunks) {
+        expect(
+          contextSection('docs/intro.md', long, chunk.locator),
+          isNotNull,
+          reason: chunk.locator,
+        );
+      }
+    });
+  });
+
   test('nothing to say is no passages', () {
     // An empty passage costs an embedding and matches everything weakly.
     for (final path in ['notes.md', 'lib/rate.dart', 'notes.txt']) {

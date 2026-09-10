@@ -167,6 +167,25 @@ void main() {
     expect(find.text(folder.path), findsOneWidget);
   });
 
+  testWidgets('flipping the section pick switch writes the preference',
+      (tester) async {
+    // The one control in this section that is about the LIBRARY rather than
+    // about a folder, so this is the only place its wiring is checked end to
+    // end: the switch, the notifier, and the row in `app_prefs`.
+    await pumpInbox(tester);
+    await openSettings(tester);
+    await expandContext(tester);
+
+    final control = find.byKey(ContextDirectoriesSection.selectExpandKey);
+    await tester.ensureVisible(control);
+    await tester.pump();
+    await tester.tap(control);
+    await tester.pump();
+    await tester.pump();
+
+    expect(await store.getPref(contextSelectExpandKey), 'false');
+  });
+
   testWidgets('the two-tap Remove takes the row away', (tester) async {
     final id = await context.registerDirectory(
       path: folder.path,

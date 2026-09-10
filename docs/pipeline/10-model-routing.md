@@ -23,7 +23,8 @@ llama-server ignores the model name field, but MLX-style runtimes route on it
 
 Assignment: triage, extraction, the attachment digest
 (`attachment_digest`), the directory file digest (`context_file_digest`), the
-directory brief (`context_brief`), and storyline membership-confirm get the
+directory brief (`context_brief`), the directory section pick
+(`context_select`), and storyline membership-confirm get the
 fast client; storyline naming (`storyline_name`), storyline refresh
 (`storyline_refresh`), storyline recap (`storyline_recap`), reply decision, and
 drafting get the 27B. Changing which slot serves a task is one line in
@@ -98,7 +99,7 @@ raw interpolation of message content into a prompt, ever.
 
 ## Task plumbing
 
-All eight chat tasks implement `JsonTask` (`app/lib/services/llm/json_task.dart`):
+Every chat task implements `JsonTask` (`app/lib/services/llm/json_task.dart`):
 a schema-constrained call whose defaults are temperature 0.2 / maxTokens 512,
 overridden per call site (see each stage's page). Decoding is
 grammar-constrained; `make bench-verify` asserts the server honours the

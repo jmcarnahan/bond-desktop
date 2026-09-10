@@ -60,6 +60,18 @@ class ContextDirectoriesSection extends StatefulWidget {
   /// string.
   final DateTime Function() now;
 
+  /// Whether a draft that reads one of these directories may spend one extra
+  /// fast call picking two sections to read in full first.
+  ///
+  /// A prop and no local state: the host watches the preference and rebuilds,
+  /// so what this switch shows is always what is stored rather than what was
+  /// last tapped.
+  final bool selectExpand;
+
+  /// Null hides the switch — a host that cannot write the preference must not
+  /// offer a control that does nothing.
+  final void Function(bool on)? onSelectExpandChanged;
+
   /// Whether the screen currently has this section open. The screen owns the
   /// open-set — see the [SettingsSection] doc — so this arrives as a prop.
   final bool expanded;
@@ -79,9 +91,13 @@ class ContextDirectoriesSection extends StatefulWidget {
     this.loading = false,
     this.error,
     this.onAdd,
+    this.selectExpand = true,
+    this.onSelectExpandChanged,
   });
 
   static const Key addKey = ValueKey('context-dirs-add');
+
+  static const Key selectExpandKey = ValueKey('context-dirs-select-expand');
 
   static ValueKey<String> rowKeyFor(String id) => ValueKey('context-dir-$id');
 
@@ -171,6 +187,24 @@ class _ContextDirectoriesSectionState extends State<ContextDirectoriesSection> {
           'change shows up in the next suggestion.',
           style: BondType.caption.copyWith(color: BondColors.inkSecondary),
         ),
+        if (widget.onSelectExpandChanged case final onChanged?)
+          SwitchListTile(
+            key: ContextDirectoriesSection.selectExpandKey,
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: widget.selectExpand,
+            title: Text(
+              'Let the model pick two sections to read in full before '
+              'drafting',
+              style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+            ),
+            subtitle: Text(
+              'One extra fast call per suggestion that reads a directory. '
+              'Off, a reply sees only the nearest passages.',
+              style: BondType.caption,
+            ),
+            onChanged: onChanged,
+          ),
         if (error != null) ...[
           const SizedBox(height: BondSpacing.s12),
           InlineAlert(severity: InlineAlertSeverity.error, text: error),

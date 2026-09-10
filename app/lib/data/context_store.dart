@@ -454,6 +454,28 @@ class ContextStore {
     return [for (final row in rows) ContextFile.fromRow(row.data)];
   }
 
+  /// Just the skill files of one directory, in path order.
+  ///
+  /// [rulesFor]'s read and its reasoning: this runs on every draft that reads
+  /// a directory, and a registered project is tens of thousands of rows of
+  /// which a handful are skills. The predicate belongs where the rows are.
+  ///
+  /// Unlike [skillVectors] this asks for no embedding and skips no row that
+  /// has none. That is the point of it: the selector chooses a skill by the
+  /// sentence its author wrote about what it is FOR, and an embedding server
+  /// that is down must not be able to hide a project's own instructions from
+  /// the model that was going to follow them.
+  Future<List<ContextFile>> skillsFor(String dirId) async {
+    final rows = await db
+        .customSelect(
+          "SELECT * FROM context_files WHERE dir_id = ? AND kind = 'skill' "
+          'ORDER BY rel_path',
+          variables: _args([dirId]),
+        )
+        .get();
+    return [for (final row in rows) ContextFile.fromRow(row.data)];
+  }
+
   Future<ContextFile?> fileByPath(String dirId, String relPath) async {
     final rows = await db
         .customSelect(

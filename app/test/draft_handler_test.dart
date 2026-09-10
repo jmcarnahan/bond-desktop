@@ -948,6 +948,67 @@ void main() {
       expect(log.notes['consulted'], isNull);
     });
 
+    test('what the section pick did, and what it could not do, are noted',
+        () async {
+      await seedInbound();
+      final log = _Recorder();
+      // A pack that both read a section whole AND could not be asked about a
+      // second one. Both are the retriever's own report on the same pass, and
+      // the row a person reads afterwards has to carry each: one says what
+      // the reply was written from, the other says what did not happen.
+      final directories = FakeContextRetriever(
+        store,
+        ContextStore(db),
+        answer: const ContextPack(
+          directories: ['acme'],
+          briefs: [],
+          guidance: [],
+          excerpts: [
+            ContextExcerpt(
+              dirName: 'acme',
+              relPath: 'docs/pricing.md',
+              locator: 'Pricing',
+              modified: '2026-08-30',
+              text: 'Q4 rates hold at nine.',
+              fileId: 1,
+              dirId: 'd1',
+              expanded: true,
+            ),
+          ],
+          skills: [],
+          expanded: ['docs/pricing.md § Pricing'],
+          selectError: 'Exception: the fast server is down',
+        ),
+      );
+
+      await runOne(DraftHandler(
+        store,
+        FakeLlm([decision(), answer()]),
+        activityLog: log,
+        contextDirs: directories,
+      ));
+
+      expect(log.notes['expanded'], 1);
+      expect(log.notes['select_error'],
+          contains('the fast server is down'));
+    });
+
+    test('a pack that asked for nothing says nothing about it', () async {
+      await seedInbound();
+      final log = _Recorder();
+
+      await runOne(DraftHandler(
+        store,
+        FakeLlm([decision(), answer()]),
+        activityLog: log,
+        contextDirs: FakeContextRetriever(store, ContextStore(db),
+            answer: directoryPack()),
+      ));
+
+      expect(log.notes.containsKey('expanded'), isFalse);
+      expect(log.notes.containsKey('select_error'), isFalse);
+    });
+
     test('a retriever that throws costs the citations, not the reply',
         () async {
       await seedInbound();

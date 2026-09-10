@@ -1,6 +1,7 @@
 import 'package:bond_inbox/services/llm/attachment_digest_task.dart';
 import 'package:bond_inbox/services/llm/context_brief_task.dart';
 import 'package:bond_inbox/services/llm/context_digest_task.dart';
+import 'package:bond_inbox/services/llm/context_select_task.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
@@ -30,6 +31,7 @@ Set<String> taskSchemaNames() => {
       const AttachmentDigestTask().schemaName,
       const ContextDigestTask().schemaName,
       const ContextBriefTask().schemaName,
+      const ContextSelectTask().schemaName,
       const ConfirmMembershipTask().schemaName,
       const NameStorylineTask().schemaName,
       const RefineStorylineTask().schemaName,
@@ -76,6 +78,7 @@ void main() {
       'attachment_digest',
       'context_file_digest',
       'context_brief',
+      'context_select',
       'storyline_membership',
     });
     expect(idsOn(ModelSlot.prose), {

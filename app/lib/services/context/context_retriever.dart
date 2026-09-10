@@ -10,9 +10,14 @@ import '../../data/message_store.dart';
 import '../../models/context_models.dart';
 import '../attachments/attachment_retriever.dart' show replyToQueryVector;
 import '../conversation_state.dart' show stripReFw;
+import '../llm/context_select_task.dart';
 import '../llm/embeddings_client.dart';
+import '../llm/json_task.dart' show runTask;
+import '../llm/llm_client.dart';
 import '../search_fusion.dart';
 import 'claude_conventions.dart';
+import 'context_chunker.dart'
+    show contextSection, expandedSectionLines, parseLineLocator;
 
 /// Every number the directory retrieval depends on, in one place.
 ///
@@ -58,6 +63,33 @@ class ContextTuning {
 
   static const int skillBodyCap = 600;
   static const int ruleBodyCap = 400;
+
+  /// How much of ONE section the selector asked for reaches the prompt.
+  ///
+  /// Three thousand characters is a long `##` section of a design note or a
+  /// whole short file, and it is three times what a ranked passage gets — the
+  /// point of asking to read something whole is that a thousand characters of
+  /// it was not enough. Past this the model is being handed a document to
+  /// summarise instead of a section to quote.
+  static const int expandedSectionCap = 3000;
+
+  /// How many of them. The select task's own `maxRead`, restated here because
+  /// this is the number the excerpt fence was widened to hold — a test pins
+  /// the two together.
+  static const int maxExpanded = 2;
+
+  /// How many ranked passages there must be before a pack with no pointers is
+  /// worth a call.
+  ///
+  /// Under this the ranking has already shown the model nearly everything the
+  /// directory had to say, and a selector choosing two of five passages it
+  /// can see in full is spending a model call to reorder a short list. A pack
+  /// WITH pointers qualifies however short its ranking is — a pointer names a
+  /// file the ranking may never have reached — once the directory has
+  /// anything indexed at all. Before that there is nothing to read: the text
+  /// and the passages are written by the same pass, so a directory with no
+  /// passages has no section to hand back either.
+  static const int selectMinCandidates = 8;
 }
 
 /// One passage of one file in a registered directory, ready to go in front of
@@ -96,6 +128,12 @@ class ContextExcerpt {
   /// read to the end.
   final bool truncated;
 
+  /// This passage is a whole section the selector asked to read, not a chunk
+  /// the ranking kept. The render says so, because the difference matters to
+  /// a model deciding whether the absence of a number means the number is not
+  /// there: a ranked passage is an extract and a section is the section.
+  final bool expanded;
+
   const ContextExcerpt({
     required this.dirName,
     required this.relPath,
@@ -105,6 +143,7 @@ class ContextExcerpt {
     required this.fileId,
     required this.dirId,
     this.truncated = false,
+    this.expanded = false,
   });
 }
 
@@ -172,12 +211,25 @@ class ContextPack {
   /// draft was written under.
   final List<String> skills;
 
+  /// The sections the selector asked to read in full, as
+  /// `<rel path> § <locator>` — or just the path when it asked for a whole
+  /// file. What the activity row counts and the handback names; the passages
+  /// themselves are in [excerpts], at the front, flagged.
+  final List<String> expanded;
+
+  /// Why the section pick did not happen, or null. Read by the activity row
+  /// only: the pack it belongs to is the pack that would have been built
+  /// anyway, so this explains a missing improvement rather than a failure.
+  final String? selectError;
+
   const ContextPack({
     required this.directories,
     required this.briefs,
     required this.guidance,
     required this.excerpts,
     required this.skills,
+    this.expanded = const [],
+    this.selectError,
   });
 
   static const ContextPack empty = ContextPack(
@@ -217,7 +269,31 @@ class ContextRetriever {
   final ContextStore _context;
   final EmbeddingsClient _embeddings;
 
-  ContextRetriever(this._store, this._context, this._embeddings);
+  /// The fast slot, for the one call this class makes. Nullable because a
+  /// build without one is a legal build — every test that is about the
+  /// ranking wants a retriever with no model behind it, and the step below
+  /// simply does not run.
+  final LlmClient? _fastClient;
+
+  /// Whether the owner has left the section pick on. A closure and not a
+  /// value, on the house rule that `services/` never reaches into
+  /// `providers/`: the preference is READ at the moment a pack is built, so
+  /// flipping the switch does not have to rebuild this object or the worker
+  /// above it.
+  final bool Function() _selectExpand;
+
+  ContextRetriever(
+    this._store,
+    this._context,
+    this._embeddings, {
+    LlmClient? fastClient,
+    bool Function()? selectExpand,
+  })  :
+        // ignore: prefer_initializing_formals
+        _fastClient = fastClient,
+        _selectExpand = selectExpand ?? _alwaysOn;
+
+  static bool _alwaysOn() => true;
 
   /// Everything worth putting in front of the model about this message.
   ///
@@ -234,6 +310,19 @@ class ContextRetriever {
   /// one memoised closure and the message's card is embedded once. Null means
   /// "build it yourself". It is called only after the `LIMIT 1` guard below,
   /// so a room whose directories hold nothing indexed still costs no POST.
+  ///
+  /// **The last step may ask to read closer.** Once the directory has
+  /// anything indexed, and with a fast client, the preference on, and either
+  /// a brief that points at files or a page of ranked passages worth choosing
+  /// between, one call names up to two sections to read WHOLE; they go to the
+  /// front of the excerpts and the passages they already contain come out.
+  /// That call needs no vector of its own — it reads the first words of what
+  /// is already in hand — so a pack that got here on a named file alone, or
+  /// on a pointer with no vector behind it at all, can still expand one. The
+  /// nested notes and the matching rules are gathered AFTER it, so a section
+  /// the ranking never surfaced still arrives with the `CLAUDE.md` beside it
+  /// and the rule that governs its path. Any failure, or an empty answer,
+  /// leaves the pack exactly as this comment's paragraphs above built it.
   Future<ContextPack> packFor({
     required String source,
     required String conversationKey,
@@ -263,6 +352,17 @@ class ContextRetriever {
     final ruleGuidance = <ContextGuidance>[];
     final excerpts = <ContextExcerpt>[];
     final skills = <String>[];
+    // What every brief in scope says answers which kind of question, in scope
+    // order. The half of the selector's input that can name a file the
+    // ranking never reached.
+    final pointers = <({String topic, String path})>[];
+    final expanded = <String>[];
+    String? selectError;
+    // Every file row already read, by id, so the steps below share one read
+    // each. Declared up here rather than beside the ranking loop that fills
+    // it because the closer read runs on the path where that loop never ran
+    // at all, and the nested notes are looked up through this map.
+    final files = <int, ContextFile>{};
 
     /// The pack as it stands. Called at every exit, including the failure
     /// one: a directory whose brief was read and whose index then threw still
@@ -279,6 +379,8 @@ class ContextRetriever {
           ]),
           excerpts: List.unmodifiable(excerpts),
           skills: List.unmodifiable(skills),
+          expanded: List.unmodifiable(expanded),
+          selectError: selectError,
         );
 
     try {
@@ -324,6 +426,7 @@ class ContextRetriever {
           }
           continue;
         }
+        pointers.addAll(brief.pointers);
         if (brief.about.isNotEmpty || brief.keyFacts.isNotEmpty) {
           contributed.add(dir.id);
           briefs.add(ContextBriefLine(
@@ -394,11 +497,57 @@ class ContextRetriever {
         }
       }
 
+      /// The tail of the pack: the closer read, and then the notes and rules
+      /// that ride with whatever the excerpts ended up being.
+      ///
+      /// A closure because there are two ways into it. The ordinary one is
+      /// the end of this method, with the ranked list behind it; the other is
+      /// the exit just below, where there is no vector and so no ranking at
+      /// all — and a pack whose brief POINTS at a file still qualifies for
+      /// the closer read, because the selector needs no vector to choose a
+      /// path somebody already wrote down. The notes and the rules run AFTER
+      /// the select step in both, so a section pulled in from a pointer
+      /// brings its nested `CLAUDE.md` and the rule whose glob matches it,
+      /// exactly as a ranked passage does.
+      Future<void> lookCloser(List<ContextChunkHit> ordered) async {
+        // The one step that can ask for more, in a try of its OWN rather than
+        // under the one below. Everything above is already built and correct;
+        // a selector that fell over must cost this pack the closer read and
+        // nothing else, and the outer catch would hand back a pack that had
+        // never run the rules.
+        try {
+          await _selectAndExpand(
+            source: source,
+            replyToId: replyToId,
+            dirs: dirs,
+            dirIds: dirIds,
+            pointers: pointers,
+            ordered: ordered,
+            files: files,
+            excerpts: excerpts,
+            skills: skills,
+            skillGuidance: skillGuidance,
+            contributed: contributed,
+            expanded: expanded,
+          );
+        } catch (error) {
+          selectError = error.toString();
+        }
+        await _addNestedNotes(excerpts, files, nestedGuidance, contributed);
+        await _addRules(dirs, excerpts, ruleGuidance, contributed);
+      }
+
       // The embedding server is down, or refused the card. Degraded, never
       // thrown — and the skills go with the passages, because they are
       // matched against this very vector. A file the person NAMED still
       // reaches the pack, because finding it never needed the question.
-      if (query == null && consulted.isEmpty) return built();
+      // Not an exit before the closer read, though: the pointers are already
+      // in hand and the selector reads them without a vector, so a brief that
+      // names the right file can still have it read whole.
+      if (query == null && consulted.isEmpty) {
+        await lookCloser(const []);
+        return built();
+      }
 
       var vectorHits = query == null
           ? const <ContextChunkHit>[]
@@ -427,7 +576,7 @@ class ContextRetriever {
       }
 
       final keywordHits = await _keywordHits(source, replyToId, dirIds);
-      final ranked = _rank(
+      final ranking = _rank(
         vectorHits: vectorHits,
         keywordHits: keywordHits,
         consultFirst: consultFirst.toSet(),
@@ -435,9 +584,8 @@ class ContextRetriever {
         k: k,
       );
 
-      final files = <int, ContextFile>{};
       var spent = 0;
-      for (final hit in ranked) {
+      for (final hit in ranking.kept) {
         if (spent >= budgetChars) break;
         var file = files[hit.fileId];
         if (file == null) {
@@ -476,8 +624,7 @@ class ContextRetriever {
       if (query != null) {
         await _addSkills(dirIds, query, skills, skillGuidance, contributed);
       }
-      await _addNestedNotes(excerpts, files, nestedGuidance, contributed);
-      await _addRules(dirs, excerpts, ruleGuidance, contributed);
+      await lookCloser(ranking.ordered);
       return built();
     } catch (_) {
       // The handler above notes the failure; this one has no activity log and
@@ -584,7 +731,12 @@ class ContextRetriever {
   /// a file the user named is not trimmed out by a nearer one; then the
   /// per-file cap, so a fifty-chunk report is not the whole answer; then the
   /// take, which is the only step that knows how many passages were wanted.
-  static List<ContextChunkHit> _rank({
+  /// [kept] is what the prompt gets. [ordered] is the same ranking one step
+  /// earlier — every passage that cleared the floor, after the consulted
+  /// partition and BEFORE the per-file cap and the take — which is the page
+  /// the section pick chooses from: a file whose three best passages the cap
+  /// trimmed to one is exactly the file worth reading whole.
+  static ({List<ContextChunkHit> kept, List<ContextChunkHit> ordered}) _rank({
     required List<ContextChunkHit> vectorHits,
     required List<ContextChunkHit> keywordHits,
     required Set<int> consultFirst,
@@ -664,7 +816,7 @@ class ContextRetriever {
       kept.add(hit);
       if (kept.length == k) break;
     }
-    return kept;
+    return (kept: kept, ordered: ordered);
   }
 
   /// The skills whose descriptions are nearest this message, and their bodies.
@@ -701,21 +853,44 @@ class ContextRetriever {
     // second-nearest skill its place for a block nothing renders.
     for (final match in matches) {
       if (skills.length >= ContextTuning.maxSkills) break;
-      final text = await _context.fileText(match.file.id) ?? '';
-      // The FOLDER name, which is what a skill is invoked as — `skillOf`'s
-      // own rule. The fallback is the same segment read directly, for a row
-      // whose words the walk never stored.
-      final name = skillOf(match.file.relPath, text)?.name ??
-          _folderOf(match.file.relPath);
-      if (name.isEmpty) continue;
+      final block = await _skillBlock(match.file);
+      if (block == null) continue;
       contributed.add(match.file.dirId);
-      skills.add(name);
-      final description = match.file.description?.trim() ?? '';
-      final body = _clamp(
-        parseFrontmatter(text).body.trim(),
-        ContextTuning.skillBodyCap,
-      );
-      guidance.add(ContextGuidance(
+      skills.add(block.name);
+      guidance.add(block.guidance);
+    }
+  }
+
+  /// One skill file as the guidance fence reads it, and the name it is
+  /// invoked by.
+  ///
+  /// Shared by the two paths that can put a skill in a pack — the cosine
+  /// match above and the selector's own pick — so that a skill chosen by the
+  /// model and a skill chosen by the vector are rendered by the same code and
+  /// carry the same label.
+  ///
+  /// Null when the skill has no name to be called by. The name is resolved
+  /// BEFORE either caller spends one of its two slots, not after: a skill
+  /// filed at the root of a project has no folder above it, and one that took
+  /// a slot and then dropped out of it would cost the next skill its place
+  /// for a block nothing renders.
+  Future<({String name, ContextGuidance guidance})?> _skillBlock(
+    ContextFile file,
+  ) async {
+    final text = await _context.fileText(file.id) ?? '';
+    // The FOLDER name, which is what a skill is invoked as — `skillOf`'s own
+    // rule. The fallback is the same segment read directly, for a row whose
+    // words the walk never stored.
+    final name = skillOf(file.relPath, text)?.name ?? _folderOf(file.relPath);
+    if (name.isEmpty) return null;
+    final description = file.description?.trim() ?? '';
+    final body = _clamp(
+      parseFrontmatter(text).body.trim(),
+      ContextTuning.skillBodyCap,
+    );
+    return (
+      name: name,
+      guidance: ContextGuidance(
         label: 'SKILL $name',
         // Description first: it is the author's own sentence saying when this
         // applies, and a model reading the body without it is reading steps
@@ -724,8 +899,287 @@ class ContextRetriever {
           if (description.isNotEmpty) description,
           if (body.isNotEmpty) body,
         ].join('\n'),
+      ),
+    );
+  }
+
+  /// The look-closer step: one fast call that may name up to two sections to
+  /// read WHOLE and up to two skills to read at all.
+  ///
+  /// Six passages of a thousand characters can miss the one section that
+  /// carries the number, and nothing in the ranking can know that — a section
+  /// is near a question because of what it is about, and the sentence with
+  /// the figure in it is the one sentence in it that is not. So the model
+  /// that is about to write the reply is shown what was found and asked
+  /// whether it wants to read any of it properly.
+  ///
+  /// It needs NO vector. The message, the pointers, the skill descriptions
+  /// and the first words of each passage are all in hand already, which is
+  /// why this can run on a pack whose only signal was a file somebody named.
+  ///
+  /// Everything is built into local lists and committed at the end. A throw
+  /// half way through — the model, the store, a file that went away — leaves
+  /// [excerpts], [skills] and [skillGuidance] exactly as the ranking left
+  /// them, and the caller notes the failure beside a pack that is still
+  /// worth sending.
+  Future<void> _selectAndExpand({
+    required String source,
+    required String replyToId,
+    required List<ContextDir> dirs,
+    required List<String> dirIds,
+    required List<({String topic, String path})> pointers,
+    required List<ContextChunkHit> ordered,
+    required Map<int, ContextFile> files,
+    required List<ContextExcerpt> excerpts,
+    required List<String> skills,
+    required List<ContextGuidance> skillGuidance,
+    required Set<String> contributed,
+    required List<String> expanded,
+  }) async {
+    final client = _fastClient;
+    if (client == null) return;
+    if (!_selectExpand()) return;
+    // A pack with pointers always qualifies, however short the ranking is:
+    // the pointer's file may hold what no passage could rank. Without them,
+    // a page too short to be worth choosing between is not worth a call.
+    if (pointers.isEmpty &&
+        ordered.length < ContextTuning.selectMinCandidates) {
+      return;
+    }
+
+    // Every skill in scope, by the name it is invoked as. Not the embedded
+    // ones — this is the list the model chooses from by DESCRIPTION, and a
+    // project whose vectors never landed still has its instructions.
+    //
+    // The name is [_folderOf] here and `skillOf` in [_skillBlock], and the
+    // two agreeing is load-bearing rather than incidental: `skillOf` resolves
+    // a skill to the segment above its `SKILL.md` whatever the frontmatter
+    // says — Claude Code's own rule, because that is what a person types —
+    // so both answer the same word. That is what makes the `skills.contains`
+    // check below a real dedup: the name the model is SHOWN and the name the
+    // block is LABELLED with have to be one name, or a skill the cosine
+    // already offered would be offered again under a second spelling and
+    // spend both slots on one file.
+    final available = <({ContextFile file, String name})>[];
+    for (final dir in dirs) {
+      for (final file in await _context.skillsFor(dir.id)) {
+        final name = _folderOf(file.relPath);
+        if (name.isEmpty) continue;
+        available.add((file: file, name: name));
+      }
+    }
+
+    final row = await _store.getMessageRow(source, replyToId);
+    // The row can be gone between the draft being queued and this read. An
+    // empty question still lets the pointers answer.
+    final message = row == null
+        ? ''
+        : '${stripReFw(row['subject'] as String?)}\n'
+            '${row['body_text'] as String? ?? ''}';
+
+    final candidates = <({String path, String locator, String preview})>[];
+    for (final hit in ordered.take(ContextSelectTask.maxCandidates)) {
+      final file = files[hit.fileId] ?? await _context.fileById(hit.fileId);
+      if (file == null) continue;
+      files[hit.fileId] = file;
+      candidates.add((
+        // The FILE row's path, never the passage's header line: a rename
+        // keeps the chunks and refiles only the keyword rows, so the stored
+        // header can name where the file used to be — and the selector has
+        // to answer with a path this code can look up again.
+        path: file.relPath,
+        locator: hit.locator,
+        preview: _withoutHeader(hit.text),
       ));
     }
+
+    final answer = await runTask(
+      client,
+      const ContextSelectTask(),
+      ContextSelectInput(
+        message: message,
+        pointers: pointers,
+        skills: [
+          for (final skill in available)
+            (name: skill.name, description: skill.file.description ?? ''),
+        ],
+        candidates: candidates,
+        now: DateTime.now(),
+      ),
+      // Deterministic: two identical drafts of the same message must read the
+      // same sections, or the difference between them is one nobody can
+      // account for.
+      temperature: 0,
+      // Two paths, two names and a sentence.
+      maxTokens: 256,
+    );
+    if (answer.isEmpty) return;
+
+    final sections = <ContextExcerpt>[];
+    final labels = <String>[];
+    final contributedNow = <String>{};
+    for (final read in answer.read) {
+      final path = read.path.trim();
+      if (path.isEmpty) continue;
+      ContextFile? file;
+      ContextDir? from;
+      for (final dir in dirs) {
+        file = await _context.fileByPath(dir.id, path) ??
+            (path.startsWith('./')
+                ? await _context.fileByPath(dir.id, path.substring(2))
+                : null);
+        if (file != null) {
+          from = dir;
+          break;
+        }
+      }
+      // Two projects in scope carrying the same path is decided by scope
+      // order, which is the order the room linked them in.
+      if (file == null || from == null) continue;
+      // Belt and braces. The guard that actually holds today is the loop
+      // above: every `fileByPath` was asked of a directory in scope, so a
+      // path the model invented simply finds no row. This line is here for
+      // the day a `fileByPath` resolves across directories — a path the model
+      // spelled is a path the model could invent, and the scope is the one
+      // property this class may never lose.
+      if (!dirIds.contains(file.dirId)) continue;
+      // The same section, asked for twice. A model that names `Pricing` and
+      // then `Pricing > Q4 rates` has named one thing and part of it, and
+      // expanding both puts the child's text in the fence twice — which is
+      // the very duplication the drop rule below exists to prevent. The
+      // LARGER of the two wins either way round: a read already held by a
+      // section taken is skipped here, and a read that holds one taken
+      // earlier replaces it, its label with it.
+      if (sections.any((section) =>
+          section.fileId == file!.id &&
+          _contains(section.locator, read.locator))) {
+        continue;
+      }
+      for (var taken = sections.length - 1; taken >= 0; taken--) {
+        if (sections[taken].fileId != file.id) continue;
+        if (!_contains(read.locator, sections[taken].locator)) continue;
+        sections.removeAt(taken);
+        labels.removeAt(taken);
+      }
+      final text = await _context.fileText(file.id);
+      if (text == null || text.isEmpty) continue;
+      final section = contextSection(file.relPath, text, read.locator);
+      // A locator this file does not have. Nothing is expanded and nothing is
+      // reported: the ranked passages are still there, which is what the pack
+      // would have been anyway.
+      if (section == null || section.trim().isEmpty) continue;
+      sections.add(ContextExcerpt(
+        dirName: from.displayName,
+        relPath: file.relPath,
+        locator: read.locator,
+        modified: _day(file.mtime),
+        text: _clamp(section, ContextTuning.expandedSectionCap),
+        fileId: file.id,
+        dirId: file.dirId,
+        truncated: file.status == 'truncated',
+        expanded: true,
+      ));
+      labels.add(read.locator.isEmpty
+          ? file.relPath
+          : '${file.relPath} § ${read.locator}');
+      // The expanded file joins the map the nested notes are looked up
+      // through. A section pulled in from a pointer is a file the ranking
+      // never surfaced, so nothing else would have put it there — and a
+      // `docs/CLAUDE.md` that governs it is exactly the note a reply quoting
+      // it should have read.
+      files[file.id] = file;
+      contributedNow.add(file.dirId);
+      if (sections.length == ContextTuning.maxExpanded) break;
+    }
+
+    // The passages the sections already contain come out. The model reading
+    // the same paragraph twice is not the problem — spending the fence on it
+    // is, and a passage quoted beside the section it was cut from reads as
+    // two sources saying the same thing.
+    final remaining = [
+      for (final excerpt in excerpts)
+        if (!sections.any((section) =>
+            section.fileId == excerpt.fileId &&
+            _contains(section.locator, excerpt.locator)))
+          excerpt,
+    ];
+
+    // The sections go FIRST: they are what the model asked to read, and the
+    // excerpt fence loses whole blocks off the END when it is over budget.
+    // Their ceiling is their own — two times [ContextTuning.expandedSectionCap]
+    // — and the ranked tail keeps the budget it was already trimmed to, so
+    // nothing here re-budgets a list that was budgeted once already.
+    final picked = <String>[];
+    final pickedGuidance = <ContextGuidance>[];
+    for (final name in answer.skills) {
+      // Already offered by the cosine, so it is already in the pack.
+      if (skills.contains(name) || picked.contains(name)) continue;
+      ContextFile? file;
+      for (final skill in available) {
+        // Exact and case-sensitive: the name is one the model was HANDED, and
+        // a near-miss is a name it made up.
+        if (skill.name != name) continue;
+        file = skill.file;
+        break;
+      }
+      if (file == null) continue;
+      final block = await _skillBlock(file);
+      if (block == null) continue;
+      picked.add(block.name);
+      pickedGuidance.add(block.guidance);
+      contributedNow.add(file.dirId);
+    }
+
+    // The model's picks DISPLACE the cosine's, they do not stack on top of
+    // them: the ceiling is two for the reason [ContextTuning.maxSkills]
+    // gives, and the pick is the better-informed of the two rankings because
+    // it read the question rather than measuring it.
+    final finalSkills = [...picked, ...skills].take(ContextTuning.maxSkills);
+    final finalGuidance =
+        [...pickedGuidance, ...skillGuidance].take(ContextTuning.maxSkills);
+
+    excerpts
+      ..clear()
+      ..addAll(sections)
+      ..addAll(remaining);
+    skills
+      ..clear()
+      ..addAll(finalSkills);
+    skillGuidance
+      ..clear()
+      ..addAll(finalGuidance);
+    expanded.addAll(labels);
+    contributed.addAll(contributedNow);
+  }
+
+  /// Whether the section located by [section] already holds the passage
+  /// located by [passage], in the same file.
+  ///
+  /// Four ways it can. An empty section locator is the whole file, so it
+  /// holds everything in it. A passage of the very same section is it. A
+  /// DEEPER breadcrumb is nested inside — the whole of `Pricing` carries its
+  /// `Pricing > Q4 rates` with it, parts and all — which is the same rule the
+  /// section reader extends by.
+  ///
+  /// And two line windows OVERLAP, which is the one the breadcrumb rules
+  /// cannot see. A code file is cut into sixty-line windows every fifty
+  /// lines while the reader hands back [expandedSectionLines] of them, so an
+  /// expanded `lines 61–120` is really lines 61 to 180 and the ranked
+  /// `lines 101–160` sits entirely inside it. Entirely is the test: a window
+  /// that only overlaps the span's tail still carries lines the section does
+  /// not, and dropping it would lose them.
+  static bool _contains(String section, String passage) {
+    if (section.isEmpty) return true;
+    if (passage == section) return true;
+    if (passage.startsWith('$section > ')) return true;
+    if (passage.startsWith('$section · part')) return true;
+    final span = parseLineLocator(section);
+    final window = parseLineLocator(passage);
+    if (span != null && window != null) {
+      return window.first >= span.first &&
+          window.last <= span.first + expandedSectionLines - 1;
+    }
+    return false;
   }
 
   /// The nested `CLAUDE.md` notes governing the subtrees the kept passages

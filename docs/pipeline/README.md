@@ -26,7 +26,7 @@ is always the authority when they disagree.
 | 8 | Bucket filing — low-value mail to Later, unless the thread holds an open ask | no | [04-extraction.md](04-extraction.md) |
 | 9 | Embeddings — clustering + per-message search vectors | no* | [05-embeddings.md](05-embeddings.md) |
 | 10 | Attachments — text extraction and chunk embeddings, then one digest per document | **yes**‡ | [12-attachments.md](12-attachments.md) |
-| 10b | Context directories — a registered folder re-read on every sync, chunked and embedded, then one digest per file and one brief per directory | **yes**‡‡ | [13-context-directories.md](13-context-directories.md) |
+| 10b | Context directories — a registered folder re-read on every sync, chunked and embedded, then one digest per file, one brief per directory, and one section pick per directory-fed draft | **yes**‡‡ | [13-context-directories.md](13-context-directories.md) |
 | 11 | **Storylines** — assign, sweep, refresh, audit, recruit, recap | **yes** | [06-storylines.md](06-storylines.md) |
 | 12 | **Reply decision** — does this message need an answer | **yes** | [07-replies.md](07-replies.md) |
 | 13 | **Draft generation** — the suggested reply itself | **yes** | [07-replies.md](07-replies.md) |

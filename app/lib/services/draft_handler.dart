@@ -360,6 +360,12 @@ class DraftHandler extends WorkHandler {
         'directories': provenance.directories,
       if (directoryFiles.isNotEmpty) 'directory_files': directoryFiles,
       if (pack.skills.isNotEmpty) 'skills': pack.skills,
+      // How many sections the model asked to read whole, and — when it could
+      // not be asked at all — why. The second is not a failure of the draft:
+      // the pack below it is the pack there would have been anyway, and this
+      // is what says the closer read was the thing that did not happen.
+      if (pack.expanded.isNotEmpty) 'expanded': pack.expanded.length,
+      if (pack.selectError != null) 'select_error': pack.selectError,
     });
   }
 

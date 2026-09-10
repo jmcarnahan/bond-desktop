@@ -5,8 +5,11 @@ import 'package:bond_inbox/data/context_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/context_models.dart';
+import 'package:bond_inbox/services/context/context_chunker.dart';
 import 'package:bond_inbox/services/context/context_retriever.dart';
+import 'package:bond_inbox/services/llm/context_select_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
+import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/search_fusion.dart' show SearchTuning;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
@@ -997,12 +1000,600 @@ void main() {
     });
   });
 
+  group('look closer', () {
+    /// A price sheet with a nested section, a sibling that is unrelated, and
+    /// a preamble before either — cut up by the REAL chunker, so every
+    /// locator in the fixture is one the app would actually have written.
+    const priceSheet = '''
+Rates are reviewed each quarter by the Marrowfield desk.
+
+## Pricing
+
+The desk publishes one sheet and nothing else binds a renewal quote.
+
+### Q4 rates
+
+Standard freight is 41 credits per pallet.
+
+## Kitchen
+
+The kitchen inventory is counted on the first of the month.
+''';
+
+    /// The chunker's own passages, filed as the reconcile pass files them and
+    /// each embedded on [axis]. Real locators, because the whole feature is
+    /// the model handing one of them back.
+    Future<void> seedChunked(
+      int fileId,
+      String relPath,
+      String text, {
+      int axis = 1,
+      bool vectors = true,
+    }) async {
+      final ids = await context.replaceChunks(fileId, [
+        for (final chunk in chunkContextText(relPath, text))
+          (seq: chunk.seq, locator: chunk.locator, text: chunk.text),
+      ]);
+      if (!vectors) return;
+      for (final id in ids) {
+        await context.setChunkEmbedding(
+          id,
+          embedding: encodeEmbedding(axes({axis: 1.0})),
+          dims: 768,
+          embedModel: tag,
+        );
+      }
+    }
+
+    /// A linked directory holding the price sheet, with a brief whose one
+    /// pointer names it. The pointer is what makes the call happen: a pack
+    /// with pointers qualifies however short its ranking is.
+    Future<String> seedDirectory({
+      String sheet = priceSheet,
+      int axis = 1,
+      bool vectors = true,
+      bool messageVector = true,
+      List<String> chain = const [],
+    }) async {
+      await seedMessage('m1', vector: messageVector);
+      final dir =
+          await context.registerDirectory(path: '/a', displayName: 'acme');
+      await context.setDirectoryWalked(dir,
+          walkedAt: MessageStore.isoStamp(DateTime.now().toUtc()),
+          rootHash: 'r', filesCount: 1, textBytes: sheet.length);
+      await context.setDirectoryBrief(
+        dir,
+        briefJson: jsonEncode({
+          'about': 'A renewal pricing model.',
+          'pointers': [
+            {'topic': 'renewal rates', 'path': 'docs/pricing.md'},
+          ],
+        }),
+        briefHash: 'h',
+      );
+      final file =
+          await seedFile(dir, 'docs/pricing.md', text: sheet, chain: chain);
+      await seedChunked(file, 'docs/pricing.md', sheet,
+          axis: axis, vectors: vectors);
+      await context.indexPendingChunks();
+      await context.link(dir, ContextScopeKind.thread, 'email', 'conv-1');
+      return dir;
+    }
+
+    Future<ContextPack> packWith(
+      FakeLlm? fake, {
+      bool on = true,
+      EmbeddingsClient? embedder,
+      int perFile = 3,
+      int budgetChars = 2500,
+      int k = 6,
+    }) =>
+        ContextRetriever(
+          messages,
+          context,
+          embedder ?? embeddings.client,
+          fastClient: fake,
+          selectExpand: () => on,
+        ).packFor(
+          source: 'email',
+          conversationKey: 'conv-1',
+          replyToId: 'm1',
+          storylineIds: const [],
+          perFile: perFile,
+          budgetChars: budgetChars,
+          k: k,
+        );
+
+    /// The same sheet with nothing in it the message's own words can reach.
+    /// The subject is `Renewal quote`, and the keyword half of the ranking
+    /// would otherwise carry the file in on those two words alone — which is
+    /// not the pack these cases are about.
+    const unreachableSheet = '''
+## Pricing
+
+The desk publishes one sheet and nothing else binds a rate.
+
+### Q4 rates
+
+Standard freight is 41 credits per pallet.
+''';
+
+    Map<String, dynamic> answer({
+      List<Map<String, String>> read = const [],
+      List<String> skills = const [],
+      String reason = 'The section holds the figure.',
+    }) =>
+        {'read': read, 'skills': skills, 'reason': reason};
+
+    test('a section is read whole, and what it contains comes out', () async {
+      if (!available) return;
+      final dir = await seedDirectory();
+      // A second file, so there is a ranked passage the expansion has no
+      // business touching: the per-file cap would otherwise have trimmed the
+      // sheet's own sibling section off the page before the model saw it.
+      const notes = '## Kitchen\n\nThe inventory is counted on the first.\n';
+      final other = await seedFile(dir, 'docs/notes.md', text: notes);
+      await seedChunked(other, 'docs/notes.md', notes);
+      await context.indexPendingChunks();
+      final fake = FakeLlm([
+        answer(read: [
+          {'path': 'docs/pricing.md', 'locator': 'Pricing'},
+        ]),
+      ]);
+
+      final pack = await packWith(fake);
+
+      final first = pack.excerpts.first;
+      expect(first.expanded, isTrue);
+      expect(first.locator, 'Pricing');
+      // The whole of `## Pricing` is `## Pricing` AND its `### Q4 rates`.
+      expect(first.text, contains('The desk publishes one sheet'));
+      expect(first.text, contains('41 credits per pallet'));
+      expect(pack.expanded, ['docs/pricing.md § Pricing']);
+
+      // The passages the section already holds are gone — quoting a
+      // paragraph beside the section it was cut from reads as two sources
+      // saying the same thing, and spends the fence twice.
+      final rest = pack.excerpts.skip(1).toList();
+      expect([for (final e in rest) e.locator],
+          isNot(contains('Pricing')));
+      expect([for (final e in rest) e.locator],
+          isNot(contains('Pricing > Q4 rates')));
+      // And the other file's passage is still there, behind it.
+      expect([for (final e in rest) e.relPath], contains('docs/notes.md'));
+      expect(pack.selectError, isNull);
+    });
+
+    test('the selector saw the message, the pointers and the passages',
+        () async {
+      if (!available) return;
+      await seedDirectory();
+      final fake = FakeLlm([answer()]);
+
+      await packWith(fake);
+
+      final sent = fake.userMessages.single;
+      expect(sent, contains('renewal rates · docs/pricing.md'));
+      // Fenced, so the chunker's ` > ` breadcrumb arrives escaped — every
+      // one of these lines is inside an `<untrusted_data>` block.
+      expect(sent, contains('docs/pricing.md · Pricing &gt; Q4 rates · '));
+      expect(sent, contains('Renewal quote'));
+      expect(sent, contains('<untrusted_data source="candidates">'));
+      // Deterministic: two drafts of one message must read the same
+      // sections.
+      expect(fake.temperatures.single, 0);
+    });
+
+    test('a very long section is clamped to its own ceiling', () async {
+      if (!available) return;
+      final long = '## Pricing\n\n${'word ' * 4000}\n';
+      await seedDirectory(sheet: long);
+      final fake = FakeLlm([
+        answer(read: [
+          {'path': 'docs/pricing.md', 'locator': 'Pricing'},
+        ]),
+      ]);
+
+      final pack = await packWith(fake);
+
+      expect(pack.excerpts.first.expanded, isTrue);
+      expect(pack.excerpts.first.text.length,
+          ContextTuning.expandedSectionCap);
+    });
+
+    test('an empty answer changes nothing at all', () async {
+      if (!available) return;
+      await seedDirectory();
+      final fake = FakeLlm([answer()]);
+
+      final chosen = await packWith(fake);
+      final untouched = await packWith(null);
+
+      expect([for (final e in chosen.excerpts) e.locator],
+          [for (final e in untouched.excerpts) e.locator]);
+      expect(chosen.expanded, isEmpty);
+      expect(chosen.selectError, isNull);
+      expect(fake.userMessages, hasLength(1));
+    });
+
+    test('a selector that throws changes nothing and is noted', () async {
+      if (!available) return;
+      await seedDirectory();
+      final fake = FakeLlm([Exception('boom')]);
+
+      final failed = await packWith(fake);
+      final untouched = await packWith(null);
+
+      expect([for (final e in failed.excerpts) e.locator],
+          [for (final e in untouched.excerpts) e.locator]);
+      expect(failed.expanded, isEmpty);
+      expect(failed.selectError, contains('boom'));
+      // The brief, the guidance and the skills the pack already had are the
+      // pack it would have been anyway.
+      expect(failed.briefs.single.about, 'A renewal pricing model.');
+      expect(failed.skills, untouched.skills);
+    });
+
+    test('the preference off makes no call', () async {
+      if (!available) return;
+      await seedDirectory();
+      final fake = FakeLlm([answer()]);
+
+      final pack = await packWith(fake, on: false);
+
+      expect(fake.userMessages, isEmpty);
+      expect(pack.excerpts, isNotEmpty);
+      expect(pack.expanded, isEmpty);
+    });
+
+    test('no pointers and a short ranking makes no call', () async {
+      if (!available) return;
+      // Three passages and no brief. The ranking has already shown the model
+      // nearly everything the directory had to say, and choosing two of
+      // three it can see in full is a model call spent reordering.
+      await seedMessage('m1');
+      final dir =
+          await context.registerDirectory(path: '/a', displayName: 'acme');
+      final file = await seedFile(dir, 'docs/pricing.md', text: 'x');
+      for (var seq = 0; seq < 3; seq++) {
+        await seedChunk(file, 'docs/pricing.md', 'The rung schedule $seq.',
+            locator: 'part $seq', vector: {1: 1.0}, seq: seq);
+      }
+      await context.indexPendingChunks();
+      await context.link(dir, ContextScopeKind.thread, 'email', 'conv-1');
+      final fake = FakeLlm([answer()]);
+
+      final pack = await packWith(fake);
+
+      expect(fake.userMessages, isEmpty);
+      expect(pack.excerpts, isNotEmpty);
+      expect(ContextTuning.selectMinCandidates, 8);
+    });
+
+    test('a path outside the scope is not read', () async {
+      if (!available) return;
+      await seedDirectory();
+      // A second project, registered and never linked to this room. Its file
+      // exists and its path is spellable; the scope is the whole point.
+      final other =
+          await context.registerDirectory(path: '/b', displayName: 'ridge');
+      await seedFile(other, 'secret/rates.md',
+          text: '## Rates\n\nAnother client pays nineteen.\n');
+      final fake = FakeLlm([
+        answer(read: [
+          {'path': 'secret/rates.md', 'locator': 'Rates'},
+        ]),
+      ]);
+
+      final pack = await packWith(fake);
+
+      expect(pack.expanded, isEmpty);
+      // Not an error either: the model named a file this room may not read,
+      // and the pack it would have had is the pack it gets.
+      expect(pack.selectError, isNull);
+      expect([for (final e in pack.excerpts) e.text],
+          isNot(contains(contains('nineteen'))));
+    });
+
+    test('a chosen skill displaces the second cosine match', () async {
+      if (!available) return;
+      final dir = await seedDirectory();
+      final near = await seedFile(
+        dir,
+        '.claude/skills/vendor-replies/SKILL.md',
+        kind: 'skill',
+        description: 'Quote a renewal rate.',
+        text: '---\ndescription: Quote a renewal rate.\n---\nName the rung.\n',
+      );
+      final second = await seedFile(
+        dir,
+        '.claude/skills/scheduling/SKILL.md',
+        kind: 'skill',
+        description: 'Offer times.',
+        text: '---\ndescription: Offer times.\n---\nOffer two slots.\n',
+      );
+      // The third has no description vector at all, so the cosine cannot
+      // reach it — which is exactly the skill the selector is for.
+      await seedFile(
+        dir,
+        '.claude/skills/renewals/SKILL.md',
+        kind: 'skill',
+        description: 'Answer a renewal question.',
+        text: '---\ndescription: Answer a renewal question.\n---\nCite it.\n',
+      );
+      await context.setFileDescEmbedding(
+          near, encodeEmbedding(axes({1: 1.0})));
+      await context.setFileDescEmbedding(
+          second, encodeEmbedding(axes({1: 1.0, 2: 1.0})));
+      final fake = FakeLlm([answer(skills: const ['renewals'])]);
+
+      final pack = await packWith(fake);
+
+      // Displaced, never stacked: three sets of instructions is a draft
+      // obeying whichever it read last.
+      expect(pack.skills, ['renewals', 'vendor-replies']);
+      final labels = [
+        for (final block in pack.guidance)
+          if (block.label.startsWith('SKILL ')) block.label,
+      ];
+      expect(labels, ['SKILL renewals', 'SKILL vendor-replies']);
+    });
+
+    test('an empty locator reads the whole file and clears its passages',
+        () async {
+      if (!available) return;
+      await seedDirectory();
+      final fake = FakeLlm([
+        answer(read: [
+          {'path': 'docs/pricing.md', 'locator': ''},
+        ]),
+      ]);
+
+      final pack = await packWith(fake);
+
+      final whole = pack.excerpts.single;
+      expect(whole.relPath, 'docs/pricing.md');
+      expect(whole.expanded, isTrue);
+      expect(whole.locator, '');
+      expect(whole.text, contains('Rates are reviewed each quarter'));
+      expect(whole.text, contains('kitchen inventory'));
+      // Every ranked passage of that file is now in front of the model
+      // twice over if it stays, so none of them does.
+      expect(pack.expanded, ['docs/pricing.md']);
+    });
+
+    test('a leading ./ on the answer still finds the file', () async {
+      if (!available) return;
+      await seedDirectory();
+      final fake = FakeLlm([
+        answer(read: [
+          {'path': './docs/pricing.md', 'locator': 'Pricing'},
+        ]),
+      ]);
+
+      final pack = await packWith(fake);
+
+      expect(pack.expanded, ['docs/pricing.md § Pricing']);
+    });
+
+    test('a pointer is read closer with no vector and no embedder', () async {
+      if (!available) return;
+      // The embedding server is down and nothing in the directory carries a
+      // vector, so there is no ranking at all — and the brief still POINTS at
+      // the file that answers this. The selector reads pointers, not vectors,
+      // so this is exactly the pack it exists for.
+      await seedDirectory(vectors: false, messageVector: false);
+      final dead = FakeEmbedServer(status: null);
+      final fake = FakeLlm([
+        answer(read: [
+          {'path': 'docs/pricing.md', 'locator': ''},
+        ]),
+      ]);
+
+      final pack = await packWith(fake, embedder: dead.client);
+
+      expect(fake.userMessages, hasLength(1));
+      final whole = pack.excerpts.single;
+      expect(whole.expanded, isTrue);
+      expect(whole.text, contains('41 credits per pallet'));
+      expect(pack.expanded, ['docs/pricing.md']);
+      // Skills are matched against a vector and there is none, so the cosine
+      // offered none and the answer named none.
+      expect(pack.skills, isEmpty);
+      expect(pack.selectError, isNull);
+    });
+
+    test('an expanded file brings the notes beside it', () async {
+      if (!available) return;
+      // Every passage of the sheet is on a far axis, so the ranking keeps
+      // none of them and the pointer is the only way in. The nested note
+      // governing `docs/` has to ride with the section all the same.
+      final dir = await seedDirectory(
+        sheet: unreachableSheet,
+        axis: 9,
+        chain: const ['CLAUDE.md', 'docs/CLAUDE.md'],
+      );
+      await seedFile(dir, 'docs/CLAUDE.md',
+          text: 'Every rate in this folder is quoted per pallet.\n');
+      final fake = FakeLlm([
+        answer(read: [
+          {'path': 'docs/pricing.md', 'locator': 'Pricing'},
+        ]),
+      ]);
+
+      final pack = await packWith(fake);
+
+      expect(pack.expanded, ['docs/pricing.md § Pricing']);
+      final labels = [for (final block in pack.guidance) block.label];
+      expect(labels, contains('docs/CLAUDE.md'));
+      expect(
+        pack.guidance
+            .firstWhere((block) => block.label == 'docs/CLAUDE.md')
+            .text,
+        contains('quoted per pallet'),
+      );
+    });
+
+    test('an expanded file brings the rule that governs it', () async {
+      if (!available) return;
+      final dir = await seedDirectory(sheet: unreachableSheet, axis: 9);
+      await seedFile(dir, '.claude/rules/pricing.md',
+          kind: 'rule',
+          pathsJson: '["docs/**"]',
+          text: '---\npaths: docs/**\n---\nNever round a rate up.\n');
+      final fake = FakeLlm([
+        answer(read: [
+          {'path': 'docs/pricing.md', 'locator': 'Pricing'},
+        ]),
+      ]);
+
+      final pack = await packWith(fake);
+
+      expect(pack.expanded, ['docs/pricing.md § Pricing']);
+      final labels = [for (final block in pack.guidance) block.label];
+      expect(labels, contains('rule pricing.md'));
+    });
+
+    test('an expanded window swallows the windows it covers', () async {
+      if (!available) return;
+      final dir = await seedDirectory();
+      // Two hundred lines cut into sixty-line windows every fifty lines:
+      // `lines 1–60`, `lines 51–110`, `lines 101–160`, `lines 151–200`.
+      final code = [for (var i = 1; i <= 200; i++) 'line $i'].join('\n');
+      final file = await seedFile(dir, 'lib/rate.dart', text: code);
+      await seedChunked(file, 'lib/rate.dart', code);
+      await context.indexPendingChunks();
+      final fake = FakeLlm([
+        answer(read: [
+          {'path': 'lib/rate.dart', 'locator': 'lines 61–120'},
+        ]),
+      ]);
+
+      // Room for every window of the file, so what the drop rule takes out is
+      // the only reason one is missing.
+      final pack =
+          await packWith(fake, perFile: 8, budgetChars: 12000, k: 20);
+
+      final first = pack.excerpts.first;
+      expect(first.expanded, isTrue);
+      // Two windows on, because a function rarely ends where its window did.
+      expect(first.text.split('\n').first, 'line 61');
+      expect(first.text.split('\n').last, 'line 180');
+      final rest = [
+        for (final excerpt in pack.excerpts.skip(1))
+          if (excerpt.relPath == 'lib/rate.dart') excerpt.locator,
+      ];
+      // Entirely inside 61–180, so quoting it again is the same sixty lines
+      // twice.
+      expect(rest, isNot(contains('lines 101–160')));
+      // These two are not: one opens before line 61 and the other runs past
+      // line 180, and each carries lines the section does not.
+      expect(rest, contains('lines 51–110'));
+      expect(rest, contains('lines 151–200'));
+    });
+
+    test('a section and the section inside it are read once', () async {
+      if (!available) return;
+      for (final order in [
+        [
+          {'path': 'docs/pricing.md', 'locator': 'Pricing > Q4 rates'},
+          {'path': 'docs/pricing.md', 'locator': 'Pricing'},
+        ],
+        [
+          {'path': 'docs/pricing.md', 'locator': 'Pricing'},
+          {'path': 'docs/pricing.md', 'locator': 'Pricing > Q4 rates'},
+        ],
+      ]) {
+        await seedDirectory();
+        final fake = FakeLlm([answer(read: order)]);
+
+        final pack = await packWith(fake);
+
+        // The larger wins either way round. Expanding both would put the
+        // child's text in the fence twice, which is what the drop rule is
+        // for in the first place.
+        expect(pack.expanded, ['docs/pricing.md § Pricing'],
+            reason: order.first['locator']);
+        expect(
+          [for (final e in pack.excerpts) if (e.expanded) e.locator],
+          ['Pricing'],
+          reason: order.first['locator'],
+        );
+        await db.close();
+        db = vecTestDb();
+        messages = MessageStore(db);
+        context = ContextStore(db);
+      }
+    });
+
+    test('a skill is named by its folder, whatever its header says', () async {
+      if (!available) return;
+      final dir = await seedDirectory();
+      await seedFile(
+        dir,
+        '.claude/skills/renewals/SKILL.md',
+        kind: 'skill',
+        description: 'Answer a renewal question.',
+        text: '---\nname: quote-desk\ndescription: Answer a renewal '
+            'question.\n---\nCite the rung.\n',
+      );
+      final fake = FakeLlm([answer(skills: const ['renewals'])]);
+
+      final pack = await packWith(fake);
+
+      // What the model is SHOWN and what the block is LABELLED are one name,
+      // or the dedup between the cosine's picks and the model's is comparing
+      // two spellings of the same file.
+      expect(fake.userMessages.single, contains('renewals · Answer a renewal'));
+      expect(pack.skills, ['renewals']);
+      expect([for (final block in pack.guidance) block.label],
+          contains('SKILL renewals'));
+    });
+
+    test('the two ceilings are the same number, said once each', () {
+      // The fence in `draft_task.dart` was widened to hold exactly this
+      // many sections; a task that could ask for three would overrun it.
+      expect(ContextTuning.maxExpanded, ContextSelectTask.maxRead);
+    });
+  });
+
   test('the floor is the search\'s own, restated nowhere', () {
     // A second spelling of the number is how the mailbox search and the
     // directory search would start disagreeing about what "relevant" means.
     expect(SearchTuning.minScore, 0.25);
     expect(ContextTuning.maxSkills, 2);
   });
+}
+
+/// An [LlmClient] that answers from a script and never opens a socket.
+///
+/// The house shape — every test file declares its own, with the positional
+/// script `draft_handler_test.dart` uses — because there is no shared fake
+/// and two of them would drift.
+class FakeLlm extends LlmClient {
+  final List<Object> script;
+  final List<String> userMessages = [];
+  final List<double> temperatures = [];
+
+  FakeLlm(this.script) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
+
+  @override
+  Future<Map<String, dynamic>> completeJson({
+    required String system,
+    required String user,
+    required Map<String, dynamic> schema,
+    String schemaName = 'result',
+    int maxTokens = 512,
+    double temperature = 0.2,
+    bool think = false,
+  }) async {
+    userMessages.add(user);
+    temperatures.add(temperature);
+    await Future<void>.delayed(const Duration(milliseconds: 1));
+    final step = script.length > 1 ? script.removeAt(0) : script.first;
+    if (step is Exception) throw step;
+    return Map<String, dynamic>.from(step as Map);
+  }
 }
 
 /// A store whose vector half is broken. Everything above it must still answer.

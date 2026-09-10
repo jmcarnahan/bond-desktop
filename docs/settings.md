@@ -382,7 +382,20 @@ about Remove and whether the open panel is out, and it builds its own
 allowed to read is a question about the model.
 
 The body opens with one sentence saying what a directory is for and that it is
-re-read on every sync. Then one block per registered directory:
+re-read on every sync. Under it, one switch for the whole library rather than
+for any one folder:
+
+- **Let the model pick two sections to read in full before drafting** —
+  `AppPrefs.contextSelectExpand`, key `context_select_expand` in `app_prefs`.
+  **On by default**, unlike almost every switch on this screen: it is what
+  makes a suggestion read the section that carries the number rather than the
+  passages nearest the question, and it is one extra fast-slot call per
+  suggestion that reads a directory at all. Off, a reply sees only the nearest
+  passages. Prop-driven with no local state — the host watches the preference,
+  so what the switch shows is what is stored. See
+  [pipeline/13-context-directories.md](pipeline/13-context-directories.md).
+
+Then one block per registered directory:
 
 - The **display name** (the folder's own name), the **path** in muted type.
 - The brief's **`about`** under the path, when one has been compiled — two or

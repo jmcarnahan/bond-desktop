@@ -748,6 +748,36 @@ void main() {
       expect([for (final rule in rules) rule.id], [pricing, source]);
       expect([for (final rule in rules) rule.kind], ['rule', 'rule']);
     });
+
+    test('the skills of a project come back whether or not they embedded',
+        () async {
+      // The read the section pick makes: it offers the model a project's
+      // skills by NAME and description, and a skill whose description was
+      // never embedded is exactly the one `skillVectors` cannot answer for.
+      // The embedder being down must not hide the owner's own instructions.
+      final atlas = await store.registerDirectory(path: '/a',
+          displayName: 'atlas');
+      final ridge = await store.registerDirectory(path: '/r',
+          displayName: 'ridge');
+      final quote = await seedFile(atlas, '.claude/skills/quote/SKILL.md',
+          kind: 'skill', sha: 'sha-a');
+      final renew = await seedFile(atlas, '.claude/skills/renew/SKILL.md',
+          kind: 'skill', sha: 'sha-b');
+      await seedFile(atlas, 'docs/pricing.md', sha: 'sha-c');
+      await seedFile(atlas, '.claude/rules/pricing.md',
+          kind: 'rule', sha: 'sha-d');
+      await seedFile(ridge, '.claude/skills/other/SKILL.md',
+          kind: 'skill', sha: 'sha-e');
+      // One of the two has a vector; the other never got one.
+      await store.setFileDescEmbedding(quote, Uint8List.fromList([1, 2, 3, 4]));
+
+      final skills = await store.skillsFor(atlas);
+
+      expect([for (final skill in skills) skill.id], [quote, renew]);
+      expect([for (final skill in skills) skill.kind], ['skill', 'skill']);
+      // The one with no vector is in the list; `skillVectors` drops it.
+      expect(await store.skillVectors([atlas]), hasLength(1));
+    });
   });
 
   group('passages', () {

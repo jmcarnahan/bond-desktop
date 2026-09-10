@@ -683,7 +683,15 @@ The steps, in this order and no other:
     not after: a skill with neither a frontmatter name nor a folder above it
     cannot be rendered, and one that took a slot and then dropped out of it
     would cost the second-nearest skill its place for a block nobody sees.
-11. **Nested `CLAUDE.md`.** For each kept passage's file, its `claude_chain`
+10b. **Look closer.** The one model call this read makes, in its own
+    `try`/`catch`: up to two sections read WHOLE and up to two skills, in
+    front of the ranked passages. It is the next section of this page, and it
+    is placed HERE, before the two steps below, on purpose — a section pulled
+    in from a pointer is a file the ranking never surfaced, and the notes and
+    the rules that govern it are gathered from the excerpts as they finally
+    stand.
+11. **Nested `CLAUDE.md`.** For each kept passage's file — the expanded
+    sections included — its `claude_chain`
     minus the root entry, de-duplicated in first-seen order and keyed by
     directory. Clamped to `nestedClaudeMdCap` (400). Claude Code's own
     on-demand rule: notes beside a file apply to that file, and are read when
@@ -692,8 +700,8 @@ The steps, in this order and no other:
     directory as rules — a project is tens of thousands of files of which a
     handful are rules, and this runs on every draft that kept a passage, so
     the predicate belongs in the query rather than in Dart. One applies when
-    any glob in its `paths_json` matches any kept passage's rel path **in its
-    own directory** —
+    any glob in its `paths_json` matches the rel path of any passage the pack
+    ENDED with, expanded sections included, **in its own directory** —
     `docs/**` in one project has nothing to say about another project's
     `docs/`. A malformed list or a glob `package:glob` will not parse means
     "this rule does not apply here", never a draft that failed. Clamped to
@@ -702,6 +710,142 @@ The steps, in this order and no other:
 **Guidance order in the pack**: the brief's `reply_guidance`, the root notes
 (when there is no brief), the nested notes, the matched skills, the rules.
 Broad to narrow, which is the order a person would read them in.
+
+## Look closer: select-expand
+
+Six passages of a thousand characters can miss the one section that carries
+the number, and no ranking can know it has: a section is near a question
+because of what it is about, and the sentence with the figure in it is the one
+sentence in it that is not. So the last step of `packFor` shows the model what
+was found and asks whether it wants to read any of it properly.
+
+**Trigger** — all three: the retriever was built with a fast client; the
+preference `context_select_expand` is on; and the pack has either a brief with
+pointers OR at least `ContextTuning.selectMinCandidates` (8) ranked passages.
+A pack WITH pointers qualifies however short its ranking is — a pointer names
+a file the neighbour page may never have reached — and a pack without them and
+only a handful of passages does not, because choosing two of five the model
+can already see in full is a call spent reordering a short list. There is
+never a second embedding POST: this call reads only what is already in hand.
+
+**Which is why it also runs with no vector at all.** The embedding server
+being down, or a message the embed queue has not reached, ends the ranking —
+`query` is null and there is nothing to rank — but it does not end this. The
+pointers are already decoded from the briefs and the selector chooses by
+reading them, so a pack whose only signal is a brief saying *renewal rates ·
+docs/pricing.md* still gets that file read whole. The one thing that does end
+it earlier is the `LIMIT 1` guard at step 5: the text and the passages are
+written by the same reconcile pass, so a directory with no passages has no
+section to hand back either.
+
+**The notes and the rules are gathered after it**, which is the whole reason
+this step sits where it does in the list above. A section pulled in from a
+pointer is a file the ranking never surfaced, so gathering them first would
+give the model a `docs/CLAUDE.md` for every file except the one it asked to
+read. They run after the step's own `try`/`catch`, so a selector that fell
+over still gets them over the ranked list.
+
+**Input** — four fences (`ContextSelectTask`), each empty half omitted:
+
+| Fence | What it holds |
+|---|---|
+| `message` | the subject with its reply markers off, then the body, clamped to 1,500 |
+| `pointers` | `topic · path` from every brief in scope, ≤ 10 |
+| `skills` | `name · description` for every skill in scope, ≤ 12 — `ContextStore.skillsFor`, which does NOT require a `desc_embedding`: the embedder being down must not hide a project's own instructions |
+| `candidates` | `path · locator · first words` for ≤ 12 ranked passages, the preview whitespace-collapsed and clamped to 120 |
+
+The candidates come from `_rank`'s `ordered` — every passage that cleared the
+floor, BEFORE the per-file cap and the take — because a file whose three best
+passages the cap trimmed to one is exactly the file worth reading whole. Each
+path is the FILE row's, never the passage's stored header line, which a rename
+can leave stale.
+
+**Answer**: `{read: [{path, locator}] (≤2), skills: [string] (≤2), reason}`, at
+temperature 0 and 256 tokens. Empty, malformed or thrown → the pack exactly as
+it was.
+
+**The section reader** is `contextSection(relPath, text, locator)` in
+`context_chunker.dart` — pure, and deciding the shape by the same path rule
+the chunker cuts with, so a file chunked as markdown is read back as markdown:
+
+- **markdown** — the section whose breadcrumb is the locator, plus every
+  following section nested UNDER it: the whole of `## Pricing` carries its
+  `### Q4 rates` with it. A trailing ` · part N` is stripped first. An empty
+  locator is the whole file; a breadcrumb this text does not have is `null`.
+- **`lines a–b`** (either dash) — line `a` through two windows on, not one,
+  because a function rarely ends where the sixty-line window it was cut at
+  did. Malformed is `null`.
+- **anything else** (`part N`, `digest`, empty) — the whole text.
+
+Each section is clamped to `ContextTuning.expandedSectionCap` (3,000) — three
+times a ranked passage, because the point of asking to read something whole is
+that a thousand characters of it was not enough.
+
+**Placement**: the chosen sections go to the FRONT of the excerpts, flagged
+`expanded`, and the renderer says `Pricing, read in full` in the bracket line.
+That flag changes what a model may conclude from a silence: a ranked passage
+that does not carry the number is an extract that does not carry it, while a
+section read in full that does not is a section that does not. Then the
+passages the section already CONTAINS are dropped — the same locator, one of
+its ` · part N` passages, any deeper breadcrumb under it, every passage of the
+file when the locator was empty, and a line window that falls ENTIRELY inside
+the expanded span. That last one is the case the breadcrumb rules cannot see:
+a code file is cut every fifty lines into sixty-line windows while the reader
+hands back a hundred and twenty, so an expanded `lines 61–120` really covers
+61 to 180 and the ranked `lines 101–160` is sixty duplicated lines. Entirely
+is the test — a window that only overlaps the tail still carries lines the
+section does not, so it stays. A paragraph quoted beside the section it was
+cut from reads as two sources saying the same thing, and spends the fence
+twice. The sections have their own ceiling (two × 3,000); the ranked tail
+keeps the `budgetChars` it was already trimmed to, and nothing re-budgets.
+
+**Two reads that overlap each other are one read.** An answer naming both
+`Pricing` and `Pricing > Q4 rates` has named one thing and part of it, and
+expanding both would put the child's text in the fence twice — the very
+duplication the drop rule exists to prevent. The larger wins either way round:
+a read already held by a section taken is skipped, and a read that holds one
+taken earlier replaces it, its label with it.
+
+**Skills**: an answered name is matched against the folder name of a skill in
+scope, exactly and case-sensitively — a near-miss is a name the model made up.
+The folder name is also what the model was SHOWN and what the rendered block
+is labelled with, because `skillOf` resolves a skill to the segment above its
+`SKILL.md` whatever the frontmatter says (§The conventions). One name, three
+places: that is what makes the check below a real de-duplication rather than a
+comparison of two spellings of the same file.
+One already offered by the cosine is skipped; otherwise it goes FIRST, and the
+list is then cut to `ContextTuning.maxSkills` (2). The picks DISPLACE the
+cosine's second-nearest rather than stacking on top of it, for the reason that
+ceiling exists at all: three sets of instructions about three kinds of message
+is a draft obeying whichever one it read last.
+
+**Scope, again.** Each answered path is resolved with
+`ContextStore.fileByPath` per directory in scope order (a leading `./` tried
+too); the first hit wins, and a file whose `dirId` is not in scope is skipped.
+A path the model spelled is a path the model could have invented.
+
+**Failure is unchanged plus a note.** The whole step sits in its own
+`try`/`catch` inside `packFor` — not under the outer one, which would hand
+back a pack that had never run the rules — and it builds every new list
+locally, committing them only at the end. So a throw half way through leaves
+the excerpts, the skills and the guidance exactly as the ranking left them,
+and `ContextPack.selectError` carries the sentence for the activity row.
+
+**The fence grows, on the draft side only.** `directory_excerpts` is 8,700 in
+`draft_task.dart`: 2,500 of ranked passages plus exactly two 3,000-character
+sections and the two bracket lines the render writes above them. It is a
+ceiling for a pack that asked to read closer, not a target.
+`reply_decision_task.dart` stays at **800** — the decision reads the head of
+the first section, which is the most relevant text there is, and a yes-or-no
+about whether a reply is owed needs no more than that.
+
+**The preference** is `AppPrefs.contextSelectExpand`, key
+`context_select_expand`, default **ON** — the one bounded call per
+directory-fed draft is the whole feature. It reaches the retriever as a
+closure (`services/` never imports `providers/`), read while a pack is being
+built, so flipping it rebuilds nothing. The switch is in Settings → Context
+directories: *Let the model pick two sections to read in full before
+drafting*.
 
 ## Linking
 
@@ -938,6 +1082,7 @@ The two compiled kinds have rows of their own:
 
 | Kind | Label | Keys |
 |---|---|---|
+| `context_select` | no row of its own — the pick runs inside a draft, and the `draft` row carries `expanded` (how many sections were read whole) and `select_error` (why the pick did not happen) |  |
 | `context_digest` | **Directory file digest** — `<kind_hint>` | `kind_hint`, `findings`, `questions`; `reason` on a skip: `malformed_entity`, `gone`, `off`, `already_digested`, `too_short`, `no_text` |
 | `context_brief` | **Directory brief** — `N files mapped` | `files_mapped`, `has_claude_md`, `pointers`; `reason` on a skip: `gone`, `nothing_to_brief`, `unchanged` |
 
@@ -964,7 +1109,11 @@ that call.
 - `app/lib/services/context/context_walk.dart` — the walk, the kinds, the
   chains.
 - `app/lib/services/context/context_extract.dart` — the extractors.
-- `app/lib/services/context/context_chunker.dart` — the passages.
+- `app/lib/services/context/context_chunker.dart` — the passages, and
+  `contextSection`, which puts one back together whole. `parseLineLocator` and
+  `expandedSectionLines` are public for the retriever's drop rule: it decides
+  whether an expanded window already holds a ranked one, and a second copy of
+  either would be a second answer to what `lines 61–120` means.
 - `app/lib/services/context/context_reconcile_handler.dart` — the pass, the
   two enqueues and the skill-description vectors.
 - `app/lib/services/context/claude_conventions.dart` — frontmatter, skills,
@@ -974,8 +1123,9 @@ that call.
 - `app/lib/services/context/context_brief_handler.dart` — one brief per
   directory.
 - `app/lib/services/llm/context_digest_task.dart`,
-  `app/lib/services/llm/context_brief_task.dart` — the two prompts and their
-  schemas.
+  `app/lib/services/llm/context_brief_task.dart`,
+  `app/lib/services/llm/context_select_task.dart` — the three prompts and
+  their schemas.
 - `app/lib/services/context/context_retriever.dart` — `ContextTuning`,
   `ContextPack` and `packFor`: the read a reply makes.
 - `app/lib/services/context/context_pack_render.dart` — the three blocks as
@@ -1005,7 +1155,7 @@ that call.
 - `app/lib/widgets/composer.dart` — the provenance chips.
 - `app/lib/widgets/thread_detail_panel.dart`,
   `app/lib/widgets/storyline_timeline.dart` — the **Context** room action.
-- `app/lib/services/llm/model_slots.dart` — the two fast-slot stage rows.
+- `app/lib/services/llm/model_slots.dart` — the three fast-slot stage rows.
 - `app/lib/services/sync_service.dart` — the tail enqueue.
 - `app/lib/services/ai_worker.dart` — `local` in `_sources`.
 - `app/lib/services/attachments/file_dialogs.dart` — `chooseDirectory()`.

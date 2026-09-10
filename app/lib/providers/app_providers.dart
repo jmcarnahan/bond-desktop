@@ -619,6 +619,16 @@ final contextRetrieverProvider = Provider<ContextRetriever>(
     ref.watch(messageStoreProvider),
     ref.watch(contextStoreProvider),
     ref.watch(embeddingsClientProvider),
+    // Bulk work on the fast server: one small structured call per
+    // directory-fed draft, which is the slot every other per-item call in
+    // this app already lands on — [fastLlmClientProvider].
+    fastClient: ref.watch(fastLlmClientProvider),
+    // `ref.read` inside the closure, never `watch`, in the `lookbackDays`
+    // shape above and for its reason: watching would rebuild this provider —
+    // and the worker holding it, mid-drain — the moment somebody moved the
+    // switch. The closure is called while a pack is being built, which is
+    // exactly when the current answer is wanted.
+    selectExpand: () => ref.read(appPrefsProvider).contextSelectExpand,
   ),
 );
 

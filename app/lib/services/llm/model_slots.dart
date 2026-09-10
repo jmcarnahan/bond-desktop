@@ -139,6 +139,13 @@ const List<PipelineStageInfo> pipelineStages = [
     slot: ModelSlot.fast,
   ),
   PipelineStageInfo(
+    id: 'context_select',
+    label: 'Directory section pick',
+    description: 'Which two sections of a directory a reply should read in '
+        'full',
+    slot: ModelSlot.fast,
+  ),
+  PipelineStageInfo(
     id: 'storyline_membership',
     label: 'Storyline membership',
     description: 'Whether a thread belongs to a storyline',

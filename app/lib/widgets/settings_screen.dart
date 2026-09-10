@@ -287,6 +287,14 @@ class SettingsScreen extends StatefulWidget {
   /// the switch a person reads as **Read ignored files**.
   final void Function(String id, bool on)? onContextHonorGitignoreChanged;
 
+  /// Whether a directory-fed draft may pick two sections to read in full
+  /// first. One switch for the library, not one per directory: it is a
+  /// question about how the app spends model calls, not about a folder.
+  final bool contextSelectExpand;
+
+  /// Null hides that switch, on the discipline every callback here follows.
+  final void Function(bool on)? onContextSelectExpandChanged;
+
   /// Which half of the screen to render — see [SettingsScope].
   final SettingsScope scope;
 
@@ -359,6 +367,8 @@ class SettingsScreen extends StatefulWidget {
     this.onRemoveContextDirectory,
     this.onContextDigestsChanged,
     this.onContextHonorGitignoreChanged,
+    this.contextSelectExpand = true,
+    this.onContextSelectExpandChanged,
   });
 
   /// Keyed because their labels are ordinary words a test would otherwise have
@@ -616,6 +626,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           onDigestsChanged: widget.onContextDigestsChanged ?? _ignoreIdFlag,
           onHonorGitignoreChanged:
               widget.onContextHonorGitignoreChanged ?? _ignoreIdFlag,
+          selectExpand: widget.contextSelectExpand,
+          onSelectExpandChanged: widget.onContextSelectExpandChanged,
           now: widget.now,
         ),
       if (!ai && widget.onRefreshNow != null)

@@ -110,6 +110,16 @@ class AppPrefs {
   /// mail.
   final bool showActivityLog;
 
+  /// Whether a draft that reads a registered directory may spend one extra
+  /// fast call choosing two sections of it to read IN FULL before it writes.
+  ///
+  /// ON by default, unlike most switches here, because the one bounded call
+  /// per directory-fed draft IS the feature: six passages of a thousand
+  /// characters can miss the one section that carries the number, and a
+  /// directory the owner registered and linked is a directory they want read
+  /// properly. Off, a reply sees only the nearest passages.
+  final bool contextSelectExpand;
+
   /// Which end of a storyline its spine starts at. Off — oldest first — is how
   /// a storyline reads as a story. Global rather than per storyline because
   /// reading direction is a habit a person has, not a fact about one grouping:
@@ -174,6 +184,7 @@ class AppPrefs {
     this.backendMode = backendModeMcp,
     this.mcpServerUrl = defaultMcpServerUrl,
     this.showActivityLog = false,
+    this.contextSelectExpand = true,
     this.storylineNewestFirst = false,
     this.needsYouSort = NeedsYouSort.priority,
     this.peopleSort = PeopleSort.recent,
@@ -228,6 +239,7 @@ class AppPrefs {
     String? backendMode,
     String? mcpServerUrl,
     bool? showActivityLog,
+    bool? contextSelectExpand,
     bool? storylineNewestFirst,
     NeedsYouSort? needsYouSort,
     PeopleSort? peopleSort,
@@ -248,6 +260,7 @@ class AppPrefs {
         backendMode: backendMode ?? this.backendMode,
         mcpServerUrl: mcpServerUrl ?? this.mcpServerUrl,
         showActivityLog: showActivityLog ?? this.showActivityLog,
+        contextSelectExpand: contextSelectExpand ?? this.contextSelectExpand,
         storylineNewestFirst:
             storylineNewestFirst ?? this.storylineNewestFirst,
         needsYouSort: needsYouSort ?? this.needsYouSort,
@@ -273,6 +286,7 @@ const String attentionThresholdKey = 'attention_threshold';
 const String backendModeKey = 'backend_mode';
 const String mcpServerUrlKey = 'mcp_server_url';
 const String showActivityLogKey = 'show_activity_log';
+const String contextSelectExpandKey = 'context_select_expand';
 const String storylineNewestFirstKey = 'storyline_newest_first';
 const String needsYouSortKey = 'needs_you_sort';
 const String peopleSortKey = 'people_sort';
@@ -332,6 +346,13 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       // Anything that is not the string this notifier writes reads as off,
       // an absent key included — which is the state every install starts in.
       showActivityLog: await store.getPref(showActivityLogKey) == 'true',
+      // Defaults ON, so the read is the inverse of the one above: only the
+      // one spelling this notifier writes reads as off. An absent key, a
+      // hand-edited value, a string from a build that meant something else —
+      // all of them leave the feature on, which is the state a fresh install
+      // wants.
+      contextSelectExpand:
+          await store.getPref(contextSelectExpandKey) != 'false',
       storylineNewestFirst:
           await store.getPref(storylineNewestFirstKey) == 'true',
       needsYouSort: _needsYouSort(await store.getPref(needsYouSortKey)),
@@ -480,6 +501,12 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   Future<void> setShowActivityLog(bool value) async {
     state = state.copyWith(showActivityLog: value);
     await _store.setPref(showActivityLogKey, value.toString());
+  }
+
+  /// Whether a directory-fed draft may read two sections in full first.
+  Future<void> setContextSelectExpand(bool value) async {
+    state = state.copyWith(contextSelectExpand: value);
+    await _store.setPref(contextSelectExpandKey, value.toString());
   }
 
   Future<void> setStorylineNewestFirst(bool value) async {

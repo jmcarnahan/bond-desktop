@@ -2028,6 +2028,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       showActivityLog: prefs.showActivityLog,
       onShowActivityLogChanged: (on) =>
           unawaited(notifier.setShowActivityLog(on)),
+      contextSelectExpand: prefs.contextSelectExpand,
+      onContextSelectExpandChanged: (on) =>
+          unawaited(notifier.setContextSelectExpand(on)),
       onOpenActivityLog: _openActivityLog,
       notifyStyle: prefs.notifyStyle,
       onNotifyStyleChanged: (style) => unawaited(notifier.setNotifyStyle(style)),

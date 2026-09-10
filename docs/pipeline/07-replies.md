@@ -407,7 +407,7 @@ is — `digest (a model's summary of this file)`.
 |---|---|---|---|
 | `directory_brief` | 700 | 300 | `«name»: about`, `Facts:`, `Terms:` |
 | `directory_guidance` | 1,500 | — | `[guidance]`, `[CLAUDE.md]`, `[docs/CLAUDE.md]`, `[SKILL vendor-replies]`, `[rule pricing.md]` |
-| `directory_excerpts` | 2,500 | 800 | `[acme/docs/pricing.md, Pricing > Q4 rates, modified 2026-08-30]` then the passage |
+| `directory_excerpts` | 8,700 (2,500 ranked + two 3,000-character sections and their bracket lines) | 800 | `[acme/docs/pricing.md, Pricing > Q4 rates, modified 2026-08-30]` then the passage |
 
 The decision gets no guidance fence at all: it answers one yes-or-no question,
 and instructions about how a reply should READ have nothing to say about

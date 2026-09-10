@@ -34,6 +34,7 @@ void main() {
     String modified = '2026-08-30',
     String text = 'Q4 rates hold at nine.',
     bool truncated = false,
+    bool expanded = false,
   }) =>
       ContextExcerpt(
         dirName: dirName,
@@ -44,6 +45,7 @@ void main() {
         fileId: 1,
         dirId: 'd1',
         truncated: truncated,
+        expanded: expanded,
       );
 
   group('the brief', () {
@@ -153,6 +155,39 @@ void main() {
           2500,
         ),
         contains("digest (a model's summary of this file)"),
+      );
+    });
+
+    test('a section read in full says so, and a whole file says both', () {
+      // The difference between an extract and a section, said in the bracket
+      // line because it changes what a model may conclude from a silence: a
+      // section read in full that does not carry the number is a section that
+      // does not carry it.
+      expect(
+        renderContextExcerpts(
+          packOf(excerpts: [excerptOf(locator: 'Pricing', expanded: true)]),
+          2500,
+        ),
+        contains('[acme/docs/pricing.md, Pricing, read in full, '
+            'modified 2026-08-30]'),
+      );
+      expect(
+        renderContextExcerpts(
+          packOf(excerpts: [excerptOf(locator: '', expanded: true)]),
+          2500,
+        ),
+        contains('[acme/docs/pricing.md, whole file, read in full, '
+            'modified 2026-08-30]'),
+      );
+      // And the truncation note still lands last, after both.
+      expect(
+        renderContextExcerpts(
+          packOf(excerpts: [
+            excerptOf(locator: 'Pricing', expanded: true, truncated: true),
+          ]),
+          2500,
+        ),
+        contains('Pricing, read in full (truncated)'),
       );
     });
 

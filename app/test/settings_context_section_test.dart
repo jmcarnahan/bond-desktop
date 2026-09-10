@@ -70,12 +70,14 @@ void main() {
   late List<String> removes;
   late List<(String, bool)> digests;
   late List<(String, bool)> ignored;
+  late List<bool> selectExpands;
 
   setUp(() {
     rereads = [];
     removes = [];
     digests = [];
     ignored = [];
+    selectExpands = [];
   });
 
   Future<void> pumpSection(
@@ -85,6 +87,8 @@ void main() {
     bool loading = false,
     String? error,
     Future<void> Function()? onAdd,
+    bool selectExpand = true,
+    bool wireSelectExpand = true,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -102,6 +106,9 @@ void main() {
             onRemove: removes.add,
             onDigestsChanged: (id, on) => digests.add((id, on)),
             onHonorGitignoreChanged: (id, on) => ignored.add((id, on)),
+            selectExpand: selectExpand,
+            onSelectExpandChanged:
+                wireSelectExpand ? selectExpands.add : null,
             now: () => DateTime.parse(_now),
           ),
         ),
@@ -109,6 +116,59 @@ void main() {
     ));
     await tester.pump();
   }
+
+  group('the section pick switch', () {
+    testWidgets('shows what is stored rather than what was tapped',
+        (tester) async {
+      // Prop-driven with no local state: the host watches the preference and
+      // rebuilds, so a switch that remembered its own tap could disagree with
+      // the database it is meant to be showing.
+      await pumpSection(tester, rows: [_row(_dir())], selectExpand: false);
+
+      final control = tester.widget<SwitchListTile>(
+        find.byKey(ContextDirectoriesSection.selectExpandKey),
+      );
+      expect(control.value, isFalse);
+      expect(
+        find.text('Let the model pick two sections to read in full before '
+            'drafting'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('One extra fast call per suggestion that reads a '
+            'directory. Off, a reply sees only the nearest passages.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a tap reaches the host with the new value', (tester) async {
+      await pumpSection(tester, rows: [_row(_dir())], selectExpand: true);
+
+      final control = find.byKey(ContextDirectoriesSection.selectExpandKey);
+      await tester.ensureVisible(control);
+      await tester.pump();
+      await tester.tap(control);
+      await tester.pump();
+
+      expect(selectExpands, [false]);
+    });
+
+    testWidgets('a host that cannot write it is offered no switch',
+        (tester) async {
+      await pumpSection(
+        tester,
+        rows: [_row(_dir())],
+        wireSelectExpand: false,
+      );
+
+      expect(
+        find.byKey(ContextDirectoriesSection.selectExpandKey),
+        findsNothing,
+      );
+      // And the rows are still there — the switch is not the section.
+      expect(find.text('acme'), findsOneWidget);
+    });
+  });
 
   group('the collapsed summary', () {
     testWidgets('says there are none yet', (tester) async {

@@ -56,14 +56,21 @@ String renderContextExcerpts(ContextPack pack, int cap) => _joined(
       cap,
     );
 
-/// Where in the file this passage sits, and whether the file was read whole.
+/// Where in the file this passage sits, whether it is the whole of that
+/// place, and whether the file was read whole.
+///
+/// `read in full` is the difference between an extract and a section, and it
+/// changes what a model may conclude from a silence: a ranked passage that
+/// does not carry the number is a paragraph that does not carry it, while a
+/// section read in full that does not carry it is a section that does not.
 String _where(ContextExcerpt excerpt) {
   final locator = switch (excerpt.locator) {
     'digest' => "digest (a model's summary of this file)",
     '' => 'whole file',
     final other => other,
   };
-  return excerpt.truncated ? '$locator (truncated)' : locator;
+  final where = excerpt.expanded ? '$locator, read in full' : locator;
+  return excerpt.truncated ? '$where (truncated)' : where;
 }
 
 /// The blocks joined and clamped to [cap], [renderAttachmentExcerpts]'s rule

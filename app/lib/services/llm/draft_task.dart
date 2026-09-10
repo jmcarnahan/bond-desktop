@@ -184,12 +184,21 @@ class DraftTask implements JsonTask<DraftResult> {
 
   /// The owner's own directories, in characters. The brief is three lines of
   /// standing fact and gets the least; the guidance is instructions the reply
-  /// is asked to follow and gets more than the brief; the passages get the
-  /// documents' own budget, because they are the same kind of evidence read
-  /// out of a different place.
+  /// is asked to follow and gets more than the brief.
+  ///
+  /// The passages get the documents' own budget PLUS room for two sections
+  /// read in full. The ranked passages are still trimmed to 2,500 in the
+  /// retriever, exactly as they were; the extra 6,200 is two sections at the
+  /// retriever's own `expandedSectionCap` PLUS the two bracket lines the
+  /// render writes above them, which cost about eighty characters each and
+  /// are not in the retriever's arithmetic. Without that allowance the worst
+  /// case lands just over the cap and the last ranked passage is trimmed for
+  /// no reason. So this is a ceiling for a pack that asked to read closer,
+  /// never a target — the ordinary directory-fed draft is the same size it
+  /// always was.
   static const int _directoryBriefCap = 700;
   static const int _directoryGuidanceCap = 1500;
-  static const int _directoryExcerptsCap = 2500;
+  static const int _directoryExcerptsCap = 8700;
   static const int _evidenceCap = 300;
 
   /// A stance is a label on a card. Two to four words is what the prompt asks
