@@ -1,16 +1,30 @@
 import 'dart:io';
 
+import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:bond_inbox/services/server/router_preset.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
+import 'fixtures/test_manifest.dart';
+
+/// The preset is now a PROJECTION of the manifest rather than a table of its
+/// own, so every case here builds one through `testManifest()` — except the
+/// first, which builds it from the real committed asset. That one is the
+/// pin: it is what says the JSON a model bump edits still writes the INI
+/// llama-server has always been given.
 void main() {
   group('RouterPreset', () {
-    test('the default trio writes the INI llama-server expects', () {
+    test('the committed manifest writes the INI llama-server expects', () {
+      // `flutter test` runs from `app/`, so the asset is a plain file here —
+      // no bundle, no binding, no channel.
+      final manifest = ModelManifest.parse(
+        File('assets/models/manifest.json').readAsStringSync(),
+      );
+
       // A folder WITH A SPACE in it, unquoted, because that is the whole
       // gotcha: llama-server's INI parser reads a value to end of line, and a
       // path helpfully wrapped in quotes arrives with the quotes still in it.
-      final ini = RouterPreset.defaults('/tmp/Bond Models').toIni();
+      final ini = manifest.toPreset('/tmp/Bond Models').toIni();
 
       expect(ini, '''
 version = 1
@@ -42,13 +56,13 @@ load-on-startup = true
 
     test('modelIds are the router ids, in file order', () {
       expect(
-        RouterPreset.defaults('/tmp/models').modelIds,
+        testPreset('/tmp/models').modelIds,
         ['bond-embed', 'bond-bulk', 'bond-prose'],
       );
     });
 
     test('modelPath flattens the repo slash to an underscore', () {
-      final preset = RouterPreset.defaults('/models');
+      final preset = testPreset('/models');
       final embed = preset.models.first;
       expect(
         preset.modelPath(embed),
@@ -58,9 +72,9 @@ load-on-startup = true
     });
 
     test('the hash is stable for one folder and moves with it', () {
-      final a = RouterPreset.defaults('/tmp/Bond Models');
-      final b = RouterPreset.defaults('/tmp/Bond Models');
-      final elsewhere = RouterPreset.defaults('/tmp/Other Models');
+      final a = testPreset('/tmp/Bond Models');
+      final b = testPreset('/tmp/Bond Models');
+      final elsewhere = testPreset('/tmp/Other Models');
 
       expect(a.hash, b.hash);
       expect(a.hash, hasLength(64));
@@ -70,7 +84,7 @@ load-on-startup = true
     });
 
     test('a changed flag changes the hash', () {
-      final preset = RouterPreset.defaults('/tmp/models');
+      final preset = testPreset('/tmp/models');
       final tweaked = RouterPreset(
         modelsFolder: '/tmp/models',
         models: [
@@ -90,7 +104,7 @@ load-on-startup = true
       final root = await Directory.systemTemp.createTemp('router_preset');
       addTearDown(() => root.delete(recursive: true));
 
-      final preset = RouterPreset.defaults(root.path);
+      final preset = testPreset(root.path);
       expect(preset.missingFiles(), hasLength(3));
 
       final present = preset.models[1];

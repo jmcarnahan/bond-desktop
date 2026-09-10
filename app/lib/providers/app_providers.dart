@@ -54,9 +54,10 @@ import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_people_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
 import '../services/message_search.dart';
+import '../services/models/model_downloader.dart';
+import '../services/models/model_manifest.dart';
 import '../services/server/llama_binary.dart';
 import '../services/server/model_server_supervisor.dart';
-import '../services/server/router_preset.dart';
 import '../services/server/process_runner.dart';
 import '../services/server/server_state.dart';
 import '../services/system/system_info.dart';
@@ -195,6 +196,21 @@ final appPathsProvider = Provider<AppPaths>(
   ),
 );
 
+/// Which checkpoints this build downloads — `assets/models/manifest.json`,
+/// parsed once in `main()` and handed in here.
+///
+/// It throws rather than defaulting, exactly as [dbProvider] does and for the
+/// same reason: reading an asset is async and a provider body cannot be. A
+/// Dart-constant fallback would be worse than a throw — it would be a SECOND
+/// place the three checkpoints are named, and the whole point of the manifest
+/// is that there is only one.
+final modelManifestProvider = Provider<ModelManifest>(
+  (ref) => throw UnimplementedError(
+    'modelManifestProvider must be overridden with the loaded manifest '
+    '(see main()).',
+  ),
+);
+
 /// The first-run and machine-local bookkeeping — a THIRD store over the same
 /// database, for [contextStoreProvider]'s reason: nothing in it is mailbox
 /// data and none of it is wiped when an identity changes.
@@ -220,9 +236,9 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
     runner: const SystemProcessRunner(),
     supportDir: paths.support,
     binaryPath: LlamaBinary.resolve,
-    buildPreset: () => RouterPreset.defaults(
-      ref.read(appPrefsProvider).effectiveModelsFolder(paths),
-    ),
+    buildPreset: () => ref
+        .read(modelManifestProvider)
+        .toPreset(ref.read(appPrefsProvider).effectiveModelsFolder(paths)),
     routerPort: () => ref.read(appPrefsProvider).routerPort,
     managed: () => ref.read(appPrefsProvider).managedServer,
     beginActivity: system.beginActivity,
@@ -249,6 +265,32 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
 final serverStateProvider = StreamProvider<ServerState>(
   (ref) => ref.watch(modelServerSupervisorProvider).states,
 );
+
+/// The thing that fills the models folder.
+///
+/// It watches the platform, the store and the paths — the three collaborators
+/// it is BUILT from — and reads the folder inside a closure, on
+/// [modelServerSupervisorProvider]'s rule: a provider that watched the prefs
+/// would be rebuilt the moment somebody moved a setting, and rebuilding this
+/// one mid-download would abandon a transfer that is hours in. Late binding
+/// costs nothing: the folder is consulted at the top of a run, never cached.
+final modelDownloaderProvider = Provider<ModelDownloader>((ref) {
+  final system = ref.watch(systemInfoProvider);
+  final store = ref.watch(setupStoreProvider);
+  final paths = ref.watch(appPathsProvider);
+  final downloader = ModelDownloader(
+    manifest: ref.watch(modelManifestProvider),
+    modelsFolder: () =>
+        ref.read(appPrefsProvider).effectiveModelsFolder(paths),
+    readLedger: store.downloadLedger,
+    writeLedger: store.recordDownload,
+    sha256: system.sha256,
+    beginActivity: system.beginActivity,
+    endActivity: system.endActivity,
+  );
+  ref.onDispose(downloader.dispose);
+  return downloader;
+});
 
 /// How a picked folder stays readable after a relaunch. The real one is a
 /// method channel onto the Runner's Swift; a test overrides it with

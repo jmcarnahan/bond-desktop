@@ -5,8 +5,6 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart' show immutable;
 import 'package:path/path.dart' as p;
 
-import '../llm/model_slots.dart';
-
 /// One model in the router's preset: what it is called, where its weights
 /// came from, and the flags it is loaded with.
 ///
@@ -44,6 +42,12 @@ class RouterModelSpec {
 /// makes that safe across a relaunch — an adopted server whose preset hash
 /// does not match the one the app would write now is serving the wrong
 /// models, and gets replaced rather than reused.
+///
+/// The SECTIONS come from `ModelManifest.toPreset` — the committed
+/// `assets/models/manifest.json` is the only place the three checkpoints are
+/// named. This class knows how to write an INI and nothing about which models
+/// belong in one, which is what lets a model bump be a JSON edit; the
+/// dependency runs manifest → preset and never the other way.
 @immutable
 class RouterPreset {
   /// Where the GGUF files live — the folder the downloader fills.
@@ -52,47 +56,6 @@ class RouterPreset {
   final List<RouterModelSpec> models;
 
   const RouterPreset({required this.modelsFolder, required this.models});
-
-  /// The default trio (Phase 3 replaces this source with the manifest).
-  ///
-  /// Ordered smallest first, and that order reaches the INI: the router loads
-  /// the sections in file order at startup, so the embedding model — the one
-  /// the ingestion pipeline blocks on first — is resident while the
-  /// twenty-seven-billion-parameter prose model is still being mapped.
-  static const List<RouterModelSpec> defaultTrio = [
-    RouterModelSpec(
-      id: routerEmbedId,
-      repo: 'ggml-org/embeddinggemma-300M-GGUF',
-      file: 'embeddinggemma-300M-Q8_0.gguf',
-      // `pooling = mean` is not a preference: the stored vectors were written
-      // under mean pooling, and a server that pooled differently would answer
-      // plausible numbers in a different space.
-      args: {
-        'embedding': 'true',
-        'pooling': 'mean',
-        'load-on-startup': 'true',
-      },
-    ),
-    RouterModelSpec(
-      id: routerBulkId,
-      repo: 'ggml-org/Qwen3-4B-Instruct-2507-Q8_0-GGUF',
-      file: 'qwen3-4b-instruct-2507-q8_0.gguf',
-      // Four parallel slots because the bulk slot is what the drain hammers:
-      // triage, needs-you, extraction and the digests all queue against it.
-      args: {'c': '32768', 'parallel': '4', 'load-on-startup': 'true'},
-    ),
-    RouterModelSpec(
-      id: routerProseId,
-      repo: 'ggml-org/Qwen3.8-27B-GGUF',
-      file: 'Qwen3.8-27B-Q4_K_M.gguf',
-      // One slot, not four: the prose model is the memory ceiling on this
-      // machine and a second concurrent context would double its KV cache.
-      args: {'c': '32768', 'parallel': '1', 'load-on-startup': 'true'},
-    ),
-  ];
-
-  factory RouterPreset.defaults(String modelsFolder) =>
-      RouterPreset(modelsFolder: modelsFolder, models: defaultTrio);
 
   /// `<modelsFolder>/<repo with '/' → '_'>/<file>`.
   ///

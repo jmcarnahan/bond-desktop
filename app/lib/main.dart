@@ -12,6 +12,7 @@ import 'providers/app_providers.dart';
 import 'providers/prefs_provider.dart';
 import 'screens/inbox_screen.dart';
 import 'screens/sign_in_screen.dart';
+import 'services/models/model_manifest.dart';
 import 'services/triage_queue.dart';
 import 'widgets/preview/pdf_preview.dart';
 import 'widgets/server_bootstrap.dart';
@@ -83,6 +84,13 @@ Future<void> main() async {
     debugPrint('container migration: $migration');
   }
 
+  // The committed manifest of model files, read from the asset bundle before
+  // anything can ask for it. NOT guarded: a manifest that is missing or does
+  // not parse is a broken build rather than a broken machine, and a launch
+  // that swallowed it would leave the router pointed at nothing and the
+  // downloader with nothing to fetch.
+  final manifest = await ModelManifest.load();
+
   // Read before the first frame rather than a microtask into it: every backend
   // provider watches the stored mode, and a frame on the defaults would build
   // — and immediately dispose — a session pointed at the wrong server.
@@ -96,6 +104,10 @@ Future<void> main() async {
         // is async and the provider's own default is a temp path nothing
         // writes to.
         appPathsProvider.overrideWithValue(paths),
+        // The model manifest, for [dbProvider]'s reason: the asset read is
+        // async and the provider's own default throws rather than inventing a
+        // second list of checkpoints.
+        modelManifestProvider.overrideWithValue(manifest),
         initialAppPrefsProvider.overrideWithValue(prefs),
         // Stamped here, once: the processing indicator only speaks for mail
         // that arrived after the app was already open, and this is the only

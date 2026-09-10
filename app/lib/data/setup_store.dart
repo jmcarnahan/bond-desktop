@@ -1,6 +1,9 @@
+import 'dart:convert';
+
 import 'package:drift/drift.dart';
 import 'package:flutter/foundation.dart' show immutable;
 
+import '../services/models/download_state.dart';
 import 'database.dart' show BondDatabase;
 import 'message_store.dart' show MessageStore;
 
@@ -57,6 +60,11 @@ class SetupStore {
   /// empty can be told from one that never had anything to bring across.
   static const String containerMigrationKey = 'container_migration';
 
+  /// Where the model download's ledger lives — one JSON value, rewritten as
+  /// the download moves. See [DownloadLedger] for why it holds no URL and
+  /// why the `.part` file's length, not this row, is the resume offset.
+  static const String downloadKey = 'download';
+
   static String _nowIso() => MessageStore.isoStamp(DateTime.now());
 
   static List<Variable> _args(List<Object?> values) => [
@@ -93,6 +101,16 @@ class SetupStore {
       variables: _args([key]),
     );
   }
+
+  /// Writes the whole ledger over itself. The downloader owns the value and
+  /// rewrites it as a unit, so there is nothing here to merge.
+  Future<void> recordDownload(DownloadLedger ledger) =>
+      set(downloadKey, jsonEncode(ledger.toJson()));
+
+  /// The ledger, or an empty one — [DownloadLedger.parse] never throws, so an
+  /// unreadable row costs a re-verify rather than a launch.
+  Future<DownloadLedger> downloadLedger() async =>
+      DownloadLedger.parse(await get(downloadKey));
 
   Future<Map<String, String>> all() async {
     final rows = await db

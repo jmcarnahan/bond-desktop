@@ -2,7 +2,6 @@ import 'dart:io';
 
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/services/server/model_server_supervisor.dart';
-import 'package:bond_inbox/services/server/router_preset.dart';
 import 'package:bond_inbox/services/server/server_state.dart';
 import 'package:bond_inbox/widgets/server_bootstrap.dart';
 import 'package:flutter/material.dart';
@@ -10,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/fake_process_runner.dart';
+import 'fixtures/test_manifest.dart';
 
 /// What launch does about the model server when nobody has asked for one.
 ///
@@ -44,7 +44,7 @@ void main() {
       // "nothing started" has to be the preference's doing rather than a
       // missing executable's.
       binaryPath: () => '/usr/bin/true',
-      buildPreset: () => RouterPreset.defaults(support.path),
+      buildPreset: () => testPreset(support.path),
       routerPort: () => 8080,
       managed: () => managed,
     );

@@ -174,6 +174,47 @@ has it readable in the binary, which is why `dist/bundle.sh` refuses to run
 while the env file has a non-empty value for it. Distributed builds use MCP
 mode, which needs only `BOND_MCP_SERVER_URL`.
 
+## Bumping a model
+
+The three checkpoints are named in exactly one place: `app/assets/models/
+manifest.json`. A bump is an edit to that file and to nothing else — no Dart
+changes, and a diff a reviewer can read.
+
+1. Get the size and the digest from the tree API. `size` is the byte count and
+   `lfs.oid` is the sha256:
+
+   ```sh
+   curl -s https://huggingface.co/api/models/<repo>/tree/main | \
+     python3 -m json.tool
+   ```
+
+2. Get the revision — the commit the file is pinned to. **Never `main`:** a
+   branch is a moving target, and a download resolved through one would fetch
+   bytes that no longer match the digest.
+
+   ```sh
+   curl -sI https://huggingface.co/<repo>/resolve/main/<file> | \
+     grep -i x-repo-commit
+   ```
+
+3. Edit the entry: `repo`, `file`, `revision`, `sizeBytes`, `sha256`,
+   `displayName`, and the licence fields if the licence changed. **Keep the
+   three `id`s** (`bond-embed`, `bond-bulk`, `bond-prose`) — they are what the
+   router routes on, what the slots resolve to, and what the ledger is keyed
+   by. Keep the file order smallest first.
+
+4. `cd app && flutter test test/model_manifest_test.dart`. It parses the real
+   asset, checks the digests and revisions, and pins the INI the preset writes.
+   Update the size and digest literals in that file in the same commit — they
+   are the second pair of eyes on a copy-paste.
+
+The next launch does the rest. The ledger records which manifest sha each
+`.part` belongs to, so a changed digest DISCARDS the stale part rather than
+resuming into bytes from the previous checkpoint, and the new file is
+downloaded from zero. The preset hash changes with the file name too, so an
+adopted server serving the old weights is replaced rather than reused
+(`docs/pipeline/10-model-routing.md`, **Managed mode: one router**).
+
 ## Releasing
 
 1. Bump `version:` in `app/pubspec.yaml`.

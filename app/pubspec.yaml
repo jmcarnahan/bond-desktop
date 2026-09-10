@@ -118,6 +118,12 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
+  # The model manifest: which GGUF files the app downloads, from where, and
+  # what they must hash to. Bumping a model is an edit to this file
+  # (docs/distribution.md, "Bumping a model").
+  assets:
+    - assets/models/manifest.json
+
   # Family names must stay exactly these three — BondType references them
   # by string (lib/theme/bond_typography.dart).
   fonts:

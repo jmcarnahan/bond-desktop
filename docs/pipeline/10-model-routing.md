@@ -144,6 +144,87 @@ behaves exactly as this page has always described.
   `~/Library/Application Support/com.bondinbox.app/models`) survive `wipeAll`
   with the four slot prefs and for the same reason.
 
+### The manifest
+
+`app/assets/models/manifest.json` is the ONLY place the three checkpoints are
+named. Phase 2's Dart trio (`RouterPreset.defaultTrio`) is gone; the preset's
+sections are now `ModelManifest.toPreset(folder)`, and `RouterPreset` knows how
+to write an INI and nothing about which models belong in one. That is the whole
+point of the file: bumping a model must not be a code change, and the diff of
+one bump must be legible on its own — three fields in one JSON file (see
+`docs/distribution.md`, **Bumping a model**).
+
+One entry per model, in FILE ORDER, which is also the order the INI's sections
+take and the order the router loads them in: smallest first, so the embedding
+model — the one the ingestion pipeline blocks on — is resident while the
+twenty-seven-billion-parameter prose model is still being mapped.
+
+| Field | What it is |
+|-------|------------|
+| `id` | The router id — `bond-embed` / `bond-bulk` / `bond-prose`, from `model_slots.dart`. |
+| `role` | `embed`, `bulk` or `prose`. Exactly one model per role; the parser refuses anything else, because the app asks for a role and the router routes on the id. |
+| `repo`, `file` | The Hugging Face repo and the artefact in it. Kept apart because the resolve URL wants both halves and so does the on-disk layout (`<repo with '/' → '_'>/<file>`, the same rule as `RouterPreset.modelPath`). |
+| `revision` | A 40-character COMMIT SHA, never `main`. A branch is a moving target: the file behind `main` can be replaced upstream, and a download resolved through it would fetch bytes that no longer match `sha256` — a checksum failure the user cannot act on and this app would have caused. |
+| `sizeBytes`, `sha256` | The measured size and the LFS oid. Both are checked against the hub's `X-Linked-Size` / `X-Linked-ETag` on the redirect, so a manifest that is wrong about a file is caught before eighteen gigabytes are spent. |
+| `minRamBytes` | What the machine must have. 0 when it always fits. |
+| `license`, `licenseUrl`, `notice` | What the first-run screen shows. `notice` is null for the permissive ones, so a screen can skip the line entirely rather than render an empty string. |
+| `serverArgs` | llama-server's long flags with the leading dashes stripped — the spelling the preset INI wants. Values are strings; the INI writer prints them verbatim. |
+
+JSON has no comments, so the three flags that are not preferences are recorded
+here instead:
+
+- **`pooling = mean`** on the embedding model is not a taste. The stored
+  vectors were written under mean pooling, and a server that pooled
+  differently would answer plausible numbers in a different space.
+- **`parallel = 4`** on the bulk model because the bulk slot is what the drain
+  hammers: triage, needs-you, extraction and the digests all queue against it.
+- **`parallel = 1`** on the prose model because it is the memory ceiling on
+  this machine, and a second concurrent context would double its KV cache.
+
+### The downloader
+
+`ModelDownloader` (`app/lib/services/models/model_downloader.dart`), behind
+`modelDownloaderProvider`. It fills the models folder the preset points at, and
+Phase 4 draws the wizard on top of it.
+
+- **One stream at a time, smallest first.** The bottleneck is the link, not the
+  server, so four concurrent transfers only make every one of them finish
+  later; smallest first means the inbox is usable after the embed and bulk
+  models (`ModelManifest.usableIds`) rather than after all twenty-three
+  gigabytes.
+- **A failure moves on.** A prose model that 404s must not hide an embedding
+  model that finished, so a file's failure is an event on the stream and the
+  run continues to the next file. The stream itself never carries an error.
+- **`.part` beside the destination, HTTP Range resume.** The part sits next to
+  the finished name so the rename onto it is not a cross-device copy. **The
+  part's own length is the resume offset, never the ledger's** — the ledger is
+  written at most every couple of seconds and a crash can lose the last write;
+  the file cannot lie about how many bytes it holds. A server that answers 200
+  to a ranged request has ignored the Range, and the part is truncated rather
+  than appended to.
+- **Re-resolve on expiry, and no URL is ever stored.** Hugging Face answers a
+  resolve with a redirect to a signed CDN address that expires in about an
+  hour. A 403 mid-transfer means the signature aged out, not that access was
+  refused: the app asks the hub again, immediately, without a backoff.
+- **sha256 on the platform side.** `SystemInfo.sha256` (CryptoKit) because a
+  pure-Dart digest over twenty-three gigabytes takes minutes on the isolate
+  that draws the UI. The Dart fallback is what runs under `flutter test`, where
+  there is no channel behind the method call. One checksum mismatch is retried
+  from zero — a flipped bit in flight is worth one more try; a second is the
+  wrong file, and leaves neither a part nor a destination behind.
+- **The ledger lives in `setup_state['download']`.** One JSON value per run,
+  holding a status, a byte count and the manifest sha each part belongs to — a
+  bumped manifest therefore invalidates a stale `.part` rather than resuming
+  into bytes from another checkpoint. It holds no URL and no host.
+- **A disk preflight with 10 GiB of headroom** (`disk_preflight.dart`) over
+  what is still to be downloaded. Free space that cannot be asked is NOT a
+  refusal: the download hits ENOSPC and keeps its part, and refusing on
+  ignorance would block a volume that simply cannot be asked.
+- **The failure vocabulary** is closed and lives in `DownloadError`:
+  `disk_full`, `checksum`, `network`, `gated`, `manifest_mismatch`,
+  `missing_folder`, and `http_<code>` for everything else. Words rather than an
+  enum, so a ledger written by another build stays readable.
+
 ## Failure policy: park, never fall back
 
 - **No fallback between servers.** A down server throws
