@@ -104,6 +104,32 @@ The copy happens in `dist/bundle.sh` rather than in an Xcode Copy Files phase
 because the macOS runner project is Flutter-regenerable, and a build phase
 added by hand is exactly what a project refresh drops without saying so.
 
+**What the app writes at runtime.** Nothing above is written to after the
+build — the bundle is read-only and code-signed. Everything the running app
+produces lives under `~/Library/Application Support/com.bondinbox.app/`:
+
+- `servers/` — the router preset the supervisor writes (`router.ini`), the pid
+  file the next launch reaps (`router.json`), and `empty-cache/`, an empty
+  directory the child is deliberately pointed at as `LLAMA_CACHE`.
+- `logs/llama-server.log` — the sidecar's own output, and the one folder a user
+  is ever asked to open and send. **Show log** on the Local server card opens
+  it.
+- `models/` — the GGUF files, tens of gigabytes of them, unless the user pointed
+  the card at a folder of their own. The only folder here worth deleting by
+  hand.
+
+That root is also a change of address. The app used to be sandboxed, which put
+its data inside `~/Library/Containers/com.bondinbox.app/`; it is not sandboxed
+any more, because it has to spawn a child process and read model files the user
+chose. `migrateSandboxContainerData` (`app/lib/data/app_paths.dart`) runs on the
+first unsandboxed launch, BEFORE the database is opened, and copies the database
+with its `-wal` and `-shm` sidecars and the attachments tree across. It copies
+rather than moves — a bad migration then costs the user nothing — never throws,
+and removes a partial copy from the target rather than leaving one that the next
+launch would read as "already migrated". What it did is recorded in
+`setup_state` under `container_migration`. Keychain items do not migrate; the
+user signs in once more.
+
 ### Signing
 
 Two rules, both from Apple's distribution-signing guidance:

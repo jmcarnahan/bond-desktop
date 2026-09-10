@@ -74,7 +74,7 @@ body has the same shape in `settings_models_body.dart`.
 |---|---|---|
 | About me | always | the saved text, whitespace collapsed to one line, cut at 80 characters with `…`; `Not written yet` when empty |
 | Microsoft connection | any of `onBackendModeChanged`, `connectionStatus`, `hasScope`, `onSignIn` is wired | `MCP` or `This device`, then (MCP only) `Deployed` / `Local` / `Custom`, then `Checking…` / `Not signed in` / `Signed in as <label>` / `Signed in`, joined by ` · ` |
-| Models | `onSlotTargetChanged` wired | `Fast <model> @ <host:port> · Prose <model> @ <host:port> · Embeddings <host:port>` |
+| Models | `onSlotTargetChanged` wired | `[<local server summary> · ]Fast <model> @ <host:port> · Prose <model> @ <host:port> · Embeddings <host:port>` — the prefix is present only when the host wires the Local server card (`localServerSummary`), so a screen without one reads exactly as it always did |
 | Needs You | always | the threshold wording, plus ` · custom rules` or ` · default rules` when `onNeedsYouRulesSaved` is wired, plus ` · judging N message(s)` while `needsYouRejudging` (the whole needs-you queue, from `needsYouPendingProvider`) is above zero — "judging", not "re-judging", because the count cannot tell a Save's rows from a sync's |
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
 | Activity log | `onShowActivityLogChanged` wired | `Shown in the sidebar` / `Hidden` |
@@ -239,8 +239,11 @@ value equal to the compiled default is sent as the **empty string**, because
 empty means "follow the build" and is stored as empty — freezing today's
 dart-define into the database would make a changed `FAST_LLAMA_MODEL` invisible
 (see `prefs_models_test.dart`). The URL and the model name are always written
-together. **A probe never blocks a Save**: somebody about to start a server has
-to be able to point the app at it first.
+together. While the **Local server** switch is on, "Default" in the two editors
+is the router target rather than the compiled one (`AppPrefs.slotBaseline`), so
+an unedited Save still leaves the slot following the router and a later port
+change still moves it. **A probe never blocks a Save**: somebody about to start
+a server has to be able to point the app at it first.
 
 **Three probe outcomes, rendered apart.** `ModelServerProbe.probe` never throws
 and answers one of:
@@ -273,6 +276,64 @@ model's name (`EmbeddingsClient.modelTag`), so swapping it would silently
 compare vectors from two different spaces. Changing it is a re-embed migration,
 not a setting — `EMBED_URL` at build time. The card shows the URL and a Check
 server button and nothing else.
+
+**Local server card.** The first thing in the section, above the stage table
+and separated from it by a divider, is `SettingsLocalServerBody`
+(`app/lib/widgets/settings_local_server_card.dart`). It is injected as
+`SettingsScreen.modelsHeader` rather than built by the section, so
+`settings_models_body.dart` keeps knowing nothing about a supervisor: the
+section is about where model calls go, and what is running is the host's answer
+to hand over. It is prop-only like everything else here, and a null callback
+hides its control.
+
+It shows, top to bottom:
+
+- **`Bond runs the model server`** — the switch over `AppPrefs.managedServer`,
+  subtitled "One llama-server serves all three models from this Mac. Off, the
+  app expects servers you started yourself." It is the only control that stays
+  live when the preference is off; everything below it is disabled, not hidden,
+  so the row does not jump about while the server stops. Flipping it writes the
+  preference and then starts or stops the process — `_setManagedServer` on
+  `_InboxScreenState`, in that order, because `ensureRunning`/`stop` both ask
+  the preference and would read the old answer if they went first.
+- **The state**, as `ServerStateDescribe.summary`: `Stopped`, `Starting… on
+  port 8080`, `Loading models (1 of 3) on port 8080`, `Ready on
+  127.0.0.1:8080`, `Failed: <reason>`, `Port 8080 is in use[ by <holder>]`, and
+  `Off — servers are started by hand`. A failure or a held port renders as an
+  error `InlineAlert`, a start or a load as an attention one, everything else
+  as body text. Under a failure sit the **last 12 lines** of the server's log
+  in mono — the reason alone never explains a crash. Under a held port sits
+  `Pick a free port below, or stop the other program.` **The switch wins over
+  the supervisor**: with the preference off the card says `Off` whatever the
+  supervisor last reported, because stopping is asynchronous and a card still
+  saying `Ready` would be describing a server the app has already stopped
+  using.
+- **The port** — a digits-only field, **Pick a free port** (fills the field
+  from `ModelServerSupervisor.pickFreePort`, and saves nothing: a port that
+  moved because somebody pressed a button labelled *Pick* would be a surprise
+  restart), and **Save port**, live only when the number parses, sits in
+  1024..65535 and differs from the stored one. Out of range shows `Use a port
+  between 1024 and 65535`. Saving restarts the server, because a running
+  process cannot change the socket it is bound to.
+- **Models folder** — the effective path in mono (the host resolves "the app's
+  own folder" through `AppPrefs.effectiveModelsFolder`) and **Change folder…**,
+  which goes through the same `FileDialogs.chooseDirectory()` open panel every
+  other folder in this app is chosen with. Cancelling changes nothing; a change
+  restarts the server, because the preset names absolute paths.
+- **Start / Stop / Restart**, offered by state — Start for stopped, failed and
+  port-in-use; Stop for starting, loading and ready; Restart for loading and
+  ready — plus **Show log**, which hands the log file to the operating system's
+  own viewer (this app has no log pane and does not want one), and **Set up
+  again**, unwired until Phase 4's first-run wizard exists and therefore absent.
+- The caption `Changing the port or the folder restarts the server. Work in
+  flight parks and resumes when it is back.`
+
+`app/test/settings_local_server_test.dart` pins every one of those strings —
+the nine state sentences, the switch's title and subtitle, the port error, the
+held-port advice, the caption — plus which buttons each state offers and that
+everything but the switch is dead while the preference is off.
+`settings_models_test.dart` pins the join: the server's line leads the collapsed
+summary, and the card renders above the stage table.
 
 **The probe's lifetime is the screen's.** `_InboxScreenState` holds one
 `ModelServerProbe` and closes it in `dispose`. A client per button press would

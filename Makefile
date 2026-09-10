@@ -722,6 +722,20 @@ endif
 ifneq ($(strip $(FAST_LLAMA_MODEL)),)
 APP_LLM_DEFINES += --dart-define=FAST_LLAMA_MODEL='$(FAST_LLAMA_MODEL)'
 endif
+# Points a DEV build at a llama-server it did not ship with — Homebrew's, or a
+# checkout's build directory — so Settings -> Models -> Local server can run
+# the one bundled-style router without packaging an .app first. The shipped
+# bundle carries its own copy beside the executable and needs none of this.
+ifneq ($(strip $(BOND_LLAMA_SERVER)),)
+APP_LLM_DEFINES += --dart-define=BOND_LLAMA_SERVER='$(BOND_LLAMA_SERVER)'
+endif
+# Read by the first-run setup gate (Phase 4) to skip the wizard on a machine
+# that is already set up. Defined here NOW, while the gate is still being
+# built, so the `local.mk` line a developer writes today keeps working when it
+# lands and nobody has to edit this block twice.
+ifneq ($(strip $(BOND_DEV_SKIP_SETUP)),)
+APP_LLM_DEFINES += --dart-define=BOND_DEV_SKIP_SETUP='$(BOND_DEV_SKIP_SETUP)'
+endif
 
 app-install:
 	@cd $(APP_DIR) && $(FLUTTER) pub get

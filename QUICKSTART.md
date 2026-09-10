@@ -87,6 +87,9 @@ CTX_SIZE = 16384
 # MODEL_PORT = 8080
 # FAST_PORT  = 8082
 # EMBED_PORT = 8081
+# Lets Settings → Models → Local server run ONE bundled-style router from this
+# dev build, instead of the three servers you start by hand.
+# BOND_LLAMA_SERVER = /opt/homebrew/bin/llama-server
 ```
 
 ## 3. Models and servers
@@ -189,6 +192,12 @@ Stop them when you need the memory back:
 make stop fast-stop embed-stop
 ```
 
+Or let the app run them for you: with `BOND_LLAMA_SERVER` set in `local.mk`
+(step 2), **Settings → Models → Local server** turns on one llama-server that
+serves all three models, and starts and stops it with the app. It is off by
+default, and turning it off puts you back on `make model fast embed` exactly as
+above.
+
 Rebuild the app after a `git pull`:
 
 ```sh
@@ -253,6 +262,15 @@ work that needs it until it comes back. Start the missing one.
 - Weights: `~/.cache/huggingface/hub/` (shared with anything else that uses
   llama.cpp's `-hf`; `make clean-model` deletes only the prose model's directory)
 - Server logs: `tmp/logs/model-<port>.log`
+- Server logs (the app's own server, managed mode):
+  `~/Library/Application Support/com.bondinbox.app/logs/llama-server.log`
+- The app's own server files: `~/Library/Application Support/com.bondinbox.app/servers/`
+  (the preset it writes, the pid file the next launch reaps, and an empty cache
+  directory the child is deliberately pointed at)
+- Models the app downloads for itself:
+  `~/Library/Application Support/com.bondinbox.app/models/`, or wherever
+  **Change folder…** on that card points. Separate from the Homebrew cache
+  above, which is what `make model` fills.
 - App data (database, attachments, settings):
   `~/Library/Application Support/com.bondinbox.app/`. A build made before the
   app dropped the sandbox kept the same files under

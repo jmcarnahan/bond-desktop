@@ -18,6 +18,12 @@ class MainFlutterWindow: NSWindow {
     // messenger exists.
     BookmarkChannel.register(with: flutterViewController.engine.binaryMessenger)
 
+    // Same messenger, same reason. The first-run flow asks what this machine
+    // is before it draws its first choice, and the supervisor asks for an App
+    // Nap assertion the moment it spawns the server — both of which can
+    // happen before any user interaction.
+    SystemChannel.register(with: flutterViewController.engine.binaryMessenger)
+
     super.awakeFromNib()
   }
 }

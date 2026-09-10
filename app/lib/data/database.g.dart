@@ -17633,6 +17633,272 @@ class ContextChunksCompanion extends UpdateCompanion<ContextChunk> {
   }
 }
 
+class SetupState extends Table with TableInfo<SetupState, SetupStateData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  SetupState(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _keyMeta = const VerificationMeta('key');
+  late final GeneratedColumn<String> key = GeneratedColumn<String>(
+    'key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL PRIMARY KEY',
+  );
+  static const VerificationMeta _valueMeta = const VerificationMeta('value');
+  late final GeneratedColumn<String> value = GeneratedColumn<String>(
+    'value',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  late final GeneratedColumn<String> updatedAt = GeneratedColumn<String>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [key, value, updatedAt];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'setup_state';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<SetupStateData> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('key')) {
+      context.handle(
+        _keyMeta,
+        key.isAcceptableOrUnknown(data['key']!, _keyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_keyMeta);
+    }
+    if (data.containsKey('value')) {
+      context.handle(
+        _valueMeta,
+        value.isAcceptableOrUnknown(data['value']!, _valueMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_valueMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {key};
+  @override
+  SetupStateData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return SetupStateData(
+      key: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}key'],
+      )!,
+      value: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}value'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}updated_at'],
+      )!,
+    );
+  }
+
+  @override
+  SetupState createAlias(String alias) {
+    return SetupState(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class SetupStateData extends DataClass implements Insertable<SetupStateData> {
+  final String key;
+  final String value;
+  final String updatedAt;
+  const SetupStateData({
+    required this.key,
+    required this.value,
+    required this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['key'] = Variable<String>(key);
+    map['value'] = Variable<String>(value);
+    map['updated_at'] = Variable<String>(updatedAt);
+    return map;
+  }
+
+  SetupStateCompanion toCompanion(bool nullToAbsent) {
+    return SetupStateCompanion(
+      key: Value(key),
+      value: Value(value),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory SetupStateData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return SetupStateData(
+      key: serializer.fromJson<String>(json['key']),
+      value: serializer.fromJson<String>(json['value']),
+      updatedAt: serializer.fromJson<String>(json['updated_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'key': serializer.toJson<String>(key),
+      'value': serializer.toJson<String>(value),
+      'updated_at': serializer.toJson<String>(updatedAt),
+    };
+  }
+
+  SetupStateData copyWith({String? key, String? value, String? updatedAt}) =>
+      SetupStateData(
+        key: key ?? this.key,
+        value: value ?? this.value,
+        updatedAt: updatedAt ?? this.updatedAt,
+      );
+  SetupStateData copyWithCompanion(SetupStateCompanion data) {
+    return SetupStateData(
+      key: data.key.present ? data.key.value : this.key,
+      value: data.value.present ? data.value.value : this.value,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SetupStateData(')
+          ..write('key: $key, ')
+          ..write('value: $value, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(key, value, updatedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is SetupStateData &&
+          other.key == this.key &&
+          other.value == this.value &&
+          other.updatedAt == this.updatedAt);
+}
+
+class SetupStateCompanion extends UpdateCompanion<SetupStateData> {
+  final Value<String> key;
+  final Value<String> value;
+  final Value<String> updatedAt;
+  final Value<int> rowid;
+  const SetupStateCompanion({
+    this.key = const Value.absent(),
+    this.value = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  SetupStateCompanion.insert({
+    required String key,
+    required String value,
+    required String updatedAt,
+    this.rowid = const Value.absent(),
+  }) : key = Value(key),
+       value = Value(value),
+       updatedAt = Value(updatedAt);
+  static Insertable<SetupStateData> custom({
+    Expression<String>? key,
+    Expression<String>? value,
+    Expression<String>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (key != null) 'key': key,
+      if (value != null) 'value': value,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  SetupStateCompanion copyWith({
+    Value<String>? key,
+    Value<String>? value,
+    Value<String>? updatedAt,
+    Value<int>? rowid,
+  }) {
+    return SetupStateCompanion(
+      key: key ?? this.key,
+      value: value ?? this.value,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (key.present) {
+      map['key'] = Variable<String>(key.value);
+    }
+    if (value.present) {
+      map['value'] = Variable<String>(value.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<String>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SetupStateCompanion(')
+          ..write('key: $key, ')
+          ..write('value: $value, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$BondDatabase extends GeneratedDatabase {
   _$BondDatabase(QueryExecutor e) : super(e);
   $BondDatabaseManager get managers => $BondDatabaseManager(this);
@@ -17766,6 +18032,7 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     'ix_context_chunks_file',
     'CREATE INDEX ix_context_chunks_file ON context_chunks (file_id)',
   );
+  late final SetupState setupState = SetupState(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -17822,6 +18089,7 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     ixContextChunksSeq,
     ixContextChunksUnindexed,
     ixContextChunksFile,
+    setupState,
   ];
 }
 
@@ -26019,6 +26287,166 @@ typedef $ContextChunksProcessedTableManager =
       ContextChunk,
       PrefetchHooks Function()
     >;
+typedef $SetupStateCreateCompanionBuilder =
+    SetupStateCompanion Function({
+      required String key,
+      required String value,
+      required String updatedAt,
+      Value<int> rowid,
+    });
+typedef $SetupStateUpdateCompanionBuilder =
+    SetupStateCompanion Function({
+      Value<String> key,
+      Value<String> value,
+      Value<String> updatedAt,
+      Value<int> rowid,
+    });
+
+class $SetupStateFilterComposer extends Composer<_$BondDatabase, SetupState> {
+  $SetupStateFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get key => $composableBuilder(
+    column: $table.key,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get value => $composableBuilder(
+    column: $table.value,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $SetupStateOrderingComposer extends Composer<_$BondDatabase, SetupState> {
+  $SetupStateOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get key => $composableBuilder(
+    column: $table.key,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get value => $composableBuilder(
+    column: $table.value,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $SetupStateAnnotationComposer
+    extends Composer<_$BondDatabase, SetupState> {
+  $SetupStateAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get key =>
+      $composableBuilder(column: $table.key, builder: (column) => column);
+
+  GeneratedColumn<String> get value =>
+      $composableBuilder(column: $table.value, builder: (column) => column);
+
+  GeneratedColumn<String> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $SetupStateTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          SetupState,
+          SetupStateData,
+          $SetupStateFilterComposer,
+          $SetupStateOrderingComposer,
+          $SetupStateAnnotationComposer,
+          $SetupStateCreateCompanionBuilder,
+          $SetupStateUpdateCompanionBuilder,
+          (
+            SetupStateData,
+            BaseReferences<_$BondDatabase, SetupState, SetupStateData>,
+          ),
+          SetupStateData,
+          PrefetchHooks Function()
+        > {
+  $SetupStateTableManager(_$BondDatabase db, SetupState table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $SetupStateFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $SetupStateOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $SetupStateAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> key = const Value.absent(),
+                Value<String> value = const Value.absent(),
+                Value<String> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => SetupStateCompanion(
+                key: key,
+                value: value,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String key,
+                required String value,
+                required String updatedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => SetupStateCompanion.insert(
+                key: key,
+                value: value,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $SetupStateProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      SetupState,
+      SetupStateData,
+      $SetupStateFilterComposer,
+      $SetupStateOrderingComposer,
+      $SetupStateAnnotationComposer,
+      $SetupStateCreateCompanionBuilder,
+      $SetupStateUpdateCompanionBuilder,
+      (
+        SetupStateData,
+        BaseReferences<_$BondDatabase, SetupState, SetupStateData>,
+      ),
+      SetupStateData,
+      PrefetchHooks Function()
+    >;
 
 class $BondDatabaseManager {
   final _$BondDatabase _db;
@@ -26072,4 +26500,6 @@ class $BondDatabaseManager {
       $ContextTextTableManager(_db, _db.contextText);
   $ContextChunksTableManager get contextChunks =>
       $ContextChunksTableManager(_db, _db.contextChunks);
+  $SetupStateTableManager get setupState =>
+      $SetupStateTableManager(_db, _db.setupState);
 }

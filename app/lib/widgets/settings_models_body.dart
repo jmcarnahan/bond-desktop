@@ -38,8 +38,16 @@ class SettingsModelsBody extends StatefulWidget {
       onSave;
   final void Function(ModelSlot slot) onReset;
 
+  /// Rendered ABOVE the stage table, before anything else in the section — the
+  /// Local server card, when the host has one to give. Injected rather than
+  /// built here so this file keeps knowing nothing about a supervisor: the
+  /// section is about where model calls go, and what is running is the host's
+  /// answer to hand over.
+  final Widget? header;
+
   const SettingsModelsBody({
     super.key,
+    this.header,
     required this.targets,
     required this.isDefault,
     required this.compiledDefaults,
@@ -54,13 +62,17 @@ class SettingsModelsBody extends StatefulWidget {
   /// Static so the screen can build it without this widget existing: a
   /// collapsed section renders its summary and nothing else, and a summary
   /// that needed the body would defeat the whole shape.
-  static String summary(Map<ModelSlot, LlmTarget> targets) {
+  /// [server] is the local server's own one-liner, prefixed when there is one.
+  /// Null leaves the summary byte-identical to what it has always said, which
+  /// is what a host that wires no server card gets.
+  static String summary(Map<ModelSlot, LlmTarget> targets, {String? server}) {
     final fast = _resolve(targets, ModelSlot.fast);
     final prose = _resolve(targets, ModelSlot.prose);
     final embed = _resolve(targets, ModelSlot.embed);
-    return 'Fast ${fast.model} @ ${hostPort(fast.baseUrl)} · '
+    final slots = 'Fast ${fast.model} @ ${hostPort(fast.baseUrl)} · '
         'Prose ${prose.model} @ ${hostPort(prose.baseUrl)} · '
         'Embeddings ${hostPort(embed.baseUrl)}';
+    return server == null ? slots : '$server · $slots';
   }
 
   /// `localhost:8082` out of a full completions URL — the part a person reads
@@ -105,6 +117,12 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (widget.header != null) ...[
+          widget.header!,
+          const SizedBox(height: BondSpacing.s24),
+          const Divider(height: 1),
+          const SizedBox(height: BondSpacing.s24),
+        ],
         Text(
           'Which model each step uses',
           style: BondType.small.copyWith(fontWeight: FontWeight.w600),

@@ -13,7 +13,9 @@ enforce the ones that are commands.
    `sqlite_master`) — create them lazily at first use, the
    `MessageVectorIndex.ensureReady` pattern.
 2. Bump `schemaVersion`; add a guarded `fromXToY` step (`_columnExists`
-   pattern); never widen a frozen step.
+   pattern); never widen a frozen step. Quote a column named `"key"` in the
+   DDL: drift silently DROPS an unquoted `key` column from the schema it
+   generates (`app_prefs` and `setup_state` both carry the quotes).
 3. From the repo root: `make app-migrations` (BOTH drift_dev commands — the
    second restores the no-data-class snapshots; the raw
    `drift_dev make-migrations` leaves ~30k lines that do not compile), then
@@ -36,6 +38,9 @@ enforce the ones that are commands.
   accuracy thresholds (`docs/model-bakeoff.md`).
 - Narrow scope while iterating (`flutter test test/<file>`); the full gate
   (`.claude/hooks/gate.sh <label>`) before review and commit.
+- Never await a real filesystem or socket future inside a `testWidgets`
+  BODY: the fake-async zone hangs the whole run silently and `--timeout`
+  never fires. Create temp dirs, servers and supervisors in `setUp`.
 
 ## Working rules
 

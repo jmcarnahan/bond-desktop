@@ -75,6 +75,75 @@ Every call records which model answered it: `LlmCallRecord` carries `model` and
 `baseUrl`, and the activity log folds the model into the row as `llm_model`
 (shown on the `t/s` cell's tooltip and in the expanded detail).
 
+## Managed mode: one router
+
+Everything above describes the app talking to servers somebody else started.
+It can also start its own — ONE llama-server in router mode, serving all three
+models — and that mode is off by default, so a build with nothing changed
+behaves exactly as this page has always described.
+
+- **The supervisor.** `ModelServerSupervisor`
+  (`app/lib/services/server/model_server_supervisor.dart`), behind
+  `modelServerSupervisorProvider`. It writes a preset, spawns the binary
+  `LlamaBinary.resolve()` found, watches the child's output for the listening
+  line, polls `/models` and `/health` until every model the preset declares is
+  resident, and reports a `ServerState`. `ServerBootstrap`
+  (`app/lib/widgets/server_bootstrap.dart`) wraps the whole app and calls
+  `ensureRunning()` once at launch — a no-op while the preference is off.
+- **Three ids, one origin.** The preset names its models for the ROLE rather
+  than the checkpoint — `bond-prose`, `bond-bulk`, `bond-embed`
+  (`model_slots.dart`) — because the router routes on the model name alone.
+  Swapping which GGUF fills a role is then a change to the preset and to
+  nothing else: no stored target, no request and no test learns the new
+  checkpoint's name.
+- **How `targetFor` routes.** With `managed_server` on, a slot whose override
+  is EMPTY — both the URL and the model — answers
+  `http://127.0.0.1:<router_port>/v1/chat/completions` with its router id.
+  A slot with a stored override keeps it. That asymmetry is deliberate: an
+  override is somebody deliberately pointing the app at a server they run, and
+  turning the managed server on must not silently take it away. Clearing the
+  override is what hands the slot back to the router. In managed mode the
+  editors' "Default" is that router target too (`AppPrefs.slotBaseline`), so
+  pressing Save without editing writes an empty override and the slot keeps
+  following the router across a port change.
+- **Embeddings, two targets.** The embed slot is still not switchable, and it
+  now has two targets that are never the same thing.
+  `targetFor(ModelSlot.embed)` is for DISPLAY and its model is the corpus tag
+  (`EmbeddingsClient.modelTag`); `AppPrefs.embedRequestTarget` is what the wire
+  carries — `bond-embed` at the router in managed mode, and the literal
+  `embed` (`EmbeddingsClient.requestModel`) at `EMBED_URL` otherwise.
+  `EmbeddingsClient` resolves it through the same late-binding
+  `LlmTarget Function()` the chat client uses, once per request.
+- **Whose job it is to start it.** `EmbeddingsClient` also takes a
+  `describeUnavailable` closure. Unmanaged, a refused connection reads
+  `is not reachable — run: make embed`; managed, it reads
+  `is not running — see Settings › Models › Local server`, because naming a
+  Makefile target would send the user back to a workflow they have opted out
+  of.
+- **`LLAMA_CACHE`.** The child is pointed at an EMPTY directory
+  (`servers/empty-cache`). `--no-models-autoload` stops the router loading
+  models it was not asked for, but it still LISTS everything in the Hugging
+  Face cache, so a developer with a dozen GGUFs downloaded would have the
+  readiness check waiting forever for models this app never asked for. An
+  empty cache makes the listing exactly the preset.
+- **The pid file and the quit hooks.** `servers/router.json` holds the pid, the
+  port, the preset hash and the binary path — JSON rather than a bare pid
+  because numbers are reused and the number alone is not evidence that the
+  process is ours. It is what the next launch reaps and what the Runner's
+  `applicationWillTerminate` reads. Dart's own hook is
+  `ServerBootstrap`'s `AppLifecycleListener.onExitRequested`, which stops the
+  server with a 4 s grace and then exits regardless; the Swift reaper is the
+  second line of defence, because a child started with
+  `ProcessStartMode.normal` still outlives a parent that dies without running
+  it (flutter#134255).
+- **Off by default.** `managed_server` reads false for an absent key, and the
+  compiled slot defaults stay `localhost:8080` / `8082` / `8081`, so the
+  three-server `make model | fast | embed` workflow is byte-identical until
+  somebody opts in. The port (`router_port`, default 8080) and the models
+  folder (`models_folder`, empty = the app's own
+  `~/Library/Application Support/com.bondinbox.app/models`) survive `wipeAll`
+  with the four slot prefs and for the same reason.
+
 ## Failure policy: park, never fall back
 
 - **No fallback between servers.** A down server throws

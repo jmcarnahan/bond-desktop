@@ -7,6 +7,11 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show debugPrint, immutable;
 import 'package:http/http.dart' as http;
 
+// ONLY [LlmTarget], by `show`. `model_slots.dart` imports this file back for
+// [modelTag], so the two are a cycle — legal in Dart, and kept narrow here so
+// nothing else in this file can start depending on the slot vocabulary.
+import 'model_slots.dart' show LlmTarget;
+
 /// Why a call to the embedding server produced no vector — the one thing
 /// `null` could never say.
 ///
@@ -125,6 +130,16 @@ class EmbeddingsClient {
   /// of habits and none of their geometry.
   static const String documentModelTag = 'embeddinggemma-300M/document';
 
+  /// The `model` field this client has always put on the wire.
+  ///
+  /// llama-server ignores the name — it serves what was loaded — but the
+  /// OpenAI request schema requires the field, so the string had to be
+  /// something and this is what it has been since the first embedding was
+  /// written. Named rather than inline because the router DOES route on it,
+  /// and the prefs now compose a target that says which of the two the next
+  /// request carries.
+  static const String requestModel = 'embed';
+
   /// A 300M model on Metal answers in well under a second. This ceiling is for
   /// a wedged server, not a slow one.
   static const Duration _timeout = Duration(seconds: 30);
@@ -142,12 +157,64 @@ class EmbeddingsClient {
   /// row per message would make the panel read as though the app were broken.
   final void Function(String reason)? onFail;
 
+  /// Late binding, on [LlmClient]'s own pattern: consulted at the top of every
+  /// request rather than at construction, so a settings change — the managed
+  /// server going on, its port moving — applies to the NEXT embedding without
+  /// rebuilding this client or the provider graph under it. Null in every test
+  /// and every bench, which then behave exactly as before.
+  final LlmTarget Function()? _resolveTarget;
+
+  /// What to say instead of "run: make embed" when this app is the one that
+  /// should have started the server. Null, or a null answer, keeps the default
+  /// sentence — which is the right one whenever the user runs the servers.
+  final String? Function()? _describeUnavailable;
+
   EmbeddingsClient({
     String? baseUrl,
     http.Client? httpClient,
     this.onFail,
+    // `this._…` in a named parameter, exactly as [LlmClient]'s constructor
+    // declares its own resolver: the fields stay private and no caller outside
+    // this library can name them.
+    this._resolveTarget,
+    this._describeUnavailable,
   })  : baseUrl = baseUrl ?? defaultBaseUrl,
         _http = httpClient ?? http.Client();
+
+  /// Where the next request will go, and what it will call the model.
+  ///
+  /// A resolver that throws falls back to the constructed target rather than
+  /// failing the call — `LlmClient.target`'s guard, for its reason: the
+  /// resolver reads a Riverpod container it does not own, and a container torn
+  /// down mid-drain must degrade to the compiled default rather than turn into
+  /// an exception inside a client whose whole contract is that failure is free.
+  LlmTarget get target {
+    final resolve = _resolveTarget;
+    if (resolve == null) {
+      return LlmTarget(baseUrl: baseUrl, model: requestModel);
+    }
+    try {
+      return resolve();
+    } catch (_) {
+      return LlmTarget(baseUrl: baseUrl, model: requestModel);
+    }
+  }
+
+  /// Why nothing answered, in the words that fit who is meant to fix it.
+  ///
+  /// Guarded for the same reason [target] is, and empty is treated as absent:
+  /// a describer that answers a blank has said nothing, and a blank in place of
+  /// a sentence would read as a truncated error.
+  String _unreachableReason() {
+    final describe = _describeUnavailable;
+    if (describe != null) {
+      try {
+        final said = describe();
+        if (said != null && said.isNotEmpty) return said;
+      } catch (_) {}
+    }
+    return 'is not reachable — run: make embed';
+  }
 
   /// One vector for [text], or null if anything at all went wrong.
   ///
@@ -165,24 +232,29 @@ class EmbeddingsClient {
     String text, {
     String prefix = clusteringPrefix,
   }) async {
+    // Resolved ONCE per call, so the URL and the model name that go on the
+    // wire are the same target's — a settings change between two calls moves
+    // both together or neither.
+    final destination = target;
     final http.Response response;
     try {
       response = await _http
           .post(
-            Uri.parse(baseUrl),
+            Uri.parse(destination.baseUrl),
             headers: const {'Content-Type': 'application/json'},
             body: jsonEncode({
               'input': '$prefix$text',
-              // llama-server ignores the name — it serves what was loaded —
-              // but the OpenAI request schema requires the field.
-              'model': 'embed',
+              // Ignored by a single-model llama-server, which serves what was
+              // loaded; the OpenAI request schema requires the field, and the
+              // router in managed mode routes on exactly this.
+              'model': destination.model,
             }),
           )
           .timeout(_timeout);
     } on SocketException {
-      return _fail('is not reachable — run: make embed', EmbedOutcome.unavailable);
+      return _fail(_unreachableReason(), EmbedOutcome.unavailable);
     } on http.ClientException {
-      return _fail('is not reachable — run: make embed', EmbedOutcome.unavailable);
+      return _fail(_unreachableReason(), EmbedOutcome.unavailable);
     } on TimeoutException {
       return _fail(
         'did not answer within ${_timeout.inSeconds} seconds',

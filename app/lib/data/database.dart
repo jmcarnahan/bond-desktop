@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 15;
+  int get schemaVersion => 16;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -591,6 +591,25 @@ UPDATE storylines
                   'CREATE INDEX IF NOT EXISTS ix_context_chunks_file '
                   'ON context_chunks(file_id)',
                 );
+              },
+              // v16 — the installer round. One table, `setup_state`: a
+              // key-value record of what this MACHINE has been through, which
+              // is a different thing from everything else in this file. The
+              // wizard's step, the download ledger and the container
+              // migration are not mailbox data, they survive a sign-out, and
+              // nothing in them is ever sent anywhere.
+              //
+              // Nothing to backfill — an install that predates the wizard has
+              // simply not been through it, and an absent key is what the
+              // first-run flow already reads as "not done".
+              //
+              // Guarded like every step here, because a replay over a torn
+              // state (step committed, version stamp lost) must be a no-op
+              // rather than "table setup_state already exists".
+              from15To16: (m, schema) async {
+                if (!await _tableExists('setup_state')) {
+                  await m.createTable(schema.setupState);
+                }
               },
             ),
           ),

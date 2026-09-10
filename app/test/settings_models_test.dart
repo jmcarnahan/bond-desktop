@@ -32,6 +32,8 @@ void main() {
         onSave,
     void Function(ModelSlot)? onReset,
     bool wireModels = true,
+    Widget? modelsHeader,
+    String? localServerSummary,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -55,6 +57,8 @@ void main() {
               ? (onSave ?? (_, {required url, required model}) {})
               : null,
           onSlotReset: onReset,
+          modelsHeader: modelsHeader,
+          localServerSummary: localServerSummary,
         ),
       ),
     ));
@@ -248,6 +252,36 @@ void main() {
     expect(find.text('Models'), findsNothing);
     // And the placeholder it replaced is gone for good.
     expect(find.text('Configured at build time'), findsNothing);
+  });
+
+  /// The Local server card is injected by the host — this section knows
+  /// nothing about a supervisor — so what is pinned here is the JOIN: the
+  /// server's own line comes first in the collapsed summary, and its card comes
+  /// first inside the expanded body, above the stage table.
+  testWidgets('a wired local server leads the summary and the body',
+      (tester) async {
+    await open(
+      tester,
+      localServerSummary: 'Ready on 127.0.0.1:8080',
+      modelsHeader: const Text('HEADER'),
+    );
+
+    expect(
+      find.text('Ready on 127.0.0.1:8080 · '
+          'Fast qwen3.8 @ localhost:8082 · '
+          'Prose qwen3.8 @ localhost:8080 · '
+          'Embeddings localhost:8081'),
+      findsOneWidget,
+    );
+    expect(find.text('HEADER'), findsNothing);
+
+    await expand(tester, 'Models');
+    expect(find.text('HEADER'), findsOneWidget);
+    // Above the stage table, not below it.
+    expect(
+      tester.getTopLeft(find.text('HEADER')).dy,
+      lessThan(tester.getTopLeft(find.text('Which model each step uses')).dy),
+    );
   });
 
   testWidgets('the whole section survives a doubled text scale',

@@ -192,6 +192,14 @@ class SettingsScreen extends StatefulWidget {
   /// hiding the section — the section's premise is [onSlotTargetChanged].
   final void Function(ModelSlot slot)? onSlotReset;
 
+  /// Drawn at the top of the Models section — the host's Local server card.
+  /// Null leaves the section exactly as it was before there was one.
+  final Widget? modelsHeader;
+
+  /// That card's one-liner, prefixed onto the collapsed Models summary. Null
+  /// keeps the summary the three slots alone.
+  final String? localServerSummary;
+
   /// When mail, Teams and the storyline sweep last ran. Null means never, and
   /// reads as 'never' rather than as a blank.
   final String? lastMailSyncIso;
@@ -344,6 +352,8 @@ class SettingsScreen extends StatefulWidget {
     this.probeServer,
     this.onSlotTargetChanged,
     this.onSlotReset,
+    this.modelsHeader,
+    this.localServerSummary,
     this.lastMailSyncIso,
     this.lastTeamsSyncIso,
     this.lastSweepIso,
@@ -600,7 +610,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (widget.onSlotTargetChanged != null)
         _section(
           'Models',
-          SettingsModelsBody.summary(widget.slotTargets),
+          SettingsModelsBody.summary(
+            widget.slotTargets,
+            server: widget.localServerSummary,
+          ),
           _modelsBody(),
         ),
       _section('Needs You', _needsYouSummary(), _needsYouBody()),
@@ -751,6 +764,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // ── Models ────────────────────────────────────────────────────────────────
 
   Widget _modelsBody() => SettingsModelsBody(
+    header: widget.modelsHeader,
     targets: widget.slotTargets,
     isDefault: widget.slotIsDefault,
     compiledDefaults: widget.compiledDefaults,
