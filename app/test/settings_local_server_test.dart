@@ -307,6 +307,25 @@ void main() {
     expect(find.byKey(SettingsLocalServerBody.setUpAgainKey), findsOneWidget);
   });
 
+  testWidgets('Set up again is live even with the switch off', (tester) async {
+    // Alone among these buttons it acts on the WIZARD rather than on a
+    // process, and a switch that is off is one of the states the wizard exists
+    // to put right — so gating it on the switch would lock the door from the
+    // inside.
+    var restarts = 0;
+    await open(
+      tester,
+      managed: false,
+      state: const ServerStopped(),
+      onSetUpAgain: () => restarts++,
+    );
+
+    expect(enabled(tester, SettingsLocalServerBody.setUpAgainKey), isTrue);
+    await tester.tap(find.byKey(SettingsLocalServerBody.setUpAgainKey));
+    await tester.pumpAndSettle();
+    expect(restarts, 1);
+  });
+
   testWidgets('the folder is shown, and Change folder… reports', (tester) async {
     var chosen = 0;
     await open(tester, folder: '/Volumes/Big/models', onChooseFolder: () => chosen++);

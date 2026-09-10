@@ -324,14 +324,27 @@ It shows, top to bottom:
   port-in-use; Stop for starting, loading and ready; Restart for loading and
   ready — plus **Show log**, which hands the log file to the operating system's
   own viewer (this app has no log pane and does not want one), and **Set up
-  again**, unwired until Phase 4's first-run wizard exists and therefore absent.
+  again**, which runs the first-run wizard from the top.
+
+  **Set up again** clears `setup_state` EXCEPT `SetupStore.keptOnRestart` —
+  the container-migration record and the download ledger — and then bumps
+  `setupRestartProvider`, which is what `SetupGate` re-decides on. The two
+  kept keys are the point: starting over must not re-copy a mailbox that is
+  already here or re-download twenty-three gigabytes that already are. So the
+  wizard opens at **Welcome to Bond** with the models still on disk and the
+  session still signed in, and those two steps are a **Continue** each. The
+  order matters and is pinned by `setup_reentry_test.dart`: the keys go
+  first, because the gate re-reads the store the moment the counter moves.
 - The caption `Changing the port or the folder restarts the server. Work in
   flight parks and resumes when it is back.`
 
 `app/test/settings_local_server_test.dart` pins every one of those strings —
 the nine state sentences, the switch's title and subtitle, the port error, the
 held-port advice, the caption — plus which buttons each state offers and that
-everything but the switch is dead while the preference is off.
+everything but the switch and **Set up again** is dead while the preference is
+off — that one stays live because it acts on the wizard rather than on a
+process, and a switch that is off is one of the states the wizard exists to put
+right.
 `settings_models_test.dart` pins the join: the server's line leads the collapsed
 summary, and the card renders above the stage table.
 
@@ -535,6 +548,86 @@ the call throws `MissingPluginException`, the provider turns that into an
 `AsyncError`, and the host's `valueOrNull` reads it as null. About then quietly
 says `Version unknown` rather than throwing. A test that wants real values
 overrides the two providers — `settings_models_host_test.dart` does.
+
+## First run
+
+Before the sign-in gate and after the server bootstrap sits `SetupGate`
+(`app/lib/screens/setup/setup_gate.dart`), which chooses the first-run wizard
+or the rest of the app from one stored word — `setup_state['setup']`, holding
+a `SetupStep.name`. `'done'` is the only value that lets the app through. It
+answers ONCE, on `AuthGate`'s pattern, and re-decides only when the flow
+reports itself finished or when **Set up again** bumps the counter.
+
+`SetupFlow` (`app/lib/screens/setup/setup_flow.dart`) is the only file in the
+flow that touches a provider. Every step body is prop-only, the
+`SettingsLocalServerBody` discipline: the host reads `setupControllerProvider`
+and hands down values and closures, and a null callback hides its control.
+One `PaneSurface`, whose title is the step's and whose trailing slot reads
+`Step N of 8`. The back arrow is `null` on the first step — which is why
+`PaneSurface.onBack` is nullable and renders DISABLED rather than absent.
+
+| # | Title | Primary button | What it does |
+|---|---|---|---|
+| 1 | Welcome to Bond | `Get started` | What Bond is; the container-migration line when there was one |
+| 2 | Your Mac | `Continue` | Chip, memory, macOS. Intel or Rosetta renders **no** button at all; too little memory for the prose model is a warning that still continues |
+| 3 | Models | `Continue` | The manifest's three rows — name, role sentence, size, licence button, and any `notice` verbatim — and the total |
+| 4 | Storage | `Continue` | The effective folder, **Change folder…**, and `checkDisk`. Dead until the preflight answers and passes; free space that could not be asked counts as passing |
+| 5 | Download | `Continue` | Three bars, smallest first. Enabled only when EVERY file is done — see below |
+| 6 | Sign in | `Continue` | `SignInBody(showTitle: false)` when signed out (signing in advances, and there is no Continue); `You're signed in.` and a Continue when already signed in |
+| 7 | Notifications | `Continue` | The press IS the ask. Exactly one button, and the word `Allow` appears nowhere — macOS is about to put its own Allow up |
+| 8 | All set | `Finish` | Folder, port, account, notifications, then `managedServer = true` and `setup = 'done'`, and only then the server |
+
+**`'done'` is written by Finish and by nothing else.** Arriving at **All set**
+records `notifications` — the step BEFORE it — because `'done'` is the gate's
+sentinel: a quit on the last screen would otherwise let the next launch
+straight past the gate with `managedServer` still off and no wizard left to
+turn it on. A relaunch lands on Notifications instead, whose Continue re-asks
+(macOS answers a settled prompt instantly) and leads back to All set.
+`SetupController.finish` returns whether BOTH writes landed; false keeps the
+wizard on the screen with `Setup could not be saved. Try Finish again.` above
+the button, because leaving for the inbox on a half-written finish would be the
+app claiming a setup that is not on disk. On a finish that DID save, the server
+is asked for fire-and-forget on `ServerBootstrap`'s reasoning — and it is
+`restart()` rather than `ensureRunning()` when the models folder moved during
+the run, since `ensureRunning` returns at once on a server that is already up
+and would leave the router mmap'ing the copies in the old folder.
+
+**Continue on the download step waits for all three files**, not for
+`ModelManifest.usableIds` (embed + bulk). `ModelServerSupervisor._launch`
+refuses to start while any file the preset names is missing, so a partial set
+could not serve the inbox anyway — and finishing early would leave a
+non-engineer looking at an idle inbox with no progress bar left to explain it.
+
+**`--dart-define=BOND_DEV_SKIP_SETUP=1`** skips the wizard entirely
+(`SetupGate.skipDefine`). It is for the engineers who run `make model fast
+embed` by hand: their models are in the Homebrew cache rather than this app's
+folder, and a wizard offering to download twenty-three gigabytes they already
+have would be in the way of every `make app-run`. A define rather than a
+preference because it describes the BUILD, not the person — `local.mk` passes
+it through (see QUICKSTART step 2).
+
+**The notifications ask happens once.** `SetupController.continueFromNotifications`
+calls `DesktopNotifier.ensureAuthorized`, then seeds the answer into
+`DesktopNotificationService.seedAuthorization` so the first settled message
+does not raise a second system prompt. A denial keeps the user on the step
+exactly once, so the sentence naming System Settings is read; the next
+Continue moves on. A seeded denial is memoized in memory and nowhere else —
+the next launch asks again, which is what makes re-granting in System Settings
+work with no stored flag to clear.
+
+**Which tests pin which strings.** `setup_step_test.dart` — the eight titles,
+the stored names, the counter. `setup_welcome`/`device`/`models`/`storage`/
+`download`/`notifications` bodies are pinned by `setup_device_test.dart`,
+`setup_models_test.dart` (including the committed Gemma notice, read off the
+real asset), `setup_storage_test.dart`, `setup_download_test.dart` (both
+`describeRemaining` and `describeDownloadError` tables) and
+`setup_notifications_test.dart` (one button, `Allow` nowhere).
+`setup_flow_test.dart` walks all eight and pins `Step N of 8`, the persisted
+step and the disabled back arrow; `setup_gate_test.dart` pins which screen a
+launch gets; `setup_controller_test.dart` and `setup_resume_test.dart` pin the
+behaviour under the screens; `setup_reentry_test.dart` pins what **Set up
+again** keeps. The end-user walk-through of the same eight screens is
+`docs/install.md`.
 
 ## Deliberate deferrals
 

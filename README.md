@@ -51,6 +51,8 @@ workload needs it.
 ## Quickstart
 
 Setting up the desktop app? Start with [QUICKSTART.md](QUICKSTART.md).
+Installing Bond Desktop from a DMG, without a toolchain? See
+[docs/install.md](docs/install.md).
 
 ```sh
 make setup

@@ -29,6 +29,15 @@ void main() {
 
   String folder() => p.join(root.path, 'models');
 
+  /// A file where the preset will look for it — what a ledger row calling a
+  /// model done is supposed to be describing.
+  Future<void> writeDone(String id) async {
+    final file = manifest.byId(id);
+    final path = p.join(folder(), file.relativePath);
+    await Directory(p.dirname(path)).create(recursive: true);
+    await File(path).writeAsBytes(List.filled(file.sizeBytes, 0));
+  }
+
   Future<void> writePart(String id, int length) async {
     final file = manifest.byId(id);
     final path = '${p.join(folder(), file.relativePath)}.part';
@@ -49,7 +58,9 @@ void main() {
     expect(check.requiredBytes, wholeSet + downloadHeadroomBytes);
   });
 
-  test('a file the ledger calls done costs nothing', () async {
+  test('a file the ledger calls done, and that is here, costs nothing',
+      () async {
+    await writeDone(manifest.byRole(ModelRole.prose).id);
     final ledger = DownloadLedger.empty.record(FileDownloadState(
       id: manifest.byRole(ModelRole.prose).id,
       status: DownloadStatus.done,
@@ -126,8 +137,42 @@ void main() {
     expect(check.shortfallBytes, 0);
   });
 
+  test('a done row whose file is not in this folder is counted again',
+      () async {
+    // The ledger survives "Set up again" and it survives a change of folder,
+    // so a done row can describe a file that lives in the OLD one. A preflight
+    // that trusted it would have the storage step tell somebody pointing Bond
+    // at an empty disk that everything was already there.
+    final ledger = DownloadLedger(Map.fromEntries([
+      for (final model in manifest.models)
+        MapEntry(
+          model.id,
+          FileDownloadState(
+            id: model.id,
+            status: DownloadStatus.done,
+            sha256: model.sha256,
+          ),
+        ),
+    ]));
+
+    final check = await checkDisk(
+      system: system,
+      manifest: manifest,
+      ledger: ledger,
+      folder: folder(),
+    );
+
+    expect(check.neededBytes, wholeSet);
+    // Which is what keeps `SetupStorageBody` off its "All models are already
+    // in this folder." branch.
+    expect(check.neededBytes, isNot(0));
+  });
+
   test('nothing left to download passes on a volume with nothing left',
       () async {
+    for (final model in manifest.models) {
+      await writeDone(model.id);
+    }
     final ledger = DownloadLedger(Map.fromEntries([
       for (final model in manifest.models)
         MapEntry(

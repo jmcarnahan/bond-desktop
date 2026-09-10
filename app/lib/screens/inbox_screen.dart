@@ -32,6 +32,7 @@ import '../providers/notify_routing.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/message_history_provider.dart';
 import '../providers/recipient_search_provider.dart';
+import '../providers/setup_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../providers/why_provider.dart';
 import '../services/attachments/attachment_bytes.dart';
@@ -2222,8 +2223,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // right reader for it — this app has no log pane and does not want
         // one.
         onShowLog: () => unawaited(launchUrl(Uri.file(supervisor.logFile.path))),
-        // Phase 4 wires 'Set up again' to the first-run wizard. Unwired takes
-        // the button off, which is this screen's discipline everywhere.
+        // Clears the wizard's own bookkeeping — everything in `setup_state`
+        // but the migration record and the download ledger — and bumps the
+        // counter `SetupGate` watches. The inbox unmounts and the wizard opens
+        // at the top, with the models still on disk and the session still
+        // signed in, so those two steps are a Continue each.
+        onSetUpAgain: () => unawaited(restartSetup(ref)),
       ),
       lastMailSyncIso: stamps?.mailIso,
       lastTeamsSyncIso: stamps?.teamsIso,

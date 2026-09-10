@@ -21,17 +21,60 @@ import '../theme/tokens.dart';
 /// signed in with nothing to read. That case is the only reason this screen has
 /// more than one state — an existing remote user signs in once and never sees
 /// it.
-class SignInScreen extends ConsumerStatefulWidget {
+class SignInScreen extends StatelessWidget {
   /// Fired once tokens are stored, so the gate above can swap in the inbox.
   final VoidCallback onSignedIn;
 
   const SignInScreen({super.key, required this.onSignedIn});
 
   @override
-  ConsumerState<SignInScreen> createState() => _SignInScreenState();
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Container(
+            padding: const EdgeInsets.all(BondSpacing.s32),
+            decoration: BoxDecoration(
+              color: BondColors.surface,
+              borderRadius: BondRadii.lgAll,
+              border: Border.all(color: BondColors.border),
+            ),
+            child: SignInBody(onSignedIn: onSignedIn),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
-class _SignInScreenState extends ConsumerState<SignInScreen>
+/// Everything the sign-in screen DOES, without the card around it.
+///
+/// Lifted out so the first-run wizard can host the same flow inside its own
+/// pane rather than owning a second copy of it: signing in is one behaviour —
+/// a browser handoff, an identity guard, an MCP connect step — and two copies
+/// would drift the day the platform grows a third grant. The card, the width
+/// and the ground stay with [SignInScreen], which is what the gate mounts.
+///
+/// The one thing the host varies is [showTitle]: the wizard's pane already
+/// carries a title, and a second `Bond Inbox` under it would be the screen
+/// introducing itself twice.
+class SignInBody extends ConsumerStatefulWidget {
+  final VoidCallback onSignedIn;
+
+  final bool showTitle;
+
+  const SignInBody({
+    super.key,
+    required this.onSignedIn,
+    this.showTitle = true,
+  });
+
+  @override
+  ConsumerState<SignInBody> createState() => _SignInBodyState();
+}
+
+class _SignInBodyState extends ConsumerState<SignInBody>
     with WidgetsBindingObserver {
   bool _busy = false;
   String? _error;
@@ -187,39 +230,25 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
           appPrefsProvider.select((p) => p.backendMode),
         ) ==
         backendModeMcp;
-    return Scaffold(
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420),
-          child: Container(
-            padding: const EdgeInsets.all(BondSpacing.s32),
-            decoration: BoxDecoration(
-              color: BondColors.surface,
-              borderRadius: BondRadii.lgAll,
-              border: Border.all(color: BondColors.border),
-            ),
-            // Scrollable because the card is not always the same height: the
-            // connect step is twice the sign-in step, and a short window must
-            // put it out of reach rather than cut it off.
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: _connectNeeded
-                    ? _connectStep()
-                    : _signInStep(mcpMode: mcpMode),
-              ),
-            ),
-          ),
-        ),
+    // Scrollable because the body is not always the same height: the connect
+    // step is twice the sign-in step, and a short window must put it out of
+    // reach rather than cut it off.
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children:
+            _connectNeeded ? _connectStep() : _signInStep(mcpMode: mcpMode),
       ),
     );
   }
 
   List<Widget> _signInStep({required bool mcpMode}) {
     return [
-      Text('Bond Inbox', style: BondType.title),
-      const SizedBox(height: BondSpacing.s8),
+      if (widget.showTitle) ...[
+        Text('Bond Inbox', style: BondType.title),
+        const SizedBox(height: BondSpacing.s8),
+      ],
       Text(
         mcpMode
             ? 'Sign in to your Bond workspace to read your mail.'

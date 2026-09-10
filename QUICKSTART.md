@@ -90,6 +90,9 @@ CTX_SIZE = 16384
 # Lets Settings → Models → Local server run ONE bundled-style router from this
 # dev build, instead of the three servers you start by hand.
 # BOND_LLAMA_SERVER = /opt/homebrew/bin/llama-server
+# Skips the first-run setup wizard. Your models are in the Homebrew cache, not
+# in the app's own folder, so it would offer to download ~22 GB you already have.
+# BOND_DEV_SKIP_SETUP = 1
 ```
 
 ## 3. Models and servers
@@ -149,7 +152,19 @@ make app-install
 make app-run
 ```
 
-The first build takes a few minutes. The app opens on a sign-in screen:
+The first build takes a few minutes.
+
+**The first launch opens the setup wizard** — eight screens that check the Mac,
+download the three models into the app's own folder (~22 GB), sign in, and turn
+Bond's managed model server on. That is not what you want on this path: you
+have just started three servers by hand and the weights are already in
+`~/.cache/huggingface/hub/`. Add `BOND_DEV_SKIP_SETUP = 1` to `local.mk`
+(step 2) and rebuild, and the app goes straight to sign-in as it always has.
+Run the wizard instead if you want the bundled shape — it downloads its own
+copies and switches the app onto one router. `docs/install.md` walks the eight
+screens; `docs/settings.md` (**First run**) is the reference.
+
+With the wizard skipped, the app opens on a sign-in screen:
 
 1. Press **Sign in**. Your browser opens the bond-mcps login. Sign in there
    and come back to the app; it picks the session up on its own.
@@ -196,7 +211,9 @@ Or let the app run them for you: with `BOND_LLAMA_SERVER` set in `local.mk`
 (step 2), **Settings → Models → Local server** turns on one llama-server that
 serves all three models, and starts and stops it with the app. It is off by
 default, and turning it off puts you back on `make model fast embed` exactly as
-above.
+above. **Set up again** on that card re-runs the first-run wizard from the top
+— it keeps the models already on disk and the session already signed in, so
+those two screens are a Continue each.
 
 Rebuild the app after a `git pull`:
 

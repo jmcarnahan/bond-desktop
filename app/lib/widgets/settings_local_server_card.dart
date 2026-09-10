@@ -391,10 +391,13 @@ class _SettingsLocalServerBodyState extends State<SettingsLocalServerBody> {
             onPressed: enabled ? widget.onShowLog : null,
             child: const Text('Show log'),
           ),
+        // Live whatever the switch says, alone among these buttons: it acts
+        // on the wizard rather than on a process, and a switch that is off is
+        // one of the states the wizard exists to put right.
         if (widget.onSetUpAgain != null)
           TextButton(
             key: SettingsLocalServerBody.setUpAgainKey,
-            onPressed: enabled ? widget.onSetUpAgain : null,
+            onPressed: widget.onSetUpAgain,
             child: const Text('Set up again'),
           ),
       ],

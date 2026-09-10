@@ -73,9 +73,14 @@ class DiskPreflight {
 /// What the volume holding [folder] would have to give up for this download.
 ///
 /// [DiskPreflight.neededBytes] counts only what is genuinely still to come:
-/// a file the ledger calls done costs nothing, and a half-written `.part`
-/// costs only its remainder. Asking for the whole manifest every time would
-/// refuse a resume that needs one more gigabyte.
+/// a file the ledger calls done AND still sitting in [folder] costs nothing,
+/// and a half-written `.part` costs only its remainder. Asking for the whole
+/// manifest every time would refuse a resume that needs one more gigabyte.
+///
+/// The ledger alone is not enough to skip a file. It survives "Set up again"
+/// and it survives a change of folder, so a done row can describe a file that
+/// lives in the OLD one — and a preflight that trusted it would tell somebody
+/// pointing Bond at an empty disk that everything was already there.
 ///
 /// Free space is asked of the NEAREST EXISTING ANCESTOR of [folder]. The
 /// models folder does not exist before the first download, and the platform
@@ -89,8 +94,9 @@ Future<DiskPreflight> checkDisk({
 }) async {
   var needed = 0;
   for (final model in manifest.models) {
-    if (ledger.isDone(model.id)) continue;
-    final part = File('${p.join(folder, model.relativePath)}.part');
+    final dest = p.join(folder, model.relativePath);
+    if (ledger.isDone(model.id) && File(dest).existsSync()) continue;
+    final part = File('$dest.part');
     var already = 0;
     try {
       if (part.existsSync()) already = part.lengthSync();

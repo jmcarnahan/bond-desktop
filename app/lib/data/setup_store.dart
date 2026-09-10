@@ -60,10 +60,21 @@ class SetupStore {
   /// empty can be told from one that never had anything to bring across.
   static const String containerMigrationKey = 'container_migration';
 
+  /// Which step the first-run wizard reached, as a `SetupStep.name`.
+  /// `'done'` is what the gate reads as "never show the flow again"; every
+  /// other value is where a relaunch picks the wizard back up.
+  static const String setupKey = 'setup';
+
   /// Where the model download's ledger lives — one JSON value, rewritten as
   /// the download moves. See [DownloadLedger] for why it holds no URL and
   /// why the `.part` file's length, not this row, is the resume offset.
   static const String downloadKey = 'download';
+
+  /// What "Set up again" keeps. Starting the wizard over must not throw away
+  /// what is expensive and still true: the container migration HAPPENED, and
+  /// the models are still on disk. Clearing either would re-copy a mailbox
+  /// that is already here, or re-download twenty-three gigabytes that are.
+  static const Set<String> keptOnRestart = {containerMigrationKey, downloadKey};
 
   static String _nowIso() => MessageStore.isoStamp(DateTime.now());
 

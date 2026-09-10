@@ -11,6 +11,7 @@ import 'data/setup_store.dart';
 import 'providers/app_providers.dart';
 import 'providers/prefs_provider.dart';
 import 'screens/inbox_screen.dart';
+import 'screens/setup/setup_gate.dart';
 import 'screens/sign_in_screen.dart';
 import 'services/models/model_manifest.dart';
 import 'services/triage_queue.dart';
@@ -132,10 +133,12 @@ class BondInboxApp extends StatelessWidget {
       title: 'Bond Inbox',
       debugShowCheckedModeBanner: false,
       theme: BondTheme.themeData,
-      // The gate decides which screen; the bootstrap around it decides
-      // whether this app is running the model server, and is the only thing
-      // above [AuthGate] because the server is wanted signed in or out.
-      home: const ServerBootstrap(child: AuthGate()),
+      // Three gates, outermost first. The bootstrap decides whether this app
+      // is running the model server, and is above everything because the
+      // server is wanted signed in or out and set up or not. [SetupGate]
+      // decides whether this machine has been set up at all. [AuthGate]
+      // decides which screen a set-up machine gets.
+      home: const ServerBootstrap(child: SetupGate(child: AuthGate())),
     );
   }
 }

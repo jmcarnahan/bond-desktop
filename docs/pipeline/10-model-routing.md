@@ -225,6 +225,57 @@ Phase 4 draws the wizard on top of it.
   `missing_folder`, and `http_<code>` for everything else. Words rather than an
   enum, so a ledger written by another build stays readable.
 
+### First run
+
+The wizard that fills the folder in the first place. Three gates, outermost
+first: `ServerBootstrap` → `SetupGate` → `AuthGate` (`app/lib/main.dart`). The
+bootstrap is above everything because the server is wanted signed in or out
+and set up or not; `SetupGate`
+(`app/lib/screens/setup/setup_gate.dart`) is above the auth gate because
+setting the machine up comes before signing in — the wizard has a sign-in step
+of its own, and meeting a bare sign-in screen before anything has explained
+what Bond is would be the app asking for credentials as its opening line.
+
+- **One stored word.** `setup_state['setup']` holds a `SetupStep.name`;
+  `'done'` is the only value that lets the app through. An unknown word — one
+  written by another build — reads as `welcome`, and so does a store read that
+  throws, on `AuthGate`'s reasoning about an unreadable keychain: the wizard is
+  the recoverable answer. The step is written BEFORE the step is entered, so a
+  quit mid-probe resumes on the screen the user was looking at; a write that
+  fails costs one step, not the button press.
+- **Eight steps.** Welcome, Your Mac, Models, Storage, Download, Sign in,
+  Notifications, All set. `docs/settings.md` (**First run**) has the table and
+  the strings; `docs/install.md` is the same walk for a non-engineer.
+- **Continue on the download step waits for EVERY file**, not for
+  `ModelManifest.usableIds`. `_launch` refuses to start while any file the
+  preset names is missing, so a partial set could not serve the inbox anyway —
+  and finishing early would leave a non-engineer looking at an idle inbox with
+  no progress bar left to explain it. The rest of the app still uses
+  `usableIds`; this is the wizard's rule, not the router's.
+- **Finish is what turns managed mode on, and the only thing that writes
+  `'done'`.** Arriving at All set records `notifications`, the step before it:
+  `'done'` is the gate's sentinel, and a quit on the last screen would
+  otherwise let the next launch past the gate with `managedServer` still off.
+  `SetupController.finish` writes `managedServer = true`, records
+  `setup = 'done'`, and returns whether both landed — a false answer keeps the
+  wizard on the screen with `Setup could not be saved. Try Finish again.`
+  rather than handing over an inbox whose setup is not on disk. Only a finish
+  that saved asks for the server, FIRE-AND-FORGET on `ServerBootstrap`'s
+  reasoning: adopting or spawning a server can take tens of seconds against a
+  twenty-seven-billion-parameter model, and the inbox has to open now. It is
+  `restart()` rather than `ensureRunning()` when the models folder moved during
+  the run — `ensureRunning` returns at once on a server that is already up, and
+  the router would go on mmap'ing the copies in the old folder. It never
+  throws.
+- **`--dart-define=BOND_DEV_SKIP_SETUP=1`** skips the wizard entirely. For the
+  three-server `make model | fast | embed` workflow, whose models live in the
+  Homebrew cache rather than this app's folder. A define rather than a
+  preference because it describes the build; `local.mk` passes it through.
+- **"Set up again"** (Settings → Models → Local server) clears `setup_state`
+  except `SetupStore.keptOnRestart` — the migration record and the download
+  ledger — and bumps the counter the gate watches. The models stay on disk and
+  the session stays signed in, so those two steps are a Continue each.
+
 ## Failure policy: park, never fall back
 
 - **No fallback between servers.** A down server throws

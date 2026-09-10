@@ -10,9 +10,14 @@ import 'package:bond_inbox/services/server/router_preset.dart';
 /// would test a layout the app does not use. The sizes and digests are the
 /// test's to choose, which is what lets a downloader test build a 4 KiB
 /// "27B model".
+/// [minRams] is what a machine must HAVE, per id — 0 everywhere unless a
+/// test says otherwise, so nothing here refuses to run on the machine the
+/// suite is on. The first-run flow's low-memory warning is the one caller
+/// that needs a real number.
 ModelManifest testManifest({
   Map<String, int>? sizes,
   Map<String, String>? sha256s,
+  Map<String, int>? minRams,
   String revision = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
 }) {
   final defaultSha = '0' * 64;
@@ -34,7 +39,7 @@ ModelManifest testManifest({
         revision: revision,
         sizeBytes: sizes?[id] ?? size,
         sha256: sha256s?[id] ?? defaultSha,
-        minRamBytes: 0,
+        minRamBytes: minRams?[id] ?? 0,
         license: 'Fictional-1.0',
         licenseUrl: 'https://example.invalid/licence',
         serverArgs: args,
