@@ -15,17 +15,26 @@ from the machine they run on.
 |---|---|---|
 | `make dist-llama` | `build-llama.sh` | Builds `llama-server` from a SHA-pinned llama.cpp source tarball into `dist/stage/llama/` |
 | `make dist-app` | `bundle.sh` | `flutter build macos`, then lays the sidecar into `dist/stage/Bond Desktop.app` |
-| `make dist-sign` | `sign.sh` | Signs the bundle inside out |
-| `make dist-dmg` | `dmg.sh` | Wraps the bundle in `dist/out/Bond-Desktop-<version>.dmg` |
+| `make dist-sign` | `sign.sh` | Signs the bundle inside out, then asserts what notarization requires |
+| `make dist-notarize` | `notarize.sh` | Submits the signed app to Apple, waits for the verdict, saves the log, staples the ticket |
+| `make dist-dmg` | `dmg.sh` | Wraps the bundle in `dist/out/Bond-Desktop-<version>.dmg`, then signs, notarizes and staples the image |
 | `make dist-check` | `check.sh` | Reports what this machine still needs; changes nothing |
 | `make dist-clean` | — | `rm -rf dist/stage dist/out` |
-| `make dist` | — | **Phase 5.** The whole chain, signed and notarized |
-| `make dist-notarize` | `notarize.sh` | **Phase 5.** Submit to Apple, wait, staple |
+| `make dist` | — | The release: a strict `dist-check`, then the whole chain, signed, notarized and stapled |
 | `make dist-appcast` | `appcast.sh` | **Phase 6.** Sign the DMG for Sparkle and regenerate the appcast |
 
-The four build targets chain: `dist-dmg` needs `dist-sign` needs `dist-app`
-needs `dist-llama`, so `make dist-dmg` runs the whole thing. `dist-check` and
-`dist-clean` stand alone and depend on nothing.
+The build targets chain: `dist-dmg` needs `dist-notarize` needs `dist-sign`
+needs `dist-app` needs `dist-llama`, so `make dist-dmg` runs the whole thing.
+Under `AD_HOC=1` the `dist-notarize` link is dropped, because an ad-hoc
+signature is not something Apple would accept. `make dist` adds one step in
+front of all of it — `dist-check` in strict mode — so a release never begins
+on a machine that cannot finish it. `dist-check` and `dist-clean` stand alone
+and depend on nothing.
+
+`dist-check` takes two switches of its own: `STRICT=1` makes it exit non-zero
+while any counted row is red (that is how `make dist` runs it), and
+`DIST_CHECK_OFFLINE=1` skips the one row that talks to Apple. The Phase 6
+Sparkle rows are counted separately and never block a release.
 
 `AD_HOC=1` makes every step work with no certificate at all:
 
@@ -36,7 +45,9 @@ make dist-dmg AD_HOC=1
 That produces an unsigned, unnotarized DMG. It is the right command for a
 tester build and for any change to the pipeline itself. It is not a rehearsal
 of the real thing: an ad-hoc signature cannot carry the hardened runtime,
-because library validation refuses ad-hoc-signed dylibs.
+because library validation refuses ad-hoc-signed dylibs. `make dist` refuses
+`AD_HOC=1` outright rather than produce an unsigned image under the name of the
+release target, and says which command to use instead.
 
 A tester build also needs a `BOND_MCP_SERVER_URL`, or it cannot sign in.
 `dist-app` refuses to build without one, so point `MS_ENV` at an env file that
@@ -49,6 +60,10 @@ make dist-dmg AD_HOC=1 MS_ENV=/path/to/.env
 To exercise the pipeline itself without one — checking a script change, not
 producing something anyone will install — set `BOND_DIST_ALLOW_NO_MCP=1`. The
 build then says so and carries on.
+
+`DIST_NOTARY_TIMEOUT` (default `30m`) bounds the wait for Apple's verdict, so
+an outage on their side fails the build with a message instead of hanging the
+terminal overnight.
 
 ## Prerequisites
 
@@ -73,6 +88,12 @@ that is specific to this developer rather than to the project:
 | `AuthKey_<id>.p8` | App Store Connect API key notarytool authenticates with. Downloadable exactly once. Keep it mode 600 | **yes** |
 | `sparkle_ed25519.key` | Sparkle's EdDSA private key, from `generate_keys -x`. Whoever holds it can sign an update the app installs without asking | **yes** |
 
+The two key files do not have to sit in `dist/local/` — `dist.env` names their
+paths, and anywhere mode-600 and outside the repo will do. The author keeps the
+`.p8` in `~/.bond-signing/` beside the certificate backups, so that removing a
+worktree after a merge cannot delete the only local copy of a file Apple will
+not issue twice.
+
 The Developer ID Application certificate and its private key are not files
 here: they live in the login keychain. The `.p12` export belongs in the
 password manager beside these.
@@ -95,17 +116,37 @@ must leave it blank), `DIST_SPARKLE_PRIVATE_KEY_PATH`,
 3. `git clone` this repo.
 4. Copy `dist/local/` out of the password manager, and
    `chmod 600 dist/local/*.p8`.
-5. Import the Developer ID `.p12` into the login keychain and allow `codesign`
-   to use it.
+5. Import the Developer ID `.p12` into the login keychain and let `codesign`
+   reach it without a prompt:
+
+   ```sh
+   security import "<path>.p12" -k ~/Library/Keychains/login.keychain-db \
+     -T /usr/bin/codesign -T /usr/bin/security
+   security set-key-partition-list -S apple-tool:,apple: -s \
+     -k "<login password>" ~/Library/Keychains/login.keychain-db
+   ```
+
+   The second command is the one that is easy to skip and painful to skip.
+   Without a partition list, macOS asks for the keychain password on **every**
+   signature — about twenty of them in one `make dist` — and a build running in
+   a terminal that cannot show the prompt simply hangs.
+
+   Then put the certificate's SHA-1, not its name, in `DIST_SIGN_IDENTITY`:
+   `security find-identity -v -p codesigning` prints it at the start of the
+   line. A renewed certificate shares the name of the one it replaces, and a
+   name that matches two identities is one codesign refuses.
 6. Write `.env` next to the `Makefile` with `BOND_MCP_SERVER_URL`, and with
    **no** `MICROSOFT_CLIENT_SECRET` — `dist-app` refuses to build otherwise,
    because that secret would be readable in the shipped binary.
-7. `make dist-check` until every row is green.
+7. `make dist-check` until the summary reads `all clear` — or `all clear for
+   make dist`, which means only the Phase 6 Sparkle rows are still yellow.
 8. `make dist`.
 
 ## Files here
 
-- `build-llama.sh`, `bundle.sh`, `sign.sh`, `dmg.sh`, `check.sh` — the steps above.
+- `build-llama.sh`, `bundle.sh`, `sign.sh`, `notarize.sh`, `dmg.sh`,
+  `check.sh` — the steps above. `notarize.sh` takes the path to a `.app` or a
+  `.dmg` and is called twice in a release, once for each.
 - `llama-server.entitlements` — an empty dict. The bundled helper gets no
   entitlements; the hardened runtime is a codesign flag `sign.sh` applies,
   not an entitlement and not an Xcode build setting.

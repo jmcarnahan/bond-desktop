@@ -1,9 +1,10 @@
 # Distributing Bond Desktop
 
-How a checkout becomes a DMG someone else can install. Draft: the signing and
-notarization steps are written but not yet exercised — they wait on a
-Developer ID certificate (Phase 5), and the update feed waits on Sparkle
-(Phase 6). Everything up to and including an unsigned tester DMG works today.
+How a checkout becomes a DMG someone else can install. One command does all of
+it — `make dist` — and what comes out is signed with a Developer ID
+certificate, notarized by Apple and stapled, so it opens on a stranger's Mac
+with no warning and no detour. The only piece still ahead is the automatic
+update feed, which waits on Sparkle (Phase 6).
 
 The machine-local half of this — what lives in `dist/local/`, and the
 new-laptop checklist — is in `dist/README.md`.
@@ -27,17 +28,40 @@ partway through with a linker error that does not name this as the cause.
 ```sh
 make dist-check              # what this machine still needs
 make dist-dmg AD_HOC=1       # a DMG for testers, no certificate needed
-make dist                    # Phase 5: signed, notarized, stapled
+make dist                    # signed, notarized, stapled
 ```
 
-Each target depends on the previous one, in this order:
+`make dist` is six steps, each the previous one's prerequisite:
 
+0. **strict `dist-check`** (`_dist-preflight`). The same report as
+   `make dist-check`, run with `STRICT=1` so a red row stops the build before
+   it starts. Half an hour of compiling and then a missing notary key is the
+   failure this exists to refuse. It also refuses `AD_HOC=1`: `make dist` is
+   the release, and the tester build is `make dist-dmg AD_HOC=1`.
 1. **`dist-llama`** builds `llama-server` from a SHA-256-pinned llama.cpp
    source tarball and stages it under `dist/stage/llama/`.
 2. **`dist-app`** runs `flutter build macos --release` and copies the sidecar
    into `dist/stage/Bond Desktop.app`.
-3. **`dist-sign`** signs the bundle inside out.
-4. **`dist-dmg`** produces `dist/out/Bond-Desktop-<version>.dmg`.
+3. **`dist-sign`** signs the bundle inside out with the Developer ID identity
+   and the hardened runtime, then asserts everything notarization requires.
+4. **`dist-notarize`** zips the app, submits it, waits for Apple's verdict,
+   saves the log and staples the ticket into the bundle.
+5. **`dist-dmg`** builds `dist/out/Bond-Desktop-<version>.dmg` from the
+   **stapled** app, signs the image, notarizes it in its own right and staples
+   that ticket too.
+
+The dependency shape is worth stating outright, because it is where the order
+is enforced rather than in any script:
+
+```make
+dist-dmg: dist-sign $(if $(AD_HOC),,dist-notarize)
+dist: _dist-preflight dist-dmg
+```
+
+`dist-dmg` pulls in `dist-notarize` **unless `AD_HOC=1`**, and `.NOTPARALLEL`
+at the top of the Makefile keeps prerequisites in the order they are written.
+There are no `$(MAKE)` sub-invocations: a sub-make would rebuild the app once
+per call.
 
 `VERSION` and `BUILD` are read from the single `version:` line in
 `app/pubspec.yaml` and passed to Flutter as `--build-name` and
@@ -161,6 +185,136 @@ ad-hoc build with the runtime on cannot load its own backends. An ad-hoc build
 is therefore a test of the layout and the pipeline, never a rehearsal of the
 real signature.
 
+**The identity is named by its SHA-1, not by its name.** `DIST_SIGN_IDENTITY`
+holds the 40-hex hash `security find-identity -v -p codesigning` prints at the
+start of each line. A renewed Developer ID certificate carries the *same name*
+as the one it replaces — this project's G2 certificate and the superseded G1
+one are both "Developer ID Application: John Carnahan (5AHEW8393H)" — and a
+name matching two identities is one codesign refuses to use at all. `sign.sh`
+resolves the value against the keychain before it signs anything, so a missing
+or ambiguous identity is a message with a fix rather than an error on the first
+`.so`.
+
+**`--options runtime` and `--timestamp`** are the two flags the Developer ID
+branch adds, and notarization requires both. The timestamp is a round trip to
+Apple's timestamp server for *every* signature, about twenty of them here, so a
+machine with no network cannot produce a distribution signature; that is what
+`AD_HOC=1` is for.
+
+**The distribution checks.** `sign.sh` ends its Developer ID run with a block
+of assertions — the things the notary service rejects an upload for, checked
+where the fix is a one-line change instead of twenty minutes later in a
+submission log:
+
+| Check | Why it matters |
+|---|---|
+| `Authority=Developer ID Application` | The notary service accepts no other kind of certificate; an Apple Development signature builds something that runs on this Mac alone |
+| `flags=0x…(runtime)` on the app and on `llama-server` | Notarization requires the hardened runtime |
+| `TeamIdentifier` equals `DIST_TEAM_ID` | `dist.env` and the certificate disagreeing is caught before the upload |
+| No `app-sandbox`, no `get-task-allow` | `get-task-allow` lets a debugger attach and is a hard rejection; the sandbox would bring back the container this app deliberately left |
+| `llama-server` carries no entitlements at all | `dist/llama-server.entitlements` is an empty dict, and anything else means the helper picked up the app's |
+| Every nested `.so`, `.dylib` and `.framework` carries the team | Library validation comes on **with** the hardened runtime and refuses to load a library whose team differs from the loading process's. A binary validly signed by somebody else is exactly this failure, and without the check it appears as a launch that dies loading its own backends |
+| `syspolicy_check notary-submission` | Apple's own pre-flight: the same checks the service runs, offline, in a second |
+
+`spctl` is deliberately *not* run there. Until a ticket is stapled it answers
+"rejected (source=Unnotarized Developer ID)", which is correct and tells nobody
+anything; `dist/notarize.sh` runs it after stapling, where the answer is the
+one a user's Mac will give.
+
+## Notarization
+
+Apple scans the upload for malware and for signing mistakes and, finding none,
+issues a **ticket** for that exact code. **Stapling** writes the ticket into the
+bundle or the image, so Gatekeeper on the user's Mac can check it with no
+network at all. An unstapled but notarized build still opens — provided that
+Mac can reach Apple at that moment. A stapled one always does.
+
+`dist/notarize.sh <path to .app or .dmg>` is five steps:
+
+1. **Preconditions.** The target exists and is a `.app` or a `.dmg`;
+   `DIST_NOTARY_KEY_PATH` names a file and `DIST_NOTARY_KEY_ID` is set; and
+   `codesign -dvv` on the target shows a Developer ID authority. An ad-hoc
+   upload would be rejected after the whole file had transferred and several
+   minutes had passed, and it would spend one of the day's submissions.
+2. **Package.** An `.app` is zipped with `ditto -c -k --keepParent`, the one
+   archive form that preserves the bundle's symlinks, extended attributes and
+   signature — `zip -r` flattens symlinks and the upload arrives broken. A
+   `.dmg` is already one file and is submitted as it is.
+3. **Submit.** `xcrun notarytool submit --wait --timeout $DIST_NOTARY_TIMEOUT`
+   (default `30m`). `--wait` exits non-zero when the verdict is `Invalid`, so
+   the *status* is what the script branches on, never the exit code.
+4. **The log, always.** `notarytool log <id>` is fetched for every submission,
+   `Accepted` included, and saved to
+   `dist/out/notary-<target name>-<submission id>.json` — the target's file
+   name with spaces turned into dashes. `Accepted` does not mean silent:
+   warnings live in the same `issues` array as errors, and a warning is how
+   Apple announces the thing that becomes a hard rejection in a later macOS.
+   Each issue names a `severity`, a `path` and a `message`, and the path is the
+   offending file inside the upload. That JSON path is what goes into a bug
+   report.
+5. **Staple and verify.** `xcrun stapler staple`, then `stapler validate`, then
+   Gatekeeper's own answer — `spctl -a -vv -t exec` for an app, `spctl -a -vv
+   -t open --context context:primary-signature` for an image — which must say
+   `source=Notarized Developer ID`. For an app, `syspolicy_check distribution`
+   finishes it off.
+
+**Twice, in that order.** The `.app` is notarized and stapled first; only then
+is the DMG built from that stapled copy. A DMG built earlier would contain an
+app with no ticket in it. The image is then signed and notarized *in its own
+right*, because it is separate code with its own signature and it is what the
+user actually downloads — Gatekeeper checks the DMG before anything inside it.
+The image is signed **without** `--options runtime`: the hardened runtime is a
+property of executing code, and a disk image does not execute. `--timestamp`
+still applies.
+
+**Team key or individual key.** An App Store Connect **Team** key requires
+`--issuer`; an **individual** key rejects the request when one is passed.
+`dist.env` records which this is by having a `DIST_NOTARY_ISSUER` or leaving it
+blank, and `dist-check` reports either as green. This project uses a Team key.
+
+**The quota** is about 75 notarizations per team per day. A release is two of
+them, the app and the image, and so is every re-run of `make dist`: the
+rebuild invalidates the previous ticket, so the app is submitted again. The
+steps are idempotent in effect, not in quota. It is not a thing to put in a
+retry loop.
+
+## Apple account setup
+
+One-time, done on 2026-09-10 for this project. It is written down because the
+next person to do it will be doing it for the first time.
+
+1. **A paid Apple Developer Program membership.** Individual is enough for
+   Developer ID; an Organization membership is only needed for things this
+   project does not do. Developer ID signing is not available on a free account
+   at all.
+2. **The certificate.** *Certificates, Identifiers & Profiles → Certificates →
+   `+` → Developer ID Application.* Apple asks for a CSR: in **Keychain
+   Access**, *Certificate Assistant → Request a Certificate From a Certificate
+   Authority*, saved to disk. Upload it, download the issued `.cer`, and
+   double-click it into the **login** keychain. Certificates issued now chain
+   through Apple's **G2** intermediate.
+3. **Back the certificate up.** In Keychain Access, export it **with its
+   private key** as a `.p12` and put that in the password manager. The private
+   key exists in exactly one place until you do; Apple cannot reissue it.
+4. **The notary key.** *App Store Connect → Users and Access → Integrations →
+   App Store Connect API → **Team Keys** → Generate.* **Developer** access is
+   enough for notarization. The `.p8` downloads **once and only once**. Note
+   the **Key ID** on its row and the **Issuer ID** at the top of the page, then
+   `chmod 600` the file and keep it outside the repo (see `dist/README.md`).
+5. **A second machine** needs the certificate imported and made reachable
+   without a prompt:
+
+   ```sh
+   security import "<path>.p12" -k ~/Library/Keychains/login.keychain-db \
+     -T /usr/bin/codesign -T /usr/bin/security
+   security set-key-partition-list -S apple-tool:,apple: -s \
+     -k "<login password>" ~/Library/Keychains/login.keychain-db
+   ```
+
+   Without the partition list, macOS asks for the keychain password on every
+   one of the twenty signatures, and a `make dist` in a terminal that cannot
+   show the prompt simply hangs.
+
 ## Secrets
 
 Full inventory and storage rules: `dist/README.md`. In short, everything
@@ -168,6 +322,12 @@ machine-local lives in the gitignored `dist/local/`, and three items are real
 secrets — the Developer ID private key (in the login keychain, `.p12` in the
 password manager), the App Store Connect `.p8` (downloadable once), and the
 Sparkle EdDSA private key.
+
+The `.p8` does not have to sit in `dist/local/`: `dist.env` names its path, and
+anywhere mode-600 and outside the repo will do. This project's copy lives in
+`~/.bond-signing/`, beside the certificate backups, so that removing a worktree
+after a merge cannot delete the only local copy of a file Apple will not issue
+twice.
 
 One secret must never ship: **`MICROSOFT_CLIENT_SECRET`**. A build carrying it
 has it readable in the binary, which is why `dist/bundle.sh` refuses to run
@@ -217,20 +377,57 @@ adopted server serving the old weights is replaced rather than reused
 
 ## Releasing
 
-1. Bump `version:` in `app/pubspec.yaml`.
-2. `make dist-check` — every row green.
-3. `make dist` — builds, signs, notarizes and staples. *(Phase 5.)*
-4. `make dist-appcast` — signs the DMG for Sparkle and regenerates
+1. Bump `version:` in `app/pubspec.yaml`. It is the only place the number is
+   written.
+2. `make dist-check` — the summary reads `all clear`, or `all clear for make
+   dist` with only the Phase 6 Sparkle rows yellow.
+3. `make dist` — preflight, build, sign, notarize, staple, DMG. It ends by
+   naming `dist/out/Bond-Desktop-<version>.dmg`.
+4. Walk the **Verifying a release** checklist below.
+5. `gh release create v<version> dist/out/Bond-Desktop-<version>.dmg`
+   (a release upload is one of the commands this repo's hooks hand to the
+   user).
+6. `make dist-appcast` — signs the DMG for Sparkle and regenerates
    `docs/appcast/appcast.xml`, which is committed. *(Phase 6.)*
-5. Upload the DMG to a GitHub release for the tag.
-6. Verify on a machine that has never run the app: `spctl -a -vv -t exec` says
-   Notarized Developer ID, and the DMG opens with no Gatekeeper prompt.
+
+## Verifying a release
+
+Six checks, none of which needs the app to be launched. The first five run on
+the build machine; the last one is the only one that answers the question a
+user is actually asking.
+
+```sh
+codesign -dvv "dist/stage/Bond Desktop.app"
+codesign -d --entitlements - "dist/stage/Bond Desktop.app"
+spctl -a -vv -t exec "dist/stage/Bond Desktop.app"
+/usr/bin/syspolicy_check distribution "dist/stage/Bond Desktop.app"
+xcrun stapler validate dist/out/Bond-Desktop-<version>.dmg
+```
+
+1. `codesign -dvv` shows `Authority=Developer ID Application` and a `flags=`
+   value containing `(runtime)`.
+2. `codesign -d --entitlements -` shows the two network keys and **no**
+   `app-sandbox` and no `get-task-allow`.
+3. `spctl -a -vv -t exec` says `source=Notarized Developer ID`. (It prints to
+   stderr.)
+4. `syspolicy_check distribution` reports no `Severity: Fatal` — the
+   companion of the `notary-submission` check `dist-sign` ran before the
+   upload. It exits 70 for warnings too, so read the severities rather than
+   the exit code; both scripts do.
+5. `xcrun stapler validate` on the **DMG** — the image carries its own ticket,
+   separate from the app's.
+6. On a Mac that has never run Bond — or, at a minimum, a second user account
+   on this one — download the DMG the way a user would, open it, drag the app
+   across and launch it. No Gatekeeper prompt, no Privacy & Security detour.
+   Anything less than a clean first launch means the ticket is not where it
+   needs to be.
 
 ## Tester builds
 
 `make dist-dmg AD_HOC=1` produces a DMG that is not signed by a known
 developer, so macOS refuses it on the first double-click. That refusal is
-expected, and the way past it is:
+expected — and it is the only kind of build it ever applies to; a release from
+`make dist` opens on the first try. The way past it is:
 
 > Open the DMG and drag **Bond Desktop** to Applications. Double-click it once
 > and let macOS refuse. Then open **System Settings → Privacy & Security**,

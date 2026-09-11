@@ -28,16 +28,21 @@ model that writes drafts will be slow. Bond tells you which case you are in.
 
 ### "Bond Desktop can't be opened"
 
-Until the released build is notarized by Apple, macOS refuses the first launch
-of anything downloaded from the internet. It is one detour, once:
+You should not see this. Released builds are checked and approved by Apple
+before they are published, so Bond opens on the first double-click with no
+warning and nothing to click past.
+
+If you do see it, you have a **test build** — one sent to you directly, before
+release, by someone who will have said so. Those are not sent to Apple, and
+macOS blocks anything it has not been told about. It is one detour, once:
 
 1. Open **System Settings → Privacy & Security**.
 2. Scroll to the bottom. There is a line about Bond Desktop being blocked, with
    an **Open Anyway** button beside it.
 3. Press it, then confirm in the dialog macOS puts up.
 
-macOS remembers, so this happens on the first launch and never again. It goes
-away entirely once the builds are notarized.
+macOS remembers, so this happens on the first launch of that build and never
+again.
 
 ## Setting up
 

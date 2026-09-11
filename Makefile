@@ -92,9 +92,9 @@ RESET  := \033[0m
 
 .DEFAULT_GOAL := help
 .NOTPARALLEL:
-# dist, dist-notarize and dist-appcast are listed even though they arrive in
-# Phases 5 and 6: a `dist/` DIRECTORY exists, so without .PHONY make would
-# see the target as already satisfied and say "up to date".
+# Every dist target is listed, dist-appcast included even though it arrives in
+# Phase 6: a `dist/` DIRECTORY exists, so without .PHONY make would see the
+# target as already satisfied and say "up to date".
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop omlx omlx-stop _wait-omlx \
@@ -102,7 +102,7 @@ RESET  := \033[0m
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ab ab-membership drain bench-compare \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
-        dist dist-notarize dist-appcast
+        dist dist-notarize dist-appcast _dist-preflight
 
 help:
 	@printf "bond-desktop — local model + agent\n\n"
@@ -146,14 +146,16 @@ help:
 	@printf "First run downloads ~19GB of weights before the port binds —\n"
 	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n\n"
 	@printf "Ship it (macOS installer, see docs/distribution.md):\n"
+	@printf "  make dist         → signed, notarized, stapled DMG (needs dist/local/, see docs/distribution.md)\n"
 	@printf "  make dist-llama   → build the bundled llama-server sidecar (SHA-pinned source)\n"
 	@printf "  make dist-app     → build \"Bond Desktop.app\" and lay the sidecar into it\n"
 	@printf "  make dist-sign    → sign the bundle inside out\n"
+	@printf "  make dist-notarize → submit the signed app to Apple, wait, staple\n"
 	@printf "  make dist-dmg     → dist/out/Bond-Desktop-$(VERSION).dmg\n"
 	@printf "  make dist-check   → what this machine still needs to ship a release\n"
 	@printf "  make dist-clean   → rm dist/stage dist/out\n"
 	@printf "  make dist-dmg AD_HOC=1 → unsigned DMG for testers (no certificate needed)\n"
-	@printf "  make dist (Phase 5)    → signed + notarized; dist-appcast (Phase 6) publishes updates\n"
+	@printf "  make dist-appcast (Phase 6) → publish the update feed\n"
 
 install:
 	@brew list llama.cpp >/dev/null 2>&1 || brew install llama.cpp
@@ -922,17 +924,18 @@ app-build:
 	@printf "  $(GREEN)✓$(RESET) \"$(APP_DIR)/build/macos/Build/Products/Release/Bond Desktop.app\"\n"
 
 # ── distribution ───────────────────────────────────────────────────────
-# The installer pipeline: build the llama-server sidecar, build and stuff the
-# bundle, sign it, wrap it in a DMG. Every step is a script under dist/ so
-# that the same commands run from a shell, and every step is idempotent.
+# The installer pipeline. `make dist` is the release: a strict dist-check
+# first, then the llama-server sidecar, the app bundle, the Developer ID
+# signature, the app notarized and stapled, and finally a DMG that is itself
+# signed, notarized and stapled. Every step is a script under dist/ so that the
+# same commands run from a shell, and every step is idempotent.
 #
 # AD_HOC=1 is the no-certificate rehearsal: everything runs, the bundle is
 # ad-hoc signed WITHOUT the hardened runtime (library validation would refuse
 # ad-hoc dylibs), and the DMG is neither signed nor notarized. Testers open it
 # through System Settings → Privacy & Security → Open Anyway.
 #
-# `make dist` (signed + notarized end to end) and `dist-notarize` arrive in
-# Phase 5 with the Developer ID certificate; `dist-appcast` in Phase 6.
+# `dist-appcast`, which publishes the Sparkle update feed, arrives in Phase 6.
 
 # One source of truth for both numbers: pubspec's `version: 1.0.0+1` line,
 # which is also what --build-name/--build-number carry into Info.plist.
@@ -945,6 +948,11 @@ AD_HOC ?=
 # Machine-local signing and notarization settings, never committed. See
 # dist/local.env.example and dist/README.md.
 DIST_ENV ?= $(CURDIR)/dist/local/dist.env
+
+# How long dist-notarize waits for Apple's verdict. Apple usually answers in a
+# few minutes; bounding the wait means an outage on their side FAILS the build
+# with a message instead of hanging a terminal overnight.
+DIST_NOTARY_TIMEOUT ?= 30m
 
 # Non-empty lets dist-app build without a BOND_MCP_SERVER_URL. Off by default
 # because a build with no MCP URL cannot sign in at all, which is a broken
@@ -961,11 +969,35 @@ dist-app: dist-llama
 dist-sign: dist-app
 	@AD_HOC=$(AD_HOC) DIST_ENV=$(DIST_ENV) dist/sign.sh
 
-dist-dmg: dist-sign
-	@VERSION=$(VERSION) AD_HOC=$(AD_HOC) dist/dmg.sh
+dist-notarize: dist-sign
+	@AD_HOC=$(AD_HOC) DIST_ENV=$(DIST_ENV) DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/notarize.sh "dist/stage/Bond Desktop.app"
+
+# A real DMG is built from the STAPLED app: the ticket is written INTO the
+# bundle, so a copy taken before notarization carries none. AD_HOC=1 has
+# nothing to notarize and drops the prerequisite. `.NOTPARALLEL` at the top of
+# this file is what keeps the two prerequisites in this order.
+dist-dmg: dist-sign $(if $(AD_HOC),,dist-notarize)
+	@VERSION=$(VERSION) AD_HOC=$(AD_HOC) DIST_ENV=$(DIST_ENV) DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/dmg.sh
 
 dist-check:
-	@MS_ENV=$(MS_ENV) DIST_ENV=$(DIST_ENV) dist/check.sh
+	@MS_ENV=$(MS_ENV) DIST_ENV=$(DIST_ENV) BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
+
+# Internal, hence the leading underscore (the `_wait-*` convention). The strict
+# report runs FIRST so a release never begins on a machine that cannot finish
+# it: half an hour of building and then a missing notary key is the failure
+# this exists to refuse.
+_dist-preflight:
+	@if [ -n "$(AD_HOC)" ]; then \
+	   printf "  $(RED)✗$(RESET) make dist is the signed, notarized release — for a tester build use: make dist-dmg AD_HOC=1\n"; \
+	   exit 1; \
+	 fi
+	@STRICT=1 MS_ENV=$(MS_ENV) DIST_ENV=$(DIST_ENV) BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
+
+# No $(MAKE) sub-invocations here: the prerequisite chain already gives the
+# order, and a sub-make would rebuild the app once per invocation.
+dist: _dist-preflight dist-dmg
+	@printf "  $(GREEN)✓$(RESET) dist/out/Bond-Desktop-$(VERSION).dmg — signed, notarized, stapled\n"
+	@printf "    Next: upload it to the GitHub release; see docs/distribution.md → Releasing\n"
 
 dist-clean:
 	@rm -rf dist/stage dist/out
