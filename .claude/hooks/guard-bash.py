@@ -170,11 +170,11 @@ ASK = [
      "The user drives the live app and the model servers; gates are serverless."),
     # The distribution commands fall into three groups.
     #
-    # 1. Targets that always reach a real identity, Apple's notary service or
-    #    the Sparkle key: `make dist`, `dist-sign`, `dist-notarize`,
-    #    `dist-appcast`. dist-llama/dist-app/dist-check/dist-clean compile,
-    #    copy and report and stay unattended, so `(?![-\w])` after each target
-    #    keeps them out — and keeps `make distclean` out too.
+    # 1. Targets that always reach a real identity or Apple's notary service:
+    #    `make dist`, `dist-sign`, `dist-notarize`. dist-llama/dist-app/
+    #    dist-check/dist-clean/dist-sparkle-tools compile, copy, fetch and
+    #    report and stay unattended, so `(?![-\w])` after each target keeps
+    #    them out — and keeps `make distclean` out too.
     #
     #    The repeated group spans everything make allows BEFORE a goal: flags,
     #    `-C dir`, variable assignments and earlier goals. Without the last two,
@@ -182,10 +182,12 @@ ASK = [
     #    unattended. It stays greedy on purpose, so a trailing `AD_HOC=1` ends
     #    with nothing left to match.
     #
-    # 2. `make dist-dmg` WITHOUT an AD_HOC=<non-empty> in the same segment.
-    #    Since Phase 5 a non-ad-hoc dist-dmg pulls in dist-notarize, signs the
-    #    image and uploads it; with AD_HOC=1 it is still the unattended tester
-    #    build it always was.
+    # 2. `make dist-dmg` and `make dist-appcast` WITHOUT an AD_HOC=<non-empty>
+    #    in the same segment. Since Phase 5 a non-ad-hoc dist-dmg pulls in
+    #    dist-notarize, signs the image and uploads it; since Phase 6 a
+    #    non-ad-hoc dist-appcast signs the DMG with the real Sparkle key and
+    #    writes the published feed. With AD_HOC=1 both are the unattended
+    #    rehearsals they were built to be.
     #
     # 3. The scripts themselves, because a make target is not the only way to
     #    reach them. A segment that starts with optional VAR=value assignments
@@ -200,8 +202,8 @@ ASK = [
     #    `AD_HOC=''` is an EMPTY value to the shell, which is the real path,
     #    so it does not count as set. Out of reach of any path rule, and
     #    accepted as such: `cd dist && ./sign.sh` and `bash -c "…"`.
-    (r"\bmake\b(?![^|;&]*(\s-n\b|--dry-run|--just-print))(?:\s+(?:-C\s+\S+|-\S+|\S+=\S+|[\w./-]+))*\s+(dist-notarize|dist-appcast|dist-sign|dist)(?![-\w])"
-     r"|\bmake\b(?![^|;&]*(\s-n\b|--dry-run|--just-print))(?![^|;&]*\bAD_HOC=(?![\"']{2})\S)(?:\s+(?:-C\s+\S+|-\S+|\S+=\S+|[\w./-]+))*\s+dist-dmg(?![-\w])"
+    (r"\bmake\b(?![^|;&]*(\s-n\b|--dry-run|--just-print))(?:\s+(?:-C\s+\S+|-\S+|\S+=\S+|[\w./-]+))*\s+(dist-notarize|dist-sign|dist)(?![-\w])"
+     r"|\bmake\b(?![^|;&]*(\s-n\b|--dry-run|--just-print))(?![^|;&]*\bAD_HOC=(?![\"']{2})\S)(?:\s+(?:-C\s+\S+|-\S+|\S+=\S+|[\w./-]+))*\s+(dist-dmg|dist-appcast)(?![-\w])"
      r"|(?:^|[;&|(\n]\s*)(?!(?:" + _RUN + r")*(?:\w+=\S*\s+)*AD_HOC=(?![\"']{2})\S)(?:" + _RUN + r")*(?:\w+=\S*\s+)*(?:" + _RUN + r")*(?:\S*/)?dist/(sign|notarize|dmg|appcast)\.sh\b"
      r"|\bxcrun\s+notarytool\s+(submit|store-credentials)\b"
      r"|\bsecurity\s+(import|create-keychain|set-key-partition-list)\b"

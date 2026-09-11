@@ -92,9 +92,8 @@ RESET  := \033[0m
 
 .DEFAULT_GOAL := help
 .NOTPARALLEL:
-# Every dist target is listed, dist-appcast included even though it arrives in
-# Phase 6: a `dist/` DIRECTORY exists, so without .PHONY make would see the
-# target as already satisfied and say "up to date".
+# Every dist target is listed: a `dist/` DIRECTORY exists, so without .PHONY
+# make would see the target as already satisfied and say "up to date".
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop omlx omlx-stop _wait-omlx \
@@ -102,7 +101,7 @@ RESET  := \033[0m
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ab ab-membership drain bench-compare \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
-        dist dist-notarize dist-appcast _dist-preflight
+        dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
 
 help:
 	@printf "bond-desktop — local model + agent\n\n"
@@ -154,8 +153,9 @@ help:
 	@printf "  make dist-dmg     → dist/out/Bond-Desktop-$(VERSION).dmg\n"
 	@printf "  make dist-check   → what this machine still needs to ship a release\n"
 	@printf "  make dist-clean   → rm dist/stage dist/out\n"
+	@printf "  make dist-appcast → regenerate docs/appcast/appcast.xml for the released DMG\n"
+	@printf "  make dist-sparkle-tools → stage Sparkle's generate_keys/generate_appcast\n"
 	@printf "  make dist-dmg AD_HOC=1 → unsigned DMG for testers (no certificate needed)\n"
-	@printf "  make dist-appcast (Phase 6) → publish the update feed\n"
 
 install:
 	@brew list llama.cpp >/dev/null 2>&1 || brew install llama.cpp
@@ -926,16 +926,15 @@ app-build:
 # ── distribution ───────────────────────────────────────────────────────
 # The installer pipeline. `make dist` is the release: a strict dist-check
 # first, then the llama-server sidecar, the app bundle, the Developer ID
-# signature, the app notarized and stapled, and finally a DMG that is itself
-# signed, notarized and stapled. Every step is a script under dist/ so that the
-# same commands run from a shell, and every step is idempotent.
+# signature, the app notarized and stapled, a DMG that is itself signed,
+# notarized and stapled, and finally the signed Sparkle appcast that tells
+# every installed copy the release exists. Every step is a script under dist/
+# so that the same commands run from a shell, and every step is idempotent.
 #
 # AD_HOC=1 is the no-certificate rehearsal: everything runs, the bundle is
 # ad-hoc signed WITHOUT the hardened runtime (library validation would refuse
 # ad-hoc dylibs), and the DMG is neither signed nor notarized. Testers open it
 # through System Settings → Privacy & Security → Open Anyway.
-#
-# `dist-appcast`, which publishes the Sparkle update feed, arrives in Phase 6.
 
 # One source of truth for both numbers: pubspec's `version: 1.0.0+1` line,
 # which is also what --build-name/--build-number carry into Info.plist.
@@ -964,6 +963,7 @@ dist-llama:
 
 dist-app: dist-llama
 	@MS_ENV=$(MS_ENV) VERSION=$(VERSION) BUILD=$(BUILD) FLUTTER=$(FLUTTER) \
+	 AD_HOC=$(AD_HOC) DIST_ENV=$(DIST_ENV) \
 	 BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/bundle.sh
 
 dist-sign: dist-app
@@ -982,6 +982,20 @@ dist-dmg: dist-sign $(if $(AD_HOC),,dist-notarize)
 dist-check:
 	@MS_ENV=$(MS_ENV) DIST_ENV=$(DIST_ENV) BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
 
+# How a maintainer gets `generate_keys` without installing anything globally:
+# the pinned tools are staged under dist/stage/ and dist-clean takes them away
+# again. dist-appcast runs this itself; it is a target of its own only for the
+# one-off key generation in docs/distribution.md.
+dist-sparkle-tools:
+	@dist/sparkle-tools.sh
+
+# No prerequisite, deliberately. dist-app rebuilds the whole app on every run,
+# and re-running the appcast after a failed upload must not rebuild and
+# re-notarize an identical binary. What it needs is the DMG in dist/out/, which
+# the script checks for and names the command that produces.
+dist-appcast:
+	@VERSION=$(VERSION) BUILD=$(BUILD) AD_HOC=$(AD_HOC) DIST_ENV=$(DIST_ENV) dist/appcast.sh
+
 # Internal, hence the leading underscore (the `_wait-*` convention). The strict
 # report runs FIRST so a release never begins on a machine that cannot finish
 # it: half an hour of building and then a missing notary key is the failure
@@ -995,9 +1009,10 @@ _dist-preflight:
 
 # No $(MAKE) sub-invocations here: the prerequisite chain already gives the
 # order, and a sub-make would rebuild the app once per invocation.
-dist: _dist-preflight dist-dmg
+dist: _dist-preflight dist-dmg dist-appcast
 	@printf "  $(GREEN)✓$(RESET) dist/out/Bond-Desktop-$(VERSION).dmg — signed, notarized, stapled\n"
-	@printf "    Next: upload it to the GitHub release; see docs/distribution.md → Releasing\n"
+	@printf "  $(GREEN)✓$(RESET) docs/appcast/appcast.xml — regenerated\n"
+	@printf "    Next: gh release create v$(VERSION) dist/out/Bond-Desktop-$(VERSION).dmg, commit docs/appcast/appcast.xml; see docs/distribution.md → Releasing\n"
 
 dist-clean:
 	@rm -rf dist/stage dist/out

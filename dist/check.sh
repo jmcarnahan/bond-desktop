@@ -7,12 +7,17 @@
 # a failed build, and `make dist-check` on a laptop that only ever builds ad-hoc
 # DMGs is expected to show the signing rows red.
 #
-# STRICT=1 turns it into a gate that exits 1 while anything counted is still
-# failing. `make dist` runs it that way as its first step, so a release never
-# begins on a machine that cannot finish it — twenty minutes of building and
-# then a missing key is the shape of failure this prevents.
+# STRICT=1 turns it into a gate that exits 1 while any row is still failing.
+# `make dist` runs it that way as its first step, so a release never begins on
+# a machine that cannot finish it — twenty minutes of building and then a
+# missing key is the shape of failure this prevents.
 #
 # DIST_CHECK_OFFLINE=1 skips the one row that talks to Apple.
+# BOND_DIST_ALLOW_NO_MCP=1 turns the missing-MCP-URL row into a skip.
+#
+# The sections are: the build toolchain, signing, notarization, updates (the
+# Sparkle key pair, the two URLs and the version pin the appcast needs) and
+# the app build inputs.
 #
 # It never prints a secret. An identity name, a team id and a key id are
 # printed because they are on every signed binary anyway; a key's CONTENTS,
@@ -30,13 +35,10 @@ BOND_DIST_ALLOW_NO_MCP="${BOND_DIST_ALLOW_NO_MCP:-}"
 
 GREEN='\033[32m'; RED='\033[31m'; YELLOW='\033[33m'; BLUE='\033[34m'; RESET='\033[0m'
 fails=0
-pending=0
 row_ok()  { printf "  ${GREEN}✓${RESET} %-34s %s\n" "$1" "${2:-}"; }
 row_bad() { printf "  ${RED}✗${RESET} %-34s %s\n" "$1" "${2:-}"; fails=$((fails + 1)); }
-# Counted apart from the failures: a row that is not needed for `make dist`
-# yet, so a machine showing only these is ready to ship today.
-row_todo() { printf "  ${YELLOW}-${RESET} %-34s %s\n" "$1" "${2:-}"; pending=$((pending + 1)); }
-# Not counted at all: a row deliberately not run.
+# Not counted: a row deliberately not run, because what it would ask about
+# cannot be answered here yet.
 row_skip() { printf "  ${YELLOW}-${RESET} %-34s %s\n" "$1" "${2:-}"; }
 step()    { printf "${BLUE}==>${RESET} %s\n" "$*"; }
 
@@ -136,7 +138,7 @@ if [ -z "$key" ]; then
 elif [ ! -f "$key" ]; then
   row_bad "DIST_NOTARY_KEY_PATH" "no file at that path"
 else
-  mode="$(stat -f '%Lp' "$key")"
+  mode="$(stat -L -f '%Lp' "$key")"
   if [ "$mode" = "600" ]; then
     row_ok "DIST_NOTARY_KEY_PATH" "present, mode 600"
     key_ready=1
@@ -197,24 +199,121 @@ else
   row_bad "syspolicy_check" "absent — macOS 14+ ships it; skip the pre-flight distribution check"
 fi
 
-step "updates (Phase 6)"
-# Sparkle is not in `make dist` yet, so these are pending rather than failing:
-# a machine with every other row green can ship a release today. When
-# dist-appcast joins `make dist` they become row_bad, because from then on a
-# release without a signed appcast is a release nobody's installed copy sees.
+step "updates"
+# `make dist` ends with dist-appcast, so every row here is a release
+# prerequisite like any other: a release with no signed appcast is a release no
+# installed copy of the app ever hears about.
 sparkle="${DIST_SPARKLE_PRIVATE_KEY_PATH:-}"
+sparkle_ready=""
 if [ -z "$sparkle" ]; then
-  row_todo "DIST_SPARKLE_PRIVATE_KEY_PATH" "Phase 6 — not needed for make dist yet"
-elif [ -f "$sparkle" ]; then
-  row_ok "DIST_SPARKLE_PRIVATE_KEY_PATH" "present"
+  row_bad "DIST_SPARKLE_PRIVATE_KEY_PATH" "not set — docs/distribution.md → Updates"
+elif [ ! -f "$sparkle" ]; then
+  row_bad "DIST_SPARKLE_PRIVATE_KEY_PATH" "no file at that path — docs/distribution.md → Updates"
 else
-  row_todo "DIST_SPARKLE_PRIVATE_KEY_PATH" "Phase 6 — set, but no file at that path"
+  row_ok "DIST_SPARKLE_PRIVATE_KEY_PATH" "present"
+  sparkle_ready=1
+  # The same rule the .p8 gets, and for a stronger reason: whoever holds this
+  # file can sign an update every installed copy of Bond installs without
+  # asking.
+  smode="$(stat -L -f '%Lp' "$sparkle")"
+  if [ "$smode" = "600" ]; then
+    row_ok "  mode" "600"
+  else
+    row_bad "  mode" "$smode — run: chmod 600 '$sparkle'"
+  fi
 fi
 
-if [ -n "${DIST_APPCAST_URL:-}" ]; then
-  row_ok "DIST_APPCAST_URL" "set"
+# 32 bytes base64 is 43 characters and one '=' of padding. Checked in shape
+# only, because the key-pair row below is what checks it for real.
+pub="${DIST_SPARKLE_PUBLIC_KEY:-}"
+pub_ready=""
+if [ -z "$pub" ]; then
+  row_bad "DIST_SPARKLE_PUBLIC_KEY" "not set — docs/distribution.md → Updates"
+elif ! printf '%s' "$pub" | grep -qE '^[A-Za-z0-9+/]{43}=$'; then
+  row_bad "DIST_SPARKLE_PUBLIC_KEY" "does not look like a Sparkle public key (44 base64 characters)"
 else
-  row_todo "DIST_APPCAST_URL" "Phase 6 — not needed for make dist yet"
+  row_ok "DIST_SPARKLE_PUBLIC_KEY" "set"
+  pub_ready=1
+fi
+
+# The row that catches the failure with no symptom. A public key that is not
+# this private key's half builds an app whose SUPublicEDKey verifies nothing
+# the release signs: every check succeeds, every update is refused, and the
+# only fix is another release.
+if [ -n "$sparkle_ready" ] && [ -n "$pub_ready" ]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    # Counted, unlike the pins row: this is the one check whose failure has no
+    # symptom, and the command line tools this report already requires ship
+    # python3.
+    row_bad "Sparkle key pair" "cannot be checked — python3 is not on PATH"
+  else
+    derived="$(python3 "$ROOT/dist/sparkle-pubkey.py" "$sparkle" 2>/dev/null || true)"
+    if [ -z "$derived" ]; then
+      row_bad "Sparkle key pair" "the file at DIST_SPARKLE_PRIVATE_KEY_PATH is not a Sparkle private key (generate_keys -x writes one)"
+    elif [ "$derived" = "$pub" ]; then
+      row_ok "Sparkle key pair" "the public key is the private key's"
+    else
+      row_bad "Sparkle key pair" "DIST_SPARKLE_PUBLIC_KEY is not the public half of the key at DIST_SPARKLE_PRIVATE_KEY_PATH — an app built with it would never accept an update"
+    fi
+  fi
+fi
+
+# Both URLs are printed as "set" and never as values: they are public in the
+# shipped plist and in the feed, and this report still gets pasted into issues.
+feed="${DIST_APPCAST_URL:-}"
+if [ -z "$feed" ]; then
+  row_bad "DIST_APPCAST_URL" "not set — docs/distribution.md → Updates"
+elif ! printf '%s' "$feed" | grep -q '^https://'; then
+  row_bad "DIST_APPCAST_URL" "must start with https:// — a feed served over http is one anybody on the network can rewrite"
+else
+  row_ok "DIST_APPCAST_URL" "set"
+fi
+
+prefix="${DIST_DOWNLOAD_URL_PREFIX:-}"
+if [ -z "$prefix" ]; then
+  row_bad "DIST_DOWNLOAD_URL_PREFIX" "not set — docs/distribution.md → Updates"
+elif ! printf '%s' "$prefix" | grep -q '^https://'; then
+  row_bad "DIST_DOWNLOAD_URL_PREFIX" "must start with https:// and end with / — generate_appcast appends the file name to it directly"
+elif ! printf '%s' "$prefix" | grep -q '/$'; then
+  row_bad "DIST_DOWNLOAD_URL_PREFIX" "must start with https:// and end with / — generate_appcast appends the file name to it directly"
+elif printf '%s' "$prefix" | grep -qF '{version}'; then
+  row_ok "DIST_DOWNLOAD_URL_PREFIX" "set · {version} substituted per release"
+else
+  row_ok "DIST_DOWNLOAD_URL_PREFIX" "set"
+fi
+
+# The two Sparkle pins have to move together: dist/sparkle-tools.sh fetches the
+# command line tools that WRITE the feed, and the pbxproj pins the framework
+# that READS it. A tools version ahead of the framework can write a feed the
+# shipped app will not accept.
+# The workspace copy first — it is the one `flutter build macos` resolves —
+# then the project's own, which Xcode writes with the same contents.
+resolved="$ROOT/app/macos/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+[ -f "$resolved" ] || resolved="$ROOT/app/macos/Runner.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+tools_pin="$(sed -n 's/^SPARKLE_VERSION=//p' "$ROOT/dist/sparkle-tools.sh" | head -1)"
+if [ ! -f "$resolved" ]; then
+  row_skip "Sparkle pins" "no build yet — make dist-app resolves it"
+elif ! command -v python3 >/dev/null 2>&1; then
+  row_skip "Sparkle pins" "skipped — python3 is not on PATH"
+else
+  embedded="$(python3 - "$resolved" <<'PY' || true
+import json, sys
+with open(sys.argv[1]) as handle:
+    doc = json.load(handle)
+for pin in doc.get("pins", []):
+    identity = pin.get("identity") or pin.get("package", "")
+    if identity.lower() == "sparkle":
+        print(pin.get("state", {}).get("version", ""))
+        break
+PY
+)"
+  if [ -z "$embedded" ]; then
+    row_bad "Sparkle pins" "Package.resolved has no sparkle pin — the Xcode project should reference sparkle-project/Sparkle"
+  elif [ "$embedded" = "$tools_pin" ]; then
+    row_ok "Sparkle pins" "$tools_pin (tools and framework)"
+  else
+    row_bad "Sparkle pins" "dist/sparkle-tools.sh pins $tools_pin, the app embeds $embedded — move them together"
+  fi
 fi
 
 step "app build inputs"
@@ -251,17 +350,14 @@ else
 fi
 
 printf "\n"
-if [ "$fails" -eq 0 ] && [ "$pending" -eq 0 ]; then
+if [ "$fails" -eq 0 ]; then
   printf "  ${GREEN}all clear${RESET}\n"
-elif [ "$fails" -eq 0 ]; then
-  printf "  ${GREEN}all clear for make dist${RESET} (%d row(s) pending Phase 6)\n" "$pending"
 else
   printf "  ${RED}%d item(s) to fix${RESET}\n" "$fails"
 fi
 
 # The report exits 0 by design; only STRICT turns a red row into a failed
-# command, and only the counted failures do — a Phase 6 row never blocks a
-# release that does not publish an appcast yet.
+# command.
 if [ -n "$STRICT" ] && [ "$fails" -gt 0 ]; then
   exit 1
 fi

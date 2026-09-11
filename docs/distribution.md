@@ -3,8 +3,9 @@
 How a checkout becomes a DMG someone else can install. One command does all of
 it — `make dist` — and what comes out is signed with a Developer ID
 certificate, notarized by Apple and stapled, so it opens on a stranger's Mac
-with no warning and no detour. The only piece still ahead is the automatic
-update feed, which waits on Sparkle (Phase 6).
+with no warning and no detour. The same command ends by regenerating the
+Sparkle update feed, so an installed copy of the previous release finds the new
+one on its own.
 
 The machine-local half of this — what lives in `dist/local/`, and the
 new-laptop checklist — is in `dist/README.md`.
@@ -31,7 +32,7 @@ make dist-dmg AD_HOC=1       # a DMG for testers, no certificate needed
 make dist                    # signed, notarized, stapled
 ```
 
-`make dist` is six steps, each the previous one's prerequisite:
+`make dist` is seven steps:
 
 0. **strict `dist-check`** (`_dist-preflight`). The same report as
    `make dist-check`, run with `STRICT=1` so a red row stops the build before
@@ -49,19 +50,28 @@ make dist                    # signed, notarized, stapled
 5. **`dist-dmg`** builds `dist/out/Bond-Desktop-<version>.dmg` from the
    **stapled** app, signs the image, notarizes it in its own right and staples
    that ticket too.
+6. **`dist-appcast`** signs that DMG with the Sparkle EdDSA key and rewrites
+   `docs/appcast/appcast.xml`, the feed every installed copy reads. See
+   [Updates](#updates).
 
 The dependency shape is worth stating outright, because it is where the order
 is enforced rather than in any script:
 
 ```make
 dist-dmg: dist-sign $(if $(AD_HOC),,dist-notarize)
-dist: _dist-preflight dist-dmg
+dist: _dist-preflight dist-dmg dist-appcast
 ```
 
 `dist-dmg` pulls in `dist-notarize` **unless `AD_HOC=1`**, and `.NOTPARALLEL`
 at the top of the Makefile keeps prerequisites in the order they are written.
 There are no `$(MAKE)` sub-invocations: a sub-make would rebuild the app once
 per call.
+
+`dist-appcast` is a goal of `dist` rather than a prerequisite of anything, and
+it declares no prerequisite of its own on purpose: `dist-app` rebuilds the app
+every time it runs, so a feed regenerated after a failed upload would otherwise
+rebuild and re-notarize a binary that had not changed. It reads the DMG already
+in `dist/out/`.
 
 `VERSION` and `BUILD` are read from the single `version:` line in
 `app/pubspec.yaml` and passed to Flutter as `--build-name` and
@@ -301,7 +311,12 @@ next person to do it will be doing it for the first time.
    enough for notarization. The `.p8` downloads **once and only once**. Note
    the **Key ID** on its row and the **Issuer ID** at the top of the page, then
    `chmod 600` the file and keep it outside the repo (see `dist/README.md`).
-5. **A second machine** needs the certificate imported and made reachable
+5. **The Sparkle key** is not an Apple item and is not created here — see
+   [Updates](#updates) → *Generating the key pair*. A second machine needs the
+   key **file** copied to it (`~/.bond-signing/sparkle_ed25519.key`, mode 600);
+   without it that machine can build a release but cannot publish an update
+   for it.
+6. **A second machine** needs the certificate imported and made reachable
    without a prompt:
 
    ```sh
@@ -314,6 +329,161 @@ next person to do it will be doing it for the first time.
    Without the partition list, macOS asks for the keychain password on every
    one of the twenty signatures, and a `make dist` in a terminal that cannot
    show the prompt simply hangs.
+
+## Updates
+
+Bond updates itself with [Sparkle](https://sparkle-project.org) 2.9.6. An
+installed copy reads a small signed XML feed about once a day, and when the feed
+names a newer version than its own it offers it, downloads it and replaces
+itself. Everything below is what makes that both work and safe.
+
+### How Sparkle gets into the app
+
+**SwiftPM, pinned exactly.** `app/macos/Runner.xcodeproj/project.pbxproj`
+carries an `XCRemoteSwiftPackageReference` on `sparkle-project/Sparkle` with
+`kind = exactVersion; version = 2.9.6`, a product dependency on `Sparkle` in the
+Runner target, and a build file for it in the Runner's Frameworks phase. The
+resolved version is committed as `Package.resolved` — Xcode writes it twice,
+under `app/macos/Runner.xcworkspace/xcshareddata/swiftpm/` (the workspace
+`flutter build macos` builds) and under
+`app/macos/Runner.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/`, with
+identical contents, and both copies are committed — so what a fresh checkout
+builds is what this one built. The first
+`make dist-app` on a machine **downloads the package**, so a fresh checkout
+needs network for that build — Xcode verifies the download against the checksum
+inside Sparkle's own `Package.swift`.
+
+Xcode embeds the framework into `Contents/Frameworks/Sparkle.framework` by
+itself; nothing in `dist/bundle.sh` copies it. It does have to be **re-signed**,
+though, which is `dist/sign.sh` step `[3/6]`:
+
+```
+Versions/B/XPCServices/Installer.xpc     ← --preserve-metadata=entitlements
+Versions/B/XPCServices/Downloader.xpc    ← --preserve-metadata=entitlements
+Versions/B/Autoupdate
+Versions/B/Updater.app
+Sparkle.framework                        ← the frameworks loop, step [4/6]
+```
+
+Innermost first, like everything else in that script. The reason is library
+validation, which comes on with the hardened runtime: it refuses to load a
+framework whose nested executables carry somebody else's team identifier, and
+the Sparkle project's own perfectly valid signature is exactly that. Without
+this step the app launches and dies the moment it touches the updater. The two
+XPC services ship with **no** entitlements in 2.9.6;
+`--preserve-metadata=entitlements` is there for the version that sandboxes the
+downloader again, where stripping them would leave a service that cannot do its
+job. `sign.sh`'s distribution checks count these four alongside the `.so` files
+and the dylibs.
+
+**The four `Info.plist` keys** come from `dist/bundle.sh` step `[5/6]`, written
+with `PlistBuddy` out of `dist.env`, and from nowhere else — not from the Xcode
+project, which is Flutter-regenerable and must not hold machine-local settings:
+
+| Key | From | What it does |
+|---|---|---|
+| `SUFeedURL` | `DIST_APPCAST_URL` | Where to look |
+| `SUPublicEDKey` | `DIST_SPARKLE_PUBLIC_KEY` | The only key whose signatures this copy will accept |
+| `SUEnableAutomaticChecks` | literal `true` | Without it Sparkle **asks the user** on the second launch whether to check automatically |
+| `SUScheduledCheckInterval` | literal `86400` | Daily |
+
+They are written **before signing**, because the signature seals `Info.plist`
+and a key added afterwards invalidates it. A release build with either of the
+two `dist.env` values missing is refused outright: a release that cannot update
+itself is one that can never be corrected. A tester build (`AD_HOC=1`) gets a
+note instead and ships without them.
+
+**Two pins that move together.** `dist/sparkle-tools.sh` pins the version of
+the command line tools that WRITE the feed; the pbxproj and `Package.resolved`
+pin the framework that READS it. A tools version ahead of the framework can
+write a feed the shipped app will not accept. `sparkle-tools.sh` cross-checks
+the two itself and refuses to run when they disagree, and `make dist-check` has
+a `Sparkle pins` row for the same comparison.
+
+### Generating the key pair
+
+Once, ever. Do it on the machine that will publish releases.
+
+```sh
+make dist-sparkle-tools
+dist/stage/sparkle-tools/bin/generate_keys
+```
+
+It prints the **public** key (44 base64 characters) and stores the private key
+in the login keychain. Export the private half to a file the release scripts
+can read, and lock it down:
+
+```sh
+dist/stage/sparkle-tools/bin/generate_keys -x ~/.bond-signing/sparkle_ed25519.key
+chmod 600 ~/.bond-signing/sparkle_ed25519.key
+```
+
+Then two lines in `dist/local/dist.env`:
+
+```sh
+DIST_SPARKLE_PRIVATE_KEY_PATH=/Users/<you>/.bond-signing/sparkle_ed25519.key
+DIST_SPARKLE_PUBLIC_KEY=<the 44 characters generate_keys printed>
+```
+
+`make dist-check` derives the public half of that key file with
+`dist/sparkle-pubkey.py` and compares it against `DIST_SPARKLE_PUBLIC_KEY`. That
+row exists because a mismatched pair is a failure with **no symptom**: every
+build succeeds, every signature is made, and every installed copy silently
+refuses every update.
+
+**Put the key file in the password manager.** Sparkle cannot re-issue it, and
+every copy of Bond that has ever been installed trusts this key and no other.
+
+### Hosting the feed
+
+GitHub → the repo's **Settings → Pages → Deploy from a branch → `main`,
+`/docs`**. The file then lives at:
+
+```
+https://jmcarnahan.github.io/bond-desktop/appcast/appcast.xml   ← DIST_APPCAST_URL
+https://github.com/jmcarnahan/bond-desktop/releases/download/v{version}/
+                                                    ↑ DIST_DOWNLOAD_URL_PREFIX
+```
+
+The download prefix must end in `/` — `generate_appcast` appends the DMG's file
+name to it directly — and a literal `{version}` in it is substituted with the
+release's version, which is what lets one line in `dist.env` name a per-tag
+release URL. `docs/appcast/README.md` says the same thing to whoever opens that
+directory first.
+
+### What the user sees
+
+**Settings → About** gains three things, all of them wired only when the updater
+actually started (`docs/settings.md` → About):
+
+- **Check for updates**, and beside it `Last checked 3h ago` or
+  `Never checked for updates`.
+- **Check for updates automatically**, a switch showing Sparkle's own
+  preference — the screen re-reads it after every move rather than keeping a
+  copy.
+- In a development build, the sentence `Updates are not configured in this
+  build.` and neither control, because the four keys above are written at
+  package time.
+
+Everything after the button is **Sparkle's own window** — the release notes, the
+progress bar, the relaunch. That is the one non-Flutter surface in the app, and
+it is deliberate: the no-dialogs house rule is a rule about Flutter screens
+(`app/test/no_dialogs_test.dart` scans `lib/`, and Sparkle is Swift), and
+reimplementing an installer in Flutter would buy nothing but risk.
+
+Sparkle **never checks on a first launch**. The interval starts counting from
+the second one, so a release reaches its users over the day after it is pushed,
+not the minute of it.
+
+### Switching keys
+
+Don't, unless the key has leaked. `SUPublicEDKey` is baked into every build that
+has ever shipped, and an installed copy accepts signatures from that key and no
+other — so a new key pair leaves every existing installation permanently unable
+to update, with no in-app way to tell them. Recovering means asking every user
+to download and install a new DMG by hand. If the private key is compromised,
+that is the price and it has to be paid; if it is merely lost, there is no price
+that helps, which is why the file belongs in a password manager.
 
 ## Secrets
 
@@ -328,6 +498,13 @@ anywhere mode-600 and outside the repo will do. This project's copy lives in
 `~/.bond-signing/`, beside the certificate backups, so that removing a worktree
 after a merge cannot delete the only local copy of a file Apple will not issue
 twice.
+
+The Sparkle private key follows the same rule and for a stronger reason:
+`DIST_SPARKLE_PRIVATE_KEY_PATH` names it, it is kept mode 600 and outside the
+repo (`~/.bond-signing/sparkle_ed25519.key` here), and it is the one secret in
+this project that **nobody can reissue** — see [Updates](#updates) →
+*Switching keys*. `make dist-check` reports its mode along with everything
+else.
 
 One secret must never ship: **`MICROSOFT_CLIENT_SECRET`**. A build carrying it
 has it readable in the binary, which is why `dist/bundle.sh` refuses to run
@@ -377,23 +554,31 @@ adopted server serving the old weights is replaced rather than reused
 
 ## Releasing
 
-1. Bump `version:` in `app/pubspec.yaml`. It is the only place the number is
-   written.
-2. `make dist-check` — the summary reads `all clear`, or `all clear for make
-   dist` with only the Phase 6 Sparkle rows yellow.
-3. `make dist` — preflight, build, sign, notarize, staple, DMG. It ends by
-   naming `dist/out/Bond-Desktop-<version>.dmg`.
+1. Bump **both halves** of `version:` in `app/pubspec.yaml` — `1.0.1+2`, not
+   `1.0.1+1`. It is the only place either number is written, and Sparkle
+   decides "newer" on the build number (`CFBundleVersion`), not the version
+   string; `dist-appcast` refuses a build number that is not above every one
+   already in the feed.
+2. `make dist-check` — the summary reads `all clear`.
+3. `make dist` — preflight, build, sign, notarize, staple, DMG, and finally the
+   appcast. It ends by naming `dist/out/Bond-Desktop-<version>.dmg` and the
+   regenerated `docs/appcast/appcast.xml`.
 4. Walk the **Verifying a release** checklist below.
 5. `gh release create v<version> dist/out/Bond-Desktop-<version>.dmg`
    (a release upload is one of the commands this repo's hooks hand to the
    user).
-6. `make dist-appcast` — signs the DMG for Sparkle and regenerates
-   `docs/appcast/appcast.xml`, which is committed. *(Phase 6.)*
+6. `git add docs/appcast/appcast.xml && git commit && git push`. GitHub Pages
+   redeploys, and installed copies see the release on their next daily check —
+   within a day, not within a minute.
+
+Something wrong with only the feed — a bad download prefix, a re-signed image?
+`make dist-appcast` on its own re-runs that one step against the DMG already in
+`dist/out/`. It rebuilds nothing and spends no notarization.
 
 ## Verifying a release
 
-Six checks, none of which needs the app to be launched. The first five run on
-the build machine; the last one is the only one that answers the question a
+Eight checks, none of which needs the app to be launched. The first seven run
+on the build machine; the last one is the only one that answers the question a
 user is actually asking.
 
 ```sh
@@ -402,6 +587,8 @@ codesign -d --entitlements - "dist/stage/Bond Desktop.app"
 spctl -a -vv -t exec "dist/stage/Bond Desktop.app"
 /usr/bin/syspolicy_check distribution "dist/stage/Bond Desktop.app"
 xcrun stapler validate dist/out/Bond-Desktop-<version>.dmg
+plutil -p "dist/stage/Bond Desktop.app/Contents/Info.plist" | grep SU
+codesign -dvv "dist/stage/Bond Desktop.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate"
 ```
 
 1. `codesign -dvv` shows `Authority=Developer ID Application` and a `flags=`
@@ -416,11 +603,26 @@ xcrun stapler validate dist/out/Bond-Desktop-<version>.dmg
    the exit code; both scripts do.
 5. `xcrun stapler validate` on the **DMG** — the image carries its own ticket,
    separate from the app's.
-6. On a Mac that has never run Bond — or, at a minimum, a second user account
+6. `plutil -p … | grep SU` shows all four Sparkle keys: `SUFeedURL`,
+   `SUPublicEDKey`, `SUEnableAutomaticChecks` and `SUScheduledCheckInterval`.
+   A release build cannot get this far without them, but the plist is what
+   actually ships, so it is what is read.
+7. `codesign -dvv` on Sparkle's `Autoupdate` shows `TeamIdentifier` equal to
+   ours, not the Sparkle project's. `sign.sh` asserts this already; it is here
+   because it is the one failure that surfaces as an app that launches fine and
+   dies later.
+8. On a Mac that has never run Bond — or, at a minimum, a second user account
    on this one — download the DMG the way a user would, open it, drag the app
    across and launch it. No Gatekeeper prompt, no Privacy & Security detour.
    Anything less than a clean first launch means the ticket is not where it
    needs to be.
+
+To exercise the update path itself without shipping a release: point a copy of
+the app at a test feed naming a higher `sparkle:version` than its own
+`CFBundleVersion`, open **Settings → About → Check for updates**, and Sparkle
+offers it. An item whose signature does not verify against the build's own
+`SUPublicEDKey` is refused — which is the behaviour worth seeing at least
+once.
 
 ## Tester builds
 
@@ -442,6 +644,16 @@ the first launch:
 ```
 
 Neither step is needed once a build is notarized.
+
+A tester build needs **no update keys**: `AD_HOC=1` with
+`DIST_APPCAST_URL` and `DIST_SPARKLE_PUBLIC_KEY` unset writes nothing into
+`Info.plist`, says so on the way past (with them set, as on the release
+machine, they are written like any other build's), and the resulting app's About section
+reports `Updates are not configured in this build.` Testers replace a tester
+build by downloading the next DMG. `AD_HOC=1 dist/appcast.sh` is the matching
+rehearsal for the feed itself: it runs the whole generation against whatever key
+`dist.env` names, skips the notarization check, and leaves the result in
+`dist/stage/appcast/` instead of writing over the published feed.
 
 ## Windows
 

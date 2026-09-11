@@ -7,6 +7,7 @@ import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/sync_service.dart';
+import 'package:bond_inbox/services/system/updater.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:bond_inbox/widgets/model_slot_editor.dart';
 import 'package:bond_inbox/widgets/settings_screen.dart';
@@ -38,6 +39,30 @@ class _FakeSync implements MailSync {
   Future<void> ensureMessageBody(String sourceMessageId) async {}
 }
 
+/// A Sparkle that answers, remembers what it was told, and counts checks.
+///
+/// `automatic` is the fake's OWN state and the switch has to follow it after
+/// a toggle: that is the wire under test — the host re-reads the updater
+/// rather than mirroring what it asked for.
+class _FakeUpdater implements Updater {
+  bool automatic = false;
+  int checks = 0;
+  final moves = <bool>[];
+
+  @override
+  Future<UpdaterStatus> status() async =>
+      UpdaterStatus(available: true, automatic: automatic);
+
+  @override
+  Future<void> checkForUpdates() async => checks++;
+
+  @override
+  Future<void> setAutomaticChecks(bool on) async {
+    moves.add(on);
+    automatic = on;
+  }
+}
+
 void main() {
   late BondDatabase db;
   late MessageStore store;
@@ -50,7 +75,7 @@ void main() {
 
   tearDown(() => db.close());
 
-  Future<void> pumpInbox(WidgetTester tester) async {
+  Future<void> pumpInbox(WidgetTester tester, {Updater? updater}) async {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
@@ -69,6 +94,12 @@ void main() {
               build: '4',
             )),
         databasePathProvider.overrideWith((ref) async => '/tmp/bond_inbox.db'),
+        // The third channel About reads. Left alone, `ChannelUpdater`'s call
+        // never comes back inside a widget test (no platform, and the
+        // fake-async zone holds the reply), so the status stays loading and
+        // About shows no update rows at all — the tests that want a verdict
+        // pass a fake.
+        if (updater != null) updaterProvider.overrideWithValue(updater),
       ],
       child: const MaterialApp(home: InboxScreen()),
     ));
@@ -176,6 +207,53 @@ void main() {
     expect(find.text('Bond 1.2.3 (4)'), findsOneWidget);
     expect(find.text('Version 1.2.3 (4)'), findsOneWidget);
     expect(find.text('/tmp/bond_inbox.db'), findsOneWidget);
+  });
+
+  testWidgets('About wires the updater when it is there, and re-reads it',
+      (tester) async {
+    final updater = _FakeUpdater();
+    await pumpInbox(tester, updater: updater);
+    await openSection(tester, 'About');
+
+    // Both controls are up, and the caption reads the fake's empty history.
+    expect(find.byKey(SettingsScreen.checkForUpdatesKey), findsOneWidget);
+    expect(find.text('Never checked for updates'), findsOneWidget);
+    expect(find.text('Updates are not configured in this build.'),
+        findsNothing);
+    final tile = find.byType(SwitchListTile);
+    expect(tile, findsOneWidget);
+    expect(tester.widget<SwitchListTile>(tile).value, isFalse);
+
+    await tapKey(tester, SettingsScreen.checkForUpdatesKey);
+    expect(updater.checks, 1);
+
+    // The move reaches the updater, and the switch then shows what the
+    // UPDATER says — the status is re-read, not mirrored. Bounded pumps: the
+    // re-read is one awaited future.
+    await tester.tap(tile);
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    expect(updater.moves, [true]);
+    expect(tester.widget<SwitchListTile>(tile).value, isTrue);
+  });
+
+  testWidgets('About says updates are off in a build with no updater',
+      (tester) async {
+    // `NullUpdater`, not "no override": inside a widget test the real
+    // channel never answers at all (the fake-async zone holds the platform
+    // reply forever), so the status stays loading and About shows nothing
+    // update-related — which the last assertion of the previous test does
+    // not cover and this one does not want. The null seam is what a build
+    // whose updater could not start resolves to.
+    await pumpInbox(tester, updater: const NullUpdater());
+    await openSection(tester, 'About');
+
+    expect(find.text('Updates are not configured in this build.'),
+        findsOneWidget);
+    expect(find.byKey(SettingsScreen.checkForUpdatesKey), findsNothing);
+    expect(find.byType(SwitchListTile), findsNothing);
+    expect(find.text('Version 1.2.3 (4)'), findsOneWidget);
   });
 
   testWidgets('Sync & data is wired to the real refresh', (tester) async {

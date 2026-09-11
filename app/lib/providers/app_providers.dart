@@ -61,6 +61,7 @@ import '../services/server/model_server_supervisor.dart';
 import '../services/server/process_runner.dart';
 import '../services/server/server_state.dart';
 import '../services/system/system_info.dart';
+import '../services/system/updater.dart';
 import '../services/needs_you_handler.dart';
 import '../services/notification_coordinator.dart';
 import '../services/notify/desktop_notifier.dart';
@@ -1067,4 +1068,33 @@ final appInfoProvider = FutureProvider<({String version, String build})>(
 /// unless the test overrides it.
 final databasePathProvider = FutureProvider<String>(
   (ref) => appDatabasePath(),
+);
+
+/// Sparkle, for the About section's update controls.
+///
+/// A plain `Provider` over the channel implementation, so a test can hand the
+/// host a `NullUpdater` (or a fake) without touching the binary messenger.
+final updaterProvider = Provider<Updater>((_) => const ChannelUpdater());
+
+/// What the updater says about itself right now.
+///
+/// [appInfoProvider]'s shape and, once more, its reason: the answer comes off
+/// a platform channel and a widget cannot await. In a widget test that call
+/// never comes back at all (nobody is on the other end, and the fake-async
+/// zone holds the reply), so the status stays loading and the host passes the
+/// About section no update props — the section renders without them rather
+/// than throwing or faking a version of Sparkle that is not there. A test that
+/// wants a verdict overrides [updaterProvider] with a fake or a `NullUpdater`.
+///
+/// `autoDispose`, and invalidated after a toggle, for one reason: Sparkle owns
+/// the automatic-checks preference AND the last-check time, and both move
+/// behind this app's back — a check the user starts from the button ends in
+/// Sparkle's window, and Sparkle records the time when that session ends. The
+/// settings host is the only watcher, so the value is dropped the moment
+/// Settings closes and read afresh on the next open, which is when 'Last
+/// checked' has to be true again. The toggle invalidates it in place so the
+/// switch shows Sparkle's answer rather than a local copy of what it was asked
+/// for.
+final updaterStatusProvider = FutureProvider.autoDispose<UpdaterStatus>(
+  (ref) => ref.watch(updaterProvider).status(),
 );

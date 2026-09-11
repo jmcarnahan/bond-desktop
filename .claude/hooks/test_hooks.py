@@ -156,6 +156,7 @@ BASH_CASES = [
     ("ask", "make dist-sign", False),
     ("ask", "make dist-notarize", False),
     ("ask", "make dist-appcast", False),
+    ("ask", "make dist-appcast AD_HOC=''", False),
     ("allow", "make dist-llama", False),
     ("allow", "make dist-dmg AD_HOC=1", False),
     ("allow", "make dist-check", False),
@@ -169,6 +170,13 @@ BASH_CASES = [
     ("ask", "make VERSION=2 dist-dmg", False),
     ("allow", "make dist-dmg AD_HOC=1 BOND_DIST_ALLOW_NO_MCP=1", False),
     ("allow", "make -n dist-dmg", False),
+    # Phase 6: the appcast rehearses like the DMG does, and the two targets
+    # that only fetch and derive stay unattended
+    ("allow", "make dist-appcast AD_HOC=1", False),
+    ("allow", "make dist-sparkle-tools", False),
+    ("allow", "dist/sparkle-tools.sh", False),
+    ("allow", "python3 dist/sparkle-pubkey.py x", False),
+    ("allow", "AD_HOC=1 dist/appcast.sh", False),
     # the scripts themselves, since a make target is not the only way in
     ("ask", 'dist/notarize.sh "dist/stage/Bond Desktop.app"', False),
     ("ask", "./dist/sign.sh", False),

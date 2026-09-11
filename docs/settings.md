@@ -549,6 +549,52 @@ the call throws `MissingPluginException`, the provider turns that into an
 says `Version unknown` rather than throwing. A test that wants real values
 overrides the two providers — `settings_models_host_test.dart` does.
 
+### Updates
+
+Between the version line and the database block sit three controls, each wired
+independently and each absent when its wire is null — the visibility rule for
+the **section** is unchanged (`appVersion` or `databasePath` known, and never
+under the AI scope):
+
+- **`Check for updates`**, an `OutlinedButton`
+  (`SettingsScreen.checkForUpdatesKey`), with a caption beside it reading
+  `Last checked <relative>` or, when nothing ever has, exactly
+  `Never checked for updates`.
+- **`Check for updates automatically`**, a `SwitchListTile` subtitled
+  `Bond looks once a day and asks before it installs anything.`
+- The sentence `Updates are not configured in this build.`, when the updater
+  could not start.
+
+**Sparkle owns both values.** The automatic-checks preference and the
+last-check time are Sparkle's, not this app's: the switch shows what the
+updater answers, and the host `ref.invalidate`s `updaterStatusProvider` after
+every move rather than keeping a local copy that could disagree. The screen
+never flips the switch itself.
+
+The wiring is `updaterProvider` / `updaterStatusProvider` over
+`ChannelUpdater` (`app/lib/services/system/updater.dart`), and the host passes
+the two callbacks **only** when the status says `available` — a control that
+could not do anything is worse than no control.
+
+**A development build shows the sentence and neither control**, and that is
+correct rather than broken: `SUFeedURL`, `SUPublicEDKey`,
+`SUEnableAutomaticChecks` and `SUScheduledCheckInterval` are written into
+`Info.plist` by `dist/bundle.sh` at package time, so no `flutter run` build has
+them. A widget test is different: the channel call never comes back inside
+the fake-async zone, so `updaterStatusProvider` stays loading and About renders
+**no update rows at all**. A test that wants a verdict overrides
+`updaterProvider` with a fake (`settings_models_host_test.dart` does both:
+a fake that answers, and `NullUpdater` for the not-configured sentence).
+
+Everything after the button is **Sparkle's own window**: the release notes, the
+download, the relaunch. It is the one non-Flutter surface in the app and it is
+deliberate — the no-dialogs rule is a rule about Flutter screens, and
+`test/no_dialogs_test.dart` scans `lib/`, where there is nothing to find
+because Sparkle is Swift. Sparkle never checks on a first launch.
+
+The full story — key generation, hosting, the release step that regenerates the
+feed — is [distribution.md → Updates](distribution.md).
+
 ## First run
 
 Before the sign-in gate and after the server bootstrap sits `SetupGate`

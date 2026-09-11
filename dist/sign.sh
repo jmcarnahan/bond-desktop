@@ -110,7 +110,7 @@ sign() {
   codesign -f -s "$ID" ${RT[@]+"${RT[@]}"} "$@" "$what"
 }
 
-step "[1/5] ggml backends (Contents/MacOS/*.so)"
+step "[1/6] ggml backends (Contents/MacOS/*.so)"
 n=0
 for so in "$APP"/Contents/MacOS/*.so; do
   [ -e "$so" ] || continue
@@ -121,7 +121,7 @@ for so in "$APP"/Contents/MacOS/*.so; do
 done
 ok "$n backend module(s)"
 
-step "[2/5] dylibs (Contents/Frameworks/*.dylib)"
+step "[2/6] dylibs (Contents/Frameworks/*.dylib)"
 n=0
 for dylib in "$APP"/Contents/Frameworks/*.dylib; do
   # Regular files only: the symlinks in a dylib chain point at a file that is
@@ -132,7 +132,49 @@ for dylib in "$APP"/Contents/Frameworks/*.dylib; do
 done
 ok "$n dylib(s)"
 
-step "[3/5] frameworks (Contents/Frameworks/*.framework)"
+step "[3/6] Sparkle nested executables"
+# Sparkle is the one framework in this bundle with executables INSIDE it, and
+# codesign on the framework does not reach them. Library validation comes on
+# with the hardened runtime and refuses to load a framework whose nested
+# executables do not carry OUR team, so an un-re-signed Sparkle is a launch
+# that dies loading the updater — with Sparkle's own valid signature on every
+# piece of it.
+#
+# Innermost first, exactly as the whole script works: the XPC services, then
+# the two things that run them, and the framework itself is sealed by the
+# frameworks loop immediately below.
+#
+# This runs in the AD_HOC branch too. The ad-hoc signature proves nothing about
+# teams, but it does exercise this order — and `codesign --deep --strict` at
+# the end of the run is what says the nesting came out valid.
+fw="$APP/Contents/Frameworks/Sparkle.framework"
+if [ ! -d "$fw" ]; then
+  note "no Sparkle.framework in this build"
+else
+  # Versions/Current is a symlink to the real version directory (B in 2.9.6).
+  # Read it rather than hard-coding the letter: Sparkle has bumped it before
+  # and a hard-coded path would fail as "no such file" rather than as a
+  # version change.
+  v="$fw/Versions/$(readlink "$fw/Versions/Current")"
+  # --preserve-metadata=entitlements on the two XPC services: 2.9.6 ships both
+  # with NO entitlements at all, but a future Sparkle that sandboxes the
+  # downloader again ships its own, and re-signing would otherwise strip them
+  # and leave a service that cannot do its job.
+  # A glob rather than the two names 2.9.6 ships, and the same glob the
+  # distribution checks count: a service a future Sparkle adds is then signed
+  # here rather than surfacing as an unexplained team-identifier miss.
+  signed=""
+  for x in "$v"/XPCServices/*.xpc; do
+    [ -d "$x" ] || continue
+    sign "$x" --preserve-metadata=entitlements
+    signed="$signed$(basename "$x"), "
+  done
+  sign "$v/Autoupdate"
+  sign "$v/Updater.app"
+  ok "${signed}Autoupdate, Updater.app"
+fi
+
+step "[4/6] frameworks (Contents/Frameworks/*.framework)"
 n=0
 for fw in "$APP"/Contents/Frameworks/*.framework; do
   [ -d "$fw" ] || continue
@@ -141,12 +183,12 @@ for fw in "$APP"/Contents/Frameworks/*.framework; do
 done
 ok "$n framework(s)"
 
-step "[4/5] llama-server helper"
+step "[5/6] llama-server helper"
 sign "$APP/Contents/MacOS/llama-server" -i com.bondinbox.app.llama-server \
   --entitlements "$HELPER_ENT"
 ok "llama-server"
 
-step "[5/5] the app"
+step "[6/6] the app"
 sign "$APP" --entitlements "$APP_ENT"
 ok "Bond Desktop.app"
 
@@ -247,9 +289,10 @@ if [ -z "$AD_HOC" ]; then
       fi
     done
     # A framework answers for ITSELF here, not for executables nested inside
-    # it (XPC services, a helper app). None of today's frameworks carry one;
-    # Sparkle (Phase 6) does, and its inside-out re-sign has to extend this
-    # loop to `Versions/*/XPCServices/*.xpc`, `Updater.app` and `Autoupdate`.
+    # it, so Sparkle's are counted separately below: `codesign -dvv` on
+    # Sparkle.framework reports the framework's own signature and says nothing
+    # about the XPC services and the two helpers inside it, which are exactly
+    # what library validation refuses the framework for.
     for fw in "$APP"/Contents/Frameworks/*.framework; do
       [ -d "$fw" ] || continue
       total=$((total + 1))
@@ -259,6 +302,22 @@ if [ -z "$AD_HOC" ]; then
         miss "$(basename "$fw") does not carry team $DIST_TEAM_ID"
       fi
     done
+
+    # The same question, asked of what step [3/6] signed. A bundle with no
+    # Sparkle in it adds no rows: the glob simply matches nothing.
+    sfw="$APP/Contents/Frameworks/Sparkle.framework"
+    if [ -d "$sfw" ]; then
+      sv="$sfw/Versions/$(readlink "$sfw/Versions/Current")"
+      for f in "$sv"/XPCServices/*.xpc "$sv/Autoupdate" "$sv/Updater.app"; do
+        [ -e "$f" ] || continue
+        total=$((total + 1))
+        if codesign -dvv "$f" 2>&1 | grep -q "^TeamIdentifier=$DIST_TEAM_ID\$"; then
+          nested=$((nested + 1))
+        else
+          miss "Sparkle's $(basename "$f") does not carry team $DIST_TEAM_ID"
+        fi
+      done
+    fi
     if [ "$nested" -eq "$total" ]; then
       ok "$nested nested binaries carry team $DIST_TEAM_ID"
     else

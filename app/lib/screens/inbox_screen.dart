@@ -2051,6 +2051,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final contextDirs = ref.watch(contextDirectoriesProvider);
     final appInfo = ref.watch(appInfoProvider).valueOrNull;
     final databasePath = ref.watch(databasePathProvider).valueOrNull;
+    // Null until the channel answers, and null forever in a widget test —
+    // which is why every update prop below is a ternary rather than a `!`.
+    final updates = ref.watch(updaterStatusProvider).valueOrNull;
     // Watched so the card follows a load through to ready without anybody
     // touching the pane; the supervisor's own field is the fallback for the
     // frame before the stream's first value lands, so the card never renders
@@ -2269,6 +2272,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ? null
           : '${appInfo.version} (${appInfo.build})',
       databasePath: databasePath,
+      // Every one of these is wired ONLY when the updater said it is
+      // available: a build without the Sparkle keys gets the sentence and no
+      // controls, and a control that could not do anything is worse than none.
+      automaticUpdates: updates?.available == true ? updates!.automatic : null,
+      lastUpdateCheckIso: updates?.lastCheck?.toIso8601String(),
+      updatesUnavailableReason:
+          (updates != null && !updates.available) ? updates.unavailableReason : null,
+      onCheckForUpdates: updates?.available == true
+          ? () => unawaited(ref.read(updaterProvider).checkForUpdates())
+          : null,
+      onAutomaticUpdatesChanged: updates?.available == true
+          ? (on) async {
+              await ref.read(updaterProvider).setAutomaticChecks(on);
+              if (!mounted) return;
+              // Re-read rather than assume: Sparkle owns the preference, so
+              // the switch has to show ITS answer — including the case where
+              // it declined to take the new value.
+              ref.invalidate(updaterStatusProvider);
+            }
+          : null,
       // `valueOrNull ?? const []` rather than the AsyncValue's own empty
       // state: the section must render — with its Loading… line — while the
       // first read is out, and a null here would take the whole section off
