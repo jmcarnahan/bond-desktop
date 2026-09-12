@@ -199,7 +199,7 @@ void main() {
     await syncReaching(() => syncFloorDays).syncNow();
     final after = midnightDaysAgo(syncFloorDays);
 
-    // The OLDER of the two wins, and here that is the fortnight.
+    // The OLDER of the two wins, and here that is the default floor.
     expect(floorOf(graph.requestsFor('inbox').first), anyOf(before, after));
   });
 
@@ -225,7 +225,7 @@ void main() {
     // The trap this test exists for: the 410 handler clears the cursor with
     // `setDeltaLink(folder, null)`, which stamps `synced_at` with now. A floor
     // recomputed here — rather than carried down from the top of the pass —
-    // would read that fresh stamp and silently shrink to the fortnight.
+    // would read that fresh stamp and silently shrink to the default floor.
     expect(floorOf(inbox[1]), away);
   });
 }

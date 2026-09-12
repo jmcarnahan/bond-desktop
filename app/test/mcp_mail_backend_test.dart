@@ -130,9 +130,9 @@ void main() {
 
     test('reads has_more, and leaves it null when the server omits it',
         () async {
-      // The server's explicit paging verdict — the drain prefers it over the
-      // next_cursor inference. A build that predates the field leaves it null,
-      // and the drain falls back to the nextLink presence it always read.
+      // The server's explicit paging verdict, defined server-side as "a
+      // next_cursor is set". Recorded as contract; the drain itself pages on
+      // the nextLink. A build that predates the field leaves it null.
       final more = _FakeMcp({
         'sync_mail': [_delta(next: 'n2', hasMore: true)],
       });

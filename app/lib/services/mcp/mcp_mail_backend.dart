@@ -83,8 +83,8 @@ class McpMailBackend implements MailBackend {
       nextLink: _emptyToNull(result['next_cursor']),
       deltaLink: _emptyToNull(result['delta_cursor']),
       // Only when the server actually said: an older build that omits the field
-      // leaves this null, and the drain falls back to the nextLink it always
-      // read. A non-bool is treated as unsaid rather than coerced.
+      // leaves this null. The drain pages on the nextLink either way; this is
+      // the contract on record. A non-bool is treated as unsaid, not coerced.
       hasMore: hasMore is bool ? hasMore : null,
     );
   }

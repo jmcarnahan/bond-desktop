@@ -226,9 +226,11 @@ class DeltaResyncRequired implements Exception {
 /// in practice: more pages to walk, or the cursor to store for next time.
 ///
 /// [hasMore] is the Bond MCP server's explicit paging verdict, null for a
-/// backend that does not report one (the direct-Graph SDK path). It tracks the
-/// nextLink in the current server, and the drain treats it as the primary
-/// keep-paging signal with the nextLink presence as the fallback.
+/// backend that does not report one (the direct-Graph SDK path). The server
+/// defines it as "a next_cursor is set", so it is recorded here as contract and
+/// pinned by test, but the drain loop keeps driving on [nextLink]: a cursor is
+/// the only thing a next page can be fetched with, and a flag that disagreed
+/// with it would otherwise be able to stop a walk with pages still behind it.
 class DeltaPage {
   final List<Map<String, dynamic>> messages;
   final String? nextLink;
