@@ -53,8 +53,11 @@ records it as contract, and the loop itself keeps paging on the presence of the
 next cursor, the only thing a further page can be fetched with. `syncNow` on
 both services carries an in-flight latch: the inbox polls every 60 s, a deep
 pass can outlast that, and a second pass over the same MCP session used to end
-in `Broken pipe`. A re-entrant call returns at once and the latch is released
-in a `finally`, so a failed pass never silences the next one.
+in `Broken pipe`. A re-entrant call JOINS the pass in flight rather than
+returning at once — `load` arms notifications and reloads when its sync comes
+back, and a no-op return would arm them a minute into a long first drain and
+announce the rest of the backlog as new mail. The latch clears with the pass,
+success or failure, so a failed pass never silences the next one.
 
 **Catch-up and revive.** Every pass ends with a block of cheap statements that
 put back what an outage, a crash or a race left behind: `reviveErroredTriage`

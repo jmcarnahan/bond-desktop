@@ -108,12 +108,20 @@ class SyncService implements MailSync {
   /// was addressed to the user, so nothing does.
   String? _userAddress;
 
-  /// Whether a [syncNow] pass is draining right now. The re-entrancy latch:
+  /// The [syncNow] pass draining right now, or null. The re-entrancy latch:
   /// the inbox polls every 60s and a pass over a deep window can outlast that,
   /// so a second syncNow would fire concurrent `sync_mail` calls over the one
   /// mcp_dart session and the server would drop them mid-write (a `Broken pipe`
-  /// SocketException). A pass already running covers this tick.
-  bool _syncing = false;
+  /// SocketException).
+  ///
+  /// A future rather than a flag because a re-entrant caller JOINS the pass
+  /// instead of being turned away. Every caller does something after its sync
+  /// "came back" — `load` arms notifications, reloads, starts the pumps — and
+  /// a no-op return would make those true one minute into a ten-minute first
+  /// drain: notifications armed, and every row the drain wrote from then on
+  /// announced as new mail. Joining keeps "returned" meaning "the pass ended".
+  /// The same shape as `AiWorker.pump`.
+  Future<void>? _inFlight;
 
   /// How many days back the user asked this mailbox to reach. A closure rather
   /// than a value, for the reason [_userAddressReader] is one: this service is
@@ -165,11 +173,18 @@ class SyncService implements MailSync {
   }
 
   @override
-  Future<void> syncNow() async {
-    // A pass already draining covers this tick — see [_syncing]. Returned
-    // before the address read so a re-entrant poll costs nothing at all.
-    if (_syncing) return;
-    _syncing = true;
+  Future<void> syncNow() {
+    // A pass already draining covers this tick — see [_inFlight]. The latch is
+    // set synchronously, before the pass reaches its first await, so a second
+    // call in the same turn already finds it.
+    final running = _inFlight;
+    if (running != null) return running;
+    final pass = _pass().whenComplete(() => _inFlight = null);
+    _inFlight = pass;
+    return pass;
+  }
+
+  Future<void> _pass() async {
     final sw = Stopwatch()..start();
     try {
       _userAddress ??= await _resolveUserAddress();
@@ -489,10 +504,6 @@ class SyncService implements MailSync {
         detail: {'error': '$e'},
       );
       rethrow;
-    } finally {
-      // Released whether the pass succeeded, threw, or was rethrown — a latch
-      // that stuck true would silence sync for the life of the process.
-      _syncing = false;
     }
   }
 

@@ -112,7 +112,8 @@ void main() {
             'only the pages it is told the floor for');
   });
 
-  test('a re-entrant syncNow while one is draining is a no-op', () async {
+  test('a re-entrant syncNow joins the pass in flight instead of starting one',
+      () async {
     // The inbox polls every 60s; a pass over a deep window can outlast that. A
     // second syncNow firing over the same session is what dropped connections
     // mid-write (`Broken pipe`). Each folder is scripted for exactly ONE drain,
@@ -125,16 +126,22 @@ void main() {
     final sync = SyncService(backend, store, lookbackDays: () => 7);
     await skipReconcile();
 
-    // `_syncing` is set synchronously, before syncNow's first await, so the
-    // second call sees the latch already raised without any pumping.
+    // The latch is set synchronously, before syncNow's first await, so the
+    // second call sees it without any pumping.
     final first = sync.syncNow();
     final second = sync.syncNow();
 
-    await second; // returns at once — the latch turned it away
-    await first; // the real pass drains both folders
-
-    expect(backend.calls.where((c) => c.folder == 'inbox').length, 1);
+    // JOINED, not turned away: when the second call comes back the pass has
+    // actually drained. A no-op return would resolve here before a single
+    // page was fetched — and `load` would arm notifications on the strength
+    // of a sync that had not happened.
+    await second;
+    expect(backend.calls.where((c) => c.folder == 'inbox').length, 1,
+        reason: 'one drain per folder, and it is finished by the time the '
+            'joined caller is released');
     expect(backend.calls.where((c) => c.folder == 'sentitems').length, 1);
+    await first;
+    expect(backend.calls.length, 2, reason: 'the first call started no second pass');
 
     // The latch is per-pass, not permanent: a later pass runs normally.
     backend.calls.clear();
@@ -142,5 +149,27 @@ void main() {
     backend.pages['sentitems'] = [const DeltaPage(deltaLink: 'sent-d2')];
     await sync.syncNow();
     expect(backend.calls, isNotEmpty);
+  });
+
+  test('a pass that throws releases the latch and fails its joiner too',
+      () async {
+    // Nothing scripted for 'inbox', so the first drain throws. The joined
+    // caller must see the same failure — it was told the sync it waited on
+    // did not happen — and the next call must run a fresh pass rather than
+    // find the latch stuck on the dead one.
+    final backend = _RecordingMail({});
+    final sync = SyncService(backend, store, lookbackDays: () => 7);
+    await skipReconcile();
+
+    final first = sync.syncNow();
+    final second = sync.syncNow();
+    await expectLater(first, throwsStateError);
+    await expectLater(second, throwsStateError);
+
+    backend.pages['inbox'] = [const DeltaPage(deltaLink: 'in-d')];
+    backend.pages['sentitems'] = [const DeltaPage(deltaLink: 'sent-d')];
+    await sync.syncNow();
+    expect(backend.calls.where((c) => c.folder == 'sentitems').length, 1,
+        reason: 'the latch cleared with the failure');
   });
 }

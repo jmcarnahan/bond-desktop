@@ -97,11 +97,12 @@ class TeamsSync {
   final TeamsBackend _teams;
   final MessageStore _store;
 
-  /// Whether a [syncNow] pass is draining right now. The re-entrancy latch, for
-  /// [SyncService._syncing]'s reason: a refresh that outlasts the poll interval
-  /// must not have a second pass fire concurrent tool calls over the one
-  /// session. A pass already running covers this tick.
-  bool _syncing = false;
+  /// The [syncNow] pass draining right now, or null. The re-entrancy latch,
+  /// for [SyncService._inFlight]'s reasons: a refresh that outlasts the poll
+  /// interval must not have a second pass fire concurrent tool calls over the
+  /// one session, and a re-entrant caller joins the pass rather than being
+  /// told it is done — `refreshTeams` arms notifications on return.
+  Future<void>? _inFlight;
 
   /// Whether Teams may be touched at all — in production, whether the tenant
   /// actually granted `Chat.Read`.
@@ -141,16 +142,14 @@ class TeamsSync {
       _store.getSyncedAt(folder, source: source);
 
   /// One pass over the chat list. Silent and free when Teams is unavailable.
-  Future<void> syncNow() async {
-    // A pass already draining covers this tick — see [_syncing]. Before the
-    // scope read so a re-entrant poll neither works nor logs a second row.
-    if (_syncing) return;
-    _syncing = true;
-    try {
-      await _syncNow();
-    } finally {
-      _syncing = false;
-    }
+  Future<void> syncNow() {
+    // A pass already draining covers this tick — see [_inFlight]. Before the
+    // scope read, so a re-entrant poll neither works nor logs a second row.
+    final running = _inFlight;
+    if (running != null) return running;
+    final pass = _syncNow().whenComplete(() => _inFlight = null);
+    _inFlight = pass;
+    return pass;
   }
 
   Future<void> _syncNow() async {

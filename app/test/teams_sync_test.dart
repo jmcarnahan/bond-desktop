@@ -1723,4 +1723,36 @@ void main() {
       expect(stripChatHtml('<div></div>'), '');
     });
   });
+
+  group('re-entry', () {
+    test('a second syncNow while one is running joins it, not a second walk',
+        () async {
+      // A refresh that outlasts the poll interval must not have a second pass
+      // fire concurrent requests over the one session — and the joiner must
+      // be released only when the pass has actually run, because
+      // `refreshTeams` arms notifications the moment its sync comes back.
+      graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = [_message(id: 'm1')];
+      final sync = build();
+
+      final first = sync.syncNow();
+      final second = sync.syncNow();
+
+      await second;
+      expect(graph.messageRequests.length, 1,
+          reason: 'one walk of the chat, finished by the time the joined '
+              'caller is released');
+      expect(await store.getMessageRow('teams', 'm1'), isNotNull);
+      await first;
+      expect(graph.messageRequests.length, 1,
+          reason: 'the first call started no second walk either');
+
+      // Per pass, not permanent. The chat is taken away first so the next
+      // pass is one chat-list read and nothing behind it.
+      graph.chats.clear();
+      graph.requests.clear();
+      await sync.syncNow();
+      expect(graph.requests, isNotEmpty);
+    });
+  });
 }
