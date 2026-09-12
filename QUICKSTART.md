@@ -87,6 +87,12 @@ CTX_SIZE = 16384
 # MODEL_PORT = 8080
 # FAST_PORT  = 8082
 # EMBED_PORT = 8081
+# Lets Settings → Models → Local server run ONE bundled-style router from this
+# dev build, instead of the three servers you start by hand.
+# BOND_LLAMA_SERVER = /opt/homebrew/bin/llama-server
+# Skips the first-run setup wizard. Your models are in the Homebrew cache, not
+# in the app's own folder, so it would offer to download ~22 GB you already have.
+# BOND_DEV_SKIP_SETUP = 1
 ```
 
 ## 3. Models and servers
@@ -146,7 +152,19 @@ make app-install
 make app-run
 ```
 
-The first build takes a few minutes. The app opens on a sign-in screen:
+The first build takes a few minutes.
+
+**The first launch opens the setup wizard** — eight screens that check the Mac,
+download the three models into the app's own folder (~22 GB), sign in, and turn
+Bond's managed model server on. That is not what you want on this path: you
+have just started three servers by hand and the weights are already in
+`~/.cache/huggingface/hub/`. Add `BOND_DEV_SKIP_SETUP = 1` to `local.mk`
+(step 2) and rebuild, and the app goes straight to sign-in as it always has.
+Run the wizard instead if you want the bundled shape — it downloads its own
+copies and switches the app onto one router. `docs/install.md` walks the eight
+screens; `docs/settings.md` (**First run**) is the reference.
+
+With the wizard skipped, the app opens on a sign-in screen:
 
 1. Press **Sign in**. Your browser opens the bond-mcps login. Sign in there
    and come back to the app; it picks the session up on its own.
@@ -188,6 +206,14 @@ Stop them when you need the memory back:
 ```sh
 make stop fast-stop embed-stop
 ```
+
+Or let the app run them for you: with `BOND_LLAMA_SERVER` set in `local.mk`
+(step 2), **Settings → Models → Local server** turns on one llama-server that
+serves all three models, and starts and stops it with the app. It is off by
+default, and turning it off puts you back on `make model fast embed` exactly as
+above. **Set up again** on that card re-runs the first-run wizard from the top
+— it keeps the models already on disk and the session already signed in, so
+those two screens are a Continue each.
 
 Rebuild the app after a `git pull`:
 
@@ -253,15 +279,29 @@ work that needs it until it comes back. Start the missing one.
 - Weights: `~/.cache/huggingface/hub/` (shared with anything else that uses
   llama.cpp's `-hf`; `make clean-model` deletes only the prose model's directory)
 - Server logs: `tmp/logs/model-<port>.log`
+- Server logs (the app's own server, managed mode):
+  `~/Library/Application Support/com.bondinbox.app/logs/llama-server.log`
+- The app's own server files: `~/Library/Application Support/com.bondinbox.app/servers/`
+  (the preset it writes, the pid file the next launch reaps, and an empty cache
+  directory the child is deliberately pointed at)
+- Models the app downloads for itself:
+  `~/Library/Application Support/com.bondinbox.app/models/`, or wherever
+  **Change folder…** on that card points. Separate from the Homebrew cache
+  above, which is what `make model` fills.
 - App data (database, attachments, settings):
-  `~/Library/Containers/com.bondinbox.app/Data/Library/Application Support/`
+  `~/Library/Application Support/com.bondinbox.app/`. A build made before the
+  app dropped the sandbox kept the same files under
+  `~/Library/Containers/com.bondinbox.app/`; the app migrates it on first
+  launch, copying rather than moving, so the old copy stays until you delete
+  it. Keychain items do not migrate — sign in again once.
 
 **Uninstall**
 
 ```sh
 make stop fast-stop embed-stop
 make clean-model
-rm -rf ~/Library/Containers/com.bondinbox.app
+rm -rf ~/Library/Application\ Support/com.bondinbox.app
+rm -rf ~/Library/Containers/com.bondinbox.app   # only if an older build ran here
 ```
 
 Delete the other two model directories under `~/.cache/huggingface/hub/` by

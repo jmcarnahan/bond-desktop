@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the bundled llama-server helper: none.
+
+  The helper binds a loopback port and mmaps files the parent hands it. It is
+  not sandboxed (neither is the app, deliberately — see Release.entitlements),
+  so it needs no network or file entitlement to do either, and every
+  entitlement it does not carry is one less thing for notarization to
+  question.
+
+  The hardened runtime is NOT an entitlement and does not belong in this file,
+  nor is it an Xcode build setting. It is a codesign flag, applied on the
+  `--options runtime` line in dist/sign.sh, and only in the Developer ID
+  branch: library validation would refuse ad-hoc-signed backend modules.
+
+  An empty dict, not an absent file: passing --entitlements a file with an
+  empty dict is how you say "this helper gets nothing", explicitly, in a way
+  that shows up in `codesign -d --entitlements -`.
+-->
+<plist version="1.0">
+<dict/>
+</plist>

@@ -151,6 +151,76 @@ BASH_CASES = [
     ("ask", "make app-run", False),
     ("ask", "flutter run -d macos", False),
     ("ask", "make model", False),
+    # --- distribution: the signing half asks, the packaging half does not ---
+    ("ask", "make dist", False),
+    ("ask", "make dist-sign", False),
+    ("ask", "make dist-notarize", False),
+    ("ask", "make dist-appcast", False),
+    ("ask", "make dist-appcast AD_HOC=''", False),
+    ("allow", "make dist-llama", False),
+    ("allow", "make dist-dmg AD_HOC=1", False),
+    ("allow", "make dist-check", False),
+    ("allow", "make -n dist", False),
+    # a goal or a variable assignment before the target must not hide it
+    ("ask", "make VERSION=2 dist", False),
+    ("ask", "make dist-llama dist", False),
+    ("allow", "make AD_HOC=1 dist-dmg", False),
+    # Phase 5: a non-ad-hoc dist-dmg signs and notarizes the image
+    ("ask", "make dist-dmg", False),
+    ("ask", "make VERSION=2 dist-dmg", False),
+    ("allow", "make dist-dmg AD_HOC=1 BOND_DIST_ALLOW_NO_MCP=1", False),
+    ("allow", "make -n dist-dmg", False),
+    # Phase 6: the appcast rehearses like the DMG does, and the two targets
+    # that only fetch and derive stay unattended
+    ("allow", "make dist-appcast AD_HOC=1", False),
+    ("allow", "make dist-sparkle-tools", False),
+    ("allow", "dist/sparkle-tools.sh", False),
+    ("allow", "python3 dist/sparkle-pubkey.py x", False),
+    ("allow", "AD_HOC=1 dist/appcast.sh", False),
+    # the scripts themselves, since a make target is not the only way in
+    ("ask", 'dist/notarize.sh "dist/stage/Bond Desktop.app"', False),
+    ("ask", "./dist/sign.sh", False),
+    ("ask", "bash dist/sign.sh", False),
+    ("ask", "DIST_ENV=/x/dist.env dist/dmg.sh", False),
+    ("ask", "VERSION=1 dist/dmg.sh && echo done", False),
+    ("ask", "/Users/x/projects/bond-desktop/dist/sign.sh", False),
+    ("ask", 'bash /Users/x/bond-desktop/dist/notarize.sh "x.app"', False),
+    ("allow", "AD_HOC=1 /Users/x/bond-desktop/dist/dmg.sh", False),
+    ("allow", "cat /Users/x/bond-desktop/dist/sign.sh", False),
+    # an empty AD_HOC is the REAL path however it is spelled
+    ("ask", "AD_HOC='' dist/sign.sh", False),
+    ("ask", "make dist-dmg AD_HOC=''", False),
+    ("ask", "make dist-dmg AD_HOC=", False),
+    # a runner word in front does not make it unattended
+    ("ask", "env AD_HOC= dist/sign.sh", False),
+    ("ask", "env dist/sign.sh", False),
+    ("ask", "nohup dist/notarize.sh x.app", False),
+    ("ask", "sudo dist/sign.sh", False),
+    ("ask", "zsh dist/sign.sh", False),
+    ("allow", "env AD_HOC=1 dist/sign.sh", False),
+    ("allow", "AD_HOC=1 nohup dist/dmg.sh", False),
+    # a second line is still a command
+    ("ask", "cd /Users/x/bond-desktop\ndist/sign.sh", False),
+    ("allow", "AD_HOC=1 dist/dmg.sh", False),
+    ("allow", "VERSION=1 AD_HOC=1 DIST_ENV=x dist/dmg.sh", False),
+    # reading them is not running them
+    ("allow", "bash -n dist/sign.sh", False),
+    ("allow", "cat dist/notarize.sh", False),
+    ("allow", "sed -n 1,20p dist/dmg.sh", False),
+    # the unattended scripts stay unattended
+    ("allow", "dist/check.sh", False),
+    ("allow", "STRICT=1 dist/check.sh", False),
+    ("allow", "dist/build-llama.sh", False),
+    # notarytool reads and the post-signature verifiers are not submissions
+    ("allow", "xcrun notarytool history --key k --key-id i", False),
+    ("allow", "xcrun notarytool log abc --key k", False),
+    ("allow", 'xcrun stapler validate "x.app"', False),
+    ("allow", "spctl -a -vv -t exec x.app", False),
+    ("allow", "codesign -dvv x.app", False),
+    ("ask", "xcrun notarytool submit x.zip", False),
+    ("ask", "security import cert.p12", False),
+    ("ask", "gh release create v1 x.dmg", False),
+    ("allow", "gh release list", False),
     ("deny", "git add app/lib/x.dart", True),
     ("deny", "git commit -m x", True),
     ("deny", "git -C app commit -m x", True),
@@ -308,7 +378,10 @@ AGENT_CASES = [
 
 
 # The commit gate's secret-file rule: a template is the one env-shaped file
-# that may be committed; everything a real value could live in may not.
+# that may be committed; everything a real value could live in may not. The
+# rule has two halves — an extension list and the dist/local/ directory — and
+# both are replayed here, because a path only the directory half catches is
+# exactly the one an extension-only test would call safe.
 SECRET_FILE_CASES = [
     (False, ".env.example"),
     (False, "docs/settings.md"),
@@ -318,14 +391,38 @@ SECRET_FILE_CASES = [
     (True, "local.mk"),
     (True, "app/macos/SigningLocal.xcconfig"),
     (True, "certs/dev.p12"),
+    (True, "dist/windows/codesign.pfx"),
+    # dist/local/ is secret by directory: dist.env is caught by extension too,
+    # but a stray note beside the keys is caught by nothing else.
+    (True, "dist/local/dist.env"),
+    (True, "dist/local/scratch.txt"),
+    # The notarization key, a keychain export and a built image.
+    (True, "certs/AuthKey_ABC.p8"),
+    (True, "backup.keychain"),
+    (True, "out/Bond-Desktop-1.0.0.dmg"),
+    # Neither rule may reach these: the directory rule is anchored at a path
+    # segment, so "docs/dist/localnotes.md" is not dist/local/, and the
+    # template suffix keeps the committed example committable.
+    (False, "docs/dist/localnotes.md"),
+    (False, "dist/local.env.example"),
 ]
+
+
+class _SecretMatcher:
+    """The gate's actual verdict: check_secrets denies on either rule."""
+
+    def __init__(self, files, dirs):
+        self._files, self._dirs = files, dirs
+
+    def search(self, path):
+        return self._files.search(path) or self._dirs.search(path)
 
 
 def secret_files():
     spec = importlib.util.spec_from_file_location("commit_gate", os.path.join(HERE, "commit-gate.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.SECRET_FILES
+    return _SecretMatcher(mod.SECRET_FILES, mod.SECRET_DIRS)
 
 
 def main():

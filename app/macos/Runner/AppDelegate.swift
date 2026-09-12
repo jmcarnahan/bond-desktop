@@ -1,4 +1,6 @@
 import Cocoa
+// `proc_pidpath` and `kill` are C, and this is where they come from.
+import Darwin
 import FlutterMacOS
 import UserNotifications
 
@@ -23,6 +25,79 @@ class AppDelegate: FlutterAppDelegate {
       UNUserNotificationCenter.current().delegate = delegate
     }
     super.applicationDidFinishLaunching(notification)
+  }
+
+  /// Kills the model server this app started, on the way out.
+  ///
+  /// A child process on macOS is NOT reaped when its parent dies: quit the
+  /// app with llama-server loaded and the server keeps running, keeps the
+  /// port, and keeps several gigabytes of weights resident — so the next
+  /// launch finds its own orphan in the way of the socket it wants.
+  ///
+  /// This is the SECOND of two places that kill it, and both are needed. The
+  /// Dart side kills the child on its own exit path, but that path is not
+  /// guaranteed to run: `flutter/flutter#134255` is an engine shutdown that
+  /// skips the Dart exit hook entirely on macOS, and a force-quit skips
+  /// everything above this method. The pid file is the handoff between them —
+  /// whichever runs first removes it, and the other finds nothing to do.
+  ///
+  /// Nothing here is allowed to fail loudly. A missing or malformed pid file
+  /// is the normal case (the server was never started, or Dart already
+  /// cleaned up), and an app that crashed while quitting would be a far worse
+  /// bug than a stray process.
+  override func applicationWillTerminate(_ notification: Notification) {
+    guard let bundleId = Bundle.main.bundleIdentifier,
+          let support = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+          ).first
+    else { return }
+    let pidFile = support
+      .appendingPathComponent(bundleId)
+      .appendingPathComponent("servers")
+      .appendingPathComponent("router.json")
+
+    defer { try? FileManager.default.removeItem(at: pidFile) }
+
+    guard let data = try? Data(contentsOf: pidFile),
+          let record = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+          let pid = record["pid"] as? Int, pid > 0
+    else { return }
+
+    // The pid alone is not evidence. Numbers are reused within hours on a
+    // machine that stays up, and signalling a stranger's process because the
+    // kernel handed out the same integer would be unforgivable. The executable
+    // path is what makes it checkable.
+    //
+    // It is compared against the path the record itself names, symlinks
+    // resolved on both sides so that `/opt/homebrew/bin/llama-server` and its
+    // Cellar target are one answer. A bare "ends in llama-server" test is
+    // looser than the Dart reaper's and runs on EVERY quit: a stale record
+    // whose pid the kernel has since handed to a hand-started `make model`
+    // server would pass it, and the app would kill a server it does not own on
+    // its way out. A record with no `binaryPath` was written by an older build
+    // and keeps the old test, which is the most that can be said about it.
+    var pathBuffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+    guard proc_pidpath(Int32(pid), &pathBuffer, UInt32(MAXPATHLEN)) > 0 else { return }
+    let executable = URL(fileURLWithPath: String(cString: pathBuffer))
+      .resolvingSymlinksInPath().path
+    if let recorded = record["binaryPath"] as? String {
+      let ours = URL(fileURLWithPath: recorded).resolvingSymlinksInPath().path
+      guard executable == ours else { return }
+    } else {
+      guard executable.hasSuffix("llama-server") else { return }
+    }
+
+    kill(Int32(pid), SIGTERM)
+    // Up to two seconds of polling, in fiftieths. llama-server can be inside a
+    // multi-gigabyte mmap when the signal lands and will not die politely; the
+    // deadline is short because this is the quit path and the user is waiting.
+    var waited = 0
+    while waited < 40 {
+      if kill(Int32(pid), 0) != 0 { return }
+      usleep(50_000)
+      waited += 1
+    }
+    kill(Int32(pid), SIGKILL)
   }
 
   override func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

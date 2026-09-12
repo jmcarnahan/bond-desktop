@@ -550,32 +550,28 @@ void main() {
   group('conversation folding', () {
     test('an inbound, a reply, then newer inbound leaves the thread open',
         () async {
-      // Dated relative to now, inside the default lookback: the newest inbound
-      // has to be news the fold opens on, and a below-floor date would land as
-      // backlog and leave the thread `waiting`. Relative rather than fixed so
-      // the test does not rot as the calendar moves past a hard-coded window.
-      String iso(Duration ago) => DateTime.now()
-          .toUtc()
-          .subtract(ago)
-          .toIso8601String()
-          .replaceFirst(RegExp(r'\.\d+Z$'), 'Z');
-      final inbound1At = iso(const Duration(days: 3));
-      final replyAt = iso(const Duration(days: 2, hours: 12));
-      final inbound2At = iso(const Duration(days: 2)); // the newest
-
+      // Relative, for the reason `_freshReceivedAt` gives: these three sat at
+      // absolute late-August dates until the sync window walked past them and
+      // the newest inbound arrived already skipped, folding the thread to
+      // waiting instead of needs-reply.
+      String ago(Duration age) =>
+          DateTime.now().toUtc().subtract(age).toIso8601String();
+      final firstAsk = ago(const Duration(days: 2, hours: 6));
+      final myReply = ago(const Duration(days: 1, hours: 6));
+      final newestWord = ago(const Duration(days: 1));
       graph.queue('inbox', [
         () => jsonOk(deltaBody(
               [
                 graphMessage(
                   id: 'in-1',
                   subject: 'Project brief',
-                  receivedDateTime: inbound1At,
+                  receivedDateTime: firstAsk,
                   preview: 'the first ask',
                 ),
                 graphMessage(
                   id: 'in-2',
                   subject: 'Re: Project brief',
-                  receivedDateTime: inbound2At,
+                  receivedDateTime: newestWord,
                   preview: 'the newest word',
                 ),
               ],
@@ -591,7 +587,7 @@ void main() {
                   fromName: 'Jordan Bond',
                   fromAddress: 'lo@bond.com',
                   to: const ['sarah@example.com'],
-                  receivedDateTime: replyAt,
+                  receivedDateTime: myReply,
                   preview: 'my reply',
                 )
               ],
@@ -607,9 +603,9 @@ void main() {
       expect(conversation.messageCount, 3);
       expect(conversation.inboundCount, 2);
       expect(conversation.lastMessagePreview, 'the newest word');
-      expect(conversation.lastMessageAt, inbound2At);
-      expect(conversation.lastInboundAt, inbound2At);
-      expect(conversation.lastOutboundAt, replyAt);
+      expect(conversation.lastMessageAt, newestWord);
+      expect(conversation.lastInboundAt, newestWord);
+      expect(conversation.lastOutboundAt, myReply);
       // Named by how it opened, with the reply marker stripped.
       expect(conversation.subject, 'Project brief');
       expect(

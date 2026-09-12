@@ -1,11 +1,13 @@
 import 'package:flutter/foundation.dart' show immutable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../data/app_paths.dart' show AppPaths;
 import '../data/message_store.dart';
 import '../models/home_sort.dart';
 import '../models/needs_you_sort.dart';
 import '../models/people_sort.dart';
 import '../services/attention.dart';
+import '../services/llm/embeddings_client.dart' show EmbeddingsClient;
 import '../services/llm/model_slots.dart';
 import '../services/sync_service.dart';
 import 'app_providers.dart';
@@ -177,6 +179,43 @@ class AppPrefs {
   final int mailLookbackDays;
   final int teamsLookbackDays;
 
+  /// Whether the app runs the model server itself, or expects servers the
+  /// user started by hand.
+  ///
+  /// FALSE by default, and that is the whole compatibility story: off, every
+  /// target below resolves exactly as it did before this existed, and the
+  /// `make model | fast | embed` workflow is untouched. Turning it on is an
+  /// opt-in in Settings, and it is what makes the three router targets live.
+  ///
+  /// Like [routerPort] and [modelsFolder] it survives a `wipeAll` — that
+  /// deletes only the keys it names, and none of these three is mailbox data:
+  /// which server this machine runs is a fact about the machine, not about
+  /// whoever is signed in.
+  final bool managedServer;
+
+  /// The port the managed router listens on.
+  ///
+  /// Stored rather than picked fresh each launch so an adopted server from the
+  /// previous run is findable, and so a user who moved off a port another
+  /// program wanted keeps that choice. Clamped to 1024..65535 on both the read
+  /// and the write: below 1024 needs root, and a stored value outside the range
+  /// would make every start fail with a message about a socket.
+  final int routerPort;
+
+  /// Where the GGUF files live, or EMPTY for the app's own folder.
+  ///
+  /// Empty is stored as empty for [fastLlmUrl]'s reason: the app's folder is
+  /// derived from the application support directory at read time, and freezing
+  /// today's path into the database would survive a move of the support
+  /// directory as a stale absolute path. [effectiveModelsFolder] is the one
+  /// place that resolves it.
+  final String modelsFolder;
+
+  /// What [routerPort] means when nothing is stored — llama-server's own
+  /// default port, which is also what `make model` uses, so a user who never
+  /// touches the field gets the port every doc in this repo names.
+  static const int defaultRouterPort = 8080;
+
   const AppPrefs({
     this.attentionThreshold = AttentionTuning.defaultThreshold,
     this.aboutMe = '',
@@ -197,25 +236,85 @@ class AppPrefs {
     this.proseLlmModel = '',
     this.mailLookbackDays = syncFloorDays,
     this.teamsLookbackDays = syncFloorDays,
+    this.managedServer = false,
+    this.routerPort = defaultRouterPort,
+    this.modelsFolder = '',
   });
 
-  /// What the bulk client will dial on its next request.
-  LlmTarget get fastTarget => LlmTarget(
-        baseUrl: fastLlmUrl.isEmpty ? fastUrlDefault : fastLlmUrl,
-        model: fastLlmModel.isEmpty ? fastModelDefault : fastLlmModel,
-      );
+  /// The managed router's origin — one server, three models.
+  String get routerBase => 'http://127.0.0.1:$routerPort';
 
-  LlmTarget get proseTarget => LlmTarget(
-        baseUrl: proseLlmUrl.isEmpty ? proseUrlDefault : proseLlmUrl,
-        model: proseLlmModel.isEmpty ? proseModelDefault : proseLlmModel,
-      );
+  /// The three targets the managed router answers on. Same origin, different
+  /// `model` field: llama-server in router mode routes on the name alone, so
+  /// the ids in `model_slots.dart` are the whole wiring between a slot and the
+  /// weights behind it.
+  LlmTarget get routerProseTarget =>
+      LlmTarget(baseUrl: '$routerBase/v1/chat/completions', model: routerProseId);
+
+  LlmTarget get routerBulkTarget =>
+      LlmTarget(baseUrl: '$routerBase/v1/chat/completions', model: routerBulkId);
+
+  LlmTarget get routerEmbedTarget =>
+      LlmTarget(baseUrl: '$routerBase/v1/embeddings', model: routerEmbedId);
+
+  /// What the bulk client will dial on its next request.
+  ///
+  /// The router answers only when this slot is on the build's own values. A
+  /// stored override is a deliberate act — someone pointed the slot at a
+  /// server they run — and turning the managed server on must not silently
+  /// take it away from them; clearing the override is what hands the slot back
+  /// to the router.
+  LlmTarget get fastTarget =>
+      managedServer && fastLlmUrl.isEmpty && fastLlmModel.isEmpty
+          ? routerBulkTarget
+          : LlmTarget(
+              baseUrl: fastLlmUrl.isEmpty ? fastUrlDefault : fastLlmUrl,
+              model: fastLlmModel.isEmpty ? fastModelDefault : fastLlmModel,
+            );
+
+  LlmTarget get proseTarget =>
+      managedServer && proseLlmUrl.isEmpty && proseLlmModel.isEmpty
+          ? routerProseTarget
+          : LlmTarget(
+              baseUrl: proseLlmUrl.isEmpty ? proseUrlDefault : proseLlmUrl,
+              model: proseLlmModel.isEmpty ? proseModelDefault : proseLlmModel,
+            );
 
   /// One slot's target, for the settings screen's table. [ModelSlot.embed] is
-  /// display only — it always answers the compiled default.
+  /// display only — its model is the CORPUS TAG the vectors were written
+  /// under, never a name a request carries, which is why the managed answer
+  /// here is still a display value and [embedRequestTarget] is the one the
+  /// wire uses.
   LlmTarget targetFor(ModelSlot slot) => switch (slot) {
         ModelSlot.fast => fastTarget,
         ModelSlot.prose => proseTarget,
-        ModelSlot.embed => embedSlotDefault,
+        ModelSlot.embed => managedServer ? routerEmbedTarget : embedSlotDefault,
+      };
+
+  /// Where the embedding client actually POSTs, and what it puts in `model`.
+  ///
+  /// Deliberately NOT `targetFor(ModelSlot.embed)`: the display target's model
+  /// is [EmbeddingsClient.modelTag], the corpus tag stored beside every vector,
+  /// and sending that to a server would ask for a model no server has. The
+  /// request target's model is what the wire carries — the router's id when the
+  /// app runs the server, and the literal `'embed'` llama-server has always
+  /// ignored when it does not.
+  LlmTarget get embedRequestTarget => managedServer
+      ? routerEmbedTarget
+      : const LlmTarget(
+          baseUrl: EmbeddingsClient.defaultBaseUrl,
+          model: EmbeddingsClient.requestModel,
+        );
+
+  /// What "Default" means for a slot's editor RIGHT NOW: the router target
+  /// while the app runs its own server, the compiled default otherwise. The
+  /// editor normalises a saved value equal to this back to the empty string,
+  /// so pressing Save on an untouched editor keeps the slot following the
+  /// router instead of freezing today's port into an override.
+  LlmTarget slotBaseline(ModelSlot slot) => switch (slot) {
+        ModelSlot.fast => managedServer ? routerBulkTarget : fastSlotDefault,
+        ModelSlot.prose => managedServer ? routerProseTarget : proseSlotDefault,
+        ModelSlot.embed => managedServer ? routerEmbedTarget : embedSlotDefault,
       };
 
   /// Whether this slot is on the build's own default — what the screen renders
@@ -225,6 +324,11 @@ class AppPrefs {
         ModelSlot.prose => proseLlmUrl.isEmpty && proseLlmModel.isEmpty,
         ModelSlot.embed => true,
       };
+
+  /// The folder the router is pointed at: the user's choice, or the app's own
+  /// `models/` under Application Support when they have not made one.
+  String effectiveModelsFolder(AppPaths paths) =>
+      modelsFolder.isEmpty ? paths.models.path : modelsFolder;
 
   /// Whether the in-app ribbon runs. It does in BOTH remaining modes — it is
   /// the whole of in-app mode and the frontmost fallback of native mode — so
@@ -252,6 +356,9 @@ class AppPrefs {
     String? proseLlmModel,
     int? mailLookbackDays,
     int? teamsLookbackDays,
+    bool? managedServer,
+    int? routerPort,
+    String? modelsFolder,
   }) =>
       AppPrefs(
         attentionThreshold: attentionThreshold ?? this.attentionThreshold,
@@ -274,6 +381,9 @@ class AppPrefs {
         proseLlmModel: proseLlmModel ?? this.proseLlmModel,
         mailLookbackDays: mailLookbackDays ?? this.mailLookbackDays,
         teamsLookbackDays: teamsLookbackDays ?? this.teamsLookbackDays,
+        managedServer: managedServer ?? this.managedServer,
+        routerPort: routerPort ?? this.routerPort,
+        modelsFolder: modelsFolder ?? this.modelsFolder,
       );
 }
 
@@ -299,6 +409,12 @@ const String proseLlmUrlKey = 'prose_llm_url';
 const String proseLlmModelKey = 'prose_llm_model';
 const String mailLookbackDaysKey = 'mail_lookback_days';
 const String teamsLookbackDaysKey = 'teams_lookback_days';
+
+/// The managed server's three keys. Not in `wipeAll`'s list, deliberately:
+/// see [AppPrefs.managedServer].
+const String managedServerKey = 'managed_server';
+const String routerPortKey = 'router_port';
+const String modelsFolderKey = 'models_folder';
 
 /// The switch [notifyStyleKey] replaced. Still read — and only read — so an
 /// install that had turned the ribbon off stays quiet across the upgrade
@@ -371,8 +487,23 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       proseLlmModel: _slotValue(await store.getPref(proseLlmModelKey)),
       mailLookbackDays: _lookback(await store.getPref(mailLookbackDaysKey)),
       teamsLookbackDays: _lookback(await store.getPref(teamsLookbackDaysKey)),
+      // Only the string this notifier writes reads as on — an absent key, a
+      // hand-edited value, a build that meant something else — all of them
+      // leave the app expecting hand-started servers, which is the state every
+      // existing install is in.
+      managedServer: await store.getPref(managedServerKey) == 'true',
+      routerPort: _routerPort(await store.getPref(routerPortKey)),
+      modelsFolder: _slotValue(await store.getPref(modelsFolderKey)),
     );
   }
+
+  /// A stored port, or the default. Unparseable is the default and
+  /// out-of-range is clamped into it, on [_lookback]'s rule and for the same
+  /// reason: a bad number here would make every start fail on a socket, and a
+  /// preference must not be able to do that.
+
+  static int _routerPort(String? raw) =>
+      clampRouterPort(int.tryParse(raw ?? '') ?? AppPrefs.defaultRouterPort);
 
   /// A stored lookback, or the default. Unparseable is the default and
   /// out-of-range is the nearest end of the range: this number decides how far
@@ -590,6 +721,39 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _store.setPref(teamsLookbackDaysKey, clamped.toString());
   }
 
+  /// Whether the app runs the model server itself.
+  ///
+  /// The state change is the whole mechanism for the TARGETS — every one of
+  /// them is composed above from this flag — but starting or stopping the
+  /// process is the caller's job, not this notifier's: prefs know nothing
+  /// about a supervisor, and the screen that flips this switch is the one
+  /// place that can also say "and start it".
+  ///
+  /// State first, then the write, like every setter above.
+  Future<void> setManagedServer(bool value) async {
+    state = state.copyWith(managedServer: value);
+    await _store.setPref(managedServerKey, value.toString());
+  }
+
+  /// Moves the managed router's port. Clamped on the way in as well as on the
+  /// way out — [_routerPort] guards the read, and this guards a caller that
+  /// hands over a number no control on screen could have produced.
+  Future<void> setRouterPort(int value) async {
+    final clamped = clampRouterPort(value);
+    state = state.copyWith(routerPort: clamped);
+    await _store.setPref(routerPortKey, clamped.toString());
+  }
+
+  /// Points the downloader and the router at a folder. Empty means the app's
+  /// own — see [AppPrefs.effectiveModelsFolder]. Trimmed on the way in as well
+  /// as on the way out, for [_slotValue]'s reason: a path with a trailing
+  /// newline is a directory that does not exist.
+  Future<void> setModelsFolder(String value) async {
+    final clean = value.trim();
+    state = state.copyWith(modelsFolder: clean);
+    await _store.setPref(modelsFolderKey, clean);
+  }
+
   /// Back to the build's defaults for one slot.
   Future<void> clearSlotTarget(ModelSlot slot) => switch (slot) {
         ModelSlot.fast => setFastLlmTarget(url: '', model: ''),
@@ -597,6 +761,12 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
         ModelSlot.embed => Future<void>.value(),
       };
 }
+
+/// The range a port may be in: below 1024 wants root, and 65535 is the top of
+/// the field. A free function beside the keys, on `clampLookbackDays`'s
+/// precedent, so the read, the setter and the settings screen's validation all
+/// mean the same thing by "a usable port".
+int clampRouterPort(int value) => value.clamp(1024, 65535);
 
 /// What `main()` read from the database before the first frame, or null where
 /// nothing preloaded them — see [AppPrefsNotifier]'s constructor.

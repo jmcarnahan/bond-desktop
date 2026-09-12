@@ -156,6 +156,10 @@ DENY = [
      "the raw drift_dev command rewrites every test/drift/bond/generated snapshot with ~30k lines that do not compile."),
 ]
 
+# A runner word in front of a signing script (`env`, `nohup`, `time`, `sudo`,
+# a shell) must not turn the run into an unattended one.
+_RUN = r"(?:bash|sh|zsh|env|nohup|time|caffeinate|sudo|command)\s+"
+
 ASK = [
     (r"\bgh\s+pr\s+(create|merge|close|ready|edit|review|comment)\b|\bgh\s+repo\s+(create|delete|edit|rename|archive|sync|fork)\b"
      r"|\bgh\s+api\b[^|;&]*(\s(-X|--method)\s*(POST|PATCH|PUT|DELETE)\b|\s(-f|-F|--field|--raw-field|--input)\b)",
@@ -164,6 +168,47 @@ ASK = [
      r"|\bopen\s+-a\b|\bopen\s+\S*\.app\b|(?:^|[;&|(]\s*)\S*\.app/Contents/MacOS/\S+"
      r"|\bxcodebuild\b(?![^|;&]*(-showBuildSettings|-list|-version|-showsdks|-showdestinations))",
      "The user drives the live app and the model servers; gates are serverless."),
+    # The distribution commands fall into three groups.
+    #
+    # 1. Targets that always reach a real identity or Apple's notary service:
+    #    `make dist`, `dist-sign`, `dist-notarize`. dist-llama/dist-app/
+    #    dist-check/dist-clean/dist-sparkle-tools compile, copy, fetch and
+    #    report and stay unattended, so `(?![-\w])` after each target keeps
+    #    them out — and keeps `make distclean` out too.
+    #
+    #    The repeated group spans everything make allows BEFORE a goal: flags,
+    #    `-C dir`, variable assignments and earlier goals. Without the last two,
+    #    `make VERSION=2 dist` and `make dist-llama dist` both slipped through
+    #    unattended. It stays greedy on purpose, so a trailing `AD_HOC=1` ends
+    #    with nothing left to match.
+    #
+    # 2. `make dist-dmg` and `make dist-appcast` WITHOUT an AD_HOC=<non-empty>
+    #    in the same segment. Since Phase 5 a non-ad-hoc dist-dmg pulls in
+    #    dist-notarize, signs the image and uploads it; since Phase 6 a
+    #    non-ad-hoc dist-appcast signs the DMG with the real Sparkle key and
+    #    writes the published feed. With AD_HOC=1 both are the unattended
+    #    rehearsals they were built to be.
+    #
+    # 3. The scripts themselves, because a make target is not the only way to
+    #    reach them. A segment that starts with optional VAR=value assignments
+    #    and then sign.sh / notarize.sh / dmg.sh / appcast.sh asks, unless one
+    #    of those assignments is AD_HOC=<non-empty>. Anchoring on the segment
+    #    start is what keeps `cat dist/sign.sh`, `bash -n dist/dmg.sh` and
+    #    `grep -n x dist/notarize.sh` allowed: there the script name is an
+    #    argument, not the command. `(?:\S*/)?` lets the script be named by
+    #    `./`, a worktree-relative or an absolute path alike; a runner word in
+    #    front (`env`, `nohup`, `time`, `sudo`, a shell) and a second line of
+    #    a multi-line command are still the command. A quoted-empty
+    #    `AD_HOC=''` is an EMPTY value to the shell, which is the real path,
+    #    so it does not count as set. Out of reach of any path rule, and
+    #    accepted as such: `cd dist && ./sign.sh` and `bash -c "…"`.
+    (r"\bmake\b(?![^|;&]*(\s-n\b|--dry-run|--just-print))(?:\s+(?:-C\s+\S+|-\S+|\S+=\S+|[\w./-]+))*\s+(dist-notarize|dist-sign|dist)(?![-\w])"
+     r"|\bmake\b(?![^|;&]*(\s-n\b|--dry-run|--just-print))(?![^|;&]*\bAD_HOC=(?![\"']{2})\S)(?:\s+(?:-C\s+\S+|-\S+|\S+=\S+|[\w./-]+))*\s+(dist-dmg|dist-appcast)(?![-\w])"
+     r"|(?:^|[;&|(\n]\s*)(?!(?:" + _RUN + r")*(?:\w+=\S*\s+)*AD_HOC=(?![\"']{2})\S)(?:" + _RUN + r")*(?:\w+=\S*\s+)*(?:" + _RUN + r")*(?:\S*/)?dist/(sign|notarize|dmg|appcast)\.sh\b"
+     r"|\bxcrun\s+notarytool\s+(submit|store-credentials)\b"
+     r"|\bsecurity\s+(import|create-keychain|set-key-partition-list)\b"
+     r"|\bgh\s+release\s+(create|upload|delete|edit)\b",
+     "Signing with a real identity, uploading to Apple or GitHub, and touching keychains are the user's call."),
 ]
 
 # ------------------------------------------------------- protected paths

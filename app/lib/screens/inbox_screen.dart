@@ -32,6 +32,7 @@ import '../providers/notify_routing.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/message_history_provider.dart';
 import '../providers/recipient_search_provider.dart';
+import '../providers/setup_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../providers/why_provider.dart';
 import '../services/attachments/attachment_bytes.dart';
@@ -78,6 +79,7 @@ import '../widgets/preview/preview_engines.dart';
 import '../widgets/preview/preview_kind.dart' show openRefused;
 import '../widgets/quick_replies.dart';
 import '../widgets/room_header.dart';
+import '../widgets/settings_local_server_card.dart';
 import '../widgets/settings_screen.dart';
 import '../widgets/side_panel.dart';
 import '../widgets/sort_menu.dart';
@@ -1925,6 +1927,51 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     unawaited(worker.pump());
   }
 
+  /// Turns the managed server on or off, and makes the process follow.
+  ///
+  /// The preference and the process are two writes, and this host is the one
+  /// place that can do both: [AppPrefsNotifier] holds a store and knows
+  /// nothing about a supervisor, and the supervisor reads the preference but
+  /// is never told when it moves. The order matters — the pref first, because
+  /// `ensureRunning` and `stop` both ask `managed()` and would read the old
+  /// answer if they went first.
+  Future<void> _setManagedServer(bool on) async {
+    final supervisor = ref.read(modelServerSupervisorProvider);
+    await ref.read(appPrefsProvider.notifier).setManagedServer(on);
+    if (on) {
+      await supervisor.ensureRunning();
+    } else {
+      await supervisor.stop();
+    }
+  }
+
+  /// Moves the port, and restarts onto it. A running server cannot change the
+  /// socket it is bound to, so the restart IS the setting taking effect;
+  /// nothing restarts when there is nothing running.
+  Future<void> _setRouterPort(int port) async {
+    final supervisor = ref.read(modelServerSupervisorProvider);
+    await ref.read(appPrefsProvider.notifier).setRouterPort(port);
+    if (!mounted) return;
+    if (ref.read(appPrefsProvider).managedServer) {
+      await supervisor.restart();
+    }
+  }
+
+  /// Points the server at another folder of model files, through the same open
+  /// panel every other folder in this app is chosen with. Cancelling changes
+  /// nothing, and the restart follows for [_setRouterPort]'s reason: the
+  /// preset names absolute paths, and a running server has already read it.
+  Future<void> _chooseModelsFolder() async {
+    final path = await _fileDialogs.chooseDirectory();
+    if (path == null || !mounted) return;
+    final supervisor = ref.read(modelServerSupervisorProvider);
+    await ref.read(appPrefsProvider.notifier).setModelsFolder(path);
+    if (!mounted) return;
+    if (ref.read(appPrefsProvider).managedServer) {
+      await supervisor.restart();
+    }
+  }
+
   /// Opens the New message screen. A pane and not a section, like Settings and
   /// the log, and it clears the same things they do — including the reply
   /// window, which belongs to a thread that is no longer on screen.
@@ -2004,6 +2051,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final contextDirs = ref.watch(contextDirectoriesProvider);
     final appInfo = ref.watch(appInfoProvider).valueOrNull;
     final databasePath = ref.watch(databasePathProvider).valueOrNull;
+    // Null until the channel answers, and null forever in a widget test —
+    // which is why every update prop below is a ternary rather than a `!`.
+    final updates = ref.watch(updaterStatusProvider).valueOrNull;
+    // Watched so the card follows a load through to ready without anybody
+    // touching the pane; the supervisor's own field is the fallback for the
+    // frame before the stream's first value lands, so the card never renders
+    // a blank where a state belongs.
+    final serverState = ref.watch(serverStateProvider).valueOrNull ??
+        ref.read(modelServerSupervisorProvider).state;
+    final supervisor = ref.read(modelServerSupervisorProvider);
+    final paths = ref.read(appPathsProvider);
     return SettingsScreen(
       scope: scope,
       onBack: onBack,
@@ -2126,6 +2184,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       slotIsDefault: {
         for (final slot in ModelSlot.values) slot: prefs.isSlotDefault(slot),
       },
+      // What each editor treats as "Default", which is the ROUTER target while
+      // the app runs its own server: handing it the compiled default instead
+      // would turn a Save on an untouched editor into an override equal to
+      // today's router URL, detaching the slot from the router for good.
+      compiledDefaults: {
+        for (final slot in ModelSlot.values) slot: prefs.slotBaseline(slot),
+      },
       probeServer: _probe.probe,
       onSlotTargetChanged: (slot, {required url, required model}) =>
           unawaited(switch (slot) {
@@ -2139,6 +2204,35 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ModelSlot.embed => Future<void>.value(),
           }),
       onSlotReset: (slot) => unawaited(notifier.clearSlotTarget(slot)),
+      localServerSummary: SettingsLocalServerBody.summary(
+        serverState,
+        managed: prefs.managedServer,
+      ),
+      modelsHeader: SettingsLocalServerBody(
+        state: serverState,
+        managed: prefs.managedServer,
+        port: prefs.routerPort,
+        // Resolved here rather than in the card: empty means "the app's own
+        // folder", and only this side knows where that is.
+        modelsFolder: prefs.effectiveModelsFolder(paths),
+        onManagedChanged: (on) => unawaited(_setManagedServer(on)),
+        onPortSaved: (port) => unawaited(_setRouterPort(port)),
+        onPickFreePort: supervisor.pickFreePort,
+        onChooseFolder: () => unawaited(_chooseModelsFolder()),
+        onStart: () => unawaited(supervisor.ensureRunning()),
+        onStop: () => unawaited(supervisor.stop()),
+        onRestart: () => unawaited(supervisor.restart()),
+        // The log is a file, and the operating system's own viewer is the
+        // right reader for it — this app has no log pane and does not want
+        // one.
+        onShowLog: () => unawaited(launchUrl(Uri.file(supervisor.logFile.path))),
+        // Clears the wizard's own bookkeeping — everything in `setup_state`
+        // but the migration record and the download ledger — and bumps the
+        // counter `SetupGate` watches. The inbox unmounts and the wizard opens
+        // at the top, with the models still on disk and the session still
+        // signed in, so those two steps are a Continue each.
+        onSetUpAgain: () => unawaited(restartSetup(ref)),
+      ),
       lastMailSyncIso: stamps?.mailIso,
       lastTeamsSyncIso: stamps?.teamsIso,
       lastSweepIso: stamps?.sweepIso,
@@ -2178,6 +2272,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ? null
           : '${appInfo.version} (${appInfo.build})',
       databasePath: databasePath,
+      // Every one of these is wired ONLY when the updater said it is
+      // available: a build without the Sparkle keys gets the sentence and no
+      // controls, and a control that could not do anything is worse than none.
+      automaticUpdates: updates?.available == true ? updates!.automatic : null,
+      lastUpdateCheckIso: updates?.lastCheck?.toIso8601String(),
+      updatesUnavailableReason:
+          (updates != null && !updates.available) ? updates.unavailableReason : null,
+      onCheckForUpdates: updates?.available == true
+          ? () => unawaited(ref.read(updaterProvider).checkForUpdates())
+          : null,
+      onAutomaticUpdatesChanged: updates?.available == true
+          ? (on) async {
+              await ref.read(updaterProvider).setAutomaticChecks(on);
+              if (!mounted) return;
+              // Re-read rather than assume: Sparkle owns the preference, so
+              // the switch has to show ITS answer — including the case where
+              // it declined to take the new value.
+              ref.invalidate(updaterStatusProvider);
+            }
+          : null,
       // `valueOrNull ?? const []` rather than the AsyncValue's own empty
       // state: the section must render — with its Loading… line — while the
       // first read is out, and a null here would take the whole section off

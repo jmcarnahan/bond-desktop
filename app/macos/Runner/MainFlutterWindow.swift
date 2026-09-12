@@ -18,6 +18,21 @@ class MainFlutterWindow: NSWindow {
     // messenger exists.
     BookmarkChannel.register(with: flutterViewController.engine.binaryMessenger)
 
+    // Same messenger, same reason. The first-run flow asks what this machine
+    // is before it draws its first choice, and the supervisor asks for an App
+    // Nap assertion the moment it spawns the server — both of which can
+    // happen before any user interaction.
+    SystemChannel.register(with: flutterViewController.engine.binaryMessenger)
+
+    // Last of the three, and here rather than later for two reasons. The About
+    // pane can ask for update status as soon as it renders, and Sparkle's
+    // scheduler has to exist before it can arm the daily check at all —
+    // registering it lazily would mean an app that only ever checks for
+    // updates once somebody has opened Settings. Nothing happens on a first
+    // launch either way: Sparkle deliberately never checks until the app has
+    // been launched twice and its interval has passed.
+    UpdaterChannel.register(with: flutterViewController.engine.binaryMessenger)
+
     super.awakeFromNib()
   }
 }

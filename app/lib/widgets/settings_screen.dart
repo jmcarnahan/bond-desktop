@@ -192,6 +192,14 @@ class SettingsScreen extends StatefulWidget {
   /// hiding the section — the section's premise is [onSlotTargetChanged].
   final void Function(ModelSlot slot)? onSlotReset;
 
+  /// Drawn at the top of the Models section — the host's Local server card.
+  /// Null leaves the section exactly as it was before there was one.
+  final Widget? modelsHeader;
+
+  /// That card's one-liner, prefixed onto the collapsed Models summary. Null
+  /// keeps the summary the three slots alone.
+  final String? localServerSummary;
+
   /// When mail, Teams and the storyline sweep last ran. Null means never, and
   /// reads as 'never' rather than as a blank.
   final String? lastMailSyncIso;
@@ -254,6 +262,27 @@ class SettingsScreen extends StatefulWidget {
   final String? appVersion;
 
   final String? databasePath;
+
+  /// Whether Sparkle checks for updates on its own. **Null hides the switch**,
+  /// the same "absent wiring, absent control" discipline every optional row
+  /// here follows — a build with no updater must not offer to configure one.
+  final bool? automaticUpdates;
+
+  /// When the updater last looked, as an ISO stamp the host composed from
+  /// Sparkle's own answer. Null reads as never having checked.
+  final String? lastUpdateCheckIso;
+
+  /// Why this build cannot update itself, when it cannot. A development build
+  /// and a widget test both land here: the Sparkle keys are written into
+  /// Info.plist by `dist/bundle.sh` and exist in no other build.
+  final String? updatesUnavailableReason;
+
+  /// Asks Sparkle to look now. Null hides the button — and Sparkle's own
+  /// window is what the user sees next, which is why nothing here is a future.
+  final VoidCallback? onCheckForUpdates;
+
+  /// Turns the daily check on or off. Null hides the switch.
+  final ValueChanged<bool>? onAutomaticUpdatesChanged;
 
   /// The registered context directories, with their link and passage counts.
   /// **Null hides the whole section** — the same "absent wiring, absent
@@ -344,6 +373,8 @@ class SettingsScreen extends StatefulWidget {
     this.probeServer,
     this.onSlotTargetChanged,
     this.onSlotReset,
+    this.modelsHeader,
+    this.localServerSummary,
     this.lastMailSyncIso,
     this.lastTeamsSyncIso,
     this.lastSweepIso,
@@ -359,6 +390,11 @@ class SettingsScreen extends StatefulWidget {
     this.onSignOutAndClear,
     this.appVersion,
     this.databasePath,
+    this.automaticUpdates,
+    this.lastUpdateCheckIso,
+    this.updatesUnavailableReason,
+    this.onCheckForUpdates,
+    this.onAutomaticUpdatesChanged,
     this.contextDirectories,
     this.contextDirectoriesLoading = false,
     this.contextDirectoriesError,
@@ -382,6 +418,10 @@ class SettingsScreen extends StatefulWidget {
       ValueKey('settings-clear-attachment-cache-confirm');
   static const Key clearCacheKeepKey =
       ValueKey('settings-clear-attachment-cache-keep');
+
+  /// Keyed for the same reason the buttons above are: 'Check for updates' is
+  /// an ordinary phrase, and the caption beside it contains half of it.
+  static const Key checkForUpdatesKey = ValueKey('settings-check-for-updates');
 
   /// The three extended permissions, which are [microsoftPermissions] — the
   /// table itself moved to the section that renders the rows. Kept here
@@ -600,7 +640,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (widget.onSlotTargetChanged != null)
         _section(
           'Models',
-          SettingsModelsBody.summary(widget.slotTargets),
+          SettingsModelsBody.summary(
+            widget.slotTargets,
+            server: widget.localServerSummary,
+          ),
           _modelsBody(),
         ),
       _section('Needs You', _needsYouSummary(), _needsYouBody()),
@@ -633,7 +676,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (!ai && widget.onRefreshNow != null)
         _section('Sync & data', _syncSummary(now), _syncBody(now)),
       if (!ai && (widget.appVersion != null || widget.databasePath != null))
-        _section('About', _aboutSummary(), _aboutBody()),
+        _section('About', _aboutSummary(), _aboutBody(now)),
     ];
   }
 
@@ -751,6 +794,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // ── Models ────────────────────────────────────────────────────────────────
 
   Widget _modelsBody() => SettingsModelsBody(
+    header: widget.modelsHeader,
     targets: widget.slotTargets,
     isDefault: widget.slotIsDefault,
     compiledDefaults: widget.compiledDefaults,
@@ -1095,12 +1139,69 @@ class _SettingsScreenState extends State<SettingsScreen> {
       : 'Bond ${widget.appVersion}';
 
   /// What this build is and where it keeps the mailbox — the two things a bug
-  /// report needs and nothing else on this screen answers.
-  Widget _aboutBody() {
+  /// report needs and nothing else on this screen answers — and, between them,
+  /// whether this copy can replace itself.
+  ///
+  /// The updates block sits directly under the version because it is the same
+  /// subject read forwards: what this build is, and what the next one would be.
+  /// It renders only as far as it is wired — the button, the switch and the
+  /// not-configured sentence are three independent `if`s, because a
+  /// development build has the sentence and neither control, and the section's
+  /// own visibility rule is unchanged either way.
+  Widget _aboutBody(DateTime now) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text('Version ${widget.appVersion ?? 'unknown'}', style: BondType.small),
+        if (widget.onCheckForUpdates case final check?) ...[
+          const SizedBox(height: BondSpacing.s12),
+          Row(
+            children: [
+              OutlinedButton(
+                key: SettingsScreen.checkForUpdatesKey,
+                onPressed: check,
+                child: const Text('Check for updates'),
+              ),
+              const SizedBox(width: BondSpacing.s12),
+              // The caption answers the question the button raises — "is what
+              // I am looking at current?" — which is exactly what
+              // `relativeTime` is for. Never a clock time: a stamp would make
+              // a reader subtract.
+              Expanded(
+                child: Text(
+                  switch (relativeTime(widget.lastUpdateCheckIso, now)) {
+                    final ago? => 'Last checked $ago',
+                    _ => 'Never checked for updates',
+                  },
+                  style: BondType.caption,
+                ),
+              ),
+            ],
+          ),
+        ],
+        if (widget.onAutomaticUpdatesChanged case final onChanged?)
+          if (widget.automaticUpdates case final on?)
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              value: on,
+              title: Text(
+                'Check for updates automatically',
+                style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+              ),
+              subtitle: Text(
+                'Bond looks once a day and asks before it installs anything.',
+                style: BondType.caption,
+              ),
+              // No local mirror of the value: Sparkle owns this preference,
+              // the host re-reads it after the call, and a `setState` here
+              // would show what was asked for rather than what is true.
+              onChanged: onChanged,
+            ),
+        if (widget.updatesUnavailableReason case final reason?) ...[
+          const SizedBox(height: BondSpacing.s12),
+          Text(reason, style: BondType.caption),
+        ],
         if (widget.databasePath case final path?) ...[
           const SizedBox(height: BondSpacing.s12),
           Text(

@@ -72,6 +72,19 @@ const Map<ModelSlot, LlmTarget> slotDefaults = {
   ModelSlot.embed: embedSlotDefault,
 };
 
+/// The ids the router preset gives the three models — the `model` field a
+/// request sends when the app runs its own server.
+///
+/// One llama-server in router mode serves all three, and it routes on the
+/// model name alone, so these strings are the whole wiring between a slot and
+/// the weights behind it. They are named for the ROLE rather than for the
+/// checkpoint (`bond-prose`, not `qwen3.8`) so that swapping which GGUF fills
+/// a role is a change to the preset file and to nothing else — no stored
+/// target, no request, and no test has to learn the new checkpoint's name.
+const String routerProseId = 'bond-prose';
+const String routerBulkId = 'bond-bulk';
+const String routerEmbedId = 'bond-embed';
+
 /// One pipeline stage, as the settings screen names it.
 ///
 /// AUTHORED, not derived. The stage→slot mapping is decided in

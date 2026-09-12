@@ -14,7 +14,7 @@ void main() {
   Future<void> pump(
     WidgetTester tester, {
     String title = 'Settings',
-    required VoidCallback onBack,
+    VoidCallback? onBack,
     VoidCallback? onHome,
     Widget? trailing,
     Size surface = const Size(900, 600),
@@ -80,6 +80,23 @@ void main() {
     await tester.pump();
 
     expect(homes, 1);
+  });
+
+  testWidgets('a host with nowhere to go back to gets a disabled arrow',
+      (tester) async {
+    // The first-run wizard's first step is the only caller with no way back.
+    // The arrow stays and goes grey rather than disappearing, because the
+    // header is a row and a missing button would shift the title of exactly
+    // one pane.
+    await pump(tester, onBack: null);
+
+    expect(find.byIcon(Icons.arrow_back), findsOneWidget);
+    expect(
+      tester
+          .widget<IconButton>(find.widgetWithIcon(IconButton, Icons.arrow_back))
+          .onPressed,
+      isNull,
+    );
   });
 
   testWidgets('the trailing slot renders what the pane puts in it',

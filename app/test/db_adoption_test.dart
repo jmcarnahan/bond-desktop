@@ -323,11 +323,11 @@ void main() {
             r['name'] as String,
         ];
     expect(tablesOf(fresh), tablesOf(legacy));
-    // 20 through v14, plus the five `context_*` tables v15 adds. A literal
-    // rather than a derived number, so a table that appears on ONE side —
-    // the failure this whole test exists to catch — cannot be absorbed by
-    // both counts moving together.
-    expect(tablesOf(fresh).length, 25);
+    // 20 through v14, plus the five `context_*` tables v15 adds, plus
+    // `setup_state` from v16. A literal rather than a derived number, so a
+    // table that appears on ONE side — the failure this whole test exists to
+    // catch — cannot be absorbed by both counts moving together.
+    expect(tablesOf(fresh).length, 26);
 
     for (final table in tablesOf(legacy)) {
       List<String> columnsOf(raw.Database db) => [

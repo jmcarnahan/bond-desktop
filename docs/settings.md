@@ -74,7 +74,7 @@ body has the same shape in `settings_models_body.dart`.
 |---|---|---|
 | About me | always | the saved text, whitespace collapsed to one line, cut at 80 characters with `…`; `Not written yet` when empty |
 | Microsoft connection | any of `onBackendModeChanged`, `connectionStatus`, `hasScope`, `onSignIn` is wired | `MCP` or `This device`, then (MCP only) `Deployed` / `Local` / `Custom`, then `Checking…` / `Not signed in` / `Signed in as <label>` / `Signed in`, joined by ` · ` |
-| Models | `onSlotTargetChanged` wired | `Fast <model> @ <host:port> · Prose <model> @ <host:port> · Embeddings <host:port>` |
+| Models | `onSlotTargetChanged` wired | `[<local server summary> · ]Fast <model> @ <host:port> · Prose <model> @ <host:port> · Embeddings <host:port>` — the prefix is present only when the host wires the Local server card (`localServerSummary`), so a screen without one reads exactly as it always did |
 | Needs You | always | the threshold wording, plus ` · custom rules` or ` · default rules` when `onNeedsYouRulesSaved` is wired, plus ` · judging N message(s)` while `needsYouRejudging` (the whole needs-you queue, from `needsYouPendingProvider`) is above zero — "judging", not "re-judging", because the count cannot tell a Save's rows from a sync's |
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
 | Activity log | `onShowActivityLogChanged` wired | `Shown in the sidebar` / `Hidden` |
@@ -239,8 +239,11 @@ value equal to the compiled default is sent as the **empty string**, because
 empty means "follow the build" and is stored as empty — freezing today's
 dart-define into the database would make a changed `FAST_LLAMA_MODEL` invisible
 (see `prefs_models_test.dart`). The URL and the model name are always written
-together. **A probe never blocks a Save**: somebody about to start a server has
-to be able to point the app at it first.
+together. While the **Local server** switch is on, "Default" in the two editors
+is the router target rather than the compiled one (`AppPrefs.slotBaseline`), so
+an unedited Save still leaves the slot following the router and a later port
+change still moves it. **A probe never blocks a Save**: somebody about to start
+a server has to be able to point the app at it first.
 
 **Three probe outcomes, rendered apart.** `ModelServerProbe.probe` never throws
 and answers one of:
@@ -273,6 +276,90 @@ model's name (`EmbeddingsClient.modelTag`), so swapping it would silently
 compare vectors from two different spaces. Changing it is a re-embed migration,
 not a setting — `EMBED_URL` at build time. The card shows the URL and a Check
 server button and nothing else.
+
+**Local server card.** The first thing in the section, above the stage table
+and separated from it by a divider, is `SettingsLocalServerBody`
+(`app/lib/widgets/settings_local_server_card.dart`). It is injected as
+`SettingsScreen.modelsHeader` rather than built by the section, so
+`settings_models_body.dart` keeps knowing nothing about a supervisor: the
+section is about where model calls go, and what is running is the host's answer
+to hand over. It is prop-only like everything else here, and a null callback
+hides its control.
+
+It shows, top to bottom:
+
+- **`Bond runs the model server`** — the switch over `AppPrefs.managedServer`,
+  subtitled "One llama-server serves all three models from this Mac. Off, the
+  app expects servers you started yourself." It is the only control that stays
+  live when the preference is off; everything below it is disabled, not hidden,
+  so the row does not jump about while the server stops. Flipping it writes the
+  preference and then starts or stops the process — `_setManagedServer` on
+  `_InboxScreenState`, in that order, because `ensureRunning`/`stop` both ask
+  the preference and would read the old answer if they went first.
+- **The state**, as `ServerStateDescribe.summary`: `Stopped`, `Starting… on
+  port 8080`, `Loading models (1 of 3) on port 8080`, `Ready on
+  127.0.0.1:8080`, `Failed: <reason>`, `Port 8080 is in use[ by <holder>]`, and
+  `Off — servers are started by hand`. A failure or a held port renders as an
+  error `InlineAlert`, a start or a load as an attention one, everything else
+  as body text. Under a failure sit the **last 12 lines** of the server's log
+  in mono — the reason alone never explains a crash. Under a held port sits
+  `Pick a free port below, or stop the other program.` **The switch wins over
+  the supervisor**: with the preference off the card says `Off` whatever the
+  supervisor last reported, because stopping is asynchronous and a card still
+  saying `Ready` would be describing a server the app has already stopped
+  using.
+- **The port** — a digits-only field, **Pick a free port** (fills the field
+  from `ModelServerSupervisor.pickFreePort`, and saves nothing: a port that
+  moved because somebody pressed a button labelled *Pick* would be a surprise
+  restart), and **Save port**, live only when the number parses, sits in
+  1024..65535 and differs from the stored one. Out of range shows `Use a port
+  between 1024 and 65535`. Saving restarts the server, because a running
+  process cannot change the socket it is bound to.
+- **Models folder** — the effective path in mono (the host resolves "the app's
+  own folder" through `AppPrefs.effectiveModelsFolder`) and **Change folder…**,
+  which goes through the same `FileDialogs.chooseDirectory()` open panel every
+  other folder in this app is chosen with. Cancelling changes nothing; a change
+  restarts the server, because the preset names absolute paths.
+- **Start / Stop / Restart**, offered by state — Start for stopped, failed and
+  port-in-use; Stop for starting, loading and ready; Restart for loading and
+  ready — plus **Show log**, which hands the log file to the operating system's
+  own viewer (this app has no log pane and does not want one), and **Set up
+  again**, which runs the first-run wizard from the top.
+
+  **Set up again** stashes a `done` that was there into
+  `SetupStore.previousSetupKey`, clears `setup_state` EXCEPT
+  `SetupStore.keptOnRestart` — the container-migration record, the download
+  ledger and that stash — and then bumps `setupRestartProvider`, which is what
+  `SetupGate` re-decides on. The kept keys are the point: starting over must
+  not re-copy a mailbox that is already here or re-download twenty-three
+  gigabytes that already are. So the wizard opens at **Welcome to Bond** with
+  the models still on disk and the session still signed in, and those two
+  steps are a **Continue** each. The order matters and is pinned by
+  `setup_reentry_test.dart`: the keys go first, because the gate re-reads the
+  store the moment the counter moves.
+
+  **It is not a one-way door.** With the stash present the welcome step draws
+  a secondary **Back to the inbox** under **Get started**
+  (`SetupWelcomeBody.onReturnToInbox`, null on a first run — there is no inbox
+  behind THAT wizard). Pressing it calls `SetupController.returnToInbox`,
+  which writes `setup = 'done'` back, removes the stash and hands control to
+  the gate through the same `onFinished` callback Finish uses. A download this
+  run started is left running, on the controller's dispose reasoning: the run
+  outlives the screen, and cancelling one an hour in would be a steeper price
+  than the button implies. `finish()` removes the stash too, so a second run
+  that was seen through to the end leaves nothing behind.
+- The caption `Changing the port or the folder restarts the server. Work in
+  flight parks and resumes when it is back.`
+
+`app/test/settings_local_server_test.dart` pins every one of those strings —
+the nine state sentences, the switch's title and subtitle, the port error, the
+held-port advice, the caption — plus which buttons each state offers and that
+everything but the switch and **Set up again** is dead while the preference is
+off — that one stays live because it acts on the wizard rather than on a
+process, and a switch that is off is one of the states the wizard exists to put
+right.
+`settings_models_test.dart` pins the join: the server's line leads the collapsed
+summary, and the card renders above the stage table.
 
 **The probe's lifetime is the screen's.** `_InboxScreenState` holds one
 `ModelServerProbe` and closes it in `dispose`. A client per button press would
@@ -474,6 +561,153 @@ the call throws `MissingPluginException`, the provider turns that into an
 `AsyncError`, and the host's `valueOrNull` reads it as null. About then quietly
 says `Version unknown` rather than throwing. A test that wants real values
 overrides the two providers — `settings_models_host_test.dart` does.
+
+### Updates
+
+Between the version line and the database block sit three controls, each wired
+independently and each absent when its wire is null — the visibility rule for
+the **section** is unchanged (`appVersion` or `databasePath` known, and never
+under the AI scope):
+
+- **`Check for updates`**, an `OutlinedButton`
+  (`SettingsScreen.checkForUpdatesKey`), with a caption beside it reading
+  `Last checked <relative>` or, when nothing ever has, exactly
+  `Never checked for updates`.
+- **`Check for updates automatically`**, a `SwitchListTile` subtitled
+  `Bond looks once a day and asks before it installs anything.`
+- The sentence `Updates are not configured in this build.`, when the updater
+  could not start.
+
+**Sparkle owns both values.** The automatic-checks preference and the
+last-check time are Sparkle's, not this app's: the switch shows what the
+updater answers, and the host `ref.invalidate`s `updaterStatusProvider` after
+every move rather than keeping a local copy that could disagree. The screen
+never flips the switch itself.
+
+The wiring is `updaterProvider` / `updaterStatusProvider` over
+`ChannelUpdater` (`app/lib/services/system/updater.dart`), and the host passes
+the two callbacks **only** when the status says `available` — a control that
+could not do anything is worse than no control.
+
+**A development build shows the sentence and neither control**, and that is
+correct rather than broken: `SUFeedURL`, `SUPublicEDKey`,
+`SUEnableAutomaticChecks` and `SUScheduledCheckInterval` are written into
+`Info.plist` by `dist/bundle.sh` at package time, so no `flutter run` build has
+them. A widget test is different: the channel call never comes back inside
+the fake-async zone, so `updaterStatusProvider` stays loading and About renders
+**no update rows at all**. A test that wants a verdict overrides
+`updaterProvider` with a fake (`settings_models_host_test.dart` does both:
+a fake that answers, and `NullUpdater` for the not-configured sentence).
+
+Everything after the button is **Sparkle's own window**: the release notes, the
+download, the relaunch. It is the one non-Flutter surface in the app and it is
+deliberate — the no-dialogs rule is a rule about Flutter screens, and
+`test/no_dialogs_test.dart` scans `lib/`, where there is nothing to find
+because Sparkle is Swift. Sparkle never checks on a first launch.
+
+The full story — key generation, hosting, the release step that regenerates the
+feed — is [distribution.md → Updates](distribution.md).
+
+## First run
+
+Before the sign-in gate and after the server bootstrap sits `SetupGate`
+(`app/lib/screens/setup/setup_gate.dart`), which chooses the first-run wizard
+or the rest of the app from one stored word — `setup_state['setup']`, holding
+a `SetupStep.name` — and one check against the manifest. `'done'` is the only
+value that lets the app through, AND the download ledger must describe the
+three checkpoints this build ships (`DownloadLedger.matches`): a manifest bump
+that keeps the file names would otherwise leave a machine serving the previous
+weights for ever, since nothing downstream compares digests. A bumped digest
+sends the wizard back to its **download** step, where `_onEnter` fetches what
+has moved. The gate answers ONCE, on `AuthGate`'s pattern, and re-decides only
+when the flow reports itself finished or when **Set up again** bumps the
+counter.
+
+`SetupFlow` (`app/lib/screens/setup/setup_flow.dart`) is the only file in the
+flow that touches a provider. Every step body is prop-only, the
+`SettingsLocalServerBody` discipline: the host reads `setupControllerProvider`
+and hands down values and closures, and a null callback hides its control.
+One `PaneSurface`, whose title is the step's and whose trailing slot reads
+`Step N of 8`. The back arrow is `null` on the first step — which is why
+`PaneSurface.onBack` is nullable and renders DISABLED rather than absent.
+
+| # | Title | Primary button | What it does |
+|---|---|---|---|
+| 1 | Welcome to Bond | `Get started` | What Bond is; the container-migration line when there was one |
+| 2 | Your Mac | `Continue` | Chip, memory, macOS. Intel or Rosetta renders **no** button at all; too little memory for the prose model is a warning that still continues |
+| 3 | Models | `Continue` | The manifest's three rows — name, role sentence, size, licence button, and any `notice` verbatim — and the total |
+| 4 | Storage | `Continue` | The effective folder, **Change folder…**, and `checkDisk`. Dead until the preflight answers and passes; free space that could not be asked counts as passing, a folder that cannot be WRITTEN does not — `Bond can't write to this folder. Choose another one.` |
+| 5 | Download | `Continue` | Three bars, smallest first. Enabled only when EVERY file is done — see below |
+| 6 | Sign in | `Continue` | `SignInBody(showTitle: false)` when signed out (signing in advances, and there is no Continue); `You're signed in.` and a Continue when already signed in |
+| 7 | Notifications | `Continue` | The press IS the ask. Exactly one button, and the word `Allow` appears nowhere — macOS is about to put its own Allow up |
+| 8 | All set | `Finish` | Folder, port, account, notifications, then `managedServer = true` and `setup = 'done'`, and only then the server |
+
+**`'done'` is written by Finish and by `returnToInbox`, and by nothing else.**
+The second writer never INVENTS the word: it only puts back a value
+`finish()` had written, stashed by **Set up again** at the moment it cleared
+it. Arriving at **All set**
+records `notifications` — the step BEFORE it — because `'done'` is the gate's
+sentinel: a quit on the last screen would otherwise let the next launch
+straight past the gate with `managedServer` still off and no wizard left to
+turn it on. A relaunch lands on Notifications instead, whose Continue re-asks
+(macOS answers a settled prompt instantly) and leads back to All set.
+`SetupController.finish` returns whether BOTH writes landed; false keeps the
+wizard on the screen with `Setup could not be saved. Try Finish again.` above
+the button, because leaving for the inbox on a half-written finish would be the
+app claiming a setup that is not on disk. On a finish that DID save, the server
+is asked for fire-and-forget on `ServerBootstrap`'s reasoning — and it is
+`restart()` rather than `ensureRunning()` when the models folder moved during
+the run OR when any file reached `done` while the wizard was open, since
+`ensureRunning` returns at once on a server that is already up: the preset
+hash it compares covers paths and arguments rather than digests, so the router
+would go on mmap'ing the copies in the old folder, or the weights the run has
+just replaced.
+
+**Changing the folder ends a run in flight.** `SetupController.setFolder`
+cancels the downloader before the preference moves, because `ModelDownloader`
+reads the folder once per run: a transfer left going would keep filling the
+folder the user has just left. The parts stay where they are, exactly as a
+Cancel leaves them.
+
+**Continue on the download step waits for all three files**, not for
+`ModelManifest.usableIds` (embed + bulk, informational and gating nothing).
+`ModelServerSupervisor._launch`
+refuses to start while any file the preset names is missing, so a partial set
+could not serve the inbox anyway — and finishing early would leave a
+non-engineer looking at an idle inbox with no progress bar left to explain it.
+
+**`--dart-define=BOND_DEV_SKIP_SETUP=1`** skips the wizard entirely
+(`SetupGate.skipDefine`). It is for the engineers who run `make model fast
+embed` by hand: their models are in the Homebrew cache rather than this app's
+folder, and a wizard offering to download twenty-three gigabytes they already
+have would be in the way of every `make app-run`. A define rather than a
+preference because it describes the BUILD, not the person — `local.mk` passes
+it through (see QUICKSTART step 2).
+
+**The notifications ask happens once.** `SetupController.continueFromNotifications`
+calls `DesktopNotifier.ensureAuthorized`, then seeds the answer into
+`DesktopNotificationService.seedAuthorization` so the first settled message
+does not raise a second system prompt. A denial keeps the user on the step
+exactly once, so the sentence naming System Settings is read; the next
+Continue moves on. A seeded denial is memoized in memory and nowhere else —
+the next launch asks again, which is what makes re-granting in System Settings
+work with no stored flag to clear.
+
+**Which tests pin which strings.** `setup_step_test.dart` — the eight titles,
+the stored names, the counter. `setup_welcome`/`device`/`models`/`storage`/
+`download`/`notifications` bodies are pinned by `setup_device_test.dart`,
+`setup_models_test.dart` (including the committed Gemma notice, read off the
+real asset), `setup_storage_test.dart`, `setup_download_test.dart` (both
+`describeRemaining` and `describeDownloadError` tables) and
+`setup_notifications_test.dart` (one button, `Allow` nowhere).
+`setup_flow_test.dart` walks all eight and pins `Step N of 8`, the persisted
+step and the disabled back arrow; `setup_gate_test.dart` pins which screen a
+launch gets, the manifest bump included; `setup_controller_test.dart` and
+`setup_resume_test.dart` pin the behaviour under the screens — the resume at
+a `.part`'s byte offset, the folder change that ends a run, the restart after
+weights land; `setup_reentry_test.dart` pins what **Set up again** keeps and
+the way back out of it. The end-user walk-through of the same eight screens is
+`docs/install.md`.
 
 ## Deliberate deferrals
 

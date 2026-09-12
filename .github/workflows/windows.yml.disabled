@@ -1,0 +1,183 @@
+# Build and sign the Bond Desktop Windows installer.
+#
+# DISABLED BY ITS FILE NAME. GitHub reads only *.yml and *.yaml in this
+# directory, so a file ending .disabled is inert. This workflow has never run.
+#
+# Enabling it is `git mv .github/workflows/windows.yml.disabled
+# .github/workflows/windows.yml`, and three things have to exist first:
+#
+#   1. The Azure resources: an Azure subscription, an Artifact Signing account
+#      (Basic), a completed identity validation, a Public Trust certificate
+#      profile, and a federated credential on an Entra app registration scoped
+#      to this repository so azure/login can authenticate by OIDC.
+#   2. The secrets and variables below. Secrets: BOND_MCP_SERVER_URL,
+#      AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_SUBSCRIPTION_ID. Variables:
+#      AZURE_SIGNING_ENDPOINT (https://<region>.codesigning.azure.net),
+#      AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_PROFILE. There is no Azure client
+#      secret and there is no Sparkle key here - the Sparkle private key stays
+#      on the release Mac.
+#   3. The Windows product-string rename: app/windows/CMakeLists.txt still sets
+#      BINARY_NAME to "bond_inbox", Runner.rc still says ProductName
+#      "bond_inbox", and app/lib/services/notify/local_desktop_notifier.dart
+#      still passes appName 'Bond Inbox' for the toast header.
+#      dist/windows/bond.iss expects bond_desktop.exe.
+#
+# Design and reasoning: dist/windows/README.md -> CI.
+name: windows-installer
+
+# Manual only. A release is a deliberate act, and half of it happens on the
+# release Mac: this workflow produces an installer, a human signs it with the
+# Sparkle key and publishes the feed.
+on:
+  workflow_dispatch:
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    permissions:
+      # Required by azure/login's OIDC flow; nothing else here needs a token.
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned to the SDK version the macOS pipeline requires, so a Flutter
+      # release cannot quietly change what ships.
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.2
+          channel: stable
+          cache: true
+
+      # app/pubspec.yaml's single version: line is the only place either number
+      # is written, exactly as the Makefile treats it for macOS.
+      - name: Read version from pubspec
+        run: |
+          $line = Select-String -Path app/pubspec.yaml -Pattern '^version:\s*(.+)$' |
+                  Select-Object -First 1
+          if (-not $line) { throw "no version: line in app/pubspec.yaml" }
+          $value = $line.Matches[0].Groups[1].Value.Trim()
+          $parts = $value.Split('+')
+          if ($parts.Count -ne 2) { throw "version: $value is not <name>+<build>" }
+          # Add-Content rather than Out-File: BOM-free under both pwsh and
+          # Windows PowerShell, and a BOM would corrupt the first line.
+          Add-Content -Path $env:GITHUB_ENV -Value "VERSION=$($parts[0])"
+          Add-Content -Path $env:GITHUB_ENV -Value "BUILD=$($parts[1])"
+          Write-Host "version $($parts[0]) build $($parts[1])"
+
+      - name: Resolve dependencies
+        working-directory: app
+        run: flutter pub get
+
+      # BOND_MCP_SERVER_URL is the ONLY define. MICROSOFT_CLIENT_SECRET never
+      # ships - a build carrying it has it readable in the binary, which is why
+      # dist/bundle.sh refuses an env file that has one on macOS. The secret
+      # reaches the step through env:, never interpolated into the script
+      # text, so no character in it can change the command.
+      - name: Build the app
+        working-directory: app
+        env:
+          BOND_MCP_SERVER_URL: ${{ secrets.BOND_MCP_SERVER_URL }}
+        run: >
+          flutter build windows --release
+          --build-name $env:VERSION
+          --build-number $env:BUILD
+          --dart-define=BOND_MCP_SERVER_URL=$env:BOND_MCP_SERVER_URL
+
+      # Downloads the pinned llama.cpp Vulkan release asset, verifies its
+      # SHA-256 and stages the allowlist into dist/windows/stage/llama.
+      - name: Stage the llama-server sidecar
+        run: pwsh dist/windows/fetch-llama.ps1
+
+      # OIDC: no client secret is stored anywhere. The signing step below uses
+      # this login because of exclude-workload-identity-credential: 'false'.
+      - name: Azure login
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Every exe AND every dll, including flutter_windows.dll and the plugin
+      # DLLs: Windows 11 Smart App Control blocks what it has no verdict on
+      # unless it is validly signed, DLLs included, and Mark-of-the-Web does
+      # not enter into it.
+      - name: Sign the app binaries
+        uses: Azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files-folder: app/build/windows/x64/runner/Release
+          files-folder-filter: exe,dll
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-workload-identity-credential: 'false'
+
+      # The third-party llama.cpp binaries get our signature like everything
+      # else, the same way dist/sign.sh re-signs every nested Mach-O on macOS.
+      - name: Sign the sidecar binaries
+        uses: Azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files-folder: dist/windows/stage/llama
+          files-folder-filter: exe,dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-workload-identity-credential: 'false'
+
+      # The compiler is the one input this image provides rather than the
+      # workflow pins: Inno Setup 6.7.1 is preinstalled on windows-latest, and
+      # Chocolatey's newest package is 6.7.1 as well, so an assertion with the
+      # fix in its message is what a pin can be here. The version is read from
+      # the executable's file properties, not from running it: ISCC with no
+      # script exits non-zero, which GitHub's pwsh wrapper turns into a failed
+      # step before anything could be matched.
+      - name: Assert the Inno Setup compiler
+        run: |
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc)) {
+            throw "ISCC.exe not found at $iscc - the image changed; fix: choco install innosetup --version=6.7.1 -y"
+          }
+          $v = (Get-Item -LiteralPath $iscc).VersionInfo.ProductVersion
+          if ($v -notmatch '^6\.7(\.|$)') {
+            throw "expected Inno Setup 6.7.x, got $v - fix: choco install innosetup --version=6.7.1 -y"
+          }
+          Write-Host "Inno Setup $v"
+
+      # The version comes from the pubspec, never from the .iss default.
+      - name: Compile the installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=$env:VERSION dist\windows\bond.iss
+
+      # Installer last: signing it before its contents would seal a hash of
+      # unsigned files.
+      - name: Sign the installer
+        uses: Azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files: dist/windows/out/Bond-Desktop-${{ env.VERSION }}-Setup.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-workload-identity-credential: 'false'
+
+      # The artifact is what a human downloads, signs for the Sparkle feed on
+      # the release Mac, and attaches to the GitHub release.
+      - name: Upload the installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: Bond-Desktop-${{ env.VERSION }}-Setup
+          path: dist/windows/out/*.exe
+          if-no-files-found: error

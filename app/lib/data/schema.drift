@@ -706,3 +706,16 @@ CREATE TABLE context_chunks (
 CREATE UNIQUE INDEX ix_context_chunks_seq ON context_chunks(file_id, seq);
 CREATE INDEX ix_context_chunks_unindexed ON context_chunks(indexed_at);
 CREATE INDEX ix_context_chunks_file ON context_chunks(file_id);
+
+-- First-run setup and machine-local state — which step the wizard reached,
+-- the download ledger, whether the sandbox container was migrated. Not
+-- mailbox data: it survives `wipeAll` (the store never deletes from it) and
+-- never leaves this machine.
+--
+-- `"key"` is quoted for `app_prefs`'s reason, above: drift drops an unquoted
+-- column of that name from the schema it generates.
+CREATE TABLE setup_state (
+  "key" TEXT NOT NULL PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
