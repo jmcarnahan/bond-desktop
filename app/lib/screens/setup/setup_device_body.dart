@@ -14,9 +14,14 @@ import 'setup_controls.dart';
 ///
 /// The two verdicts are deliberately different in kind. An Intel Mac, or an
 /// x86_64 build under Rosetta, has no Metal backend under it and there is
-/// nothing to offer: this step renders NO way forward. Too little memory for
-/// the writing model is a warning and nothing more — triage, extraction and
-/// search all run on the two small models, and those fit anywhere.
+/// nothing to offer: this step renders NO way forward. The blocked branch is
+/// insurance for a HAND-BUILT x86_64 binary rather than the shipped path —
+/// the released app is arm64-only (`ARCHS = arm64`), so macOS refuses to open
+/// it on an Intel Mac and nobody ever reaches this screen there.
+///
+/// Too little memory for the writing model is a warning and nothing more —
+/// triage, extraction and search all run on the two small models, and those
+/// fit anywhere.
 class SetupDeviceBody extends StatelessWidget {
   /// Null while the platform is still being asked.
   final HardwareInfo? hardware;

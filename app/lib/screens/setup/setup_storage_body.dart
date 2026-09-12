@@ -16,7 +16,9 @@ import 'setup_controls.dart';
 /// Free space that CANNOT be asked is not a refusal. The download hits ENOSPC
 /// and keeps its part, which is a recoverable failure with a sentence
 /// attached, and refusing on ignorance would block a network mount that
-/// simply cannot answer.
+/// simply cannot answer. A folder Bond cannot WRITE to is the other way
+/// round: that one is known, it is fatal to every file, and the only way past
+/// it is another folder.
 class SetupStorageBody extends StatelessWidget {
   /// The EFFECTIVE folder — the host has already resolved "the app's own
   /// folder" into a path.
@@ -79,6 +81,17 @@ class SetupStorageBody extends StatelessWidget {
   List<Widget> _space(DiskPreflight? preflight) {
     if (preflight == null) {
       return [Text('Checking free space…', style: BondType.body)];
+    }
+    if (!preflight.writable) {
+      // Ahead of every arithmetic branch: a folder that refuses the first byte
+      // makes the free figure beside it irrelevant, and the preflight's `ok`
+      // has already made Continue dead.
+      return [
+        InlineAlert(
+          severity: InlineAlertSeverity.error,
+          text: "Bond can't write to this folder. Choose another one.",
+        ),
+      ];
     }
     if (!preflight.known) {
       return [

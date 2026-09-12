@@ -67,10 +67,25 @@ class AppDelegate: FlutterAppDelegate {
     // machine that stays up, and signalling a stranger's process because the
     // kernel handed out the same integer would be unforgivable. The executable
     // path is what makes it checkable.
+    //
+    // It is compared against the path the record itself names, symlinks
+    // resolved on both sides so that `/opt/homebrew/bin/llama-server` and its
+    // Cellar target are one answer. A bare "ends in llama-server" test is
+    // looser than the Dart reaper's and runs on EVERY quit: a stale record
+    // whose pid the kernel has since handed to a hand-started `make model`
+    // server would pass it, and the app would kill a server it does not own on
+    // its way out. A record with no `binaryPath` was written by an older build
+    // and keeps the old test, which is the most that can be said about it.
     var pathBuffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
     guard proc_pidpath(Int32(pid), &pathBuffer, UInt32(MAXPATHLEN)) > 0 else { return }
-    let executable = String(cString: pathBuffer)
-    guard executable.hasSuffix("llama-server") else { return }
+    let executable = URL(fileURLWithPath: String(cString: pathBuffer))
+      .resolvingSymlinksInPath().path
+    if let recorded = record["binaryPath"] as? String {
+      let ours = URL(fileURLWithPath: recorded).resolvingSymlinksInPath().path
+      guard executable == ours else { return }
+    } else {
+      guard executable.hasSuffix("llama-server") else { return }
+    }
 
     kill(Int32(pid), SIGTERM)
     // Up to two seconds of polling, in fiftieths. llama-server can be inside a

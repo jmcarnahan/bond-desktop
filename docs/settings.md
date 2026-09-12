@@ -326,15 +326,28 @@ It shows, top to bottom:
   own viewer (this app has no log pane and does not want one), and **Set up
   again**, which runs the first-run wizard from the top.
 
-  **Set up again** clears `setup_state` EXCEPT `SetupStore.keptOnRestart` —
-  the container-migration record and the download ledger — and then bumps
-  `setupRestartProvider`, which is what `SetupGate` re-decides on. The two
-  kept keys are the point: starting over must not re-copy a mailbox that is
-  already here or re-download twenty-three gigabytes that already are. So the
-  wizard opens at **Welcome to Bond** with the models still on disk and the
-  session still signed in, and those two steps are a **Continue** each. The
-  order matters and is pinned by `setup_reentry_test.dart`: the keys go
-  first, because the gate re-reads the store the moment the counter moves.
+  **Set up again** stashes a `done` that was there into
+  `SetupStore.previousSetupKey`, clears `setup_state` EXCEPT
+  `SetupStore.keptOnRestart` — the container-migration record, the download
+  ledger and that stash — and then bumps `setupRestartProvider`, which is what
+  `SetupGate` re-decides on. The kept keys are the point: starting over must
+  not re-copy a mailbox that is already here or re-download twenty-three
+  gigabytes that already are. So the wizard opens at **Welcome to Bond** with
+  the models still on disk and the session still signed in, and those two
+  steps are a **Continue** each. The order matters and is pinned by
+  `setup_reentry_test.dart`: the keys go first, because the gate re-reads the
+  store the moment the counter moves.
+
+  **It is not a one-way door.** With the stash present the welcome step draws
+  a secondary **Back to the inbox** under **Get started**
+  (`SetupWelcomeBody.onReturnToInbox`, null on a first run — there is no inbox
+  behind THAT wizard). Pressing it calls `SetupController.returnToInbox`,
+  which writes `setup = 'done'` back, removes the stash and hands control to
+  the gate through the same `onFinished` callback Finish uses. A download this
+  run started is left running, on the controller's dispose reasoning: the run
+  outlives the screen, and cancelling one an hour in would be a steeper price
+  than the button implies. `finish()` removes the stash too, so a second run
+  that was seen through to the end leaves nothing behind.
 - The caption `Changing the port or the folder restarts the server. Work in
   flight parks and resumes when it is back.`
 
@@ -600,9 +613,15 @@ feed — is [distribution.md → Updates](distribution.md).
 Before the sign-in gate and after the server bootstrap sits `SetupGate`
 (`app/lib/screens/setup/setup_gate.dart`), which chooses the first-run wizard
 or the rest of the app from one stored word — `setup_state['setup']`, holding
-a `SetupStep.name`. `'done'` is the only value that lets the app through. It
-answers ONCE, on `AuthGate`'s pattern, and re-decides only when the flow
-reports itself finished or when **Set up again** bumps the counter.
+a `SetupStep.name` — and one check against the manifest. `'done'` is the only
+value that lets the app through, AND the download ledger must describe the
+three checkpoints this build ships (`DownloadLedger.matches`): a manifest bump
+that keeps the file names would otherwise leave a machine serving the previous
+weights for ever, since nothing downstream compares digests. A bumped digest
+sends the wizard back to its **download** step, where `_onEnter` fetches what
+has moved. The gate answers ONCE, on `AuthGate`'s pattern, and re-decides only
+when the flow reports itself finished or when **Set up again** bumps the
+counter.
 
 `SetupFlow` (`app/lib/screens/setup/setup_flow.dart`) is the only file in the
 flow that touches a provider. Every step body is prop-only, the
@@ -617,13 +636,16 @@ One `PaneSurface`, whose title is the step's and whose trailing slot reads
 | 1 | Welcome to Bond | `Get started` | What Bond is; the container-migration line when there was one |
 | 2 | Your Mac | `Continue` | Chip, memory, macOS. Intel or Rosetta renders **no** button at all; too little memory for the prose model is a warning that still continues |
 | 3 | Models | `Continue` | The manifest's three rows — name, role sentence, size, licence button, and any `notice` verbatim — and the total |
-| 4 | Storage | `Continue` | The effective folder, **Change folder…**, and `checkDisk`. Dead until the preflight answers and passes; free space that could not be asked counts as passing |
+| 4 | Storage | `Continue` | The effective folder, **Change folder…**, and `checkDisk`. Dead until the preflight answers and passes; free space that could not be asked counts as passing, a folder that cannot be WRITTEN does not — `Bond can't write to this folder. Choose another one.` |
 | 5 | Download | `Continue` | Three bars, smallest first. Enabled only when EVERY file is done — see below |
 | 6 | Sign in | `Continue` | `SignInBody(showTitle: false)` when signed out (signing in advances, and there is no Continue); `You're signed in.` and a Continue when already signed in |
 | 7 | Notifications | `Continue` | The press IS the ask. Exactly one button, and the word `Allow` appears nowhere — macOS is about to put its own Allow up |
 | 8 | All set | `Finish` | Folder, port, account, notifications, then `managedServer = true` and `setup = 'done'`, and only then the server |
 
-**`'done'` is written by Finish and by nothing else.** Arriving at **All set**
+**`'done'` is written by Finish and by `returnToInbox`, and by nothing else.**
+The second writer never INVENTS the word: it only puts back a value
+`finish()` had written, stashed by **Set up again** at the moment it cleared
+it. Arriving at **All set**
 records `notifications` — the step BEFORE it — because `'done'` is the gate's
 sentinel: a quit on the last screen would otherwise let the next launch
 straight past the gate with `managedServer` still off and no wizard left to
@@ -635,11 +657,21 @@ the button, because leaving for the inbox on a half-written finish would be the
 app claiming a setup that is not on disk. On a finish that DID save, the server
 is asked for fire-and-forget on `ServerBootstrap`'s reasoning — and it is
 `restart()` rather than `ensureRunning()` when the models folder moved during
-the run, since `ensureRunning` returns at once on a server that is already up
-and would leave the router mmap'ing the copies in the old folder.
+the run OR when any file reached `done` while the wizard was open, since
+`ensureRunning` returns at once on a server that is already up: the preset
+hash it compares covers paths and arguments rather than digests, so the router
+would go on mmap'ing the copies in the old folder, or the weights the run has
+just replaced.
+
+**Changing the folder ends a run in flight.** `SetupController.setFolder`
+cancels the downloader before the preference moves, because `ModelDownloader`
+reads the folder once per run: a transfer left going would keep filling the
+folder the user has just left. The parts stay where they are, exactly as a
+Cancel leaves them.
 
 **Continue on the download step waits for all three files**, not for
-`ModelManifest.usableIds` (embed + bulk). `ModelServerSupervisor._launch`
+`ModelManifest.usableIds` (embed + bulk, informational and gating nothing).
+`ModelServerSupervisor._launch`
 refuses to start while any file the preset names is missing, so a partial set
 could not serve the inbox anyway — and finishing early would leave a
 non-engineer looking at an idle inbox with no progress bar left to explain it.
@@ -670,9 +702,11 @@ real asset), `setup_storage_test.dart`, `setup_download_test.dart` (both
 `setup_notifications_test.dart` (one button, `Allow` nowhere).
 `setup_flow_test.dart` walks all eight and pins `Step N of 8`, the persisted
 step and the disabled back arrow; `setup_gate_test.dart` pins which screen a
-launch gets; `setup_controller_test.dart` and `setup_resume_test.dart` pin the
-behaviour under the screens; `setup_reentry_test.dart` pins what **Set up
-again** keeps. The end-user walk-through of the same eight screens is
+launch gets, the manifest bump included; `setup_controller_test.dart` and
+`setup_resume_test.dart` pin the behaviour under the screens — the resume at
+a `.part`'s byte offset, the folder change that ends a run, the restart after
+weights land; `setup_reentry_test.dart` pins what **Set up again** keeps and
+the way back out of it. The end-user walk-through of the same eight screens is
 `docs/install.md`.
 
 ## Deliberate deferrals

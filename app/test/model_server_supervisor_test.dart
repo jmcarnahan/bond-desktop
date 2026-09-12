@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -42,6 +43,52 @@ void main() {
   Future<ServerState> waitFor(bool Function(ServerState) matches) =>
       supervisor.states.firstWhere(matches).timeout(const Duration(seconds: 5));
 
+  /// Polls until [reached] answers true, or three seconds are up.
+  ///
+  /// The alternative — sleeping for "the timeout plus the backoff" — is a
+  /// guess about how fast this machine is, and a loaded CI box makes a liar of
+  /// it. Coming back early is the point: a run that returns in twenty
+  /// milliseconds and a run that needs two seconds both end with the same
+  /// assertion, and only the assertion decides.
+  Future<void> waitUntil(bool Function() reached) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 3));
+    while (DateTime.now().isBefore(deadline)) {
+      if (reached()) return;
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+  }
+
+  /// The supervisor every test runs against, and the two knobs a test has
+  /// wanted to change. Everything else is read through a closure, so the
+  /// values `setUp` puts in the variables above are what a call sees.
+  ModelServerSupervisor buildSupervisor({
+    List<Duration> restartBackoff = const [
+      Duration(milliseconds: 5),
+      Duration(milliseconds: 10),
+      Duration(milliseconds: 15),
+    ],
+    Future<int?> Function(String reason)? beginActivity,
+  }) =>
+      ModelServerSupervisor(
+        runner: runner,
+        supportDir: root,
+        binaryPath: () => binaryOverride,
+        buildPreset: () => preset,
+        routerPort: () => server.port,
+        managed: () => managed,
+        onReady: () => readyCalls++,
+        beginActivity: beginActivity ??
+            (reason) async {
+              activities.add('begin:$reason');
+              return 7;
+            },
+        endActivity: (token) async => activities.add('end:$token'),
+        healthInterval: const Duration(milliseconds: 10),
+        terminateGrace: const Duration(milliseconds: 60),
+        startTimeout: const Duration(milliseconds: 800),
+        restartBackoff: restartBackoff,
+      );
+
   setUp(() async {
     root = await Directory.systemTemp.createTemp('supervisor');
     models = Directory(p.join(root.path, 'models'));
@@ -79,28 +126,7 @@ void main() {
       return process;
     };
 
-    supervisor = ModelServerSupervisor(
-      runner: runner,
-      supportDir: root,
-      binaryPath: () => binaryOverride,
-      buildPreset: () => preset,
-      routerPort: () => server.port,
-      managed: () => managed,
-      onReady: () => readyCalls++,
-      beginActivity: (reason) async {
-        activities.add('begin:$reason');
-        return 7;
-      },
-      endActivity: (token) async => activities.add('end:$token'),
-      healthInterval: const Duration(milliseconds: 10),
-      terminateGrace: const Duration(milliseconds: 60),
-      startTimeout: const Duration(milliseconds: 800),
-      restartBackoff: const [
-        Duration(milliseconds: 5),
-        Duration(milliseconds: 10),
-        Duration(milliseconds: 15),
-      ],
-    );
+    supervisor = buildSupervisor();
   });
 
   tearDown(() async {
@@ -283,6 +309,13 @@ void main() {
   /// unrelated failure as a port problem — and, worse, would never retry it,
   /// because a port problem is the one crash no backoff is spent on.
   test('a bind failure in one attempt does not explain the next one', () async {
+    // Nothing here ever finishes loading, so no attempt reaches ready. That is
+    // load-bearing for the ending this test asserts: a launch that DID reach
+    // ready hands the restart budget back — it has proved the launch works —
+    // and the run would go round for ever instead of giving up, which is the
+    // budget's own test and not this one's.
+    server.loaded = {for (final id in preset.modelIds) id: false};
+    server.healthy = false;
     runner.listeners[server.port] = 'llama-server (pid 4242)';
     var attempt = 0;
     runner.onStart = (start) {
@@ -327,8 +360,9 @@ void main() {
     await supervisor.start();
     final first = runner.processes.single.pid;
 
-    // The 800 ms timeout, then the 5 ms backoff.
-    await Future<void>.delayed(const Duration(milliseconds: 900));
+    // The 800 ms timeout, then the 5 ms backoff — polled rather than slept
+    // through, so a slow machine costs time here instead of a failure.
+    await waitUntil(() => runner.starts.length >= 2);
 
     expect(runner.kills, contains((first, ProcessSignal.sigterm)));
     expect(runner.starts.length, greaterThanOrEqualTo(2));
@@ -354,8 +388,9 @@ void main() {
 
     server.healthy = false;
 
-    // Three failed polls at 10 ms, the crash, then the 5 ms backoff.
-    await Future<void>.delayed(const Duration(milliseconds: 200));
+    // Three failed polls at 10 ms, the crash, then the 5 ms backoff — polled
+    // for rather than slept through, on the previous test's reasoning.
+    await waitUntil(() => runner.starts.length >= 2);
 
     expect(runner.kills, contains((first, ProcessSignal.sigterm)));
     expect(runner.starts.length, greaterThanOrEqualTo(2));
@@ -414,6 +449,79 @@ void main() {
     final first = await supervisor.states.first;
     expect(first, supervisor.state);
     expect(first, isA<ServerReady>());
+  });
+
+  /// The restart budget belongs to a launch that cannot come up, not to the
+  /// session.
+  ///
+  /// A machine that crashes its server once a day and recovers every time is
+  /// a machine in working order — a wedged GPU driver, a model swapped under
+  /// the router — and counting those crashes against one budget means the app
+  /// quietly stops restarting after the third, on a day when nothing is
+  /// different. One rung of backoff here, so the SECOND crash is the one that
+  /// would give up.
+  test('a server that reached ready gets the whole budget again', () async {
+    final idle = supervisor;
+    addTearDown(idle.dispose);
+    supervisor = buildSupervisor(
+      restartBackoff: const [Duration(milliseconds: 5)],
+    );
+    runner.onStart = (start) {
+      final process = FakeRunningProcess(pid: runner.nextPid++);
+      Future<void>.delayed(Duration.zero, () {
+        process.emit('main: server is listening on '
+            'http://127.0.0.1:${server.port} - starting the main loop');
+      });
+      return process;
+    };
+
+    final readies = <ServerReady>[];
+    var failures = 0;
+    final sub = supervisor.states.listen((state) {
+      if (state is ServerReady) readies.add(state);
+      if (state is ServerFailed) failures++;
+    });
+    addTearDown(sub.cancel);
+
+    await supervisor.start();
+    await waitUntil(() => readies.length == 1);
+    runner.processes.last.finish(1);
+    await waitUntil(() => readies.length == 2);
+    // The second crash of the session, and the first of THIS launch.
+    runner.processes.last.finish(1);
+    await waitUntil(() => readies.length == 3);
+
+    expect(readies, hasLength(3));
+    expect(failures, 0);
+  });
+
+  /// The activity assertion outlives the launch that asked for it unless the
+  /// token is handed back.
+  ///
+  /// `beginActivity` is a platform channel — an await — and a quit landing in
+  /// that gap has already looked for a token, found none and ended nothing. A
+  /// token stored afterwards would hold an `NSProcessInfo` assertion for the
+  /// life of the process, and App Nap would never get the app back.
+  test('an activity that arrives after the stop is handed straight back',
+      () async {
+    final idle = supervisor;
+    addTearDown(idle.dispose);
+    final begun = Completer<int?>();
+    supervisor = buildSupervisor(beginActivity: (reason) {
+      activities.add('begin:$reason');
+      return begun.future;
+    });
+    runner.onStart = (start) => FakeRunningProcess(pid: 2020);
+
+    unawaited(supervisor.start());
+    await waitUntil(() => activities.isNotEmpty);
+    await supervisor.stop();
+    // The channel answers only now, to a supervisor that has already stopped.
+    begun.complete(99);
+    await waitUntil(() => activities.length > 1);
+
+    expect(activities, ['begin:Starting the model server', 'end:99']);
+    expect(supervisor.state, const ServerStopped());
   });
 
   test('pickFreePort asks the runner', () async {

@@ -180,7 +180,12 @@ nissues=0
 case "$nissues" in
   ''|*[!0-9]*) nissues=0 ;;
 esac
-if [ "$nissues" -eq 0 ]; then
+if [ -z "$have_log" ]; then
+  # Without the log there is nothing to count, and "no issues" would be a
+  # claim about a file this run never got — the one sentence someone reads
+  # before deciding not to look further.
+  note "log not fetched — issues unknown"
+elif [ "$nissues" -eq 0 ]; then
   ok "no issues in the log"
 else
   # Not a failure row: warnings appear here on an Accepted submission too, and

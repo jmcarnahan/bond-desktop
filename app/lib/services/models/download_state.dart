@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart' show immutable;
 
+import 'model_manifest.dart';
+
 /// Where one file is in its life.
 ///
 /// [paused] and [failed] are both "not moving", and they are kept apart
@@ -238,9 +240,33 @@ class DownloadLedger {
 
   bool isDone(String id) => files[id]?.status == DownloadStatus.done;
 
-  /// True when every id in [ids] is done — callers pass
-  /// `ModelManifest.usableIds` for "the inbox can start" and every id for
-  /// "the whole set is here".
+  /// Done, AND against the digest the manifest names today.
+  ///
+  /// [isDone] answers the question a RUN asks — is there anything left to
+  /// fetch for this id — and it cannot answer the one a LAUNCH asks. A
+  /// manifest bump that keeps the file name leaves a done row describing the
+  /// previous checkpoint, and an install that trusted it would go on serving
+  /// the old weights for ever: nothing else compares digests, because hashing
+  /// eighteen gigabytes to open a window is not a thing this app may do.
+  bool isCurrent(ModelFile file) {
+    final row = files[file.id];
+    return row != null &&
+        row.status == DownloadStatus.done &&
+        row.sha256 == file.sha256;
+  }
+
+  /// Every file in [manifest] is [isCurrent] — the whole set, at this build's
+  /// digests. What the gate and the wizard's resume both ask.
+  bool matches(ModelManifest manifest) {
+    for (final file in manifest.models) {
+      if (!isCurrent(file)) return false;
+    }
+    return true;
+  }
+
+  /// True when every id in [ids] is done, whatever digest its row carries.
+  /// The question a run asks about the ids it was handed; [matches] is the
+  /// one to ask about a manifest.
   bool allDone(Iterable<String> ids) {
     for (final id in ids) {
       if (!isDone(id)) return false;

@@ -90,6 +90,13 @@ behaves exactly as this page has always described.
   resident, and reports a `ServerState`. `ServerBootstrap`
   (`app/lib/widgets/server_bootstrap.dart`) wraps the whole app and calls
   `ensureRunning()` once at launch — a no-op while the preference is off.
+- **The restart budget is per failing launch, not per session.** A crash is
+  retried on a 1 / 4 / 16 s backoff and then reported as `failed` with the log
+  tail. Reaching ready RESETS the count: a launch that came up has proved it
+  can, so a server that crashes once a week and recovers gets the whole ladder
+  every time rather than being given up on for good on its fourth crash. A
+  `couldn't bind` line is the exception that is never retried — no amount of
+  waiting frees a port somebody else is holding.
 - **Three ids, one origin.** The preset names its models for the ROLE rather
   than the checkpoint — `bond-prose`, `bond-bulk`, `bond-embed`
   (`model_slots.dart`) — because the router routes on the model name alone.
@@ -135,7 +142,21 @@ behaves exactly as this page has always described.
   server with a 4 s grace and then exits regardless; the Swift reaper is the
   second line of defence, because a child started with
   `ProcessStartMode.normal` still outlives a parent that dies without running
-  it (flutter#134255).
+  it (flutter#134255). That reaper compares the record's `binaryPath` against
+  the process's own executable (symlinks resolved on both sides) rather than
+  testing that the name ends in `llama-server`, so a pid the kernel has since
+  handed to a hand-started `make model` server is never signalled on quit.
+- **Adoption takes FOUR agreements**, and every one of them has been the wrong
+  answer on its own: the pid is alive, the recorded `presetHash` is the one
+  this build writes, the recorded `binaryPath` is the binary this build would
+  spawn (symlinks resolved, so `/opt/homebrew/bin/llama-server` and its Cellar
+  target are one answer), and the recorded `port` is the one `router_port`
+  names. Anything else falls through to the reap-then-start path, which kills
+  only when the process's command line carries both `llama-server` AND the
+  preset file this app wrote. The binary check is what stops a packaged build
+  adopting the Homebrew server a `BOND_LLAMA_SERVER` session left behind and
+  reporting Ready for it; the port check is what stops a record written before
+  a port change being adopted while every client dials the new one.
 - **Off by default.** `managed_server` reads false for an absent key, and the
   compiled slot defaults stay `localhost:8080` / `8082` / `8081`, so the
   three-server `make model | fast | embed` workflow is byte-identical until
@@ -189,9 +210,13 @@ Phase 4 draws the wizard on top of it.
 
 - **One stream at a time, smallest first.** The bottleneck is the link, not the
   server, so four concurrent transfers only make every one of them finish
-  later; smallest first means the inbox is usable after the embed and bulk
-  models (`ModelManifest.usableIds`) rather than after all twenty-three
-  gigabytes.
+  later; smallest first means the two small models land early and the wizard's
+  bars show real progress within minutes. It does NOT open the inbox early:
+  the wizard's Continue and the server both wait for all three, because the
+  preset names every file and `_launch` refuses to start with one missing
+  (`ModelManifest.usableIds` is informational). And a digest that MOVED is
+  noticed at the next launch — `DownloadLedger.matches` fails, the gate shows
+  the wizard again and it opens on its download step.
 - **A failure moves on.** A prose model that 404s must not hide an embedding
   model that finished, so a file's failure is an event on the stream and the
   run continues to the next file. The stream itself never carries an error.

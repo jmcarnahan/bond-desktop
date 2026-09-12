@@ -938,8 +938,14 @@ app-build:
 
 # One source of truth for both numbers: pubspec's `version: 1.0.0+1` line,
 # which is also what --build-name/--build-number carry into Info.plist.
-VERSION ?= $(shell sed -n 's/^version:[[:space:]]*\([^+]*\)+.*/\1/p' $(APP_DIR)/pubspec.yaml)
-BUILD   ?= $(shell sed -n 's/^version:[[:space:]]*[^+]*+\(.*\)/\1/p' $(APP_DIR)/pubspec.yaml)
+# Both halves are matched as DIGITS rather than as "everything up to +" and
+# "everything after it": the loose form let a trailing YAML comment ride along
+# into BUILD (`version: 1.0.1+2 # bump` → `2 # bump`), which then reaches
+# --build-number and Sparkle's sparkle:version. A line these cannot parse
+# leaves both empty, and dist-check's "pubspec version" row is what says so
+# before a release starts.
+VERSION ?= $(shell sed -n 's/^version:[[:space:]]*\([0-9][0-9.]*\)+.*/\1/p' $(APP_DIR)/pubspec.yaml)
+BUILD   ?= $(shell sed -n 's/^version:[[:space:]]*[0-9][0-9.]*+\([0-9][0-9]*\).*/\1/p' $(APP_DIR)/pubspec.yaml)
 
 # Non-empty selects the ad-hoc rehearsal described above.
 AD_HOC ?=
@@ -962,25 +968,25 @@ dist-llama:
 	@dist/build-llama.sh
 
 dist-app: dist-llama
-	@MS_ENV=$(MS_ENV) VERSION=$(VERSION) BUILD=$(BUILD) FLUTTER=$(FLUTTER) \
-	 AD_HOC=$(AD_HOC) DIST_ENV=$(DIST_ENV) \
+	@MS_ENV="$(MS_ENV)" VERSION=$(VERSION) BUILD=$(BUILD) FLUTTER=$(FLUTTER) \
+	 AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" \
 	 BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/bundle.sh
 
 dist-sign: dist-app
-	@AD_HOC=$(AD_HOC) DIST_ENV=$(DIST_ENV) dist/sign.sh
+	@AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" dist/sign.sh
 
 dist-notarize: dist-sign
-	@AD_HOC=$(AD_HOC) DIST_ENV=$(DIST_ENV) DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/notarize.sh "dist/stage/Bond Desktop.app"
+	@AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/notarize.sh "dist/stage/Bond Desktop.app"
 
 # A real DMG is built from the STAPLED app: the ticket is written INTO the
 # bundle, so a copy taken before notarization carries none. AD_HOC=1 has
 # nothing to notarize and drops the prerequisite. `.NOTPARALLEL` at the top of
 # this file is what keeps the two prerequisites in this order.
 dist-dmg: dist-sign $(if $(AD_HOC),,dist-notarize)
-	@VERSION=$(VERSION) AD_HOC=$(AD_HOC) DIST_ENV=$(DIST_ENV) DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/dmg.sh
+	@VERSION=$(VERSION) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/dmg.sh
 
 dist-check:
-	@MS_ENV=$(MS_ENV) DIST_ENV=$(DIST_ENV) BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
+	@MS_ENV="$(MS_ENV)" DIST_ENV="$(DIST_ENV)" BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
 
 # How a maintainer gets `generate_keys` without installing anything globally:
 # the pinned tools are staged under dist/stage/ and dist-clean takes them away
@@ -994,7 +1000,7 @@ dist-sparkle-tools:
 # re-notarize an identical binary. What it needs is the DMG in dist/out/, which
 # the script checks for and names the command that produces.
 dist-appcast:
-	@VERSION=$(VERSION) BUILD=$(BUILD) AD_HOC=$(AD_HOC) DIST_ENV=$(DIST_ENV) dist/appcast.sh
+	@VERSION=$(VERSION) BUILD=$(BUILD) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" dist/appcast.sh
 
 # Internal, hence the leading underscore (the `_wait-*` convention). The strict
 # report runs FIRST so a release never begins on a machine that cannot finish
@@ -1005,7 +1011,7 @@ _dist-preflight:
 	   printf "  $(RED)✗$(RESET) make dist is the signed, notarized release — for a tester build use: make dist-dmg AD_HOC=1\n"; \
 	   exit 1; \
 	 fi
-	@STRICT=1 MS_ENV=$(MS_ENV) DIST_ENV=$(DIST_ENV) BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
+	@STRICT=1 MS_ENV="$(MS_ENV)" DIST_ENV="$(DIST_ENV)" BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
 
 # No $(MAKE) sub-invocations here: the prerequisite chain already gives the
 # order, and a sub-make would rebuild the app once per invocation.

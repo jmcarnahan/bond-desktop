@@ -38,7 +38,12 @@ make dist                    # signed, notarized, stapled
    `make dist-check`, run with `STRICT=1` so a red row stops the build before
    it starts. Half an hour of compiling and then a missing notary key is the
    failure this exists to refuse. It also refuses `AD_HOC=1`: `make dist` is
-   the release, and the tester build is `make dist-dmg AD_HOC=1`.
+   the release, and the tester build is `make dist-dmg AD_HOC=1`. The preflight
+   is **not** run with `DIST_CHECK_OFFLINE=1`, so it includes the one row that
+   talks to Apple — `notarytool history` against the .p8, the key id and the
+   issuer — and a release build therefore proves the notarization credentials
+   before the twenty-minute build rather than after it. `DIST_CHECK_OFFLINE=1`
+   is for running `make dist-check` on a plane, not for a release.
 1. **`dist-llama`** builds `llama-server` from a SHA-256-pinned llama.cpp
    source tarball and stages it under `dist/stage/llama/`.
 2. **`dist-app`** runs `flutter build macos --release` and copies the sidecar
@@ -553,12 +558,28 @@ changes, and a diff a reviewer can read.
    Update the size and digest literals in that file in the same commit — they
    are the second pair of eyes on a copy-paste.
 
-The next launch does the rest. The ledger records which manifest sha each
-`.part` belongs to, so a changed digest DISCARDS the stale part rather than
-resuming into bytes from the previous checkpoint, and the new file is
-downloaded from zero. The preset hash changes with the file name too, so an
-adopted server serving the old weights is replaced rather than reused
-(`docs/pipeline/10-model-routing.md`, **Managed mode: one router**).
+### What an installed copy does with the bump
+
+The manifest's `sha256` is the **identity** of a checkpoint, not just a
+checksum over it. The setup ledger (`setup_state['download']`) records the
+digest each file was downloaded against, and that record is what makes a bump
+reach a machine where setup already finished.
+
+On every launch of an existing install the setup gate compares the ledger's
+digests with the manifest. A digest that changed — or a model id the ledger has
+never seen — reopens setup at the **Download models** step on the next launch,
+with the other steps already green. The downloader deletes a destination file
+whose recorded digest no longer matches and fetches the new one from zero; a
+`.part` from the previous checkpoint is discarded rather than resumed into.
+**Finish** restarts the model server, so the process that comes back is serving
+the new weights (`docs/pipeline/10-model-routing.md`, **Managed mode: one
+router**).
+
+One thing this does **not** do: a bump that changes `repo` or `file` — a new
+quantisation, say — writes the new file **beside** the old one, and nothing
+prunes the old one. The download folder keeps both, and the disk stays spent
+until someone clears it. Note it in the release notes: the user may delete the
+old `<repo with / → _>` folder under the models folder by hand.
 
 ## Releasing
 

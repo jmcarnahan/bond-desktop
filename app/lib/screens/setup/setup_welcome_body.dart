@@ -23,11 +23,21 @@ class SetupWelcomeBody extends StatelessWidget {
 
   final VoidCallback onContinue;
 
+  /// Leaves the wizard for the inbox it was opened over. Null on a first run
+  /// — there is nothing behind this screen to go back to — and non-null only
+  /// when "Set up again" brought somebody here from a machine that was
+  /// already finished, which is what turns that button from a one-way door
+  /// into a look around.
+  final VoidCallback? onReturnToInbox;
+
   const SetupWelcomeBody({
     super.key,
     required this.migration,
     required this.onContinue,
+    this.onReturnToInbox,
   });
+
+  static const Key returnToInboxKey = ValueKey('setup-return-to-inbox');
 
   @override
   Widget build(BuildContext context) {
@@ -66,6 +76,15 @@ class SetupWelcomeBody extends StatelessWidget {
         ],
         const SizedBox(height: BondSpacing.s24),
         SetupPrimaryButton(label: 'Get started', onPressed: onContinue),
+        if (onReturnToInbox != null)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              key: returnToInboxKey,
+              onPressed: onReturnToInbox,
+              child: const Text('Back to the inbox'),
+            ),
+          ),
       ],
     );
   }

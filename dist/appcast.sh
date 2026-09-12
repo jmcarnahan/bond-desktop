@@ -93,6 +93,18 @@ ok "Bond-Desktop-$VERSION.dmg"
 # one: every check below still passes, and no installed copy ever moves. So
 # the build number has to be above every one already published.
 FEED="$ROOT/docs/appcast/appcast.xml"
+# The comparison below is `[ "$BUILD" -le "$highest" ] 2>/dev/null`, and that
+# 2>/dev/null is the problem: a non-numeric BUILD makes the test ERROR rather
+# than answer, the error is swallowed, and the else branch reports the release
+# as newer than the feed. So BUILD's shape is settled here, before anything
+# reads it as a number. A malformed pubspec `version:` line is the way it gets
+# here empty.
+case "$BUILD" in
+  ''|*[!0-9]*)
+    bad "BUILD is not a number: '$BUILD' — write \`version: <major.minor.patch>+<n>\` in app/pubspec.yaml"
+    exit 1
+    ;;
+esac
 if [ -f "$FEED" ]; then
   # Only the numeric ones are comparable; ours are always integers from pubspec.
   highest="$(grep -o '<sparkle:version>[0-9]*</sparkle:version>' "$FEED" | grep -o '[0-9]\{1,\}' | sort -n | tail -1 || true)"

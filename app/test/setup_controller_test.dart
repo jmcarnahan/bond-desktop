@@ -25,6 +25,18 @@ import 'fixtures/fake_system_info.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/test_manifest.dart';
 
+/// Every byte sitting under [dir], parts included — what a folder that was
+/// left behind must stop gaining.
+int _bytesUnder(String dir) {
+  final root = Directory(dir);
+  if (!root.existsSync()) return 0;
+  var total = 0;
+  for (final entity in root.listSync(recursive: true)) {
+    if (entity is File) total += entity.lengthSync();
+  }
+  return total;
+}
+
 /// A store whose writes fail, for the one case that must not throw.
 class _UnwritableStore extends SetupStore {
   _UnwritableStore(super.db);
@@ -331,6 +343,37 @@ void main() {
     expect(controller.state.disk!.folder, other);
   });
 
+  test('choosing another folder mid-download ends the run it was filling',
+      () async {
+    // The downloader reads the folder ONCE per run, so a transfer left going
+    // would keep filling the folder the user has just left — gigabytes
+    // nobody will use, under progress bars describing somewhere else.
+    manifest = publish(embed: 512 * 1024);
+    hub.chunkDelay = const Duration(milliseconds: 5);
+    system.free = 500 * 1024 * 1024 * 1024;
+    await store.set(SetupStore.setupKey, SetupStep.download.name);
+    final downloader = buildDownloader();
+    final controller = build(downloader: downloader);
+
+    await controller.init();
+    await waitUntil(
+      () => (controller.state.downloads[routerEmbedId]?.receivedBytes ?? 0) > 0,
+      reason: 'the first bytes into the old folder',
+    );
+
+    hub.chunkDelay = null;
+    await controller.setFolder(p.join(root.path, 'elsewhere'));
+
+    expect(controller.state.downloadRunning, isFalse);
+    expect(controller.state.downloadPaused, isFalse);
+    await waitUntil(() => !downloader.running, reason: 'the run to end');
+
+    // And nothing more arrives in the folder that was left behind.
+    final settled = _bytesUnder(folder());
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(_bytesUnder(folder()), settled);
+  });
+
   test('entering the download step runs it, and every file lands', () async {
     await store.set(SetupStore.setupKey, SetupStep.download.name);
     final controller = build();
@@ -507,10 +550,10 @@ void main() {
 
   test('a stored done resumes at the top rather than at the last screen',
       () async {
-    // The gate never shows the flow for a store that says `done`, and "Set up
-    // again" clears the key before bumping the counter — so arriving here on
-    // `done` means something else wrote it, and the beginning is the honest
-    // place to put somebody.
+    // The gate never shows the flow for a store that says `done` AND a ledger
+    // that matches — so arriving here that way means something else wrote it,
+    // and the beginning is the honest place to put somebody.
+    await seedComplete();
     await store.set(SetupStore.setupKey, SetupStep.done.name);
     final controller = build();
     await controller.init();
@@ -519,6 +562,31 @@ void main() {
     // And there is nothing before it.
     await controller.back();
     expect(controller.state.step, SetupStep.welcome);
+  });
+
+  test('a stored done over a bumped manifest opens on the download step',
+      () async {
+    // The model-bump path. The word says the machine finished; the ledger
+    // describes the checkpoint BEFORE this build's, so the weights on disk
+    // are the old ones and the download step is where that gets put right.
+    await seedComplete();
+    final prose = manifest.byRole(ModelRole.prose);
+    var stale = await store.downloadLedger();
+    stale = stale.record(stale[prose.id]!.copyWith(sha256: 'f' * 64));
+    await store.recordDownload(stale);
+    await store.set(SetupStore.setupKey, SetupStep.done.name);
+
+    final controller = build();
+    await controller.init();
+
+    expect(controller.state.step, SetupStep.download);
+    expect(controller.state.downloadsComplete, isFalse);
+    // And `_onEnter` started the transfer for what has moved.
+    await waitUntil(
+      () => !controller.state.downloadRunning,
+      reason: 'the bumped file to be fetched',
+    );
+    expect(controller.state.downloadsComplete, isTrue);
   });
 
   test('the done step names who is signed in', () async {
@@ -588,6 +656,30 @@ void main() {
     await waitUntil(
       () => runner.starts.length == 2,
       reason: 'the server to be restarted',
+    );
+  });
+
+  test('Finish after weights landed in this run restarts the server',
+      () async {
+    // The preset hash the supervisor compares covers paths and arguments, not
+    // digests: a server still running over the files this run replaced looks
+    // healthy to `ensureRunning`, and would go on answering from them.
+    managed = true;
+    await store.set(SetupStore.setupKey, SetupStep.download.name);
+    final controller = build();
+    await controller.init();
+    await waitUntil(
+      () => !controller.state.downloadRunning,
+      reason: 'the run to finish',
+    );
+    await supervisor.ensureRunning();
+    expect(runner.starts.length, 1);
+
+    await controller.finish();
+
+    await waitUntil(
+      () => runner.starts.length == 2,
+      reason: 'the server to be restarted over the new weights',
     );
   });
 

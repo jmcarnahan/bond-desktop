@@ -143,6 +143,7 @@ void main() {
     int maxAttempts = 10,
     String Function()? at,
     OpenPart? openPart,
+    Uri Function(ModelFile)? resolveUri,
   }) {
     final downloader = ModelDownloader(
       manifest: which ?? manifest,
@@ -156,7 +157,7 @@ void main() {
       sha256: system.sha256,
       beginActivity: system.beginActivity,
       endActivity: system.endActivity,
-      resolveUri: hub.resolveUriFor,
+      resolveUri: resolveUri ?? hub.resolveUriFor,
       // Recorded, never slept: a backoff schedule is the property under test
       // and nine real minutes of it is not.
       sleep: (d) async => sleeps.add(d),
@@ -838,6 +839,32 @@ void main() {
     // guess that hammers a server which has already said no.
     expect(sleeps, [const Duration(seconds: 60)]);
     expect(events.last.status, DownloadStatus.done);
+  });
+
+  test('a rate limit asking for a day is still capped at the longest backoff',
+      () async {
+    // `t=86400` is tomorrow. A downloader that took it literally would leave
+    // the wizard's download step sitting on a spinner for a day, and the
+    // whole point of the cap is that nothing a server says can do that.
+    final wall = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => wall.close(force: true));
+    wall.listen((request) async {
+      request.response.statusCode = HttpStatus.tooManyRequests;
+      request.response.headers.set('RateLimit', '"api";r=0;t=86400');
+      await request.response.close();
+    });
+
+    final events = await build(
+      maxAttempts: 2,
+      resolveUri: (file) => Uri.parse(
+        'http://127.0.0.1:${wall.port}/${file.repo}/resolve/'
+        '${file.revision}/${file.file}',
+      ),
+    ).run([manifest.byId(routerEmbedId)]).toList();
+
+    expect(sleeps, [const Duration(seconds: 60)]);
+    expect(events.last.status, DownloadStatus.failed);
+    expect(events.last.error, DownloadError.network);
   });
 
   test('a second expired signature with no bytes in between waits',

@@ -3,9 +3,11 @@ import 'dart:convert';
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/setup_store.dart';
 import 'package:bond_inbox/services/models/download_state.dart';
+import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
+import 'fixtures/test_manifest.dart';
 
 FileDownloadState state(
   String id, {
@@ -100,6 +102,54 @@ void main() {
       expect(ledger.allDone(['a']), isTrue);
       expect(ledger.allDone(['a', 'b']), isFalse);
       expect(ledger.allDone(const <String>[]), isTrue);
+    });
+
+    test('isCurrent wants the digest as well as the word done', () {
+      // `isDone` answers what a RUN asks; it cannot answer what a LAUNCH
+      // asks. A manifest bump that kept the file name leaves a done row
+      // against the previous checkpoint, and an install that trusted it would
+      // serve the old weights for ever.
+      final manifest = testManifest();
+      final embed = manifest.byRole(ModelRole.embed);
+      final ledger = DownloadLedger.empty
+          .record(state(embed.id, sha: embed.sha256))
+          .record(state(
+            manifest.byRole(ModelRole.bulk).id,
+            sha: 'f' * 64,
+          ));
+
+      expect(ledger.isCurrent(embed), isTrue);
+      expect(ledger.isCurrent(manifest.byRole(ModelRole.bulk)), isFalse);
+      // Done at the right digest, in the ledger's eyes, is still not done
+      // when the row says otherwise.
+      expect(ledger.isCurrent(manifest.byRole(ModelRole.prose)), isFalse);
+      expect(
+        DownloadLedger.empty
+            .record(state(embed.id,
+                status: DownloadStatus.paused, sha: embed.sha256))
+            .isCurrent(embed),
+        isFalse,
+      );
+    });
+
+    test('matches wants every file in the manifest at this build\'s digests',
+        () {
+      final manifest = testManifest();
+      var ledger = DownloadLedger.empty;
+      for (final model in manifest.models) {
+        ledger = ledger.record(state(model.id, sha: model.sha256));
+      }
+
+      expect(ledger.matches(manifest), isTrue);
+      // One model bumped is the whole set out of date, because the server
+      // will not start with a file the preset names missing or wrong.
+      final prose = manifest.byRole(ModelRole.prose);
+      expect(
+        ledger.record(state(prose.id, sha: 'f' * 64)).matches(manifest),
+        isFalse,
+      );
+      expect(ledger.without(prose.id).matches(manifest), isFalse);
+      expect(DownloadLedger.empty.matches(manifest), isFalse);
     });
 
     test('parse tolerates null, empty and rubbish', () {

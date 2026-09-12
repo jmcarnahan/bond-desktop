@@ -25,6 +25,20 @@ void main() {
     expect(await file.readAsString(), 'hello\n');
   });
 
+  test('a log that cannot be written closes without throwing', () async {
+    // A DIRECTORY where the log file should be: `openWrite` cannot open it,
+    // and the failure lands on the sink asynchronously — the shape a filled
+    // disk or a folder that turned read-only takes mid-session. The contract
+    // is that no public method throws, and `close()` is the one that used to.
+    final file = File(p.join(root.path, 'logs', 'llama-server.log'));
+    await Directory(file.path).create(recursive: true);
+    final log = ServerLog(file);
+    await log.open();
+    log.write('lost');
+
+    await expectLater(log.close(), completes);
+  });
+
   test('a log past maxBytes is rotated to .1 on open', () async {
     final file = File(p.join(root.path, 'logs', 'llama-server.log'));
     await file.parent.create(recursive: true);

@@ -70,11 +70,27 @@ class SetupStore {
   /// why the `.part` file's length, not this row, is the resume offset.
   static const String downloadKey = 'download';
 
+  /// The `'done'` that "Set up again" took away, stashed so the wizard can
+  /// give it back.
+  ///
+  /// Written only when the flow is restarted on a machine that HAD finished,
+  /// and read by one screen: the welcome step, which offers **Back to the
+  /// inbox** when it is there. Nothing else may act on it — [setupKey] is
+  /// still the only word the gate reads.
+  static const String previousSetupKey = 'setup_previous';
+
   /// What "Set up again" keeps. Starting the wizard over must not throw away
   /// what is expensive and still true: the container migration HAPPENED, and
   /// the models are still on disk. Clearing either would re-copy a mailbox
   /// that is already here, or re-download twenty-three gigabytes that are.
-  static const Set<String> keptOnRestart = {containerMigrationKey, downloadKey};
+  /// [previousSetupKey] is the third because it is the value "Set up again"
+  /// has just stashed — a clear that took it out again would close the door
+  /// the same press opened.
+  static const Set<String> keptOnRestart = {
+    containerMigrationKey,
+    downloadKey,
+    previousSetupKey,
+  };
 
   static String _nowIso() => MessageStore.isoStamp(DateTime.now());
 

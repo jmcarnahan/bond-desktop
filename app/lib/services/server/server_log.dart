@@ -1,4 +1,7 @@
+import 'dart:async';
 import 'dart:io';
+
+import 'package:flutter/foundation.dart' show debugPrint;
 
 /// The child server's output, on disk and in memory.
 ///
@@ -37,7 +40,17 @@ class ServerLog {
       if (await rotated.exists()) await rotated.delete();
       await file.rename(rotated.path);
     }
-    _sink = file.openWrite(mode: FileMode.append);
+    final sink = file.openWrite(mode: FileMode.append);
+    // [write] is deliberately fire-and-forget, so NOTHING else watches this
+    // sink. A disk that filled or a folder that turned unwritable would then
+    // land as an unhandled async error from whichever `close()` happened to be
+    // running — a crash raised by the LOG, in a class whose whole contract is
+    // that no public method throws. Handled here, at the one place that can
+    // see it.
+    unawaited(sink.done.catchError((Object e) {
+      debugPrint('server log: ${file.path} stopped accepting writes: $e');
+    }));
+    _sink = sink;
   }
 
   /// Appends one line, and remembers it.
@@ -61,7 +74,14 @@ class ServerLog {
     final sink = _sink;
     _sink = null;
     if (sink == null) return;
-    await sink.flush();
-    await sink.close();
+    try {
+      await sink.flush();
+      await sink.close();
+    } catch (e) {
+      // Closing a log is the last thing a shutdown does, and a log that could
+      // not be written is not a reason to fail the shutdown — the error the
+      // sink is carrying has already been reported by [open]'s handler.
+      debugPrint('server log: could not close ${file.path}: $e');
+    }
   }
 }

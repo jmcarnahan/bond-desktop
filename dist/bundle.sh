@@ -44,8 +44,15 @@ step "[1/6] secrets check"
 # A distributed build must never carry the Entra client secret: it is baked
 # into the binary by --dart-define and anyone with the DMG can read it out.
 # MCP mode needs no secret, which is why distributed builds use MCP mode.
+# The env-file read used everywhere in dist/ (dist/check.sh reads the same two
+# keys with the identical sed, so its rows and these refusals can never
+# disagree). Two things the obvious pattern gets wrong and this one does not:
+# an `export KEY=value` line still sets the key, so a guard that skips it is a
+# guard that silently does not guard; and a file saved with CRLF endings leaves
+# a trailing \r that --dart-define would bake into the URL and ship a DMG that
+# cannot sign in.
 if [ -f "$MS_ENV" ]; then
-  secret="$(sed -n 's/^[[:space:]]*MICROSOFT_CLIENT_SECRET[[:space:]]*=[[:space:]]*//p' "$MS_ENV" | tail -1)"
+  secret="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}MICROSOFT_CLIENT_SECRET[[:space:]]*=[[:space:]]*//p' "$MS_ENV" | tr -d '\r' | tail -1)"
   secret="${secret%\"}"; secret="${secret#\"}"
   secret="${secret%\'}"; secret="${secret#\'}"
   if [ -n "$secret" ]; then
@@ -81,7 +88,7 @@ fi
 # to discover that this build was never going to work.
 MCP_URL=""
 if [ -f "$MS_ENV" ]; then
-  MCP_URL="$(sed -n 's/^[[:space:]]*BOND_MCP_SERVER_URL[[:space:]]*=[[:space:]]*//p' "$MS_ENV" | tail -1)"
+  MCP_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}BOND_MCP_SERVER_URL[[:space:]]*=[[:space:]]*//p' "$MS_ENV" | tr -d '\r' | tail -1)"
   MCP_URL="${MCP_URL%\"}"; MCP_URL="${MCP_URL#\"}"
   MCP_URL="${MCP_URL%\'}"; MCP_URL="${MCP_URL#\'}"
 fi

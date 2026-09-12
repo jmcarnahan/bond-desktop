@@ -88,6 +88,15 @@ class _SetupFlowState extends ConsumerState<SetupFlow> {
     widget.onFinished();
   }
 
+  /// The other way out of the wizard, and the only one that does not go
+  /// through Finish. It reaches the gate exactly as [_finish] does — the
+  /// controller has put the stored word back, and the gate re-reads it.
+  Future<void> _returnToInbox() async {
+    final restored = await _controller.returnToInbox();
+    if (!mounted || !restored) return;
+    widget.onFinished();
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(setupControllerProvider);
@@ -132,7 +141,15 @@ class _SetupFlowState extends ConsumerState<SetupFlow> {
     void next() => unawaited(_controller.next());
     switch (state.step) {
       case SetupStep.welcome:
-        return SetupWelcomeBody(migration: state.migration, onContinue: next);
+        return SetupWelcomeBody(
+          migration: state.migration,
+          onContinue: next,
+          // Null on a first run: a null callback hides its control, and there
+          // is no inbox behind THAT wizard to offer.
+          onReturnToInbox: state.canReturnToInbox
+              ? () => unawaited(_returnToInbox())
+              : null,
+        );
       case SetupStep.device:
         final prose = manifest.byRole(ModelRole.prose);
         return SetupDeviceBody(

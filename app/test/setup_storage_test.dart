@@ -19,12 +19,14 @@ void main() {
   DiskPreflight preflight({
     int needed = 20 * gib,
     int? free = 100 * gib,
+    bool writable = true,
   }) =>
       DiskPreflight(
         folder: folder,
         neededBytes: needed,
         headroomBytes: downloadHeadroomBytes,
         freeBytes: free,
+        writable: writable,
       );
 
   Future<void> open(
@@ -132,6 +134,30 @@ void main() {
           'free. Free up 30.0 GB or choose another folder.'),
       findsOneWidget,
     );
+    expect(canContinue(tester), isFalse);
+  });
+
+  testWidgets('a folder Bond cannot write to says so and stops the step',
+      (tester) async {
+    // Free space is not permission, and the number beside it is beside the
+    // point: a folder that refuses the first byte fails every file.
+    await open(tester, disk: preflight(writable: false));
+
+    expect(
+      find.text("Bond can't write to this folder. Choose another one."),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Free after download'), findsNothing);
+    expect(canContinue(tester), isFalse);
+  });
+
+  testWidgets('an unwritable folder that holds every model is still a refusal',
+      (tester) async {
+    // Nothing left to download is the one case that passes on a full volume;
+    // it must not pass on a folder the run cannot rename a part in.
+    await open(tester, disk: preflight(needed: 0, writable: false));
+
+    expect(find.text('All models are already in this folder.'), findsNothing);
     expect(canContinue(tester), isFalse);
   });
 

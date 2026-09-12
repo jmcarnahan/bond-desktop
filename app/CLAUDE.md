@@ -41,6 +41,11 @@ enforce the ones that are commands.
 - Never await a real filesystem or socket future inside a `testWidgets`
   BODY: the fake-async zone hangs the whole run silently and `--timeout`
   never fires. Create temp dirs, servers and supervisors in `setUp`.
+- Fixture timestamps that a sync window or an age rule will judge are
+  derived from `DateTime.now()` (`delta_paging_test.dart`'s `ago()` shape),
+  never written as absolute dates: the 14-day `syncFloorDays` window walks
+  past a literal at midnight UTC and the test rots with no code change
+  (it happened twice on 2026-09-12).
 
 ## Working rules
 

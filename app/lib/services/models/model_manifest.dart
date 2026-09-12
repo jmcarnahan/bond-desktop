@@ -387,11 +387,13 @@ class ModelManifest {
     return total;
   }
 
-  /// The ids the inbox can work with before the prose model lands.
+  /// The two smallest ids — the embedding and bulk models, INFORMATIONAL.
   ///
-  /// Triage, extraction and search all run on the embedding and bulk models,
-  /// so an install is USEFUL after four gigabytes rather than after
-  /// twenty-three — which is what lets Phase 4 open the inbox mid-download.
+  /// Nothing gates on this set. The wizard's Continue and
+  /// `ModelServerSupervisor._launch` both wait for all three, because the
+  /// preset names every file and the server refuses to start with one of them
+  /// missing. It is here for a screen that wants to say which models the
+  /// inbox itself leans on, and for the downloader's smallest-first order.
   Set<String> get usableIds => {
         byRole(ModelRole.embed).id,
         byRole(ModelRole.bulk).id,

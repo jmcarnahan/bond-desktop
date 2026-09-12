@@ -9,6 +9,9 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/notification_provider.dart';
 import 'package:bond_inbox/providers/setup_provider.dart';
 import 'package:bond_inbox/screens/setup/setup_gate.dart';
+import 'package:bond_inbox/services/models/download_state.dart';
+import 'package:bond_inbox/services/models/model_downloader.dart';
+import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:bond_inbox/services/notify/desktop_notification_service.dart';
 import 'package:bond_inbox/services/notify/settled_event.dart';
 import 'package:bond_inbox/services/server/model_server_supervisor.dart';
@@ -18,6 +21,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/fake_auth_session.dart';
 import 'fixtures/fake_desktop_notifier.dart';
+import 'fixtures/fake_hub_server.dart';
 import 'fixtures/fake_process_runner.dart';
 import 'fixtures/fake_system_info.dart';
 import 'fixtures/test_db.dart';
@@ -52,12 +56,45 @@ void main() {
   late DesktopNotificationService notifications;
   late FakeDesktopNotifier notifier;
   late ProviderContainer container;
+  late FakeHubServer hub;
+
+  /// A ledger saying the whole manifest is here, at the digests this build
+  /// names — what a machine the gate is allowed to let through really has.
+  /// [bump] moves one model's sha, which is the manifest-bump case.
+  Future<void> seedLedger({bool bump = false}) async {
+    final manifest = testManifest();
+    var ledger = DownloadLedger.empty;
+    for (final model in manifest.models) {
+      ledger = ledger.record(FileDownloadState(
+        id: model.id,
+        status: DownloadStatus.done,
+        receivedBytes: model.sizeBytes,
+        totalBytes: model.sizeBytes,
+        sha256:
+            bump && model.role == ModelRole.prose ? 'f' * 64 : model.sha256,
+      ));
+    }
+    await store.recordDownload(ledger);
+  }
 
   Future<void> makeContainer({SetupStore? overStore}) async {
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
       appPathsProvider.overrideWithValue(AppPaths(support)),
       modelManifestProvider.overrideWithValue(testManifest()),
+      // A downloader pointed at the loopback hub with nothing published on
+      // it: the model-bump case opens the wizard ON the download step, and a
+      // run against the real Hugging Face is not a thing a test may start.
+      modelDownloaderProvider.overrideWithValue(ModelDownloader(
+        manifest: testManifest(),
+        modelsFolder: () => support.path,
+        readLedger: (overStore ?? store).downloadLedger,
+        writeLedger: (overStore ?? store).recordDownload,
+        sha256: (_) async => null,
+        resolveUri: hub.resolveUriFor,
+        sleep: (_) async {},
+        maxAttempts: 1,
+      )),
       systemInfoProvider.overrideWithValue(FakeSystemInfo()),
       modelServerSupervisorProvider.overrideWithValue(supervisor),
       authSessionProvider.overrideWithValue(FakeAuthSession()),
@@ -69,6 +106,7 @@ void main() {
   }
 
   setUp(() async {
+    hub = await FakeHubServer.start();
     support = await Directory.systemTemp.createTemp('bond-gate');
     db = testDb();
     store = SetupStore(db);
@@ -91,6 +129,7 @@ void main() {
   });
 
   tearDown(() async {
+    await hub.close();
     notifications.dispose();
     await settles.close();
     await supervisor.dispose();
@@ -118,6 +157,7 @@ void main() {
   testWidgets('a machine that has been set up goes straight through',
       (tester) async {
     await store.set(SetupStore.setupKey, SetupStep.done.name);
+    await seedLedger();
     await makeContainer();
 
     await mount(tester);
@@ -150,9 +190,26 @@ void main() {
     expect(find.text('the app'), findsNothing);
   });
 
+  testWidgets('a manifest bump reopens the wizard on the download step',
+      (tester) async {
+    // The stored word still says `done` and the file names have not changed,
+    // so nothing downstream would ever notice that the weights on disk are
+    // the previous checkpoint. The ledger is what notices.
+    await store.set(SetupStore.setupKey, SetupStep.done.name);
+    await seedLedger(bump: true);
+    await makeContainer();
+
+    await mount(tester);
+
+    expect(find.text('the app'), findsNothing);
+    expect(find.text('Download'), findsOneWidget);
+    expect(find.text('Step 5 of 8'), findsOneWidget);
+  });
+
   testWidgets('"Set up again" brings the wizard back over a running app',
       (tester) async {
     await store.set(SetupStore.setupKey, SetupStep.done.name);
+    await seedLedger();
     await makeContainer();
     await mount(tester);
     expect(find.text('the app'), findsOneWidget);
@@ -182,6 +239,7 @@ void main() {
     final first = container.read(setupControllerProvider.notifier);
 
     await store.set(SetupStore.setupKey, SetupStep.done.name);
+    await seedLedger();
     container.read(setupRestartProvider.notifier).state++;
     await tester.pump();
     await tester.pump();
@@ -222,6 +280,7 @@ void main() {
     // The gate re-DECIDES on the counter; it does not assume the answer. A
     // bump with the key still saying `done` has to leave the app on screen.
     await store.set(SetupStore.setupKey, SetupStep.done.name);
+    await seedLedger();
     await makeContainer();
     await mount(tester);
 

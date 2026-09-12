@@ -189,11 +189,25 @@ final class SystemChannel {
 
   // MARK: - notifications
 
+  /// Two pane ids, newest first.
+  ///
+  /// `com.apple.Notifications-Settings.extension` is the System Settings pane
+  /// of macOS 13 and later; this app's deployment target is 12.0, where that
+  /// url opens nothing and `open` answers false. The second is the Monterey
+  /// System Preferences pane, which is the whole reason a false answer is
+  /// worth retrying rather than reporting — the caller shows a dead link
+  /// otherwise.
   private static func openNotificationSettings(_ result: FlutterResult) {
-    guard let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") else {
-      result(false)
-      return
+    let candidates = [
+      "x-apple.systempreferences:com.apple.Notifications-Settings.extension",
+      "x-apple.systempreferences:com.apple.preference.notifications",
+    ]
+    var opened = false
+    for candidate in candidates {
+      guard let url = URL(string: candidate) else { continue }
+      opened = NSWorkspace.shared.open(url)
+      if opened { break }
     }
-    result(NSWorkspace.shared.open(url))
+    result(opened)
   }
 }

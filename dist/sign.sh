@@ -155,7 +155,16 @@ else
   # Read it rather than hard-coding the letter: Sparkle has bumped it before
   # and a hard-coded path would fail as "no such file" rather than as a
   # version change.
-  v="$fw/Versions/$(readlink "$fw/Versions/Current")"
+  # The readlink is guarded rather than left bare: under `set -e` a failure
+  # here would end the run silently, right after the .so and dylib passes
+  # printed their rows, and the layout change that caused it would never be
+  # named.
+  cur="$(readlink "$fw/Versions/Current" || true)"
+  if [ -z "$cur" ]; then
+    bad "Sparkle.framework has no Versions/Current — the layout changed; update step [3/6]"
+    exit 1
+  fi
+  v="$fw/Versions/$cur"
   # --preserve-metadata=entitlements on the two XPC services: 2.9.6 ships both
   # with NO entitlements at all, but a future Sparkle that sandboxes the
   # downloader again ships its own, and re-signing would otherwise strip them
@@ -307,7 +316,14 @@ if [ -z "$AD_HOC" ]; then
     # Sparkle in it adds no rows: the glob simply matches nothing.
     sfw="$APP/Contents/Frameworks/Sparkle.framework"
     if [ -d "$sfw" ]; then
-      sv="$sfw/Versions/$(readlink "$sfw/Versions/Current")"
+      # Guarded like step [3/6]'s read, and for the same reason: a bare
+      # readlink failure would end the distribution checks mid-count.
+      scur="$(readlink "$sfw/Versions/Current" || true)"
+      if [ -z "$scur" ]; then
+        bad "Sparkle.framework has no Versions/Current — the layout changed; update step [3/6]"
+        exit 1
+      fi
+      sv="$sfw/Versions/$scur"
       for f in "$sv"/XPCServices/*.xpc "$sv/Autoupdate" "$sv/Updater.app"; do
         [ -e "$f" ] || continue
         total=$((total + 1))

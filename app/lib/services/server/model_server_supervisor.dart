@@ -335,7 +335,26 @@ class ModelServerSupervisor {
 
     _port = port;
     _emit(ServerStarting(port: port));
-    _activityToken ??= await beginActivity?.call('Starting the model server');
+    // One assertion across a whole start, retries included — hence the null
+    // check rather than a second `beginActivity` on every attempt.
+    //
+    // The token is taken into a LOCAL and only then stored, because the
+    // channel call is an await and a `stop()` or `dispose()` during it has
+    // already looked at `_activityToken`, found it null and ended nothing. A
+    // token assigned after that would hold an `NSProcessInfo` activity for the
+    // life of the process and App Nap would never get the app back — so a
+    // launch that was overtaken hands its token straight back instead.
+    if (_activityToken == null) {
+      final token = await beginActivity?.call('Starting the model server');
+      if (token != null) {
+        final overtaken = generation != _generation || _activityToken != null;
+        if (overtaken) {
+          await _end(token);
+        } else {
+          _activityToken = token;
+        }
+      }
+    }
     if (generation != _generation) return;
 
     try {
@@ -522,6 +541,12 @@ class ModelServerSupervisor {
       if (loaded.values.every((v) => v) && await _healthOk(port)) {
         if (generation != _generation) return;
         _healthFailures = 0;
+        // The restart budget is per FAILING LAUNCH, not per session. A server
+        // that reached ready has proved the launch works, so the next crash is
+        // a new problem and deserves the whole ladder again — without this, a
+        // machine that has recovered three times over a day is declared failed
+        // on its fourth ordinary crash and stops trying for good.
+        _restarts = 0;
         _emit(ServerReady(port: port, pid: pid));
         await _endActivity();
         if (!_readyCalled) {
@@ -638,6 +663,10 @@ class ModelServerSupervisor {
     _generation++;
     await _terminate();
     await _cancelPipes();
+    // The one exit that used to leave the pid file behind. Nothing is running
+    // by now, and a record pointing at a dead pid is what sends the next
+    // launch hunting — or, once that number is reused, killing a stranger.
+    await _deletePidFile();
     // The whole session's tail, not [_recent]: a final failure is what someone
     // reads to find out why, and the attempt that actually explains it is
     // often not the last one.
@@ -685,8 +714,24 @@ class ModelServerSupervisor {
       return false;
     }
 
+    // FOUR things have to agree before a running process is treated as this
+    // app's server, and each of them has been the wrong answer on its own.
+    // The preset hash says it serves the models this build wants. The BINARY
+    // says it is this build's server at all: a developer whose session set
+    // `BOND_LLAMA_SERVER=/opt/homebrew/bin/llama-server` and ended without the
+    // exit hooks leaves a record the packaged app would otherwise adopt,
+    // reporting Ready for a server built from somebody else's tree. The PORT
+    // says it is where the clients are dialling: a crash between the
+    // preference moving and the restart leaves a record on the OLD port, and
+    // adopting that is a Ready state nothing can talk to. The listing is the
+    // server's own answer, asked last because it costs a round trip.
+    final recordedBinary = record['binaryPath'] as String?;
+    final currentBinary = binaryPath();
+    final sameBinary = recordedBinary != null &&
+        currentBinary != null &&
+        _samePath(recordedBinary, currentBinary);
     final preset = buildPreset();
-    if (recordedHash == preset.hash) {
+    if (recordedHash == preset.hash && sameBinary && port == routerPort()) {
       final listing = await _models(port);
       if (listing != null && preset.modelIds.every(listing.containsKey)) {
         _generation++;
@@ -709,8 +754,9 @@ class ModelServerSupervisor {
       }
     }
 
-    // Alive, but not a server this build can use — a stale preset, or a
-    // listing that no longer matches. Ours to kill only if its command line
+    // Alive, but not a server this build can use — a stale preset, another
+    // build's binary, a port nothing dials any more, or a listing that no
+    // longer matches. Ours to kill only if its command line
     // says so on both counts: the program AND the preset file this app wrote.
     final command = await runner.commandLineOf(pid);
     if (command != null &&
@@ -726,6 +772,23 @@ class ModelServerSupervisor {
   }
 
   // ── plumbing ─────────────────────────────────────────────────────────
+
+  /// Whether two paths name the same executable, symlinks resolved.
+  ///
+  /// `/opt/homebrew/bin/llama-server` is a symlink into the Cellar, and a
+  /// record written through one of those names while the override says the
+  /// other is still the same program. A path that cannot be resolved — the
+  /// build it names has been deleted since — compares as the literal string,
+  /// which is the honest answer when there is nothing left to resolve.
+  static bool _samePath(String a, String b) => _resolved(a) == _resolved(b);
+
+  static String _resolved(String path) {
+    try {
+      return File(path).resolveSymbolicLinksSync();
+    } catch (e) {
+      return path;
+    }
+  }
 
   Future<void> _ensureLog() async {
     if (_log != null) return;
@@ -813,6 +876,12 @@ class ModelServerSupervisor {
     final token = _activityToken;
     _activityToken = null;
     if (token == null) return;
+    await _end(token);
+  }
+
+  /// Hands one token back, whether or not it was ever the held one — the
+  /// overtaken-launch path in [_launch] has a token and no field to clear.
+  Future<void> _end(int token) async {
     try {
       await endActivity?.call(token);
     } catch (e) {

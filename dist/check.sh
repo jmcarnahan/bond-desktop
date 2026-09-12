@@ -73,7 +73,12 @@ else
 fi
 
 if command -v flutter >/dev/null 2>&1; then
-  fv="$(flutter --version 2>/dev/null | sed -n 's/^Flutter \([0-9.]*\).*/\1/p' | head -1)"
+  # `|| true` inside the substitution, and for the reason every other row's
+  # pipeline carries one: under set -e/pipefail a `flutter --version` that
+  # exits non-zero (an SDK mid-upgrade, a held pub-cache lock) would end the
+  # whole report here. A report that always finishes never lets a row's
+  # command end it — an unknown version is a red row, not a missing report.
+  fv="$(flutter --version 2>/dev/null | sed -n 's/^Flutter \([0-9.]*\).*/\1/p' | head -1 || true)"
   # Sort-based compare, so 3.47 vs 3.5 does not read as "smaller".
   if [ -n "$fv" ] && [ "$(printf '3.47\n%s\n' "$fv" | sort -V | head -1)" = "3.47" ]; then
     row_ok "flutter >= 3.47" "$fv"
@@ -157,9 +162,12 @@ if [ -z "$key" ]; then
 elif [ ! -f "$key" ]; then
   row_bad "DIST_NOTARY_KEY_PATH" "no file at that path"
 else
+  # 400 passes too: the key is only ever read, so read-only-to-owner is
+  # stricter than what the fix text asks for and refusing it would be asking
+  # a maintainer to loosen a mode.
   mode="$(stat -L -f '%Lp' "$key")"
-  if [ "$mode" = "600" ]; then
-    row_ok "DIST_NOTARY_KEY_PATH" "present, mode 600"
+  if [ "$mode" = "600" ] || [ "$mode" = "400" ]; then
+    row_ok "DIST_NOTARY_KEY_PATH" "present, mode $mode"
     key_ready=1
   else
     row_bad "DIST_NOTARY_KEY_PATH" "mode $mode — run: chmod 600 '$key'"
@@ -234,9 +242,10 @@ else
   # The same rule the .p8 gets, and for a stronger reason: whoever holds this
   # file can sign an update every installed copy of Bond installs without
   # asking.
+  # 400 passes here too, for the reason the .p8 row gives.
   smode="$(stat -L -f '%Lp' "$sparkle")"
-  if [ "$smode" = "600" ]; then
-    row_ok "  mode" "600"
+  if [ "$smode" = "600" ] || [ "$smode" = "400" ]; then
+    row_ok "  mode" "$smode"
   else
     row_bad "  mode" "$smode — run: chmod 600 '$sparkle'"
   fi
@@ -309,7 +318,9 @@ fi
 # then the project's own, which Xcode writes with the same contents.
 resolved="$ROOT/app/macos/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved"
 [ -f "$resolved" ] || resolved="$ROOT/app/macos/Runner.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
-tools_pin="$(sed -n 's/^SPARKLE_VERSION=//p' "$ROOT/dist/sparkle-tools.sh" | head -1)"
+# `|| true` again: a missing dist/sparkle-tools.sh must leave this row unable
+# to answer, not leave the report unfinished.
+tools_pin="$(sed -n 's/^SPARKLE_VERSION=//p' "$ROOT/dist/sparkle-tools.sh" 2>/dev/null | head -1 || true)"
 if [ ! -f "$resolved" ]; then
   row_skip "Sparkle pins" "no build yet — make dist-app resolves it"
 elif ! command -v python3 >/dev/null 2>&1; then
@@ -326,7 +337,9 @@ for pin in doc.get("pins", []):
         break
 PY
 )"
-  if [ -z "$embedded" ]; then
+  if [ -z "$tools_pin" ]; then
+    row_bad "Sparkle pins" "no SPARKLE_VERSION literal in dist/sparkle-tools.sh"
+  elif [ -z "$embedded" ]; then
     row_bad "Sparkle pins" "Package.resolved has no sparkle pin — the Xcode project should reference sparkle-project/Sparkle"
   elif [ "$embedded" = "$tools_pin" ]; then
     row_ok "Sparkle pins" "$tools_pin (tools and framework)"
@@ -336,12 +349,29 @@ PY
 fi
 
 step "app build inputs"
+# Both release numbers come from one pubspec line, parsed with the Makefile's
+# own two seds. A line they cannot read leaves VERSION and BUILD EMPTY, and
+# nothing downstream says so: the DMG is named Bond-Desktop-.dmg, the plist
+# carries no CFBundleVersion, and dist/appcast.sh compares an empty build
+# against the feed. So the parse is a row of its own, ahead of the build.
+pv="$(sed -n 's/^version:[[:space:]]*\([0-9][0-9.]*\)+.*/\1/p' "$ROOT/app/pubspec.yaml" 2>/dev/null | head -1 || true)"
+pb="$(sed -n 's/^version:[[:space:]]*[0-9][0-9.]*+\([0-9][0-9]*\).*/\1/p' "$ROOT/app/pubspec.yaml" 2>/dev/null | head -1 || true)"
+case "${pb:-x}" in
+  *[!0-9]*) pb="" ;;
+esac
+if [ -n "$pv" ] && [ -n "$pb" ]; then
+  row_ok "pubspec version" "$pv+$pb"
+else
+  row_bad "pubspec version" "unparsable — write \`version: <major.minor.patch>+<n>\` in app/pubspec.yaml"
+fi
+
 if [ ! -f "$MS_ENV" ]; then
   row_bad "MS_ENV" "$MS_ENV does not exist — the build would ship with no MCP server URL"
 else
-  secret="$(sed -n 's/^[[:space:]]*MICROSOFT_CLIENT_SECRET[[:space:]]*=[[:space:]]*//p' "$MS_ENV" | tail -1)"
-  # Stripped exactly as dist/bundle.sh strips it, so this row and that
-  # refusal can never disagree.
+  # Parsed exactly as dist/bundle.sh parses it — `export KEY=` counts, and a
+  # CRLF file's trailing \r is dropped — so this row and that refusal can
+  # never disagree. Keep the two seds identical when either changes.
+  secret="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}MICROSOFT_CLIENT_SECRET[[:space:]]*=[[:space:]]*//p' "$MS_ENV" | tr -d '\r' | tail -1)"
   secret="${secret%\"}"; secret="${secret#\"}"
   secret="${secret%\'}"; secret="${secret#\'}"
   if [ -n "$secret" ]; then
@@ -353,7 +383,7 @@ else
   # Parsed exactly as dist/bundle.sh parses it, so this row and that refusal
   # can never disagree. The URL itself is not printed: it names a customer's
   # server, and this report gets pasted into issues.
-  mcp="$(sed -n 's/^[[:space:]]*BOND_MCP_SERVER_URL[[:space:]]*=[[:space:]]*//p' "$MS_ENV" | tail -1)"
+  mcp="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}BOND_MCP_SERVER_URL[[:space:]]*=[[:space:]]*//p' "$MS_ENV" | tr -d '\r' | tail -1)"
   mcp="${mcp%\"}"; mcp="${mcp#\"}"
   mcp="${mcp%\'}"; mcp="${mcp#\'}"
   if [ -n "$mcp" ]; then

@@ -30,6 +30,7 @@ void main() {
     required int pid,
     required int port,
     required String presetHash,
+    String? binaryPath,
   }) async {
     await supervisor.pidFile.parent.create(recursive: true);
     await supervisor.pidFile.writeAsString(jsonEncode({
@@ -37,7 +38,7 @@ void main() {
       'port': port,
       'startedAt': DateTime.now().toUtc().toIso8601String(),
       'presetHash': presetHash,
-      'binaryPath': binary,
+      'binaryPath': binaryPath ?? binary,
     }));
   }
 
@@ -191,6 +192,66 @@ void main() {
     // would be unforgivable.
     expect(runner.kills, isEmpty);
     expect(runner.starts, hasLength(1));
+  });
+
+  /// The hash says which MODELS a server serves; it says nothing about which
+  /// BUILD is serving them.
+  ///
+  /// A developer's session with `BOND_LLAMA_SERVER` pointed at the Homebrew
+  /// binary, ended without the exit hooks, leaves a live server and a record
+  /// the packaged app would happily adopt — and then report Ready for a
+  /// program it did not build, ship or sign. Which is a false pass on exactly
+  /// the check a release is verified with.
+  test('a pid file naming another binary is not adopted (and is reaped only '
+      'when the command line is ours)', () async {
+    await writePidFile(
+      pid: 9006,
+      port: server.port,
+      presetHash: preset.hash,
+      binaryPath: '/opt/homebrew/bin/llama-server',
+    );
+    runner.alive[9006] = true;
+    // Ours by both halves — the program and the preset file this app wrote —
+    // which is the only thing that licenses the kill.
+    runner.commandLines[9006] =
+        '/opt/homebrew/bin/llama-server --models-preset '
+        '${supervisor.presetFile.path} --port ${server.port}';
+
+    await supervisor.ensureRunning();
+    await waitFor((s) => s is ServerReady);
+
+    expect(runner.kills.map((k) => k.$1), contains(9006));
+    expect(runner.starts, hasLength(1));
+    final record = jsonDecode(await supervisor.pidFile.readAsString())
+        as Map<String, dynamic>;
+    expect(record['binaryPath'], binary);
+  });
+
+  /// A record on the old port is a Ready state nothing can talk to.
+  ///
+  /// The port moves in Settings and the restart follows, but a crash between
+  /// those two writes leaves the pid file naming the port the server was
+  /// bound to while every client is already dialling the new one.
+  test('a pid file on a port other than the preference is replaced', () async {
+    await writePidFile(
+      pid: 9007,
+      port: server.port + 1,
+      presetHash: preset.hash,
+    );
+    runner.alive[9007] = true;
+    runner.commandLines[9007] =
+        '$binary --models-preset ${supervisor.presetFile.path} '
+        '--port ${server.port + 1}';
+
+    await supervisor.ensureRunning();
+    final ready = await waitFor((s) => s is ServerReady) as ServerReady;
+
+    expect(ready.port, server.port);
+    expect(runner.kills.map((k) => k.$1), contains(9007));
+    expect(runner.starts, hasLength(1));
+    final record = jsonDecode(await supervisor.pidFile.readAsString())
+        as Map<String, dynamic>;
+    expect(record['port'], server.port);
   });
 
   test('a malformed pid file is discarded and a server started', () async {

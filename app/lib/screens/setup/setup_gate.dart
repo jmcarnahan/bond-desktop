@@ -61,11 +61,24 @@ class SetupGate extends ConsumerStatefulWidget {
 class _SetupGateState extends ConsumerState<SetupGate> {
   late Future<bool> _done = _decide();
 
+  /// Set up, AND set up against the models this build ships.
+  ///
+  /// The stored word alone is not enough. A manifest bump that keeps the file
+  /// names leaves a machine whose `setup` still says `done` and whose weights
+  /// are the previous checkpoint — and a gate that let it through would serve
+  /// those weights for ever, since nothing downstream compares digests. The
+  /// ledger is the cheap way to notice: the wizard opens on its download step
+  /// and fetches what has moved.
   Future<bool> _decide() async {
     if (SetupGate.skipsSetup(SetupGate.skipDefine)) return true;
     try {
-      final stored = await ref.read(setupStoreProvider).get(SetupStore.setupKey);
-      return stored == SetupStep.done.name;
+      final store = ref.read(setupStoreProvider);
+      final stored = await store.get(SetupStore.setupKey);
+      if (stored != SetupStep.done.name) return false;
+      // READ, never watched: this gate answers once, and a manifest provider
+      // it subscribed to would be a second way to rebuild it.
+      return (await store.downloadLedger())
+          .matches(ref.read(modelManifestProvider));
     } on Object {
       // A store read that throws is treated as "not set up", exactly as
       // `AuthGate` treats an unreadable keychain: the wizard is the

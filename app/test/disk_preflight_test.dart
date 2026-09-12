@@ -213,11 +213,104 @@ void main() {
     );
 
     // The models folder does not exist before the first download, and the
-    // platform call wants a real path. The volume is the same either way.
+    // platform call wants a real path. The volume is the same either way —
+    // and the question is asked BEFORE the write probe, so the answer comes
+    // from the volume rather than from the folder the probe then makes.
     expect(system.freeBytesPaths, [root.path]);
     expect(check.folder, missing);
-    expect(Directory(missing).existsSync(), isFalse);
+    // Which the probe did make: knowing whether Bond may write there costs
+    // exactly the folder the very next step fills.
+    expect(Directory(missing).existsSync(), isTrue);
   });
+
+  test('a done row against another digest is counted all over again',
+      () async {
+    // A manifest bump that kept the file name. The bytes on disk are the
+    // PREVIOUS checkpoint, the download step is going to fetch the whole file
+    // again, and the storage step has to ask for room for it.
+    final prose = manifest.byRole(ModelRole.prose);
+    await writeDone(prose.id);
+    final ledger = DownloadLedger.empty.record(FileDownloadState(
+      id: prose.id,
+      status: DownloadStatus.done,
+      sha256: 'f' * 64,
+    ));
+
+    final check = await checkDisk(
+      system: system,
+      manifest: manifest,
+      ledger: ledger,
+      folder: folder(),
+    );
+
+    expect(check.neededBytes, wholeSet);
+  });
+
+  test('a part left over from the previous checkpoint saves nothing',
+      () async {
+    // The downloader deletes a part whose ledger row disagrees with the
+    // manifest rather than resuming into it, so counting those bytes here
+    // would promise room the download does not have.
+    final bulk = manifest.byId('bond-bulk');
+    await writePart(bulk.id, 1000);
+    final ledger = DownloadLedger.empty.record(FileDownloadState(
+      id: bulk.id,
+      status: DownloadStatus.paused,
+      receivedBytes: 1000,
+      totalBytes: bulk.sizeBytes,
+      sha256: 'f' * 64,
+    ));
+
+    final check = await checkDisk(
+      system: system,
+      manifest: manifest,
+      ledger: ledger,
+      folder: folder(),
+    );
+
+    expect(check.neededBytes, wholeSet);
+  });
+
+  test('a folder that can be written passes and keeps no probe', () async {
+    final check = await checkDisk(
+      system: system,
+      manifest: manifest,
+      ledger: DownloadLedger.empty,
+      folder: folder(),
+    );
+
+    expect(check.writable, isTrue);
+    expect(check.ok, isTrue);
+    expect(Directory(folder()).existsSync(), isTrue);
+    expect(File(p.join(folder(), '.bond-write-probe')).existsSync(), isFalse);
+  });
+
+  test('a folder Bond cannot write to is a refusal whatever the volume says',
+      () async {
+    // Free space is not permission: a read-only mount, a locked external
+    // disk or somebody else's home all report gigabytes and refuse the first
+    // byte. The download would fail file by file with a network-shaped error
+    // to show for it, so the storage step asks now.
+    final locked = Directory(p.join(root.path, 'locked'))
+      ..createSync(recursive: true);
+    Process.runSync('chmod', ['500', locked.path]);
+    addTearDown(() => Process.runSync('chmod', ['700', locked.path]));
+    system.free = 500 * 1024 * 1024 * 1024;
+
+    final check = await checkDisk(
+      system: system,
+      manifest: manifest,
+      ledger: DownloadLedger.empty,
+      folder: p.join(locked.path, 'models'),
+    );
+
+    expect(check.writable, isFalse);
+    expect(check.known, isTrue);
+    expect(check.ok, isFalse);
+  },
+      skip: Platform.environment['USER'] == 'root'
+          ? 'root writes to a mode-500 folder'
+          : null);
 
   test('a folder that exists is asked about directly', () async {
     await Directory(folder()).create(recursive: true);

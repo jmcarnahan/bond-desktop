@@ -85,6 +85,11 @@ class SetupState {
   /// finish would be claiming a setup that is not on disk.
   final bool finishFailed;
 
+  /// This run of the wizard was opened by "Set up again" on a machine that
+  /// was already set up, so the welcome step may offer a way back out. False
+  /// on a first run, where there is no inbox behind the wizard to go to.
+  final bool canReturnToInbox;
+
   const SetupState({
     this.loaded = false,
     this.step = SetupStep.welcome,
@@ -102,6 +107,7 @@ class SetupState {
     this.notificationsGranted,
     this.finishing = false,
     this.finishFailed = false,
+    this.canReturnToInbox = false,
   });
 
   SetupState copyWith({
@@ -126,6 +132,7 @@ class SetupState {
     bool clearNotificationsGranted = false,
     bool? finishing,
     bool? finishFailed,
+    bool? canReturnToInbox,
   }) =>
       SetupState(
         loaded: loaded ?? this.loaded,
@@ -147,6 +154,7 @@ class SetupState {
             : (notificationsGranted ?? this.notificationsGranted),
         finishing: finishing ?? this.finishing,
         finishFailed: finishFailed ?? this.finishFailed,
+        canReturnToInbox: canReturnToInbox ?? this.canReturnToInbox,
       );
 
   @override
@@ -168,7 +176,8 @@ class SetupState {
       other.accountName == accountName &&
       other.notificationsGranted == notificationsGranted &&
       other.finishing == finishing &&
-      other.finishFailed == finishFailed;
+      other.finishFailed == finishFailed &&
+      other.canReturnToInbox == canReturnToInbox;
 
   static bool _sameDownloads(
     Map<String, DownloadProgress> a,
@@ -202,6 +211,7 @@ class SetupState {
         notificationsGranted,
         finishing,
         finishFailed,
+        canReturnToInbox,
       );
 
   @override
@@ -263,6 +273,13 @@ class SetupController extends StateNotifier<SetupState> {
 
   StreamSubscription<DownloadProgress>? _progress;
 
+  /// A file reached `done` while THIS controller was watching.
+  ///
+  /// [finish] needs it because the supervisor's preset hash covers paths and
+  /// arguments, not digests: a server left running over the old weights looks
+  /// healthy to `ensureRunning`, and would go on answering from them.
+  bool _downloadedThisRun = false;
+
   /// The downloader's own ledger once it has one, this controller's otherwise.
   /// An empty ledger on a downloader that has never run is not an answer.
   DownloadLedger get _currentLedger =>
@@ -276,17 +293,26 @@ class SetupController extends StateNotifier<SetupState> {
     final prefs = readPrefs();
     SetupStep step = SetupStep.welcome;
     MigrationReport? migration;
+    var canReturn = false;
     try {
       step = SetupStep.parse(await store.get(SetupStore.setupKey));
       migration = _readMigration(await store.get(SetupStore.containerMigrationKey));
       _ledger = await store.downloadLedger();
+      canReturn = await store.get(SetupStore.previousSetupKey) ==
+          SetupStep.done.name;
     } on Object catch (e) {
       debugPrint('setup: could not read setup_state: $e');
     }
-    // Defensive: nothing writes `done` before [finish], so a store holding it
-    // here was edited by hand — and the last step is no place to strand a
-    // wizard that has not been through the rest of itself.
-    if (step == SetupStep.done) step = SetupStep.welcome;
+    // A stored `done` is one of two things. With the ledger describing the
+    // manifest this build ships, it is a machine that finished — the last
+    // step is no place to strand it, so the wizard opens at the top. With a
+    // ledger the manifest has moved past, it is the MODEL BUMP path: the
+    // weights on disk are the previous checkpoint, and the download step is
+    // where that gets put right — its `_onEnter` starts the transfer for
+    // everything missing or stale.
+    if (step == SetupStep.done) {
+      step = _ledger.matches(manifest) ? SetupStep.welcome : SetupStep.download;
+    }
     final folder = prefs.effectiveModelsFolder(paths);
     _folderAtInit = folder;
     if (!mounted) return;
@@ -297,6 +323,7 @@ class SetupController extends StateNotifier<SetupState> {
       modelsFolder: folder,
       routerPort: prefs.routerPort,
       downloadsComplete: _allFilesPresent(folder),
+      canReturnToInbox: canReturn,
     );
     await _onEnter(step);
   }
@@ -412,12 +439,26 @@ class SetupController extends StateNotifier<SetupState> {
   /// A folder the user picked. The preference is written first, because
   /// everything downstream — the preflight, the downloader, the preset — reads
   /// the folder rather than being told it.
+  ///
+  /// A run in flight is ENDED before the preference moves. [ModelDownloader]
+  /// reads the folder once per run, so a transfer that kept going would go on
+  /// filling the folder the user has just left — gigabytes nobody will use,
+  /// under progress bars describing somewhere else. The parts stay where they
+  /// are, exactly as a Cancel leaves them, and the download step starts a new
+  /// run into the new folder on the next arrival.
   Future<void> setFolder(String path) async {
+    if (downloader.running) await downloader.cancel();
+    // The subscription goes with the run: the stream it was listening to is
+    // ending, and the flags it would have cleared are cleared here instead.
+    await _progress?.cancel();
+    _progress = null;
     await setModelsFolder(path);
     if (!mounted) return;
     final folder = readPrefs().effectiveModelsFolder(paths);
     state = state.copyWith(
       modelsFolder: folder,
+      downloadRunning: false,
+      downloadPaused: false,
       downloadsComplete: _allFilesPresent(folder),
     );
     await checkStorage();
@@ -443,6 +484,9 @@ class SetupController extends StateNotifier<SetupState> {
     state = state.copyWith(downloadRunning: true, downloadPaused: false);
     _progress = stream.listen(
       (progress) {
+        if (progress.status == DownloadStatus.done) {
+          _downloadedThisRun = true;
+        }
         if (!mounted) return;
         state = state.copyWith(
           downloads: {...state.downloads, progress.id: progress},
@@ -553,6 +597,10 @@ class SetupController extends StateNotifier<SetupState> {
     var saved = false;
     try {
       await setManagedServer(true);
+      // The stash exists only while the welcome step is offering a way back;
+      // finishing is the end of that offer, and a leftover value would have
+      // the NEXT first run think it had an inbox behind it.
+      await store.remove(SetupStore.previousSetupKey);
       await store.set(SetupStore.setupKey, SetupStep.done.name);
       saved = true;
       // The server is asked for only once the setup is on disk, and
@@ -560,12 +608,16 @@ class SetupController extends StateNotifier<SetupState> {
       // a server can take tens of seconds against a
       // twenty-seven-billion-parameter model, and the inbox must open now.
       //
-      // A folder that MOVED wants a restart rather than a nudge.
-      // `ensureRunning` returns at once on a server that is already ready, so
-      // a "Set up again" that pointed the wizard at another disk would leave
-      // the router mmap'ing the copies in the old one — which is why the
+      // A folder that MOVED wants a restart rather than a nudge, and so do
+      // WEIGHTS that landed while this wizard was open. `ensureRunning`
+      // returns at once on a server that is already ready, and the preset
+      // hash it compares covers paths and arguments rather than digests — so
+      // a "Set up again" that pointed the wizard at another disk, or a
+      // manifest bump that rewrote the files under the same names, would both
+      // leave the router serving what it mmap'd before. Which is why the
       // Settings card does folder-then-restart too.
-      if (readPrefs().effectiveModelsFolder(paths) != _folderAtInit) {
+      if (_downloadedThisRun ||
+          readPrefs().effectiveModelsFolder(paths) != _folderAtInit) {
         unawaited(supervisor.restart());
       } else {
         unawaited(supervisor.ensureRunning());
@@ -578,15 +630,47 @@ class SetupController extends StateNotifier<SetupState> {
     return saved;
   }
 
-  /// Every manifest file done in the ledger AND sitting where the preset will
-  /// look for it. `existsSync` rather than the async form because this is
-  /// asked from inside a state update: three stats on a local path are
-  /// cheaper than the frame a `Future` would cost.
+  /// Leaves the wizard the way it was entered, for somebody who pressed
+  /// "Set up again" and meant to look rather than to redo.
+  ///
+  /// `'done'` is written by [finish] and by this, and by nothing else. The
+  /// rule survives because this one never INVENTS the word: it puts back the
+  /// value the store already held — stashed by `restartSetupWith` at the
+  /// moment it cleared it — and only on a machine where [finish] had written
+  /// it before. The stash goes with it, so the offer is not standing the next
+  /// time the wizard opens.
+  ///
+  /// A download this run started is left alone: the run outlives the screen
+  /// by [dispose]'s reasoning, and cancelling one an hour in would be a
+  /// steeper price than the button implies.
+  Future<bool> returnToInbox() async {
+    try {
+      await store.set(SetupStore.setupKey, SetupStep.done.name);
+      await store.remove(SetupStore.previousSetupKey);
+    } on Object catch (e) {
+      // The gate would only show the wizard again, so the honest answer is to
+      // stay here rather than to hand over an inbox the next launch takes
+      // back.
+      debugPrint('setup: could not return to the inbox: $e');
+      return false;
+    }
+    if (mounted) state = state.copyWith(canReturnToInbox: false);
+    return true;
+  }
+
+  /// Every manifest file done in the ledger AT THIS MANIFEST'S DIGEST and
+  /// sitting where the preset will look for it. `existsSync` rather than the
+  /// async form because this is asked from inside a state update: three stats
+  /// on a local path are cheaper than the frame a `Future` would cost.
+  ///
+  /// The digest is what makes a model bump visible. A row that merely says
+  /// done can describe the checkpoint before this build's, and a Continue
+  /// granted on it would hand over an inbox serving the old weights.
   bool _allFilesPresent(String folder) {
     if (folder.isEmpty) return false;
     final ledger = _currentLedger;
     for (final model in manifest.models) {
-      if (!ledger.isDone(model.id)) return false;
+      if (!ledger.isCurrent(model)) return false;
       if (!File(p.join(folder, model.relativePath)).existsSync()) return false;
     }
     return true;
@@ -649,17 +733,28 @@ final setupControllerProvider =
   );
 });
 
-/// "Set up again": clears `setup_state` except [SetupStore.keptOnRestart],
-/// then bumps the counter the gate watches.
+/// "Set up again": stashes a `done` that was there, clears `setup_state`
+/// except [SetupStore.keptOnRestart], then bumps the counter the gate watches.
 ///
 /// The order matters. The gate re-reads the store the moment the counter
 /// moves, so a bump before the clear would race it and find the key still
 /// saying `done`.
+///
+/// The stash is what keeps this from being a one-way door. Pressing the
+/// button on a machine that was set up used to mean walking all eight steps
+/// again with no way out, because the word the gate reads had already gone;
+/// [SetupStore.previousSetupKey] holds it so the welcome step can offer
+/// **Back to the inbox**. Nothing is stashed on a machine that had not
+/// finished — there is no inbox behind that wizard to go back to.
 Future<void> restartSetupWith({
   required SetupStore store,
   required StateController<int> restart,
 }) async {
   try {
+    final current = await store.get(SetupStore.setupKey);
+    if (current == SetupStep.done.name) {
+      await store.set(SetupStore.previousSetupKey, SetupStep.done.name);
+    }
     await store.clearExcept(SetupStore.keptOnRestart);
   } on Object catch (e) {
     // Worth saying, not worth refusing: the wizard still opens, and the

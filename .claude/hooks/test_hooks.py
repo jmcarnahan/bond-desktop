@@ -378,7 +378,10 @@ AGENT_CASES = [
 
 
 # The commit gate's secret-file rule: a template is the one env-shaped file
-# that may be committed; everything a real value could live in may not.
+# that may be committed; everything a real value could live in may not. The
+# rule has two halves — an extension list and the dist/local/ directory — and
+# both are replayed here, because a path only the directory half catches is
+# exactly the one an extension-only test would call safe.
 SECRET_FILE_CASES = [
     (False, ".env.example"),
     (False, "docs/settings.md"),
@@ -389,14 +392,37 @@ SECRET_FILE_CASES = [
     (True, "app/macos/SigningLocal.xcconfig"),
     (True, "certs/dev.p12"),
     (True, "dist/windows/codesign.pfx"),
+    # dist/local/ is secret by directory: dist.env is caught by extension too,
+    # but a stray note beside the keys is caught by nothing else.
+    (True, "dist/local/dist.env"),
+    (True, "dist/local/scratch.txt"),
+    # The notarization key, a keychain export and a built image.
+    (True, "certs/AuthKey_ABC.p8"),
+    (True, "backup.keychain"),
+    (True, "out/Bond-Desktop-1.0.0.dmg"),
+    # Neither rule may reach these: the directory rule is anchored at a path
+    # segment, so "docs/dist/localnotes.md" is not dist/local/, and the
+    # template suffix keeps the committed example committable.
+    (False, "docs/dist/localnotes.md"),
+    (False, "dist/local.env.example"),
 ]
+
+
+class _SecretMatcher:
+    """The gate's actual verdict: check_secrets denies on either rule."""
+
+    def __init__(self, files, dirs):
+        self._files, self._dirs = files, dirs
+
+    def search(self, path):
+        return self._files.search(path) or self._dirs.search(path)
 
 
 def secret_files():
     spec = importlib.util.spec_from_file_location("commit_gate", os.path.join(HERE, "commit-gate.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.SECRET_FILES
+    return _SecretMatcher(mod.SECRET_FILES, mod.SECRET_DIRS)
 
 
 def main():

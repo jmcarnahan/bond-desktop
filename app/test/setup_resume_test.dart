@@ -157,6 +157,45 @@ void main() {
     }
   });
 
+  test('a quit mid-FILE resumes at the byte the part stopped on', () async {
+    // The promise the download step makes out loud — "you can quit" — is
+    // about a file that was half here, not about a file that was finished.
+    // A `.part` and a paused row are what that really leaves behind.
+    const partLen = 700;
+    final embed = manifest.byId(routerEmbedId);
+    final part = File('${destOf(embed)}${ModelDownloader.partSuffix}');
+    await part.parent.create(recursive: true);
+    await part.writeAsBytes(
+      hub.contents['${embed.repo}/${embed.file}']!.sublist(0, partLen),
+    );
+    await store.recordDownload(DownloadLedger.empty.record(FileDownloadState(
+      id: embed.id,
+      status: DownloadStatus.paused,
+      receivedBytes: partLen,
+      totalBytes: embed.sizeBytes,
+      sha256: embed.sha256,
+    )));
+    await store.set(SetupStore.setupKey, SetupStep.download.name);
+
+    final controller = build();
+    await controller.init();
+
+    expect(controller.state.step, SetupStep.download);
+    await waitUntil(
+      () => !controller.state.downloadRunning,
+      reason: 'the resumed run to finish',
+    );
+
+    expect(controller.state.downloadsComplete, isTrue);
+    // Exactly one ranged request, for exactly the bytes that were missing:
+    // the other two files are fresh and ask for no range at all.
+    expect(hub.cdnRanges.where((r) => r != null).toList(), ['bytes=$partLen-']);
+    expect(
+      File(destOf(embed)).readAsBytesSync(),
+      hub.contents['${embed.repo}/${embed.file}'],
+    );
+  });
+
   test('a launch on the sign-in step lands there with the session probed',
       () async {
     await store.set(SetupStore.setupKey, SetupStep.signIn.name);
