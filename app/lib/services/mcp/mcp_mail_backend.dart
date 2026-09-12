@@ -71,6 +71,7 @@ class McpMailBackend implements MailBackend {
     if (result['resync'] == true) throw const DeltaResyncRequired();
 
     final messages = result['messages'];
+    final hasMore = result['has_more'];
     return DeltaPage(
       messages: [
         for (final item in messages is List ? messages : const [])
@@ -81,6 +82,10 @@ class McpMailBackend implements MailBackend {
       ],
       nextLink: _emptyToNull(result['next_cursor']),
       deltaLink: _emptyToNull(result['delta_cursor']),
+      // Only when the server actually said: an older build that omits the field
+      // leaves this null, and the drain falls back to the nextLink it always
+      // read. A non-bool is treated as unsaid rather than coerced.
+      hasMore: hasMore is bool ? hasMore : null,
     );
   }
 

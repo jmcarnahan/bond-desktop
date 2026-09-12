@@ -172,36 +172,49 @@ class ConversationListPane extends StatelessWidget {
       );
     }
 
-    return ListView(
+    // Flattened to one index of header/row entries, then built lazily. A
+    // section with no rows contributes nothing — in the two-section `open` view
+    // an empty half just pushes the other half down. Building the entry list is
+    // cheap (records, not widgets); the win is `ListView.builder` materialising
+    // only the rows on screen. The eager `ListView(children:)` this replaced
+    // built a widget for every thread up front, which on a mailbox with
+    // thousands of "Done" threads exhausted the GPU and crashed the app.
+    final entries = <_PaneEntry>[];
+    for (final (label, rows) in sections) {
+      if (rows.isEmpty) continue;
+      entries.add(_HeaderEntry(label, rows.length));
+      for (final c in rows) {
+        entries.add(_RowEntry(c));
+      }
+    }
+
+    return ListView.builder(
       padding: const EdgeInsets.only(bottom: BondSpacing.s24),
-      children: [
-        for (final (label, rows) in sections)
-          // A section with no rows says nothing worth the vertical space —
-          // in the two-section `open` view an empty half just pushes the
-          // other half down.
-          if (rows.isNotEmpty) ...[
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                BondSpacing.s4,
-                BondSpacing.s16,
-                BondSpacing.s4,
-                BondSpacing.s8,
-              ),
-              child: Row(
-                children: [
-                  Text(label, style: BondType.label),
-                  const SizedBox(width: BondSpacing.s8),
-                  Text('${rows.length}', style: BondType.caption),
-                ],
-              ),
+      itemCount: entries.length,
+      itemBuilder: (context, i) {
+        final entry = entries[i];
+        if (entry is _HeaderEntry) {
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(
+              BondSpacing.s4,
+              BondSpacing.s16,
+              BondSpacing.s4,
+              BondSpacing.s8,
             ),
-            for (final c in rows)
-              Padding(
-                padding: const EdgeInsets.only(bottom: BondSpacing.s8),
-                child: _row(c),
-              ),
-          ],
-      ],
+            child: Row(
+              children: [
+                Text(entry.label, style: BondType.label),
+                const SizedBox(width: BondSpacing.s8),
+                Text('${entry.count}', style: BondType.caption),
+              ],
+            ),
+          );
+        }
+        return Padding(
+          padding: const EdgeInsets.only(bottom: BondSpacing.s8),
+          child: _row((entry as _RowEntry).conversation),
+        );
+      },
     );
   }
 
@@ -237,4 +250,22 @@ class ConversationListPane extends StatelessWidget {
       ],
     );
   }
+}
+
+/// One line in the pane's flattened, lazily-built list: a section header or a
+/// thread row. Flattening is what lets a `ListView.builder` render only the
+/// entries on screen instead of a widget per thread.
+sealed class _PaneEntry {
+  const _PaneEntry();
+}
+
+class _HeaderEntry extends _PaneEntry {
+  final String label;
+  final int count;
+  const _HeaderEntry(this.label, this.count);
+}
+
+class _RowEntry extends _PaneEntry {
+  final Conversation conversation;
+  const _RowEntry(this.conversation);
 }

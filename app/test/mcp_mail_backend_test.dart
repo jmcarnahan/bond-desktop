@@ -73,12 +73,16 @@ Map<String, dynamic> _delta({
   String next = '',
   String delta = '',
   bool resync = false,
+  // Only added to the payload when set, so the "absent field" case can be
+  // exercised alongside an older server that never sends it.
+  bool? hasMore,
 }) =>
     {
       'messages': messages,
       'next_cursor': next,
       'delta_cursor': delta,
       'resync': resync,
+      'has_more': ?hasMore,
     };
 
 void main() {
@@ -122,6 +126,27 @@ void main() {
       });
       expect(page.nextLink, 'n2', reason: 'more pages to walk');
       expect(page.deltaLink, isNull);
+    });
+
+    test('reads has_more, and leaves it null when the server omits it',
+        () async {
+      // The server's explicit paging verdict — the drain prefers it over the
+      // next_cursor inference. A build that predates the field leaves it null,
+      // and the drain falls back to the nextLink presence it always read.
+      final more = _FakeMcp({
+        'sync_mail': [_delta(next: 'n2', hasMore: true)],
+      });
+      expect((await McpMailBackend(more).deltaPage('inbox')).hasMore, isTrue);
+
+      final done = _FakeMcp({
+        'sync_mail': [_delta(delta: 'd1', hasMore: false)],
+      });
+      expect((await McpMailBackend(done).deltaPage('inbox')).hasMore, isFalse);
+
+      final silent = _FakeMcp({
+        'sync_mail': [_delta(delta: 'd1')],
+      });
+      expect((await McpMailBackend(silent).deltaPage('inbox')).hasMore, isNull);
     });
 
     test('a resync answer is the cursor being refused', () async {

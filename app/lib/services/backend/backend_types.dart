@@ -224,14 +224,21 @@ class DeltaResyncRequired implements Exception {
 
 /// One page of a delta drain. Exactly one of [nextLink] / [deltaLink] is set
 /// in practice: more pages to walk, or the cursor to store for next time.
+///
+/// [hasMore] is the Bond MCP server's explicit paging verdict, null for a
+/// backend that does not report one (the direct-Graph SDK path). It tracks the
+/// nextLink in the current server, and the drain treats it as the primary
+/// keep-paging signal with the nextLink presence as the fallback.
 class DeltaPage {
   final List<Map<String, dynamic>> messages;
   final String? nextLink;
   final String? deltaLink;
+  final bool? hasMore;
 
   const DeltaPage({
     this.messages = const [],
     this.nextLink,
     this.deltaLink,
+    this.hasMore,
   });
 }

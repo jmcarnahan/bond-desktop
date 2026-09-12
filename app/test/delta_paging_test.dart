@@ -359,17 +359,20 @@ void main() {
   });
 
   group('recovery', () {
-    test('a 410 restarts the drain once, from the full 14-day floor', () async {
+    test('a 410 restarts the drain once, from the full first-run floor',
+        () async {
       graph.queue('inbox', [
         () => http.Response('{"error":{"code":"resyncRequired"}}', 410),
         () => jsonOk(deltaBody([graphMessage(id: 'm1')],
             deltaLink: deltaCursor('inbox', 'fresh'))),
       ]);
 
-      /// UTC midnight, fourteen days back — the floor's shape since the
+      /// UTC midnight, [syncFloorDays] back — the floor's shape since the
       /// lookback became a setting the screen names a day for.
       String midnightFloor() {
-        final t = DateTime.now().toUtc().subtract(const Duration(days: 14));
+        final t = DateTime.now()
+            .toUtc()
+            .subtract(const Duration(days: syncFloorDays));
         return DateTime.utc(t.year, t.month, t.day)
             .toIso8601String()
             .replaceFirst('.000Z', 'Z');
@@ -547,19 +550,32 @@ void main() {
   group('conversation folding', () {
     test('an inbound, a reply, then newer inbound leaves the thread open',
         () async {
+      // Dated relative to now, inside the default lookback: the newest inbound
+      // has to be news the fold opens on, and a below-floor date would land as
+      // backlog and leave the thread `waiting`. Relative rather than fixed so
+      // the test does not rot as the calendar moves past a hard-coded window.
+      String iso(Duration ago) => DateTime.now()
+          .toUtc()
+          .subtract(ago)
+          .toIso8601String()
+          .replaceFirst(RegExp(r'\.\d+Z$'), 'Z');
+      final inbound1At = iso(const Duration(days: 3));
+      final replyAt = iso(const Duration(days: 2, hours: 12));
+      final inbound2At = iso(const Duration(days: 2)); // the newest
+
       graph.queue('inbox', [
         () => jsonOk(deltaBody(
               [
                 graphMessage(
                   id: 'in-1',
                   subject: 'Project brief',
-                  receivedDateTime: '2026-08-27T09:00:00Z',
+                  receivedDateTime: inbound1At,
                   preview: 'the first ask',
                 ),
                 graphMessage(
                   id: 'in-2',
                   subject: 'Re: Project brief',
-                  receivedDateTime: '2026-08-28T15:00:00Z',
+                  receivedDateTime: inbound2At,
                   preview: 'the newest word',
                 ),
               ],
@@ -575,7 +591,7 @@ void main() {
                   fromName: 'Jordan Bond',
                   fromAddress: 'lo@bond.com',
                   to: const ['sarah@example.com'],
-                  receivedDateTime: '2026-08-28T09:00:00Z',
+                  receivedDateTime: replyAt,
                   preview: 'my reply',
                 )
               ],
@@ -591,9 +607,9 @@ void main() {
       expect(conversation.messageCount, 3);
       expect(conversation.inboundCount, 2);
       expect(conversation.lastMessagePreview, 'the newest word');
-      expect(conversation.lastMessageAt, '2026-08-28T15:00:00Z');
-      expect(conversation.lastInboundAt, '2026-08-28T15:00:00Z');
-      expect(conversation.lastOutboundAt, '2026-08-28T09:00:00Z');
+      expect(conversation.lastMessageAt, inbound2At);
+      expect(conversation.lastInboundAt, inbound2At);
+      expect(conversation.lastOutboundAt, replyAt);
       // Named by how it opened, with the reply marker stripped.
       expect(conversation.subject, 'Project brief');
       expect(
