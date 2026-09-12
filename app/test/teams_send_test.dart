@@ -484,11 +484,18 @@ void main() {
         'chat-1',
         ConversationState.done,
       );
+      // Yesterday, not a date: an absolute one sat still until the sync
+      // window walked past it, and a message outside the window folds the
+      // thread to done rather than reopening it.
+      final yesterday = DateTime.now()
+          .toUtc()
+          .subtract(const Duration(days: 1))
+          .toIso8601String();
       teams.stored.add({
         'id': 'm2',
         'messageType': 'message',
-        'createdDateTime': '2026-08-28T22:30:00Z',
-        'lastModifiedDateTime': '2026-08-28T22:30:00Z',
+        'createdDateTime': yesterday,
+        'lastModifiedDateTime': yesterday,
         'body': {'contentType': 'text', 'content': 'Still waiting.'},
         'from': {
           'user': {'id': 'u1', 'displayName': 'Sarah Whitfield'},

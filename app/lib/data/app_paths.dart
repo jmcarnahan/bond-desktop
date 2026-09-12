@@ -17,6 +17,15 @@ import 'package:path_provider/path_provider.dart';
 /// `~/Library/Application Support/com.bondinbox.app/`. That is a change of
 /// address from the sandboxed container the app used to live in, which is
 /// what [migrateSandboxContainerData] exists for.
+///
+/// On Windows (unimplemented; the design is `dist/windows/README.md` →
+/// What ships) the root will be `%LOCALAPPDATA%\Bond Desktop\`, read from
+/// the environment rather than taken from path_provider: its
+/// `getApplicationSupportDirectory()` answers a ROAMING path
+/// (`%APPDATA%\<CompanyName>\<ProductName>`), and a roaming profile copies
+/// its whole tree at logon and logoff. This tree is a live SQLite database
+/// with `-wal` and `-shm` sidecars, an attachments folder and, by default,
+/// tens of gigabytes of model weights — none of which may roam.
 class AppPaths {
   AppPaths(this.support);
 

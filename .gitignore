@@ -25,6 +25,13 @@ CLAUDE.local.md
 dist/local/
 dist/stage/
 dist/out/
+# The Windows design's outputs: fetch-llama.ps1 stages the sidecar into
+# stage/, iscc writes the installer into out/. Neither is ever built here.
+dist/windows/stage/
+dist/windows/out/
 *.dmg
 *.p12
 *.p8
+# A Windows code-signing certificate export. None exists — the Windows design
+# signs in Azure — and a stray one must not be the exception.
+*.pfx

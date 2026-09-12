@@ -182,3 +182,9 @@ must leave it blank), `DIST_SPARKLE_PRIVATE_KEY_PATH`,
   not an entitlement and not an Xcode build setting.
 - `local.env.example` — the template for `dist/local/dist.env`. Named this way
   round because `*.env` is gitignored and the commit hook refuses to stage it.
+- `windows/` — the Windows design: `README.md`, an Inno Setup skeleton
+  (`bond.iss`) and `fetch-llama.ps1`, which stages the pinned llama.cpp
+  Windows release binaries. Design only, and nothing in it runs on macOS —
+  `iscc` and `pwsh` are Windows tools and there is no Windows build host.
+  `dist-check`'s **Windows llama pin** row is the one place the two platforms
+  meet: it compares `fetch-llama.ps1`'s tag against `build-llama.sh`'s.

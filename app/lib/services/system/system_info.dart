@@ -9,6 +9,11 @@ import 'package:flutter/services.dart';
 /// looks redundant and is not — an arm64 Mac running an x86_64 build of this
 /// app gets no Metal acceleration and would otherwise look like a fast
 /// machine that is mysteriously slow.
+///
+/// [appleSilicon] and [rosetta] are the macOS shape of "can this machine run
+/// the models"; the Windows shape of the same question is x64 plus a Vulkan
+/// device, and it is described in `dist/windows/README.md` → Setup wizard on
+/// Windows.
 @immutable
 class HardwareInfo {
   final String chip;

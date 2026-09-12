@@ -29,7 +29,7 @@ SECRET_PATTERNS = [
     (r"\bsk-[A-Za-z0-9]{20,}\b", "API key"),
     (r"\beyJ[A-Za-z0-9_-]{30,}\.[A-Za-z0-9_-]{20,}\.", "JWT"),
 ]
-SECRET_FILES = re.compile(r"(^|/)(\.env(\..*)?|.*\.env|local\.mk|SigningLocal\.xcconfig|.*\.(p12|pem|key|mobileprovision|p8|cer|keychain|dmg))$"
+SECRET_FILES = re.compile(r"(^|/)(\.env(\..*)?|.*\.env|local\.mk|SigningLocal\.xcconfig|.*\.(p12|pfx|pem|key|mobileprovision|p8|cer|keychain|dmg))$"
                           r"(?<!\.example)(?<!\.sample)(?<!\.template)(?<!\.dist)")
 # dist/local/ is the one directory whose whole contents are machine-local: the
 # notarization key, the Sparkle signing key and dist.env. Extension alone does

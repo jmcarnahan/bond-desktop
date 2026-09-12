@@ -44,8 +44,10 @@ class LlamaBinary {
     if (fromEnv != null && fromEnv.isNotEmpty) return fromEnv;
 
     final executable = resolvedExecutable ?? Platform.resolvedExecutable;
-    // Windows (Phase 7): `llama-server.exe`, and the DLL backends sit beside
-    // it for the same reason the `.so` modules do here.
+    // Windows (unimplemented): `llama-server.exe`, in this same directory,
+    // and the `ggml-*.dll` backends beside it for the same reason the `.so`
+    // modules are here — ggml scans the running executable's own directory.
+    // See `dist/windows/README.md` → What the app needs.
     final beside = p.join(p.dirname(executable), 'llama-server');
     final check = exists ?? (path) => File(path).existsSync();
     return check(beside) ? beside : null;

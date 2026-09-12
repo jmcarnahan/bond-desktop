@@ -506,6 +506,14 @@ this project that **nobody can reissue** — see [Updates](#updates) →
 *Switching keys*. `make dist-check` reports its mode along with everything
 else.
 
+The Windows design adds no fourth item on the release Mac: its signing lives
+in Azure, so no certificate file exists to keep anywhere (a `.pfx` would be
+refused by `.gitignore` and by the commit hook regardless), and the Sparkle key
+stays on the release Mac and never becomes a CI secret. What it does add is
+four **repository secrets** on GitHub, whose values live only there:
+`BOND_MCP_SERVER_URL` and the three Azure identity ids — see
+`dist/windows/README.md` → CI.
+
 One secret must never ship: **`MICROSOFT_CLIENT_SECRET`**. A build carrying it
 has it readable in the binary, which is why `dist/bundle.sh` refuses to run
 while the env file has a non-empty value for it. Distributed builds use MCP
@@ -657,5 +665,31 @@ rehearsal for the feed itself: it runs the whole generation against whatever key
 
 ## Windows
 
-Design only, in a later phase: Flutter's Windows builds run on Windows, and
-there is no build host yet. See `dist/windows/README.md` when it lands.
+**Design only — nothing in it has ever run.** Flutter builds Windows only on
+Windows, this project has no Windows machine, and neither `iscc` nor `pwsh` is
+installed on the Mac the design was written on. The shape it settles on:
+
+- A **per-user Inno Setup installer** (`PrivilegesRequired=lowest`, into
+  `%LOCALAPPDATA%\Programs\Bond Desktop`), with the sidecar beside the app
+  executable for the same reason it sits in `Contents/MacOS/` here, and app
+  data under `%LOCALAPPDATA%\Bond Desktop\` — local, never roaming.
+- **llama.cpp from the project's own Windows release binaries** rather than
+  built from source: the Vulkan x64 asset at the same tag `dist/build-llama.sh`
+  pins, downloaded against a measured SHA-256. One llama.cpp per release on
+  both platforms, and `make dist-check` has a row that says so.
+- **Azure Artifact Signing** for every shipped `.exe` and `.dll`, not just the
+  installer: Windows 11 Smart App Control blocks what it has no verdict on
+  unless it is validly signed, DLLs included, which is the Windows shape of
+  the library-validation rule behind `dist/sign.sh`.
+- **The same appcast**, with a second `<item>` per release whose enclosure
+  carries `sparkle:os="windows"`, signed by the same Ed25519 key on the
+  release Mac and inserted after the macOS item, where `generate_appcast`
+  leaves it alone. Sparkle on macOS drops that item; a Dart feed reader on
+  Windows verifies it and offers the update as a Flutter screen.
+- **GitHub Actions `windows-latest`** as the build host.
+
+What exists: `dist/windows/` (the design, an Inno Setup skeleton and
+`fetch-llama.ps1`) and `.github/workflows/windows.yml.disabled`, disabled by
+its file name. Start at **[`dist/windows/README.md`](../dist/windows/README.md)**,
+whose *To verify on the build host* list is everything the design asserts
+without evidence.

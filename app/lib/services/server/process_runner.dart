@@ -87,7 +87,10 @@ class SystemProcessRunner implements ProcessRunner {
   /// process exists and is ours. `Process.killPid` cannot express it — its
   /// signal enum has no zero — so this shells out.
   ///
-  // Windows (Phase 7): no `kill`; ask `tasklist /FI "PID eq <pid>"` instead.
+  // Windows (unimplemented): no `kill`. `tasklist /FI "PID eq <pid>" /NH
+  // /FO CSV` prints the row when the process exists and `INFO: No tasks are
+  // running…` when it does not. See `dist/windows/README.md` → What the app
+  // needs.
   @override
   Future<bool> isAlive(int pid) async {
     try {
@@ -103,8 +106,10 @@ class SystemProcessRunner implements ProcessRunner {
   /// plausibility before anything is killed: a pid is reused within hours on
   /// a busy machine, and the number alone is not evidence.
   ///
-  // Windows (Phase 7): `wmic process where processid=<pid> get commandline`,
-  // or the CIM equivalent on newer builds.
+  // Windows (unimplemented): PowerShell `Get-CimInstance Win32_Process
+  // -Filter "ProcessId = <pid>" | Select-Object -ExpandProperty CommandLine`.
+  // Not `wmic` — it is no longer installed by default since Windows 11 24H2.
+  // See `dist/windows/README.md` → What the app needs.
   @override
   Future<String?> commandLineOf(int pid) async {
     try {
@@ -147,8 +152,9 @@ class SystemProcessRunner implements ProcessRunner {
   /// state it feeds is already correct without it — the holder is the extra
   /// half-sentence, never the finding.
   ///
-  // Windows (Phase 7): `netstat -ano -p TCP` filtered to LISTENING, then the
-  // pid through `tasklist` for the image name.
+  // Windows (unimplemented): `netstat -ano -p TCP` filtered to `LISTENING`
+  // and `:<port>`, then `tasklist /FI "PID eq <pid>" /NH /FO CSV` on that pid
+  // for the image name. See `dist/windows/README.md` → What the app needs.
   @override
   Future<String?> listenerOn(int port) async {
     try {
@@ -175,8 +181,10 @@ class SystemProcessRunner implements ProcessRunner {
   /// Signals a process this app may no longer hold a handle to — the pid
   /// read out of the pid file after a relaunch.
   ///
-  // Windows (Phase 7): `taskkill /PID <pid>` and `/PID <pid> /F` for the
-  // two rungs; there are no POSIX signals to send.
+  // Windows (unimplemented): `taskkill /PID <pid>` then `taskkill /PID <pid>
+  // /F` for the two rungs; there are no POSIX signals to send, and
+  // `Process.killPid` cannot express the polite one. See
+  // `dist/windows/README.md` → What the app needs.
   @override
   bool kill(int pid, ProcessSignal signal) {
     try {

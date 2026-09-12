@@ -84,6 +84,25 @@ else
   row_bad "flutter >= 3.47" "not on PATH — see QUICKSTART.md"
 fi
 
+# One llama.cpp per release, both platforms. macOS builds it from a pinned
+# source tarball and Windows downloads a pinned release asset, and if the two
+# tags drift the two installers ship different servers under one version
+# number. Both literals are read with anchored patterns, so a tag mentioned in
+# a comment cannot answer for the real one.
+# `|| true` on both: under set -e/pipefail a missing file would end the whole
+# report at sed, and this is a report that always finishes.
+mac_tag="$(sed -n 's/^LLAMA_TAG=//p' "$ROOT/dist/build-llama.sh" 2>/dev/null | head -1 || true)"
+win_tag="$(sed -n "s/^\\\$LlamaTag *= *'\([^']*\)'.*/\1/p" "$ROOT/dist/windows/fetch-llama.ps1" 2>/dev/null | head -1 || true)"
+if [ -z "$mac_tag" ]; then
+  row_bad "Windows llama pin" "no LLAMA_TAG literal in dist/build-llama.sh"
+elif [ -z "$win_tag" ]; then
+  row_bad "Windows llama pin" "no \$LlamaTag literal in dist/windows/fetch-llama.ps1"
+elif [ "$win_tag" = "$mac_tag" ]; then
+  row_ok "Windows llama pin" "$win_tag (matches dist/build-llama.sh)"
+else
+  row_bad "Windows llama pin" "build-llama.sh pins $mac_tag, fetch-llama.ps1 pins $win_tag — edit dist/windows/fetch-llama.ps1 to $mac_tag and re-measure its SHA"
+fi
+
 step "signing"
 if [ -f "$DIST_ENV" ]; then
   row_ok "dist/local/dist.env" "$DIST_ENV"

@@ -388,6 +388,7 @@ SECRET_FILE_CASES = [
     (True, "local.mk"),
     (True, "app/macos/SigningLocal.xcconfig"),
     (True, "certs/dev.p12"),
+    (True, "dist/windows/codesign.pfx"),
 ]
 
 

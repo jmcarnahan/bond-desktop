@@ -372,7 +372,10 @@ class ModelServerSupervisor {
         // The executable's own directory, and it has to be: llama.cpp's ggml
         // backend modules are `.so` files loaded relative to it, so a child
         // started anywhere else silently loses the Metal backend and runs on
-        // the CPU. There is no environment variable for this.
+        // the CPU. There is no environment variable for this. The same rule
+        // holds on Windows for the `ggml-*.dll` backends, which is why the
+        // sidecar installs beside the app executable there too
+        // (`dist/windows/README.md` → What ships).
         workingDirectory: p.dirname(binary),
         environment: {
           ...Platform.environment,
@@ -756,6 +759,13 @@ class ModelServerSupervisor {
   /// Terminates whatever child this supervisor is responsible for — the one
   /// it holds a handle to, or the one it only knows by pid because it was
   /// adopted after a relaunch.
+  ///
+  // Windows (unimplemented): `Process.kill` accepts only sigterm and sigkill
+  // and both of them call `TerminateProcess`, so the ladder below collapses
+  // to one rung and the grace period is a plain wait for the handle to close
+  // rather than a chance to shut down cleanly. The real two-rung path there
+  // is `taskkill` through the runner. See `dist/windows/README.md` → What
+  // the app needs.
   Future<void> _terminate() async {
     final process = _process;
     final pid = _pid;
