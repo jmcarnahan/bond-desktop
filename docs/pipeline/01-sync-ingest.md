@@ -25,7 +25,7 @@ Microsoft data; everything after it runs against local rows.
   `requeueWork` and the doc comments distinguishing them (why storylines need
   the revive path rather than a plain enqueue).
 
-**Windows and caps.** How far back a sync reaches is a preference — 14 days by
+**Windows and caps.** How far back a sync reaches is a preference — 7 days by
 default, set in Settings → Sync & data — and the AI pipeline reads that same
 window: mail inside the lookback is triaged, extracted, judged and embedded,
 with no separate 7-day AI window behind it. The backlog enqueue files at most
@@ -33,7 +33,7 @@ with no separate 7-day AI window behind it. The backlog enqueue files at most
 already have a work row, so a deep window drains across passes rather than
 being truncated to its newest 150. Work in flight is re-queued at the next
 launch, so a restart loses nothing. Teams carries its own lookback in the same
-Settings section, defaulting to the same 14 days: a chat's first fetch reaches
+Settings section, defaulting to the same 7 days: a chat's first fetch reaches
 back to that floor through a server-side date filter rather than taking one
 page of its newest messages. Two limits bound that walk and both are logged
 when hit — the chat list stops at 200 chats (4 pages of 50), and one chat's
@@ -41,6 +41,23 @@ message walk stops at 40 pages. Both windows are set by the **How far back to
 sync** pair at the top of Settings → Sync & data — a preset per source or a
 custom `YYYY-MM-DD` date, with the calendar day the window reaches spelled out
 under it (see [../settings.md](../settings.md)).
+
+**Paging and re-entry.** A window-asking drain — first run, widen, 410
+recovery — sends its `min_received` floor on EVERY `sync_mail` page, not just
+the first. The Bond MCP server enforces the floor as a hard cap per page, but
+only on pages it is told the floor for, so a continuation that dropped it would
+let the server walk past the window (`sync_paging_guard_test`). Incremental
+passes send no floor; the cursor drives them. The server also answers
+`has_more`, defined on its side as "a `next_cursor` is set"; `DeltaPage.hasMore`
+records it as contract, and the loop itself keeps paging on the presence of the
+next cursor, the only thing a further page can be fetched with. `syncNow` on
+both services carries an in-flight latch: the inbox polls every 60 s, a deep
+pass can outlast that, and a second pass over the same MCP session used to end
+in `Broken pipe`. A re-entrant call JOINS the pass in flight rather than
+returning at once — `load` arms notifications and reloads when its sync comes
+back, and a no-op return would arm them a minute into a long first drain and
+announce the rest of the backlog as new mail. The latch clears with the pass,
+success or failure, so a failed pass never silences the next one.
 
 **Catch-up and revive.** Every pass ends with a block of cheap statements that
 put back what an outage, a crash or a race left behind: `reviveErroredTriage`

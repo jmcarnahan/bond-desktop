@@ -73,14 +73,14 @@ class TeamsSync {
   static const String folder = 'chats';
 
   /// How far back a chat list reaches when nobody has said otherwise. The same
-  /// two weeks the mail drain defaults to, and for the same reason: enough
-  /// context to see what is live without dragging in a year of archive.
+  /// week the mail drain defaults to, and for the same reason: enough context to
+  /// see what is live without dragging in a year of archive.
   ///
   /// A DEFAULT, not a limit. The user's Teams lookback overrides it through the
   /// resolver this class is built with, and this constant is what a caller that
   /// wired no resolver — every test that does not care, every caller from
   /// before the setting existed — falls back to.
-  static const int syncFloorDays = 14;
+  static const int syncFloorDays = 7;
 
   /// How many chat messages one refresh may queue for extraction. Lower than
   /// mail's cap: a chat message is a sentence, and a hundred of them is already
@@ -96,6 +96,13 @@ class TeamsSync {
 
   final TeamsBackend _teams;
   final MessageStore _store;
+
+  /// The [syncNow] pass draining right now, or null. The re-entrancy latch,
+  /// for [SyncService._inFlight]'s reasons: a refresh that outlasts the poll
+  /// interval must not have a second pass fire concurrent tool calls over the
+  /// one session, and a re-entrant caller joins the pass rather than being
+  /// told it is done — `refreshTeams` arms notifications on return.
+  Future<void>? _inFlight;
 
   /// Whether Teams may be touched at all — in production, whether the tenant
   /// actually granted `Chat.Read`.
@@ -135,7 +142,17 @@ class TeamsSync {
       _store.getSyncedAt(folder, source: source);
 
   /// One pass over the chat list. Silent and free when Teams is unavailable.
-  Future<void> syncNow() async {
+  Future<void> syncNow() {
+    // A pass already draining covers this tick — see [_inFlight]. Before the
+    // scope read, so a re-entrant poll neither works nor logs a second row.
+    final running = _inFlight;
+    if (running != null) return running;
+    final pass = _syncNow().whenComplete(() => _inFlight = null);
+    _inFlight = pass;
+    return pass;
+  }
+
+  Future<void> _syncNow() async {
     if (!await _canSync()) {
       // Recorded rather than returned silently, and safe to record on every
       // call: a Teams refresh only ever happens because the user asked for

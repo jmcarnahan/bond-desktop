@@ -217,6 +217,33 @@ void main() {
       expect(find.text('Custom…'), findsWidgets);
     });
 
+    testWidgets('a deployed URL equal to the local one offers one item, '
+        'not a crashing duplicate', (tester) async {
+      // Regression: BOND_MCP_SERVER_URL=http://localhost:18001/mcp makes the
+      // Deployed preset's value identical to the Local one's. Two dropdown items
+      // with the same value trips DropdownButton's "exactly one" assertion and
+      // takes the whole Settings screen down with a red screen.
+      await open(
+        tester,
+        deployedUrl: mcpLocalUrl,
+        mcpServerUrl: mcpLocalUrl,
+        onBackendModeChanged: (_) {},
+      );
+      await expand(tester, 'Microsoft connection');
+
+      expect(tester.takeException(), isNull,
+          reason: 'a deployed URL equal to the local one must not crash the '
+              'picker');
+
+      // Open the menu to inspect the items: the Local item survives (its label
+      // is what the collapsed field showed too), and the duplicate Deployed one
+      // is dropped rather than emitted with a colliding value.
+      await tester.tap(find.text('Local'));
+      await tester.pumpAndSettle();
+      expect(find.text('Deployed'), findsNothing);
+      expect(find.text('Custom…'), findsWidgets);
+    });
+
     testWidgets('picking the local preset commits it', (tester) async {
       final urls = <String>[];
       await open(

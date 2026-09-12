@@ -1093,12 +1093,12 @@ void main() {
       graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
       graph.messages['chat-1'] = [_message(id: 'm1')];
 
-      final before = _isoDaysAgo(14);
+      final before = _isoDaysAgo(TeamsSync.syncFloorDays);
       await build().syncNow();
 
       expect(
         filterOf(graph.messageRequests.single),
-        _filterReaching(14, before),
+        _filterReaching(TeamsSync.syncFloorDays, before),
         reason: 'a first sight that stopped at one page would make the '
             'lookback setting a promise the app does not keep',
       );
@@ -1150,13 +1150,13 @@ void main() {
       graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
       graph.messages['chat-1'] = [_message(id: 'm1')];
 
-      final before = _isoDaysAgo(14);
+      final before = _isoDaysAgo(TeamsSync.syncFloorDays);
       await build(lookbackDays: () => throw StateError('gone')).syncNow();
 
       expect(await store.getMessageRow('teams', 'm1'), isNotNull);
       expect(
         filterOf(graph.messageRequests.single),
-        _filterReaching(14, before),
+        _filterReaching(TeamsSync.syncFloorDays, before),
         reason: 'a disposed container is worth one default window, never a '
             'refresh that throws',
       );
@@ -1170,10 +1170,10 @@ void main() {
       graph.chats.add(_chat(id: 'chat-1', previewAt: at));
       graph.messages['chat-1'] = [_message(id: 'm1', at: at)];
 
-      final fortnightBefore = _isoDaysAgo(14);
+      final defaultBefore = _isoDaysAgo(TeamsSync.syncFloorDays);
       await build().syncNow();
       expect(await store.getPref(teamsBootstrapFloorKey),
-          _midnightDaysAgo(14, fortnightBefore),
+          _midnightDaysAgo(TeamsSync.syncFloorDays, defaultBefore),
           reason: 'an absent marker is adopted silently, so the pass after an '
               'upgrade is not a re-read for nothing');
       graph.requests.clear();
@@ -1208,17 +1208,17 @@ void main() {
       final at = _iso(const Duration(hours: 2));
       graph.chats.add(_chat(id: 'chat-1', previewAt: at));
       graph.messages['chat-1'] = [_message(id: 'm1', at: at)];
-      final before = _isoDaysAgo(14);
+      final before = _isoDaysAgo(TeamsSync.syncFloorDays);
       await build().syncNow();
       graph.requests.clear();
 
-      await build(lookbackDays: () => 7).syncNow();
+      await build(lookbackDays: () => 3).syncNow();
 
       expect(graph.messageRequests, isEmpty,
           reason: 'a narrower window is a preference about what to keep, not '
               'a reason to fetch anything');
       expect(await store.getPref(teamsBootstrapFloorKey),
-          _midnightDaysAgo(14, before));
+          _midnightDaysAgo(TeamsSync.syncFloorDays, before));
     });
 
     test('a widen that fails mid-list leaves the marker where it was',
@@ -1226,10 +1226,10 @@ void main() {
       final at = _iso(const Duration(hours: 2));
       graph.chats.add(_chat(id: 'chat-1', previewAt: at));
       graph.messages['chat-1'] = [_message(id: 'm1', at: at)];
-      final before = _isoDaysAgo(14);
+      final before = _isoDaysAgo(TeamsSync.syncFloorDays);
       await build().syncNow();
       final adopted = await store.getPref(teamsBootstrapFloorKey);
-      expect(adopted, _midnightDaysAgo(14, before));
+      expect(adopted, _midnightDaysAgo(TeamsSync.syncFloorDays, before));
       graph.requests.clear();
 
       graph.failingChats.add('chat-1');
@@ -1252,11 +1252,11 @@ void main() {
       graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
       graph.messages['chat-1'] = [_message(id: 'm1')];
 
-      final before = _isoDaysAgo(14);
+      final before = _isoDaysAgo(TeamsSync.syncFloorDays);
       await build().syncNow();
 
       expect(await store.getPref(teamsBootstrapFloorKey),
-          _midnightDaysAgo(14, before));
+          _midnightDaysAgo(TeamsSync.syncFloorDays, before));
     });
   });
 
@@ -1721,6 +1721,38 @@ void main() {
       expect(stripChatHtml(null), '');
       expect(stripChatHtml(''), '');
       expect(stripChatHtml('<div></div>'), '');
+    });
+  });
+
+  group('re-entry', () {
+    test('a second syncNow while one is running joins it, not a second walk',
+        () async {
+      // A refresh that outlasts the poll interval must not have a second pass
+      // fire concurrent requests over the one session — and the joiner must
+      // be released only when the pass has actually run, because
+      // `refreshTeams` arms notifications the moment its sync comes back.
+      graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = [_message(id: 'm1')];
+      final sync = build();
+
+      final first = sync.syncNow();
+      final second = sync.syncNow();
+
+      await second;
+      expect(graph.messageRequests.length, 1,
+          reason: 'one walk of the chat, finished by the time the joined '
+              'caller is released');
+      expect(await store.getMessageRow('teams', 'm1'), isNotNull);
+      await first;
+      expect(graph.messageRequests.length, 1,
+          reason: 'the first call started no second walk either');
+
+      // Per pass, not permanent. The chat is taken away first so the next
+      // pass is one chat-list read and nothing behind it.
+      graph.chats.clear();
+      graph.requests.clear();
+      await sync.syncNow();
+      expect(graph.requests, isNotEmpty);
     });
   });
 }

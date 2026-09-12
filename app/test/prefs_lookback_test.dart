@@ -33,7 +33,7 @@ void main() {
 
   tearDown(() => db.close());
 
-  test('a fresh install reaches back the default fortnight', () async {
+  test('a fresh install reaches back the default window', () async {
     final ref = await container();
     final store = MessageStore(db);
 

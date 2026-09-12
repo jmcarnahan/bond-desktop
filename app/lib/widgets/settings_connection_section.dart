@@ -584,7 +584,11 @@ class MicrosoftConnectionSectionState extends State<MicrosoftConnectionSection> 
         initialValue: _serverPreset,
         decoration: const InputDecoration(labelText: 'MCP server'),
         items: [
-          if (widget.deployedUrl.isNotEmpty)
+          // Only when it is a DISTINCT URL: pointing the deployed define at the
+          // local endpoint (BOND_MCP_SERVER_URL=http://localhost:18001/mcp) makes
+          // this item's value equal the Local item's below, and two dropdown
+          // items sharing one value trips DropdownButton's "exactly one" assert.
+          if (widget.deployedUrl.isNotEmpty && widget.deployedUrl != mcpLocalUrl)
             DropdownMenuItem(
               value: widget.deployedUrl,
               child: const Text('Deployed'),

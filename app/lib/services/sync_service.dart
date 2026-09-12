@@ -17,10 +17,11 @@ import 'graph_mail.dart';
 import 'mail_text.dart';
 import 'pipeline_progress.dart';
 
-/// How far back a mailbox that has never synced reaches. Two weeks is enough
+/// How far back a mailbox that has never synced reaches. One week is enough
 /// context to thread the conversations that are actually live without
-/// dragging in a year of archive.
-const int syncFloorDays = 14;
+/// dragging in a year of archive — and the smaller a first drain, the sooner a
+/// new sign-in has a usable inbox. A user who wants more raises it in Settings.
+const int syncFloorDays = 7;
 
 /// The range a user may choose that floor from. A day is the shortest window
 /// that still means "recent mail" on a machine that syncs once a morning; a
@@ -107,6 +108,21 @@ class SyncService implements MailSync {
   /// was addressed to the user, so nothing does.
   String? _userAddress;
 
+  /// The [syncNow] pass draining right now, or null. The re-entrancy latch:
+  /// the inbox polls every 60s and a pass over a deep window can outlast that,
+  /// so a second syncNow would fire concurrent `sync_mail` calls over the one
+  /// mcp_dart session and the server would drop them mid-write (a `Broken pipe`
+  /// SocketException).
+  ///
+  /// A future rather than a flag because a re-entrant caller JOINS the pass
+  /// instead of being turned away. Every caller does something after its sync
+  /// "came back" — `load` arms notifications, reloads, starts the pumps — and
+  /// a no-op return would make those true one minute into a ten-minute first
+  /// drain: notifications armed, and every row the drain wrote from then on
+  /// announced as new mail. Joining keeps "returned" meaning "the pass ended".
+  /// The same shape as `AiWorker.pump`.
+  Future<void>? _inFlight;
+
   /// How many days back the user asked this mailbox to reach. A closure rather
   /// than a value, for the reason [_userAddressReader] is one: this service is
   /// built once and the preference changes under it, and a sync must use the
@@ -157,10 +173,21 @@ class SyncService implements MailSync {
   }
 
   @override
-  Future<void> syncNow() async {
-    _userAddress ??= await _resolveUserAddress();
+  Future<void> syncNow() {
+    // A pass already draining covers this tick — see [_inFlight]. The latch is
+    // set synchronously, before the pass reaches its first await, so a second
+    // call in the same turn already finds it.
+    final running = _inFlight;
+    if (running != null) return running;
+    final pass = _pass().whenComplete(() => _inFlight = null);
+    _inFlight = pass;
+    return pass;
+  }
+
+  Future<void> _pass() async {
     final sw = Stopwatch()..start();
     try {
+      _userAddress ??= await _resolveUserAddress();
       // Computed exactly ONCE per pass, here, before anything drains — and
       // then carried down as a parameter rather than recomputed where it is
       // used. [MessageStore.setDeltaLink] stamps `synced_at` on EVERY call,
@@ -726,18 +753,20 @@ class SyncService implements MailSync {
     void Function(String subject)? onFirstSighting,
   }) async {
     var link = startLink;
-    var firstRequest = true;
     var newMessages = 0;
 
     while (true) {
       final page = await _mail.deltaPage(
         folder,
         link: link,
-        // The floor belongs to the first request only. Every link after it
-        // is opaque and already carries the query it was born with.
-        minReceivedIso: firstRequest ? minReceivedIso : null,
+        // Sent on EVERY request, not just the first: the Bond MCP server honours
+        // min_received as a hard cap PER PAGE, but only for the pages it is told
+        // about — a continuation that dropped the floor lets the server walk
+        // past the window. On an incremental pass this is null (the cursor
+        // drives the drain), so only the window-asking drains — first run,
+        // widen, 410 recovery — carry a floor, and now they carry it all the way.
+        minReceivedIso: minReceivedIso,
       );
-      firstRequest = false;
 
       newMessages += await _ingestPage(
         page.messages,
@@ -747,6 +776,13 @@ class SyncService implements MailSync {
         onFirstSighting: onFirstSighting,
       );
 
+      // The next cursor is the only ACTIONABLE paging signal: a page cannot be
+      // fetched without one. `has_more` is read into [DeltaPage.hasMore] for the
+      // server contract (and pinned in mcp_mail_backend_test), but it is not the
+      // loop's gate — letting a `has_more: false` stop the walk while a cursor
+      // is still present would silently drop whatever is behind that cursor if
+      // the two ever disagreed. So the loop drives on the cursor, as it did
+      // before has_more existed.
       final next = page.nextLink;
       if (next != null && next.isNotEmpty) {
         // Deliberately NOT persisted: a nextLink is a position inside an

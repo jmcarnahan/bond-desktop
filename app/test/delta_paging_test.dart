@@ -359,17 +359,20 @@ void main() {
   });
 
   group('recovery', () {
-    test('a 410 restarts the drain once, from the full 14-day floor', () async {
+    test('a 410 restarts the drain once, from the full first-run floor',
+        () async {
       graph.queue('inbox', [
         () => http.Response('{"error":{"code":"resyncRequired"}}', 410),
         () => jsonOk(deltaBody([graphMessage(id: 'm1')],
             deltaLink: deltaCursor('inbox', 'fresh'))),
       ]);
 
-      /// UTC midnight, fourteen days back — the floor's shape since the
+      /// UTC midnight, [syncFloorDays] back — the floor's shape since the
       /// lookback became a setting the screen names a day for.
       String midnightFloor() {
-        final t = DateTime.now().toUtc().subtract(const Duration(days: 14));
+        final t = DateTime.now()
+            .toUtc()
+            .subtract(const Duration(days: syncFloorDays));
         return DateTime.utc(t.year, t.month, t.day)
             .toIso8601String()
             .replaceFirst('.000Z', 'Z');
