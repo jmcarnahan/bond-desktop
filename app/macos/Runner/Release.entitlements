@@ -1,33 +1,36 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  keychain-access-groups is still ABSENT, and Manual signing does not change
-  that. Measured against this Xcode: the key present as
-  $(AppIdentifierPrefix)com.bondinbox.app fails the ad-hoc build with
-  "Runner requires a provisioning profile", and the key present as an empty
-  array fails identically — it is the key itself, not the group string, that
-  makes Xcode demand a profile. Removing the key builds clean.
+  The app is UNSANDBOXED on purpose, which is why com.apple.security.app-sandbox
+  is absent and why the file-access keys that only mean something inside the
+  sandbox went with it.
 
-  This file therefore stays key-less on purpose, so ad-hoc builds keep
-  working. The keyed variant already exists as ReleaseSigned.entitlements
-  (DebugProfile.entitlements has DebugProfileSigned.entitlements); a build
-  selects it by setting BOND_ENTITLEMENTS_SUFFIX = Signed in
-  Runner/Configs/SigningLocal.xcconfig alongside a real Apple Development
-  identity. Nothing to add here — keep the non-keychain keys in sync with the
-  Signed variant.
+  Three things this app does that the sandbox forbids:
+    - it spawns and supervises a llama-server child. The sandbox allows
+      process-exec only inside the app bundle and a short list of system
+      directories, and a child always inherits the parent's sandbox.
+    - it reads a models folder the user picks anywhere on disk, from that
+      CHILD process, which no security-scoped bookmark can grant.
+    - it stores tens of gigabytes of weights outside a container the user
+      cannot find or move.
+  Every comparable local-model app ships the same way. Notarization does not
+  require the sandbox.
+
+  What replaces it: the hardened runtime, plus Gatekeeper's notarization
+  check. The hardened runtime is neither an entitlement nor an Xcode build
+  setting here — it is a codesign flag (--options runtime) that dist/sign.sh
+  applies in its Developer ID branch and nowhere else, because an ad-hoc
+  build carrying it cannot load its own ad-hoc dylibs. Distribution signing
+  happens in dist/sign.sh, not in Xcode.
+
+  The two network keys stay because they cost nothing and document intent:
+  the app talks to Microsoft Graph and to a loopback model server.
 -->
 <plist version="1.0">
 <dict>
-	<key>com.apple.security.app-sandbox</key>
-	<true/>
 	<key>com.apple.security.network.client</key>
 	<true/>
 	<key>com.apple.security.network.server</key>
-	<true/>
-	<key>com.apple.security.files.user-selected.read-write</key>
-	<true/>
-	<!-- The app keeps reading a user-picked context directory after relaunch through a security-scoped bookmark. -->
-	<key>com.apple.security.files.bookmarks.app-scope</key>
 	<true/>
 </dict>
 </plist>

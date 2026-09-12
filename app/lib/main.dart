@@ -1,14 +1,22 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'data/app_paths.dart';
 import 'data/db.dart';
 import 'data/message_store.dart';
+import 'data/setup_store.dart';
 import 'providers/app_providers.dart';
 import 'providers/prefs_provider.dart';
 import 'screens/inbox_screen.dart';
+import 'screens/setup/setup_gate.dart';
 import 'screens/sign_in_screen.dart';
+import 'services/models/model_manifest.dart';
 import 'services/triage_queue.dart';
 import 'widgets/preview/pdf_preview.dart';
+import 'widgets/server_bootstrap.dart';
 import 'theme/bond_theme.dart';
 
 Future<void> main() async {
@@ -28,6 +36,19 @@ Future<void> main() async {
     // reading without it.
     debugPrint('pdf engine did not initialise: $e');
   }
+
+  // Before the database is opened, and it has to be: the app used to be
+  // sandboxed, so an existing user's mailbox is inside
+  // `~/Library/Containers/…` and invisible from the new home. `openAppDb`
+  // would create an empty file beside it and the migration would then decline
+  // to run, because a database in the target is what "already migrated"
+  // means. It never throws and it never deletes from the source — see
+  // [migrateSandboxContainerData].
+  final paths = await AppPaths.locate();
+  final migration = await migrateSandboxContainerData(
+    home: Directory(Platform.environment['HOME'] ?? ''),
+    target: paths.support,
+  );
 
   // Opened once, here, rather than lazily behind a provider: the open is
   // async, every screen needs it, and a database that cannot be opened is a
@@ -51,6 +72,26 @@ Future<void> main() async {
   await store.resetInterruptedWork();
   await store.pruneActivity();
 
+  // Recorded only when there was something to record. `attempted: false` is
+  // the normal case — no container, or a home that already had a database —
+  // and writing a row for it would leave every install carrying a report about
+  // a migration that never happened. Written AFTER the open, because
+  // `setup_state` is a table in the database this is a report about.
+  if (migration.attempted) {
+    await SetupStore(db).set(
+      SetupStore.containerMigrationKey,
+      jsonEncode(migration.toJson()),
+    );
+    debugPrint('container migration: $migration');
+  }
+
+  // The committed manifest of model files, read from the asset bundle before
+  // anything can ask for it. NOT guarded: a manifest that is missing or does
+  // not parse is a broken build rather than a broken machine, and a launch
+  // that swallowed it would leave the router pointed at nothing and the
+  // downloader with nothing to fetch.
+  final manifest = await ModelManifest.load();
+
   // Read before the first frame rather than a microtask into it: every backend
   // provider watches the stored mode, and a frame on the defaults would build
   // — and immediately dispose — a session pointed at the wrong server.
@@ -60,6 +101,14 @@ Future<void> main() async {
     ProviderScope(
       overrides: [
         dbProvider.overrideWithValue(db),
+        // The located support directory, for [dbProvider]'s reason: the lookup
+        // is async and the provider's own default is a temp path nothing
+        // writes to.
+        appPathsProvider.overrideWithValue(paths),
+        // The model manifest, for [dbProvider]'s reason: the asset read is
+        // async and the provider's own default throws rather than inventing a
+        // second list of checkpoints.
+        modelManifestProvider.overrideWithValue(manifest),
         initialAppPrefsProvider.overrideWithValue(prefs),
         // Stamped here, once: the processing indicator only speaks for mail
         // that arrived after the app was already open, and this is the only
@@ -84,7 +133,12 @@ class BondInboxApp extends StatelessWidget {
       title: 'Bond Inbox',
       debugShowCheckedModeBanner: false,
       theme: BondTheme.themeData,
-      home: const AuthGate(),
+      // Three gates, outermost first. The bootstrap decides whether this app
+      // is running the model server, and is above everything because the
+      // server is wanted signed in or out and set up or not. [SetupGate]
+      // decides whether this machine has been set up at all. [AuthGate]
+      // decides which screen a set-up machine gets.
+      home: const ServerBootstrap(child: SetupGate(child: AuthGate())),
     );
   }
 }

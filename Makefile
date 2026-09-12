@@ -92,12 +92,16 @@ RESET  := \033[0m
 
 .DEFAULT_GOAL := help
 .NOTPARALLEL:
+# Every dist target is listed: a `dist/` DIRECTORY exists, so without .PHONY
+# make would see the target as already satisfied and say "up to date".
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop omlx omlx-stop _wait-omlx \
         app-install app-run app-test app-gen app-migrations app-analyze \
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
-        ab ab-membership drain bench-compare
+        ab ab-membership drain bench-compare \
+        dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
+        dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
 
 help:
 	@printf "bond-desktop — local model + agent\n\n"
@@ -139,7 +143,19 @@ help:
 	@printf "BENCH_VERIFY=0 skips the contract check; BENCH_K=1,3,6 picks the drain\n"
 	@printf "rounds (start the server with FAST_SLOTS >= max(K)).\n\n"
 	@printf "First run downloads ~19GB of weights before the port binds —\n"
-	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n"
+	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n\n"
+	@printf "Ship it (macOS installer, see docs/distribution.md):\n"
+	@printf "  make dist         → signed, notarized, stapled DMG (needs dist/local/, see docs/distribution.md)\n"
+	@printf "  make dist-llama   → build the bundled llama-server sidecar (SHA-pinned source)\n"
+	@printf "  make dist-app     → build \"Bond Desktop.app\" and lay the sidecar into it\n"
+	@printf "  make dist-sign    → sign the bundle inside out\n"
+	@printf "  make dist-notarize → submit the signed app to Apple, wait, staple\n"
+	@printf "  make dist-dmg     → dist/out/Bond-Desktop-$(VERSION).dmg\n"
+	@printf "  make dist-check   → what this machine still needs to ship a release\n"
+	@printf "  make dist-clean   → rm dist/stage dist/out\n"
+	@printf "  make dist-appcast → regenerate docs/appcast/appcast.xml for the released DMG\n"
+	@printf "  make dist-sparkle-tools → stage Sparkle's generate_keys/generate_appcast\n"
+	@printf "  make dist-dmg AD_HOC=1 → unsigned DMG for testers (no certificate needed)\n"
 
 install:
 	@brew list llama.cpp >/dev/null 2>&1 || brew install llama.cpp
@@ -708,6 +724,20 @@ endif
 ifneq ($(strip $(FAST_LLAMA_MODEL)),)
 APP_LLM_DEFINES += --dart-define=FAST_LLAMA_MODEL='$(FAST_LLAMA_MODEL)'
 endif
+# Points a DEV build at a llama-server it did not ship with — Homebrew's, or a
+# checkout's build directory — so Settings -> Models -> Local server can run
+# the one bundled-style router without packaging an .app first. The shipped
+# bundle carries its own copy beside the executable and needs none of this.
+ifneq ($(strip $(BOND_LLAMA_SERVER)),)
+APP_LLM_DEFINES += --dart-define=BOND_LLAMA_SERVER='$(BOND_LLAMA_SERVER)'
+endif
+# Read by the first-run setup gate (Phase 4) to skip the wizard on a machine
+# that is already set up. Defined here NOW, while the gate is still being
+# built, so the `local.mk` line a developer writes today keeps working when it
+# lands and nobody has to edit this block twice.
+ifneq ($(strip $(BOND_DEV_SKIP_SETUP)),)
+APP_LLM_DEFINES += --dart-define=BOND_DEV_SKIP_SETUP='$(BOND_DEV_SKIP_SETUP)'
+endif
 
 app-install:
 	@cd $(APP_DIR) && $(FLUTTER) pub get
@@ -891,7 +921,108 @@ vec-vendor:
 
 app-build:
 	@cd $(APP_DIR) && $(FLUTTER) build macos --release $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
-	@printf "  $(GREEN)✓$(RESET) $(APP_DIR)/build/macos/Build/Products/Release/bond_inbox.app\n"
+	@printf "  $(GREEN)✓$(RESET) \"$(APP_DIR)/build/macos/Build/Products/Release/Bond Desktop.app\"\n"
+
+# ── distribution ───────────────────────────────────────────────────────
+# The installer pipeline. `make dist` is the release: a strict dist-check
+# first, then the llama-server sidecar, the app bundle, the Developer ID
+# signature, the app notarized and stapled, a DMG that is itself signed,
+# notarized and stapled, and finally the signed Sparkle appcast that tells
+# every installed copy the release exists. Every step is a script under dist/
+# so that the same commands run from a shell, and every step is idempotent.
+#
+# AD_HOC=1 is the no-certificate rehearsal: everything runs, the bundle is
+# ad-hoc signed WITHOUT the hardened runtime (library validation would refuse
+# ad-hoc dylibs), and the DMG is neither signed nor notarized. Testers open it
+# through System Settings → Privacy & Security → Open Anyway.
+
+# One source of truth for both numbers: pubspec's `version: 1.0.0+1` line,
+# which is also what --build-name/--build-number carry into Info.plist.
+# Both halves are matched as DIGITS rather than as "everything up to +" and
+# "everything after it": the loose form let a trailing YAML comment ride along
+# into BUILD (`version: 1.0.1+2 # bump` → `2 # bump`), which then reaches
+# --build-number and Sparkle's sparkle:version. A line these cannot parse
+# leaves both empty, and dist-check's "pubspec version" row is what says so
+# before a release starts.
+VERSION ?= $(shell sed -n 's/^version:[[:space:]]*\([0-9][0-9.]*\)+.*/\1/p' $(APP_DIR)/pubspec.yaml)
+BUILD   ?= $(shell sed -n 's/^version:[[:space:]]*[0-9][0-9.]*+\([0-9][0-9]*\).*/\1/p' $(APP_DIR)/pubspec.yaml)
+
+# Non-empty selects the ad-hoc rehearsal described above.
+AD_HOC ?=
+
+# Machine-local signing and notarization settings, never committed. See
+# dist/local.env.example and dist/README.md.
+DIST_ENV ?= $(CURDIR)/dist/local/dist.env
+
+# How long dist-notarize waits for Apple's verdict. Apple usually answers in a
+# few minutes; bounding the wait means an outage on their side FAILS the build
+# with a message instead of hanging a terminal overnight.
+DIST_NOTARY_TIMEOUT ?= 30m
+
+# Non-empty lets dist-app build without a BOND_MCP_SERVER_URL. Off by default
+# because a build with no MCP URL cannot sign in at all, which is a broken
+# tester build that only announces itself after someone has installed it.
+BOND_DIST_ALLOW_NO_MCP ?=
+
+dist-llama:
+	@dist/build-llama.sh
+
+dist-app: dist-llama
+	@MS_ENV="$(MS_ENV)" VERSION=$(VERSION) BUILD=$(BUILD) FLUTTER=$(FLUTTER) \
+	 AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" \
+	 BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/bundle.sh
+
+dist-sign: dist-app
+	@AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" dist/sign.sh
+
+dist-notarize: dist-sign
+	@AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/notarize.sh "dist/stage/Bond Desktop.app"
+
+# A real DMG is built from the STAPLED app: the ticket is written INTO the
+# bundle, so a copy taken before notarization carries none. AD_HOC=1 has
+# nothing to notarize and drops the prerequisite. `.NOTPARALLEL` at the top of
+# this file is what keeps the two prerequisites in this order.
+dist-dmg: dist-sign $(if $(AD_HOC),,dist-notarize)
+	@VERSION=$(VERSION) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/dmg.sh
+
+dist-check:
+	@MS_ENV="$(MS_ENV)" DIST_ENV="$(DIST_ENV)" BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
+
+# How a maintainer gets `generate_keys` without installing anything globally:
+# the pinned tools are staged under dist/stage/ and dist-clean takes them away
+# again. dist-appcast runs this itself; it is a target of its own only for the
+# one-off key generation in docs/distribution.md.
+dist-sparkle-tools:
+	@dist/sparkle-tools.sh
+
+# No prerequisite, deliberately. dist-app rebuilds the whole app on every run,
+# and re-running the appcast after a failed upload must not rebuild and
+# re-notarize an identical binary. What it needs is the DMG in dist/out/, which
+# the script checks for and names the command that produces.
+dist-appcast:
+	@VERSION=$(VERSION) BUILD=$(BUILD) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" dist/appcast.sh
+
+# Internal, hence the leading underscore (the `_wait-*` convention). The strict
+# report runs FIRST so a release never begins on a machine that cannot finish
+# it: half an hour of building and then a missing notary key is the failure
+# this exists to refuse.
+_dist-preflight:
+	@if [ -n "$(AD_HOC)" ]; then \
+	   printf "  $(RED)✗$(RESET) make dist is the signed, notarized release — for a tester build use: make dist-dmg AD_HOC=1\n"; \
+	   exit 1; \
+	 fi
+	@STRICT=1 MS_ENV="$(MS_ENV)" DIST_ENV="$(DIST_ENV)" BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
+
+# No $(MAKE) sub-invocations here: the prerequisite chain already gives the
+# order, and a sub-make would rebuild the app once per invocation.
+dist: _dist-preflight dist-dmg dist-appcast
+	@printf "  $(GREEN)✓$(RESET) dist/out/Bond-Desktop-$(VERSION).dmg — signed, notarized, stapled\n"
+	@printf "  $(GREEN)✓$(RESET) docs/appcast/appcast.xml — regenerated\n"
+	@printf "    Next: gh release create v$(VERSION) dist/out/Bond-Desktop-$(VERSION).dmg, commit docs/appcast/appcast.xml; see docs/distribution.md → Releasing\n"
+
+dist-clean:
+	@rm -rf dist/stage dist/out
+	@printf "  $(GREEN)✓$(RESET) removed dist/stage and dist/out\n"
 
 # This exists because a corrupt download does NOT announce itself. A
 # concurrent writer once clobbered the 19GB blob mid-pull and every cheap

@@ -9,10 +9,12 @@ import 'package:path_provider/path_provider.dart';
 
 // `show BondDatabase`: drift generates row classes (Message, Conversation,
 // Storyline, …) whose names collide with the app's models.
+import '../data/app_paths.dart';
 import '../data/context_store.dart';
 import '../data/database.dart' show BondDatabase;
 import '../data/db.dart' show appDatabasePath;
 import '../data/message_store.dart';
+import '../data/setup_store.dart';
 import '../services/activity_log.dart';
 import '../services/ai_worker.dart';
 import '../services/attachments/attachment_bytes.dart';
@@ -52,6 +54,14 @@ import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_people_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
 import '../services/message_search.dart';
+import '../services/models/model_downloader.dart';
+import '../services/models/model_manifest.dart';
+import '../services/server/llama_binary.dart';
+import '../services/server/model_server_supervisor.dart';
+import '../services/server/process_runner.dart';
+import '../services/server/server_state.dart';
+import '../services/system/system_info.dart';
+import '../services/system/updater.dart';
 import '../services/needs_you_handler.dart';
 import '../services/notification_coordinator.dart';
 import '../services/notify/desktop_notifier.dart';
@@ -166,6 +176,122 @@ final messageStoreProvider =
 /// none of it is wiped when an identity changes.
 final contextStoreProvider =
     Provider<ContextStore>((ref) => ContextStore(ref.watch(dbProvider)));
+
+/// What this machine can be asked about itself — chip, memory, free disk, and
+/// the two calls that keep it awake while a model loads. The real one is a
+/// method channel onto the Runner's Swift, on [directoryAccessProvider]'s
+/// pattern; a test overrides it with `FakeSystemInfo` and touches no channel.
+final systemInfoProvider = Provider<SystemInfo>((ref) => const ChannelSystemInfo());
+
+/// Every folder the app owns. `main()` OVERRIDES this with the located
+/// directory, exactly as it overrides [dbProvider], because
+/// `getApplicationSupportDirectory()` is async and a provider body cannot be.
+///
+/// The default is a path under the system temp directory that nothing creates.
+/// It exists so a widget test can build the graph without reaching the real
+/// support directory, and it is never written to in one: every writer here is
+/// behind the managed server, which is off by default.
+final appPathsProvider = Provider<AppPaths>(
+  (ref) => AppPaths(
+    Directory(p.join(Directory.systemTemp.path, 'bond-desktop-unlocated')),
+  ),
+);
+
+/// Which checkpoints this build downloads — `assets/models/manifest.json`,
+/// parsed once in `main()` and handed in here.
+///
+/// It throws rather than defaulting, exactly as [dbProvider] does and for the
+/// same reason: reading an asset is async and a provider body cannot be. A
+/// Dart-constant fallback would be worse than a throw — it would be a SECOND
+/// place the three checkpoints are named, and the whole point of the manifest
+/// is that there is only one.
+final modelManifestProvider = Provider<ModelManifest>(
+  (ref) => throw UnimplementedError(
+    'modelManifestProvider must be overridden with the loaded manifest '
+    '(see main()).',
+  ),
+);
+
+/// The first-run and machine-local bookkeeping — a THIRD store over the same
+/// database, for [contextStoreProvider]'s reason: nothing in it is mailbox
+/// data and none of it is wiped when an identity changes.
+final setupStoreProvider =
+    Provider<SetupStore>((ref) => SetupStore(ref.watch(dbProvider)));
+
+/// The app's own llama-server, when it runs one.
+///
+/// Constructing it starts nothing: `ServerBootstrap` calls `ensureRunning()`
+/// once at launch, and that is a no-op while the preference is off.
+///
+/// It watches the PATHS and the PLATFORM and nothing else. Every preference it
+/// needs — the port, the folder, whether it is managed at all — is read inside
+/// a closure with `ref.read`, on the rule [llmClientProvider] states: a
+/// provider that watched the prefs would be rebuilt the moment somebody moved
+/// a setting, and rebuilding this one mid-drain would tear down the supervisor
+/// holding the server the drain is talking to. Late binding costs nothing here
+/// — every one of these is consulted at the top of a start, never cached.
+final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
+  final paths = ref.watch(appPathsProvider);
+  final system = ref.watch(systemInfoProvider);
+  final supervisor = ModelServerSupervisor(
+    runner: const SystemProcessRunner(),
+    supportDir: paths.support,
+    binaryPath: LlamaBinary.resolve,
+    buildPreset: () => ref
+        .read(modelManifestProvider)
+        .toPreset(ref.read(appPrefsProvider).effectiveModelsFolder(paths)),
+    routerPort: () => ref.read(appPrefsProvider).routerPort,
+    managed: () => ref.read(appPrefsProvider).managedServer,
+    beginActivity: system.beginActivity,
+    endActivity: system.endActivity,
+    // The two drains park when a server is down and do not poll to find out it
+    // came back, so something has to tell them. Guarded and `read`, on
+    // [embeddingsClientProvider]'s precedent: this callback outlives the body
+    // and fires from a health poll, where a torn-down container must cost
+    // nothing rather than throw on a timer.
+    onReady: () {
+      try {
+        ref.read(triageQueueProvider).pump();
+        ref.read(aiWorkerProvider).pump();
+      } catch (_) {}
+    },
+  );
+  ref.onDispose(supervisor.dispose);
+  return supervisor;
+});
+
+/// The server's state, for the widgets that draw it. Watched by the settings
+/// card and by nothing that runs work — see the supervisor above for why the
+/// clients must never watch this.
+final serverStateProvider = StreamProvider<ServerState>(
+  (ref) => ref.watch(modelServerSupervisorProvider).states,
+);
+
+/// The thing that fills the models folder.
+///
+/// It watches the platform, the store and the paths — the three collaborators
+/// it is BUILT from — and reads the folder inside a closure, on
+/// [modelServerSupervisorProvider]'s rule: a provider that watched the prefs
+/// would be rebuilt the moment somebody moved a setting, and rebuilding this
+/// one mid-download would abandon a transfer that is hours in. Late binding
+/// costs nothing: the folder is consulted at the top of a run, never cached.
+final modelDownloaderProvider = Provider<ModelDownloader>((ref) {
+  final system = ref.watch(systemInfoProvider);
+  final store = ref.watch(setupStoreProvider);
+  final paths = ref.watch(appPathsProvider);
+  final downloader = ModelDownloader(
+    manifest: ref.watch(modelManifestProvider),
+    modelsFolder: () =>
+        ref.read(appPrefsProvider).effectiveModelsFolder(paths),
+    readLedger: store.downloadLedger,
+    writeLedger: store.recordDownload,
+    sha256: system.sha256,
+    beginActivity: system.beginActivity,
+    endActivity: system.endActivity,
+  );
+  ref.onDispose(downloader.dispose);
+  return downloader;
+});
 
 /// How a picked folder stays readable after a relaunch. The real one is a
 /// method channel onto the Runner's Swift; a test overrides it with
@@ -564,6 +690,17 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
 /// it was before this phase.
 final embeddingsClientProvider = Provider<EmbeddingsClient>(
   (ref) => EmbeddingsClient(
+    // Read at call time, exactly as the two chat clients resolve theirs: the
+    // managed router's port moves the next embedding without rebuilding this
+    // client or anything downstream of it.
+    resolveTarget: () => ref.read(appPrefsProvider).embedRequestTarget,
+    // Whose job it is to start the server decides the sentence. `make embed`
+    // is the right advice only while the user runs the servers; when the app
+    // does, the fix is a card in Settings and naming a Makefile target would
+    // send them to a workflow they have opted out of.
+    describeUnavailable: () => ref.read(appPrefsProvider).managedServer
+        ? 'is not running — see Settings › Models › Local server'
+        : null,
     // One row per distinct reason, which is what the client's own dedupe
     // already guarantees. `read` and not `watch`: the callback outlives this
     // body and must not make the client depend on the log's lifetime. The
@@ -931,4 +1068,33 @@ final appInfoProvider = FutureProvider<({String version, String build})>(
 /// unless the test overrides it.
 final databasePathProvider = FutureProvider<String>(
   (ref) => appDatabasePath(),
+);
+
+/// Sparkle, for the About section's update controls.
+///
+/// A plain `Provider` over the channel implementation, so a test can hand the
+/// host a `NullUpdater` (or a fake) without touching the binary messenger.
+final updaterProvider = Provider<Updater>((_) => const ChannelUpdater());
+
+/// What the updater says about itself right now.
+///
+/// [appInfoProvider]'s shape and, once more, its reason: the answer comes off
+/// a platform channel and a widget cannot await. In a widget test that call
+/// never comes back at all (nobody is on the other end, and the fake-async
+/// zone holds the reply), so the status stays loading and the host passes the
+/// About section no update props — the section renders without them rather
+/// than throwing or faking a version of Sparkle that is not there. A test that
+/// wants a verdict overrides [updaterProvider] with a fake or a `NullUpdater`.
+///
+/// `autoDispose`, and invalidated after a toggle, for one reason: Sparkle owns
+/// the automatic-checks preference AND the last-check time, and both move
+/// behind this app's back — a check the user starts from the button ends in
+/// Sparkle's window, and Sparkle records the time when that session ends. The
+/// settings host is the only watcher, so the value is dropped the moment
+/// Settings closes and read afresh on the next open, which is when 'Last
+/// checked' has to be true again. The toggle invalidates it in place so the
+/// switch shows Sparkle's answer rather than a local copy of what it was asked
+/// for.
+final updaterStatusProvider = FutureProvider.autoDispose<UpdaterStatus>(
+  (ref) => ref.watch(updaterProvider).status(),
 );

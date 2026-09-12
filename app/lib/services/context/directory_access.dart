@@ -72,17 +72,16 @@ class ChannelDirectoryAccess implements DirectoryAccess {
     }
   }
 
-  /// Null covers every bad ending — no channel (`MissingPluginException`), a
-  /// bookmark the system would not resolve at all (`resolve_failed`, which
-  /// is a folder deleted or a bookmark it refused to renew), and a resource
-  /// the sandbox resolved but declined to open (`access_denied`) — for
+  /// Null covers every bad ending — no channel (`MissingPluginException`) and
+  /// a bookmark the system would not resolve at all (`resolve_failed`, which
+  /// is a folder deleted or a bookmark it refused to renew) — for
   /// [bookmark]'s reason.
   ///
-  /// `access_denied` is the one worth naming: the Swift side answers a path
-  /// only when this process holds access to it, so a null here means the
-  /// reconcile pass falls back to the stored path, finds it unlistable, and
-  /// marks the directory `unavailable` — which is the truth, and better than
-  /// walking a folder that answers an error per file.
+  /// `access_denied` is no longer among them. The app is unsandboxed, so
+  /// there is no security scope to enter and nothing to be refused: the Swift
+  /// side answers the resolved path whenever the bookmark decodes. A folder
+  /// that has become unreadable therefore surfaces later, as an error from
+  /// the directory listing, rather than here as a null.
   @override
   Future<String?> resolve(Uint8List bookmark) async {
     try {

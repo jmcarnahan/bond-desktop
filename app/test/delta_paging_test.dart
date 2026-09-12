@@ -547,19 +547,28 @@ void main() {
   group('conversation folding', () {
     test('an inbound, a reply, then newer inbound leaves the thread open',
         () async {
+      // Relative, for the reason `_freshReceivedAt` gives: these three sat at
+      // absolute late-August dates until the sync window walked past them and
+      // the newest inbound arrived already skipped, folding the thread to
+      // waiting instead of needs-reply.
+      String ago(Duration age) =>
+          DateTime.now().toUtc().subtract(age).toIso8601String();
+      final firstAsk = ago(const Duration(days: 2, hours: 6));
+      final myReply = ago(const Duration(days: 1, hours: 6));
+      final newestWord = ago(const Duration(days: 1));
       graph.queue('inbox', [
         () => jsonOk(deltaBody(
               [
                 graphMessage(
                   id: 'in-1',
                   subject: 'Project brief',
-                  receivedDateTime: '2026-08-27T09:00:00Z',
+                  receivedDateTime: firstAsk,
                   preview: 'the first ask',
                 ),
                 graphMessage(
                   id: 'in-2',
                   subject: 'Re: Project brief',
-                  receivedDateTime: '2026-08-28T15:00:00Z',
+                  receivedDateTime: newestWord,
                   preview: 'the newest word',
                 ),
               ],
@@ -575,7 +584,7 @@ void main() {
                   fromName: 'Jordan Bond',
                   fromAddress: 'lo@bond.com',
                   to: const ['sarah@example.com'],
-                  receivedDateTime: '2026-08-28T09:00:00Z',
+                  receivedDateTime: myReply,
                   preview: 'my reply',
                 )
               ],
@@ -591,9 +600,9 @@ void main() {
       expect(conversation.messageCount, 3);
       expect(conversation.inboundCount, 2);
       expect(conversation.lastMessagePreview, 'the newest word');
-      expect(conversation.lastMessageAt, '2026-08-28T15:00:00Z');
-      expect(conversation.lastInboundAt, '2026-08-28T15:00:00Z');
-      expect(conversation.lastOutboundAt, '2026-08-28T09:00:00Z');
+      expect(conversation.lastMessageAt, newestWord);
+      expect(conversation.lastInboundAt, newestWord);
+      expect(conversation.lastOutboundAt, myReply);
       // Named by how it opened, with the reply marker stripped.
       expect(conversation.subject, 'Project brief');
       expect(

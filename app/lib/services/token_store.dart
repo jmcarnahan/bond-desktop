@@ -22,14 +22,24 @@ abstract class TokenStore {
 
 /// Production store: the OS keychain via `flutter_secure_storage`.
 ///
-/// Two accommodations for this project's ad-hoc signing, both learned the
-/// hard way:
+/// Two accommodations, both learned the hard way:
 ///
-/// - `usesDataProtectionKeychain: false`. The default (data-protection, the
-///   iOS-style keychain) requires the `keychain-access-groups` entitlement,
-///   which Xcode refuses to grant an ad-hoc-signed build — every write dies
-///   with errSecMissingEntitlement (-34018). The legacy file-based keychain
-///   needs no entitlement and persists fine.
+/// - `usesDataProtectionKeychain: false`, and it stays false now that the app
+///   is unsandboxed and Developer ID signed. The default (data-protection,
+///   the iOS-style keychain) requires the `keychain-access-groups`
+///   entitlement, which an ad-hoc-signed build cannot be granted at all —
+///   every write dies with errSecMissingEntitlement (-34018) — and which a
+///   distributed build would only carry to gain an isolation the file-based
+///   login keychain already provides for a single unsandboxed app. So the
+///   file-based keychain is the deliberate choice, not a workaround left
+///   over from ad-hoc days.
+///
+///   One consequence for anyone upgrading from a pre-Bond-Desktop build:
+///   keychain items do NOT migrate. The old build's items were written by a
+///   sandboxed app under a different code identity, and the OS treats a
+///   different identity as a different owner. The database and attachments
+///   are copied forward on first launch; the sign-in is not, so the user
+///   signs in again once.
 /// - every call swallows [PlatformException]. A keychain refusal must cost
 ///   persistence (a re-auth at next launch), never crash a sign-in that
 ///   already holds a working token.

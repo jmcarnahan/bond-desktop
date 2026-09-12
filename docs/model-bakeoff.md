@@ -246,13 +246,11 @@ it can be measured at all, let alone adopted.
 
 ## Open questions
 
-**Distribution.** There is no install story yet for llama.cpp, oMLX, or the
-model weights when this app goes to anyone who is not the person who built it.
-The dev setup is hand-rolled: Homebrew for the runtimes, this `Makefile` for
-the servers, HuggingFace downloads for tens of gigabytes of weights. Whichever
-runtime wins here, a future round has to design the first-run dependency and
-model install flow — what gets bundled, what gets fetched, and what happens on
-a machine where the download is still in progress.
+**Distribution.** The installer round answers this: the app bundles its own
+`llama-server`, built from a SHA-pinned llama.cpp source tarball, and ships as
+a DMG, with the weights downloaded on first run from a committed manifest.
+`docs/distribution.md` is the authority on how a checkout becomes an
+installable build.
 
 **Reasoning models on oMLX.** oMLX needs per-model reasoning-parser
 configuration to separate reasoning tokens from the answer. Nothing in the

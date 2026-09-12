@@ -130,6 +130,32 @@ void main() {
     expect(notifier.authorizeCalls, 1);
   });
 
+  test('an answer the wizard already got is not asked for again', () async {
+    // The first run asks on its own step, where the question has a sentence
+    // around it explaining what it is for. A second system prompt on the
+    // first settle would be the app asking twice.
+    build();
+    service.seedAuthorization(true);
+
+    settles.add(_settled(title: 'Homepage copy'));
+    await flush();
+
+    expect(notifier.authorizeCalls, 0);
+    expect(notifier.shown, hasLength(1));
+  });
+
+  test('a denial the wizard already got is obeyed without a second prompt',
+      () async {
+    build();
+    service.seedAuthorization(false);
+
+    settles.add(_settled());
+    await flush();
+
+    expect(notifier.authorizeCalls, 0);
+    expect(notifier.shown, isEmpty);
+  });
+
   test('the opted-out user is never even asked', () async {
     // The whole reason authorization is deferred to the first worthy flush:
     // somebody who turned this off must not meet the OS permission prompt.

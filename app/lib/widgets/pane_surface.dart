@@ -14,7 +14,13 @@ class PaneSurface extends StatelessWidget {
   final String title;
 
   /// Leaves the pane, back to whatever was underneath.
-  final VoidCallback onBack;
+  ///
+  /// Null renders the arrow DISABLED rather than absent, because the header is
+  /// a row and a missing button would shift the title of exactly one pane. The
+  /// first-run wizard's first step is the only caller with nowhere to go back
+  /// to — which is why this is nullable and REQUIRED: a pane with no way out
+  /// has to be somebody's decision rather than a forgotten argument.
+  final VoidCallback? onBack;
 
   /// Goes straight to the Inbox. Null renders no such affordance at all —
   /// panes reached from a single click do not need one.

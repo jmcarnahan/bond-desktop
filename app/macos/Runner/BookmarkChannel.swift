@@ -1,15 +1,19 @@
 import Cocoa
 import FlutterMacOS
 
-/// Keeping permission to read a folder after the open panel that granted it
-/// has closed.
+/// Remembering which folder the user picked, across relaunches.
 ///
-/// The app is sandboxed with `files.user-selected` and nothing more, so a
-/// directory the user picks is readable for THAT LAUNCH and then gone. A
-/// security-scoped bookmark — `files.bookmarks.app-scope` in all four
-/// entitlement files — is the one Apple-sanctioned way to hold the grant
-/// across a relaunch without asking for a Documents-folder entitlement the
-/// app would then keep forever.
+/// This channel was written for a sandboxed app, where a directory picked in
+/// the open panel is readable for THAT LAUNCH and then gone, and a
+/// security-scoped bookmark is the one Apple-sanctioned way to hold the grant
+/// across a relaunch. The app is UNSANDBOXED now (see Release.entitlements),
+/// so there is no grant to hold: a path the user picked is simply readable.
+///
+/// The channel stays because the bookmark is still the durable, rename-proof
+/// handle to a folder — it survives the user moving or renaming it, which a
+/// stored path does not. What changed is `resolve`: a security scope that
+/// cannot be entered is no longer an error, because there is no longer a
+/// scope to enter.
 ///
 /// The Dart side of this is `DirectoryAccess`
 /// (`lib/services/context/directory_access.dart`), which turns every failure
@@ -24,13 +28,15 @@ final class BookmarkChannel {
 
   /// The URLs whose security scope this process has entered, held for the
   /// LIFETIME of the process and deliberately never balanced with a
-  /// `stopAccessingSecurityScopedResource`.
+  /// `stopAccessingSecurityScopedResource`. Unsandboxed this map stays
+  /// empty, because no scope is ever successfully entered; the reasoning
+  /// below is what governs whenever one is.
   ///
   /// The access is not a single read: the reconcile walk lists the tree, the
   /// extractors open every changed file, and a later draft may read one again
   /// minutes afterwards. Scoping the access to any one of those would revoke
   /// it under the next. A handful of retained folder URLs is the whole cost,
-  /// and the sandbox drops them all when the app quits.
+  /// and they are dropped when the app quits.
   ///
   /// Keyed by PATH, and checked before any start: `resolve` runs on every
   /// reconcile pass — once a minute per directory — and each unbalanced
@@ -94,11 +100,11 @@ final class BookmarkChannel {
   /// logged, because "the bookmark wants re-making" is the fact behind a
   /// folder that starts failing after an update.
   ///
-  /// A resource the sandbox REFUSES is a different thing, and it answers
-  /// with an error rather than a path. Access is what this method is for: a
-  /// path handed back without it sends the caller off to walk a directory it
-  /// cannot open, one file-system error at a time, when the honest answer is
-  /// that this folder needs picking again.
+  /// A security scope that will not start is NOT an error any more. Under the
+  /// sandbox it meant the folder needed picking again, and refusing was the
+  /// honest answer. Unsandboxed it means only that there was no scope to
+  /// enter, and the resolved path is readable regardless — so the path is
+  /// what comes back.
   private static func resolve(_ call: FlutterMethodCall, _ result: FlutterResult) {
     guard let args = call.arguments as? [String: Any],
           let data = args["bookmark"] as? FlutterStandardTypedData
@@ -118,15 +124,15 @@ final class BookmarkChannel {
         NSLog("bookmarks: the bookmark for %@ is stale and wants re-making", url.path)
       }
       if accessed[url.path] == nil {
-        guard url.startAccessingSecurityScopedResource() else {
-          result(FlutterError(
-            code: "access_denied",
-            message: "The sandbox refused access to \(url.path)",
-            details: nil
-          ))
-          return
+        // A false return here is the NORMAL answer now that the app is
+        // unsandboxed: there is no scope to enter, so nothing grants one.
+        // The plain path is readable, and refusing it would take away a
+        // working folder over a permission that no longer applies. Only a
+        // successful start is recorded, so the unbalanced-access budget
+        // described above is unchanged.
+        if url.startAccessingSecurityScopedResource() {
+          accessed[url.path] = url
         }
-        accessed[url.path] = url
       }
       result(url.path)
     } catch {

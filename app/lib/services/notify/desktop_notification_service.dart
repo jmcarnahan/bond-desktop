@@ -42,6 +42,21 @@ class DesktopNotificationService {
   /// without a stored flag to clear.
   Future<bool>? _authorized;
 
+  /// Records an answer the wizard already got, so the first flush does not ask
+  /// a second time.
+  ///
+  /// The first run asks for notification permission on its own step, where the
+  /// question has a sentence around it explaining what it is for. Without this
+  /// the first settle would raise the system prompt again — the app asking
+  /// twice, which reads as a bug whichever way the user answered.
+  ///
+  /// A DENIAL seeded here is memoized exactly as a denial answered here would
+  /// be: in memory and nowhere else. The next launch asks again, which is what
+  /// makes re-granting in System Settings work with no stored flag to clear.
+  void seedAuthorization(bool granted) {
+    _authorized = Future<bool>.value(granted);
+  }
+
   /// The tail of the posts made so far — see [_flush] for why they are a chain
   /// rather than parallel calls.
   Future<void> _posting = Future<void>.value();
