@@ -119,10 +119,11 @@ class _Server {
   /// Replies for the token endpoint, one per POST; the last one repeats.
   List<http.Response> tokenReplies = [];
 
-  /// Whether the RFC 8414 metadata carries a `registration_endpoint`. Every
-  /// bond-mcps server does; false is the foreign server the static client
-  /// exists for.
-  bool advertiseRegistration = true;
+  /// The `registration_endpoint` the RFC 8414 metadata carries, verbatim.
+  /// Every bond-mcps server publishes a real URL; null is the foreign server
+  /// the static client exists for, and a malformed value is a document the
+  /// app must read as "no registration" rather than post to.
+  String? registrationEndpoint = _registerEndpoint;
 
   /// Every registration body this server was sent, decoded, in order.
   final List<Map<String, dynamic>> registrations = [];
@@ -175,8 +176,8 @@ class _Server {
                 'issuer': _issuer,
                 'authorization_endpoint': _authorizeEndpoint,
                 'token_endpoint': _tokenEndpoint,
-                if (advertiseRegistration)
-                  'registration_endpoint': _registerEndpoint,
+                if (registrationEndpoint != null)
+                  'registration_endpoint': registrationEndpoint,
                 'code_challenge_methods_supported': ['S256'],
                 'token_endpoint_auth_methods_supported': ['none'],
               }),
@@ -365,7 +366,7 @@ void main() {
       // A foreign or CDN-stripped authorization server. The static client is
       // the only way in, and its redirect URI names the port it was registered
       // with, so that port has to be the one this listens on.
-      server.advertiseRegistration = false;
+      server.registrationEndpoint = null;
       server.tokenReplies = [
         _tokenOk(accessToken: _liveJwt(email: 'ada@example.test'), refreshToken: 'rt-1'),
       ];
@@ -384,6 +385,28 @@ void main() {
       expect(post['redirect_uri'], 'http://127.0.0.1:8766/callback');
       expect(store.values[_keys.clientIdKey], 'bond-desktop');
     });
+
+    for (final malformed in const ['/oauth/register', 'urn:example:register']) {
+      test('a registration endpoint that is not an http URL ($malformed) reads '
+          'as no registration, not as something to post to', () async {
+        // `Uri.tryParse` accepts both of these, and the HTTP client answers a
+        // POST to either with an ArgumentError the UI can only render as
+        // "Sign-in failed." A malformed document is read the same way as a
+        // missing field: the static client, on its fixed port.
+        server.registrationEndpoint = malformed;
+        server.tokenReplies = [
+          _tokenOk(accessToken: _liveJwt(), refreshToken: 'rt-1'),
+        ];
+
+        await sessionWith(browser()).signIn();
+
+        expect(server.registrations, isEmpty);
+        final q = opened.single.queryParameters;
+        expect(q['client_id'], 'bond-desktop');
+        expect(q['redirect_uri'], 'http://127.0.0.1:8766/callback');
+        expect(store.values[_keys.clientIdKey], 'bond-desktop');
+      });
+    }
 
     test('a refused registration is an AuthException naming the reason, and '
         'opens no browser', () async {

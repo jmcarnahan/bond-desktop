@@ -501,12 +501,16 @@ class McpAuthSession implements AuthSession {
     final String code;
     final verifier = randomUrlSafe(64);
     try {
-      redirectUri = registerAt == null
-          ? staticRedirectUri
-          : 'http://127.0.0.1:${server.port}$callbackPath';
-      clientId = registerAt == null
-          ? staticClientId
-          : await _registerClient(registerAt, redirectUri);
+      // One decision, made once: which client this sign-in is and where the
+      // browser comes back to. Both go into the authorize request AND the
+      // token request, and the two requests have to agree byte for byte.
+      if (registerAt == null) {
+        clientId = staticClientId;
+        redirectUri = staticRedirectUri;
+      } else {
+        redirectUri = 'http://127.0.0.1:${server.port}$callbackPath';
+        clientId = await _registerClient(registerAt, redirectUri);
+      }
       code = await _authorizeRound(
         server: server,
         authorizeEndpoint: endpoints.authorize,
@@ -597,15 +601,19 @@ class McpAuthSession implements AuthSession {
     }
     // Optional by design: a server that publishes no registration endpoint is
     // not broken, it simply has to have been told about this app in advance.
-    // `hasScheme`, because `tryParse` accepts almost anything: a relative
-    // path here is a malformed document, and posting to it would throw an
-    // ArgumentError rather than say what is wrong.
+    // Only an http(s) URL counts, because `tryParse` accepts almost anything:
+    // a relative path or a `urn:` here is a malformed document, and posting to
+    // it would throw an ArgumentError out of the HTTP client rather than say
+    // what is wrong. Anything else reads as "no registration offered", which
+    // is the one situation the static fallback exists for.
     final register = asMetadata['registration_endpoint'];
     final registerUri = register is String ? Uri.tryParse(register) : null;
+    final registerIsHttp = registerUri != null &&
+        (registerUri.isScheme('http') || registerUri.isScheme('https'));
     return _AuthServerEndpoints(
       Uri.parse(authorize),
       Uri.parse(token),
-      registerUri != null && registerUri.hasScheme ? registerUri : null,
+      registerIsHttp ? registerUri : null,
     );
   }
 
@@ -919,6 +927,12 @@ class McpAuthSession implements AuthSession {
       // the slot holding a new id next to an old refresh token whenever a
       // browser round was abandoned, and the next refresh would present the
       // wrong client and be signed out of a session that was fine.
+      //
+      // Two writes, not one atomic pair — the keychain offers no transaction.
+      // A crash between them leaves the slot mismatched whichever is written
+      // first, and the cost either way is one refresh answered `invalid_grant`
+      // and one sign-in. Neither order is better, so this one is not worth
+      // tuning.
       await _store.write(_keyClientId, clientId);
       await _store.write(_keyRefreshToken, refreshToken);
     }
