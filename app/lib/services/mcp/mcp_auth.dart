@@ -3,7 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart' show sha256;
-import 'package:flutter/foundation.dart' show immutable, visibleForTesting;
+import 'package:flutter/foundation.dart'
+    show debugPrint, immutable, visibleForTesting;
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
@@ -47,6 +48,29 @@ import 'bond_mcp_client.dart';
 /// own slot, which either holds a session or does not, and destroys neither.
 /// Switching between this backend and the direct-Graph one is likewise
 /// lossless — those keys are the SDK session's and are never touched here.
+///
+/// Three rules keep a session from being lost to plumbing rather than to the
+/// server's judgement. Every write to a slot's keychain pair is serialized
+/// through one lock (see `_withSlot`), so a sign-in, a sign-out and a refresh
+/// racing each other cannot leave the pair mismatched. A refresh whose request
+/// failed on the wire or timed out is retried exactly once, because the
+/// authorization server honours a rotation whose response was lost while the
+/// successor is unused — so the retry is what makes an interrupted refresh
+/// invisible. And every HTTP call this file makes carries a timeout, because a
+/// hung refresh used to pin the single-flight guard until the app was
+/// relaunched.
+
+/// A request that never reached a server, or never came back: a dropped
+/// connection, an unresolvable host, a timeout.
+///
+/// An [AuthException] to every caller — the message is the same one the
+/// transport failure always produced — and private on purpose. Only the
+/// refresh path tells it apart from a server's own answer, because only a
+/// failure of this shape is worth retrying: a request that may never have
+/// arrived. An HTTP status is the server's judgement and is never retried.
+class _TransportFailure extends AuthException {
+  const _TransportFailure(super.message);
+}
 
 /// One token exchange's outcome. `invalid_grant` has to be told apart from
 /// every other non-200: the first means the session is over, the rest are
@@ -183,6 +207,13 @@ class McpAuthSession implements AuthSession {
   final TokenStore _store;
   final Future<bool> Function(Uri url) _openBrowser;
 
+  /// How long any single HTTP call here waits before it is abandoned. A hung
+  /// request must not pin the refresh guard until the app is relaunched.
+  final Duration _requestTimeout;
+
+  /// How long the refresh waits before its one retry. Zero in tests.
+  final Duration _refreshRetryDelay;
+
   /// In memory only, deliberately: a leaked JWT is short-lived, while a leaked
   /// refresh token is not.
   String? _jwt;
@@ -195,7 +226,11 @@ class McpAuthSession implements AuthSession {
 
   /// Single-flight guard for [validJwt]. Refresh tokens ROTATE here, so a
   /// second concurrent exchange would race on an already-consumed one.
-  Future<String>? _refreshInFlight;
+  Future<String?>? _refreshInFlight;
+
+  /// The tail of the chain of everything queued on this slot's lock. See
+  /// [_withSlot].
+  Future<void> _slotLock = Future<void>.value();
 
   Map<String, dynamic>? _statusCache;
   DateTime? _statusCachedAt;
@@ -206,11 +241,19 @@ class McpAuthSession implements AuthSession {
     http.Client? httpClient,
     TokenStore? store,
     Future<bool> Function(Uri url)? openBrowser,
+    // Null rather than a defaulted parameter, like [httpClient] and [store]
+    // above: the fields behind them are private, so an initializing formal —
+    // which is what the analyzer asks for when a parameter is copied straight
+    // into a field — is not spellable for a named parameter.
+    Duration? requestTimeout,
+    Duration? refreshRetryDelay,
   })  : mcpUrl = _canonical(mcpUrl),
         _mcp = mcpClient,
         _http = httpClient ?? http.Client(),
         _store = store ?? const SecureTokenStore(),
-        _openBrowser = openBrowser ?? _launchInSystemBrowser {
+        _openBrowser = openBrowser ?? _launchInSystemBrowser,
+        _requestTimeout = requestTimeout ?? const Duration(seconds: 30),
+        _refreshRetryDelay = refreshRetryDelay ?? const Duration(seconds: 1) {
     // Fire-and-forget: nothing waits on the old keys going away, and a
     // keychain that refuses the write leaves three dead entries behind rather
     // than failing a session that is otherwise fine.
@@ -289,6 +332,31 @@ class McpAuthSession implements AuthSession {
   /// identity provider needs.
   static Future<bool> _launchInSystemBrowser(Uri url) =>
       launchUrl(url, mode: LaunchMode.externalApplication);
+
+  /// Runs [body] with exclusive use of this slot's keychain pair.
+  ///
+  /// Serializes every write to the pair — the client id and the refresh token
+  /// — across all four writers: a refresh, the tail of a sign-in, a local
+  /// sign-in, and a clear. Refresh tokens ROTATE, so two interleaved writers
+  /// can leave the slot holding a pair the server has already retired: a
+  /// sign-in that stored its new pair a moment before a refresh in flight
+  /// stored the old session's rotated one costs the user the session they just
+  /// signed in to. Correctness here must not depend on which buttons the UI
+  /// happens to render at once.
+  ///
+  /// The browser round is deliberately OUTSIDE this: it is an unbounded user
+  /// action, and holding the lock across it would block every [validJwt] for
+  /// as long as someone leaves the sign-in page open.
+  ///
+  /// The chain future is completed by `whenComplete` and so always completes
+  /// NORMALLY: a body that throws hands its error to its own caller and never
+  /// poisons the next waiter.
+  Future<T> _withSlot<T>(Future<T> Function() body) {
+    final previous = _slotLock;
+    final released = Completer<void>();
+    _slotLock = released.future;
+    return previous.then((_) => body()).whenComplete(released.complete);
+  }
 
   // ── State ─────────────────────────────────────────────────────────────
 
@@ -437,11 +505,16 @@ class McpAuthSession implements AuthSession {
             'clientInfo': {'name': 'bond-inbox-probe', 'version': '1.0.0'},
           },
         }),
-      );
+      ).timeout(_requestTimeout);
     } on http.ClientException catch (e) {
-      throw AuthException('Could not reach the MCP server: ${e.message}');
+      throw _TransportFailure('Could not reach the MCP server: ${e.message}');
     } on SocketException catch (e) {
-      throw AuthException('Could not reach the MCP server: ${e.message}');
+      throw _TransportFailure('Could not reach the MCP server: ${e.message}');
+    } on TimeoutException {
+      throw _TransportFailure(
+        'Could not reach the MCP server: timed out after '
+        '${_describeDuration(_requestTimeout)}',
+      );
     }
 
     if (response.statusCode == HttpStatus.unauthorized) {
@@ -465,21 +538,30 @@ class McpAuthSession implements AuthSession {
 
   /// The dev-server path: nothing to authorize, so record that and try to name
   /// the user from whatever the server already knows.
+  ///
+  /// The writes run under the slot lock like every other writer's: this path
+  /// DELETES the pair a refresh in flight is about to rewrite, and the two
+  /// orders are not the same session. The profile fetch runs OUTSIDE it, on
+  /// purpose: it goes through the MCP client, whose bearer hook calls back
+  /// into [validJwt], and a lock held across a call that can re-enter it is a
+  /// deadlock waiting for the one day the early return does not fire.
   Future<AccountInfo> _signInLocal() async {
-    await _store.write(_keyLocalMode, '1');
-    // The two markers are mutually exclusive states of ONE session within this
-    // server's slot — and one server can change nature between restarts, a
-    // local dev box rebooted with auth on being the everyday case. A refresh
-    // token left over from an earlier deployed-shaped sign-in AT THIS SAME URL
-    // would win over the local-mode flag in [validJwt] and send a refresh at a
-    // server with no token endpoint to discover — breaking every call until a
-    // sign-out.
-    _jwt = null;
-    _jwtExpiry = null;
-    await _store.write(_keyRefreshToken, null);
-    // The client id goes with it: it is only ever the one that refresh token
-    // was issued to, and a local session has no token to refresh.
-    await _store.write(_keyClientId, null);
+    await _withSlot(() async {
+      await _store.write(_keyLocalMode, '1');
+      // The two markers are mutually exclusive states of ONE session within
+      // this server's slot — and one server can change nature between
+      // restarts, a local dev box rebooted with auth on being the everyday
+      // case. A refresh token left over from an earlier deployed-shaped
+      // sign-in AT THIS SAME URL would win over the local-mode flag in
+      // [validJwt] and send a refresh at a server with no token endpoint to
+      // discover — breaking every call until a sign-out.
+      _jwt = null;
+      _jwtExpiry = null;
+      await _store.write(_keyRefreshToken, null);
+      // The client id goes with it: it is only ever the one that refresh
+      // token was issued to, and a local session has no token to refresh.
+      await _store.write(_keyClientId, null);
+    });
     final account = await _profileAccount();
     if (account == null) return const AccountInfo(displayName: 'Local session');
     await _store.write(_keyAccountJson, jsonEncode(account.toJson()));
@@ -525,25 +607,32 @@ class McpAuthSession implements AuthSession {
       await server.close(force: true);
     }
 
-    final response = await _postForm(endpoints.token, {
-      'grant_type': 'authorization_code',
-      'code': code,
-      'redirect_uri': redirectUri,
-      'client_id': clientId,
-      'code_verifier': verifier,
-      // RFC 8707, and not optional: the token this omits comes back with an
-      // `aud` the MCP server will not accept.
-      'resource': mcpUrl.toString(),
+    // Everything from here that TOUCHES the slot runs under its lock, and the
+    // browser round above deliberately did not: a refresh that started before
+    // this sign-in must land before it, or the session the user just created
+    // is overwritten by the rotated pair of the one they replaced.
+    final jwt = await _withSlot(() async {
+      final response = await _postForm(endpoints.token, {
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': redirectUri,
+        'client_id': clientId,
+        'code_verifier': verifier,
+        // RFC 8707, and not optional: the token this omits comes back with an
+        // `aud` the MCP server will not accept.
+        'resource': mcpUrl.toString(),
+      });
+      if (response.statusCode != 200) {
+        throw AuthException(_describeTokenError(response));
+      }
+      final jwt = await _adoptTokens(response.json, clientId: clientId);
+      // The mirror of the clearing in [_signInLocal], and for the same reason
+      // within this server's slot: a stale local-mode flag would let
+      // [validJwt] answer "no bearer needed" the day the refresh token is
+      // gone, instead of the honest NotSignedIn.
+      await _store.write(_keyLocalMode, null);
+      return jwt;
     });
-    if (response.statusCode != 200) {
-      throw AuthException(_describeTokenError(response));
-    }
-    final jwt = await _adoptTokens(response.json, clientId: clientId);
-    // The mirror of the clearing in [_signInLocal], and for the same reason
-    // within this server's slot: a stale local-mode flag would let [validJwt]
-    // answer "no bearer needed" the day the refresh token is gone, instead of
-    // the honest NotSignedIn.
-    await _store.write(_keyLocalMode, null);
 
     // A profile the platform cannot give us is not a failed sign-in: the user
     // simply has not connected Microsoft yet. Name them from the JWT and let
@@ -644,16 +733,21 @@ class McpAuthSession implements AuthSession {
           'response_types': ['code'],
           'token_endpoint_auth_method': 'none',
         }),
-      );
+      ).timeout(_requestTimeout);
     } on http.ClientException catch (e) {
-      throw AuthException(
+      throw _TransportFailure(
         'Could not reach the sign-in service to register this app: '
         '${e.message}',
       );
     } on SocketException catch (e) {
-      throw AuthException(
+      throw _TransportFailure(
         'Could not reach the sign-in service to register this app: '
         '${e.message}',
+      );
+    } on TimeoutException {
+      throw _TransportFailure(
+        'Could not reach the sign-in service to register this app: timed out '
+        'after ${_describeDuration(_requestTimeout)}',
       );
     }
 
@@ -861,20 +955,50 @@ class McpAuthSession implements AuthSession {
 
     // whenComplete, not then: a FAILED refresh must clear the slot too, or
     // every later call reawaits the same poisoned future.
+    //
+    // Two guards, doing two jobs: this one coalesces the callers of THIS
+    // method onto one exchange, and the slot lock inside [_refresh] keeps that
+    // exchange from interleaving with a sign-in, a local sign-in or a
+    // sign-out.
     return _refreshInFlight ??=
-        _doRefresh().whenComplete(() => _refreshInFlight = null);
+        _refresh().whenComplete(() => _refreshInFlight = null);
   }
 
-  Future<String> _doRefresh() async {
-    final refreshToken = await _store.read(_keyRefreshToken);
-    if (refreshToken == null || refreshToken.isEmpty) {
-      throw const NotSignedIn();
-    }
-
+  /// One refresh: discovery first, then the exchange under the slot lock.
+  ///
+  /// Discovery sits OUTSIDE the lock deliberately. It touches nothing in the
+  /// slot — it walks the challenge, the protected-resource metadata and the
+  /// authorization server's document, all of them public — and after a
+  /// relaunch it is three HTTP calls, each able to sit out [_requestTimeout]
+  /// on a network that is down. Holding the lock across all of that would
+  /// leave a sign-out queued behind it looking dead for a minute and a half.
+  /// The lock covers the token POST and its one retry, and nothing else.
+  Future<String?> _refresh() async {
     // Empty after a relaunch: the endpoint was discovered in a previous
     // process, so walk the chain again rather than forcing an interactive
     // sign-in the user does not need.
     final endpoint = _tokenEndpoint ??= (await _discoverEndpoints()).token;
+    return _withSlot(() => _doRefreshLocked(endpoint));
+  }
+
+  /// Runs under the slot lock, and so may clear the slot directly via
+  /// [_clearLocked].
+  ///
+  /// Null carries [validJwt]'s "send no bearer" answer: the slot became a
+  /// local-mode session while this was queued.
+  Future<String?> _doRefreshLocked(Uri endpoint) async {
+    final refreshToken = await _store.read(_keyRefreshToken);
+    if (refreshToken == null || refreshToken.isEmpty) {
+      // Read again, because [validJwt] read it BEFORE queuing here and the
+      // slot can have changed hands in between. A local sign-in that ran while
+      // this waited deleted the pair ON PURPOSE, and what it left behind is a
+      // live session that sends no bearer — not a session that ended. Throwing
+      // here would put "You are not signed in." on the inbox a moment after a
+      // sign-in that worked. A sign-out clears the local flag too, so it still
+      // lands on the throw below, which is what it should get.
+      if (await _store.read(_keyLocalMode) == '1') return null;
+      throw const NotSignedIn();
+    }
 
     // The client this token was issued to: the authorization server binds the
     // two and answers a mismatch with `invalid_grant`. Missing only for a
@@ -884,23 +1008,74 @@ class McpAuthSession implements AuthSession {
     final stored = await _store.read(_keyClientId);
     final clientId = (stored == null || stored.isEmpty) ? staticClientId : stored;
 
-    final response = await _postForm(endpoint, {
+    final form = {
       'grant_type': 'refresh_token',
       'refresh_token': refreshToken,
       'client_id': clientId,
       'resource': mcpUrl.toString(),
-    });
+    };
+    // Retried exactly once, and only when the request itself failed — a
+    // dropped connection, an unresolvable host, a timeout. The first attempt
+    // may well have REACHED the server, which rotated the token and lost the
+    // reply on the way back; the authorization server honours a second
+    // presentation of a token whose successor was never used, so the retry is
+    // what makes an interrupted refresh invisible instead of a sign-out. The
+    // same form is re-sent, presenting the same token, because that is exactly
+    // what the grace is keyed on. An HTTP status is the server's judgement and
+    // is never retried.
+    _TokenResponse response;
+    try {
+      response = await _postForm(endpoint, form);
+    } on _TransportFailure {
+      await Future<void>.delayed(_refreshRetryDelay);
+      response = await _postForm(endpoint, form);
+    }
 
     if (response.statusCode != 200) {
       if (response.json['error'] == 'invalid_grant') {
-        await _clear();
-        throw const NotSignedIn('Session expired — sign in again.');
+        await _clearLocked();
+        throw NotSignedIn(_sessionEndedMessage(response.json));
       }
       // Everything else (5xx, offline, throttling) is transient. Clearing
       // storage here would turn a dropped network into a forced sign-out.
       throw AuthException(_describeTokenError(response));
     }
     return _adoptTokens(response.json, clientId: clientId);
+  }
+
+  /// What to tell the user when the authorization server has ended the
+  /// session, read from the `error_reason` it sends beside
+  /// `error_description`.
+  ///
+  /// The four causes are genuinely different things to have happened, and one
+  /// "Session expired" for all of them made a month of inactivity
+  /// indistinguishable from a revoked grant in the field. This message IS
+  /// user-visible — the inbox renders it as its load error — so it is written
+  /// for someone who has just been signed out and wants to know why.
+  ///
+  /// `error_reason` is a non-standard extension, so an absent or unknown value
+  /// falls back to the old text rather than inventing one; an older server
+  /// says nothing here and is served exactly as before. The server's own
+  /// description is for the log, not the user: it is written for an operator.
+  String _sessionEndedMessage(Map<String, dynamic> json) {
+    final description = json['error_description'];
+    if (description is String && description.isNotEmpty) {
+      debugPrint('The authorization server ended the session: $description');
+    }
+    final reason = json['error_reason'];
+    switch (reason is String ? reason : null) {
+      case 'expired':
+        return 'Your session expired after a month without use — sign in '
+            'again.';
+      case 'revoked':
+        return 'Your session was ended on the server — sign in again.';
+      case 'client_mismatch':
+        return 'Your saved session no longer matches this app\'s registration '
+            '— sign in again.';
+      case 'unknown':
+        return 'The server no longer recognizes your session — sign in again.';
+    }
+    return 'Session expired — sign in again.';
   }
 
   /// Keeps the JWT in memory, persists the rotated refresh token beside the
@@ -952,7 +1127,14 @@ class McpAuthSession implements AuthSession {
     return DateTime.now().add(Duration(seconds: expiresIn));
   }
 
-  Future<void> _clear() async {
+  /// Ends this slot's session, taking the slot lock.
+  ///
+  /// Split in two because the refresh path clears while it is ALREADY holding
+  /// the lock — taking it again there would deadlock on itself. Every caller
+  /// that is not already inside the lock uses this one.
+  Future<void> _clear() => _withSlot(_clearLocked);
+
+  Future<void> _clearLocked() async {
     _jwt = null;
     _jwtExpiry = null;
     invalidateStatusCache();
@@ -1014,11 +1196,18 @@ class McpAuthSession implements AuthSession {
   Future<Map<String, dynamic>> _getJson(Uri url, String what) async {
     final http.Response response;
     try {
-      response = await _http.get(url, headers: const {'Accept': 'application/json'});
+      response = await _http
+          .get(url, headers: const {'Accept': 'application/json'})
+          .timeout(_requestTimeout);
     } on http.ClientException catch (e) {
-      throw AuthException('Could not read $what: ${e.message}');
+      throw _TransportFailure('Could not read $what: ${e.message}');
     } on SocketException catch (e) {
-      throw AuthException('Could not read $what: ${e.message}');
+      throw _TransportFailure('Could not read $what: ${e.message}');
+    } on TimeoutException {
+      throw _TransportFailure(
+        'Could not read $what: timed out after '
+        '${_describeDuration(_requestTimeout)}',
+      );
     }
     if (response.statusCode != 200) {
       throw AuthException('Could not read $what (HTTP ${response.statusCode}).');
@@ -1037,11 +1226,20 @@ class McpAuthSession implements AuthSession {
         endpoint,
         headers: const {'Content-Type': 'application/x-www-form-urlencoded'},
         body: form,
-      );
+      ).timeout(_requestTimeout);
     } on http.ClientException catch (e) {
-      throw AuthException('Could not reach the sign-in service: ${e.message}');
+      throw _TransportFailure(
+        'Could not reach the sign-in service: ${e.message}',
+      );
     } on SocketException catch (e) {
-      throw AuthException('Could not reach the sign-in service: ${e.message}');
+      throw _TransportFailure(
+        'Could not reach the sign-in service: ${e.message}',
+      );
+    } on TimeoutException {
+      throw _TransportFailure(
+        'Could not reach the sign-in service: timed out after '
+        '${_describeDuration(_requestTimeout)}',
+      );
     }
     return _TokenResponse(response.statusCode, _decodeJsonObject(response));
   }
@@ -1102,6 +1300,13 @@ String _describeTokenError(_TokenResponse response) {
   }
   return 'Sign-in failed with HTTP ${response.statusCode}.';
 }
+
+/// A timeout the way a person reads one: `30s`, and `50ms` below a second,
+/// where whole seconds alone would have said "timed out after 0s".
+String _describeDuration(Duration duration) =>
+    duration.inMilliseconds % 1000 == 0
+        ? '${duration.inSeconds}s'
+        : '${duration.inMilliseconds}ms';
 
 String _trimSlash(String url) =>
     url.endsWith('/') ? url.substring(0, url.length - 1) : url;

@@ -252,6 +252,11 @@ back to the pre-registered `bond-desktop` client on the fixed port 8766; every
 bond-mcps deployment offers registration, so that fallback is for foreign
 servers.
 
+**An interrupted refresh never costs a sign-in.** A token refresh cut short by
+sleep or a dropped connection is retried at once, and one cut short by quitting
+the app is repeated at the next launch; the server honours either for a week,
+so long as the replacement token it minted was never used.
+
 **Which server.** The **MCP server** dropdown offers **Deployed** (the
 `BOND_MCP_SERVER_URL` endpoint, when the build carries one), **Local** —
 `http://localhost:18001/mcp` — and **Custom…** for anything else. The deployed

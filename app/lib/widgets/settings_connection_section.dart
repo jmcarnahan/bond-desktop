@@ -198,6 +198,12 @@ class MicrosoftConnectionSectionState extends State<MicrosoftConnectionSection> 
   /// that has to be disabled.
   bool _signingIn = false;
 
+  /// True while a sign-out from this screen is still going. A sign-out waits
+  /// on the session's own lock, so a refresh already in flight can hold it up
+  /// for a moment; without this the button looked dead rather than busy, and
+  /// pressing it again would queue a second one.
+  bool _signingOut = false;
+
   /// Whatever the last sign-in or sign-out attempt said went wrong, shown
   /// under the button and cleared by the next attempt. Inline rather than a
   /// snack bar: the failure belongs beside the control that caused it, and the
@@ -509,8 +515,14 @@ class MicrosoftConnectionSectionState extends State<MicrosoftConnectionSection> 
   Widget _signOutButton() {
     if (widget.onSignOutOfServer == null) return const SizedBox.shrink();
     return TextButton(
-      onPressed: () => unawaited(_signOutOfServer()),
-      child: const Text('Sign out of this server'),
+      onPressed: _signingOut ? null : () => unawaited(_signOutOfServer()),
+      child: _signingOut
+          ? const SizedBox(
+              height: 16,
+              width: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Text('Sign out of this server'),
     );
   }
 
@@ -564,14 +576,21 @@ class MicrosoftConnectionSectionState extends State<MicrosoftConnectionSection> 
   Future<void> _signOutOfServer() async {
     final signOut = widget.onSignOutOfServer;
     if (signOut == null) return;
-    setState(() => _sessionError = null);
+    setState(() {
+      _signingOut = true;
+      _sessionError = null;
+    });
     try {
       await signOut();
       if (!mounted) return;
+      setState(() => _signingOut = false);
       _refreshPermissions();
     } on Object {
       if (!mounted) return;
-      setState(() => _sessionError = 'Sign-out failed.');
+      setState(() {
+        _signingOut = false;
+        _sessionError = 'Sign-out failed.';
+      });
     }
   }
 
