@@ -29,14 +29,24 @@ import 'bond_mcp_client.dart';
 /// [microsoftConnectUrl]; a user can be legitimately signed IN here while
 /// having connected nothing yet.
 ///
-/// The JWT lives in memory only. Only the rotating refresh token, the account
-/// summary, and the local-mode flag are persisted — and they are persisted PER
-/// SERVER, under keys derived from the canonical MCP URL (see [slotFor]). A
-/// session belongs to the endpoint it was obtained from: pointing the app at
-/// another server switches to that server's own slot, which either holds a
-/// session or does not, and destroys neither. Switching between this backend
-/// and the direct-Graph one is likewise lossless — those keys are the SDK
-/// session's and are never touched here.
+/// This app is pre-registered nowhere. When the authorization server's
+/// metadata advertises an RFC 7591 `registration_endpoint` — every bond-mcps
+/// one does — each interactive sign-in registers a fresh public client naming
+/// the loopback URI the browser will come back to, and the id that comes back
+/// carries the authorize round, the code exchange and every later refresh.
+/// Only a server advertising no registration endpoint falls back to the
+/// pre-registered [McpAuthSession.staticClientId] on its fixed port. That
+/// fallback is the whole of what an operator ever has to seed, and no
+/// bond-mcps deployment needs it.
+///
+/// The JWT lives in memory only. Only the rotating refresh token, the client
+/// id it was issued to, the account summary, and the local-mode flag are
+/// persisted — and they are persisted PER SERVER, under keys derived from the
+/// canonical MCP URL (see [slotFor]). A session belongs to the endpoint it was
+/// obtained from: pointing the app at another server switches to that server's
+/// own slot, which either holds a session or does not, and destroys neither.
+/// Switching between this backend and the direct-Graph one is likewise
+/// lossless — those keys are the SDK session's and are never touched here.
 
 /// One token exchange's outcome. `invalid_grant` has to be told apart from
 /// every other non-200: the first means the session is over, the rest are
@@ -49,13 +59,19 @@ class _TokenResponse {
   const _TokenResponse(this.statusCode, this.json);
 }
 
-/// The two authorization-server endpoints this flow uses, discovered together.
+/// The authorization-server endpoints this flow uses, discovered together.
 @immutable
 class _AuthServerEndpoints {
   final Uri authorize;
   final Uri token;
 
-  const _AuthServerEndpoints(this.authorize, this.token);
+  /// RFC 7591 dynamic client registration, when the server publishes one.
+  ///
+  /// Null means it offers no registration at all, and the pre-registered
+  /// static client is then the only way in.
+  final Uri? register;
+
+  const _AuthServerEndpoints(this.authorize, this.token, this.register);
 }
 
 /// Pulls the RFC 9728 protected-resource-metadata URL out of a
@@ -80,17 +96,36 @@ Uri? resourceMetadataUrlFrom(String? header) {
 }
 
 class McpAuthSession implements AuthSession {
-  /// A static, pre-registered public client. There is no secret and there
-  /// never will be one — the authorization server advertises
+  /// The pre-registered public client, and the FALLBACK: presented only
+  /// against an authorization server whose metadata advertises no RFC 7591
+  /// `registration_endpoint`. Every bond-mcps server advertises one, so the
+  /// everyday path registers this app itself, per sign-in, and this id is
+  /// never sent. There is no secret and there never will be one — the
+  /// authorization server advertises
   /// `token_endpoint_auth_methods_supported: ["none"]`.
-  static const String clientId = 'bond-desktop';
+  ///
+  /// Also what a refresh presents when the slot holds no client id: a session
+  /// signed in before ids were stored was issued to this client, and must keep
+  /// refreshing as it rather than be pushed through a sign-in it does not
+  /// need. That is the upgrade path.
+  static const String staticClientId = 'bond-desktop';
 
-  /// Registered byte for byte with the authorization server; it must match in
-  /// BOTH the authorize and the token request.
-  static const String redirectUri = 'http://127.0.0.1:8766/callback';
+  /// Registered byte for byte with whichever server knows [staticClientId]; it
+  /// must match in BOTH the authorize and the token request. A registering
+  /// sign-in names the port it actually bound instead.
+  static const String staticRedirectUri = 'http://127.0.0.1:8766/callback';
 
-  /// Fixed by the redirect above — there is no fallback port.
-  static const int redirectPort = 8766;
+  /// Fixed by the redirect above — on the fallback path there is no other port
+  /// to move to. A registering sign-in binds an ephemeral one (RFC 8252 §7.3)
+  /// and tells the server which one it got.
+  static const int staticRedirectPort = 8766;
+
+  /// The `client_name` a registration carries: what an operator reading the
+  /// authorization server's clients table sees.
+  static const String clientName = 'Bond Desktop';
+
+  /// Where the browser is sent back to, on whichever loopback port is in use.
+  static const String callbackPath = '/callback';
 
   /// The pre-slot global keys. Read by no code path any more — kept only so
   /// [_retireLegacyKeys] can name them.
@@ -204,6 +239,11 @@ class McpAuthSession implements AuthSession {
   String get _keyAccountJson => 'mcp_account_$_slot';
   String get _keyLocalMode => 'mcp_local_$_slot';
 
+  /// The client this slot's refresh token was issued to. Lives and dies with
+  /// that token: the authorization server binds the two, and presenting the
+  /// wrong client is `invalid_grant`.
+  String get _keyClientId => 'mcp_client_$_slot';
+
   @visibleForTesting
   String get refreshTokenKey => _keyRefreshToken;
 
@@ -212,6 +252,9 @@ class McpAuthSession implements AuthSession {
 
   @visibleForTesting
   String get localModeKey => _keyLocalMode;
+
+  @visibleForTesting
+  String get clientIdKey => _keyClientId;
 
   /// Deletes the pre-slot global keys, once per session construction.
   ///
@@ -323,7 +366,7 @@ class McpAuthSession implements AuthSession {
 
   /// Ends the session.
   ///
-  /// Clears THIS server's three keys one by one rather than wiping the store:
+  /// Clears THIS server's four keys one by one rather than wiping the store:
   /// a `deleteAll` here would take the direct-Graph session and every other
   /// server's slot with it.
   /// Wiping the local mail database is not done here either — that belongs to
@@ -434,6 +477,9 @@ class McpAuthSession implements AuthSession {
     _jwt = null;
     _jwtExpiry = null;
     await _store.write(_keyRefreshToken, null);
+    // The client id goes with it: it is only ever the one that refresh token
+    // was issued to, and a local session has no token to refresh.
+    await _store.write(_keyClientId, null);
     final account = await _profileAccount();
     if (account == null) return const AccountInfo(displayName: 'Local session');
     await _store.write(_keyAccountJson, jsonEncode(account.toJson()));
@@ -443,13 +489,37 @@ class McpAuthSession implements AuthSession {
   Future<AccountInfo> _signInWithAuthServer(Uri resourceMetadataUrl) async {
     final endpoints = await _discoverEndpoints(resourceMetadataUrl);
     _tokenEndpoint = endpoints.token;
+    final registerAt = endpoints.register;
 
+    // Bound BEFORE registering: the registration must name the exact loopback
+    // URI the browser will come back to, and on that path the port is whatever
+    // the OS hands out. Without registration the port is the static client's.
+    final server =
+        await _bindCallbackListener(registerAt == null ? staticRedirectPort : 0);
+    final String clientId;
+    final String redirectUri;
+    final String code;
     final verifier = randomUrlSafe(64);
-    final code = await _authorizeRound(
-      authorizeEndpoint: endpoints.authorize,
-      challenge: pkceChallengeFor(verifier),
-      state: randomUrlSafe(32),
-    );
+    try {
+      redirectUri = registerAt == null
+          ? staticRedirectUri
+          : 'http://127.0.0.1:${server.port}$callbackPath';
+      clientId = registerAt == null
+          ? staticClientId
+          : await _registerClient(registerAt, redirectUri);
+      code = await _authorizeRound(
+        server: server,
+        authorizeEndpoint: endpoints.authorize,
+        clientId: clientId,
+        redirectUri: redirectUri,
+        challenge: pkceChallengeFor(verifier),
+        state: randomUrlSafe(32),
+      );
+    } finally {
+      // Unconditional: an abandoned sign-in must not hold the port for the
+      // rest of the process's life.
+      await server.close(force: true);
+    }
 
     final response = await _postForm(endpoints.token, {
       'grant_type': 'authorization_code',
@@ -464,7 +534,7 @@ class McpAuthSession implements AuthSession {
     if (response.statusCode != 200) {
       throw AuthException(_describeTokenError(response));
     }
-    final jwt = await _adoptTokens(response.json);
+    final jwt = await _adoptTokens(response.json, clientId: clientId);
     // The mirror of the clearing in [_signInLocal], and for the same reason
     // within this server's slot: a stale local-mode flag would let [validJwt]
     // answer "no bearer needed" the day the refresh token is gone, instead of
@@ -525,51 +595,151 @@ class McpAuthSession implements AuthSession {
         'sign in.',
       );
     }
-    return _AuthServerEndpoints(Uri.parse(authorize), Uri.parse(token));
+    // Optional by design: a server that publishes no registration endpoint is
+    // not broken, it simply has to have been told about this app in advance.
+    // `hasScheme`, because `tryParse` accepts almost anything: a relative
+    // path here is a malformed document, and posting to it would throw an
+    // ArgumentError rather than say what is wrong.
+    final register = asMetadata['registration_endpoint'];
+    final registerUri = register is String ? Uri.tryParse(register) : null;
+    return _AuthServerEndpoints(
+      Uri.parse(authorize),
+      Uri.parse(token),
+      registerUri != null && registerUri.hasScheme ? registerUri : null,
+    );
   }
 
-  /// One browser round trip: open the authorize page, wait on the loopback
-  /// redirect, return its `code`.
-  Future<String> _authorizeRound({
-    required Uri authorizeEndpoint,
-    required String challenge,
-    required String state,
-  }) async {
-    final HttpServer server;
+  /// Registers this app as a public client (RFC 7591) and returns its id.
+  ///
+  /// No secret is asked for and none would ever be kept: the authorization
+  /// server advertises `token_endpoint_auth_methods_supported: ["none"]` and
+  /// registers what this sends as a public client.
+  ///
+  /// Fresh on every interactive sign-in, on purpose. A stored registration
+  /// cannot be checked cheaply — an id the server has forgotten is answered
+  /// with a 400 in the BROWSER, which this app never sees, so the user would
+  /// sit out the callback timeout — and the URI it was registered with names a
+  /// loopback port that will not be free next time.
+  Future<String> _registerClient(Uri endpoint, String redirectUri) async {
+    final http.Response response;
     try {
-      server = await HttpServer.bind(InternetAddress.loopbackIPv4, redirectPort);
-    } on SocketException {
-      throw const AuthException(
-        'Port $redirectPort is in use, so sign-in cannot start. This port is '
-        'fixed by the registered redirect URI. Find the holder: '
-        'lsof -nP -iTCP:$redirectPort -sTCP:LISTEN',
+      response = await _http.post(
+        endpoint,
+        headers: const {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: jsonEncode({
+          'client_name': clientName,
+          'redirect_uris': [redirectUri],
+          'grant_types': ['authorization_code', 'refresh_token'],
+          'response_types': ['code'],
+          'token_endpoint_auth_method': 'none',
+        }),
+      );
+    } on http.ClientException catch (e) {
+      throw AuthException(
+        'Could not reach the sign-in service to register this app: '
+        '${e.message}',
+      );
+    } on SocketException catch (e) {
+      throw AuthException(
+        'Could not reach the sign-in service to register this app: '
+        '${e.message}',
       );
     }
 
-    try {
-      final authorizeUrl = authorizeEndpoint.replace(queryParameters: {
-        'response_type': 'code',
-        'client_id': clientId,
-        'redirect_uri': redirectUri,
-        'state': state,
-        'code_challenge': challenge,
-        'code_challenge_method': 'S256',
-        // Sent on the authorize request as well as the token request: the
-        // authorization server binds the audience at THIS step.
-        'resource': mcpUrl.toString(),
-        // No `scope`: this authorization server issues what the client is
-        // registered for, and naming a scope it does not know is an error.
-      });
-      final launched = await _openBrowser(authorizeUrl);
-      if (!launched) {
-        throw const AuthException('Could not open a browser to sign in.');
-      }
-      return await awaitCallbackCode(server, state);
-    } finally {
-      // Unconditional: an abandoned sign-in must not hold the port for the
-      // rest of the process's life.
-      await server.close(force: true);
+    final json = _decodeJsonObject(response);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      // Read, never cast: this is the least predictable reply in the flow — a
+      // gateway's own error page is JSON too, in whatever shape it likes.
+      final description = json['error_description'];
+      final error = json['error'];
+      final detail = description is String && description.isNotEmpty
+          ? description
+          : error is String && error.isNotEmpty
+              ? error
+              : 'HTTP ${response.statusCode}';
+      throw AuthException(
+        'The authorization server refused to register this app: $detail',
+      );
     }
+
+    final registered = json['client_id'];
+    if (registered is! String || registered.isEmpty) {
+      throw const AuthException(
+        'The authorization server registered this app but returned no client '
+        'id.',
+      );
+    }
+    // RFC 7591 lets a server hand back metadata it changed. A redirect URI it
+    // rewrote would surface as a 400 in the browser the app never sees, so
+    // the echo is checked here, where the failure can be named.
+    final echoed = json['redirect_uris'];
+    if (echoed is List && !echoed.contains(redirectUri)) {
+      throw const AuthException(
+        'The authorization server registered this app under a redirect URI '
+        'other than the one it asked for.',
+      );
+    }
+    return registered;
+  }
+
+  /// The loopback listener the browser's redirect comes back to.
+  ///
+  /// Port 0 lets the OS pick (RFC 8252 §7.3), which a registering sign-in can
+  /// do because it tells the server the URI it actually bound. The fallback
+  /// path has to ask for [staticRedirectPort], and that is the one thing about
+  /// it that can fail outright.
+  Future<HttpServer> _bindCallbackListener(int port) async {
+    try {
+      return await HttpServer.bind(InternetAddress.loopbackIPv4, port);
+    } on SocketException catch (e) {
+      if (port == staticRedirectPort) {
+        throw const AuthException(
+          'Port $staticRedirectPort is in use, so sign-in cannot start. This '
+          'server offers no client registration, so the port is fixed by the '
+          'pre-registered redirect URI. Find the holder: '
+          'lsof -nP -iTCP:$staticRedirectPort -sTCP:LISTEN',
+        );
+      }
+      throw AuthException(
+        'Could not open a loopback port for the sign-in callback: ${e.message}',
+      );
+    }
+  }
+
+  /// One browser round trip on an already-bound listener: open the authorize
+  /// page, wait on the loopback redirect, return its `code`.
+  ///
+  /// The caller owns [server] and closes it, because the same listener has to
+  /// be bound before the registration that names its port.
+  Future<String> _authorizeRound({
+    required HttpServer server,
+    required Uri authorizeEndpoint,
+    required String clientId,
+    required String redirectUri,
+    required String challenge,
+    required String state,
+  }) async {
+    final authorizeUrl = authorizeEndpoint.replace(queryParameters: {
+      'response_type': 'code',
+      'client_id': clientId,
+      'redirect_uri': redirectUri,
+      'state': state,
+      'code_challenge': challenge,
+      'code_challenge_method': 'S256',
+      // Sent on the authorize request as well as the token request: the
+      // authorization server binds the audience at THIS step.
+      'resource': mcpUrl.toString(),
+      // No `scope`: this authorization server issues what the client is
+      // registered for, and naming a scope it does not know is an error.
+    });
+    final launched = await _openBrowser(authorizeUrl);
+    if (!launched) {
+      throw const AuthException('Could not open a browser to sign in.');
+    }
+    return awaitCallbackCode(server, state);
   }
 
   /// Waits for the browser's redirect and returns its `code`, answering the
@@ -698,6 +868,14 @@ class McpAuthSession implements AuthSession {
     // sign-in the user does not need.
     final endpoint = _tokenEndpoint ??= (await _discoverEndpoints()).token;
 
+    // The client this token was issued to: the authorization server binds the
+    // two and answers a mismatch with `invalid_grant`. Missing only for a
+    // session that predates ids being stored, which was necessarily issued to
+    // the static client — the upgrade path, so it keeps refreshing instead of
+    // being pushed through a sign-in it does not need.
+    final stored = await _store.read(_keyClientId);
+    final clientId = (stored == null || stored.isEmpty) ? staticClientId : stored;
+
     final response = await _postForm(endpoint, {
       'grant_type': 'refresh_token',
       'refresh_token': refreshToken,
@@ -714,12 +892,15 @@ class McpAuthSession implements AuthSession {
       // storage here would turn a dropped network into a forced sign-out.
       throw AuthException(_describeTokenError(response));
     }
-    return _adoptTokens(response.json);
+    return _adoptTokens(response.json, clientId: clientId);
   }
 
-  /// Keeps the JWT in memory, persists the rotated refresh token, returns the
-  /// JWT.
-  Future<String> _adoptTokens(Map<String, dynamic> json) async {
+  /// Keeps the JWT in memory, persists the rotated refresh token beside the
+  /// client it was issued to, returns the JWT.
+  Future<String> _adoptTokens(
+    Map<String, dynamic> json, {
+    required String clientId,
+  }) async {
     final accessToken = json['access_token'] as String?;
     if (accessToken == null || accessToken.isEmpty) {
       throw const AuthException(
@@ -733,6 +914,12 @@ class McpAuthSession implements AuthSession {
     // the replacement has to be stored on every single exchange.
     final refreshToken = json['refresh_token'] as String?;
     if (refreshToken != null && refreshToken.isNotEmpty) {
+      // The client id is written HERE and only here, beside the token it
+      // belongs to. Writing it earlier — at registration, say — would leave
+      // the slot holding a new id next to an old refresh token whenever a
+      // browser round was abandoned, and the next refresh would present the
+      // wrong client and be signed out of a session that was fine.
+      await _store.write(_keyClientId, clientId);
       await _store.write(_keyRefreshToken, refreshToken);
     }
     return accessToken;
@@ -756,6 +943,7 @@ class McpAuthSession implements AuthSession {
     _jwtExpiry = null;
     invalidateStatusCache();
     await _store.write(_keyRefreshToken, null);
+    await _store.write(_keyClientId, null);
     await _store.write(_keyAccountJson, null);
     await _store.write(_keyLocalMode, null);
   }

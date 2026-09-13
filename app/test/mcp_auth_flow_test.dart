@@ -67,6 +67,7 @@ const String _asMetadata =
     '$_issuer/.well-known/oauth-authorization-server';
 const String _authorizeEndpoint = '$_issuer/oauth/authorize';
 const String _tokenEndpoint = '$_issuer/oauth/token';
+const String _registerEndpoint = '$_issuer/oauth/register';
 
 /// The local `make dev` server, the second endpoint this file signs in to.
 /// Its session lives in its own keychain slot, which is the entire point of
@@ -118,6 +119,19 @@ class _Server {
   /// Replies for the token endpoint, one per POST; the last one repeats.
   List<http.Response> tokenReplies = [];
 
+  /// Whether the RFC 8414 metadata carries a `registration_endpoint`. Every
+  /// bond-mcps server does; false is the foreign server the static client
+  /// exists for.
+  bool advertiseRegistration = true;
+
+  /// Every registration body this server was sent, decoded, in order.
+  final List<Map<String, dynamic>> registrations = [];
+
+  /// What the registration endpoint answers, as a function of the body it was
+  /// sent so the default can echo the redirect URIs back.
+  http.Response Function(Map<String, dynamic> body) registerReply =
+      _registerOk('bm-test-1');
+
   MockClient get client => MockClient((request) async {
         final url = request.url.toString();
         if (request.method == 'POST' && url == _tokenEndpoint) {
@@ -125,6 +139,13 @@ class _Server {
           return tokenReplies.length == 1
               ? tokenReplies.first
               : tokenReplies.removeAt(0);
+        }
+        // Before the fall-through below, which would file a registration under
+        // `gets` and answer it 404.
+        if (request.method == 'POST' && url == _registerEndpoint) {
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          registrations.add(body);
+          return registerReply(body);
         }
         gets.add(request.url);
         if (request.method == 'POST' && url == _mcp) probes.add(request);
@@ -154,6 +175,8 @@ class _Server {
                 'issuer': _issuer,
                 'authorization_endpoint': _authorizeEndpoint,
                 'token_endpoint': _tokenEndpoint,
+                if (advertiseRegistration)
+                  'registration_endpoint': _registerEndpoint,
                 'code_challenge_methods_supported': ['S256'],
                 'token_endpoint_auth_methods_supported': ['none'],
               }),
@@ -163,6 +186,25 @@ class _Server {
         return http.Response('unexpected ${request.method} $url', 404);
       });
 }
+
+/// The 201 a registration really gets back, echoing the redirect URIs it was
+/// handed. Only `client_id` is read by the app; the rest is here so the reply
+/// has the shape the real server answers with.
+http.Response Function(Map<String, dynamic>) _registerOk(String clientId) =>
+    (body) => http.Response(
+          jsonEncode({
+            'client_id': clientId,
+            'client_id_issued_at': 1,
+            'client_secret_expires_at': 0,
+            'redirect_uris': body['redirect_uris'],
+            'grant_types': ['authorization_code', 'refresh_token'],
+            'response_types': ['code'],
+            'token_endpoint_auth_method': 'none',
+            'client_name': 'Bond Desktop',
+          }),
+          201,
+          headers: {'content-type': 'application/json'},
+        );
 
 http.Response _tokenOk({
   required String accessToken,
@@ -194,7 +236,10 @@ void main() {
     }) =>
         (Uri authorizeUrl) async {
           opened.add(authorizeUrl);
-          final callbackBase = Uri.parse(McpAuthSession.redirectUri);
+          // Wherever the authorize request said to come back to — which with a
+          // registered client is a port the OS picked moments ago.
+          final callbackBase =
+              Uri.parse(authorizeUrl.queryParameters['redirect_uri']!);
           for (final params in strays) {
             callbacks.add(_fire(callbackBase.replace(queryParameters: params)));
           }
@@ -246,7 +291,8 @@ void main() {
       expect(account.displayName, 'Ada Lovelace');
     });
 
-    test('walks discovery, authorizes, and exchanges the code', () async {
+    test('registers itself, walks discovery, authorizes, and exchanges the code',
+        () async {
       server.tokenReplies = [
         _tokenOk(accessToken: _liveJwt(email: 'ada@example.test'), refreshToken: 'rt-1'),
       ];
@@ -268,9 +314,24 @@ void main() {
       final authorize = opened.single;
       expect(authorize.origin + authorize.path, _authorizeEndpoint);
       final q = authorize.queryParameters;
+
+      // Nothing was pre-registered: the app registered itself as a public
+      // client naming the loopback URI it had already bound.
+      final registration = server.registrations.single;
+      expect(registration['client_name'], 'Bond Desktop');
+      expect(registration['token_endpoint_auth_method'], 'none');
+      expect(registration['redirect_uris'], [q['redirect_uri']]);
+
+      final callback = Uri.parse(q['redirect_uri']!);
+      expect(callback.scheme, 'http');
+      expect(callback.host, '127.0.0.1');
+      expect(callback.path, '/callback');
+      // The OS picked it (RFC 8252 §7.3), so the static client's fixed port is
+      // not what a registered sign-in listens on.
+      expect(callback.port, isNot(8766));
+
       expect(q['response_type'], 'code');
-      expect(q['client_id'], 'bond-desktop');
-      expect(q['redirect_uri'], 'http://127.0.0.1:8766/callback');
+      expect(q['client_id'], 'bm-test-1');
       expect(q['code_challenge_method'], 'S256');
       expect(q['code_challenge'], isNotEmpty);
       // RFC 8707 on the authorize request: the audience is bound at this step.
@@ -281,8 +342,8 @@ void main() {
       final post = server.tokenPosts.single;
       expect(post['grant_type'], 'authorization_code');
       expect(post['code'], 'the-auth-code');
-      expect(post['client_id'], 'bond-desktop');
-      expect(post['redirect_uri'], 'http://127.0.0.1:8766/callback');
+      expect(post['client_id'], 'bm-test-1');
+      expect(post['redirect_uri'], q['redirect_uri']);
       // ...and on the token request, or the JWT comes back with an `aud` the
       // MCP server will not accept.
       expect(post['resource'], _mcp);
@@ -292,8 +353,163 @@ void main() {
       expect(account.displayName, 'Ada Lovelace');
       expect(account.mail, 'ada@example.test');
       expect(store.values[_keys.refreshTokenKey], 'rt-1');
+      // Stored beside the refresh token, because the authorization server
+      // binds the two: a refresh has to present this exact client.
+      expect(store.values[_keys.clientIdKey], 'bm-test-1');
       expect(store.values[_keys.accountJsonKey], isNotNull);
       expect(await auth.isSignedIn, isTrue);
+    });
+
+    test('without a registration endpoint the pre-registered client and its '
+        'fixed port are used', () async {
+      // A foreign or CDN-stripped authorization server. The static client is
+      // the only way in, and its redirect URI names the port it was registered
+      // with, so that port has to be the one this listens on.
+      server.advertiseRegistration = false;
+      server.tokenReplies = [
+        _tokenOk(accessToken: _liveJwt(email: 'ada@example.test'), refreshToken: 'rt-1'),
+      ];
+
+      await sessionWith(browser(), tools: {
+        'get_profile': {'display_name': 'Ada', 'mail': 'ada@example.test'},
+      }).signIn();
+
+      expect(server.registrations, isEmpty);
+      final q = opened.single.queryParameters;
+      expect(q['client_id'], 'bond-desktop');
+      expect(q['redirect_uri'], 'http://127.0.0.1:8766/callback');
+
+      final post = server.tokenPosts.single;
+      expect(post['client_id'], 'bond-desktop');
+      expect(post['redirect_uri'], 'http://127.0.0.1:8766/callback');
+      expect(store.values[_keys.clientIdKey], 'bond-desktop');
+    });
+
+    test('a refused registration is an AuthException naming the reason, and '
+        'opens no browser', () async {
+      // Ambiguity is an error here, never an answer: falling through to a
+      // static client the server has probably never heard of would just move
+      // the failure into the browser, where this app cannot see it.
+      server.registerReply = (_) => http.Response(
+            jsonEncode({
+              'error': 'invalid_client_metadata',
+              'error_description': 'redirect_uris must be a non-empty list.',
+            }),
+            400,
+          );
+      final auth = sessionWith(browser());
+
+      await expectLater(
+        auth.signIn(),
+        throwsA(isA<AuthException>().having((e) => e.message, 'message',
+            contains('redirect_uris must be a non-empty list.'))),
+      );
+      expect(opened, isEmpty);
+      expect(server.tokenPosts, isEmpty);
+      expect(store.values.containsKey(_keys.clientIdKey), isFalse);
+    });
+
+    test('each interactive sign-in registers afresh', () async {
+      // A registration is never reused: an id the server has forgotten comes
+      // back as a 400 in the BROWSER, which this app never sees, and the URI it
+      // was registered with names a port that will not be free next time.
+      server.tokenReplies = [
+        _tokenOk(accessToken: _liveJwt(), refreshToken: 'rt-1'),
+        _tokenOk(accessToken: _liveJwt(), refreshToken: 'rt-2'),
+      ];
+      final auth = sessionWith(browser());
+
+      await auth.signIn();
+      server.registerReply = _registerOk('bm-test-2');
+      await auth.signIn();
+
+      expect(server.registrations, hasLength(2));
+      expect(opened.last.queryParameters['client_id'], 'bm-test-2');
+      expect(store.values[_keys.clientIdKey], 'bm-test-2');
+    });
+
+    test('an abandoned sign-in leaves the existing session and its client in '
+        'step', () async {
+      // The client id is written beside the refresh token, not at
+      // registration: a registration that succeeded and a browser round that
+      // did not must leave the slot exactly as it was, or the next refresh
+      // would present the new client for the old token and be signed out.
+      store.values[_keys.refreshTokenKey] = 'rt-old';
+      store.values[_keys.clientIdKey] = 'bm-old';
+      final auth = sessionWith((Uri authorizeUrl) async {
+        opened.add(authorizeUrl);
+        callbacks.add(_fire(
+          Uri.parse(authorizeUrl.queryParameters['redirect_uri']!)
+              .replace(queryParameters: {
+            'state': authorizeUrl.queryParameters['state']!,
+            'error': 'access_denied',
+          }),
+        ));
+        return true;
+      });
+
+      await expectLater(auth.signIn(), throwsA(isA<AuthorizeDenied>()));
+      expect(server.registrations, hasLength(1));
+      expect(store.values[_keys.refreshTokenKey], 'rt-old');
+      expect(store.values[_keys.clientIdKey], 'bm-old');
+    });
+
+    test('a registration that returns no client id is an error', () async {
+      server.registerReply = (body) => http.Response(
+            jsonEncode({'redirect_uris': body['redirect_uris']}),
+            201,
+          );
+
+      await expectLater(
+        sessionWith(browser()).signIn(),
+        throwsA(isA<AuthException>().having((e) => e.message, 'message',
+            contains('returned no client id'))),
+      );
+      expect(opened, isEmpty);
+    });
+
+    test('a registration endpoint that cannot be reached names itself',
+        () async {
+      server.registerReply =
+          (_) => throw http.ClientException('connection refused');
+
+      await expectLater(
+        sessionWith(browser()).signIn(),
+        throwsA(isA<AuthException>().having((e) => e.message, 'message',
+            contains('register this app'))),
+      );
+      expect(opened, isEmpty);
+    });
+
+    test('a refusal with a non-JSON body names the status', () async {
+      // A gateway's error page, not the authorization server's own answer.
+      server.registerReply =
+          (_) => http.Response('<html>bad gateway</html>', 502);
+
+      await expectLater(
+        sessionWith(browser()).signIn(),
+        throwsA(isA<AuthException>().having((e) => e.message, 'message',
+            contains('HTTP 502'))),
+      );
+      expect(opened, isEmpty);
+    });
+
+    test('a registration echoing a different redirect URI is an error, not a '
+        'browser 400 later', () async {
+      server.registerReply = (_) => http.Response(
+            jsonEncode({
+              'client_id': 'bm-test-1',
+              'redirect_uris': ['http://127.0.0.1:1/elsewhere'],
+            }),
+            201,
+          );
+
+      await expectLater(
+        sessionWith(browser()).signIn(),
+        throwsA(isA<AuthException>().having((e) => e.message, 'message',
+            contains('redirect URI'))),
+      );
+      expect(opened, isEmpty);
     });
 
     test('the Graph session\'s keys are untouched by an MCP sign-in', () async {
@@ -356,7 +572,8 @@ void main() {
       final auth = sessionWith((Uri authorizeUrl) async {
         opened.add(authorizeUrl);
         callbacks.add(_fire(
-          Uri.parse(McpAuthSession.redirectUri).replace(queryParameters: {
+          Uri.parse(authorizeUrl.queryParameters['redirect_uri']!)
+              .replace(queryParameters: {
             'state': authorizeUrl.queryParameters['state']!,
             'error': 'access_denied',
             'error_description': 'the user said no',
@@ -487,7 +704,9 @@ void main() {
       // this slot would win over the local-mode flag in validJwt and send a
       // refresh at a server with no token endpoint to discover — breaking
       // every call until a sign-out.
-      final store = _Tokens()..values[_localKeys.refreshTokenKey] = 'stale-deployed-rt';
+      final store = _Tokens()
+        ..values[_localKeys.refreshTokenKey] = 'stale-deployed-rt'
+        ..values[_localKeys.clientIdKey] = 'bm-stale';
       final auth = McpAuthSession(
         mcpUrl: Uri.parse(_localMcp),
         mcpClient: _FakeBondMcpClient({
@@ -500,6 +719,9 @@ void main() {
 
       await auth.signIn();
       expect(store.values.containsKey(_localKeys.refreshTokenKey), isFalse);
+      // The client id goes with the token it was issued to — one slot, one
+      // lifetime, no half-state left for a later refresh to read.
+      expect(store.values.containsKey(_localKeys.clientIdKey), isFalse);
       expect(store.values[_localKeys.localModeKey], '1');
       expect(await auth.validJwt(), isNull);
     });
@@ -627,8 +849,23 @@ void main() {
           containsAllInOrder([_mcp, _prm, _asMetadata]));
       expect(server.tokenPosts.single['grant_type'], 'refresh_token');
       expect(server.tokenPosts.single['refresh_token'], 'rt-1');
+      // The upgrade path: this slot holds no client id, so the token was
+      // issued to the static client before ids were stored, and it keeps
+      // refreshing as that client rather than being signed out.
       expect(server.tokenPosts.single['client_id'], 'bond-desktop');
       expect(server.tokenPosts.single['resource'], _mcp);
+    });
+
+    test('a refresh presents the client the session was registered as',
+        () async {
+      // The authorization server binds a refresh token to its client and
+      // answers a mismatch with invalid_grant, so a registered session must
+      // keep presenting the id it registered under.
+      store.values[_keys.clientIdKey] = 'bm-old';
+      server.tokenReplies = [_tokenOk(accessToken: _liveJwt())];
+
+      expect(await session().validJwt(), isNotNull);
+      expect(server.tokenPosts.single['client_id'], 'bm-old');
     });
 
     test('a fresh token is reused without another exchange', () async {
@@ -655,6 +892,9 @@ void main() {
       server.tokenReplies = [_tokenOk(accessToken: _liveJwt(), refreshToken: 'rt-2')];
       await session().validJwt();
       expect(store.values[_keys.refreshTokenKey], 'rt-2');
+      // ...stored beside the client it was issued to. This slot had no id (the
+      // upgrade path), so from here on it says which client it refreshes as.
+      expect(store.values[_keys.clientIdKey], 'bond-desktop');
     });
 
     test('invalid_grant ends the session, and only this one', () async {
@@ -663,6 +903,7 @@ void main() {
       store.values['account_json'] = '{"displayName":"Graph User"}';
       store.values[_keys.accountJsonKey] = '{"displayName":"Ada"}';
       store.values[_keys.localModeKey] = '1';
+      store.values[_keys.clientIdKey] = 'bm-old';
       server.tokenReplies = [
         http.Response(jsonEncode({'error': 'invalid_grant'}), 400),
       ];
@@ -670,6 +911,7 @@ void main() {
       await expectLater(session().validJwt(), throwsA(isA<NotSignedIn>()));
 
       expect(store.values.containsKey(_keys.refreshTokenKey), isFalse);
+      expect(store.values.containsKey(_keys.clientIdKey), isFalse);
       expect(store.values.containsKey(_keys.accountJsonKey), isFalse);
       expect(store.values.containsKey(_keys.localModeKey), isFalse);
       expect(store.values['refresh_token'], 'graph-rt');

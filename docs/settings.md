@@ -186,7 +186,11 @@ Under them sits the session block: a `BondChip.semantic` reading `Signed in` or
 `Not signed in`, the sentence beside it, and **Sign in…** / **Sign out of this
 server**. Sessions are managed here because the gate in front of the app decides
 at launch only — a target with no session is a thing to fix in place, not a
-reason to swap the screen out. A sign-in failure renders as an `InlineAlert`
+reason to swap the screen out. Against a server that asks for a login,
+**Sign in…** registers the app with that server's authorization server before
+it opens the browser, so nothing has to be pre-registered there; a local
+`make dev` server asks for nothing and gets no browser. A sign-in failure
+renders as an `InlineAlert`
 with `InlineAlertSeverity.error` beneath the button that caused it.
 
 The Microsoft permissions rows fold in at the bottom of the same section: they
