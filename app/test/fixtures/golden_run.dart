@@ -168,6 +168,21 @@ class GoldenRunEntry {
 
   final Map<String, GoldenCall> calls = {};
 
+  /// Whether any stage was so much as tried on this item.
+  ///
+  /// The rule for which rows a run file carries: a row that attempted nothing
+  /// is not a row (the item was outside the run's population), while a row
+  /// whose only stage failed still is — its `calls` say what went wrong, and
+  /// the scorer reads its missing sections as "not attempted" either way.
+  bool get attempted =>
+      calls.isNotEmpty ||
+      triage != null ||
+      extract != null ||
+      needsYou != null ||
+      storylineId != null ||
+      decision != null ||
+      draft != null;
+
   GoldenRunEntry({
     required this.id,
     required this.stratum,

@@ -26,6 +26,8 @@ depends on a server being up, and each `make` target below runs it with
 | `make bench-verify` | Not a measurement — a contract check. See "Protocol". |
 | `make golden-baseline` | Not a model run at all: what the shipping app already scored on the golden set, from the labels the set stores. See "The golden set". |
 | `make golden-score R=…` | Scores a golden run file, keep-only first and all items second. See "The golden set". |
+| `make golden` | The golden set through triage, needs-you and extraction on the bulk slot — the run behind a golden-ledger row. Writes the run file and the timing/cost JSON. |
+| `make golden-prose` | Reply decisions for every gold-keep item and drafts for the reply-rubric items, on the prose slot. |
 
 The knobs, all `?=` in the `Makefile` and all overridable on the command line
 (or durably in a git-ignored `local.mk`):
@@ -43,6 +45,8 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
 - `BENCH_VERIFY` — `0` skips the contract check that otherwise runs before
   every bench.
 - `BENCH_K` — the concurrencies `make drain` races, in order (e.g. `1,3,6`).
+- `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_K`, `GOLDEN_OWNER_NAME` /
+  `GOLDEN_OWNER_ADDRESS` — see "The golden set".
 
 Name the weights in a label, not just the runtime: two quantizations of one
 model otherwise produce two identical-looking tables. Once two runs have
@@ -197,13 +201,72 @@ two thirds of them. The `compressed` rung is therefore a lower bound on what
 real compression would buy, and any row run at it says so.
 Gold records, per stage, which rung a label needs, so
 `BREAKDOWN=derivable_from` answers the question the ladder was built for: what
-does context buy, and where. The live replay itself lands in a later phase;
-until then these are the knobs it will read.
+does context buy, and where.
 
 `GOLDEN_K` sets the replay's concurrency (a llama.cpp server needs
 `FAST_SLOTS` at least that high), and `GOLDEN_OWNER_NAME` /
 `GOLDEN_OWNER_ADDRESS` supply the inbox owner, which the set itself does not
 carry.
+
+**Running it.** Two targets, one per slot:
+
+```sh
+make golden                               # bulk slot, tail3 — the shipping rung
+make golden GOLDEN_CTX=none               # the same, message alone
+make golden GOLDEN_CTX=compressed         # the digest rung, with its caveat
+make golden BENCH_URL=… BENCH_LABEL=…     # point it at a candidate
+make golden-prose                         # prose slot: decisions + drafts
+```
+
+Each run writes a PAIR of files to `BENCH_OUT`. The run file
+(`golden-run-<label>-<stamp>.json`) holds real message content and is what
+`make golden-score R=…` reads — the run prints that exact command when it
+finishes. The timing and cost JSON (`golden-bulk-…` / `golden-prose-…`) is
+schema 1 like every other bench result, and carries `extra.run_file`,
+`extra.ctx`, `extra.k`, `extra.msgs_per_min` and `extra.cost`, so a row can be
+quoted from one file and scored from the other.
+
+The replay runs the app's own tasks with the HANDLERS' parameters, not a
+bench's: triage on the defaults, needs-you and extraction at temperature 0,
+and the deterministic needs-you floor applied FIRST — a floor item never calls
+the model at all and its row is marked `floor: true`, so a reader can tell the
+model's recall from the floor's. The owner line comes from `GOLDEN_OWNER_NAME`
+/ `GOLDEN_OWNER_ADDRESS`; a run with neither set says so in its banner, because
+needs-you then judges "does this name the owner" with no owner to name.
+`msgs/min` is items over wall time for the whole run at the `GOLDEN_K` it was
+given, which is the throughput a backlog is felt in. Cost comes from the dated
+Bedrock price table in `app/test/fixtures/golden_prices.dart`: zero for a local
+server, and BLANK — never zero — for a remote model the table does not price,
+because an unpriced cloud call is unknown rather than free.
+
+Two things the needs-you replay leaves out, for the same reason the draft
+below leaves things out: the attachment digests the handler passes (the set
+carries none) and this machine's custom needs-you rules — the replay runs the
+default prompt, so a row measures the shipped prompt on the model rather than
+one machine's rules on it.
+
+One comparability caveat. The replay runs triage, needs-you and extraction on
+gold-DROP items too — the gate strata need reading — where the shipping app
+never ran them. So a replay's ALL-ITEMS pass is not comparable with the
+baseline's all-items pass: the baseline reads those items as "not attempted",
+the replay as answers. The keep-only pass, which a ledger row quotes, is
+unaffected.
+
+The prose run differs in three ways worth stating. First, its decision context
+is the plain tail whatever `GOLDEN_CTX` says, because the decision keeps six
+messages at 500 characters and the tail already fits it whole — the ladder is a
+question about the two stages that clip. Second, a draft gets the message and
+its tail and nothing else: no style examples, no about-me, no storyline summary, no
+directory pack, because the set carries none of them, so a prose row measures
+the model rather than the retrieval that would feed it in the app. Third, in a
+prose run file `triage.reply_expected` IS the reply decision: the scorer's
+`triage.reply_expected` asks "is the sender waiting on an answer", which is
+exactly what the reply-decision stage answers and what gold has one label for,
+so a decision-only row writes its verdict there and repeats it in a `decision`
+object with the model's reason beside it.
+
+A `compressed` row carries the lower-bound caveat above, printed by the run
+itself so it travels with the number rather than being remembered.
 
 ### Golden ledger
 
@@ -213,6 +276,38 @@ judge, not from `score_run.py`.
 | date | slot | label | ctx | run file | keep-only: category / urgency / needs_action / reply_expected / needs_you / intent / importance / project / topics / people | rubric | p50 ms | gen t/s | msgs/min | $/1K msgs | note |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-09-12 | — | the shipping app, as stored | tail3 | none — `--baseline` | 94% / 88% / 68% / 77% / 94% / 84% / 45% / 67% / 31% / 86% | Opus 4.5 judge: label 84% · action items 61% · summary 53% · needs-you evidence 36% · extract evidence 25% | — | — | — | — | the shipping app's stored output; gate 76/100, storyline 42/99 with no correct positive |
+| 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | 89% / 89% / 66% / 70% / 92% / 75% / 39% / 66% / 26% / 87% | — | 2436 / 1616 / 1950 (triage / needs_you / extraction) | 41.4 | 8.9 | $0.00 | the shipping bulk model, replayed; second of two passes |
+| 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | none | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-175832.json` | 88% / 89% / 75% / 75% / 93% / 75% / 39% / 66% / 26% / 87% | — | 2173 / 1458 / 2020 (triage / needs_you / extraction) | 41.5 | 9.1 | $0.00 | context ladder: message alone (one pass) |
+| 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | compressed | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-181030.json` | 89% / 89% / 68% / 74% / 91% / 75% / 39% / 66% / 26% / 87% | — | 2452 / 1684 / 2028 (triage / needs_you / extraction) | 40.4 | 8.7 | $0.00 | context ladder: digest + two newest tail messages, 300-char clip — lower bound (one pass) |
+| 2026-09-14 | bulk | llamacpp/Qwen3.5-4B-UD-Q4_K_XL | tail3 | `golden-run-llamacpp-qwen3-5-4b-ud-q4-k-xl-20260914-190503.json` | 91% / 89% / 66% / 83% / 87% / 79% / 66% / 63% / 29% / 88% | — | 2838 / 1716 / 2745 (triage / needs_you / extraction) | 36.9 | 7.5 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
+| 2026-09-14 | bulk | llamacpp/Qwen3.5-9B-Q4_K_M | tail3 | `golden-run-llamacpp-qwen3-5-9b-q4-k-m-20260914-200430.json` | 91% / 93% / 64% / 70% / 83% / 82% / 74% / 64% / 24% / 83% | — | 4394 / 2648 / 4444 (triage / needs_you / extraction) | 22.8 | 4.6 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
+| 2026-09-14 | bulk | llamacpp/Qwen3.8-27B-Q4_K_M (as bulk) | tail3 | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-20260914-223320.json` | 92% / 95% / 72% / 84% / 93% / 86% / 74% / 58% / 32% / 93% | — | 13412 / 8969 / 13907 (triage / needs_you / extraction) | 7.1 | 1.5 | $0.00 | accuracy ceiling for these prompts: the prose model doing bulk work, 1 slot, no MTP; second of two passes |
+| 2026-09-14 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260914-230921.json` | — / — / — / 82% / — / — / — / — / — / — | — | 6578 / 16589 (reply_decision / draft_reply) | 7.1 | 4.4 | $0.00 | prose slot: reply decision for the 76 gold-keep items (scored as reply_expected) + 25 drafts for the reply-rubric items, judged in Phase 3; message + tail only; second of two passes |
+
+**What the first rows say** (2026-09-14, all at `GOLDEN_K=1`, keep-only, every
+row the second of two passes unless its note says otherwise). Bigger bulk
+models buy the enums, not the booleans: category and urgency reach 91–95% on
+anything from Qwen3.5-4B up, against 89% on the shipping 4B, and importance
+jumps from 39% to 66–74% — but needs-you FALLS as the bulk model grows (92 →
+87 → 83) until the 27B recovers it (93), and project is flat or worse. The
+context ladder on the 4B is the row worth re-reading: the thread tail lowers
+needs-action (75% alone → 66% with it) and reply-expected (75 → 70), on the
+items whose gold label needs the tail as much as on the rest, and the digest
+rung sits between the two. Extraction is identical across rungs by
+construction — it has no thread field. The 27B doing bulk work is the ceiling
+for these prompts (needs-action 72, reply-expected 84, needs-you 93) at six
+times the shipping model's time per message. On the prose slot the dedicated
+reply decision scores 82% against gold reply-expected, twelve points above the
+4B's triage boolean for the same question. Topics stay under a third for every
+model, the one field nothing separates them on. The temperature-0 stages
+(needs-you, extraction) reproduce token for token between passes; triage at
+0.2 moves one to three points, which is the noise floor for its booleans. The
+replayed 4B also lands a few points under the stored baseline on several
+fields: the stored run saw the live thread of 2026-09-12 and is one sample of
+the same model, so candidates are read against the replayed row, not the
+stored one. Rubric columns wait for the judge; recommendations for the round's
+last phase.
+
 
 ## oMLX
 

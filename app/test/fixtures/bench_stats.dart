@@ -239,3 +239,53 @@ String scorecardBlock(List<Scorecard> cards) {
       '\n'
       '${misses.isEmpty ? 'no disagreements with the corpus' : misses.join('\n')}';
 }
+
+/// Runs [body] over [items] with at most [k] in flight, in the order of issue.
+///
+/// K workers pull from one shared iterator, so K=1 is a plain sequential loop
+/// over exactly the order the iterable yields, and a slow item never blocks
+/// the others from starting — which a chunked `Future.wait` over batches of k
+/// would, turning every batch into a wait for its slowest member and reporting
+/// the result as throughput.
+///
+/// The first error in [body] stops the pool: workers finish the item they are
+/// on and take no more, and the error is rethrown once they have. A bare
+/// `Future.wait` would do the opposite — let every other worker drain the rest
+/// of the list before saying anything — and on a hundred-item replay that is
+/// ninety minutes of work after the point where the run was already lost. A
+/// caller that wants a run to SURVIVE a failed call catches inside [body],
+/// which is what the golden replay does per stage: one unanswerable message
+/// must not discard the ninety-nine rows already paid for.
+Future<void> forEachBounded<T>(
+  Iterable<T> items,
+  int k,
+  Future<void> Function(T item) body,
+) async {
+  if (k < 1) {
+    throw ArgumentError.value(k, 'k', 'must be a positive integer');
+  }
+  final iterator = items.iterator;
+  Object? failure;
+  StackTrace? failureTrace;
+  Future<void> worker() async {
+    while (failure == null) {
+      // Advanced synchronously and read before the first await: two workers
+      // that resumed between `moveNext` and `current` would be handed the same
+      // item, and the run would quietly measure one message twice.
+      if (!iterator.moveNext()) return;
+      final item = iterator.current;
+      try {
+        await body(item);
+      } catch (error, trace) {
+        failure ??= error;
+        failureTrace ??= trace;
+        return;
+      }
+    }
+  }
+
+  await Future.wait([for (var i = 0; i < k; i++) worker()]);
+  if (failure != null) {
+    Error.throwWithStackTrace(failure!, failureTrace!);
+  }
+}

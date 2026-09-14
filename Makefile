@@ -100,7 +100,7 @@ RESET  := \033[0m
         app-install app-run app-test app-gen app-migrations app-analyze \
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ab ab-membership drain bench-compare \
-        golden-check golden-baseline golden-score \
+        golden-check golden-baseline golden-score golden golden-prose \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
         dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
 
@@ -135,6 +135,8 @@ help:
 	@printf "  make ab-membership → membership eval, 27B vs fast model (needs both up)\n"
 	@printf "  make drain        → drain concurrency race, BENCH_K rounds (needs make fast up)\n"
 	@printf "  make bench-compare A=<a.json> B=<b.json> → diff two bench results\n"
+	@printf "  make golden        → the golden set through triage/needs-you/extraction on the bulk slot (GOLDEN_CTX=none|tail3|compressed, GOLDEN_K=…)\n"
+	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
 	@printf "  make golden-baseline → what the shipping app scores on the golden set (needs golden/)\n"
 	@printf "  make golden-score R=<run.json> → score a golden run file (BREAKDOWN= per-bucket tables, JSON= the tallies)\n"
 	@printf "  make app-build    → release build of the macOS app\n"
@@ -904,6 +906,24 @@ golden-score: golden-check
 	@test -n "$(R)" || { printf "$(RED)✗$(RESET) usage: make golden-score R=<run.json> [BREAKDOWN=stratum|difficulty|derivable_from] [JSON=<out.json>]\n"; exit 1; }
 	@cd $(dir $(GOLDEN)) && python3 tools/score_run.py --run '$(abspath $(R))' --keep-only $(if $(BREAKDOWN),--breakdown $(BREAKDOWN),) $(if $(JSON),--json '$(abspath $(JSON))',)
 	@cd $(dir $(GOLDEN)) && python3 tools/score_run.py --run '$(abspath $(R))'
+
+# The golden set through the real tasks on the bulk slot (triage, needs-you,
+# extraction) — the run that produces a ledger row. Writes two files to
+# $(BENCH_OUT): golden-run-<label>-<stamp>.json (score it with
+# `make golden-score R=…`; the test prints the exact command) and the
+# golden-bulk timing/cost JSON beside it. GOLDEN_CTX picks the context rung;
+# GOLDEN_K > 1 needs the server started with FAST_SLOTS >= K, or the pool
+# measures queue-wait dressed up as throughput.
+golden: golden-check
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'triage' $(BENCH_DEFINES)
+
+# The prose half: a reply decision for every gold-keep item and a draft for
+# every item that carries a reply rubric, on the prose slot. Same two files,
+# bench name golden-prose; the drafts are judged by rubric in a later phase.
+golden-prose: golden-check
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'reply' $(BENCH_DEFINES)
 
 app-analyze:
 	@cd $(APP_DIR) && $(FLUTTER) analyze
