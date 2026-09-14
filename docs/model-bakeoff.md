@@ -24,6 +24,8 @@ depends on a server being up, and each `make` target below runs it with
 | `make ab-membership` | The membership eval set through the confirm task on both slots, against the answer a person would give. |
 | `make drain` | The drain concurrency race: one round per concurrency in `BENCH_K` over the same backlog. The only bench that can see batching. |
 | `make bench-verify` | Not a measurement — a contract check. See "Protocol". |
+| `make golden-baseline` | Not a model run at all: what the shipping app already scored on the golden set, from the labels the set stores. See "The golden set". |
+| `make golden-score R=…` | Scores a golden run file, keep-only first and all items second. See "The golden set". |
 
 The knobs, all `?=` in the `Makefile` and all overridable on the command line
 (or durably in a git-ignored `local.mk`):
@@ -77,6 +79,140 @@ Follow this or the numbers are decoration.
    sending `enable_thinking: false` and relaxes the reasoning-leak gate to a
    printed count. The resulting numbers honestly include the cost of the
    reasoning tokens, which is the point: that cost is what the app would pay.
+
+## The golden set
+
+The bakeoff's accuracy numbers used to come from seventeen fictional emails.
+The golden set replaces them for anything that claims to be a quality
+measurement.
+
+**What it is.** A hundred real messages from the live mailbox, each carrying
+gold labels for every stage the pipeline runs: the gate verdict and its reason,
+triage (category, urgency, needs-action, reply-expected, deadline, plus rubrics
+for the label, the summary and the action items), extraction (intent,
+importance, project, topics, people, organisations, plus an evidence rubric),
+the needs-you verdict with a confidence floor, the storyline the message
+belongs under, and the thread's state. Twenty-five of them also carry a REPLY
+rubric — the points a draft must make, the points it must not, and the facts
+only the owner knows, which a good draft asks about rather than invents.
+
+The hundred are drawn across nine strata, each named for what it tests rather
+than for what it contains: messages at the core of a storyline, messages that
+tempt a wrong one, the spread of triage labels, gates that should keep,
+gates that should drop, gates that were missed, gate edge cases, hard
+needs-you calls, and thread recaps. Every item is marked `easy`, `medium` or
+`hard`, and records which rung of the context ladder its label needs.
+
+**How the labels were made**, in one paragraph, because it is what the numbers
+rest on: two independent model annotators worked from a written spec, one at
+temperature 0 and shown the app's stored output, one at temperature 1 and not
+shown it, so the second opinion cannot be anchored by the first or by the
+system under test. Deterministic facts (thread state, and what the app
+currently does) are computed rather than judged. Where the two annotators split
+on a genuinely ambiguous enum, BOTH answers become acceptable rather than one
+being chosen — a model is not marked wrong for a call two careful annotators
+split on — while forbidden lists are unioned, so a trap either annotator spotted
+stays a trap. The remaining conflicts were adjudicated by hand, a third harness
+ran as a control, and an adversarial review then tried to refute the gold
+itself, with every finding re-checked by a skeptic whose default stance was
+that the gold was right. Every item records whether the annotators agreed
+(`2/2`) or needed adjudication (`1/2`), and every table below is printed twice:
+once over all items, once over the `2/2` subset. A candidate that only looks
+good on the clean subset is a different animal from one that is uniformly
+mediocre, and a single number hides it.
+
+**Where it lives.** `golden/`, at the repo root, git-ignored in full — the set
+is real correspondence and this repository is public. It exists on the machine
+that built it and nowhere else, which means the targets below depend on files
+a clean checkout cannot supply. That is deliberate and is not going to change.
+`GOLDEN` points at the set (`golden/golden-set.json` by default) and
+`GOLDEN_REGISTRY` at the storyline registry; override either in `local.mk`.
+Committed tests use a small FICTIONAL fixture of the same shape
+(`app/test/fixtures/golden_fixture.json`) so the loader and the run-file writer
+are covered offline by anyone.
+
+**The scorer of record is `golden/tools/score_run.py`, not Dart.** One set of
+scoring semantics, already reviewed and already producing the baseline below;
+a Dart re-implementation would be a second opinion about what "correct" means,
+which is the one thing a bakeoff must not grow. It reads either the labels the
+app already stored (`--baseline`, no model run at all) or a RUN FILE a replay
+wrote. Two commands:
+
+```sh
+make golden-baseline                      # what the shipping app scores
+make golden-score R=tmp/bench/golden-run-….json
+make golden-score R=… BREAKDOWN=stratum   # or difficulty, or derivable_from
+make golden-score R=… JSON=tmp/row.json   # the same tallies, for a ledger row
+```
+
+`BREAKDOWN` and `JSON` apply to the keep-only pass only. That is the pass a
+ledger row quotes; breaking down the all-items pass as well would double the
+output for a copy nobody reads.
+
+Both print twice, because there are two honest populations:
+
+- **all items** — every message, including the ones the gate dropped. Triage
+  never ran on those, so their absence counts as "not attempted" rather than
+  wrong, and the gate's own quality is priced into the read.
+- **gold-keep only** (`--keep-only`, which the make targets run first) — the
+  76 messages gold says should have been kept. This is the model-quality
+  number, and it is what a ledger row quotes first.
+
+A run file is a JSON array of per-item objects, and **an omitted section means
+"not attempted", not "wrong"**, so a partial run scores honestly. The one trap
+is `triage.deadline`: the empty string is the claim "this message named no
+deadline" and scores as an answer, while a null is a stage that never ran.
+
+**Lexical against rubric.** The scorer checks what can be checked without a
+reader: enums, booleans, list membership, surname matching, a normalised
+project name. The fields a user actually reads — the label, the summary, the
+action items, the two evidence sentences, and a drafted reply — are rubric
+judgements ("does this sentence contain this claim") and a lexical proxy for
+them produces confident nonsense. They are counted here and judged in a later
+phase, by a judge that grades the baseline and every candidate alike.
+
+**The context ladder.** The set exists partly because the pipeline is
+inconsistent about thread context: triage and needs-you see the last three
+messages at 300 characters each, extraction sees the judged message completely
+alone. So every item carries three rungs, and `GOLDEN_CTX` picks which one the
+replay shows triage and needs-you:
+
+| rung | what the thread carries |
+|---|---|
+| `none` | the message alone |
+| `tail3` | the last three messages, 300 characters each — what ships today |
+| `compressed` | the tail, led by an extractive digest of everything earlier |
+
+The digest is extractive, never generated: a model inside the fixture would
+make it irreproducible, and a generated summary leaks the answer. It rides in
+as one synthetic leading thread message rather than as a new prompt field,
+because a measurement round does not edit the prompts it measures. Two
+consequences follow from riding in that fence. Triage and needs-you keep only
+the newest three thread messages, so at this rung the digest takes one of the
+three slots and the two newest tail messages take the others — a fourth would
+push the digest, the oldest, straight out. **And both clip a thread message at
+300 characters, so what they actually see of a digest is its head**: the
+median digest in the set is about 670 characters, so the clip bites on roughly
+two thirds of them. The `compressed` rung is therefore a lower bound on what
+real compression would buy, and any row run at it says so.
+Gold records, per stage, which rung a label needs, so
+`BREAKDOWN=derivable_from` answers the question the ladder was built for: what
+does context buy, and where. The live replay itself lands in a later phase;
+until then these are the knobs it will read.
+
+`GOLDEN_K` sets the replay's concurrency (a llama.cpp server needs
+`FAST_SLOTS` at least that high), and `GOLDEN_OWNER_NAME` /
+`GOLDEN_OWNER_ADDRESS` supply the inbox owner, which the set itself does not
+carry.
+
+### Golden ledger
+
+Keep-only numbers, per the population rule above. Rubric columns come from the
+judge, not from `score_run.py`.
+
+| date | slot | label | ctx | run file | keep-only: category / urgency / needs_action / reply_expected / needs_you / intent / importance / project / topics / people | rubric | p50 ms | gen t/s | msgs/min | $/1K msgs | note |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-09-12 | — | the shipping app, as stored | tail3 | none — `--baseline` | 94% / 88% / 68% / 77% / 94% / 84% / 45% / 67% / 31% / 86% | Opus 4.5 judge: label 84% · action items 61% · summary 53% · needs-you evidence 36% · extract evidence 25% | — | — | — | — | the shipping app's stored output; gate 76/100, storyline 42/99 with no correct positive |
 
 ## oMLX
 
@@ -205,7 +341,9 @@ server started differently from the default.
 Appended after each run, second-run numbers only (see the protocol). Prose
 rows quote the draft_reply p50 in the "p50 triage ms" column's place — marked
 (draft) — since prose runs never triage. gen t/s is wall-clock throughout;
-llama.cpp rows also carry a server-clock rate in their JSON.
+llama.cpp rows also carry a server-clock rate in their JSON. The accuracy
+column here is measured on the fictional corpus; accuracy against real traffic
+lives in the golden ledger above.
 
 | date | label | result json | gen t/s | p50 ms | accuracy | drain msgs/min K=1/3/6 | verdict |
 | --- | --- | --- | --- | --- | --- | --- | --- |

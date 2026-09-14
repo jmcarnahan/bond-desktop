@@ -18,6 +18,9 @@ local.mk
 !.claude/hooks/
 __pycache__/
 CLAUDE.local.md
+golden/*
+# real inbox content and vendor briefs kept beside the repo — never committed
+docs/external/
 
 # distribution — the built pipeline's outputs and its machine-local secrets.
 # dist/local/ holds the notarization key and the Sparkle signing key; the

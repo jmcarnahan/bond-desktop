@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "generated": "2026-09-14",
+  "basis": "FICTIONAL — invented to mirror the real registry's shape for tests. No real effort, person or channel appears here.",
+  "definition": "A storyline is a body of WORK: a named effort with a goal, that spans conversations and days. It is not a person, not a team, not a channel, not a meeting series, and not a shape of request.",
+  "anti_storylines": [
+    {
+      "slug": "ANTI-person-hub",
+      "why_tempting": "One person appears in every thread, so their name reads like a project.",
+      "why_wrong": "A person is not an effort. Filing by who wrote it buries the work under a contact card.",
+      "detect_with": "A candidate title that is a person's name, or a name plus a generic noun.",
+      "signature": {
+        "title_patterns": [
+          "^[A-Z][a-z]+ [A-Z][a-z]+ (Coordination|Threads|Updates)$",
+          "Coordination$"
+        ],
+        "note": "Matched against the app's own cluster titles, which is all the scorer has to go on."
+      }
+    }
+  ],
+  "storylines": [
+    {
+      "slug": "river-office-lease",
+      "title": "River office lease",
+      "charter": "Signing and fitting out the second-floor suite on River Street: the lease itself, the addendum, the fit-out allowance, the sprinkler work, and the keys. Ends when the suite is occupied.",
+      "includes": [
+        "the addendum and its allowance clause",
+        "the walkthrough that settles the fit-out"
+      ],
+      "excludes": [
+        "the surveyor's report on the north elevation, which belongs to the building, not the lease"
+      ],
+      "members": [
+        {
+          "source": "email",
+          "conversation_key": "email:fx-conv-lease",
+          "strength": "must",
+          "note": "The addendum thread itself."
+        },
+        {
+          "source": "email",
+          "conversation_key": "email:fx-conv-lease-2",
+          "strength": "should",
+          "note": "A one-question spur off the same negotiation."
+        }
+      ],
+      "forbidden_neighbors": ["studio-website-redesign", "ANTI-person-hub"]
+    },
+    {
+      "slug": "studio-website-redesign",
+      "title": "Studio website redesign",
+      "charter": "Rebuilding the studio's public site: the content audit, the new templates, the photography, and the launch. Ends at launch.",
+      "includes": ["template reviews", "the photography shoot list"],
+      "excludes": ["the office lease, which shares people and nothing else"],
+      "members": [
+        {
+          "source": "teams",
+          "conversation_key": "teams:fx-chat-site-build",
+          "strength": "must",
+          "note": "Where the templates are argued about."
+        }
+      ],
+      "forbidden_neighbors": ["river-office-lease"]
+    },
+    {
+      "slug": "spring-portfolio-review",
+      "title": "Spring portfolio review",
+      "charter": "The once-a-year read of every open commission: what shipped, what stalled, and what is dropped. Ends when the review meeting has minutes.",
+      "includes": ["the per-commission write-ups", "the review meeting itself"],
+      "excludes": ["any single commission's day-to-day work"],
+      "members": [
+        {
+          "source": "email",
+          "conversation_key": "email:fx-conv-portfolio",
+          "strength": "may",
+          "note": "A scheduling spur; defensible either way."
+        }
+      ],
+      "forbidden_neighbors": ["ANTI-person-hub"]
+    }
+  ],
+  "genuine_one_offs": [
+    {
+      "source": "email",
+      "conversation_key": "email:fx-conv-survey",
+      "note": "One survey delivered once. No effort spans it."
+    }
+  ],
+  "known_bots": [
+    {
+      "who": "Riverside Weekly",
+      "from_address": "digest@riverside-weekly.example.com",
+      "from_name": "Riverside Weekly",
+      "tell": "An unsubscribe footer and a fixed send hour.",
+      "prevalence": "weekly",
+      "expected": "dropped at the gate"
+    }
+  ],
+  "quasi_automated_human_content": [
+    {
+      "who": "Marcus Feld",
+      "what": "A per-bay survey narrative that reads like a generated report.",
+      "expected": "kept — a person wrote the covering note"
+    }
+  ]
+}

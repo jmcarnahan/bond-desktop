@@ -100,6 +100,7 @@ RESET  := \033[0m
         app-install app-run app-test app-gen app-migrations app-analyze \
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ab ab-membership drain bench-compare \
+        golden-check golden-baseline golden-score \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
         dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
 
@@ -134,6 +135,8 @@ help:
 	@printf "  make ab-membership → membership eval, 27B vs fast model (needs both up)\n"
 	@printf "  make drain        → drain concurrency race, BENCH_K rounds (needs make fast up)\n"
 	@printf "  make bench-compare A=<a.json> B=<b.json> → diff two bench results\n"
+	@printf "  make golden-baseline → what the shipping app scores on the golden set (needs golden/)\n"
+	@printf "  make golden-score R=<run.json> → score a golden run file (BREAKDOWN= per-bucket tables, JSON= the tallies)\n"
 	@printf "  make app-build    → release build of the macOS app\n"
 	@printf "  make vec-vendor   → re-download the sqlite-vec C sources (SHA-pinned)\n\n"
 	@printf "Point a bench at a candidate runtime without editing anything:\n"
@@ -576,6 +579,20 @@ BENCH_VERIFY ?= 1
 # thing being measured.
 BENCH_K      ?= 1,3
 
+# ── the golden set ──────────────────────────────────────────────────
+# 100 real messages with gold labels for every stage, kept OUTSIDE version
+# control in golden/ (this repo is public). GOLDEN points the live harness at
+# the file; the scorer of record is golden/tools/score_run.py, not Dart.
+GOLDEN            ?= $(CURDIR)/golden/golden-set.json
+GOLDEN_REGISTRY   ?= $(CURDIR)/golden/storylines.json
+# The inbox owner as the app knows them; the set carries no owner line.
+GOLDEN_OWNER_NAME    ?=
+GOLDEN_OWNER_ADDRESS ?=
+# Concurrency of a golden replay; a llama.cpp server needs FAST_SLOTS >= K.
+GOLDEN_K   ?= 1
+# Which context rung triage and needs-you see: none | tail3 | compressed.
+GOLDEN_CTX ?= tail3
+
 # Single-quoted values, every one: a label carries spaces and parentheses, and
 # an unquoted --dart-define would hand the shell a second word to run.
 BENCH_DEFINES := \
@@ -588,7 +605,13 @@ BENCH_DEFINES := \
   --dart-define=BENCH_OUT='$(BENCH_OUT)' \
   --dart-define=BENCH_WARMUP=$(BENCH_WARMUP) \
   --dart-define=BENCH_THINK=$(if $(filter-out 0,$(BENCH_THINK)),true,false) \
-  --dart-define=BENCH_K='$(BENCH_K)'
+  --dart-define=BENCH_K='$(BENCH_K)' \
+  --dart-define=GOLDEN_SET='$(GOLDEN)' \
+  --dart-define=GOLDEN_REGISTRY='$(GOLDEN_REGISTRY)' \
+  --dart-define=GOLDEN_OWNER_NAME='$(GOLDEN_OWNER_NAME)' \
+  --dart-define=GOLDEN_OWNER_ADDRESS='$(GOLDEN_OWNER_ADDRESS)' \
+  --dart-define=GOLDEN_K='$(GOLDEN_K)' \
+  --dart-define=GOLDEN_CTX='$(GOLDEN_CTX)'
 
 # ── the bakeoff: oMLX, the candidate runtime ───────────────────────────
 # oMLX is an MLX-based OpenAI-compatible server, and unlike llama-server it is
@@ -845,6 +868,42 @@ bench-compare:
 	   printf "$(RED)✗$(RESET) usage: make bench-compare A=<a.json> B=<b.json>\n"; \
 	   printf "    results land in $(BENCH_OUT)\n"; exit 1; }
 	@cd $(APP_DIR) && dart run tool/bench_compare.dart '$(A)' '$(B)'
+
+# ── the golden set ─────────────────────────────────────────────────────
+# Accuracy against 100 real messages, scored by golden/tools/score_run.py.
+# Everything under golden/ is git-ignored and machine-local, so these targets
+# depend on files this checkout cannot supply — exactly like the set itself.
+# See docs/model-bakeoff.md, "The golden set".
+#
+# BREAKDOWN= and JSON= apply to the KEEP-ONLY pass only, by design. That pass
+# is the model-quality number a ledger row quotes; the all-items pass below it
+# is the second opinion, and printing every bucket of it too would double the
+# output for a copy nobody reads.
+
+# The golden set's own check, on BOTH files the round needs: the set, and the
+# storyline registry. score_run.py opens the registry at import time, so a
+# missing one is a traceback rather than a sentence; the Dart harness reads
+# $(GOLDEN_REGISTRY) directly.
+golden-check:
+	@test -f "$(GOLDEN)" || { printf "$(RED)✗$(RESET) no golden set at $(GOLDEN) — set GOLDEN in local.mk\n"; exit 1; }
+	@test -f "$(GOLDEN_REGISTRY)" || { printf "$(RED)✗$(RESET) no storyline registry at $(GOLDEN_REGISTRY) — set GOLDEN_REGISTRY in local.mk\n"; exit 1; }
+
+# Both recipes cd to the DIRECTORY OF $(GOLDEN), never to a hard-coded golden/:
+# score_run.py opens `golden-set.json` and `storylines.json` relative to its own
+# cwd, so a hard-coded cd would let an overridden GOLDEN pass the guard above
+# and then score the default set anyway — the worst kind of wrong number, the
+# kind that looks right.
+
+# What the shipping app scored on 2026-09-12, from the labels the set stores.
+golden-baseline: golden-check
+	@cd $(dir $(GOLDEN)) && python3 tools/score_run.py --baseline --keep-only $(if $(BREAKDOWN),--breakdown $(BREAKDOWN),) $(if $(JSON),--json '$(abspath $(JSON))',)
+	@cd $(dir $(GOLDEN)) && python3 tools/score_run.py --baseline
+
+# Score a run file the live harness wrote: make golden-score R=tmp/bench/golden-run-….json
+golden-score: golden-check
+	@test -n "$(R)" || { printf "$(RED)✗$(RESET) usage: make golden-score R=<run.json> [BREAKDOWN=stratum|difficulty|derivable_from] [JSON=<out.json>]\n"; exit 1; }
+	@cd $(dir $(GOLDEN)) && python3 tools/score_run.py --run '$(abspath $(R))' --keep-only $(if $(BREAKDOWN),--breakdown $(BREAKDOWN),) $(if $(JSON),--json '$(abspath $(JSON))',)
+	@cd $(dir $(GOLDEN)) && python3 tools/score_run.py --run '$(abspath $(R))'
 
 app-analyze:
 	@cd $(APP_DIR) && $(FLUTTER) analyze

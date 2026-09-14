@@ -1,0 +1,1488 @@
+{
+  "schema_version": 1,
+  "generated": "2026-09-14",
+  "source": "FICTIONAL — Alex Rivera's invented inbox, safe for a public repo",
+  "spec": "LABEL-SPEC.md",
+  "frame": "FRAME.md",
+  "storyline_registry": "golden_registry_fixture.json",
+  "annotation": "Hand-written fixture; no annotator ran on it.",
+  "items": [
+    {
+      "id": "email:fx-keep-tail",
+      "stratum": "storyline-core",
+      "note": "A lease negotiation that only reads right with the thread tail.",
+      "provenance": {
+        "source": "email",
+        "source_message_id": "fx-msg-0001",
+        "conversation_key": "email:fx-conv-lease",
+        "direction": "inbound",
+        "received_at": "2026-09-08T14:12:33Z",
+        "is_read": 0,
+        "has_attachments": 0,
+        "attachment_names": [],
+        "from_name": "Dana Whitfield",
+        "from_address": "dana.whitfield@harborlane.example.com",
+        "subject": "Re: Addendum for the River Street suite",
+        "to_count": 3,
+        "addressed_me": 0
+      },
+      "stage_input": {
+        "now": "2026-09-09 (Wednesday)",
+        "directness_line": "Addressed to: you and 2 others.",
+        "message_block": "From: Dana Whitfield <dana.whitfield@harborlane.example.com>\nSubject: Re: Addendum for the River Street suite\nReceived: 2026-09-08T14:12:33Z\n\nBody:\nHi Alex,\n\nThe landlord came back on the addendum. They will cover the sprinkler work in the second-floor suite but they want the fit-out allowance capped at 18,000 rather than the 25,000 we asked for.\n\nCan you tell me by Friday whether the capped allowance still works for your build-out, or whether we push back one more time? I can send the signature packet the same afternoon if you are happy.\n\nDana",
+        "ctx_none": {
+          "used_by_today": [
+            "extract"
+          ],
+          "content": "message_block only"
+        },
+        "ctx_tail3": {
+          "used_by_today": [
+            "triage",
+            "needs_you"
+          ],
+          "thread_tail": [
+            {
+              "who": "Dana Whitfield",
+              "received_at": "2026-09-04T09:20:00Z",
+              "text": "Sending the draft addendum over for your read."
+            },
+            {
+              "who": "You",
+              "received_at": "2026-09-05T16:45:00Z",
+              "text": "Read it. The fit-out allowance is the only clause I care about."
+            },
+            {
+              "who": "Dana Whitfield",
+              "received_at": "2026-09-08T08:02:00Z",
+              "text": "Understood, I put that to the landlord this morning."
+            }
+          ]
+        },
+        "ctx_compressed": {
+          "used_by_today": [],
+          "proposal": true,
+          "thread_digest": {
+            "earlier_message_count": 9,
+            "quoted": 6,
+            "omitted": 3,
+            "span": [
+              "2026-08-19",
+              "2026-09-08"
+            ],
+            "roster": [
+              "Dana Whitfield (5)",
+              "Alex Rivera (4)"
+            ],
+            "digest": "Earlier: the suite was toured on 19 August; a draft lease followed on 24 August; the fit-out allowance has been the one open clause since 28 August. [+3 omitted]"
+          }
+        },
+        "ctx_title": {
+          "used_by_today": [],
+          "proposal": true,
+          "channel_title": null,
+          "withheld_from_model": false
+        }
+      },
+      "conversation": {
+        "subject": "Addendum for the River Street suite",
+        "participants": [
+          "Dana Whitfield",
+          "Alex Rivera",
+          "Priya Raman"
+        ],
+        "message_count": 12,
+        "inbound_count": 7,
+        "state": "needs_reply",
+        "cta_text": "Confirm the capped allowance by Friday",
+        "cta_urgency": "normal"
+      },
+      "stored": {
+        "triage_status": "triaged",
+        "gate_reason": null,
+        "gate_override": null,
+        "category": "work",
+        "urgency": "normal",
+        "label": "lease addendum",
+        "summary": "The landlord will fund the sprinkler work but caps the fit-out allowance at 18,000.",
+        "needs_action": 1,
+        "action_items_json": "[\"Answer on the capped allowance by Friday\"]",
+        "reply_expected": 1,
+        "deadline": "Friday",
+        "needs_you_verdict": 1,
+        "needs_you_reason": "Dana asks Alex directly to decide on the cap.",
+        "extraction": {
+          "evidence": "They want the fit-out allowance capped at 18,000.",
+          "topics": [
+            "lease addendum",
+            "fit-out allowance"
+          ],
+          "people": [
+            "Dana Whitfield"
+          ],
+          "organizations": [
+            "Harbor Lane Properties"
+          ],
+          "project": "River Street office",
+          "intent": "request",
+          "importance": "high"
+        },
+        "progress": {
+          "triage_state": "done",
+          "extract_state": "done",
+          "storyline_state": "done",
+          "settle_state": "done",
+          "triage_at": "2026-09-09T08:01:00Z",
+          "extract_at": "2026-09-09T08:01:40Z",
+          "storyline_at": "2026-09-09T08:02:10Z",
+          "outcome": "kept",
+          "dropped": 0,
+          "drop_reason": null,
+          "storyline_id": "sl-1",
+          "needs_you": 1
+        },
+        "storylines": [
+          {
+            "id": "sl-1",
+            "title": "River office lease",
+            "charter": "Signing and fitting out the second-floor office on River Street.",
+            "summary": "Addendum under review; keys expected once the addendum is signed.",
+            "status": "active",
+            "added_by": "storyline_sweep",
+            "evidence": "Both messages argue about the same addendum clause."
+          }
+        ]
+      },
+      "gold": {
+        "gate": {
+          "verdict": "keep",
+          "reason": "a human wrote it",
+          "tier": "none",
+          "current": "keep",
+          "why": "A named human asking a direct question.",
+          "reason_acceptable": [],
+          "current_evidence": {
+            "conversation_messages": 12,
+            "newest_kept_inbound": "fx-msg-0001",
+            "newest_outbound": null,
+            "stored_triage_status": "triaged",
+            "stored_gate_reason": null
+          }
+        },
+        "triage": {
+          "category": "work",
+          "urgency": "normal",
+          "urgency_acceptable": [
+            "high"
+          ],
+          "label_rubric": [
+            "names the addendum or the allowance"
+          ],
+          "summary_facts_required": [
+            "the allowance is capped at 18,000",
+            "an answer is wanted by Friday"
+          ],
+          "summary_facts_forbidden": [
+            "the lease is signed"
+          ],
+          "needs_action": true,
+          "reply_expected": true,
+          "action_items_rubric": [
+            "answer on the capped allowance"
+          ],
+          "deadline": "Friday",
+          "derivable_from": "ctx_tail3",
+          "why": "The ask is explicit and dated."
+        },
+        "extract": {
+          "evidence_rubric": [
+            "quotes the capped allowance"
+          ],
+          "topics_required_any": [
+            [
+              "allowance",
+              "addendum"
+            ]
+          ],
+          "topics_forbidden": [
+            "invoice"
+          ],
+          "people_required": [
+            "Dana Whitfield"
+          ],
+          "people_forbidden": [
+            "Marcus Feld"
+          ],
+          "organizations_required": [
+            "Harbor Lane"
+          ],
+          "project": "River Street office",
+          "project_acceptable": [
+            "River office lease"
+          ],
+          "intent": "request",
+          "importance": "high",
+          "derivable_from": "ctx_none",
+          "why": "The message states the ask on its own.",
+          "intent_acceptable": [
+            "question"
+          ],
+          "importance_acceptable": []
+        },
+        "needs_you": {
+          "verdict": true,
+          "confidence_floor": "high",
+          "evidence_rubric": [
+            "names the decision Alex has to make"
+          ],
+          "derivable_from": "ctx_none",
+          "why": "A direct question to the owner."
+        },
+        "storyline": {
+          "id": "river-office-lease",
+          "strength": "must",
+          "forbidden": [
+            "ANTI-person-hub",
+            "studio-website-redesign"
+          ],
+          "derivable_from": "ctx_tail3",
+          "why": "The whole thread is the lease."
+        },
+        "thread_state": "needs_reply",
+        "reply": {
+          "audience": "the leasing agent",
+          "points_required": [
+            "a yes or no on the capped allowance"
+          ],
+          "points_forbidden": [
+            "a new rent figure"
+          ],
+          "owner_only": [
+            "whether 18,000 covers the build-out"
+          ],
+          "form": "a short direct answer",
+          "why": "Only the owner knows the build-out cost."
+        },
+        "review_fix": [],
+        "annotator_agreement": "2/2",
+        "disagreed_fields": [],
+        "second_opinion": {},
+        "adjudication": null,
+        "cross_harness": {
+          "harness": "fixture",
+          "agreed": 8,
+          "of": 8,
+          "differed_on": []
+        }
+      },
+      "difficulty": "easy",
+      "annotators": {
+        "A": "fixture",
+        "B": "fixture"
+      }
+    },
+    {
+      "id": "teams:fx-floor",
+      "stratum": "needsyou-hard",
+      "note": "A chat that names the owner; the deterministic floor settles it.",
+      "provenance": {
+        "source": "teams",
+        "source_message_id": "fx-msg-0002",
+        "conversation_key": "teams:fx-chat-site",
+        "direction": "inbound",
+        "received_at": "2026-09-09T07:41:10Z",
+        "is_read": 0,
+        "has_attachments": 0,
+        "attachment_names": [],
+        "from_name": "Noor Haddad",
+        "from_address": "teams:0c9d41e2-7b55-4a10-9d3f-6b2f8c1e4a77",
+        "subject": null,
+        "to_count": 1,
+        "addressed_me": 1
+      },
+      "stage_input": {
+        "now": "2026-09-09 (Wednesday)",
+        "directness_line": "Addressed to: you directly (a 1:1 chat, or you are @mentioned).",
+        "message_block": "From: Noor Haddad\nReceived: 2026-09-09T07:41:10Z\n\nBody:\nAlex — quick one before the site call: are we still holding the Thursday slot for the walkthrough, or has that moved?",
+        "ctx_none": {
+          "used_by_today": [
+            "extract"
+          ],
+          "content": "message_block only"
+        },
+        "ctx_tail3": {
+          "used_by_today": [
+            "triage",
+            "needs_you"
+          ],
+          "thread_tail": []
+        },
+        "ctx_compressed": {
+          "used_by_today": [],
+          "proposal": true,
+          "thread_digest": null
+        },
+        "ctx_title": {
+          "used_by_today": [],
+          "proposal": true,
+          "channel_title": "Riverfront build — weekly",
+          "withheld_from_model": true
+        }
+      },
+      "conversation": {
+        "subject": null,
+        "participants": [
+          "Noor Haddad",
+          "Alex Rivera"
+        ],
+        "message_count": 4,
+        "inbound_count": 3,
+        "state": "needs_reply",
+        "cta_text": "Confirm the Thursday walkthrough",
+        "cta_urgency": "normal"
+      },
+      "stored": {
+        "triage_status": "triaged",
+        "gate_reason": null,
+        "gate_override": null,
+        "category": "work",
+        "urgency": "normal",
+        "label": "walkthrough slot",
+        "summary": "Noor asks whether the Thursday walkthrough still stands.",
+        "needs_action": 1,
+        "action_items_json": "[\"Confirm or move the Thursday walkthrough\"]",
+        "reply_expected": 1,
+        "deadline": "Thursday",
+        "needs_you_verdict": 1,
+        "needs_you_reason": "teams_direct",
+        "extraction": {
+          "evidence": "Are we still holding the Thursday slot?",
+          "topics": [
+            "walkthrough"
+          ],
+          "people": [
+            "Noor Haddad"
+          ],
+          "organizations": [],
+          "project": "Riverfront build",
+          "intent": "question",
+          "importance": "normal"
+        },
+        "progress": {
+          "triage_state": "done",
+          "extract_state": "done",
+          "storyline_state": "pending",
+          "settle_state": "done",
+          "triage_at": "2026-09-09T08:01:00Z",
+          "extract_at": "2026-09-09T08:01:40Z",
+          "storyline_at": null,
+          "outcome": "kept",
+          "dropped": 0,
+          "drop_reason": null,
+          "storyline_id": null,
+          "needs_you": 1
+        },
+        "storylines": []
+      },
+      "gold": {
+        "gate": {
+          "verdict": "keep",
+          "reason": "a human wrote it",
+          "tier": "none",
+          "current": "keep",
+          "why": "A chat from a named colleague.",
+          "reason_acceptable": [],
+          "current_evidence": {
+            "conversation_messages": 4,
+            "newest_kept_inbound": "fx-msg-0002",
+            "newest_outbound": null,
+            "stored_triage_status": "triaged",
+            "stored_gate_reason": null
+          }
+        },
+        "triage": {
+          "category": "work",
+          "urgency": "normal",
+          "urgency_acceptable": [],
+          "label_rubric": [
+            "names the walkthrough"
+          ],
+          "summary_facts_required": [
+            "the Thursday slot is in question"
+          ],
+          "summary_facts_forbidden": [],
+          "needs_action": true,
+          "reply_expected": true,
+          "action_items_rubric": [
+            "confirm or move the walkthrough"
+          ],
+          "deadline": "Thursday",
+          "derivable_from": "ctx_none",
+          "why": "One question, asked plainly."
+        },
+        "extract": {
+          "evidence_rubric": [
+            "quotes the Thursday question"
+          ],
+          "topics_required_any": [
+            [
+              "walkthrough"
+            ]
+          ],
+          "topics_forbidden": [],
+          "people_required": [
+            "Noor Haddad"
+          ],
+          "people_forbidden": [],
+          "organizations_required": [],
+          "project": "Riverfront build",
+          "project_acceptable": [],
+          "intent": "question",
+          "importance": "normal",
+          "derivable_from": "ctx_none",
+          "why": "Self-contained.",
+          "intent_acceptable": [
+            "scheduling"
+          ],
+          "importance_acceptable": []
+        },
+        "needs_you": {
+          "verdict": true,
+          "confidence_floor": "high",
+          "evidence_rubric": [
+            "says the owner is asked directly"
+          ],
+          "derivable_from": "ctx_none",
+          "why": "An inbound chat that names the owner."
+        },
+        "storyline": {
+          "id": "none",
+          "strength": "must",
+          "forbidden": [
+            "ANTI-person-hub"
+          ],
+          "derivable_from": "ctx_none",
+          "why": "One scheduling question is not a body of work."
+        },
+        "thread_state": "needs_reply",
+        "review_fix": [],
+        "annotator_agreement": "2/2",
+        "disagreed_fields": [],
+        "second_opinion": {},
+        "adjudication": null,
+        "cross_harness": {
+          "harness": "fixture",
+          "agreed": 8,
+          "of": 8,
+          "differed_on": []
+        }
+      },
+      "difficulty": "medium",
+      "annotators": {
+        "A": "fixture",
+        "B": "fixture"
+      }
+    },
+    {
+      "id": "email:fx-drop-notification",
+      "stratum": "gate-drop-clear",
+      "note": "A mailing-list digest with an unsubscribe footer.",
+      "provenance": {
+        "source": "email",
+        "source_message_id": "fx-msg-0003",
+        "conversation_key": "email:fx-conv-weekly",
+        "direction": "inbound",
+        "received_at": "2026-09-09T05:00:00Z",
+        "is_read": 1,
+        "has_attachments": 0,
+        "attachment_names": [],
+        "from_name": "Riverside Weekly",
+        "from_address": "digest@riverside-weekly.example.com",
+        "subject": "Riverside Weekly — 9 September",
+        "to_count": 1,
+        "addressed_me": 0
+      },
+      "stage_input": {
+        "now": "2026-09-09 (Wednesday)",
+        "directness_line": "Addressed to: you indirectly (CC, a list, or unknown).",
+        "message_block": "From: Riverside Weekly <digest@riverside-weekly.example.com>\nSubject: Riverside Weekly — 9 September\nReceived: 2026-09-09T05:00:00Z\n\nBody:\nRIVERSIDE WEEKLY\n\nThree new listings on the north bank, a note on the harbour path works, and the autumn market dates.\n\nYou are receiving this because you signed up at a listings desk. Unsubscribe at any time.",
+        "ctx_none": {
+          "used_by_today": [
+            "extract"
+          ],
+          "content": "message_block only"
+        },
+        "ctx_tail3": {
+          "used_by_today": [
+            "triage",
+            "needs_you"
+          ],
+          "thread_tail": []
+        },
+        "ctx_compressed": {
+          "used_by_today": [],
+          "proposal": true,
+          "thread_digest": null
+        },
+        "ctx_title": {
+          "used_by_today": [],
+          "proposal": true,
+          "channel_title": null,
+          "withheld_from_model": false
+        }
+      },
+      "conversation": {
+        "subject": "Riverside Weekly — 9 September",
+        "participants": [
+          "Riverside Weekly",
+          "Alex Rivera"
+        ],
+        "message_count": 1,
+        "inbound_count": 1,
+        "state": "waiting",
+        "cta_text": null,
+        "cta_urgency": "low"
+      },
+      "stored": {
+        "triage_status": "skipped",
+        "gate_reason": "newsletter",
+        "gate_override": null,
+        "category": null,
+        "urgency": null,
+        "label": null,
+        "summary": null,
+        "needs_action": null,
+        "action_items_json": null,
+        "reply_expected": null,
+        "deadline": null,
+        "needs_you_verdict": null,
+        "needs_you_reason": null,
+        "extraction": null,
+        "progress": {
+          "triage_state": "skipped",
+          "extract_state": "skipped",
+          "storyline_state": "pending",
+          "settle_state": "done",
+          "triage_at": null,
+          "extract_at": null,
+          "storyline_at": null,
+          "outcome": "dropped",
+          "dropped": 1,
+          "drop_reason": "newsletter",
+          "storyline_id": null,
+          "needs_you": 0
+        },
+        "storylines": []
+      },
+      "gold": {
+        "gate": {
+          "verdict": "drop",
+          "reason": "newsletter",
+          "tier": "1",
+          "current": "drop",
+          "why": "A list blast with an unsubscribe.",
+          "reason_acceptable": [
+            "bulk_sender"
+          ],
+          "current_evidence": {
+            "conversation_messages": 1,
+            "newest_kept_inbound": null,
+            "newest_outbound": null,
+            "stored_triage_status": "skipped",
+            "stored_gate_reason": "newsletter"
+          }
+        },
+        "triage": {
+          "category": "notification",
+          "urgency": "low",
+          "urgency_acceptable": [],
+          "label_rubric": [
+            "names the digest"
+          ],
+          "summary_facts_required": [],
+          "summary_facts_forbidden": [
+            "a listing was offered to Alex"
+          ],
+          "needs_action": false,
+          "reply_expected": false,
+          "action_items_rubric": [],
+          "deadline": "",
+          "derivable_from": "ctx_none",
+          "why": "Decoration, not correspondence."
+        },
+        "extract": {
+          "evidence_rubric": [],
+          "topics_required_any": [
+            [
+              "listings"
+            ]
+          ],
+          "topics_forbidden": [
+            "lease"
+          ],
+          "people_required": [],
+          "people_forbidden": [
+            "Dana Whitfield"
+          ],
+          "organizations_required": [],
+          "project": "none",
+          "project_acceptable": [],
+          "intent": "fyi",
+          "importance": "low",
+          "derivable_from": "ctx_none",
+          "why": "Nothing is asked.",
+          "intent_acceptable": [],
+          "importance_acceptable": []
+        },
+        "needs_you": {
+          "verdict": false,
+          "confidence_floor": "high",
+          "evidence_rubric": [],
+          "derivable_from": "ctx_none",
+          "why": "Nobody is waiting."
+        },
+        "storyline": {
+          "id": "none",
+          "strength": "must",
+          "forbidden": [],
+          "derivable_from": "ctx_none",
+          "why": "A blast."
+        },
+        "thread_state": "waiting",
+        "review_fix": [],
+        "annotator_agreement": "2/2",
+        "disagreed_fields": [],
+        "second_opinion": {},
+        "adjudication": null,
+        "cross_harness": {
+          "harness": "fixture",
+          "agreed": 8,
+          "of": 8,
+          "differed_on": []
+        }
+      },
+      "difficulty": "easy",
+      "annotators": {
+        "A": "fixture",
+        "B": "fixture"
+      }
+    },
+    {
+      "id": "email:fx-outbound",
+      "stratum": "thread-recap",
+      "note": "The owner's own recap; nothing inbound about it.",
+      "provenance": {
+        "source": "email",
+        "source_message_id": "fx-msg-0004",
+        "conversation_key": "email:fx-conv-recap",
+        "direction": "outbound",
+        "received_at": "2026-09-09T09:15:00Z",
+        "is_read": 1,
+        "has_attachments": 0,
+        "attachment_names": [],
+        "from_name": "Alex Rivera",
+        "from_address": "alex.rivera@rivermail.example.com",
+        "subject": "Where the lease stands",
+        "to_count": 1,
+        "addressed_me": 0
+      },
+      "stage_input": {
+        "now": "2026-09-09 (Wednesday)",
+        "directness_line": "Addressed to: you indirectly (CC, a list, or unknown).",
+        "message_block": "From: Alex Rivera <alex.rivera@rivermail.example.com>\nSubject: Where the lease stands\nReceived: 2026-09-09T09:15:00Z\n\nBody:\nPriya — recapping this morning for the file: the allowance question goes back to the landlord, and I will confirm the walkthrough once the addendum lands. Nothing needed from you today.",
+        "ctx_none": {
+          "used_by_today": [
+            "extract"
+          ],
+          "content": "message_block only"
+        },
+        "ctx_tail3": {
+          "used_by_today": [
+            "triage",
+            "needs_you"
+          ],
+          "thread_tail": []
+        },
+        "ctx_compressed": {
+          "used_by_today": [],
+          "proposal": true,
+          "thread_digest": null
+        },
+        "ctx_title": {
+          "used_by_today": [],
+          "proposal": true,
+          "channel_title": null,
+          "withheld_from_model": false
+        }
+      },
+      "conversation": {
+        "subject": "Where the lease stands",
+        "participants": [
+          "Alex Rivera",
+          "Priya Raman"
+        ],
+        "message_count": 3,
+        "inbound_count": 1,
+        "state": "waiting",
+        "cta_text": null,
+        "cta_urgency": "low"
+      },
+      "stored": {
+        "triage_status": "skipped",
+        "gate_reason": "outbound",
+        "gate_override": null,
+        "category": null,
+        "urgency": null,
+        "label": null,
+        "summary": null,
+        "needs_action": null,
+        "action_items_json": null,
+        "reply_expected": null,
+        "deadline": null,
+        "needs_you_verdict": null,
+        "needs_you_reason": null,
+        "extraction": null,
+        "progress": {
+          "triage_state": "skipped",
+          "extract_state": "skipped",
+          "storyline_state": "pending",
+          "settle_state": "done",
+          "triage_at": null,
+          "extract_at": null,
+          "storyline_at": null,
+          "outcome": "dropped",
+          "dropped": 1,
+          "drop_reason": "outbound",
+          "storyline_id": null,
+          "needs_you": 0
+        },
+        "storylines": []
+      },
+      "gold": {
+        "gate": {
+          "verdict": "drop",
+          "reason": "outbound",
+          "tier": "1",
+          "current": "drop",
+          "why": "The owner wrote it.",
+          "reason_acceptable": [],
+          "current_evidence": {
+            "conversation_messages": 3,
+            "newest_kept_inbound": null,
+            "newest_outbound": "fx-msg-0004",
+            "stored_triage_status": "skipped",
+            "stored_gate_reason": "outbound"
+          }
+        },
+        "triage": {
+          "category": "work",
+          "urgency": "low",
+          "urgency_acceptable": [],
+          "label_rubric": [],
+          "summary_facts_required": [],
+          "summary_facts_forbidden": [],
+          "needs_action": false,
+          "reply_expected": false,
+          "action_items_rubric": [],
+          "deadline": "",
+          "derivable_from": "ctx_none",
+          "why": "Sent mail is never triaged."
+        },
+        "extract": {
+          "evidence_rubric": [],
+          "topics_required_any": [],
+          "topics_forbidden": [],
+          "people_required": [],
+          "people_forbidden": [],
+          "organizations_required": [],
+          "project": "River Street office",
+          "project_acceptable": [],
+          "intent": "fyi",
+          "importance": "low",
+          "derivable_from": "ctx_none",
+          "why": "A recap of the owner's own position.",
+          "intent_acceptable": [],
+          "importance_acceptable": []
+        },
+        "needs_you": {
+          "verdict": false,
+          "confidence_floor": "high",
+          "evidence_rubric": [],
+          "derivable_from": "ctx_none",
+          "why": "The owner is the sender."
+        },
+        "storyline": {
+          "id": "none",
+          "strength": "may",
+          "forbidden": [],
+          "derivable_from": "ctx_none",
+          "why": "Sent mail is not filed."
+        },
+        "thread_state": "waiting",
+        "review_fix": [],
+        "annotator_agreement": "2/2",
+        "disagreed_fields": [],
+        "second_opinion": {},
+        "adjudication": null,
+        "cross_harness": {
+          "harness": "fixture",
+          "agreed": 8,
+          "of": 8,
+          "differed_on": []
+        }
+      },
+      "difficulty": "easy",
+      "annotators": {
+        "A": "fixture",
+        "B": "fixture"
+      }
+    },
+    {
+      "id": "email:fx-reply",
+      "stratum": "triage-spread",
+      "note": "A short ask that pairs with the lease thread.",
+      "provenance": {
+        "source": "email",
+        "source_message_id": "fx-msg-0005",
+        "conversation_key": "email:fx-conv-lease-2",
+        "direction": "inbound",
+        "received_at": "2026-09-09T11:05:00Z",
+        "is_read": 0,
+        "has_attachments": 0,
+        "attachment_names": [],
+        "from_name": "Priya Raman",
+        "from_address": "priya.raman@northgate.example.com",
+        "subject": "One question on the addendum",
+        "to_count": 1,
+        "addressed_me": 1
+      },
+      "stage_input": {
+        "now": "2026-09-09 (Wednesday)",
+        "directness_line": "Addressed to: only you.",
+        "message_block": "From: Priya Raman <priya.raman@northgate.example.com>\nSubject: One question on the addendum\nReceived: 2026-09-09T11:05:00Z\n\nBody:\nAlex, one more thing on the addendum — the landlord's agent wants to know whether you will take the suite as-is if the allowance stays capped. A yes or no is enough for now; I will handle the wording.",
+        "ctx_none": {
+          "used_by_today": [
+            "extract"
+          ],
+          "content": "message_block only"
+        },
+        "ctx_tail3": {
+          "used_by_today": [
+            "triage",
+            "needs_you"
+          ],
+          "thread_tail": [
+            {
+              "who": "Priya Raman",
+              "received_at": "2026-09-09T10:40:00Z",
+              "text": "Morning Alex — the agent just called me about the suite."
+            }
+          ]
+        },
+        "ctx_compressed": {
+          "used_by_today": [],
+          "proposal": true,
+          "thread_digest": null
+        },
+        "ctx_title": {
+          "used_by_today": [],
+          "proposal": true,
+          "channel_title": null,
+          "withheld_from_model": false
+        }
+      },
+      "conversation": {
+        "subject": "One question on the addendum",
+        "participants": [
+          "Priya Raman",
+          "Alex Rivera"
+        ],
+        "message_count": 2,
+        "inbound_count": 2,
+        "state": "needs_reply",
+        "cta_text": "Say yes or no to the suite as-is",
+        "cta_urgency": "normal"
+      },
+      "stored": {
+        "triage_status": "triaged",
+        "gate_reason": null,
+        "gate_override": null,
+        "category": "work",
+        "urgency": "normal",
+        "label": "addendum question",
+        "summary": "Priya asks whether the suite is acceptable with the cap.",
+        "needs_action": 1,
+        "action_items_json": "[\"Answer yes or no on the suite as-is\"]",
+        "reply_expected": 1,
+        "deadline": null,
+        "needs_you_verdict": 1,
+        "needs_you_reason": "A yes-or-no only the owner can give.",
+        "extraction": {
+          "evidence": "A yes or no is enough for now.",
+          "topics": [
+            "addendum",
+            "suite"
+          ],
+          "people": [
+            "Priya Raman"
+          ],
+          "organizations": [
+            "Northgate Advisors"
+          ],
+          "project": "River Street office",
+          "intent": "question",
+          "importance": "high"
+        },
+        "progress": {
+          "triage_state": "done",
+          "extract_state": "done",
+          "storyline_state": "done",
+          "settle_state": "done",
+          "triage_at": "2026-09-09T08:01:00Z",
+          "extract_at": "2026-09-09T08:01:40Z",
+          "storyline_at": "2026-09-09T08:02:10Z",
+          "outcome": "kept",
+          "dropped": 0,
+          "drop_reason": null,
+          "storyline_id": "sl-1",
+          "needs_you": 1
+        },
+        "storylines": [
+          {
+            "id": "sl-1",
+            "title": "River office lease",
+            "charter": "Signing and fitting out the second-floor office on River Street.",
+            "summary": "Addendum under review; keys expected once the addendum is signed.",
+            "status": "active",
+            "added_by": "storyline_sweep",
+            "evidence": "Both messages argue about the same addendum clause."
+          }
+        ]
+      },
+      "gold": {
+        "gate": {
+          "verdict": "keep",
+          "reason": "a human wrote it",
+          "tier": "none",
+          "current": "keep",
+          "why": "A direct question.",
+          "reason_acceptable": [],
+          "current_evidence": {
+            "conversation_messages": 2,
+            "newest_kept_inbound": "fx-msg-0005",
+            "newest_outbound": null,
+            "stored_triage_status": "triaged",
+            "stored_gate_reason": null
+          }
+        },
+        "triage": {
+          "category": "work",
+          "urgency": "normal",
+          "urgency_acceptable": [
+            "high"
+          ],
+          "label_rubric": [
+            "names the addendum"
+          ],
+          "summary_facts_required": [
+            "a yes or no is wanted"
+          ],
+          "summary_facts_forbidden": [
+            "the suite is taken"
+          ],
+          "needs_action": true,
+          "reply_expected": true,
+          "action_items_rubric": [
+            "answer yes or no"
+          ],
+          "deadline": "",
+          "derivable_from": "ctx_none",
+          "why": "The ask is one sentence."
+        },
+        "extract": {
+          "evidence_rubric": [
+            "quotes the yes-or-no ask"
+          ],
+          "topics_required_any": [
+            [
+              "addendum",
+              "suite"
+            ]
+          ],
+          "topics_forbidden": [
+            "newsletter"
+          ],
+          "people_required": [
+            "Priya Raman"
+          ],
+          "people_forbidden": [],
+          "organizations_required": [],
+          "project": "River Street office",
+          "project_acceptable": [
+            "River office lease"
+          ],
+          "intent": "question",
+          "importance": "high",
+          "derivable_from": "ctx_none",
+          "why": "Self-contained.",
+          "intent_acceptable": [
+            "request"
+          ],
+          "importance_acceptable": [
+            "normal"
+          ]
+        },
+        "needs_you": {
+          "verdict": true,
+          "confidence_floor": "high",
+          "evidence_rubric": [
+            "says only the owner can answer"
+          ],
+          "derivable_from": "ctx_none",
+          "why": "A decision nobody else can make."
+        },
+        "storyline": {
+          "id": "river-office-lease",
+          "strength": "should",
+          "forbidden": [
+            "ANTI-person-hub"
+          ],
+          "derivable_from": "ctx_none",
+          "why": "Same effort as the addendum thread."
+        },
+        "thread_state": "needs_reply",
+        "reply": {
+          "audience": "the adviser",
+          "points_required": [
+            "a yes or no on the suite as-is"
+          ],
+          "points_forbidden": [
+            "a counter-offer on rent"
+          ],
+          "owner_only": [
+            "whether the capped fit-out is workable"
+          ],
+          "form": "two or three sentences",
+          "why": "Only the owner knows the build-out budget."
+        },
+        "review_fix": [],
+        "annotator_agreement": "2/2",
+        "disagreed_fields": [],
+        "second_opinion": {},
+        "adjudication": null,
+        "cross_harness": {
+          "harness": "fixture",
+          "agreed": 8,
+          "of": 8,
+          "differed_on": []
+        }
+      },
+      "difficulty": "medium",
+      "annotators": {
+        "A": "fixture",
+        "B": "fixture"
+      }
+    },
+    {
+      "id": "email:fx-attachments-long",
+      "stratum": "gate-keep-trap",
+      "note": "Looks like a machine report; a person wrote it, and it is clipped.",
+      "provenance": {
+        "source": "email",
+        "source_message_id": "fx-msg-0006",
+        "conversation_key": "email:fx-conv-survey",
+        "direction": "inbound",
+        "received_at": "2026-09-08T18:30:00Z",
+        "is_read": 0,
+        "has_attachments": 1,
+        "attachment_names": [
+          "north-elevation-survey.pdf",
+          "summary-sheet.xlsx"
+        ],
+        "from_name": "Marcus Feld",
+        "from_address": "marcus.feld@bluefinstudio.example.com",
+        "subject": "North elevation survey",
+        "to_count": 2,
+        "addressed_me": 0
+      },
+      "stage_input": {
+        "now": "2026-09-09 (Wednesday)",
+        "directness_line": "Addressed to: you and 1 others.",
+        "message_block": "From: Marcus Feld <marcus.feld@bluefinstudio.example.com>\nSubject: North elevation survey\nReceived: 2026-09-08T18:30:00Z\n\nBody:\nAlex,\n\nThe full survey is attached. The narrative runs long because the surveyor wrote a paragraph per bay.\n\nThe surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before winter. The surveyor's note repeats the same four points for every bay on the north elevation: the render is sound, the flashing is not, the gutter falls the wrong way, and the sill needs replacing before wint",
+        "ctx_none": {
+          "used_by_today": [
+            "extract"
+          ],
+          "content": "message_block only"
+        },
+        "ctx_tail3": {
+          "used_by_today": [
+            "triage",
+            "needs_you"
+          ],
+          "thread_tail": []
+        },
+        "ctx_compressed": {
+          "used_by_today": [],
+          "proposal": true,
+          "thread_digest": null
+        },
+        "ctx_title": {
+          "used_by_today": [],
+          "proposal": true,
+          "channel_title": null,
+          "withheld_from_model": false
+        }
+      },
+      "conversation": {
+        "subject": "North elevation survey",
+        "participants": [
+          "Marcus Feld",
+          "Alex Rivera"
+        ],
+        "message_count": 1,
+        "inbound_count": 1,
+        "state": "needs_reply",
+        "cta_text": null,
+        "cta_urgency": "normal"
+      },
+      "stored": {
+        "triage_status": "triaged",
+        "gate_reason": null,
+        "gate_override": null,
+        "category": "work",
+        "urgency": "normal",
+        "label": "survey report",
+        "summary": "Marcus attached the north elevation survey and a summary sheet.",
+        "needs_action": 0,
+        "action_items_json": null,
+        "reply_expected": 0,
+        "deadline": null,
+        "needs_you_verdict": 0,
+        "needs_you_reason": "A report sent for the file.",
+        "extraction": {
+          "evidence": "The full survey is attached.",
+          "topics": [
+            "survey",
+            "north elevation"
+          ],
+          "people": [
+            "Marcus Feld"
+          ],
+          "organizations": [
+            "Bluefin Studio"
+          ],
+          "project": "River Street office",
+          "intent": "fyi",
+          "importance": "normal"
+        },
+        "progress": {
+          "triage_state": "done",
+          "extract_state": "done",
+          "storyline_state": "pending",
+          "settle_state": "done",
+          "triage_at": "2026-09-09T08:01:00Z",
+          "extract_at": "2026-09-09T08:01:40Z",
+          "storyline_at": null,
+          "outcome": "kept",
+          "dropped": 0,
+          "drop_reason": null,
+          "storyline_id": null,
+          "needs_you": 0
+        },
+        "storylines": []
+      },
+      "gold": {
+        "gate": {
+          "verdict": "keep",
+          "reason": "a human wrote it",
+          "tier": "none",
+          "current": "keep",
+          "why": "Machine-shaped, but a person wrote the covering note.",
+          "reason_acceptable": [],
+          "current_evidence": {
+            "conversation_messages": 1,
+            "newest_kept_inbound": "fx-msg-0006",
+            "newest_outbound": null,
+            "stored_triage_status": "triaged",
+            "stored_gate_reason": null
+          }
+        },
+        "triage": {
+          "category": "work",
+          "urgency": "low",
+          "urgency_acceptable": [
+            "normal"
+          ],
+          "label_rubric": [
+            "names the survey"
+          ],
+          "summary_facts_required": [
+            "a survey is attached"
+          ],
+          "summary_facts_forbidden": [
+            "the render must be replaced"
+          ],
+          "needs_action": false,
+          "reply_expected": false,
+          "action_items_rubric": [],
+          "deadline": "",
+          "derivable_from": "ctx_none",
+          "why": "Delivery of a document, nothing asked."
+        },
+        "extract": {
+          "evidence_rubric": [
+            "quotes the covering note"
+          ],
+          "topics_required_any": [
+            [
+              "survey"
+            ]
+          ],
+          "topics_forbidden": [
+            "lease"
+          ],
+          "people_required": [
+            "Marcus Feld"
+          ],
+          "people_forbidden": [],
+          "organizations_required": [
+            "Bluefin"
+          ],
+          "project": "River Street office",
+          "project_acceptable": [],
+          "intent": "fyi",
+          "importance": "normal",
+          "derivable_from": "ctx_none",
+          "why": "The note says what it is.",
+          "intent_acceptable": [],
+          "importance_acceptable": [
+            "low"
+          ]
+        },
+        "needs_you": {
+          "verdict": false,
+          "confidence_floor": "medium",
+          "evidence_rubric": [
+            "says nothing is asked"
+          ],
+          "derivable_from": "ctx_none",
+          "why": "Filed, not answered."
+        },
+        "storyline": {
+          "id": "none",
+          "strength": "must",
+          "forbidden": [
+            "ANTI-person-hub"
+          ],
+          "derivable_from": "ctx_none",
+          "why": "One survey is not an effort."
+        },
+        "thread_state": "needs_reply",
+        "review_fix": [
+          "urgency widened to low/normal"
+        ],
+        "annotator_agreement": "1/2",
+        "disagreed_fields": [
+          "triage.urgency"
+        ],
+        "second_opinion": {
+          "triage.urgency": "normal"
+        },
+        "adjudication": "Widened rather than decided.",
+        "cross_harness": {
+          "harness": "fixture",
+          "agreed": 7,
+          "of": 8,
+          "differed_on": [
+            "triage.urgency"
+          ]
+        }
+      },
+      "difficulty": "hard",
+      "annotators": {
+        "A": "fixture",
+        "B": "fixture"
+      }
+    },
+    {
+      "id": "teams:fx-empty-body",
+      "stratum": "gate-edge",
+      "note": "A chat that is nothing but a dropped file, in a room nobody named Alex in.",
+      "provenance": {
+        "source": "teams",
+        "source_message_id": "fx-msg-0007",
+        "conversation_key": "teams:fx-chat-dropbox",
+        "direction": "inbound",
+        "received_at": "2026-09-09T06:20:00Z",
+        "is_read": 1,
+        "has_attachments": 1,
+        "attachment_names": [
+          "elevation-sketch.png"
+        ],
+        "from_name": "Tomas Lindqvist",
+        "from_address": "teams:4a71b0c8-33de-4f92-8c07-15b9ed2a6f31",
+        "subject": null,
+        "to_count": 3,
+        "addressed_me": 0
+      },
+      "stage_input": {
+        "now": "2026-09-09 (Wednesday)",
+        "directness_line": "Addressed to: a group chat, not you specifically.",
+        "message_block": "From: Tomas Lindqvist\nReceived: 2026-09-09T06:20:00Z\n\nBody:\n",
+        "ctx_none": {
+          "used_by_today": [
+            "extract"
+          ],
+          "content": "message_block only"
+        },
+        "ctx_tail3": {
+          "used_by_today": [
+            "triage",
+            "needs_you"
+          ],
+          "thread_tail": []
+        },
+        "ctx_compressed": {
+          "used_by_today": [],
+          "proposal": true,
+          "thread_digest": null
+        },
+        "ctx_title": {
+          "used_by_today": [],
+          "proposal": true,
+          "channel_title": "Site photos",
+          "withheld_from_model": true
+        }
+      },
+      "conversation": {
+        "subject": null,
+        "participants": [
+          "Tomas Lindqvist",
+          "Alex Rivera",
+          "Noor Haddad"
+        ],
+        "message_count": 6,
+        "inbound_count": 5,
+        "state": "waiting",
+        "cta_text": null,
+        "cta_urgency": "low"
+      },
+      "stored": {
+        "triage_status": "skipped",
+        "gate_reason": "empty",
+        "gate_override": null,
+        "category": null,
+        "urgency": null,
+        "label": null,
+        "summary": null,
+        "needs_action": null,
+        "action_items_json": null,
+        "reply_expected": null,
+        "deadline": null,
+        "needs_you_verdict": null,
+        "needs_you_reason": null,
+        "extraction": null,
+        "progress": {
+          "triage_state": "skipped",
+          "extract_state": "skipped",
+          "storyline_state": "pending",
+          "settle_state": "done",
+          "triage_at": null,
+          "extract_at": null,
+          "storyline_at": null,
+          "outcome": "dropped",
+          "dropped": 1,
+          "drop_reason": "empty",
+          "storyline_id": null,
+          "needs_you": 0
+        },
+        "storylines": []
+      },
+      "gold": {
+        "gate": {
+          "verdict": "drop",
+          "reason": "empty",
+          "tier": "1",
+          "current": "drop",
+          "why": "No words, and nobody addressed.",
+          "reason_acceptable": [
+            "no_body"
+          ],
+          "current_evidence": {
+            "conversation_messages": 6,
+            "newest_kept_inbound": null,
+            "newest_outbound": null,
+            "stored_triage_status": "skipped",
+            "stored_gate_reason": "empty"
+          }
+        },
+        "triage": {
+          "category": "work",
+          "urgency": "low",
+          "urgency_acceptable": [],
+          "label_rubric": [],
+          "summary_facts_required": [],
+          "summary_facts_forbidden": [
+            "a question was asked"
+          ],
+          "needs_action": false,
+          "reply_expected": false,
+          "action_items_rubric": [],
+          "deadline": "",
+          "derivable_from": "ctx_tail3",
+          "why": "Nothing in the message itself to judge."
+        },
+        "extract": {
+          "evidence_rubric": [],
+          "topics_required_any": [],
+          "topics_forbidden": [
+            "lease"
+          ],
+          "people_required": [],
+          "people_forbidden": [],
+          "organizations_required": [],
+          "project": "none",
+          "project_acceptable": [],
+          "intent": "fyi",
+          "importance": "low",
+          "derivable_from": "ctx_none",
+          "why": "A file arrived; nothing was said.",
+          "intent_acceptable": [],
+          "importance_acceptable": []
+        },
+        "needs_you": {
+          "verdict": false,
+          "confidence_floor": "high",
+          "evidence_rubric": [],
+          "derivable_from": "ctx_none",
+          "why": "A group room, and nobody named."
+        },
+        "storyline": {
+          "id": "none",
+          "strength": "must",
+          "forbidden": [],
+          "derivable_from": "ctx_none",
+          "why": "A dropped file is not an effort."
+        },
+        "thread_state": "waiting",
+        "review_fix": [],
+        "annotator_agreement": "2/2",
+        "disagreed_fields": [],
+        "second_opinion": {},
+        "adjudication": null,
+        "cross_harness": {
+          "harness": "fixture",
+          "agreed": 8,
+          "of": 8,
+          "differed_on": []
+        }
+      },
+      "difficulty": "easy",
+      "annotators": {
+        "A": "fixture",
+        "B": "fixture"
+      }
+    }
+  ]
+}

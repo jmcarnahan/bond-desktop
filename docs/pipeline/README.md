@@ -80,6 +80,10 @@ Cross-cutting concerns — which client serves which task, ports and defaults,
 parking and retry policy, and the untrusted-data fence around every prompt —
 live in [10-model-routing.md](10-model-routing.md).
 
+Evaluating any stage's model against real traffic — the golden set, its gold
+labels, the scorer and the populations a number is quoted on — is described in
+[../model-bakeoff.md](../model-bakeoff.md) under "The golden set".
+
 ## The two-model split at a glance
 
 | Task | Slot | Default server (compile-time) |
