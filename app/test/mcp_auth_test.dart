@@ -416,6 +416,7 @@ void main() {
     test('clears the MCP keys and leaves the Graph session alone', () async {
       final store = _Tokens()
         ..values[_keys.refreshTokenKey] = 'mcp-rt'
+        ..values[_keys.clientIdKey] = 'bm-test-1'
         ..values[_keys.accountJsonKey] = '{"displayName":"Ada"}'
         ..values[_keys.localModeKey] = '1'
         ..values['refresh_token'] = 'graph-rt'
@@ -425,6 +426,8 @@ void main() {
       await _session(_FakeBondMcpClient(const {}), store).signOut();
 
       expect(store.values.containsKey(_keys.refreshTokenKey), isFalse);
+      // The registered client id goes out with the token it was issued to.
+      expect(store.values.containsKey(_keys.clientIdKey), isFalse);
       expect(store.values.containsKey(_keys.accountJsonKey), isFalse);
       expect(store.values.containsKey(_keys.localModeKey), isFalse);
       expect(store.values['refresh_token'], 'graph-rt');

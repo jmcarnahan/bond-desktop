@@ -235,9 +235,12 @@ port means one rebuild:
 make app-run EMBED_URL=http://localhost:9081/v1/embeddings
 ```
 
-**Sign-in cannot start: "Port 8766 is in use".** The bond-mcps sign-in listens
-on a fixed loopback port for the browser to come back to. Find the holder and
-quit it, then press Sign in again:
+**Sign-in cannot start: "Port 8766 is in use".** Rare, and only against a
+server that offers no client registration. Every bond-mcps server registers the
+app at sign-in, and the app then listens on whichever loopback port is free; a
+server without registration knows the app only by a pre-registered redirect URI
+that names this one port. Find the holder and quit it, then press Sign in
+again:
 
 ```sh
 lsof -nP -iTCP:8766 -sTCP:LISTEN

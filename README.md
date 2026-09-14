@@ -243,6 +243,20 @@ platform's own consent page, and the app picks the connection up when you come
 back — on its own when the window regains focus, or on
 **I've connected — continue**.
 
+**No client is registered anywhere ahead of time.** At each sign-in the app
+registers itself with the server's own authorization server (RFC 7591 dynamic
+client registration) and listens on a free loopback port for the browser to
+come back to, so no operator has to seed a client for this app and no port has
+to be kept clear. Only a server that advertises no registration endpoint falls
+back to the pre-registered `bond-desktop` client on the fixed port 8766; every
+bond-mcps deployment offers registration, so that fallback is for foreign
+servers.
+
+**An interrupted refresh never costs a sign-in.** A token refresh cut short by
+sleep or a dropped connection is retried at once, and one cut short by quitting
+the app is repeated at the next launch; the server honours either for a week,
+so long as the replacement token it minted was never used.
+
 **Which server.** The **MCP server** dropdown offers **Deployed** (the
 `BOND_MCP_SERVER_URL` endpoint, when the build carries one), **Local** —
 `http://localhost:18001/mcp` — and **Custom…** for anything else. The deployed
@@ -261,7 +275,10 @@ no session yet.
 **Working against a local server.** Start bond-mcps with its own `make dev`,
 then Settings → Microsoft connection → **MCP server** → **Local**, and sign
 in. The local server asks for
-no token at all, so that sign-in is instant — no browser round trip.
+no token at all, so that sign-in is instant — no browser round trip. A
+bond-mcps started with `make dev-multitenant` instead does ask for a login, and
+still needs nothing added to its `auth/.env` for this app: the app registers
+itself with that server's authorization server like any other.
 
 **An Azure app registration is needed only by "This device".** The client id,
 tenant id and (for a registration without a public-client platform) client
