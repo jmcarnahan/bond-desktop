@@ -354,12 +354,42 @@ class LlmClient {
       label: schemaName,
     ));
 
-    // Converse hands back the object a tool call was made with, so there is
-    // nothing to decode here and nothing to re-encode on the way in.
+    // Decoded inside [_post], on either wire, so a constrained call's reply
+    // always arrives here as an object — see [_decoded] for why the decode
+    // does not live in this method.
     final json = reply.json;
-    if (json != null) return json;
+    if (json == null) {
+      throw LlmFormatException('$_modelNoun answered with no message content.');
+    }
+    return json;
+  }
 
-    final content = reply.text;
+  /// [reply] with its JSON decoded when [request] was a constrained call and
+  /// the wire handed back text (the OpenAI wire; Converse returns the tool
+  /// call's object already parsed).
+  ///
+  /// This runs INSIDE [_post]'s instrumented try rather than in [completeJson]
+  /// because the observer fires from that try. When the decode lived in
+  /// [completeJson], an answer that was not JSON — a model that overran its
+  /// token budget mid-object, say — was recorded as `ok` by the observer and
+  /// then thrown as a format failure one frame up, so a bench could print
+  /// `failures: 0` over a run that had lost an item to exactly that. The
+  /// golden storyline replay caught it on 2026-09-15: one unfiled item, zero
+  /// recorded failures. A call whose answer cannot be used is a failed call,
+  /// and the record has to say so.
+  _Reply _decoded(_Reply reply, _Request request) {
+    if (request.schema == null || reply.json != null) return reply;
+    return (
+      text: reply.text,
+      json: _decodeObject(reply.text),
+      promptTokens: reply.promptTokens,
+      completionTokens: reply.completionTokens,
+      serverPromptMs: reply.serverPromptMs,
+      serverPredictedMs: reply.serverPredictedMs,
+    );
+  }
+
+  Map<String, dynamic> _decodeObject(String? content) {
     if (content == null) {
       throw LlmFormatException('$_modelNoun answered with no message content.');
     }
@@ -483,12 +513,18 @@ class LlmClient {
 
     final observer = _onCall;
     if (observer == null) {
-      return _postInner(body, request: request, target: target);
+      return _decoded(
+        await _postInner(body, request: request, target: target),
+        request,
+      );
     }
 
     final sw = Stopwatch()..start();
     try {
-      final result = await _postInner(body, request: request, target: target);
+      final result = _decoded(
+        await _postInner(body, request: request, target: target),
+        request,
+      );
       observer(LlmCallRecord(
         label: request.label,
         durationMs: sw.elapsedMilliseconds,

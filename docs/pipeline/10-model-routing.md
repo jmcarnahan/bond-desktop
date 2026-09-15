@@ -73,7 +73,12 @@ restart and without interrupting work in flight.
 
 Every call records which model answered it: `LlmCallRecord` carries `model` and
 `baseUrl`, and the activity log folds the model into the row as `llm_model`
-(shown on the `t/s` cell's tooltip and in the expanded detail).
+(shown on the `t/s` cell's tooltip and in the expanded detail). The record's
+`outcome` is decided after the answer has been made usable: a constrained
+call whose content is not the JSON object it asked for is recorded as
+`format`, never as `ok` — the decode runs inside the same instrumented try as
+the request, so a model that overran its budget mid-object counts as a failed
+call in every table built from these records.
 
 **Two wires, one client.** `LlmClient` can also carry a bearer token and speak
 Bedrock's Converse wire (`LlmWire.bedrockConverse`) alongside the OpenAI one.
