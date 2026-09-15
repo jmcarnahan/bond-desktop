@@ -268,6 +268,58 @@ object with the model's reason beside it.
 A `compressed` row carries the lower-bound caveat above, printed by the run
 itself so it travels with the number rather than being remembered.
 
+**Judging the rubric fields.** Six fields need a reader rather than a matcher:
+the label, the summary, the action items, the needs-you evidence, the extract
+evidence, and a drafted reply. The judge answers one boolean per rubric string
+— "is this claim in this sentence" — and nothing else. The pass/fail arithmetic
+is code in `golden/tools/judge_rubrics.py`: every required point present, no
+forbidden point asserted, and the text inside the app's own caps (summary 500,
+label 40, evidence 300 characters). The judge reads; it does not grade.
+
+The middle step is Claude Code agents rather than a Bedrock call, so a judging
+round needs no cloud credentials at all:
+
+```sh
+make golden-judge-pack R=tmp/bench/golden-run-….json    # write the packets
+#   then one Claude Code agent (Opus) per packet under
+#   golden/labels/judge/<run>/packets/, each writing one file per item
+make golden-judge-tally R=tmp/bench/golden-run-….json   # grade what they wrote
+make golden-judge-tally R=… JSON=tmp/rubric.json        # the same, for a row
+make golden-judge-pack  BASELINE=1 NAME=baseline-cc     # re-judge what the app stored
+make golden-judge-tally BASELINE=1 NAME=baseline-cc
+```
+
+Pack writes one packet per `GOLDEN_BATCH` items, each carrying the judge prompt
+verbatim, so an agent needs nothing but the file it is handed. Tally prints
+twice, keep-only first and then all items, exactly like `make golden-score`,
+and `JSON=` captures the keep-only pass. `NAME=` picks the directory, which is
+how a re-judged `baseline-cc` sits BESIDE the original Opus 4.5 files instead
+of over them. Items already carrying a result file are skipped, so a re-pack
+after a half-finished round packs only the remainder.
+
+**These numbers are comparable, not absolute.** The gold rubrics were written
+with Claude's help and the judge is Claude, so every row leans the same way. A
+rubric number is worth reading against another rubric number — the baseline and
+every candidate share one judge and one prompt — and is not worth reading as
+the truth about how good a summary is.
+
+Three honesty counters print under the table, because a judging pass can fail
+quietly in ways a pass rate hides. `missing` is judgeable items with no result
+file, and under `--tally-only` it names them (the first twenty), so an agent
+that dropped its packet shows up instead of being rounded away. `unreadable` is
+files that exist but carry an error or no verdict; a re-pack treats both as not
+yet judged, so the next round of agents picks them up without `--force`. Under
+keep-only every counter covers the keep population, the same one the rates do. `rubric keys unmatched` counts keys the judge invented
+instead of copying: a paraphrased key is never looked up, so the rubric point
+it stands for silently fails. A non-zero count means the row is partly
+measuring the judge's formatting rather than the model's writing — re-judge
+those items rather than quoting them.
+
+The ledger's `rubric` column reads `label · action items · summary · needs-you
+evidence · extract evidence · draft`, as keep-only pass rates. The baseline
+appears once, carrying both judges' numbers side by side: the same stored
+output, read twice by two different readers.
+
 ### Golden ledger
 
 Keep-only numbers, per the population rule above. Rubric columns come from the
@@ -275,14 +327,14 @@ judge, not from `score_run.py`.
 
 | date | slot | label | ctx | run file | keep-only: category / urgency / needs_action / reply_expected / needs_you / intent / importance / project / topics / people | rubric | p50 ms | gen t/s | msgs/min | $/1K msgs | note |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2026-09-12 | — | the shipping app, as stored | tail3 | none — `--baseline` | 94% / 88% / 68% / 77% / 94% / 84% / 45% / 67% / 31% / 86% | Opus 4.5 judge: label 84% · action items 61% · summary 53% · needs-you evidence 36% · extract evidence 25% | — | — | — | — | the shipping app's stored output; gate 76/100, storyline 42/99 with no correct positive |
-| 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | 89% / 89% / 66% / 70% / 92% / 75% / 39% / 66% / 26% / 87% | — | 2436 / 1616 / 1950 (triage / needs_you / extraction) | 41.4 | 8.9 | $0.00 | the shipping bulk model, replayed; second of two passes |
-| 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | none | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-175832.json` | 88% / 89% / 75% / 75% / 93% / 75% / 39% / 66% / 26% / 87% | — | 2173 / 1458 / 2020 (triage / needs_you / extraction) | 41.5 | 9.1 | $0.00 | context ladder: message alone (one pass) |
-| 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | compressed | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-181030.json` | 89% / 89% / 68% / 74% / 91% / 75% / 39% / 66% / 26% / 87% | — | 2452 / 1684 / 2028 (triage / needs_you / extraction) | 40.4 | 8.7 | $0.00 | context ladder: digest + two newest tail messages, 300-char clip — lower bound (one pass) |
-| 2026-09-14 | bulk | llamacpp/Qwen3.5-4B-UD-Q4_K_XL | tail3 | `golden-run-llamacpp-qwen3-5-4b-ud-q4-k-xl-20260914-190503.json` | 91% / 89% / 66% / 83% / 87% / 79% / 66% / 63% / 29% / 88% | — | 2838 / 1716 / 2745 (triage / needs_you / extraction) | 36.9 | 7.5 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
-| 2026-09-14 | bulk | llamacpp/Qwen3.5-9B-Q4_K_M | tail3 | `golden-run-llamacpp-qwen3-5-9b-q4-k-m-20260914-200430.json` | 91% / 93% / 64% / 70% / 83% / 82% / 74% / 64% / 24% / 83% | — | 4394 / 2648 / 4444 (triage / needs_you / extraction) | 22.8 | 4.6 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
-| 2026-09-14 | bulk | llamacpp/Qwen3.8-27B-Q4_K_M (as bulk) | tail3 | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-20260914-223320.json` | 92% / 95% / 72% / 84% / 93% / 86% / 74% / 58% / 32% / 93% | — | 13412 / 8969 / 13907 (triage / needs_you / extraction) | 7.1 | 1.5 | $0.00 | accuracy ceiling for these prompts: the prose model doing bulk work, 1 slot, no MTP; second of two passes |
-| 2026-09-14 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260914-230921.json` | — / — / — / 82% / — / — / — / — / — / — | — | 6578 / 16589 (reply_decision / draft_reply) | 7.1 | 4.4 | $0.00 | prose slot: reply decision for the 76 gold-keep items (scored as reply_expected) + 25 drafts for the reply-rubric items, judged in Phase 3; message + tail only; second of two passes |
+| 2026-09-12 | — | the shipping app, as stored | tail3 | none — `--baseline` | 94% / 88% / 68% / 77% / 94% / 84% / 45% / 67% / 31% / 86% | Opus 4.5 judge: label 86% · action items 59% · summary 54% · needs-you evidence 37% · extract evidence 24% — Claude Code subagent judge: label 82% · action items 54% · summary 37% · needs-you evidence 29% · extract evidence 22% | — | — | — | — | the shipping app's stored output; gate 76/100, storyline 42/99 with no correct positive |
+| 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | 89% / 89% / 66% / 70% / 92% / 75% / 39% / 66% / 26% / 87% | label 84% · action items 67% · summary 39% · needs-you evidence 27% · extract evidence 25% | 2436 / 1616 / 1950 (triage / needs_you / extraction) | 41.4 | 8.9 | $0.00 | the shipping bulk model, replayed; second of two passes |
+| 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | none | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-175832.json` | 88% / 89% / 75% / 75% / 93% / 75% / 39% / 66% / 26% / 87% | label 83% · action items 71% · summary 34% · needs-you evidence 34% · extract evidence 24% | 2173 / 1458 / 2020 (triage / needs_you / extraction) | 41.5 | 9.1 | $0.00 | context ladder: message alone (one pass) |
+| 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | compressed | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-181030.json` | 89% / 89% / 68% / 74% / 91% / 75% / 39% / 66% / 26% / 87% | label 80% · action items 62% · summary 33% · needs-you evidence 25% · extract evidence 24% | 2452 / 1684 / 2028 (triage / needs_you / extraction) | 40.4 | 8.7 | $0.00 | context ladder: digest + two newest tail messages, 300-char clip — lower bound (one pass) |
+| 2026-09-14 | bulk | llamacpp/Qwen3.5-4B-UD-Q4_K_XL | tail3 | `golden-run-llamacpp-qwen3-5-4b-ud-q4-k-xl-20260914-190503.json` | 91% / 89% / 66% / 83% / 87% / 79% / 66% / 63% / 29% / 88% | label 82% · action items 53% · summary 16% · needs-you evidence 23% · extract evidence 33% | 2838 / 1716 / 2745 (triage / needs_you / extraction) | 36.9 | 7.5 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
+| 2026-09-14 | bulk | llamacpp/Qwen3.5-9B-Q4_K_M | tail3 | `golden-run-llamacpp-qwen3-5-9b-q4-k-m-20260914-200430.json` | 91% / 93% / 64% / 70% / 83% / 82% / 74% / 64% / 24% / 83% | label 78% · action items 62% · summary 24% · needs-you evidence 25% · extract evidence 38% | 4394 / 2648 / 4444 (triage / needs_you / extraction) | 22.8 | 4.6 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
+| 2026-09-14 | bulk | llamacpp/Qwen3.8-27B-Q4_K_M (as bulk) | tail3 | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-20260914-223320.json` | 92% / 95% / 72% / 84% / 93% / 86% / 74% / 58% / 32% / 93% | label 89% · action items 64% · summary 41% · needs-you evidence 39% · extract evidence 41% | 13412 / 8969 / 13907 (triage / needs_you / extraction) | 7.1 | 1.5 | $0.00 | accuracy ceiling for these prompts: the prose model doing bulk work, 1 slot, no MTP; second of two passes |
+| 2026-09-14 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260914-230921.json` | — / — / — / 82% / — / — / — / — / — / — | draft 20% | 6578 / 16589 (reply_decision / draft_reply) | 7.1 | 4.4 | $0.00 | prose slot: reply decision for the 76 gold-keep items (scored as reply_expected) + 25 drafts for the reply-rubric items, judged in Phase 3; message + tail only; second of two passes |
 
 **What the first rows say** (2026-09-14, all at `GOLDEN_K=1`, keep-only, every
 row the second of two passes unless its note says otherwise). Bigger bulk
@@ -307,6 +359,31 @@ fields: the stored run saw the live thread of 2026-09-12 and is one sample of
 the same model, so candidates are read against the replayed row, not the
 stored one. Rubric columns wait for the judge; recommendations for the round's
 last phase.
+
+**What the judged rows say** (2026-09-14, keep-only, the same Claude Code judge
+for every row). Read the rubric column against the `baseline-cc` half of the
+baseline cell, never against the Opus 4.5 half: the same stored output scores
+54% on summary under one reader and 37% under the other, which is the size of
+the judge effect and the reason the column compares rows only. The replayed 4B
+lands where the re-judged baseline does (label 84 vs 82, summary 39 vs 37,
+evidence 25 / 27 vs 22 / 29). The context ladder barely moves the rubric fields
+on the 4B — summary 34 / 39 / 33 and action items 71 / 67 / 62 for none / tail3
+/ compressed — so the tail buys a little on action items and nothing on
+summaries. The candidate small models are worse writers than the shipping 4B
+even where they are better classifiers: Qwen3.5-4B passes 16% of summaries and
+Qwen3.5-9B 24%, against 39%, while both write better extract evidence (33% and
+38% against 25%). The 27B as bulk is the ceiling on label, summary and both
+evidence fields (89 / 41 / 39 / 41) and even it passes fewer than half the
+summaries. The summary failures are almost entirely omitted required facts, not
+asserted traps: across the six bulk rows the forbidden-fact traps fire on 0–4
+items of 76 while 46–60 items miss a required fact, and summaries average
+113–129 characters against a 500-character cap. That is a prompt-and-budget
+problem, not a model problem, and it goes on the follow-up list ahead of any
+model swap. Drafts: 5 of 25 pass on the 27B; of the 20 failures, 10 invent an
+owner-only fact, 9 commit a forbidden move and 8 miss a required point
+(overlapping), at an average of 148 characters — the draft prompt needs its
+"ask, don't invent" rule made explicit before any cloud model is compared on
+this column.
 
 
 ## oMLX

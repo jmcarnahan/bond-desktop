@@ -101,6 +101,7 @@ RESET  := \033[0m
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ab ab-membership drain bench-compare \
         golden-check golden-baseline golden-score golden golden-prose \
+        golden-judge-pack golden-judge-tally \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
         dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
 
@@ -139,6 +140,8 @@ help:
 	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
 	@printf "  make golden-baseline → what the shipping app scores on the golden set (needs golden/)\n"
 	@printf "  make golden-score R=<run.json> → score a golden run file (BREAKDOWN= per-bucket tables, JSON= the tallies)\n"
+	@printf "  make golden-judge-pack R=<run.json> → packets for the Claude Code rubric judge (NAME=, GOLDEN_BATCH=)\n"
+	@printf "  make golden-judge-tally R=<run.json> → tally the judged rubric files (NAME=, JSON= the tallies)\n"
 	@printf "  make app-build    → release build of the macOS app\n"
 	@printf "  make vec-vendor   → re-download the sqlite-vec C sources (SHA-pinned)\n\n"
 	@printf "Point a bench at a candidate runtime without editing anything:\n"
@@ -592,6 +595,9 @@ GOLDEN_OWNER_NAME    ?=
 GOLDEN_OWNER_ADDRESS ?=
 # Concurrency of a golden replay; a llama.cpp server needs FAST_SLOTS >= K.
 GOLDEN_K   ?= 1
+# How many items ride in one rubric-judge packet; one Claude Code agent reads
+# one packet, so this is really "how much work per agent".
+GOLDEN_BATCH ?= 10
 # Which context rung triage and needs-you see: none | tail3 | compressed.
 GOLDEN_CTX ?= tail3
 
@@ -924,6 +930,35 @@ golden: golden-check
 golden-prose: golden-check
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'reply' $(BENCH_DEFINES)
+
+# The rubric fields — label, summary, action items, the two evidence sentences
+# and a drafted reply — need a READER, and the middle step here is deliberately
+# Claude Code agents rather than a Bedrock call: pack writes one packet per
+# group of items under labels/judge/<name>/packets/, each packet is handed to
+# ONE agent that applies the packet's own prompt and writes the per-item files,
+# and the tally is arithmetic in code over those files. NAME=baseline-cc
+# re-judges the stored app output BESIDE the original Opus 4.5 files rather
+# than over them, so the two judges can be read side by side.
+# One source selector for both targets. BASELINE=0 means "not the baseline"
+# (the $(filter-out 0,…) idiom bench-verify uses), and R= with BASELINE=1 is
+# refused rather than letting --baseline quietly win over the run file.
+GOLDEN_JUDGE_SRC = $(if $(filter-out 0,$(BASELINE)),--baseline,--run '$(abspath $(R))') $(if $(NAME),--name '$(NAME)',)
+define golden-judge-guard
+	@test -n "$(R)$(filter-out 0,$(BASELINE))" || { printf "$(RED)✗$(RESET) usage: make $(1) R=<run.json> [NAME=…] $(2)  —  or  make $(1) BASELINE=1 NAME=baseline-cc\n"; exit 1; }
+	@test -z "$(R)" || test -z "$(filter-out 0,$(BASELINE))" || { printf "$(RED)✗$(RESET) pass R=<run.json> or BASELINE=1, not both\n"; exit 1; }
+endef
+
+golden-judge-pack: golden-check
+	$(call golden-judge-guard,golden-judge-pack,[GOLDEN_BATCH=10])
+	@cd $(dir $(GOLDEN)) && python3 tools/judge_pack.py $(GOLDEN_JUDGE_SRC) --batch $(GOLDEN_BATCH)
+
+# Same selector, and the same two passes as golden-score: the keep-only pass a
+# ledger row quotes, then the all-items second opinion. JSON= applies to the
+# keep-only pass only, for the same reason it does there.
+golden-judge-tally: golden-check
+	$(call golden-judge-guard,golden-judge-tally,[JSON=<out.json>])
+	@cd $(dir $(GOLDEN)) && python3 tools/judge_rubrics.py $(GOLDEN_JUDGE_SRC) --tally-only --keep-only $(if $(JSON),--json '$(abspath $(JSON))',)
+	@cd $(dir $(GOLDEN)) && python3 tools/judge_rubrics.py $(GOLDEN_JUDGE_SRC) --tally-only
 
 app-analyze:
 	@cd $(APP_DIR) && $(FLUTTER) analyze
