@@ -75,6 +75,16 @@ Every call records which model answered it: `LlmCallRecord` carries `model` and
 `baseUrl`, and the activity log folds the model into the row as `llm_model`
 (shown on the `t/s` cell's tooltip and in the expanded detail).
 
+**Two wires, one client.** `LlmClient` can also carry a bearer token and speak
+Bedrock's Converse wire (`LlmWire.bedrockConverse`) alongside the OpenAI one.
+Nothing in `lib/` sets either — every provider still constructs the client on
+the OpenAI wire with no token — so routing, the slots and the failure policy
+below are exactly what they were. The seam exists for the bakeoff
+(`docs/model-bakeoff.md`, "Bedrock as a target") and for the speed design's
+opt-in cloud drafts. On Converse a JSON answer is a forced tool call rather
+than a `response_format`, `temperature` is not sent, and the response carries
+no server timings.
+
 ## Managed mode: one router
 
 Everything above describes the app talking to servers somebody else started.
@@ -308,7 +318,8 @@ what Bond is would be the app asking for credentials as its opening line.
   parks only that *kind* of work, and a dead session parks the whole drain.
   Work resumes when the server comes up.
 - Per-request timeout 120 s (`llm_client.dart`). 5xx → unavailable/park;
-  timeout → counted against the item; HTTP 400 → fatal, never retried — which
+  429 (a throttled cloud server) → unavailable/park as well; timeout →
+  counted against the item; HTTP 400 → fatal, never retried — which
   is what a model name the server does not have looks like.
 - `TriageQueue` and `AiWorker` share one `DrainGate`
   (`app/lib/services/drain_gate.dart`) so the two drains never compete for the

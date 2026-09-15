@@ -21,6 +21,20 @@ import 'model_slots.dart';
 ///   caches the KV prefix, and a prompt that differs by one character throws
 ///   that cache away — about two seconds per message. Everything that varies
 ///   per message, the date anchor included, belongs in the user message.
+///
+/// Two wires, one client. [LlmWire.openAi] is the app's own and is what every
+/// provider constructs; [LlmWire.bedrockConverse] is the second request shape
+/// a bakeoff needs, because Anthropic models on Bedrock are served on Converse
+/// and nowhere else. A bearer token can ride on EITHER wire — Bedrock's
+/// OpenAI-compatible endpoint takes the same body this app already sends and
+/// only wants the header.
+///
+/// NOTHING in `lib/` sets either: the providers build this client on the
+/// OpenAI wire with no token, so routing and the app's failure policy are
+/// exactly what they were. The seam exists for the bakeoff
+/// (`docs/model-bakeoff.md`, "Bedrock as a target") and for the speed design's
+/// opt-in cloud drafts. The token is a request header and nothing else: it
+/// never reaches an [LlmCallRecord], an exception message, or a log line.
 
 /// A failed call to the local model. [message] is safe to show a user.
 class LlmException implements Exception {
@@ -50,6 +64,18 @@ class LlmFormatException extends LlmException {
   const LlmFormatException(super.message);
 }
 
+/// Which request shape a client puts on the wire.
+enum LlmWire {
+  /// OpenAI chat completions: llama-server, oMLX, and Bedrock's
+  /// OpenAI-compatible endpoint. The app's own wire.
+  openAi,
+
+  /// AWS Bedrock Converse: the only wire Anthropic models are served on
+  /// there. A JSON answer is a forced tool call rather than a
+  /// `response_format`.
+  bedrockConverse,
+}
+
 /// One call to the local model, as the HTTP layer saw it.
 ///
 /// Lives here rather than beside the activity log because this file may not
@@ -72,7 +98,7 @@ class LlmCallRecord {
 
   /// llama-server's own `timings` — how long IT spent on the prompt and on
   /// generation. Null when the runtime sends no such block; an MLX-based
-  /// server does not.
+  /// server does not, and neither does Bedrock on either wire.
   ///
   /// Kept BESIDE [durationMs] rather than replacing it because the difference
   /// between the two is the answer to a question neither number can settle
@@ -120,6 +146,30 @@ class LlmCallRecord {
 /// not throw; whatever it does happens on the queues' hot path.
 typedef LlmCallObserver = void Function(LlmCallRecord record);
 
+/// One call as the wire-specific body builders read it — what was asked for,
+/// before either wire has an opinion about how to say it.
+typedef _Request = ({
+  String system,
+  String user,
+  int maxTokens,
+  double temperature,
+  bool think,
+  Map<String, dynamic>? schema,
+  String schemaName,
+  String label,
+});
+
+/// One answer, wire-independent: the free text a completion returned, or the
+/// JSON object a constrained one did, plus whatever the server said it cost.
+typedef _Reply = ({
+  String? text,
+  Map<String, dynamic>? json,
+  int? promptTokens,
+  int? completionTokens,
+  int? serverPromptMs,
+  int? serverPredictedMs,
+});
+
 class LlmClient {
   /// Overridable at build time (`--dart-define=LLAMA_URL=…`) for a model
   /// server on another port or another machine.
@@ -153,13 +203,6 @@ class LlmClient {
   /// catch a wedged server, not a slow one.
   static const Duration _defaultTimeout = Duration(seconds: 120);
 
-  /// Names the server that did not answer. The old constant said
-  /// "run: make model" for BOTH clients, which was wrong for the fast slot
-  /// and wronger now that either can point anywhere.
-  static String _unreachable(String url) =>
-      'The local model server at $url is not reachable — start it, or change '
-      'it in Settings → Models';
-
   /// Where this client points when nothing resolves for it — the constructor's
   /// arguments, which is what every test that subclasses this passes.
   final String _baseUrl;
@@ -180,6 +223,15 @@ class LlmClient {
   final http.Client _http;
   final LlmCallObserver? _onCall;
 
+  /// Sent as `Authorization: Bearer …` on either wire when set, and read
+  /// nowhere else in this file. Null for every client the app builds.
+  final String? _bearerToken;
+
+  /// Which request shape this client speaks. [LlmWire.openAi] everywhere in
+  /// the app; a bench pointed at an Anthropic model on Bedrock passes
+  /// [LlmWire.bedrockConverse].
+  final LlmWire wire;
+
   /// Fires with the tripwire below, so a test can catch a thinking regression.
   void Function()? onReasoningLeak;
 
@@ -188,6 +240,8 @@ class LlmClient {
     String? model,
     Duration? timeout,
     http.Client? httpClient,
+    this._bearerToken,
+    this.wire = LlmWire.openAi,
     this._onCall,
     this._resolveTarget,
   })  : _baseUrl = baseUrl ?? defaultBaseUrl,
@@ -217,6 +271,27 @@ class LlmClient {
   String get baseUrl => target.baseUrl;
   String get model => target.model;
 
+  /// Whether this client is talking to somebody else's machine.
+  ///
+  /// Only the WORDING below turns on it. "start it, or change it in Settings"
+  /// is advice about a server on this desk, and a cloud endpoint that answers
+  /// 403 is not something the reader can go and launch.
+  bool get _remote => _bearerToken != null || wire == LlmWire.bedrockConverse;
+
+  String get _serverNoun =>
+      _remote ? 'The model server' : 'The local model server';
+
+  String get _modelNoun => _remote ? 'The model' : 'The local model';
+
+  /// Names the server that did not answer. The old constant said
+  /// "run: make model" for BOTH clients, which was wrong for the fast slot
+  /// and wronger now that either can point anywhere.
+  String _unreachable(String url) => _remote
+      ? 'The model server at $url is not reachable — check the network and '
+          'the URL'
+      : 'The local model server at $url is not reachable — start it, or change '
+          'it in Settings → Models';
+
   /// Free-text completion. Nothing in this app uses it yet; it is the seam a
   /// draft-reply task lands on.
   Future<String> complete({
@@ -226,18 +301,21 @@ class LlmClient {
     double temperature = 0.2,
     bool think = false,
   }) async {
-    final message = await _post(
-      _body(
-        system: system,
-        user: user,
-        maxTokens: maxTokens,
-        temperature: temperature,
-        think: think,
-      ),
+    final reply = await _post((
+      system: system,
+      user: user,
+      maxTokens: maxTokens,
+      temperature: temperature,
       think: think,
+      schema: null,
+      schemaName: 'complete',
       label: 'complete',
-    );
-    return _content(message);
+    ));
+    final text = reply.text;
+    if (text == null) {
+      throw LlmFormatException('$_modelNoun answered with no message content.');
+    }
+    return text;
   }
 
   /// A completion constrained to [schema].
@@ -252,6 +330,10 @@ class LlmClient {
   /// something a retry fixes. It also means the answer's SHAPE is guaranteed
   /// and its SENSE is not: a grammar-valid string can still hold nonsense, so
   /// every caller validates what comes back.
+  ///
+  /// On [LlmWire.bedrockConverse] the same guarantee comes from a forced tool
+  /// call rather than a `response_format`, and the answer arrives as the
+  /// object itself — see [_converseBody].
   Future<Map<String, dynamic>> completeJson({
     required String system,
     required String user,
@@ -261,85 +343,154 @@ class LlmClient {
     double temperature = 0.2,
     bool think = false,
   }) async {
-    final body = _body(
+    final reply = await _post((
       system: system,
       user: user,
       maxTokens: maxTokens,
       temperature: temperature,
       think: think,
-    );
-    body['response_format'] = {
-      'type': 'json_schema',
-      'json_schema': {
-        'name': schemaName,
-        'strict': true,
-        'schema': schema,
-      },
-    };
+      schema: schema,
+      schemaName: schemaName,
+      label: schemaName,
+    ));
 
-    final content = _content(await _post(body, think: think, label: schemaName));
+    // Converse hands back the object a tool call was made with, so there is
+    // nothing to decode here and nothing to re-encode on the way in.
+    final json = reply.json;
+    if (json != null) return json;
+
+    final content = reply.text;
+    if (content == null) {
+      throw LlmFormatException('$_modelNoun answered with no message content.');
+    }
     final Object? decoded;
     try {
       decoded = jsonDecode(content);
     } on FormatException {
       throw LlmFormatException(
-        'The local model did not answer with JSON: ${_snippet(content)}',
+        '$_modelNoun did not answer with JSON: ${_snippet(content)}',
       );
     }
     if (decoded is! Map<String, dynamic>) {
       throw LlmFormatException(
-        'The local model answered with ${decoded.runtimeType}, not a JSON '
+        '$_modelNoun answered with ${decoded.runtimeType}, not a JSON '
         'object: ${_snippet(content)}',
       );
     }
     return decoded;
   }
 
-  Map<String, dynamic> _body({
-    required String system,
-    required String user,
-    required int maxTokens,
-    required double temperature,
-    required bool think,
-  }) =>
-      {
-        // 'model' is NOT set here — see [_post], which resolves the target
-        // once and stamps both the name and the URL from that one answer.
+  /// The app's own wire, unchanged: `model` is stamped by [_post]'s single
+  /// target resolution, and a constrained call carries the strict
+  /// `json_schema` envelope llama-server turns into a grammar.
+  Map<String, dynamic> _openAiBody(_Request request, LlmTarget target) => {
+        // ONE resolution per request, passed in rather than read again here:
+        // reading `baseUrl` and `model` separately would let a save between
+        // the two stamp a name from the new target onto the old target's URL.
+        'model': target.model,
         'messages': [
-          {'role': 'system', 'content': system},
-          {'role': 'user', 'content': user},
+          {'role': 'system', 'content': request.system},
+          {'role': 'user', 'content': request.user},
         ],
-        'max_tokens': maxTokens,
-        'temperature': temperature,
-        if (!think) 'chat_template_kwargs': {'enable_thinking': false},
+        'max_tokens': request.maxTokens,
+        'temperature': request.temperature,
+        if (!request.think)
+          'chat_template_kwargs': {'enable_thinking': false},
+        if (request.schema != null)
+          'response_format': {
+            'type': 'json_schema',
+            'json_schema': {
+              'name': request.schemaName,
+              'strict': true,
+              'schema': request.schema,
+            },
+          },
       };
 
-  /// POSTs and returns the assistant message object, telling the observer —
-  /// when there is one — what every round trip cost and how it ended.
+  /// The Converse body, and everything it deliberately leaves out.
+  ///
+  /// No `model` — the id is in the URL. No `chat_template_kwargs` — that is a
+  /// llama-server template knob and Bedrock rejects unknown fields. No
+  /// `strict` — a tool's `inputSchema` is enforced by the service, and the
+  /// flag has no place to sit. And no `temperature`: Haiku 4.5 accepts one,
+  /// Claude 5 answers HTTP 400 `temperature is deprecated for this model`, and
+  /// one wire cannot behave two ways — so a Converse row samples at the
+  /// model's default and says so in its banner.
+  Map<String, dynamic> _converseBody(_Request request) => {
+        'system': [
+          {'text': request.system},
+        ],
+        'messages': [
+          {
+            'role': 'user',
+            'content': [
+              {'text': request.user},
+            ],
+          },
+        ],
+        'inferenceConfig': {'maxTokens': request.maxTokens},
+        if (request.schema != null)
+          'toolConfig': {
+            'tools': [
+              {
+                'toolSpec': {
+                  'name': request.schemaName,
+                  'description': 'Answer in this shape.',
+                  'inputSchema': {'json': request.schema},
+                },
+              },
+            ],
+            // Forced, not offered: an unconstrained model that answered in
+            // prose would be the format failure `response_format` exists to
+            // make impossible on the other wire.
+            'toolChoice': {
+              'tool': {'name': request.schemaName},
+            },
+          },
+      };
+
+  /// Where this request goes.
+  ///
+  /// The OpenAI wire posts to the configured URL as it stands. Converse
+  /// addresses the model in the PATH, so the base URL is a host and the id —
+  /// `…-v1:0` and all — is percent-encoded into it.
+  Uri _endpoint(LlmTarget target) {
+    switch (wire) {
+      case LlmWire.openAi:
+        return Uri.parse(target.baseUrl);
+      case LlmWire.bedrockConverse:
+        final base = target.baseUrl.endsWith('/')
+            ? target.baseUrl.substring(0, target.baseUrl.length - 1)
+            : target.baseUrl;
+        return Uri.parse(
+          '$base/model/${Uri.encodeComponent(target.model)}/converse',
+        );
+    }
+  }
+
+  /// POSTs and returns the answer, telling the observer — when there is one —
+  /// what every round trip cost and how it ended.
   ///
   /// A thin wrapper on purpose: the single try below is what instruments all
   /// of [_postInner]'s failure paths without touching any of them.
-  Future<Map<String, dynamic>> _post(
-    Map<String, dynamic> body, {
-    required bool think,
-    required String label,
-  }) async {
-    // ONE resolution per request. Reading `baseUrl` and `model` separately
-    // would let a save between the two stamp a name from the new target onto
-    // the old target's URL.
+  Future<_Reply> _post(_Request request) async {
+    // ONE resolution per request, for both the URL and the model name.
     final target = this.target;
-    body['model'] = target.model;
+    final body = switch (wire) {
+      LlmWire.openAi => _openAiBody(request, target),
+      LlmWire.bedrockConverse => _converseBody(request),
+    };
 
     final observer = _onCall;
     if (observer == null) {
-      return (await _postInner(body, think: think, target: target)).message;
+      return _postInner(body, request: request, target: target);
     }
 
     final sw = Stopwatch()..start();
     try {
-      final result = await _postInner(body, think: think, target: target);
+      final result = await _postInner(body, request: request, target: target);
       observer(LlmCallRecord(
-        label: label,
+        label: request.label,
         durationMs: sw.elapsedMilliseconds,
         outcome: 'ok',
         model: target.model,
@@ -349,10 +500,10 @@ class LlmClient {
         serverPromptMs: result.serverPromptMs,
         serverPredictedMs: result.serverPredictedMs,
       ));
-      return result.message;
+      return result;
     } on LlmUnavailableException catch (e) {
       observer(LlmCallRecord(
-        label: label,
+        label: request.label,
         durationMs: sw.elapsedMilliseconds,
         outcome: 'unavailable',
         model: target.model,
@@ -362,7 +513,7 @@ class LlmClient {
       rethrow;
     } on LlmFormatException catch (e) {
       observer(LlmCallRecord(
-        label: label,
+        label: request.label,
         durationMs: sw.elapsedMilliseconds,
         outcome: 'format',
         model: target.model,
@@ -372,7 +523,7 @@ class LlmClient {
       rethrow;
     } on LlmException catch (e) {
       observer(LlmCallRecord(
-        label: label,
+        label: request.label,
         durationMs: sw.elapsedMilliseconds,
         outcome: 'error',
         model: target.model,
@@ -384,38 +535,37 @@ class LlmClient {
     }
   }
 
-  Future<
-      ({
-        Map<String, dynamic> message,
-        int? promptTokens,
-        int? completionTokens,
-        int? serverPromptMs,
-        int? serverPredictedMs,
-      })> _postInner(
+  Future<_Reply> _postInner(
     Map<String, dynamic> body, {
-    required bool think,
+    required _Request request,
     required LlmTarget target,
   }) async {
+    final url = _endpoint(target);
     final http.Response response;
     try {
       response = await _http
           .post(
-            Uri.parse(target.baseUrl),
-            headers: const {'Content-Type': 'application/json'},
+            url,
+            headers: {
+              'Content-Type': 'application/json',
+              // The one place the token appears. It is never logged, never
+              // recorded, and never put into an exception message.
+              if (_bearerToken != null) 'Authorization': 'Bearer $_bearerToken',
+            },
             body: jsonEncode(body),
           )
           .timeout(timeout);
     } on SocketException {
-      throw LlmUnavailableException(_unreachable(target.baseUrl));
+      throw LlmUnavailableException(_unreachable(url.toString()));
     } on http.ClientException {
-      throw LlmUnavailableException(_unreachable(target.baseUrl));
+      throw LlmUnavailableException(_unreachable(url.toString()));
     } on TimeoutException {
       // NOT [LlmUnavailableException]: the server accepted the connection, so
       // this is one request going wrong rather than a server that is down.
       // Counting it against the message is what stops a single pathological
       // email from blocking the queue behind it forever.
       throw LlmException(
-        'The local model did not answer within ${timeout.inSeconds} seconds.',
+        '$_modelNoun did not answer within ${timeout.inSeconds} seconds.',
       );
     }
 
@@ -426,14 +576,25 @@ class LlmClient {
     // exactly as it does for a refused connection.
     if (response.statusCode >= 500) {
       throw LlmUnavailableException(
-        'The local model server is not ready '
+        '$_serverNoun is not ready '
         '(HTTP ${response.statusCode}). ${_snippet(_text(response))}',
+      );
+    }
+
+    // A 429 is the same kind of thing one step further out: Bedrock throttles
+    // with `ThrottlingException` and the request would succeed unchanged a few
+    // seconds later. So it parks and is retried rather than costing the item,
+    // exactly as a 503 does.
+    if (response.statusCode == 429) {
+      throw LlmUnavailableException(
+        '$_serverNoun is throttling requests '
+        '(HTTP 429). ${_snippet(_text(response))}',
       );
     }
 
     if (response.statusCode != 200) {
       throw LlmException(
-        'The local model rejected the request (HTTP ${response.statusCode}). '
+        '$_modelNoun rejected the request (HTTP ${response.statusCode}). '
         '${_snippet(_text(response))}',
         response.statusCode,
       );
@@ -443,23 +604,34 @@ class LlmClient {
     try {
       decoded = jsonDecode(_text(response));
     } on FormatException {
-      throw const LlmFormatException(
-        'The local model answered with something that is not JSON.',
+      throw LlmFormatException(
+        '$_modelNoun answered with something that is not JSON.',
       );
     }
     if (decoded is! Map) {
-      throw const LlmFormatException(
-        'The local model answered with an unexpected payload shape.',
+      throw LlmFormatException(
+        '$_modelNoun answered with an unexpected payload shape.',
       );
     }
 
+    return switch (wire) {
+      LlmWire.openAi => _readOpenAi(decoded, think: request.think),
+      LlmWire.bedrockConverse => _readConverse(decoded, request: request),
+    };
+  }
+
+  /// The OpenAI answer: one choice, one message, and llama-server's own
+  /// counters beside it.
+  ///
+  /// The content is returned as it came — a caller that asked for JSON decodes
+  /// it, and a non-string content is that caller's format failure, which is
+  /// where it has always been raised.
+  _Reply _readOpenAi(Map<Object?, Object?> decoded, {required bool think}) {
     final choices = decoded['choices'];
     final first = choices is List && choices.isNotEmpty ? choices.first : null;
     final message = first is Map ? first['message'] : null;
     if (message is! Map) {
-      throw const LlmFormatException(
-        'The local model answered with no message content.',
-      );
+      throw LlmFormatException('$_modelNoun answered with no message content.');
     }
 
     // A tripwire, not a failure: the app still works, it just runs at half
@@ -468,13 +640,11 @@ class LlmClient {
     if (!think) {
       final reasoning = message['reasoning_content'];
       if (reasoning is String && reasoning.trim().isNotEmpty) {
-        debugPrint(
-          'LlmClient: enable_thinking was ignored — triage will be ~2x slower',
-        );
-        onReasoningLeak?.call();
+        _noteReasoningLeak();
       }
     }
 
+    final content = message['content'];
     final usage = decoded['usage'];
     // `timings` is llama-server's, not OpenAI's, and its milliseconds arrive
     // as doubles — hence `as num?` before `.toInt()`, the same defensiveness
@@ -483,7 +653,8 @@ class LlmClient {
     // distinguishable to anything averaging these.
     final timings = decoded['timings'];
     return (
-      message: Map<String, dynamic>.from(message),
+      text: content is String ? content : null,
+      json: null,
       promptTokens:
           usage is Map ? (usage['prompt_tokens'] as num?)?.toInt() : null,
       completionTokens:
@@ -495,14 +666,89 @@ class LlmClient {
     );
   }
 
-  static String _content(Map<String, dynamic> message) {
-    final content = message['content'];
-    if (content is! String) {
-      throw const LlmFormatException(
-        'The local model answered with no message content.',
+  /// The Converse answer: a list of content blocks, one of which is the one
+  /// this request asked for.
+  ///
+  /// The missing block is raised HERE rather than in the caller, unlike the
+  /// OpenAI wire above: a forced tool call that came back as prose is the
+  /// service failing the contract, and the observer has to see it as a format
+  /// failure rather than as a successful call somebody threw away afterwards.
+  _Reply _readConverse(
+    Map<Object?, Object?> decoded, {
+    required _Request request,
+  }) {
+    final output = decoded['output'];
+    final message = output is Map ? output['message'] : null;
+    final blocks = message is Map ? message['content'] : null;
+    if (blocks is! List) {
+      throw LlmFormatException('$_modelNoun answered with no message content.');
+    }
+
+    // Every text block, joined: Converse may split one assistant turn across
+    // several, and a draft read from the first alone would be silently cut
+    // short — scored as a poor draft rather than seen as a truncated one.
+    final texts = <String>[];
+    Map<String, dynamic>? json;
+    var reasoned = false;
+    for (final block in blocks) {
+      if (block is! Map) continue;
+      final blockText = block['text'];
+      if (blockText is String) texts.add(blockText);
+      final toolUse = block['toolUse'];
+      final input = toolUse is Map ? toolUse['input'] : null;
+      if (json == null && input is Map) {
+        json = Map<String, dynamic>.from(input);
+      }
+      if (block['reasoningContent'] != null) reasoned = true;
+    }
+    final text = texts.isEmpty ? null : texts.join();
+
+    // The same tripwire the other wire has, on the block a thinking model adds.
+    if (!request.think && reasoned) _noteReasoningLeak();
+
+    if (request.schema != null && json == null) {
+      throw LlmFormatException(
+        '$_modelNoun answered with no tool call, so it answered with no JSON.',
       );
     }
-    return content;
+    // Parity with the other wire, where a constrained answer cut off by
+    // `max_tokens` fails `jsonDecode` and is a format failure. Converse
+    // assembles the tool input server-side, so a cut-off call can arrive as a
+    // well-formed PARTIAL object — and only `stopReason` says so.
+    if (request.schema != null && decoded['stopReason'] == 'max_tokens') {
+      throw LlmFormatException(
+        '$_modelNoun ran out of tokens before finishing the answer '
+        '(stopReason max_tokens).',
+      );
+    }
+    if (request.schema == null && text == null) {
+      throw LlmFormatException('$_modelNoun answered with no message content.');
+    }
+
+    final usage = decoded['usage'];
+    // Both server clocks stay null on this wire, deliberately. Converse
+    // reports `metrics.latencyMs`, which is the whole request's latency and
+    // not a generation time — and `TaskMetrics.timingSource` reads a
+    // non-null `serverPredictedMs` as "this table's rate came from the
+    // server's own clock". Mapping one into the other would have a Bedrock row
+    // claim a generation rate nobody measured, so these rows are wall-clock.
+    return (
+      text: text,
+      json: json,
+      promptTokens:
+          usage is Map ? (usage['inputTokens'] as num?)?.toInt() : null,
+      completionTokens:
+          usage is Map ? (usage['outputTokens'] as num?)?.toInt() : null,
+      serverPromptMs: null,
+      serverPredictedMs: null,
+    );
+  }
+
+  void _noteReasoningLeak() {
+    debugPrint(
+      'LlmClient: enable_thinking was ignored — triage will be ~2x slower',
+    );
+    onReasoningLeak?.call();
   }
 
   /// llama-server sends `application/json` with no charset, which makes

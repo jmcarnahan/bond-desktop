@@ -1,4 +1,5 @@
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:http/http.dart' as http;
 
 import 'bench_stats.dart';
 
@@ -23,11 +24,18 @@ class BenchTarget {
   final String url;
   final String model;
 
+  /// Which request shape this target is spoken to in — `openai` or
+  /// `converse`, parsed by [parseWire]. A string rather than an [LlmWire]
+  /// because it comes straight off a `--dart-define`, and a const constructor
+  /// cannot parse.
+  final String wireName;
+
   const BenchTarget({
     required this.slot,
     required this.label,
     required this.url,
     required this.model,
+    this.wireName = 'openai',
   });
 
   /// The bulk-work slot: triage, extraction, membership. Defaults to the fast
@@ -38,6 +46,7 @@ class BenchTarget {
     url: String.fromEnvironment('BENCH_URL', defaultValue: LlmClient.fastBaseUrl),
     model: String.fromEnvironment('BENCH_MODEL',
         defaultValue: LlmClient.defaultModel),
+    wireName: String.fromEnvironment('BENCH_WIRE', defaultValue: 'openai'),
   );
 
   /// The prose slot: drafts and storyline names — the work that goes to the
@@ -49,6 +58,7 @@ class BenchTarget {
         defaultValue: LlmClient.defaultBaseUrl),
     model: String.fromEnvironment('PROSE_MODEL',
         defaultValue: LlmClient.defaultModel),
+    wireName: String.fromEnvironment('PROSE_WIRE', defaultValue: 'openai'),
   );
 
   /// Where a run drops its JSON, or empty for none. Absolute: `flutter test`
@@ -81,8 +91,30 @@ class BenchTarget {
   static const String drainK =
       String.fromEnvironment('BENCH_K', defaultValue: '1,3');
 
-  LlmClient client({LlmCallObserver? onCall}) =>
-      LlmClient(baseUrl: url, model: model, onCall: onCall);
+  /// The cloud key, for both slots at once — an A/B against a hosted model
+  /// uses one account, not two.
+  ///
+  /// Resolved by the SHELL inside the Makefile recipe (`$(grep … $(BEDROCK_ENV)
+  /// | cut -d= -f2-)`), so the value never sits in a make variable and
+  /// `make -n` prints the grep rather than the key. Empty means none, which is
+  /// every local run.
+  static const String bearer = String.fromEnvironment('BENCH_BEARER');
+
+  /// Which wire this target's client speaks.
+  LlmWire get wire => parseWire(wireName);
+
+  /// The key this target is entitled to, or null — see [bearerFor].
+  String? get bearerToken => bearerFor(url, bearer);
+
+  LlmClient client({LlmCallObserver? onCall, http.Client? httpClient}) =>
+      LlmClient(
+        baseUrl: url,
+        model: model,
+        onCall: onCall,
+        httpClient: httpClient,
+        bearerToken: bearerToken,
+        wire: wire,
+      );
 
   CallCollector collector() =>
       CallCollector(label: label, url: url, model: model);
@@ -112,3 +144,36 @@ List<int> parseDrainK([String raw = BenchTarget.drainK]) {
   }
   return rounds;
 }
+
+/// The key a target at [url] may be handed, or null.
+///
+/// The key is Bedrock's, so it goes to Bedrock and nowhere else: only a host
+/// under `amazonaws.com` receives it. A llama-server on this desk, on the LAN
+/// or on a `.local` name has no use for it and is not shown it, so a `.env`
+/// that carries a key does not change a single byte of what any other run
+/// sends. A URL that cannot be parsed gets nothing, for the same reason
+/// `isLocalUrl` in `golden_prices.dart` treats one as remote: "could not read
+/// where this went" must never resolve to "so send the credential".
+String? bearerFor(String url, String key) {
+  if (key.isEmpty) return null;
+  final host = Uri.tryParse(url)?.host ?? '';
+  final isBedrock =
+      host == 'amazonaws.com' || host.endsWith('.amazonaws.com');
+  return isBedrock ? key : null;
+}
+
+/// [BenchTarget.wireName] as the wire it names.
+///
+/// Loud rather than lenient, for [parseDrainK]'s reason: a `BENCH_WIRE=bedrock`
+/// that quietly meant `openai` would send an OpenAI body to an endpoint that
+/// answers 404 for it, and the run would report the candidate as broken rather
+/// than the define as mistyped.
+LlmWire parseWire(String raw) => switch (raw) {
+      'openai' => LlmWire.openAi,
+      'converse' => LlmWire.bedrockConverse,
+      _ => throw ArgumentError.value(
+          raw,
+          'BENCH_WIRE',
+          "expected 'openai' or 'converse'",
+        ),
+    };

@@ -390,6 +390,101 @@ void main() {
     }
   });
 
+  // ── a throttled call is retried, everything else is not ───────────────
+  group('a throttled call is retried with backoff', () {
+    late List<Duration> waited;
+
+    setUp(() => waited = []);
+
+    Future<void> record(Duration delay) async => waited.add(delay);
+
+    test('succeeds on the third try, having doubled the wait once', () async {
+      var calls = 0;
+      var retries = 0;
+
+      final answer = await retryingUnavailable<String>(
+        () async {
+          calls++;
+          if (calls < 3) {
+            throw const LlmUnavailableException('throttled');
+          }
+          return 'ok';
+        },
+        wait: record,
+        onRetry: () => retries++,
+      );
+
+      expect(answer, 'ok');
+      expect(calls, 3);
+      expect(retries, 2);
+      expect(waited, const [Duration(seconds: 2), Duration(seconds: 4)]);
+    });
+
+    test('gives up after the last attempt and rethrows what it saw', () async {
+      var calls = 0;
+
+      await expectLater(
+        retryingUnavailable<String>(
+          () async {
+            calls++;
+            throw const LlmUnavailableException('throttled');
+          },
+          wait: record,
+        ),
+        throwsA(isA<LlmUnavailableException>()),
+      );
+
+      expect(calls, 4);
+      // One fewer sleep than attempts: nothing waits after the last failure.
+      expect(waited, hasLength(3));
+    });
+
+    test('a plain rejection is this side\'s bug and is not repeated',
+        () async {
+      var calls = 0;
+
+      await expectLater(
+        retryingUnavailable<String>(
+          () async {
+            calls++;
+            throw const LlmException('rejected', 400);
+          },
+          wait: record,
+        ),
+        throwsA(isA<LlmException>()
+            .having((e) => e.statusCode, 'statusCode', 400)),
+      );
+
+      expect(calls, 1);
+      expect(waited, isEmpty);
+    });
+
+    test('an answer in the wrong shape is not repeated either', () async {
+      var calls = 0;
+
+      await expectLater(
+        retryingUnavailable<String>(
+          () async {
+            calls++;
+            throw const LlmFormatException('not JSON');
+          },
+          wait: record,
+        ),
+        throwsA(isA<LlmFormatException>()),
+      );
+
+      expect(calls, 1);
+      expect(waited, isEmpty);
+    });
+
+    test('an attempt count nobody could run is refused', () {
+      expect(
+        () => retryingUnavailable<String>(() async => 'ok', attempts: 0),
+        throwsArgumentError,
+      );
+    });
+  });
+
   // ── the new files must stay safe for a public repo ────────────────────
   test('nothing new names a host that is not example.com', () {
     // The same check `golden_set_test.dart` holds the fixtures to, over the

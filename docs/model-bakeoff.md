@@ -268,6 +268,88 @@ object with the model's reason beside it.
 A `compressed` row carries the lower-bound caveat above, printed by the run
 itself so it travels with the number rather than being remembered.
 
+**Bedrock as a target.** A hosted candidate is a target like any other — a
+URL, a model id and a label — with two differences: it needs a key, and it may
+need the other wire.
+
+Most Bedrock models speak the OpenAI shape at
+`https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions`
+and take the app's body unchanged: `nvidia.nemotron-nano-3-30b`,
+`nvidia.nemotron-super-3-120b`, `zai.glm-4.7-flash`, `zai.glm-4.7`,
+`zai.glm-5`, `deepseek.v3.2`, `google.gemma-3-12b-it`, `google.gemma-3-27b-it`,
+`openai.gpt-oss-20b-1:0`, `openai.gpt-oss-120b-1:0`,
+`openai.gpt-oss-safeguard-20b`. The Anthropic ids —
+`us.anthropic.claude-haiku-4-5-20251001-v1:0`, `us.anthropic.claude-sonnet-5`,
+`us.anthropic.claude-opus-5` — are not served on that wire at all, so they are
+disqualified on it and run on Converse instead (`BENCH_WIRE=converse`, or
+`PROSE_WIRE` for the prose slot), which addresses the model in the URL path
+rather than in the body. `minimax.minimax-m2.5` answers on both wires and is
+disqualified on both, for R1-Distill's reason: it reasons whatever it is told —
+`<reasoning>…` written INTO `content` on the OpenAI wire (178 tokens for a
+ten-token answer), a `reasoningContent` block plus a tool input outside the
+enum on Converse — so every latency against it would measure the leak and
+every budget would be spent on it.
+
+The key is a long-term Bedrock API key for an IAM user:
+
+```sh
+aws iam create-service-specific-credential \
+  --user-name <user> --service-name bedrock.amazonaws.com
+```
+
+Store it as `BEDROCK_API_KEY=…` in the git-ignored `.env` (`BEDROCK_ENV` in the
+Makefile — its own variable rather than `MS_ENV`, which may point at another
+project's registration file). The harness receives it as a `--dart-define` the
+SHELL resolves inside the recipe, so it never sits in a make variable, never
+appears in `make -n` output, and never reaches a result file, an
+`LlmCallRecord` or a log line. One gotcha: an `aws` CLI older than the feature
+(2.27.35 here) parses the secret out of its own output — read the raw response
+under `--debug`, or upgrade the CLI. `BEDROCK_REGION` defaults to `us-east-1`,
+which is the region the price table in
+`app/test/fixtures/golden_prices.dart` (dated `2026-09-12`) was copied for; a
+row run elsewhere is priced against the wrong table.
+
+```sh
+make bench-verify BENCH_URL='$(BEDROCK_OPENAI_URL)' BENCH_MODEL=nvidia.nemotron-nano-3-30b
+make golden BENCH_URL='$(BEDROCK_OPENAI_URL)' BENCH_MODEL=nvidia.nemotron-nano-3-30b \
+            BENCH_LABEL=bedrock/nemotron-nano-3-30b GOLDEN_K=4
+make golden-prose PROSE_URL='$(BEDROCK_CONVERSE_URL)' PROSE_WIRE=converse \
+            PROSE_MODEL=us.anthropic.claude-sonnet-5 PROSE_LABEL=bedrock/claude-sonnet-5
+```
+
+`make bench-verify` first, always, and here for a second reason: the OpenAI
+wire's `/openai/v1/models` answers 404, so there is no listing to check a
+target against and a real completion is the only proof the id exists.
+
+What that verify confirmed on 2026-09-14: the OpenAI wire accepts
+`chat_template_kwargs` and `response_format: json_schema` with `strict`, and it
+CONSTRAINS decoding — an enum probe that asked for a value outside the enum got
+one inside it. It reports `usage` and sends no `timings`, so those rows are
+wall-clock only and carry `timing_source: wall`.
+
+Converse differs in four ways worth knowing before reading a row. A JSON answer
+is a forced tool call (`toolConfig` plus a `toolChoice` naming it), not a
+`response_format`. `temperature` is NOT sent: Claude 5 answers HTTP 400
+`temperature is deprecated for this model` while Haiku 4.5 accepts one, and a
+wire cannot behave two ways — so a Converse row samples at the model's default
+and the run prints that caveat beside its banner. A `reasoningContent` block
+counts as a reasoning leak, exactly as `reasoning_content` does on the other
+wire. And `metrics.latencyMs` is the whole request's latency rather than a
+generation time, so it is dropped rather than reported as a server clock: a
+Bedrock row quotes no server-side rate.
+
+Throttling is HTTP 429 on both wires, which the client maps to
+`LlmUnavailableException` — the same class a 503 gets, because it says nothing
+about the request and the app would park on it. A golden replay retries an
+unavailable stage up to three more times with 2/4/8 s backoff and prints
+`retried N` in its failure line, so a throttled row comes out complete rather
+than quietly missing stages. `GOLDEN_K=4` is the intended concurrency for a
+cloud row; there is no slot count to respect, only the account's rate limit.
+
+Comparability: a Bedrock row runs the same handler parameters as a local row,
+with the Converse temperature caveat as the single exception. Cost comes from
+the dated price table and is blank — not zero — for an id nobody has priced.
+
 **Judging the rubric fields.** Six fields need a reader rather than a matcher:
 the label, the summary, the action items, the needs-you evidence, the extract
 evidence, and a drafted reply. The judge answers one boolean per rubric string
@@ -335,6 +417,16 @@ judge, not from `score_run.py`.
 | 2026-09-14 | bulk | llamacpp/Qwen3.5-9B-Q4_K_M | tail3 | `golden-run-llamacpp-qwen3-5-9b-q4-k-m-20260914-200430.json` | 91% / 93% / 64% / 70% / 83% / 82% / 74% / 64% / 24% / 83% | label 78% · action items 62% · summary 24% · needs-you evidence 25% · extract evidence 38% | 4394 / 2648 / 4444 (triage / needs_you / extraction) | 22.8 | 4.6 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
 | 2026-09-14 | bulk | llamacpp/Qwen3.8-27B-Q4_K_M (as bulk) | tail3 | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-20260914-223320.json` | 92% / 95% / 72% / 84% / 93% / 86% / 74% / 58% / 32% / 93% | label 89% · action items 64% · summary 41% · needs-you evidence 39% · extract evidence 41% | 13412 / 8969 / 13907 (triage / needs_you / extraction) | 7.1 | 1.5 | $0.00 | accuracy ceiling for these prompts: the prose model doing bulk work, 1 slot, no MTP; second of two passes |
 | 2026-09-14 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260914-230921.json` | — / — / — / 82% / — / — / — / — / — / — | draft 20% | 6578 / 16589 (reply_decision / draft_reply) | 7.1 | 4.4 | $0.00 | prose slot: reply decision for the 76 gold-keep items (scored as reply_expected) + 25 drafts for the reply-rubric items, judged in Phase 3; message + tail only; second of two passes |
+| 2026-09-15 | bulk | bedrock/nemotron-nano-3-30b | tail3 | `golden-run-bedrock-nemotron-nano-3-30b-20260915-011152.json` | 88% / 88% / 64% / 65% / 79% / 69% / 69% / 65% / 31% / 80% | label 72% · action items 36% · summary 19% · needs-you evidence 8% · extract evidence 15% | 1129 / 847 / 1226 (triage / needs_you / extraction) | 86.8 | 70.7 | $0.28 | OpenAI wire; K=4 |
+| 2026-09-15 | bulk | bedrock/nemotron-super-3-120b | tail3 | `golden-run-bedrock-nemotron-super-3-120b-20260915-011547.json` | 91% / 95% / 74% / 75% / 93% / 83% / 79% / 70% / 37% / 93% | label 87% · action items 67% · summary 47% · needs-you evidence 19% · extract evidence 41% | 1284 / 883 / 1218 (triage / needs_you / extraction) | 79.1 | 70.7 | $0.69 | OpenAI wire; K=4 |
+| 2026-09-15 | bulk | bedrock/glm-4.7-flash | tail3 | `golden-run-bedrock-glm-4-7-flash-20260915-012130.json` | 84% / 92% / 68% / 74% / 76% / 76% / 82% / 87% / 28% / 83% | label 87% · action items 60% · summary 21% · needs-you evidence 22% · extract evidence 28% | 1296 / 998 / 1304 (triage / needs_you / extraction) | 55.8 | 63.9 | $0.30 | OpenAI wire; K=4 |
+| 2026-09-15 | bulk | bedrock/gemma-3-12b-it | tail3 | `golden-run-bedrock-gemma-3-12b-it-20260915-012458.json` | 91% / 93% / 72% / 87% / 71% / 86% / 79% / 80% / 25% / 86% | label 71% · action items 62% · summary 30% · needs-you evidence 5% · extract evidence 17% | 1302 / 700 / 1178 (triage / needs_you / extraction) | 82.9 | 71.5 | $0.39 | OpenAI wire; K=4 |
+| 2026-09-15 | bulk | bedrock/deepseek-v3.2 | tail3 | `golden-run-bedrock-deepseek-v3-2-20260915-013258.json` | 96% / 92% / 68% / 74% / 89% / 83% / 79% / 71% / 20% / 95% | label 91% · action items 69% · summary 42% · needs-you evidence 39% · extract evidence 22% | 1905 / 1125 / 1818 (triage / needs_you / extraction) | 27.8 | 26.3 | $2.41 | OpenAI wire; K=4 |
+| 2026-09-15 | bulk | bedrock/claude-haiku-4.5 | tail3 | `golden-run-bedrock-claude-haiku-4-5-20260915-013812.json` | 86% / 88% / 72% / 82% / 92% / 84% / 63% / 67% / 34% / 91% | label 95% · action items 62% · summary 53% · needs-you evidence 48% · extract evidence 38% | 1995 / 1593 / 1802 (triage / needs_you / extraction) | 93.9 | 44.7 | $8.27 | Converse, no temperature; K=4 |
+| 2026-09-15 | prose | bedrock/claude-sonnet-5 | tail (fixed) | `golden-run-bedrock-claude-sonnet-5-20260915-014246.json` | — / — / — / 68% / — / — / — / — / — / — | draft 40% | 2409 / 4374 (reply_decision / draft_reply) | 47.4 | 59.8 | $6.80 | Converse, no temperature; K=4 |
+| 2026-09-15 | prose | bedrock/claude-opus-5 | tail (fixed) | `golden-run-bedrock-claude-opus-5-20260915-014610.json` | — / — / — / 78% / — / — / — / — / — / — | draft 48% | 2162 / 5365 (reply_decision / draft_reply) | 51.9 | 56.8 | $17.17 | Converse, no temperature; K=4 |
+| 2026-09-15 | prose | bedrock/nemotron-super-3-120b | tail (fixed) | `golden-run-bedrock-nemotron-super-3-120b-20260915-014735.json` | — / — / — / 66% / — / — / — / — / — / — | draft 28% | 760 / 1319 (reply_decision / draft_reply) | 70.7 | 189.1 | $0.24 | OpenAI wire; K=4 |
+| 2026-09-15 | prose | bedrock/deepseek-v3.2 | tail (fixed) | `golden-run-bedrock-deepseek-v3-2-20260915-015039.json` | — / — / — / 78% / — / — / — / — / — / — | draft 40% | 1045 / 3011 (reply_decision / draft_reply) | 20.7 | 64.0 | $0.84 | OpenAI wire; K=4 |
 
 **What the first rows say** (2026-09-14, all at `GOLDEN_K=1`, keep-only, every
 row the second of two passes unless its note says otherwise). Bigger bulk
@@ -385,6 +477,35 @@ owner-only fact, 9 commit a forbidden move and 8 miss a required point
 "ask, don't invent" rule made explicit before any cloud model is compared on
 this column.
 
+
+**What the cloud rows say** (2026-09-15, keep-only, `GOLDEN_K=4`, the same
+judge, second pass kept, every target through `bench-verify` first, `retried 0`
+on every pass). Read the enum columns against the replayed 4B and the
+27B-as-bulk rows, and the rubric column against `baseline-cc`. Nemotron Super
+3 120B is the first bulk candidate that beats the shipping 4B on both
+needs_action and needs_you (74 / 93 against 66 / 92) and matches or exceeds the
+local 27B ceiling on every enum — at 70 messages a minute against the 27B's
+1.5, and $0.69 per thousand messages. It also writes the best summaries of any
+non-Claude row (47%). Haiku 4.5 on Converse is the best writer of any bulk row
+— label 95%, summary 53%, needs-you evidence 48%, every one above the 27B's 89
+/ 41 / 39 — but at twelve times the 120B's price and with the weakest
+importance (63%) of the cloud rows. DeepSeek V3.2 has the best category (96%)
+and label (91%) and is 2.7x slower and 3.5x dearer than the 120B for no gain on
+the booleans. Gemma 3 12B and GLM 4.7 Flash classify well (reply_expected 87%,
+project 87%) and write badly (needs-you evidence 5%, summary 21%); Nemotron
+Nano 3 is worse than the 4B on every rubric field. No cloud model passes more
+than 53% of summaries, which confirms the summary-omission finding above as
+model-independent. On the prose slot, Opus 5 and Sonnet 5 pass 12 and 10 of
+25 drafts (48% and 40%) against the local 27B's 5, DeepSeek matches Sonnet at
+40% for an eighth of the price, and Nemotron Super passes 7 at 189 messages a
+minute; the reply decision is best on the local 27B (82%) with Opus and
+DeepSeek at 78% — Sonnet's 68% is below the 4B's own triage boolean. The draft
+failures have one shape everywhere: of the failing drafts, 10–15 per model
+invent an owner-only fact (Sonnet 12 of 15, Opus 10 of 13, DeepSeek 10 of 15,
+Nemotron 15 of 18, the 27B 10 of 20), so the "ask, don't invent" prompt change
+is model-independent and comes before any prose model swap. The Converse rows
+sampled at the models' default temperature; the OpenAI-wire rows ran the
+handlers' own.
 
 ## oMLX
 

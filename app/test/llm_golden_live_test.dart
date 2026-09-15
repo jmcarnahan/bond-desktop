@@ -55,6 +55,14 @@ const String _compressedCaveat =
 const String _noneCaveat =
     'ctx none: triage and needs-you saw the message alone';
 
+/// The caveat a Converse row is quoted with, for [_compressedCaveat]'s reason:
+/// `temperature` is the one handler parameter that wire cannot carry, so a
+/// reader comparing this row with a local one has to know it sampled
+/// differently.
+const String _converseCaveat =
+    'wire converse — temperature not sent (Claude 5 rejects it); sampling at '
+    "the model's default";
+
 void main() {
   test(
     'the golden set through triage, needs-you and extraction',
@@ -83,11 +91,16 @@ void main() {
       final warmupClient = target.client();
       for (var i = 0; i < BenchTarget.warmup; i++) {
         try {
-          await runTask(
-            warmupClient,
-            const TriageTask(),
-            TriageInput(set.items.first.message, set.items.first.now),
-            think: BenchTarget.allowReasoning,
+          // Retried like every other call: the warmup is the first burst
+          // against a cloud account and so the likeliest throttle, and a 429
+          // here would otherwise read as a server that is down.
+          await retryingUnavailable(
+            () => runTask(
+              warmupClient,
+              const TriageTask(),
+              TriageInput(set.items.first.message, set.items.first.now),
+              think: BenchTarget.allowReasoning,
+            ),
           );
         } on LlmException catch (e) {
           _warmupFailed('triage', e, target);
@@ -102,6 +115,10 @@ void main() {
       // and a per-item map is the only way a row's `calls` are its own.
       final shared = http.Client();
       final master = target.collector();
+      // Throttled stages retried, printed with the failures: a cloud row
+      // that had to wait is a slower row, and the wall clock above cannot
+      // say why on its own.
+      var retries = 0;
       final startedAt = DateTime.now();
 
       try {
@@ -109,9 +126,7 @@ void main() {
           final (index, item) = pair;
           final entry = entries[index];
           final itemCalls = <String, LlmCallRecord>{};
-          final client = LlmClient(
-            baseUrl: target.url,
-            model: target.model,
+          final client = target.client(
             httpClient: shared,
             onCall: (r) {
               master.record(r);
@@ -124,16 +139,19 @@ void main() {
           // recorded the failed call with its outcome, so the catch has
           // nothing to do but let the next stage start.
           try {
-            final triage = await runTask(
-              client,
-              const TriageTask(),
-              TriageInput(
-                item.message,
-                item.now,
-                thread: item.threadFor(ctx),
-                attachments: item.attachmentRows,
+            final triage = await retryingUnavailable(
+              () => runTask(
+                client,
+                const TriageTask(),
+                TriageInput(
+                  item.message,
+                  item.now,
+                  thread: item.threadFor(ctx),
+                  attachments: item.attachmentRows,
+                ),
+                think: BenchTarget.allowReasoning,
               ),
-              think: BenchTarget.allowReasoning,
+              onRetry: () => retries++,
             );
             entry.triage = triageOut(triage);
           } on LlmException catch (_) {
@@ -147,21 +165,24 @@ void main() {
             entry.needsYou = floorOut();
           } else {
             try {
-              final needsYou = await runTask(
-                client,
-                const NeedsYouTask(),
-                NeedsYouInput(
-                  message: item.message,
-                  thread: item.threadFor(ctx),
-                  ownerName: GoldenDefines.ownerName,
-                  ownerAddress: GoldenDefines.ownerAddress,
-                  now: item.now,
+              final needsYou = await retryingUnavailable(
+                () => runTask(
+                  client,
+                  const NeedsYouTask(),
+                  NeedsYouInput(
+                    message: item.message,
+                    thread: item.threadFor(ctx),
+                    ownerName: GoldenDefines.ownerName,
+                    ownerAddress: GoldenDefines.ownerAddress,
+                    now: item.now,
+                  ),
+                  // The handler's own parameters, both of them: a different
+                  // temperature or budget measures a pipeline nobody ships.
+                  temperature: 0,
+                  maxTokens: 256,
+                  think: BenchTarget.allowReasoning,
                 ),
-                // The handler's own parameters, both of them: a different
-                // temperature or budget measures a pipeline nobody ships.
-                temperature: 0,
-                maxTokens: 256,
-                think: BenchTarget.allowReasoning,
+                onRetry: () => retries++,
               );
               entry.needsYou = needsYouOut(needsYou);
             } on LlmException catch (_) {
@@ -170,12 +191,15 @@ void main() {
           }
 
           try {
-            final extraction = await runTask(
-              client,
-              const ExtractTask(),
-              ExtractionInput(item.message, item.now),
-              temperature: 0,
-              think: BenchTarget.allowReasoning,
+            final extraction = await retryingUnavailable(
+              () => runTask(
+                client,
+                const ExtractTask(),
+                ExtractionInput(item.message, item.now),
+                temperature: 0,
+                think: BenchTarget.allowReasoning,
+              ),
+              onRetry: () => retries++,
             );
             entry.extract = extractOut(extraction);
           } on LlmException catch (_) {
@@ -214,12 +238,18 @@ void main() {
           items: items,
         );
 
+        // A Converse row samples at the model's default, and a reader
+        // comparing it with a local row has to be told so here.
+        final caveat =
+            target.wire == LlmWire.bedrockConverse ? '$_converseCaveat\n' : '';
+
         // ignore: avoid_print
         print(
           '\n${master.banner}\n'
+          '$caveat'
           '\n${master.table()}\n'
           '\n${lines.whereType<String>().join('\n')}\n'
-          '\n${_failureLine(master)}\n'
+          '\n${_failureLine(master, retries)}\n'
           '${_ctxLine(ctx, k, items, wall)}\n'
           '\n${_costBlock(cost, target.url)}\n',
         );
@@ -247,6 +277,8 @@ void main() {
             'run_file': runPath,
             'ctx': ctx.name,
             'k': k,
+            'wire': target.wireName,
+            'retries': retries,
             'items': items,
             'wall_ms': wall.inMilliseconds,
             msgsPerMinKey: msgsPerMinute(items, wall),
@@ -328,17 +360,21 @@ void main() {
       final warmupClient = target.client();
       for (var i = 0; i < BenchTarget.warmup; i++) {
         try {
-          await runTask(
-            warmupClient,
-            const ReplyDecisionTask(),
-            ReplyDecisionInput(
-              context: set.keep.first.tail,
-              message: set.keep.first.message,
-              now: set.keep.first.now,
+          // Retried for the bulk half's reason: a throttled first call is
+          // not a server that is down.
+          await retryingUnavailable(
+            () => runTask(
+              warmupClient,
+              const ReplyDecisionTask(),
+              ReplyDecisionInput(
+                context: set.keep.first.tail,
+                message: set.keep.first.message,
+                now: set.keep.first.now,
+              ),
+              temperature: 0,
+              maxTokens: 256,
+              think: BenchTarget.allowReasoning,
             ),
-            temperature: 0,
-            maxTokens: 256,
-            think: BenchTarget.allowReasoning,
           );
         } on LlmException catch (e) {
           _warmupFailed('reply_decision', e, target);
@@ -347,6 +383,10 @@ void main() {
 
       final shared = http.Client();
       final master = target.collector();
+      // Throttled stages retried, printed with the failures: a cloud row
+      // that had to wait is a slower row, and the wall clock above cannot
+      // say why on its own.
+      var retries = 0;
       final startedAt = DateTime.now();
 
       try {
@@ -358,9 +398,7 @@ void main() {
 
           final entry = entries[index];
           final itemCalls = <String, LlmCallRecord>{};
-          final client = LlmClient(
-            baseUrl: target.url,
-            model: target.model,
+          final client = target.client(
             httpClient: shared,
             onCall: (r) {
               master.record(r);
@@ -370,22 +408,25 @@ void main() {
 
           if (wantsDecision) {
             try {
-              final decision = await runTask(
-                client,
-                const ReplyDecisionTask(),
-                // The plain tail, whatever GOLDEN_CTX says. The decision keeps
-                // six messages at 500 characters, so the tail already fits it
-                // whole — the ladder is a question about the two stages that
-                // clip, and answering it here would move a number for a reason
-                // that has nothing to do with context.
-                ReplyDecisionInput(
-                  context: item.tail,
-                  message: item.message,
-                  now: item.now,
+              final decision = await retryingUnavailable(
+                () => runTask(
+                  client,
+                  const ReplyDecisionTask(),
+                  // The plain tail, whatever GOLDEN_CTX says. The decision
+                  // keeps six messages at 500 characters, so the tail already
+                  // fits it whole — the ladder is a question about the two
+                  // stages that clip, and answering it here would move a
+                  // number for a reason that has nothing to do with context.
+                  ReplyDecisionInput(
+                    context: item.tail,
+                    message: item.message,
+                    now: item.now,
+                  ),
+                  temperature: 0,
+                  maxTokens: 256,
+                  think: BenchTarget.allowReasoning,
                 ),
-                temperature: 0,
-                maxTokens: 256,
-                think: BenchTarget.allowReasoning,
+                onRetry: () => retries++,
               );
               entry.decision = decisionOut(decision);
             } on LlmException catch (_) {
@@ -395,30 +436,34 @@ void main() {
 
           if (wantsDraft) {
             try {
-              final draft = await runTask(
-                client,
-                const DraftTask(),
-                // The tail with the judged message LAST, because that is what
-                // the task reads: `DraftTask` renders only `thread` and answers
-                // its final message, falling back to `replyTo` alone when the
-                // thread is empty — and the handler's `loadThread(untilIso:
-                // received_at)` includes the judged message the same way. A
-                // bare tail would have the model answer the message BEFORE the
-                // one under test, invisibly on every row with a tail.
-                //
-                // And nothing else: the set carries no style examples, no
-                // about-me, no storyline summary and no directory pack, so a
-                // draft here measures the MODEL rather than the retrieval that
-                // would feed it in the app. An empty stand-in for any of them
-                // would measure neither.
-                DraftInput(
-                  thread: [...item.tail, item.message],
-                  replyTo: item.message,
-                  now: item.now,
+              final draft = await retryingUnavailable(
+                () => runTask(
+                  client,
+                  const DraftTask(),
+                  // The tail with the judged message LAST, because that is
+                  // what the task reads: `DraftTask` renders only `thread` and
+                  // answers its final message, falling back to `replyTo` alone
+                  // when the thread is empty — and the handler's
+                  // `loadThread(untilIso: received_at)` includes the judged
+                  // message the same way. A bare tail would have the model
+                  // answer the message BEFORE the one under test, invisibly on
+                  // every row with a tail.
+                  //
+                  // And nothing else: the set carries no style examples, no
+                  // about-me, no storyline summary and no directory pack, so a
+                  // draft here measures the MODEL rather than the retrieval
+                  // that would feed it in the app. An empty stand-in for any of
+                  // them would measure neither.
+                  DraftInput(
+                    thread: [...item.tail, item.message],
+                    replyTo: item.message,
+                    now: item.now,
+                  ),
+                  temperature: 0,
+                  maxTokens: 1536,
+                  think: BenchTarget.allowReasoning,
                 ),
-                temperature: 0,
-                maxTokens: 1536,
-                think: BenchTarget.allowReasoning,
+                onRetry: () => retries++,
               );
               entry.draft = draftOut(draft);
             } on LlmException catch (_) {
@@ -457,12 +502,18 @@ void main() {
           items: written.length,
         );
 
+        // A Converse row samples at the model's default, and a reader
+        // comparing it with a local row has to be told so here.
+        final caveat =
+            target.wire == LlmWire.bedrockConverse ? '$_converseCaveat\n' : '';
+
         // ignore: avoid_print
         print(
           '\n${master.banner}\n'
+          '$caveat'
           '\n${master.table()}\n'
           '\n${lines.whereType<String>().join('\n')}\n'
-          '\n${_failureLine(master)}\n'
+          '\n${_failureLine(master, retries)}\n'
           'ctx tail (fixed), k $k, ${written.length} items in '
           '${wall.inSeconds}s, '
           '${msgsPerMinute(written.length, wall).toStringAsFixed(1)} msgs/min\n'
@@ -487,6 +538,8 @@ void main() {
             'ctx': 'tail (fixed)',
             'draft_context': 'message + tail only',
             'k': k,
+            'wire': target.wireName,
+            'retries': retries,
             'items': written.length,
             'decisions': keepIds.length,
             'drafts': set.items.where((i) => i.gold.hasReply).length,
@@ -510,14 +563,19 @@ void main() {
         isTrue,
         reason: 'no call succeeded — is the server up?',
       );
+      // Shape only, and the shape the SCHEMA promises: a string. Neither
+      // schema sets a minimum length, so an empty reason or body is a poor
+      // answer for the judge to fail, not a broken run for this test to fail —
+      // Sonnet 5 on Bedrock returned one empty reason in 76 decisions, and
+      // failing the whole row for it would have thrown away the other 75.
       for (final entry in entries) {
         final decision = entry.decision;
         if (decision != null) {
-          expect(decision.reason, isNotEmpty, reason: entry.id);
+          expect(decision.reason, isA<String>(), reason: entry.id);
         }
         final draft = entry.draft;
         if (draft != null) {
-          expect(draft.body, isNotEmpty, reason: entry.id);
+          expect(draft.body, isA<String>(), reason: entry.id);
         }
       }
 
@@ -591,8 +649,12 @@ String _ms(LlmCallRecord? record) =>
 /// Failures per stage, from the collector's own buckets. Read rather than
 /// `metricsFor`'d: that one creates the bucket it looks in, which would put an
 /// empty row for a stage nobody ran into the table and the result JSON.
-String _failureLine(CallCollector master) =>
-    'failures: ${[for (final m in master.tasks) '${m.task} ${m.failures}'].join(', ')}';
+String _failureLine(CallCollector master, int retries) =>
+    'failures: ${[for (final m in master.tasks) '${m.task} ${m.failures}'].join(', ')}'
+    ', retried $retries'
+    // A retried attempt is a recorded failure that a later attempt answered
+    // for, so the two numbers overlap and the line has to say so.
+    '${retries == 0 ? '' : ' (each retried attempt is counted among the failures above)'}';
 
 String _ctxLine(GoldenCtx ctx, int k, int items, Duration wall) {
   final head = 'ctx ${ctx.name}, k $k, $items items in ${wall.inSeconds}s, '

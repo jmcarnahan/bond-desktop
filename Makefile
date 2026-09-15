@@ -147,6 +147,11 @@ help:
 	@printf "Point a bench at a candidate runtime without editing anything:\n"
 	@printf "  make bench BENCH_URL=http://localhost:9000/v1/chat/completions \\\\\n"
 	@printf "             BENCH_LABEL=omlx/qwen3-4b-4bit BENCH_MODEL=qwen3-4b\n"
+	@printf "  make golden BENCH_URL='\$$(BEDROCK_OPENAI_URL)' BENCH_MODEL=nvidia.nemotron-nano-3-30b \\\\\n"
+	@printf "              BENCH_LABEL=bedrock/nemotron-nano-3-30b GOLDEN_K=4\n"
+	@printf "  make golden-prose PROSE_URL='\$$(BEDROCK_CONVERSE_URL)' PROSE_WIRE=converse \\\\\n"
+	@printf "              PROSE_MODEL=us.anthropic.claude-sonnet-5 PROSE_LABEL=bedrock/claude-sonnet-5\n"
+	@printf "The Bedrock bearer comes from BEDROCK_API_KEY in \$$(BEDROCK_ENV).\n"
 	@printf "Each run writes JSON to $(BENCH_OUT); PROSE_* points the other slot.\n"
 	@printf "BENCH_VERIFY=0 skips the contract check; BENCH_K=1,3,6 picks the drain\n"
 	@printf "rounds (start the server with FAST_SLOTS >= max(K)).\n\n"
@@ -584,6 +589,29 @@ BENCH_VERIFY ?= 1
 # thing being measured.
 BENCH_K      ?= 1,3
 
+# ── the bakeoff: Bedrock as a target ────────────────────────────────────
+# Two wires. Most Bedrock models speak the OpenAI shape at
+# $(BEDROCK_OPENAI_URL) with the app's body unchanged; Anthropic models are
+# served only on Converse, at $(BEDROCK_CONVERSE_URL) with BENCH_WIRE=converse
+# (PROSE_WIRE for the prose slot). Either way the bearer comes from
+# BEDROCK_API_KEY in $(BEDROCK_ENV) — read INSIDE the recipe by the shell, so
+# the key never sits in a make variable and `make -n` prints the grep, not the
+# value. Its own file variable rather than MS_ENV because MS_ENV may point at
+# another project's registration file; this key is this repo's own.
+#   make golden BENCH_URL='$(BEDROCK_OPENAI_URL)' BENCH_MODEL=nvidia.nemotron-nano-3-30b \
+#               BENCH_LABEL=bedrock/nemotron-nano-3-30b GOLDEN_K=4
+#   make golden-prose PROSE_URL='$(BEDROCK_CONVERSE_URL)' PROSE_WIRE=converse \
+#               PROSE_MODEL=us.anthropic.claude-sonnet-5 PROSE_LABEL=bedrock/claude-sonnet-5
+BEDROCK_ENV    ?= $(CURDIR)/.env
+# us-east-1 on purpose: the price table in app/test/fixtures/golden_prices.dart
+# was copied for that region.
+BEDROCK_REGION ?= us-east-1
+BEDROCK_OPENAI_URL   := https://bedrock-runtime.$(BEDROCK_REGION).amazonaws.com/openai/v1/chat/completions
+BEDROCK_CONVERSE_URL := https://bedrock-runtime.$(BEDROCK_REGION).amazonaws.com
+# openai | converse, per slot.
+BENCH_WIRE ?= openai
+PROSE_WIRE ?= openai
+
 # ── the golden set ──────────────────────────────────────────────────
 # 100 real messages with gold labels for every stage, kept OUTSIDE version
 # control in golden/ (this repo is public). GOLDEN points the live harness at
@@ -603,6 +631,13 @@ GOLDEN_CTX ?= tail3
 
 # Single-quoted values, every one: a label carries spaces and parentheses, and
 # an unquoted --dart-define would hand the shell a second word to run.
+#
+# BENCH_BEARER is the exception, and deliberately: `:=` expands `$$` to a
+# literal `$` once, here, so what is STORED is the text `$(grep …)` and every
+# recipe that uses BENCH_DEFINES has its own shell run that grep at recipe
+# time. The key therefore never sits in a make variable, never appears in
+# `make -n` output, and never reaches the environment of anything but the one
+# flutter test that needs it.
 BENCH_DEFINES := \
   --dart-define=BENCH_URL='$(BENCH_URL)' \
   --dart-define=BENCH_LABEL='$(BENCH_LABEL)' \
@@ -619,7 +654,10 @@ BENCH_DEFINES := \
   --dart-define=GOLDEN_OWNER_NAME='$(GOLDEN_OWNER_NAME)' \
   --dart-define=GOLDEN_OWNER_ADDRESS='$(GOLDEN_OWNER_ADDRESS)' \
   --dart-define=GOLDEN_K='$(GOLDEN_K)' \
-  --dart-define=GOLDEN_CTX='$(GOLDEN_CTX)'
+  --dart-define=GOLDEN_CTX='$(GOLDEN_CTX)' \
+  --dart-define=BENCH_WIRE='$(BENCH_WIRE)' \
+  --dart-define=PROSE_WIRE='$(PROSE_WIRE)' \
+  --dart-define=BENCH_BEARER="$$(grep -m1 '^BEDROCK_API_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)"
 
 # ── the bakeoff: oMLX, the candidate runtime ───────────────────────────
 # oMLX is an MLX-based OpenAI-compatible server, and unlike llama-server it is

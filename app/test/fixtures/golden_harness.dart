@@ -214,3 +214,44 @@ Map<String, Object?> costSummary({
 /// measurable time measured nothing.
 double msgsPerMinute(int items, Duration wall) =>
     wall.inMilliseconds <= 0 ? 0 : items * 60000 / wall.inMilliseconds;
+
+/// Runs [call], retrying only the failure that says nothing about the request.
+///
+/// A cloud server throttles with HTTP 429, which the client maps to
+/// [LlmUnavailableException] for the same reason a 503 maps there: the same
+/// request succeeds a few seconds later. Without a retry a throttled stage
+/// would leave its section out of the run file, and an omitted section reads
+/// to the scorer as "not attempted" — a silently smaller denominator rather
+/// than a visible failure. Everything else propagates on the first try: a 400
+/// is this side's bug, a format failure is the model's answer, and neither is
+/// improved by asking again.
+///
+/// The cost when the server really is down is the backoff and nothing else —
+/// the warmup has already failed the run by then.
+///
+/// [wait] is injectable so the offline test can assert the schedule without
+/// sleeping through it; [onRetry] is how a run counts what it had to repeat.
+Future<T> retryingUnavailable<T>(
+  Future<T> Function() call, {
+  int attempts = 4,
+  Duration firstDelay = const Duration(seconds: 2),
+  Future<void> Function(Duration delay) wait = _sleep,
+  void Function()? onRetry,
+}) async {
+  if (attempts < 1) {
+    throw ArgumentError.value(attempts, 'attempts', 'must be at least one');
+  }
+  var delay = firstDelay;
+  for (var attempt = 1;; attempt++) {
+    try {
+      return await call();
+    } on LlmUnavailableException {
+      if (attempt >= attempts) rethrow;
+      onRetry?.call();
+      await wait(delay);
+      delay *= 2;
+    }
+  }
+}
+
+Future<void> _sleep(Duration d) => Future<void>.delayed(d);
