@@ -541,16 +541,17 @@ this column.
 judge, second pass kept, every target through `bench-verify` first, `retried 0`
 on every pass). Read the enum columns against the replayed 4B and the
 27B-as-bulk rows, and the rubric column against `baseline-cc`. Nemotron Super
-3 120B is the first bulk candidate that beats the shipping 4B on both
-needs_action and needs_you (74 / 93 against 66 / 92) and matches or exceeds the
-local 27B ceiling on every enum — at 70 messages a minute against the 27B's
+3 120B is the first bulk candidate that beats the shipping 4B on needs_action
+(74 against 66) without losing needs_you (93 against 92) and matches or exceeds the
+local 27B ceiling on every enum but reply_expected (75 against 84) — at 70
+messages a minute against the 27B's
 1.5, and $0.69 per thousand messages. It also writes the best summaries of any
 non-Claude row (47%). Haiku 4.5 on Converse is the best writer of any bulk row
 — label 95%, summary 53%, needs-you evidence 48%, every one above the 27B's 89
 / 41 / 39 — but at twelve times the 120B's price and with the weakest
 importance (63%) of the cloud rows. DeepSeek V3.2 has the best category (96%)
-and label (91%) and is 2.7x slower and 3.5x dearer than the 120B for no gain on
-the booleans. Gemma 3 12B and GLM 4.7 Flash classify well (reply_expected 87%,
+and the best label of the non-Claude rows (91%) and is 2.7x slower and 3.5x
+dearer than the 120B for no gain on the booleans. Gemma 3 12B and GLM 4.7 Flash classify well (reply_expected 87%,
 project 87%) and write badly (needs-you evidence 5%, summary 21%); Nemotron
 Nano 3 is worse than the 4B on every rubric field. No cloud model passes more
 than 53% of summaries, which confirms the summary-omission finding above as
@@ -603,6 +604,232 @@ gold candidates were judged with an empty People line because the set holds no
 other thread of theirs, which is a lower bound on recall, and 22 of the 30
 charters are cut at the task's 400-character clamp, so a longer charter budget
 is a follow-up worth measuring before a model swap.
+
+### Recommendations (golden set, 2026-09)
+
+Everything below rests on the rows above: eighteen ledger rows and three
+confirm rows, keep-only, the second of two passes except where a row's note
+says one, one judge for every rubric number. The `## Recommendations` section
+further down is the fictional-corpus bakeoff's, about runtimes and quants;
+this one is about models per stage on real traffic, and where the two overlap
+they agree — keep the 4B, keep the 27B. Three reading rules travel with the
+numbers. Candidates are read against the REPLAYED 4B, not the stored baseline
+(the stored run is one sample of the same model on a different day's thread).
+Rubric numbers are read against other rubric numbers under the same judge,
+never as absolutes — the same stored summaries score 54% under one reader and
+37% under the other. And a difference under four points is not a finding:
+triage at its shipping temperature moves one to three points between identical
+passes, and the one Bedrock row that was run twice at temperature zero moved
+two to three.
+
+**Per stage, the best of each kind.** Keep-only accuracy, the rubric fields
+that stage owns, the stage's p50, and the run's throughput and price.
+Throughput is the whole three-stage run for a bulk row (K=1 local, K=4 cloud),
+so it is comparable down a column and not across slots.
+
+| stage | the shipping 4B, replayed | best local | best cloud |
+| --- | --- | --- | --- |
+| triage | category 89 · urgency 89 · needs_action 66 · reply_expected 70; label 84 · action items 67 · summary 39; p50 2.4 s; 8.9 msgs/min; $0 | the 4B itself. The 27B as bulk is the ceiling (92 / 95 / 72 / 84; label 89, summary 41) at 13.4 s and 1.5 msgs/min; Qwen3.5-4B gains reply_expected (83) and loses the text (summary 16, action items 53) | Nemotron Super 3 120B: 91 / 95 / 74 / 75; label 87 · action items 67 · summary 47; p50 1.3 s; 70.7 msgs/min; $0.69 / 1K |
+| needs-you | verdict 92; evidence 27; p50 1.6 s | the 4B. The 27B's 93 is one point; its evidence (39) is the only gain | Nemotron Super 93 (evidence 19); Haiku 4.5 92 with the best evidence of any row (48) at $8.27 / 1K |
+| extraction | intent 75 · importance 39 · project 66 · topics 26 · people 87; evidence 25; p50 2.0 s | the 27B as bulk: 86 / 74 / 58 / 32 / 93, evidence 41, at 13.9 s. Qwen3.5-4B: 79 / 66 / 63 / 29 / 88, evidence 33, at 2.7 s | Nemotron Super: 83 / 79 / 70 / 37 / 93, evidence 41, p50 1.2 s, $0.69 / 1K. GLM 4.7 Flash has the best project (87) and importance (82) with weak evidence (28) |
+| reply decision | the 4B's triage boolean for the same question: 70 (tail3), 75 (none, one pass) | the 27B on the dedicated task: 82% at 6.6 s | none beats it: Opus 5 78, DeepSeek V3.2 78, Sonnet 5 68, Nemotron Super 66 |
+| drafts (25 reply-rubric items) | — | the 27B: 5 of 25 (20%) at 16.6 s | Opus 5 12 of 25 (48%) at 5.4 s, $17.17 / 1K; Sonnet 5 10 (40%) at 4.4 s, $6.80; DeepSeek V3.2 10 (40%) at 3.0 s, $0.84; Nemotron Super 7 (28%) at 1.3 s, $0.24 |
+| storyline confirm | the 4B: 82%; accepts 19% of named neighbours and 5% of random draws; 15 ties; 1.1 s a call, 51 calls/min | the 27B: 90%; 7% and 0%; 3 ties; 6.4 s a call, 9 calls/min | Nemotron Super: 89%; 17% and 1%; 5 ties; 0.9 s a call, 251.6 calls/min, $0.75 / 1K |
+
+**1. Bulk slot: keep Qwen3-4B-Instruct Q8_0. There is no local swap worth
+making.** The same verdict the fictional corpus gave, for a better reason: the
+candidates that classify better write worse, and the label and summary are
+what the user reads. Qwen3.5-4B passes 16% of summaries against the 4B's 39%
+and Qwen3.5-9B 24%; and the drain bench of 2026-09-13 (not a golden number;
+`make drain`, K=6, same llama.cpp build) has the Qwen3.5-4B at about 70% of
+the 4B's throughput (36 against 51 messages a minute) and the 9B at a third.
+The 27B in the bulk slot is a ceiling, not a slot: it beats the 4B on every
+enum but project (58 against 66) and on label and both evidence fields, with
+summary and action items inside the floor, at six times the time per message
+and 1.5 messages a minute, and the bulk slot's defining workload is the drain.
+What the 4B leaves on the table is now a number rather than a feeling —
+importance 39 against a ceiling of 74, needs_action 66 against 72, and summary
+39 against 41, which is inside the floor — and the cheapest way to close most
+of it is in the prompts (item 7), not in the model.
+
+**2. Needs-you stays local on every tier.** The verdict is 92% on the 4B, 93
+on the 27B and on the 120B, 92 on Haiku; nothing beats the shipping model
+beyond the noise floor, and part of that recall is the deterministic floor,
+which costs no model at all. The models differ on the evidence sentence (27 on
+the 4B, 39 on the 27B, 48 on Haiku), which is a shown sentence and worth a
+prompt experiment, not a model swap for a one-point verdict.
+
+**3. If a cloud bulk model is ever wanted, it is Nemotron Super 3 120B and no
+other.** It is the first candidate that beats the 4B on needs_action (74
+against 66) while matching it on needs_you (93 against 92, inside the floor),
+it matches or exceeds the local 27B ceiling on every enum but reply_expected
+(75 against 84), it writes the best summaries of any non-Claude row (47%), and
+it does so at 70 messages a minute for $0.69 per thousand messages — four
+cents for a sixty-message day. The others each lose on one axis that matters:
+Haiku 4.5 is the best writer of any bulk row (label 95, summary 53) at twelve
+times the price and with the weakest importance of the cloud rows (63);
+DeepSeek V3.2 has the best category (96) and the best label of the non-Claude
+rows (91) and is 2.7x slower and 3.5x dearer for no gain on the booleans;
+Gemma 3 12B and GLM 4.7 Flash classify well and write badly (needs-you
+evidence 5 and 22); Nemotron Nano 3 is worse than the 4B on every rubric
+field. Using Nemotron Super for bulk work would break the speed design's rule
+2 — cloud is never used for triage or extraction and never in a drain — and
+that rule is about consent and what leaves the machine, so a bakeoff does not
+amend it and this round does not. What the numbers do is price the rule:
+staying local costs about forty points of importance, eight of needs_action
+and eight of summary against the one cloud model worth having. If the rule is
+ever reopened for the tiers that cannot hold the 27B (item 8), this is the
+model the amendment would name, and this is what it would buy; that is a
+product decision not taken here.
+
+**4. Prose slot: the 27B keeps the reply decision; drafts are where cloud
+pays.** The dedicated decision on the 27B scores 82% against gold and no cloud
+model reaches it — Opus 5 and DeepSeek 78, Sonnet 68, which is below the 4B's
+own triage boolean. Drafts are the opposite picture: the 27B passes 5 of 25,
+Opus 5 passes 12, Sonnet 5 and DeepSeek V3.2 10 each, Nemotron Super 7. That
+is the speed design's §4 conclusion measured: the opt-in "better draft" should
+be **Claude Opus 5** (the best pass rate, about three cents a draft at the
+design's 5K-in / 300-out shape, $17 per thousand messages in the ledger's
+accounting), with **Sonnet 5** as the cheaper option at 40% of the price and
+40% of drafts passing. DeepSeek V3.2 matching Sonnet at an eighth of the price
+is a fact worth keeping; whether a second provider belongs on the consent
+screen is a product call, not a bakeoff call. Two caveats sit on the whole
+column. Every model's draft failures have the same shape — of the failing
+drafts, 10 to 15 per model invent a fact only the owner knows — so the "ask,
+don't invent" rule in the draft prompt precedes any swap and any escalation,
+and the four prose rows are re-run after it. And the replay drafts from the
+message and its tail alone, with no directory pack, style examples, about-me
+or storyline summary, so every pass rate here is a floor on what the app would
+produce.
+
+**5. The reply decision on the 4B is one run away.** The speed design wants
+the decision off the 27B and onto the fast slot behind an A/B. The set now
+holds half of that A/B: the dedicated decision on the 27B is 82%, and the 4B's
+triage answer to the same question is 70% (75% without the tail, on one pass).
+The half that is missing is `ReplyDecisionTask` itself on the 4B:
+
+```sh
+make golden-prose PROSE_URL=http://localhost:8082/v1/chat/completions \
+                  PROSE_MODEL=<the bulk model name> PROSE_LABEL='llamacpp/Qwen3-4B (decision)'
+```
+
+Seventy-six decisions and twenty-five drafts, a few minutes; only the decision
+number needs reading, and the drafts need not be judged. Within four points of
+82 and the 27B leaves the per-message path, as the design hopes; near 70 and
+the decision stays on the 27B at its measured 6.6 s, which the design's
+per-message budget already absorbs.
+
+**6. Storyline filing: fix the code, then choose the model.** Handed a
+candidate list a person wrote, every model files far better than the app has
+ever filed — 82%, 90% and 89% against the app's 42 of 99 with no correct
+positive, each accepting its gold storyline on 90–98% of `must` items. The
+confirm task is therefore not where filing fails; the sweep that proposes
+storylines and the shortlist that picks the candidate are, and both are code.
+The rework of those two comes before any model decision, and the confirm
+replay is its before-and-after. What the rows say about the model half, for
+when that day comes: the confirm runs on the fast client today, and the 4B is
+the loosest judge of the three — it accepts 19% of the neighbours gold names
+as traps and tied with itself fifteen times — so a shortlist that offers it a
+plausible neighbour gets a wrong filing. The 27B is the strictest (7% of
+neighbours, none of the random draws, 33 of 35 gold-`none` items filed
+nowhere) and a confirm is one call per assignment rather than per message, so
+its 6.4 s is affordable off the critical path; the 120B is 27B-like on random
+draws and gold-`none` and 4B-like on neighbours, at 250 confirmations a
+minute. Before either, one measurement is free: 22 of the 30 real charters are
+cut at the task's 400-character clamp, and `make golden-storyline` against a
+longer clamp says what the missing half of a charter is worth.
+
+**7. The context ladder: the tail as given does not help the 4B, and
+compression was not measurable.** On the shipping model the thread tail lowers
+needs_action (75% alone, 66% with it) and reply_expected (75, 70), on the
+items whose gold label needs the tail as much as on the rest; action items
+rise without it (71 against 67) and summaries fall (34 against 39); the
+needs-you verdict and extraction do not move, though the needs-you evidence sentence
+does (34 / 27 / 25 for `none` / `tail3` / `compressed`, a nine-point spread on
+a rubric field). The `none` and `compressed` rows are single passes and
+triage's noise floor is three points, so the nine on needs_action is outside
+the noise and still wants a second pass before anything acts on it. The
+`compressed` rung (needs_action 68, reply_expected 74, summary 33) is a lower
+bound and says nothing about compression itself: the digest rides in as the
+third of three thread slots and is clipped to 300 characters like any thread
+message, and the median digest is about 670, so the model saw the head of most
+digests and nothing more. What real compression would buy is unmeasurable
+until the digest is its own unclipped prompt field, which is a prompt change
+and the first experiment of the follow-up round. Two more rows would cost
+minutes: `none` on Nemotron Super (every cloud row ran at `tail3`), and
+extraction with a thread at all — it has never seen one, and no knob for it
+was built this round.
+
+**8. The local/cloud split by machine tier**, as the speed design's §2.3 table
+now reads with the set's numbers beside it. The 64 GB row is measured; the 32
+GB and 16 GB rows reuse its bulk numbers, because the bulk slot is the same
+model with a smaller context; the 8 GB row is the one tier whose bulk model
+the set measured separately.
+
+| machine | bulk | prose | what the set measured | cloud, opt-in |
+| --- | --- | --- | --- | --- |
+| 64 GB | 4B | 27B + MTP | triage 89 / 89 / 66 / 70, needs-you 92, extraction importance 39, decision 82, drafts 20%, confirm 82% on the 4B / 90% on the 27B | drafts on Opus 5 (48%) or Sonnet 5 (40%). Nothing else beats local beyond noise except extraction's importance and the summary field, and both are cheaper to move in the prompt than in the model |
+| 32 GB | 4B, ctx 8K | none local | the 64 GB bulk numbers; no local decision, draft or recap | drafts on Opus 5 or Sonnet 5; the decision on the 4B if item 5 holds, else Opus 5 or DeepSeek V3.2 (78); confirm on the 4B, loose, so the shortlist fix matters most here |
+| 16 GB | 4B, ctx 8K | cloud on demand | as above | as above. Nemotron Super (70 msgs/min, $0.69 / 1K) is the only cloud bulk model that beats the 4B on needs_action, but using it for bulk work needs rule 2 amended first (item 3), which this round does not do |
+| 8 GB | Qwen3.5-4B Q4 | cloud on demand | triage 91 / 89 / 66 / 83, needs-you 87, summaries 16%, action items 53 — better enums, far worse text than the 4B | as the 16 GB row |
+
+The tiers below 64 GB were sized, not measured, in the speed design; the table
+above is the first measurement any of them has, and the 8 GB row's summary
+number is the honest caveat the installer's "Your Mac" step should carry.
+
+**9. What the set could not measure.** The gates: Tier 1 and 2 need mail
+headers the set does not carry, so the gate verdict (76 of 100) is what the
+app did on 2026-09-12 and no candidate was asked; the model-side proxy — does
+triage call a gold-drop item a `notification` — is in every all-items pass and
+was not read this round. The storyline sweep, the embedding shortlist, the
+recruit laps and the chaining: the confirm replay hands the model a list a
+human wrote. Drafts without the directory pack, style examples, about-me or
+storyline summary, so the draft column is a floor. `thread_state`, which is
+computed rather than asked. Attachment digests and this machine's custom
+needs-you rules, both left out of the needs-you replay on purpose. The judge's
+family bias: the rubrics were written with Claude's help and the judge is
+Claude, so the rubric column compares rows and states no truth. The Converse
+rows sampled at the models' default temperature. And two caveats on every
+confirm row: thirteen gold candidates were judged with an empty People line,
+and 22 of 30 charters were clipped. One more, about the harness: before commit
+20ce25f a constrained answer that was not JSON was counted as `ok` on the
+OpenAI wire, so the failure line of every bulk and prose row above may
+under-count that case; their run files omit the section honestly and the scorer read
+it as not attempted, so no accuracy number is affected.
+
+**10. What to change next, in order.**
+
+1. **A prompt-and-budget round with a golden before and after**, because every
+   item in it is model-independent and so precedes every swap: summaries,
+   where 46 to 60 of 76 items omit a required fact while the traps fire on 0
+   to 4 and the text averages 113–129 characters against a 500-character cap;
+   the draft prompt's "ask, don't invent" rule, since 10 to 15 of the failing
+   drafts per model invent an owner-only fact; the thread digest as its own
+   unclipped field for triage and needs-you and, for the first time,
+   extraction, with `none` as the control and a second pass on both; the
+   confirm task's 400-character charter clamp. The first two have their
+   commands already (`make golden`, `make golden-prose`, then the judge); the
+   digest field and the charter clamp each need a code change first — the
+   clamp is a constant inside the task, and no extraction-context knob exists
+   — and then `make golden` and `make golden-storyline` are their
+   before-and-after.
+2. **The reply decision on the 4B**, item 5: one `make golden-prose` run
+   decides the speed design's §1.3 item 2.
+3. **The storyline sweep and shortlist rework**, item 6 — code, with the app's
+   own 42 of 99 as the before and the confirm replay as the after.
+4. **Cloud escalation** (speed design §4) with Opus 5 as the default "better
+   draft" and Sonnet 5 as the cheaper option — after the prompt round, not
+   before, so the consent screen promises a measured number.
+5. **The gate fixes the set already encodes**: the `gate-drop-missed` (9),
+   `gate-edge` (7) and `gate-keep-trap` (12) strata are tests waiting to be
+   written against a gate that scores 76 of 100 today.
+6. **Harness housekeeping**, none of it urgent: two of the golden fixtures
+   (the set loader and the registry loader) carry their own copies of the
+   JSON-shape helpers; the storyline run parses a `GOLDEN_CTX` it ignores;
+   `calls_per_min` divides the planned call count rather than the made one; a
+   decode error escapes the loaders without the file's path; a pseudonymised
+   public fixture; and whether `golden/tools/` should be versioned separately
+   from the data it sits beside.
 
 
 ## oMLX
