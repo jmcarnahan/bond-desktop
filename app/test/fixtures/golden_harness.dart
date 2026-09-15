@@ -46,6 +46,18 @@ class GoldenDefines {
   static const String ctxRaw =
       String.fromEnvironment('GOLDEN_CTX', defaultValue: 'tail3');
 
+  /// The gold storyline registry — the thirty efforts a storyline replay files
+  /// candidates into, and the anti-storylines it must not. Machine-local like
+  /// the set, and empty for the same reason: a bare `flutter test` passed
+  /// nobody a path.
+  static const String registryPath = String.fromEnvironment('GOLDEN_REGISTRY');
+
+  /// The bulk run file whose extraction topics and triage summary build each
+  /// candidate card — the app's card carries the newest inbound message's
+  /// extraction and summary, so a replay without them would judge a thinner
+  /// card than the app sends.
+  static const String runPath = String.fromEnvironment('GOLDEN_RUN');
+
   /// The owner's name, or null when the define is empty or only whitespace.
   /// Null and not the empty string: `NeedsYouInput` takes a `String?` and
   /// omits the owner line entirely for null, which is the honest rendering of

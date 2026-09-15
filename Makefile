@@ -101,6 +101,7 @@ RESET  := \033[0m
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ab ab-membership drain bench-compare \
         golden-check golden-baseline golden-score golden golden-prose \
+        golden-storyline \
         golden-judge-pack golden-judge-tally \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
         dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
@@ -138,6 +139,7 @@ help:
 	@printf "  make bench-compare A=<a.json> B=<b.json> → diff two bench results\n"
 	@printf "  make golden        → the golden set through triage/needs-you/extraction on the bulk slot (GOLDEN_CTX=none|tail3|compressed, GOLDEN_K=…)\n"
 	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
+	@printf "  make golden-storyline GOLDEN_RUN=<run.json> → storyline confirm for every golden item against the gold registry, on the bulk slot\n"
 	@printf "  make golden-baseline → what the shipping app scores on the golden set (needs golden/)\n"
 	@printf "  make golden-score R=<run.json> → score a golden run file (BREAKDOWN= per-bucket tables, JSON= the tallies)\n"
 	@printf "  make golden-judge-pack R=<run.json> → packets for the Claude Code rubric judge (NAME=, GOLDEN_BATCH=)\n"
@@ -628,6 +630,10 @@ GOLDEN_K   ?= 1
 GOLDEN_BATCH ?= 10
 # Which context rung triage and needs-you see: none | tail3 | compressed.
 GOLDEN_CTX ?= tail3
+# The bulk run file (from `make golden`) whose extraction topics and triage
+# summary build each storyline candidate card, the way the app's card carries
+# the newest inbound message's; required by golden-storyline.
+GOLDEN_RUN ?=
 
 # Single-quoted values, every one: a label carries spaces and parentheses, and
 # an unquoted --dart-define would hand the shell a second word to run.
@@ -655,6 +661,7 @@ BENCH_DEFINES := \
   --dart-define=GOLDEN_OWNER_ADDRESS='$(GOLDEN_OWNER_ADDRESS)' \
   --dart-define=GOLDEN_K='$(GOLDEN_K)' \
   --dart-define=GOLDEN_CTX='$(GOLDEN_CTX)' \
+  --dart-define=GOLDEN_RUN='$(if $(GOLDEN_RUN),$(abspath $(GOLDEN_RUN)),)' \
   --dart-define=BENCH_WIRE='$(BENCH_WIRE)' \
   --dart-define=PROSE_WIRE='$(PROSE_WIRE)' \
   --dart-define=BENCH_BEARER="$$(grep -m1 '^BEDROCK_API_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)"
@@ -968,6 +975,21 @@ golden: golden-check
 golden-prose: golden-check
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'reply' $(BENCH_DEFINES)
+
+# The storyline half: `ConfirmMembershipTask` alone, on the bulk slot, for every
+# golden item against the gold registry. The candidate list is BOUNDED — the
+# item's gold storyline, the registry storylines gold marks forbidden on it, and
+# three more drawn by a seeded shuffle — because thirty confirmations an item is
+# three thousand calls and five is four hundred and fifty. GOLDEN_RUN supplies
+# the cards: a run file from `make golden`, whose extraction topics and triage
+# summary are what the app's own candidate card carries. Writes the same two
+# files as the other halves; score the run file with `make golden-score R=…`,
+# which reads its `storyline.id`.
+golden-storyline: golden-check
+	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-storyline GOLDEN_RUN=<golden-run-….json from make golden> [BENCH_URL=… BENCH_MODEL=… BENCH_LABEL=… GOLDEN_K=…]\n"; exit 1; }
+	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'storyline' $(BENCH_DEFINES)
 
 # The rubric fields — label, summary, action items, the two evidence sentences
 # and a drafted reply — need a READER, and the middle step here is deliberately

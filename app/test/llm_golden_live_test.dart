@@ -1,13 +1,15 @@
-@Skip('live — needs the golden set and a server. Run: make golden (bulk) or '
-    'make golden-prose (prose)')
+@Skip('live — needs the golden set and a server. Run: make golden (bulk), '
+    'make golden-prose (prose) or make golden-storyline (storyline confirm)')
 library;
 
+import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/llm/reply_decision_task.dart';
+import 'package:bond_inbox/services/llm/storyline_tasks.dart';
 import 'package:bond_inbox/services/llm/triage_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -17,8 +19,10 @@ import 'fixtures/bench_stats.dart';
 import 'fixtures/bench_target.dart';
 import 'fixtures/golden_harness.dart';
 import 'fixtures/golden_prices.dart';
+import 'fixtures/golden_registry.dart';
 import 'fixtures/golden_run.dart';
 import 'fixtures/golden_set.dart';
+import 'fixtures/golden_storyline.dart';
 
 /// The golden set through the app's real tasks, on whatever server the defines
 /// point at.
@@ -583,6 +587,383 @@ void main() {
     },
     timeout: const Timeout(Duration(minutes: 90)),
   );
+
+  /// The confirm task against the gold registry, item by item.
+  ///
+  /// **What it measures.** `ConfirmMembershipTask` alone — "does this thread
+  /// belong to this storyline" — asked of every golden item against a BOUNDED
+  /// candidate list: the item's gold storyline, every registry storyline gold
+  /// marks forbidden on it, and three more drawn by a seeded shuffle. Each
+  /// registry storyline arrives as the app's own [Storyline] with its charter
+  /// as the criterion and its people drawn from the set; each candidate card is
+  /// built the way `enrichedCardForConversationRow` builds one, from a bulk run
+  /// file's topics and summary.
+  ///
+  /// **What it does NOT measure.** Everything around the call: the sweep that
+  /// proposes storylines, the embeddings and thresholds that shortlist them,
+  /// the recruit laps, the chaining, and the owner's kept and removed examples
+  /// — a gold storyline has no owner history, so both fences ride in empty.
+  /// Those are code, and the golden set says the stage they sit around has
+  /// never once been right; this run asks whether the MODEL is the reason.
+  /// Nor is it the app's economics: the app asks one confirmation per
+  /// assignment and this asks four or five per message.
+  test(
+    'the golden set through storyline confirm',
+    () async {
+      final (set, _) = await _loadOrFail();
+      final k = checkK(GoldenDefines.k);
+      const target = BenchTarget.bulk;
+
+      if (GoldenDefines.registryPath.isEmpty) {
+        fail('GOLDEN_REGISTRY is not defined — run via make golden-storyline '
+            '(the Makefile passes it); a bare flutter test cannot find the '
+            'registry');
+      }
+      final registry = await loadGoldenRegistry(GoldenDefines.registryPath);
+      if (GoldenDefines.runPath.isEmpty) {
+        fail('GOLDEN_RUN=<bulk run file from make golden> is not defined — a '
+            'candidate card carries that run\'s extraction topics and triage '
+            'summary, exactly as the app\'s card carries the newest inbound '
+            'message\'s, so a replay without one would judge a thinner card '
+            'than the app ever sends');
+      }
+      final cards = await loadGoldenCards(GoldenDefines.runPath);
+      if (cards.size == 0) {
+        // A STORYLINE run file is a JSON array of the same shape and carries
+        // no topics and no summary, so pointing GOLDEN_RUN at one loads
+        // cleanly and then judges a hundred items on a card the app never
+        // sends. Ninety minutes and a whole ledger row, lost silently.
+        fail('the run file at ${GoldenDefines.runPath} carries no cards — '
+            'GOLDEN_RUN wants a BULK run file from make golden (a storyline '
+            'run file has the same shape and no topics or summary)');
+      }
+
+      // Per slug once: the storyline object is the same on every prompt it
+      // appears in. Its PEOPLE are not — they depend on which candidate is
+      // being asked about — so they are computed per call below.
+      final storylines = <String, Storyline>{};
+      for (final slug in registry.slugs) {
+        storylines[slug] = registry.bySlug[slug]!.toAppStoryline();
+      }
+      final candidates = {
+        for (final item in set.items) item.id: candidatesFor(item, registry),
+      };
+
+      // A gold slug the registry does not carry is dropped by `candidatesFor`,
+      // which shrinks the gold denominator and reads in the ledger as a model
+      // that got worse. The set and the registry are packed together, so this
+      // is zero or the two files do not belong to each other — and the second
+      // is worth stopping for rather than quoting. Counted, never named.
+      final missingGold = set.items
+          .where((item) =>
+              item.gold.storylineId != 'none' &&
+              !registry.bySlug.containsKey(item.gold.storylineId))
+          .length;
+      if (missingGold > 0) {
+        fail('$missingGold items are gold-filed under a storyline the '
+            'registry at ${GoldenDefines.registryPath} does not carry — the '
+            'set and the registry do not belong to each other');
+      }
+
+      final calls = candidates.values.fold(0, (sum, list) => sum + list.length);
+      // What the old "no participants" count really measured: a registry
+      // storyline no golden item is filed under, which has nobody whatever is
+      // excluded.
+      final filedSlugs = {
+        for (final item in set.items) item.gold.storylineId,
+      };
+      final storylinesWithoutItems =
+          registry.slugs.where((slug) => !filedSlugs.contains(slug)).length;
+      // And the count the exclusion creates: a gold candidate whose storyline
+      // has no OTHER golden thread, so it is judged with an empty People line.
+      // Thinner than the app's prompt, which penalises rather than flatters —
+      // but a reader has to know how much of the gold-accept rate was asked
+      // that way. From the set alone; no call needed.
+      final goldPeopleEmpty = set.items
+          .where((item) =>
+              registry.bySlug.containsKey(item.gold.storylineId) &&
+              participantsFor(
+                item.gold.storylineId,
+                set,
+                excludingConversation: item.conversationKey,
+              ).isEmpty)
+          .length;
+      // The task clamps a charter at 400 characters at prompt time. Stated as
+      // a literal rather than read off the task, whose cap is private: what
+      // this line reports is how many charters the reader should expect to see
+      // truncated, and a test reaching into a private static to say so would
+      // be the worse of the two couplings.
+      const charterCap = 400;
+      final overCap = registry.storylines
+          .where((storyline) => storyline.charter.length > charterCap)
+          .length;
+      final carded =
+          set.items.where((item) => cards.byId.containsKey(item.id)).length;
+
+      // ignore: avoid_print
+      print(
+        'storyline: ${registry.storylines.length} storylines, '
+        '${registry.antiSlugs.length} anti, $calls candidate calls over '
+        '${set.items.length} items, $storylinesWithoutItems storylines with '
+        'no item in the set, $goldPeopleEmpty gold candidates judged with an '
+        'empty People line, $missingGold gold slugs missing from the '
+        'registry, $overCap charters over the task\'s $charterCap-char clamp, '
+        'cards from the run for $carded of ${set.items.length} items',
+      );
+
+      // Built up front, in set order, so the run file's rows come out in the
+      // order the set lists them whatever order the pool finishes in.
+      final entries = [
+        for (final item in set.items)
+          GoldenRunEntry(
+            id: item.id,
+            stratum: item.stratum,
+            difficulty: item.difficulty,
+          ),
+      ];
+      final lines = List<String?>.filled(set.items.length, null);
+      final tally = StorylineTally();
+
+      final first = set.items.first;
+      final firstCandidates = candidates[first.id]!;
+      if (firstCandidates.isEmpty) {
+        fail('the first item has no candidate storyline — the registry at '
+            '${GoldenDefines.registryPath} and the set do not belong to each '
+            'other');
+      }
+      final warmupClient = target.client();
+      for (var i = 0; i < BenchTarget.warmup; i++) {
+        try {
+          // Retried like every other call, for the bulk half's reason: a
+          // throttled first call is not a server that is down.
+          await retryingUnavailable(
+            () => runTask(
+              warmupClient,
+              const ConfirmMembershipTask(),
+              ConfirmInput(
+                storyline: storylines[firstCandidates.first]!,
+                storylineParticipants: participantsFor(
+                  firstCandidates.first,
+                  set,
+                  excludingConversation: first.conversationKey,
+                ),
+                candidateCard: candidateCardFor(first, cards.byId[first.id]),
+              ),
+              temperature: 0,
+              think: BenchTarget.allowReasoning,
+            ),
+          );
+        } on LlmException catch (e) {
+          _warmupFailed('storyline_membership', e, target);
+        }
+      }
+
+      final shared = http.Client();
+      final master = target.collector();
+      var retries = 0;
+      final startedAt = DateTime.now();
+
+      try {
+        await forEachBounded(set.items.indexed, k, (pair) async {
+          final (index, item) = pair;
+          final entry = entries[index];
+          // A LIST rather than a map by label: every confirmation on this item
+          // carries the same label, `storyline_membership`, so a map keyed by
+          // it would keep the last call and silently drop the three or four
+          // the item also paid for.
+          final itemRecords = <LlmCallRecord>[];
+          final client = target.client(
+            httpClient: shared,
+            onCall: (r) {
+              master.record(r);
+              itemRecords.add(r);
+            },
+          )..onReasoningLeak = master.noteLeak;
+
+          // Built once per item: the card is what varies between ITEMS and is
+          // constant across an item's candidates, which is also the order the
+          // task puts its fences in so a server's prefix cache stays warm.
+          final card = candidateCardFor(item, cards.byId[item.id]);
+          final outcomes = <ConfirmOutcome>[];
+
+          // Sequentially, in candidate order. The concurrency of this run is
+          // GOLDEN_K items, never candidates within an item: the four prompts
+          // of one item share their storyline-fence prefix only if they arrive
+          // one after another.
+          for (final slug in candidates[item.id]!) {
+            ConfirmResult? result;
+            try {
+              result = await retryingUnavailable(
+                () => runTask(
+                  client,
+                  const ConfirmMembershipTask(),
+                  ConfirmInput(
+                    storyline: storylines[slug]!,
+                    // Per candidate, not per slug: this thread is never among
+                    // the members the storyline is described by, because in
+                    // the app a candidate is by construction not yet one. A
+                    // whole-set union would hand the model the candidate's own
+                    // people back as the storyline's, on every gold question
+                    // it is asked. 453 scans of a hundred items costs nothing
+                    // against the call they precede.
+                    storylineParticipants: participantsFor(
+                      slug,
+                      set,
+                      excludingConversation: item.conversationKey,
+                    ),
+                    candidateCard: card,
+                  ),
+                  // The handler's own temperature: the same thread judged
+                  // against the same storyline twice must give the same
+                  // answer (storyline_service.dart).
+                  temperature: 0,
+                  think: BenchTarget.allowReasoning,
+                ),
+                onRetry: () => retries++,
+              );
+            } on LlmException catch (_) {
+              // Recorded by the observer, with its outcome.
+            }
+            outcomes.add(ConfirmOutcome(
+              slug: slug,
+              kind: kindOf(item, slug),
+              result: result,
+            ));
+          }
+
+          final derived = deriveStorylineId(outcomes);
+          entry.storylineId = derived.id;
+          if (itemRecords.isNotEmpty) {
+            entry.calls['storyline_membership'] = summariseCalls(itemRecords);
+          }
+          tally.add(item, outcomes, derived);
+
+          final totalMs =
+              itemRecords.fold<int>(0, (sum, r) => sum + r.durationMs);
+          final forbidden = outcomes
+              .where((o) => o.kind == CandidateKind.forbidden)
+              .toList();
+          final extra =
+              outcomes.where((o) => o.kind == CandidateKind.extra).toList();
+          // Ids, counts, milliseconds and enums. No slug, no title, no
+          // evidence sentence and no card text: the registry's slugs are
+          // derived from real project names, and scrollback is how they leak.
+          lines[index] = '${item.id.padRight(40)} '
+              'calls ${outcomes.length}  ${totalMs}ms  '
+              'gold=${goldCell(outcomes)}  '
+              'forbidden ${forbidden.where((o) => o.accepted).length}'
+              '/${forbidden.where((o) => o.result != null).length}  '
+              'extra ${extra.where((o) => o.accepted).length}'
+              '/${extra.where((o) => o.result != null).length}  '
+              'derived=${derivedBucket(item, derived)}'
+              '${derived.tie ? ' tie' : ''}';
+        });
+      } finally {
+        shared.close();
+        final wall = DateTime.now().difference(startedAt);
+        final items = set.items.length;
+        final cost = costSummary(
+          tasks: master.tasks,
+          url: target.url,
+          model: target.model,
+          items: items,
+        );
+
+        // A Converse row samples at the model's default, and a reader
+        // comparing it with a local row has to be told so here.
+        final caveat =
+            target.wire == LlmWire.bedrockConverse ? '$_converseCaveat\n' : '';
+
+        // ignore: avoid_print
+        print(
+          '\n${master.banner}\n'
+          '$caveat'
+          '\n${master.table()}\n'
+          '\n${lines.whereType<String>().join('\n')}\n'
+          '\n${tally.table()}\n'
+          '\n${_failureLine(master, retries)}\n'
+          'k $k, $items items, $calls calls in ${wall.inSeconds}s, '
+          '${msgsPerMinute(items, wall).toStringAsFixed(1)} msgs/min, '
+          '${msgsPerMinute(calls, wall).toStringAsFixed(1)} calls/min\n'
+          '\n${_costBlock(cost, target.url)}\n',
+        );
+
+        final written = [
+          for (final entry in entries)
+            if (entry.attempted) entry,
+        ];
+        final runPath = BenchTarget.outDir.isEmpty
+            ? null
+            : await writeGoldenRun(
+                written,
+                bench: 'golden-storyline',
+                // The label carries the half, so `slug()` names the file
+                // `…-storyline-<stamp>.json`. A bulk run and a storyline run
+                // under one BENCH_LABEL would otherwise differ by a timestamp
+                // alone, and feeding the wrong one back as GOLDEN_RUN is
+                // exactly the mistake the zero-cards guard above catches.
+                label: '${target.label} storyline',
+                outDir: BenchTarget.outDir,
+              );
+        final timingPath = await writeBenchResult(
+          bench: 'golden-storyline',
+          collectors: [master],
+          accuracy: const [],
+          startedAt: startedAt,
+          extra: {
+            'run_file': runPath,
+            'cards_from': GoldenDefines.runPath,
+            'k': k,
+            'wire': target.wireName,
+            'retries': retries,
+            'items': items,
+            'calls': calls,
+            'wall_ms': wall.inMilliseconds,
+            msgsPerMinKey: msgsPerMinute(items, wall),
+            'calls_per_min': msgsPerMinute(calls, wall),
+            costKey: cost,
+            'storyline': {
+              ...tally.toJson(),
+              'registry': {
+                'path': GoldenDefines.registryPath,
+                'storylines': registry.storylines.length,
+                'anti': registry.antiSlugs.length,
+                'storylines_without_items': storylinesWithoutItems,
+                'gold_people_empty': goldPeopleEmpty,
+                'charters_over_cap': overCap,
+                'cards_from_run': carded,
+              },
+            },
+            'golden': {
+              'path': GoldenDefines.setPath,
+              'generated': set.generated,
+              'items': items,
+              'block_mismatches': _blockMismatches(set),
+              'directness_mismatches': _directnessMismatches(set),
+            },
+          },
+        );
+        _printPaths(runPath, timingPath);
+      }
+
+      // Shape, never quality — and there is unusually little shape left to
+      // assert. `ConfirmMembershipTask.validate` already fixes all three
+      // fields: `belongs` is an identity check against `true`, `confidence` is
+      // one of three words or `low`, and `evidence` is a clamped non-nullable
+      // String. So what remains is that every item got a row, that something
+      // answered at all, and the reasoning tripwire.
+      expect(entries, hasLength(set.items.length));
+      expect(
+        master.tasks.any((m) => m.n > 0),
+        isTrue,
+        reason: 'no call succeeded — is the server up?',
+      );
+      _assertNoLeaks(master);
+    },
+    // A hundred items times four or five confirmations, on a candidate that
+    // may answer in twenty seconds a call.
+    timeout: const Timeout(Duration(minutes: 90)),
+  );
 }
 
 /// The set and the rung both halves run on, or a failure that says what to run.
@@ -593,7 +974,8 @@ void main() {
 Future<(GoldenSet, GoldenCtx)> _loadOrFail() async {
   if (GoldenDefines.setPath.isEmpty) {
     fail('GOLDEN_SET is not defined — run via make golden / make golden-prose '
-        '(the Makefile passes it); a bare flutter test cannot find the set');
+        '/ make golden-storyline (the Makefile passes it); a bare flutter '
+        'test cannot find the set');
   }
   final set = await loadGoldenSet(GoldenDefines.setPath);
   if (set.items.isEmpty) {

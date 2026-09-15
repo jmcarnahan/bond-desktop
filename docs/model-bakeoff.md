@@ -402,6 +402,65 @@ evidence · extract evidence · draft`, as keep-only pass rates. The baseline
 appears once, carrying both judges' numbers side by side: the same stored
 output, read twice by two different readers.
 
+**Storyline membership.** Filing is the stage the golden set says has never
+once been right — the shipping app scores 42 of 99 on `storyline.id` with no
+correct positive — and the only model in it is `ConfirmMembershipTask`. So
+there is a third replay that asks that task alone, per item, against a BOUNDED
+candidate list: the item's gold storyline when it has one, every registry
+storyline gold marks forbidden on it, and three more drawn from the rest of the
+registry. That is three to six questions an item, about four and a half on
+average and 453 over the set, against the three thousand a full sweep of thirty
+storylines would ask. Each registry storyline arrives as the app's own
+`Storyline` with its charter as the membership criterion — clamped at 400
+characters at prompt time, exactly as in the app, which bites on most real
+charters — and with its people unioned out of the set's OTHER items filed
+under it. The candidate's own thread is never among the members it is judged
+against, as in the app, where a candidate is by construction not yet one; a
+whole-set union would hand the model the candidate card's own participants
+segment back as the storyline's people, on exactly the question the headline
+gold-accept rate is read from. A storyline whose only golden item IS the
+candidate therefore arrives with an empty People line, which is thinner than
+the prompt the app would send and so penalises rather than flatters — the run
+counts how many gold candidates were asked that way. The candidate card is
+built the way `enrichedCardForConversationRow` builds one: the subject
+stripped of its Re:/Fw: markers, the conversation's people, and the extraction
+topics and triage summary of a BULK RUN FILE, passed as `GOLDEN_RUN=`. The
+card is therefore the one the app would carry if the model that wrote that
+run file were the one shipping, which is the only honest way to card a thread
+the replay never triaged. The extras are drawn by a shuffle seeded with the
+item's id, so two candidates sit the same exam; the anti-storylines are never
+instantiated, because an anti-storyline has no charter to judge against and is
+scored through the real storylines' forbidden lists instead.
+
+What this does NOT measure is most of the stage. The sweep that proposes
+storylines, the embeddings and thresholds that shortlist them, the recruit laps
+and the chaining are code, and this replay is blind to all of it: it hands the
+model a list a human wrote. The owner's kept and removed example fences ride
+in empty, because a gold storyline has no owner history to teach it. And the
+economics do not transfer — the app asks one confirmation per assignment and
+this asks four or five per message, so the `$/1K msgs` on a storyline row is
+per thousand messages FILED through the bounded list, not per thousand
+triaged.
+
+Scoring has two halves. The derived `storyline.id` is the accepted candidate
+with the highest confidence — `low` counts as a no, the service's own rule,
+and a tie at the top is broken alphabetically, blind to gold, with the ties
+counted so a reader knows how often the rule decided anything. That id goes
+into a run file and `make golden-score` applies the toolkit's
+must/should/may/forbidden rules to it, the same scorer as every other row. An
+item that lost a candidate call to a failure is left UNFILED, so the scorer
+reads it as not attempted rather than as a miss. Beside the scorer the run
+prints its own direct rates, which a single derived id cannot express:
+gold-accept on the `must` and `should` populations, forbidden-accept,
+extra-accept, how often a gold-`none` item was filed nowhere, and how many
+yeses were hedged into `low` and thrown away.
+
+```sh
+make golden-storyline GOLDEN_RUN=tmp/bench/golden-run-<bulk>-….json         # the shipping 4B
+make golden-storyline GOLDEN_RUN=… BENCH_URL=… BENCH_MODEL=… BENCH_LABEL=…  # a candidate on the bulk slot
+make golden-score R=tmp/bench/golden-run-<bulk>-storyline-….json           # storyline.id, must/should/forbidden rules
+```
+
 ### Golden ledger
 
 Keep-only numbers, per the population rule above. Rubric columns come from the
@@ -506,6 +565,16 @@ Nemotron 15 of 18, the 27B 10 of 20), so the "ask, don't invent" prompt change
 is model-independent and comes before any prose model swap. The Converse rows
 sampled at the models' default temperature; the OpenAI-wire rows ran the
 handlers' own.
+
+#### Storyline confirm
+
+The confirm task against the gold registry, per the block above.
+`storyline.id` is the scorer's number over the items it counts — a `may` item
+is skipped unless it was filed under a forbidden slug, so the denominator is
+98 or 99 — and the rest are the replay's own rates.
+
+| date | bulk label | cards from | run file | storyline.id | gold-accept must / should | forbidden-accept | extra-accept | derived none on gold-none | low-yes | p50 ms | calls/min | msgs/min | $/1K msgs | note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 
 ## oMLX
 
