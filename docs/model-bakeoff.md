@@ -575,6 +575,35 @@ is skipped unless it was filed under a forbidden slug, so the denominator is
 
 | date | bulk label | cards from | run file | storyline.id | gold-accept must / should | forbidden-accept | extra-accept | derived none on gold-none | low-yes | p50 ms | calls/min | msgs/min | $/1K msgs | note |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-09-15 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-storyline-20260915-031444.json` | 80/98 (82%) | 47/48 (98%) / 10/15 (67%) | 17/88 (19%) | 14/300 (5%) | 26/35 (74%) | 0 | 1146 | 51.4 | 11.3 | $0.00 | shipping 4B; cards from its own tail3 run; ties 15; derived gold 50 / none 32 / other 18; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp |
+| 2026-09-15 | llamacpp/Qwen3.8-27B-Q4_K_M (as bulk) | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-20260914-223320.json` | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-storyline-20260915-045507.json` | 88/98 (90%) | 43/48 (90%) / 8/15 (53%) | 6/88 (7%) | 1/300 (0%) | 33/35 (94%) | 0 | 6373 | 9.2 | 2.0 | $0.00 | 27B in the bulk slot; cards from its own as-bulk run; ties 3; derived gold 50 / none 45 / other 5; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp |
+| 2026-09-15 | bedrock/nemotron-super-3-120b | `golden-run-bedrock-nemotron-super-3-120b-20260915-011547.json` | `golden-run-bedrock-nemotron-super-3-120b-storyline-20260915-050910.json` | 86/97 (89%) | 45/48 (94%) / 7/15 (47%) | 15/88 (17%) | 2/299 (1%) | 32/35 (91%) | 0 | 909 | 251.6 | 55.5 | $0.75 | OpenAI wire; cards from its own Phase 4 run; the failed call's item is unfiled (not attempted); 1 failed calls; ties 5; incomplete 1; derived gold 49 / none 41 / other 9; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp |
+
+**What the confirm rows say.** Handed a candidate list a person wrote, every
+model files far better than the app ever has: the shipping app's own filing
+scored 42 of 99 with no correct positive, and against the bounded list the 4B
+scores 82%, the 27B 90% and Nemotron Super 3 120B 89% — each accepting its
+gold storyline on 90–98% of `must` items. So the model half of storyline
+filing is not where the stage fails; the sweep and the shortlist that decide
+WHICH storyline the model is asked about are, and that is code. The three
+differ in what they say no to. The 4B is the loosest: it accepts 19% of the
+forbidden neighbours gold names and 5% of storylines drawn at random, and
+fifteen times it said yes with the same confidence to two storylines at once —
+so a shortlist that offers it a neighbour gets a wrong filing. The 27B is the
+strictest — 7% of neighbours, none of the random draws, 33 of 35 gold-`none`
+items filed nowhere, three ties — at nine confirmations a minute, five times
+slower than the 4B. Nemotron sits between: the 27B's precision on the random
+draws and the gold-`none` items, the 4B's looseness on the named neighbours
+(17%), 250 confirmations a minute for 75 cents a thousand messages; one of its
+453 answers was not valid JSON and that item is left unfiled, and its numbers
+moved two to three points between two passes at temperature 0 where both local
+rows reproduced exactly. `should` items are where all three decline (47–67%
+accepted), which the scorer forgives. Two caveats ride on every row: thirteen
+gold candidates were judged with an empty People line because the set holds no
+other thread of theirs, which is a lower bound on recall, and 22 of the 30
+charters are cut at the task's 400-character clamp, so a longer charter budget
+is a follow-up worth measuring before a model swap.
+
 
 ## oMLX
 
