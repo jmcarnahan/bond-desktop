@@ -464,18 +464,20 @@ make golden-score R=tmp/bench/golden-run-<bulk>-storyline-….json           # s
 ### Golden ledger
 
 Keep-only numbers, per the population rule above. Rubric columns come from the
-judge, not from `score_run.py`.
+judge, not from `score_run.py`. Rows sit with the run they compare against,
+not in date order.
 
 | date | slot | label | ctx | run file | keep-only: category / urgency / needs_action / reply_expected / needs_you / intent / importance / project / topics / people | rubric | p50 ms | gen t/s | msgs/min | $/1K msgs | note |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-09-12 | — | the shipping app, as stored | tail3 | none — `--baseline` | 94% / 88% / 68% / 77% / 94% / 84% / 45% / 67% / 31% / 86% | Opus 4.5 judge: label 86% · action items 59% · summary 54% · needs-you evidence 37% · extract evidence 24% — Claude Code subagent judge: label 82% · action items 54% · summary 37% · needs-you evidence 29% · extract evidence 22% | — | — | — | — | the shipping app's stored output; gate 76/100, storyline 42/99 with no correct positive |
 | 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | 89% / 89% / 66% / 70% / 92% / 75% / 39% / 66% / 26% / 87% | label 84% · action items 67% · summary 39% · needs-you evidence 27% · extract evidence 25% | 2436 / 1616 / 1950 (triage / needs_you / extraction) | 41.4 | 8.9 | $0.00 | the shipping bulk model, replayed; second of two passes |
-| 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | none | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-175832.json` | 88% / 89% / 75% / 75% / 93% / 75% / 39% / 66% / 26% / 87% | label 83% · action items 71% · summary 34% · needs-you evidence 34% · extract evidence 24% | 2173 / 1458 / 2020 (triage / needs_you / extraction) | 41.5 | 9.1 | $0.00 | context ladder: message alone (one pass) |
+| 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | none | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-032602.json` | 88% / 91% / 78% / 78% / 93% / 75% / 39% / 66% / 26% / 87% | pass 1 judge: label 83% · action items 71% · summary 34% · needs-you evidence 34% · extract evidence 24% (pass 2 not judged) | 2232 / 1513 / 2113 (triage / needs_you / extraction) | 40.3 | 8.9 | $0.00 | context ladder: message alone; second of two passes — pass 1 (2026-09-14) read needs_action 75 / reply_expected 75; 4 slots at 4096 tokens each, no failures |
 | 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | compressed | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-181030.json` | 89% / 89% / 68% / 74% / 91% / 75% / 39% / 66% / 26% / 87% | label 80% · action items 62% · summary 33% · needs-you evidence 25% · extract evidence 24% | 2452 / 1684 / 2028 (triage / needs_you / extraction) | 40.4 | 8.7 | $0.00 | context ladder: digest + two newest tail messages, 300-char clip — lower bound (one pass) |
 | 2026-09-14 | bulk | llamacpp/Qwen3.5-4B-UD-Q4_K_XL | tail3 | `golden-run-llamacpp-qwen3-5-4b-ud-q4-k-xl-20260914-190503.json` | 91% / 89% / 66% / 83% / 87% / 79% / 66% / 63% / 29% / 88% | label 82% · action items 53% · summary 16% · needs-you evidence 23% · extract evidence 33% | 2838 / 1716 / 2745 (triage / needs_you / extraction) | 36.9 | 7.5 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
 | 2026-09-14 | bulk | llamacpp/Qwen3.5-9B-Q4_K_M | tail3 | `golden-run-llamacpp-qwen3-5-9b-q4-k-m-20260914-200430.json` | 91% / 93% / 64% / 70% / 83% / 82% / 74% / 64% / 24% / 83% | label 78% · action items 62% · summary 24% · needs-you evidence 25% · extract evidence 38% | 4394 / 2648 / 4444 (triage / needs_you / extraction) | 22.8 | 4.6 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
 | 2026-09-14 | bulk | llamacpp/Qwen3.8-27B-Q4_K_M (as bulk) | tail3 | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-20260914-223320.json` | 92% / 95% / 72% / 84% / 93% / 86% / 74% / 58% / 32% / 93% | label 89% · action items 64% · summary 41% · needs-you evidence 39% · extract evidence 41% | 13412 / 8969 / 13907 (triage / needs_you / extraction) | 7.1 | 1.5 | $0.00 | accuracy ceiling for these prompts: the prose model doing bulk work, 1 slot, no MTP; second of two passes |
 | 2026-09-14 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260914-230921.json` | — / — / — / 82% / — / — / — / — / — / — | draft 20% | 6578 / 16589 (reply_decision / draft_reply) | 7.1 | 4.4 | $0.00 | prose slot: reply decision for the 76 gold-keep items (scored as reply_expected) + 25 drafts for the reply-rubric items, judged in Phase 3; message + tail only; second of two passes |
+| 2026-09-16 | prose | llamacpp/Qwen3-4B (decision) | tail (fixed) | `golden-run-llamacpp-qwen3-4b-decision-20260916-031409.json` | — / — / — / 64% / — / — / — / — / — / — | drafts not judged | 1158 / 2715 (reply_decision / draft_reply) | 38.6 | 26.2 | $0.00 | the 4B on ReplyDecisionTask, served by the bulk model on :8082 (4 slots at 4096): reply decision for the 76 gold-keep items (scored as reply_expected) + 25 drafts; message + tail only; second of two passes, both 64% at temperature 0; recommendation item 5's missing half |
 | 2026-09-15 | bulk | bedrock/nemotron-nano-3-30b | tail3 | `golden-run-bedrock-nemotron-nano-3-30b-20260915-011152.json` | 88% / 88% / 64% / 65% / 79% / 69% / 69% / 65% / 31% / 80% | label 72% · action items 36% · summary 19% · needs-you evidence 8% · extract evidence 15% | 1129 / 847 / 1226 (triage / needs_you / extraction) | 86.8 | 70.7 | $0.28 | OpenAI wire; K=4 |
 | 2026-09-15 | bulk | bedrock/nemotron-super-3-120b | tail3 | `golden-run-bedrock-nemotron-super-3-120b-20260915-011547.json` | 91% / 95% / 74% / 75% / 93% / 83% / 79% / 70% / 37% / 93% | label 87% · action items 67% · summary 47% · needs-you evidence 19% · extract evidence 41% | 1284 / 883 / 1218 (triage / needs_you / extraction) | 79.1 | 70.7 | $0.69 | OpenAI wire; K=4 |
 | 2026-09-15 | bulk | bedrock/glm-4.7-flash | tail3 | `golden-run-bedrock-glm-4-7-flash-20260915-012130.json` | 84% / 92% / 68% / 74% / 76% / 76% / 82% / 87% / 28% / 83% | label 87% · action items 60% · summary 21% · needs-you evidence 22% · extract evidence 28% | 1296 / 998 / 1304 (triage / needs_you / extraction) | 55.8 | 63.9 | $0.30 | OpenAI wire; K=4 |
@@ -488,13 +490,15 @@ judge, not from `score_run.py`.
 | 2026-09-15 | prose | bedrock/deepseek-v3.2 | tail (fixed) | `golden-run-bedrock-deepseek-v3-2-20260915-015039.json` | — / — / — / 78% / — / — / — / — / — / — | draft 40% | 1045 / 3011 (reply_decision / draft_reply) | 20.7 | 64.0 | $0.84 | OpenAI wire; K=4 |
 
 **What the first rows say** (2026-09-14, all at `GOLDEN_K=1`, keep-only, every
-row the second of two passes unless its note says otherwise). Bigger bulk
+row the second of two passes unless its note says otherwise; the 2026-09-16
+rows are read in items 5 and 7). Bigger bulk
 models buy the enums, not the booleans: category and urgency reach 91–95% on
 anything from Qwen3.5-4B up, against 89% on the shipping 4B, and importance
 jumps from 39% to 66–74% — but needs-you FALLS as the bulk model grows (92 →
 87 → 83) until the 27B recovers it (93), and project is flat or worse. The
 context ladder on the 4B is the row worth re-reading: the thread tail lowers
-needs-action (75% alone → 66% with it) and reply-expected (75 → 70), on the
+needs-action (75% alone → 66% with it) and reply-expected (75 → 70; the
+`none` rung's second pass of 2026-09-16 reads 78 and 78, item 7), on the
 items whose gold label needs the tail as much as on the rest, and the digest
 rung sits between the two. Extraction is identical across rungs by
 construction — it has no thread field. The 27B doing bulk work is the ceiling
@@ -607,7 +611,7 @@ is a follow-up worth measuring before a model swap.
 
 ### Recommendations (golden set, 2026-09)
 
-Everything below rests on the rows above: eighteen ledger rows and three
+Everything below rests on the rows above: nineteen ledger rows and three
 confirm rows, keep-only, the second of two passes except where a row's note
 says one, one judge for every rubric number. The `## Recommendations` section
 further down is the fictional-corpus bakeoff's, about runtimes and quants;
@@ -632,7 +636,7 @@ so it is comparable down a column and not across slots.
 | triage | category 89 · urgency 89 · needs_action 66 · reply_expected 70; label 84 · action items 67 · summary 39; p50 2.4 s; 8.9 msgs/min; $0 | the 4B itself. The 27B as bulk is the ceiling (92 / 95 / 72 / 84; label 89, summary 41) at 13.4 s and 1.5 msgs/min; Qwen3.5-4B gains reply_expected (83) and loses the text (summary 16, action items 53) | Nemotron Super 3 120B: 91 / 95 / 74 / 75; label 87 · action items 67 · summary 47; p50 1.3 s; 70.7 msgs/min; $0.69 / 1K |
 | needs-you | verdict 92; evidence 27; p50 1.6 s | the 4B. The 27B's 93 is one point; its evidence (39) is the only gain | Nemotron Super 93 (evidence 19); Haiku 4.5 92 with the best evidence of any row (48) at $8.27 / 1K |
 | extraction | intent 75 · importance 39 · project 66 · topics 26 · people 87; evidence 25; p50 2.0 s | the 27B as bulk: 86 / 74 / 58 / 32 / 93, evidence 41, at 13.9 s. Qwen3.5-4B: 79 / 66 / 63 / 29 / 88, evidence 33, at 2.7 s | Nemotron Super: 83 / 79 / 70 / 37 / 93, evidence 41, p50 1.2 s, $0.69 / 1K. GLM 4.7 Flash has the best project (87) and importance (82) with weak evidence (28) |
-| reply decision | the 4B's triage boolean for the same question: 70 (tail3), 75 (none, one pass) | the 27B on the dedicated task: 82% at 6.6 s | none beats it: Opus 5 78, DeepSeek V3.2 78, Sonnet 5 68, Nemotron Super 66 |
+| reply decision | the 4B on the dedicated task: 64% at 1.2 s (2026-09-16); its triage boolean for the same question: 70 (tail3), 78 (none, second pass) | the 27B on the dedicated task: 82% at 6.6 s | none beats it: Opus 5 78, DeepSeek V3.2 78, Sonnet 5 68, Nemotron Super 66 |
 | drafts (25 reply-rubric items) | — | the 27B: 5 of 25 (20%) at 16.6 s | Opus 5 12 of 25 (48%) at 5.4 s, $17.17 / 1K; Sonnet 5 10 (40%) at 4.4 s, $6.80; DeepSeek V3.2 10 (40%) at 3.0 s, $0.84; Nemotron Super 7 (28%) at 1.3 s, $0.24 |
 | storyline confirm | the 4B: 82%; accepts 19% of named neighbours and 5% of random draws; 15 ties; 1.1 s a call, 51 calls/min | the 27B: 90%; 7% and 0%; 3 ties; 6.4 s a call, 9 calls/min | Nemotron Super: 89%; 17% and 1%; 5 ties; 0.9 s a call, 251.6 calls/min, $0.75 / 1K |
 
@@ -719,6 +723,22 @@ number needs reading, and the drafts need not be judged. Within four points of
 the decision stays on the 27B at its measured 6.6 s, which the design's
 per-message budget already absorbs.
 
+**Answered 2026-09-16:** the run was made, twice, on the fast slot at 4096
+tokens a slot, and both passes agree — the 4B's dedicated decision scores
+64% keep-only, 49 of 76 — the same score on both passes, as temperature 0
+predicts — at p50 1.2 s. That is six points under the 4B's own triage
+boolean (70) and eighteen under the 27B's 82, nowhere near within four of
+it. So the decision stays on the 27B, overlapped with the bulk stages rather
+than ahead of them, and the speed design's §1.3 item 2 is settled that way:
+the 27B's 6.6 s is the cost the per-message budget carries. The surprise is worth recording
+honestly — asked the question on its own the 4B answers it worse than it
+answers it inside triage, where the same boolean reads 70 with the tail and
+78 without one. If the decision ever does leave the 27B, then, the candidate
+is triage's own boolean on the `none` context, not a second call — and at
+78 it sits exactly four points under 82, on the edge of this item's own
+threshold and on one second pass, so it is the follow-up round's A/B and
+not a decision taken here.
+
 **6. Storyline filing: fix the code, then choose the model.** Handed a
 candidate list a person wrote, every model files far better than the app has
 ever filed — 82%, 90% and 89% against the app's 42 of 99 with no correct
@@ -760,6 +780,22 @@ minutes: `none` on Nemotron Super (every cloud row ran at `tail3`), and
 extraction with a thread at all — it has never seen one, and no knob for it
 was built this round.
 
+**Second pass, 2026-09-16:** `none` ran again on the 4B at 4096 tokens a
+slot and read needs_action 78 and reply_expected 78, against pass 1's 75 /
+75 and `tail3`'s 66 / 70 — twelve points and eight, well outside the
+three-point floor. Category and urgency stayed inside it (88 / 91 against
+89 / 89), and the needs-you verdict and extraction did not move at all —
+those two stages run at temperature 0 and reproduced pass 1 exactly, which
+is also the evidence that the smaller per-slot context between the passes
+(4096 tokens a slot, against the unified 32K pool the 2026-09-14 rows ran
+under, before phase 1's `CTX_SIZE = 16384`) changed nothing the model saw.
+The nine points pass 1 saw were not noise. So the follow-up round's digest
+experiment — the thread digest as its own field, item 1 of "what to change
+next" below — takes `none` as its control, and a triage prompt without the
+tail is a live candidate for shipping, pending that round's before-and-after.
+The rubric side of the ladder still rests on pass 1: the summary and
+needs-you-evidence fields were not re-judged on this pass.
+
 **8. The local/cloud split by machine tier**, as the speed design's §2.3 table
 now reads with the set's numbers beside it. The 64 GB row is measured; the 32
 GB and 16 GB rows reuse its bulk numbers, because the bulk slot is the same
@@ -769,7 +805,7 @@ the set measured separately.
 | machine | bulk | prose | what the set measured | cloud, opt-in |
 | --- | --- | --- | --- | --- |
 | 64 GB | 4B | 27B + MTP | triage 89 / 89 / 66 / 70, needs-you 92, extraction importance 39, decision 82, drafts 20%, confirm 82% on the 4B / 90% on the 27B | drafts on Opus 5 (48%) or Sonnet 5 (40%). Nothing else beats local beyond noise except extraction's importance and the summary field, and both are cheaper to move in the prompt than in the model |
-| 32 GB | 4B, ctx 8K | none local | the 64 GB bulk numbers; no local decision, draft or recap | drafts on Opus 5 or Sonnet 5; the decision on the 4B if item 5 holds, else Opus 5 or DeepSeek V3.2 (78); confirm on the 4B, loose, so the shortlist fix matters most here |
+| 32 GB | 4B, ctx 8K | none local | the 64 GB bulk numbers; no local decision, draft or recap | drafts on Opus 5 or Sonnet 5; the decision is triage's own boolean on `none` (78) — the dedicated task on the 4B answered 64 (item 5) — or Opus 5 / DeepSeek V3.2 (78) when a cloud call is being made anyway; confirm on the 4B, loose, so the shortlist fix matters most here |
 | 16 GB | 4B, ctx 8K | cloud on demand | as above | as above. Nemotron Super (70 msgs/min, $0.69 / 1K) is the only cloud bulk model that beats the 4B on needs_action, but using it for bulk work needs rule 2 amended first (item 3), which this round does not do |
 | 8 GB | Qwen3.5-4B Q4 | cloud on demand | triage 91 / 89 / 66 / 83, needs-you 87, summaries 16%, action items 53 — better enums, far worse text than the 4B | as the 16 GB row |
 
@@ -813,8 +849,9 @@ it as not attempted, so no accuracy number is affected.
    clamp is a constant inside the task, and no extraction-context knob exists
    — and then `make golden` and `make golden-storyline` are their
    before-and-after.
-2. **The reply decision on the 4B**, item 5: one `make golden-prose` run
-   decides the speed design's §1.3 item 2.
+2. **The reply decision on the 4B**, item 5 — done 2026-09-16: 64%, so the
+   decision stays on the 27B and the speed design's §1.3 item 2 is settled the
+   slow way.
 3. **The storyline sweep and shortlist rework**, item 6 — code, with the app's
    own 42 of 99 as the before and the confirm replay as the after.
 4. **Cloud escalation** (speed design §4) with Opus 5 as the default "better
