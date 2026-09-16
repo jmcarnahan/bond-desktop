@@ -100,6 +100,9 @@ RESET  := \033[0m
         app-install app-run app-test app-gen app-migrations app-analyze \
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ab ab-membership drain bench-compare \
+        golden-check golden-baseline golden-score golden golden-prose \
+        golden-storyline \
+        golden-judge-pack golden-judge-tally \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
         dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
 
@@ -134,11 +137,23 @@ help:
 	@printf "  make ab-membership → membership eval, 27B vs fast model (needs both up)\n"
 	@printf "  make drain        → drain concurrency race, BENCH_K rounds (needs make fast up)\n"
 	@printf "  make bench-compare A=<a.json> B=<b.json> → diff two bench results\n"
+	@printf "  make golden        → the golden set through triage/needs-you/extraction on the bulk slot (GOLDEN_CTX=none|tail3|compressed, GOLDEN_K=…)\n"
+	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
+	@printf "  make golden-storyline GOLDEN_RUN=<run.json> → storyline confirm for every golden item against the gold registry, on the bulk slot\n"
+	@printf "  make golden-baseline → what the shipping app scores on the golden set (needs golden/)\n"
+	@printf "  make golden-score R=<run.json> → score a golden run file (BREAKDOWN= per-bucket tables, JSON= the tallies)\n"
+	@printf "  make golden-judge-pack R=<run.json> → packets for the Claude Code rubric judge (NAME=, GOLDEN_BATCH=)\n"
+	@printf "  make golden-judge-tally R=<run.json> → tally the judged rubric files (NAME=, JSON= the tallies)\n"
 	@printf "  make app-build    → release build of the macOS app\n"
 	@printf "  make vec-vendor   → re-download the sqlite-vec C sources (SHA-pinned)\n\n"
 	@printf "Point a bench at a candidate runtime without editing anything:\n"
 	@printf "  make bench BENCH_URL=http://localhost:9000/v1/chat/completions \\\\\n"
 	@printf "             BENCH_LABEL=omlx/qwen3-4b-4bit BENCH_MODEL=qwen3-4b\n"
+	@printf "  make golden BENCH_URL='\$$(BEDROCK_OPENAI_URL)' BENCH_MODEL=nvidia.nemotron-nano-3-30b \\\\\n"
+	@printf "              BENCH_LABEL=bedrock/nemotron-nano-3-30b GOLDEN_K=4\n"
+	@printf "  make golden-prose PROSE_URL='\$$(BEDROCK_CONVERSE_URL)' PROSE_WIRE=converse \\\\\n"
+	@printf "              PROSE_MODEL=us.anthropic.claude-sonnet-5 PROSE_LABEL=bedrock/claude-sonnet-5\n"
+	@printf "The Bedrock bearer comes from BEDROCK_API_KEY in \$$(BEDROCK_ENV).\n"
 	@printf "Each run writes JSON to $(BENCH_OUT); PROSE_* points the other slot.\n"
 	@printf "BENCH_VERIFY=0 skips the contract check; BENCH_K=1,3,6 picks the drain\n"
 	@printf "rounds (start the server with FAST_SLOTS >= max(K)).\n\n"
@@ -576,8 +591,59 @@ BENCH_VERIFY ?= 1
 # thing being measured.
 BENCH_K      ?= 1,3
 
+# ── the bakeoff: Bedrock as a target ────────────────────────────────────
+# Two wires. Most Bedrock models speak the OpenAI shape at
+# $(BEDROCK_OPENAI_URL) with the app's body unchanged; Anthropic models are
+# served only on Converse, at $(BEDROCK_CONVERSE_URL) with BENCH_WIRE=converse
+# (PROSE_WIRE for the prose slot). Either way the bearer comes from
+# BEDROCK_API_KEY in $(BEDROCK_ENV) — read INSIDE the recipe by the shell, so
+# the key never sits in a make variable and `make -n` prints the grep, not the
+# value. Its own file variable rather than MS_ENV because MS_ENV may point at
+# another project's registration file; this key is this repo's own.
+#   make golden BENCH_URL='$(BEDROCK_OPENAI_URL)' BENCH_MODEL=nvidia.nemotron-nano-3-30b \
+#               BENCH_LABEL=bedrock/nemotron-nano-3-30b GOLDEN_K=4
+#   make golden-prose PROSE_URL='$(BEDROCK_CONVERSE_URL)' PROSE_WIRE=converse \
+#               PROSE_MODEL=us.anthropic.claude-sonnet-5 PROSE_LABEL=bedrock/claude-sonnet-5
+BEDROCK_ENV    ?= $(CURDIR)/.env
+# us-east-1 on purpose: the price table in app/test/fixtures/golden_prices.dart
+# was copied for that region.
+BEDROCK_REGION ?= us-east-1
+BEDROCK_OPENAI_URL   := https://bedrock-runtime.$(BEDROCK_REGION).amazonaws.com/openai/v1/chat/completions
+BEDROCK_CONVERSE_URL := https://bedrock-runtime.$(BEDROCK_REGION).amazonaws.com
+# openai | converse, per slot.
+BENCH_WIRE ?= openai
+PROSE_WIRE ?= openai
+
+# ── the golden set ──────────────────────────────────────────────────
+# 100 real messages with gold labels for every stage, kept OUTSIDE version
+# control in golden/ (this repo is public). GOLDEN points the live harness at
+# the file; the scorer of record is golden/tools/score_run.py, not Dart.
+GOLDEN            ?= $(CURDIR)/golden/golden-set.json
+GOLDEN_REGISTRY   ?= $(CURDIR)/golden/storylines.json
+# The inbox owner as the app knows them; the set carries no owner line.
+GOLDEN_OWNER_NAME    ?=
+GOLDEN_OWNER_ADDRESS ?=
+# Concurrency of a golden replay; a llama.cpp server needs FAST_SLOTS >= K.
+GOLDEN_K   ?= 1
+# How many items ride in one rubric-judge packet; one Claude Code agent reads
+# one packet, so this is really "how much work per agent".
+GOLDEN_BATCH ?= 10
+# Which context rung triage and needs-you see: none | tail3 | compressed.
+GOLDEN_CTX ?= tail3
+# The bulk run file (from `make golden`) whose extraction topics and triage
+# summary build each storyline candidate card, the way the app's card carries
+# the newest inbound message's; required by golden-storyline.
+GOLDEN_RUN ?=
+
 # Single-quoted values, every one: a label carries spaces and parentheses, and
 # an unquoted --dart-define would hand the shell a second word to run.
+#
+# BENCH_BEARER is the exception, and deliberately: `:=` expands `$$` to a
+# literal `$` once, here, so what is STORED is the text `$(grep …)` and every
+# recipe that uses BENCH_DEFINES has its own shell run that grep at recipe
+# time. The key therefore never sits in a make variable, never appears in
+# `make -n` output, and never reaches the environment of anything but the one
+# flutter test that needs it.
 BENCH_DEFINES := \
   --dart-define=BENCH_URL='$(BENCH_URL)' \
   --dart-define=BENCH_LABEL='$(BENCH_LABEL)' \
@@ -588,7 +654,17 @@ BENCH_DEFINES := \
   --dart-define=BENCH_OUT='$(BENCH_OUT)' \
   --dart-define=BENCH_WARMUP=$(BENCH_WARMUP) \
   --dart-define=BENCH_THINK=$(if $(filter-out 0,$(BENCH_THINK)),true,false) \
-  --dart-define=BENCH_K='$(BENCH_K)'
+  --dart-define=BENCH_K='$(BENCH_K)' \
+  --dart-define=GOLDEN_SET='$(GOLDEN)' \
+  --dart-define=GOLDEN_REGISTRY='$(GOLDEN_REGISTRY)' \
+  --dart-define=GOLDEN_OWNER_NAME='$(GOLDEN_OWNER_NAME)' \
+  --dart-define=GOLDEN_OWNER_ADDRESS='$(GOLDEN_OWNER_ADDRESS)' \
+  --dart-define=GOLDEN_K='$(GOLDEN_K)' \
+  --dart-define=GOLDEN_CTX='$(GOLDEN_CTX)' \
+  --dart-define=GOLDEN_RUN='$(if $(GOLDEN_RUN),$(abspath $(GOLDEN_RUN)),)' \
+  --dart-define=BENCH_WIRE='$(BENCH_WIRE)' \
+  --dart-define=PROSE_WIRE='$(PROSE_WIRE)' \
+  --dart-define=BENCH_BEARER="$$(grep -m1 '^BEDROCK_API_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)"
 
 # ── the bakeoff: oMLX, the candidate runtime ───────────────────────────
 # oMLX is an MLX-based OpenAI-compatible server, and unlike llama-server it is
@@ -845,6 +921,104 @@ bench-compare:
 	   printf "$(RED)✗$(RESET) usage: make bench-compare A=<a.json> B=<b.json>\n"; \
 	   printf "    results land in $(BENCH_OUT)\n"; exit 1; }
 	@cd $(APP_DIR) && dart run tool/bench_compare.dart '$(A)' '$(B)'
+
+# ── the golden set ─────────────────────────────────────────────────────
+# Accuracy against 100 real messages, scored by golden/tools/score_run.py.
+# Everything under golden/ is git-ignored and machine-local, so these targets
+# depend on files this checkout cannot supply — exactly like the set itself.
+# See docs/model-bakeoff.md, "The golden set".
+#
+# BREAKDOWN= and JSON= apply to the KEEP-ONLY pass only, by design. That pass
+# is the model-quality number a ledger row quotes; the all-items pass below it
+# is the second opinion, and printing every bucket of it too would double the
+# output for a copy nobody reads.
+
+# The golden set's own check, on BOTH files the round needs: the set, and the
+# storyline registry. score_run.py opens the registry at import time, so a
+# missing one is a traceback rather than a sentence; the Dart harness reads
+# $(GOLDEN_REGISTRY) directly.
+golden-check:
+	@test -f "$(GOLDEN)" || { printf "$(RED)✗$(RESET) no golden set at $(GOLDEN) — set GOLDEN in local.mk\n"; exit 1; }
+	@test -f "$(GOLDEN_REGISTRY)" || { printf "$(RED)✗$(RESET) no storyline registry at $(GOLDEN_REGISTRY) — set GOLDEN_REGISTRY in local.mk\n"; exit 1; }
+
+# Both recipes cd to the DIRECTORY OF $(GOLDEN), never to a hard-coded golden/:
+# score_run.py opens `golden-set.json` and `storylines.json` relative to its own
+# cwd, so a hard-coded cd would let an overridden GOLDEN pass the guard above
+# and then score the default set anyway — the worst kind of wrong number, the
+# kind that looks right.
+
+# What the shipping app scored on 2026-09-12, from the labels the set stores.
+golden-baseline: golden-check
+	@cd $(dir $(GOLDEN)) && python3 tools/score_run.py --baseline --keep-only $(if $(BREAKDOWN),--breakdown $(BREAKDOWN),) $(if $(JSON),--json '$(abspath $(JSON))',)
+	@cd $(dir $(GOLDEN)) && python3 tools/score_run.py --baseline
+
+# Score a run file the live harness wrote: make golden-score R=tmp/bench/golden-run-….json
+golden-score: golden-check
+	@test -n "$(R)" || { printf "$(RED)✗$(RESET) usage: make golden-score R=<run.json> [BREAKDOWN=stratum|difficulty|derivable_from] [JSON=<out.json>]\n"; exit 1; }
+	@cd $(dir $(GOLDEN)) && python3 tools/score_run.py --run '$(abspath $(R))' --keep-only $(if $(BREAKDOWN),--breakdown $(BREAKDOWN),) $(if $(JSON),--json '$(abspath $(JSON))',)
+	@cd $(dir $(GOLDEN)) && python3 tools/score_run.py --run '$(abspath $(R))'
+
+# The golden set through the real tasks on the bulk slot (triage, needs-you,
+# extraction) — the run that produces a ledger row. Writes two files to
+# $(BENCH_OUT): golden-run-<label>-<stamp>.json (score it with
+# `make golden-score R=…`; the test prints the exact command) and the
+# golden-bulk timing/cost JSON beside it. GOLDEN_CTX picks the context rung;
+# GOLDEN_K > 1 needs the server started with FAST_SLOTS >= K, or the pool
+# measures queue-wait dressed up as throughput.
+golden: golden-check
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'triage' $(BENCH_DEFINES)
+
+# The prose half: a reply decision for every gold-keep item and a draft for
+# every item that carries a reply rubric, on the prose slot. Same two files,
+# bench name golden-prose; the drafts are judged by rubric in a later phase.
+golden-prose: golden-check
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'reply' $(BENCH_DEFINES)
+
+# The storyline half: `ConfirmMembershipTask` alone, on the bulk slot, for every
+# golden item against the gold registry. The candidate list is BOUNDED — the
+# item's gold storyline, the registry storylines gold marks forbidden on it, and
+# three more drawn by a seeded shuffle — because thirty confirmations an item is
+# three thousand calls and five is four hundred and fifty. GOLDEN_RUN supplies
+# the cards: a run file from `make golden`, whose extraction topics and triage
+# summary are what the app's own candidate card carries. Writes the same two
+# files as the other halves; score the run file with `make golden-score R=…`,
+# which reads its `storyline.id`.
+golden-storyline: golden-check
+	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-storyline GOLDEN_RUN=<golden-run-….json from make golden> [BENCH_URL=… BENCH_MODEL=… BENCH_LABEL=… GOLDEN_K=…]\n"; exit 1; }
+	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'storyline' $(BENCH_DEFINES)
+
+# The rubric fields — label, summary, action items, the two evidence sentences
+# and a drafted reply — need a READER, and the middle step here is deliberately
+# Claude Code agents rather than a Bedrock call: pack writes one packet per
+# group of items under labels/judge/<name>/packets/, each packet is handed to
+# ONE agent that applies the packet's own prompt and writes the per-item files,
+# and the tally is arithmetic in code over those files. NAME=baseline-cc
+# re-judges the stored app output BESIDE the original Opus 4.5 files rather
+# than over them, so the two judges can be read side by side.
+# One source selector for both targets. BASELINE=0 means "not the baseline"
+# (the $(filter-out 0,…) idiom bench-verify uses), and R= with BASELINE=1 is
+# refused rather than letting --baseline quietly win over the run file.
+GOLDEN_JUDGE_SRC = $(if $(filter-out 0,$(BASELINE)),--baseline,--run '$(abspath $(R))') $(if $(NAME),--name '$(NAME)',)
+define golden-judge-guard
+	@test -n "$(R)$(filter-out 0,$(BASELINE))" || { printf "$(RED)✗$(RESET) usage: make $(1) R=<run.json> [NAME=…] $(2)  —  or  make $(1) BASELINE=1 NAME=baseline-cc\n"; exit 1; }
+	@test -z "$(R)" || test -z "$(filter-out 0,$(BASELINE))" || { printf "$(RED)✗$(RESET) pass R=<run.json> or BASELINE=1, not both\n"; exit 1; }
+endef
+
+golden-judge-pack: golden-check
+	$(call golden-judge-guard,golden-judge-pack,[GOLDEN_BATCH=10])
+	@cd $(dir $(GOLDEN)) && python3 tools/judge_pack.py $(GOLDEN_JUDGE_SRC) --batch $(GOLDEN_BATCH)
+
+# Same selector, and the same two passes as golden-score: the keep-only pass a
+# ledger row quotes, then the all-items second opinion. JSON= applies to the
+# keep-only pass only, for the same reason it does there.
+golden-judge-tally: golden-check
+	$(call golden-judge-guard,golden-judge-tally,[JSON=<out.json>])
+	@cd $(dir $(GOLDEN)) && python3 tools/judge_rubrics.py $(GOLDEN_JUDGE_SRC) --tally-only --keep-only $(if $(JSON),--json '$(abspath $(JSON))',)
+	@cd $(dir $(GOLDEN)) && python3 tools/judge_rubrics.py $(GOLDEN_JUDGE_SRC) --tally-only
 
 app-analyze:
 	@cd $(APP_DIR) && $(FLUTTER) analyze

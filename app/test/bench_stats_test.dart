@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -318,6 +320,83 @@ void main() {
           scorecardBlock([Scorecard('category (exact)')..judge('a', matched: true)]);
 
       expect(block, contains('no disagreements with the corpus'));
+    });
+  });
+
+  // ── the pool ──────────────────────────────────────────────────────────
+  group('the bounded pool runs the work once, k at a time', () {
+    test('K=1 is a sequential loop in the order the iterable yields', () async {
+      final seen = <int>[];
+      await forEachBounded([0, 1, 2, 3, 4, 5], 1, (item) async {
+        await Future<void>.delayed(Duration.zero);
+        seen.add(item);
+      });
+      expect(seen, [0, 1, 2, 3, 4, 5]);
+    });
+
+    test('K=3 keeps at most three in flight and runs all ten', () async {
+      // Completers rather than sleeps: concurrency observed through timing is
+      // concurrency the test is guessing at, and a slow CI box would make the
+      // guess wrong in whichever direction hides a bug.
+      final gates = [for (var i = 0; i < 10; i++) Completer<void>()];
+      final started = <int>[];
+      var inFlight = 0;
+      var peak = 0;
+
+      final run = forEachBounded(List.generate(10, (i) => i), 3, (item) async {
+        started.add(item);
+        inFlight++;
+        peak = peak > inFlight ? peak : inFlight;
+        await gates[item].future;
+        inFlight--;
+      });
+
+      // Nothing has been released, so exactly the pool's width has started.
+      await Future<void>.delayed(Duration.zero);
+      expect(started, hasLength(3));
+      expect(peak, 3);
+
+      for (final gate in gates) {
+        gate.complete();
+        await Future<void>.delayed(Duration.zero);
+      }
+      await run;
+
+      expect(started, hasLength(10));
+      expect(started.toSet(), hasLength(10), reason: 'an item ran twice');
+      expect(peak, lessThanOrEqualTo(3));
+      expect(peak, greaterThanOrEqualTo(2));
+    });
+
+    test('a pool of no workers is a typo worth stopping for', () {
+      expect(
+        () => forEachBounded([1, 2], 0, (_) async {}),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('an error in the body reaches the caller', () async {
+      await expectLater(
+        forEachBounded([1, 2, 3], 2, (item) async {
+          if (item == 2) throw StateError('item $item');
+        }),
+        throwsA(isA<StateError>()),
+      );
+    });
+
+    test('after a failure the pool takes no more items', () async {
+      // The replay catches its own call failures, so anything that escapes
+      // the body is a bug — and a bug that surfaces on item one must not be
+      // followed by ninety-nine more items of work before anybody hears of it.
+      final started = <int>[];
+      await expectLater(
+        forEachBounded([1, 2, 3, 4], 1, (item) async {
+          started.add(item);
+          if (item == 1) throw StateError('item $item');
+        }),
+        throwsA(isA<StateError>()),
+      );
+      expect(started, [1]);
     });
   });
 }

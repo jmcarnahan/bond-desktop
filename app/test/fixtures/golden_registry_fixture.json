@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "generated": "2026-09-14",
+  "basis": "FICTIONAL — invented to mirror the real registry's shape for tests. No real effort, person or channel appears here.",
+  "definition": "A storyline is a body of WORK: a named effort with a goal, that spans conversations and days. It is not a person, not a team, not a channel, not a meeting series, and not a shape of request.",
+  "anti_storylines": [
+    {
+      "slug": "ANTI-person-hub",
+      "why_tempting": "One person appears in every thread, so their name reads like a project.",
+      "why_wrong": "A person is not an effort. Filing by who wrote it buries the work under a contact card.",
+      "detect_with": "A candidate title that is a person's name, or a name plus a generic noun.",
+      "signature": {
+        "title_patterns": [
+          "^[A-Z][a-z]+ [A-Z][a-z]+ (Coordination|Threads|Updates)$",
+          "Coordination$"
+        ],
+        "note": "Matched against the app's own cluster titles, which is all the scorer has to go on."
+      }
+    }
+  ],
+  "storylines": [
+    {
+      "slug": "river-office-lease",
+      "title": "River office lease",
+      "charter": "Signing and fitting out the second-floor suite on River Street: the lease itself, the addendum and its capped allowance clause, the fit-out schedule, the sprinkler work the landlord owes, and the handover of keys. A thread belongs here when it moves the suite closer to being occupied — a term being negotiated, a drawing being approved, a contractor being booked, a date being held. It does not belong here because it shares the same people or the same street; the building has other work going on, and that work is not this effort. Ends when the suite is occupied and the snagging list is closed.",
+      "includes": [
+        "the addendum and its allowance clause",
+        "the walkthrough that settles the fit-out"
+      ],
+      "excludes": [
+        "the surveyor's report on the north elevation, which belongs to the building, not the lease"
+      ],
+      "members": [
+        {
+          "source": "email",
+          "conversation_key": "email:fx-conv-lease",
+          "strength": "must",
+          "note": "The addendum thread itself."
+        },
+        {
+          "source": "email",
+          "conversation_key": "email:fx-conv-lease-2",
+          "strength": "should",
+          "note": "A one-question spur off the same negotiation."
+        }
+      ],
+      "forbidden_neighbors": ["studio-website-redesign", "ANTI-person-hub"]
+    },
+    {
+      "slug": "studio-website-redesign",
+      "title": "Studio website redesign",
+      "charter": "Rebuilding the studio's public site end to end: the content audit of what is already there, the new page templates and their reviews, the photography shoot and its list of subjects, the copy rewrite, and the launch itself. A thread belongs here when it decides or changes something that will be visible on the finished site, or when it schedules the people doing that work. Threads about the studio's other commitments belong to those commitments, even when the same designer is on them and the same week is being argued about. Ends at launch, once the old site stops serving.",
+      "includes": ["template reviews", "the photography shoot list"],
+      "excludes": ["the office lease, which shares people and nothing else"],
+      "members": [
+        {
+          "source": "teams",
+          "conversation_key": "teams:fx-chat-site-build",
+          "strength": "must",
+          "note": "Where the templates are argued about."
+        }
+      ],
+      "forbidden_neighbors": ["river-office-lease"]
+    },
+    {
+      "slug": "spring-portfolio-review",
+      "title": "Spring portfolio review",
+      "charter": "The once-a-year read across every open commission: the per-commission write-ups, the numbers each one is judged on, the meeting where they are read together, and the decisions about what continues, what is paused and what is dropped. A thread belongs here when it feeds or follows that review — a write-up being drafted, a figure being questioned, the meeting being scheduled, the minutes being circulated. Any single commission's day-to-day work belongs to that commission and not to the review that reads it. Ends when the review meeting has minutes and the decisions are recorded.",
+      "includes": ["the per-commission write-ups", "the review meeting itself"],
+      "excludes": ["any single commission's day-to-day work"],
+      "members": [
+        {
+          "source": "email",
+          "conversation_key": "email:fx-conv-portfolio",
+          "strength": "may",
+          "note": "A scheduling spur; defensible either way."
+        }
+      ],
+      "forbidden_neighbors": ["ANTI-person-hub"]
+    }
+  ],
+  "genuine_one_offs": [
+    {
+      "source": "email",
+      "conversation_key": "email:fx-conv-survey",
+      "note": "One survey delivered once. No effort spans it."
+    }
+  ],
+  "known_bots": [
+    {
+      "who": "Riverside Weekly",
+      "from_address": "digest@riverside-weekly.example.com",
+      "from_name": "Riverside Weekly",
+      "tell": "An unsubscribe footer and a fixed send hour.",
+      "prevalence": "weekly",
+      "expected": "dropped at the gate"
+    }
+  ],
+  "quasi_automated_human_content": [
+    {
+      "who": "Marcus Feld",
+      "what": "A per-bay survey narrative that reads like a generated report.",
+      "expected": "kept — a person wrote the covering note"
+    }
+  ]
+}

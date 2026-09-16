@@ -42,6 +42,7 @@ void main(List<String> args) {
   stdout.writeln();
   _writeTasks(aTarget, bTarget);
   stdout.writeln();
+  _writeRun(a, b);
   _writeAccuracy(a, b);
   stdout.writeln();
   stdout.writeln('A: ${aTarget['label'] ?? '—'}  B: ${bTarget['label'] ?? '—'}');
@@ -118,6 +119,40 @@ void _writeTasks(Map<String, Object?> aTarget, Map<String, Object?> bTarget) {
       '| ${_rate(atps)} | ${_rate(btps)} | $deltaPct |',
     );
   }
+}
+
+/// The two whole-run numbers a golden replay adds, when BOTH sides carry them.
+///
+/// Silent otherwise, and silent per row: the benches that predate the golden
+/// replay write neither, and a table of em dashes would be two more lines to
+/// read past on every ordinary comparison. Nothing is written — not even the
+/// spacing line — unless a row is.
+void _writeRun(Map<String, Object?> a, Map<String, Object?> b) {
+  final aRate = _double(_extra(a)['msgs_per_min']);
+  final bRate = _double(_extra(b)['msgs_per_min']);
+  final aCost = _double(_cost(a)['per_1k_messages_usd']);
+  final bCost = _double(_cost(b)['per_1k_messages_usd']);
+
+  final rows = [
+    if (aRate != null && bRate != null)
+      'msgs/min: A ${aRate.toStringAsFixed(1)}  B ${bRate.toStringAsFixed(1)}',
+    if (aCost != null && bCost != null)
+      '\$/1K msgs: A ${aCost.toStringAsFixed(2)}  '
+          'B ${bCost.toStringAsFixed(2)}',
+  ];
+  if (rows.isEmpty) return;
+  rows.forEach(stdout.writeln);
+  stdout.writeln();
+}
+
+Map<String, Object?> _extra(Map<String, Object?> doc) {
+  final extra = doc['extra'];
+  return extra is Map ? Map<String, Object?>.from(extra) : const {};
+}
+
+Map<String, Object?> _cost(Map<String, Object?> doc) {
+  final cost = _extra(doc)['cost'];
+  return cost is Map ? Map<String, Object?>.from(cost) : const {};
 }
 
 void _writeAccuracy(Map<String, Object?> a, Map<String, Object?> b) {

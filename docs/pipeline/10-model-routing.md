@@ -73,7 +73,22 @@ restart and without interrupting work in flight.
 
 Every call records which model answered it: `LlmCallRecord` carries `model` and
 `baseUrl`, and the activity log folds the model into the row as `llm_model`
-(shown on the `t/s` cell's tooltip and in the expanded detail).
+(shown on the `t/s` cell's tooltip and in the expanded detail). The record's
+`outcome` is decided after the answer has been made usable: a constrained
+call whose content is not the JSON object it asked for is recorded as
+`format`, never as `ok` — the decode runs inside the same instrumented try as
+the request, so a model that overran its budget mid-object counts as a failed
+call in every table built from these records.
+
+**Two wires, one client.** `LlmClient` can also carry a bearer token and speak
+Bedrock's Converse wire (`LlmWire.bedrockConverse`) alongside the OpenAI one.
+Nothing in `lib/` sets either — every provider still constructs the client on
+the OpenAI wire with no token — so routing, the slots and the failure policy
+below are exactly what they were. The seam exists for the bakeoff
+(`docs/model-bakeoff.md`, "Bedrock as a target") and for the speed design's
+opt-in cloud drafts. On Converse a JSON answer is a forced tool call rather
+than a `response_format`, `temperature` is not sent, and the response carries
+no server timings.
 
 ## Managed mode: one router
 
@@ -308,7 +323,8 @@ what Bond is would be the app asking for credentials as its opening line.
   parks only that *kind* of work, and a dead session parks the whole drain.
   Work resumes when the server comes up.
 - Per-request timeout 120 s (`llm_client.dart`). 5xx → unavailable/park;
-  timeout → counted against the item; HTTP 400 → fatal, never retried — which
+  429 (a throttled cloud server) → unavailable/park as well; timeout →
+  counted against the item; HTTP 400 → fatal, never retried — which
   is what a model name the server does not have looks like.
 - `TriageQueue` and `AiWorker` share one `DrainGate`
   (`app/lib/services/drain_gate.dart`) so the two drains never compete for the

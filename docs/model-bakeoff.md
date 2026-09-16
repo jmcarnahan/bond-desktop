@@ -24,6 +24,10 @@ depends on a server being up, and each `make` target below runs it with
 | `make ab-membership` | The membership eval set through the confirm task on both slots, against the answer a person would give. |
 | `make drain` | The drain concurrency race: one round per concurrency in `BENCH_K` over the same backlog. The only bench that can see batching. |
 | `make bench-verify` | Not a measurement — a contract check. See "Protocol". |
+| `make golden-baseline` | Not a model run at all: what the shipping app already scored on the golden set, from the labels the set stores. See "The golden set". |
+| `make golden-score R=…` | Scores a golden run file, keep-only first and all items second. See "The golden set". |
+| `make golden` | The golden set through triage, needs-you and extraction on the bulk slot — the run behind a golden-ledger row. Writes the run file and the timing/cost JSON. |
+| `make golden-prose` | Reply decisions for every gold-keep item and drafts for the reply-rubric items, on the prose slot. |
 
 The knobs, all `?=` in the `Makefile` and all overridable on the command line
 (or durably in a git-ignored `local.mk`):
@@ -41,6 +45,8 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
 - `BENCH_VERIFY` — `0` skips the contract check that otherwise runs before
   every bench.
 - `BENCH_K` — the concurrencies `make drain` races, in order (e.g. `1,3,6`).
+- `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_K`, `GOLDEN_OWNER_NAME` /
+  `GOLDEN_OWNER_ADDRESS` — see "The golden set".
 
 Name the weights in a label, not just the runtime: two quantizations of one
 model otherwise produce two identical-looking tables. Once two runs have
@@ -77,6 +83,754 @@ Follow this or the numbers are decoration.
    sending `enable_thinking: false` and relaxes the reasoning-leak gate to a
    printed count. The resulting numbers honestly include the cost of the
    reasoning tokens, which is the point: that cost is what the app would pay.
+
+## The golden set
+
+The bakeoff's accuracy numbers used to come from seventeen fictional emails.
+The golden set replaces them for anything that claims to be a quality
+measurement.
+
+**What it is.** A hundred real messages from the live mailbox, each carrying
+gold labels for every stage the pipeline runs: the gate verdict and its reason,
+triage (category, urgency, needs-action, reply-expected, deadline, plus rubrics
+for the label, the summary and the action items), extraction (intent,
+importance, project, topics, people, organisations, plus an evidence rubric),
+the needs-you verdict with a confidence floor, the storyline the message
+belongs under, and the thread's state. Twenty-five of them also carry a REPLY
+rubric — the points a draft must make, the points it must not, and the facts
+only the owner knows, which a good draft asks about rather than invents.
+
+The hundred are drawn across nine strata, each named for what it tests rather
+than for what it contains: messages at the core of a storyline, messages that
+tempt a wrong one, the spread of triage labels, gates that should keep,
+gates that should drop, gates that were missed, gate edge cases, hard
+needs-you calls, and thread recaps. Every item is marked `easy`, `medium` or
+`hard`, and records which rung of the context ladder its label needs.
+
+**How the labels were made**, in one paragraph, because it is what the numbers
+rest on: two independent model annotators worked from a written spec, one at
+temperature 0 and shown the app's stored output, one at temperature 1 and not
+shown it, so the second opinion cannot be anchored by the first or by the
+system under test. Deterministic facts (thread state, and what the app
+currently does) are computed rather than judged. Where the two annotators split
+on a genuinely ambiguous enum, BOTH answers become acceptable rather than one
+being chosen — a model is not marked wrong for a call two careful annotators
+split on — while forbidden lists are unioned, so a trap either annotator spotted
+stays a trap. The remaining conflicts were adjudicated by hand, a third harness
+ran as a control, and an adversarial review then tried to refute the gold
+itself, with every finding re-checked by a skeptic whose default stance was
+that the gold was right. Every item records whether the annotators agreed
+(`2/2`) or needed adjudication (`1/2`), and every table below is printed twice:
+once over all items, once over the `2/2` subset. A candidate that only looks
+good on the clean subset is a different animal from one that is uniformly
+mediocre, and a single number hides it.
+
+**Where it lives.** `golden/`, at the repo root, git-ignored in full — the set
+is real correspondence and this repository is public. It exists on the machine
+that built it and nowhere else, which means the targets below depend on files
+a clean checkout cannot supply. That is deliberate and is not going to change.
+`GOLDEN` points at the set (`golden/golden-set.json` by default) and
+`GOLDEN_REGISTRY` at the storyline registry; override either in `local.mk`.
+Committed tests use a small FICTIONAL fixture of the same shape
+(`app/test/fixtures/golden_fixture.json`) so the loader and the run-file writer
+are covered offline by anyone.
+
+**The scorer of record is `golden/tools/score_run.py`, not Dart.** One set of
+scoring semantics, already reviewed and already producing the baseline below;
+a Dart re-implementation would be a second opinion about what "correct" means,
+which is the one thing a bakeoff must not grow. It reads either the labels the
+app already stored (`--baseline`, no model run at all) or a RUN FILE a replay
+wrote. Two commands:
+
+```sh
+make golden-baseline                      # what the shipping app scores
+make golden-score R=tmp/bench/golden-run-….json
+make golden-score R=… BREAKDOWN=stratum   # or difficulty, or derivable_from
+make golden-score R=… JSON=tmp/row.json   # the same tallies, for a ledger row
+```
+
+`BREAKDOWN` and `JSON` apply to the keep-only pass only. That is the pass a
+ledger row quotes; breaking down the all-items pass as well would double the
+output for a copy nobody reads.
+
+Both print twice, because there are two honest populations:
+
+- **all items** — every message, including the ones the gate dropped. Triage
+  never ran on those, so their absence counts as "not attempted" rather than
+  wrong, and the gate's own quality is priced into the read.
+- **gold-keep only** (`--keep-only`, which the make targets run first) — the
+  76 messages gold says should have been kept. This is the model-quality
+  number, and it is what a ledger row quotes first.
+
+A run file is a JSON array of per-item objects, and **an omitted section means
+"not attempted", not "wrong"**, so a partial run scores honestly. The one trap
+is `triage.deadline`: the empty string is the claim "this message named no
+deadline" and scores as an answer, while a null is a stage that never ran.
+
+**Lexical against rubric.** The scorer checks what can be checked without a
+reader: enums, booleans, list membership, surname matching, a normalised
+project name. The fields a user actually reads — the label, the summary, the
+action items, the two evidence sentences, and a drafted reply — are rubric
+judgements ("does this sentence contain this claim") and a lexical proxy for
+them produces confident nonsense. They are counted here and judged in a later
+phase, by a judge that grades the baseline and every candidate alike.
+
+**The context ladder.** The set exists partly because the pipeline is
+inconsistent about thread context: triage and needs-you see the last three
+messages at 300 characters each, extraction sees the judged message completely
+alone. So every item carries three rungs, and `GOLDEN_CTX` picks which one the
+replay shows triage and needs-you:
+
+| rung | what the thread carries |
+|---|---|
+| `none` | the message alone |
+| `tail3` | the last three messages, 300 characters each — what ships today |
+| `compressed` | the tail, led by an extractive digest of everything earlier |
+
+The digest is extractive, never generated: a model inside the fixture would
+make it irreproducible, and a generated summary leaks the answer. It rides in
+as one synthetic leading thread message rather than as a new prompt field,
+because a measurement round does not edit the prompts it measures. Two
+consequences follow from riding in that fence. Triage and needs-you keep only
+the newest three thread messages, so at this rung the digest takes one of the
+three slots and the two newest tail messages take the others — a fourth would
+push the digest, the oldest, straight out. **And both clip a thread message at
+300 characters, so what they actually see of a digest is its head**: the
+median digest in the set is about 670 characters, so the clip bites on roughly
+two thirds of them. The `compressed` rung is therefore a lower bound on what
+real compression would buy, and any row run at it says so.
+Gold records, per stage, which rung a label needs, so
+`BREAKDOWN=derivable_from` answers the question the ladder was built for: what
+does context buy, and where.
+
+`GOLDEN_K` sets the replay's concurrency (a llama.cpp server needs
+`FAST_SLOTS` at least that high), and `GOLDEN_OWNER_NAME` /
+`GOLDEN_OWNER_ADDRESS` supply the inbox owner, which the set itself does not
+carry.
+
+**Running it.** Two targets, one per slot:
+
+```sh
+make golden                               # bulk slot, tail3 — the shipping rung
+make golden GOLDEN_CTX=none               # the same, message alone
+make golden GOLDEN_CTX=compressed         # the digest rung, with its caveat
+make golden BENCH_URL=… BENCH_LABEL=…     # point it at a candidate
+make golden-prose                         # prose slot: decisions + drafts
+```
+
+Each run writes a PAIR of files to `BENCH_OUT`. The run file
+(`golden-run-<label>-<stamp>.json`) holds real message content and is what
+`make golden-score R=…` reads — the run prints that exact command when it
+finishes. The timing and cost JSON (`golden-bulk-…` / `golden-prose-…`) is
+schema 1 like every other bench result, and carries `extra.run_file`,
+`extra.ctx`, `extra.k`, `extra.msgs_per_min` and `extra.cost`, so a row can be
+quoted from one file and scored from the other.
+
+The replay runs the app's own tasks with the HANDLERS' parameters, not a
+bench's: triage on the defaults, needs-you and extraction at temperature 0,
+and the deterministic needs-you floor applied FIRST — a floor item never calls
+the model at all and its row is marked `floor: true`, so a reader can tell the
+model's recall from the floor's. The owner line comes from `GOLDEN_OWNER_NAME`
+/ `GOLDEN_OWNER_ADDRESS`; a run with neither set says so in its banner, because
+needs-you then judges "does this name the owner" with no owner to name.
+`msgs/min` is items over wall time for the whole run at the `GOLDEN_K` it was
+given, which is the throughput a backlog is felt in. Cost comes from the dated
+Bedrock price table in `app/test/fixtures/golden_prices.dart`: zero for a local
+server, and BLANK — never zero — for a remote model the table does not price,
+because an unpriced cloud call is unknown rather than free.
+
+Two things the needs-you replay leaves out, for the same reason the draft
+below leaves things out: the attachment digests the handler passes (the set
+carries none) and this machine's custom needs-you rules — the replay runs the
+default prompt, so a row measures the shipped prompt on the model rather than
+one machine's rules on it.
+
+One comparability caveat. The replay runs triage, needs-you and extraction on
+gold-DROP items too — the gate strata need reading — where the shipping app
+never ran them. So a replay's ALL-ITEMS pass is not comparable with the
+baseline's all-items pass: the baseline reads those items as "not attempted",
+the replay as answers. The keep-only pass, which a ledger row quotes, is
+unaffected.
+
+The prose run differs in three ways worth stating. First, its decision context
+is the plain tail whatever `GOLDEN_CTX` says, because the decision keeps six
+messages at 500 characters and the tail already fits it whole — the ladder is a
+question about the two stages that clip. Second, a draft gets the message and
+its tail and nothing else: no style examples, no about-me, no storyline summary, no
+directory pack, because the set carries none of them, so a prose row measures
+the model rather than the retrieval that would feed it in the app. Third, in a
+prose run file `triage.reply_expected` IS the reply decision: the scorer's
+`triage.reply_expected` asks "is the sender waiting on an answer", which is
+exactly what the reply-decision stage answers and what gold has one label for,
+so a decision-only row writes its verdict there and repeats it in a `decision`
+object with the model's reason beside it.
+
+A `compressed` row carries the lower-bound caveat above, printed by the run
+itself so it travels with the number rather than being remembered.
+
+**Bedrock as a target.** A hosted candidate is a target like any other — a
+URL, a model id and a label — with two differences: it needs a key, and it may
+need the other wire.
+
+Most Bedrock models speak the OpenAI shape at
+`https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions`
+and take the app's body unchanged: `nvidia.nemotron-nano-3-30b`,
+`nvidia.nemotron-super-3-120b`, `zai.glm-4.7-flash`, `zai.glm-4.7`,
+`zai.glm-5`, `deepseek.v3.2`, `google.gemma-3-12b-it`, `google.gemma-3-27b-it`,
+`openai.gpt-oss-20b-1:0`, `openai.gpt-oss-120b-1:0`,
+`openai.gpt-oss-safeguard-20b`. The Anthropic ids —
+`us.anthropic.claude-haiku-4-5-20251001-v1:0`, `us.anthropic.claude-sonnet-5`,
+`us.anthropic.claude-opus-5` — are not served on that wire at all, so they are
+disqualified on it and run on Converse instead (`BENCH_WIRE=converse`, or
+`PROSE_WIRE` for the prose slot), which addresses the model in the URL path
+rather than in the body. `minimax.minimax-m2.5` answers on both wires and is
+disqualified on both, for R1-Distill's reason: it reasons whatever it is told —
+`<reasoning>…` written INTO `content` on the OpenAI wire (178 tokens for a
+ten-token answer), a `reasoningContent` block plus a tool input outside the
+enum on Converse — so every latency against it would measure the leak and
+every budget would be spent on it.
+
+The key is a long-term Bedrock API key for an IAM user:
+
+```sh
+aws iam create-service-specific-credential \
+  --user-name <user> --service-name bedrock.amazonaws.com
+```
+
+Store it as `BEDROCK_API_KEY=…` in the git-ignored `.env` (`BEDROCK_ENV` in the
+Makefile — its own variable rather than `MS_ENV`, which may point at another
+project's registration file). The harness receives it as a `--dart-define` the
+SHELL resolves inside the recipe, so it never sits in a make variable, never
+appears in `make -n` output, and never reaches a result file, an
+`LlmCallRecord` or a log line. One gotcha: an `aws` CLI older than the feature
+(2.27.35 here) parses the secret out of its own output — read the raw response
+under `--debug`, or upgrade the CLI. `BEDROCK_REGION` defaults to `us-east-1`,
+which is the region the price table in
+`app/test/fixtures/golden_prices.dart` (dated `2026-09-12`) was copied for; a
+row run elsewhere is priced against the wrong table.
+
+```sh
+make bench-verify BENCH_URL='$(BEDROCK_OPENAI_URL)' BENCH_MODEL=nvidia.nemotron-nano-3-30b
+make golden BENCH_URL='$(BEDROCK_OPENAI_URL)' BENCH_MODEL=nvidia.nemotron-nano-3-30b \
+            BENCH_LABEL=bedrock/nemotron-nano-3-30b GOLDEN_K=4
+make golden-prose PROSE_URL='$(BEDROCK_CONVERSE_URL)' PROSE_WIRE=converse \
+            PROSE_MODEL=us.anthropic.claude-sonnet-5 PROSE_LABEL=bedrock/claude-sonnet-5
+```
+
+`make bench-verify` first, always, and here for a second reason: the OpenAI
+wire's `/openai/v1/models` answers 404, so there is no listing to check a
+target against and a real completion is the only proof the id exists.
+
+What that verify confirmed on 2026-09-14: the OpenAI wire accepts
+`chat_template_kwargs` and `response_format: json_schema` with `strict`, and it
+CONSTRAINS decoding — an enum probe that asked for a value outside the enum got
+one inside it. It reports `usage` and sends no `timings`, so those rows are
+wall-clock only and carry `timing_source: wall`.
+
+Converse differs in four ways worth knowing before reading a row. A JSON answer
+is a forced tool call (`toolConfig` plus a `toolChoice` naming it), not a
+`response_format`. `temperature` is NOT sent: Claude 5 answers HTTP 400
+`temperature is deprecated for this model` while Haiku 4.5 accepts one, and a
+wire cannot behave two ways — so a Converse row samples at the model's default
+and the run prints that caveat beside its banner. A `reasoningContent` block
+counts as a reasoning leak, exactly as `reasoning_content` does on the other
+wire. And `metrics.latencyMs` is the whole request's latency rather than a
+generation time, so it is dropped rather than reported as a server clock: a
+Bedrock row quotes no server-side rate.
+
+Throttling is HTTP 429 on both wires, which the client maps to
+`LlmUnavailableException` — the same class a 503 gets, because it says nothing
+about the request and the app would park on it. A golden replay retries an
+unavailable stage up to three more times with 2/4/8 s backoff and prints
+`retried N` in its failure line, so a throttled row comes out complete rather
+than quietly missing stages. `GOLDEN_K=4` is the intended concurrency for a
+cloud row; there is no slot count to respect, only the account's rate limit.
+
+Comparability: a Bedrock row runs the same handler parameters as a local row,
+with the Converse temperature caveat as the single exception. Cost comes from
+the dated price table and is blank — not zero — for an id nobody has priced.
+
+**Judging the rubric fields.** Six fields need a reader rather than a matcher:
+the label, the summary, the action items, the needs-you evidence, the extract
+evidence, and a drafted reply. The judge answers one boolean per rubric string
+— "is this claim in this sentence" — and nothing else. The pass/fail arithmetic
+is code in `golden/tools/judge_rubrics.py`: every required point present, no
+forbidden point asserted, and the text inside the app's own caps (summary 500,
+label 40, evidence 300 characters). The judge reads; it does not grade.
+
+The middle step is Claude Code agents rather than a Bedrock call, so a judging
+round needs no cloud credentials at all:
+
+```sh
+make golden-judge-pack R=tmp/bench/golden-run-….json    # write the packets
+#   then one Claude Code agent (Opus) per packet under
+#   golden/labels/judge/<run>/packets/, each writing one file per item
+make golden-judge-tally R=tmp/bench/golden-run-….json   # grade what they wrote
+make golden-judge-tally R=… JSON=tmp/rubric.json        # the same, for a row
+make golden-judge-pack  BASELINE=1 NAME=baseline-cc     # re-judge what the app stored
+make golden-judge-tally BASELINE=1 NAME=baseline-cc
+```
+
+Pack writes one packet per `GOLDEN_BATCH` items, each carrying the judge prompt
+verbatim, so an agent needs nothing but the file it is handed. Tally prints
+twice, keep-only first and then all items, exactly like `make golden-score`,
+and `JSON=` captures the keep-only pass. `NAME=` picks the directory, which is
+how a re-judged `baseline-cc` sits BESIDE the original Opus 4.5 files instead
+of over them. Items already carrying a result file are skipped, so a re-pack
+after a half-finished round packs only the remainder.
+
+**These numbers are comparable, not absolute.** The gold rubrics were written
+with Claude's help and the judge is Claude, so every row leans the same way. A
+rubric number is worth reading against another rubric number — the baseline and
+every candidate share one judge and one prompt — and is not worth reading as
+the truth about how good a summary is.
+
+Three honesty counters print under the table, because a judging pass can fail
+quietly in ways a pass rate hides. `missing` is judgeable items with no result
+file, and under `--tally-only` it names them (the first twenty), so an agent
+that dropped its packet shows up instead of being rounded away. `unreadable` is
+files that exist but carry an error or no verdict; a re-pack treats both as not
+yet judged, so the next round of agents picks them up without `--force`. Under
+keep-only every counter covers the keep population, the same one the rates do. `rubric keys unmatched` counts keys the judge invented
+instead of copying: a paraphrased key is never looked up, so the rubric point
+it stands for silently fails. A non-zero count means the row is partly
+measuring the judge's formatting rather than the model's writing — re-judge
+those items rather than quoting them.
+
+The ledger's `rubric` column reads `label · action items · summary · needs-you
+evidence · extract evidence · draft`, as keep-only pass rates. The baseline
+appears once, carrying both judges' numbers side by side: the same stored
+output, read twice by two different readers.
+
+**Storyline membership.** Filing is the stage the golden set says has never
+once been right — the shipping app scores 42 of 99 on `storyline.id` with no
+correct positive — and the only model in it is `ConfirmMembershipTask`. So
+there is a third replay that asks that task alone, per item, against a BOUNDED
+candidate list: the item's gold storyline when it has one, every registry
+storyline gold marks forbidden on it, and three more drawn from the rest of the
+registry. That is three to six questions an item, about four and a half on
+average and 453 over the set, against the three thousand a full sweep of thirty
+storylines would ask. Each registry storyline arrives as the app's own
+`Storyline` with its charter as the membership criterion — clamped at 400
+characters at prompt time, exactly as in the app, which bites on most real
+charters — and with its people unioned out of the set's OTHER items filed
+under it. The candidate's own thread is never among the members it is judged
+against, as in the app, where a candidate is by construction not yet one; a
+whole-set union would hand the model the candidate card's own participants
+segment back as the storyline's people, on exactly the question the headline
+gold-accept rate is read from. A storyline whose only golden item IS the
+candidate therefore arrives with an empty People line, which is thinner than
+the prompt the app would send and so penalises rather than flatters — the run
+counts how many gold candidates were asked that way. The candidate card is
+built the way `enrichedCardForConversationRow` builds one: the subject
+stripped of its Re:/Fw: markers, the conversation's people, and the extraction
+topics and triage summary of a BULK RUN FILE, passed as `GOLDEN_RUN=`. The
+card is therefore the one the app would carry if the model that wrote that
+run file were the one shipping, which is the only honest way to card a thread
+the replay never triaged. The extras are drawn by a shuffle seeded with the
+item's id, so two candidates sit the same exam; the anti-storylines are never
+instantiated, because an anti-storyline has no charter to judge against and is
+scored through the real storylines' forbidden lists instead.
+
+What this does NOT measure is most of the stage. The sweep that proposes
+storylines, the embeddings and thresholds that shortlist them, the recruit laps
+and the chaining are code, and this replay is blind to all of it: it hands the
+model a list a human wrote. The owner's kept and removed example fences ride
+in empty, because a gold storyline has no owner history to teach it. And the
+economics do not transfer — the app asks one confirmation per assignment and
+this asks four or five per message, so the `$/1K msgs` on a storyline row is
+per thousand messages FILED through the bounded list, not per thousand
+triaged.
+
+Scoring has two halves. The derived `storyline.id` is the accepted candidate
+with the highest confidence — `low` counts as a no, the service's own rule,
+and a tie at the top is broken alphabetically, blind to gold, with the ties
+counted so a reader knows how often the rule decided anything. That id goes
+into a run file and `make golden-score` applies the toolkit's
+must/should/may/forbidden rules to it, the same scorer as every other row. An
+item that lost a candidate call to a failure is left UNFILED, so the scorer
+reads it as not attempted rather than as a miss. Beside the scorer the run
+prints its own direct rates, which a single derived id cannot express:
+gold-accept on the `must` and `should` populations, forbidden-accept,
+extra-accept, how often a gold-`none` item was filed nowhere, and how many
+yeses were hedged into `low` and thrown away.
+
+```sh
+make golden-storyline GOLDEN_RUN=tmp/bench/golden-run-<bulk>-….json         # the shipping 4B
+make golden-storyline GOLDEN_RUN=… BENCH_URL=… BENCH_MODEL=… BENCH_LABEL=…  # a candidate on the bulk slot
+make golden-score R=tmp/bench/golden-run-<bulk>-storyline-….json           # storyline.id, must/should/forbidden rules
+```
+
+### Golden ledger
+
+Keep-only numbers, per the population rule above. Rubric columns come from the
+judge, not from `score_run.py`.
+
+| date | slot | label | ctx | run file | keep-only: category / urgency / needs_action / reply_expected / needs_you / intent / importance / project / topics / people | rubric | p50 ms | gen t/s | msgs/min | $/1K msgs | note |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-09-12 | — | the shipping app, as stored | tail3 | none — `--baseline` | 94% / 88% / 68% / 77% / 94% / 84% / 45% / 67% / 31% / 86% | Opus 4.5 judge: label 86% · action items 59% · summary 54% · needs-you evidence 37% · extract evidence 24% — Claude Code subagent judge: label 82% · action items 54% · summary 37% · needs-you evidence 29% · extract evidence 22% | — | — | — | — | the shipping app's stored output; gate 76/100, storyline 42/99 with no correct positive |
+| 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | 89% / 89% / 66% / 70% / 92% / 75% / 39% / 66% / 26% / 87% | label 84% · action items 67% · summary 39% · needs-you evidence 27% · extract evidence 25% | 2436 / 1616 / 1950 (triage / needs_you / extraction) | 41.4 | 8.9 | $0.00 | the shipping bulk model, replayed; second of two passes |
+| 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | none | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-175832.json` | 88% / 89% / 75% / 75% / 93% / 75% / 39% / 66% / 26% / 87% | label 83% · action items 71% · summary 34% · needs-you evidence 34% · extract evidence 24% | 2173 / 1458 / 2020 (triage / needs_you / extraction) | 41.5 | 9.1 | $0.00 | context ladder: message alone (one pass) |
+| 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | compressed | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-181030.json` | 89% / 89% / 68% / 74% / 91% / 75% / 39% / 66% / 26% / 87% | label 80% · action items 62% · summary 33% · needs-you evidence 25% · extract evidence 24% | 2452 / 1684 / 2028 (triage / needs_you / extraction) | 40.4 | 8.7 | $0.00 | context ladder: digest + two newest tail messages, 300-char clip — lower bound (one pass) |
+| 2026-09-14 | bulk | llamacpp/Qwen3.5-4B-UD-Q4_K_XL | tail3 | `golden-run-llamacpp-qwen3-5-4b-ud-q4-k-xl-20260914-190503.json` | 91% / 89% / 66% / 83% / 87% / 79% / 66% / 63% / 29% / 88% | label 82% · action items 53% · summary 16% · needs-you evidence 23% · extract evidence 33% | 2838 / 1716 / 2745 (triage / needs_you / extraction) | 36.9 | 7.5 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
+| 2026-09-14 | bulk | llamacpp/Qwen3.5-9B-Q4_K_M | tail3 | `golden-run-llamacpp-qwen3-5-9b-q4-k-m-20260914-200430.json` | 91% / 93% / 64% / 70% / 83% / 82% / 74% / 64% / 24% / 83% | label 78% · action items 62% · summary 24% · needs-you evidence 25% · extract evidence 38% | 4394 / 2648 / 4444 (triage / needs_you / extraction) | 22.8 | 4.6 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
+| 2026-09-14 | bulk | llamacpp/Qwen3.8-27B-Q4_K_M (as bulk) | tail3 | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-20260914-223320.json` | 92% / 95% / 72% / 84% / 93% / 86% / 74% / 58% / 32% / 93% | label 89% · action items 64% · summary 41% · needs-you evidence 39% · extract evidence 41% | 13412 / 8969 / 13907 (triage / needs_you / extraction) | 7.1 | 1.5 | $0.00 | accuracy ceiling for these prompts: the prose model doing bulk work, 1 slot, no MTP; second of two passes |
+| 2026-09-14 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260914-230921.json` | — / — / — / 82% / — / — / — / — / — / — | draft 20% | 6578 / 16589 (reply_decision / draft_reply) | 7.1 | 4.4 | $0.00 | prose slot: reply decision for the 76 gold-keep items (scored as reply_expected) + 25 drafts for the reply-rubric items, judged in Phase 3; message + tail only; second of two passes |
+| 2026-09-15 | bulk | bedrock/nemotron-nano-3-30b | tail3 | `golden-run-bedrock-nemotron-nano-3-30b-20260915-011152.json` | 88% / 88% / 64% / 65% / 79% / 69% / 69% / 65% / 31% / 80% | label 72% · action items 36% · summary 19% · needs-you evidence 8% · extract evidence 15% | 1129 / 847 / 1226 (triage / needs_you / extraction) | 86.8 | 70.7 | $0.28 | OpenAI wire; K=4 |
+| 2026-09-15 | bulk | bedrock/nemotron-super-3-120b | tail3 | `golden-run-bedrock-nemotron-super-3-120b-20260915-011547.json` | 91% / 95% / 74% / 75% / 93% / 83% / 79% / 70% / 37% / 93% | label 87% · action items 67% · summary 47% · needs-you evidence 19% · extract evidence 41% | 1284 / 883 / 1218 (triage / needs_you / extraction) | 79.1 | 70.7 | $0.69 | OpenAI wire; K=4 |
+| 2026-09-15 | bulk | bedrock/glm-4.7-flash | tail3 | `golden-run-bedrock-glm-4-7-flash-20260915-012130.json` | 84% / 92% / 68% / 74% / 76% / 76% / 82% / 87% / 28% / 83% | label 87% · action items 60% · summary 21% · needs-you evidence 22% · extract evidence 28% | 1296 / 998 / 1304 (triage / needs_you / extraction) | 55.8 | 63.9 | $0.30 | OpenAI wire; K=4 |
+| 2026-09-15 | bulk | bedrock/gemma-3-12b-it | tail3 | `golden-run-bedrock-gemma-3-12b-it-20260915-012458.json` | 91% / 93% / 72% / 87% / 71% / 86% / 79% / 80% / 25% / 86% | label 71% · action items 62% · summary 30% · needs-you evidence 5% · extract evidence 17% | 1302 / 700 / 1178 (triage / needs_you / extraction) | 82.9 | 71.5 | $0.39 | OpenAI wire; K=4 |
+| 2026-09-15 | bulk | bedrock/deepseek-v3.2 | tail3 | `golden-run-bedrock-deepseek-v3-2-20260915-013258.json` | 96% / 92% / 68% / 74% / 89% / 83% / 79% / 71% / 20% / 95% | label 91% · action items 69% · summary 42% · needs-you evidence 39% · extract evidence 22% | 1905 / 1125 / 1818 (triage / needs_you / extraction) | 27.8 | 26.3 | $2.41 | OpenAI wire; K=4 |
+| 2026-09-15 | bulk | bedrock/claude-haiku-4.5 | tail3 | `golden-run-bedrock-claude-haiku-4-5-20260915-013812.json` | 86% / 88% / 72% / 82% / 92% / 84% / 63% / 67% / 34% / 91% | label 95% · action items 62% · summary 53% · needs-you evidence 48% · extract evidence 38% | 1995 / 1593 / 1802 (triage / needs_you / extraction) | 93.9 | 44.7 | $8.27 | Converse, no temperature; K=4 |
+| 2026-09-15 | prose | bedrock/claude-sonnet-5 | tail (fixed) | `golden-run-bedrock-claude-sonnet-5-20260915-014246.json` | — / — / — / 68% / — / — / — / — / — / — | draft 40% | 2409 / 4374 (reply_decision / draft_reply) | 47.4 | 59.8 | $6.80 | Converse, no temperature; K=4 |
+| 2026-09-15 | prose | bedrock/claude-opus-5 | tail (fixed) | `golden-run-bedrock-claude-opus-5-20260915-014610.json` | — / — / — / 78% / — / — / — / — / — / — | draft 48% | 2162 / 5365 (reply_decision / draft_reply) | 51.9 | 56.8 | $17.17 | Converse, no temperature; K=4 |
+| 2026-09-15 | prose | bedrock/nemotron-super-3-120b | tail (fixed) | `golden-run-bedrock-nemotron-super-3-120b-20260915-014735.json` | — / — / — / 66% / — / — / — / — / — / — | draft 28% | 760 / 1319 (reply_decision / draft_reply) | 70.7 | 189.1 | $0.24 | OpenAI wire; K=4 |
+| 2026-09-15 | prose | bedrock/deepseek-v3.2 | tail (fixed) | `golden-run-bedrock-deepseek-v3-2-20260915-015039.json` | — / — / — / 78% / — / — / — / — / — / — | draft 40% | 1045 / 3011 (reply_decision / draft_reply) | 20.7 | 64.0 | $0.84 | OpenAI wire; K=4 |
+
+**What the first rows say** (2026-09-14, all at `GOLDEN_K=1`, keep-only, every
+row the second of two passes unless its note says otherwise). Bigger bulk
+models buy the enums, not the booleans: category and urgency reach 91–95% on
+anything from Qwen3.5-4B up, against 89% on the shipping 4B, and importance
+jumps from 39% to 66–74% — but needs-you FALLS as the bulk model grows (92 →
+87 → 83) until the 27B recovers it (93), and project is flat or worse. The
+context ladder on the 4B is the row worth re-reading: the thread tail lowers
+needs-action (75% alone → 66% with it) and reply-expected (75 → 70), on the
+items whose gold label needs the tail as much as on the rest, and the digest
+rung sits between the two. Extraction is identical across rungs by
+construction — it has no thread field. The 27B doing bulk work is the ceiling
+for these prompts (needs-action 72, reply-expected 84, needs-you 93) at six
+times the shipping model's time per message. On the prose slot the dedicated
+reply decision scores 82% against gold reply-expected, twelve points above the
+4B's triage boolean for the same question. Topics stay under a third for every
+model, the one field nothing separates them on. The temperature-0 stages
+(needs-you, extraction) reproduce token for token between passes; triage at
+0.2 moves one to three points, which is the noise floor for its booleans. The
+replayed 4B also lands a few points under the stored baseline on several
+fields: the stored run saw the live thread of 2026-09-12 and is one sample of
+the same model, so candidates are read against the replayed row, not the
+stored one. Rubric columns wait for the judge; recommendations for the round's
+last phase.
+
+**What the judged rows say** (2026-09-14, keep-only, the same Claude Code judge
+for every row). Read the rubric column against the `baseline-cc` half of the
+baseline cell, never against the Opus 4.5 half: the same stored output scores
+54% on summary under one reader and 37% under the other, which is the size of
+the judge effect and the reason the column compares rows only. The replayed 4B
+lands where the re-judged baseline does (label 84 vs 82, summary 39 vs 37,
+evidence 25 / 27 vs 22 / 29). The context ladder barely moves the rubric fields
+on the 4B — summary 34 / 39 / 33 and action items 71 / 67 / 62 for none / tail3
+/ compressed — so the tail buys a little on action items and nothing on
+summaries. The candidate small models are worse writers than the shipping 4B
+even where they are better classifiers: Qwen3.5-4B passes 16% of summaries and
+Qwen3.5-9B 24%, against 39%, while both write better extract evidence (33% and
+38% against 25%). The 27B as bulk is the ceiling on label, summary and both
+evidence fields (89 / 41 / 39 / 41) and even it passes fewer than half the
+summaries. The summary failures are almost entirely omitted required facts, not
+asserted traps: across the six bulk rows the forbidden-fact traps fire on 0–4
+items of 76 while 46–60 items miss a required fact, and summaries average
+113–129 characters against a 500-character cap. That is a prompt-and-budget
+problem, not a model problem, and it goes on the follow-up list ahead of any
+model swap. Drafts: 5 of 25 pass on the 27B; of the 20 failures, 10 invent an
+owner-only fact, 9 commit a forbidden move and 8 miss a required point
+(overlapping), at an average of 148 characters — the draft prompt needs its
+"ask, don't invent" rule made explicit before any cloud model is compared on
+this column.
+
+
+**What the cloud rows say** (2026-09-15, keep-only, `GOLDEN_K=4`, the same
+judge, second pass kept, every target through `bench-verify` first, `retried 0`
+on every pass). Read the enum columns against the replayed 4B and the
+27B-as-bulk rows, and the rubric column against `baseline-cc`. Nemotron Super
+3 120B is the first bulk candidate that beats the shipping 4B on needs_action
+(74 against 66) without losing needs_you (93 against 92) and matches or exceeds the
+local 27B ceiling on every enum but reply_expected (75 against 84) — at 70
+messages a minute against the 27B's
+1.5, and $0.69 per thousand messages. It also writes the best summaries of any
+non-Claude row (47%). Haiku 4.5 on Converse is the best writer of any bulk row
+— label 95%, summary 53%, needs-you evidence 48%, every one above the 27B's 89
+/ 41 / 39 — but at twelve times the 120B's price and with the weakest
+importance (63%) of the cloud rows. DeepSeek V3.2 has the best category (96%)
+and the best label of the non-Claude rows (91%) and is 2.7x slower and 3.5x
+dearer than the 120B for no gain on the booleans. Gemma 3 12B and GLM 4.7 Flash classify well (reply_expected 87%,
+project 87%) and write badly (needs-you evidence 5%, summary 21%); Nemotron
+Nano 3 is worse than the 4B on every rubric field. No cloud model passes more
+than 53% of summaries, which confirms the summary-omission finding above as
+model-independent. On the prose slot, Opus 5 and Sonnet 5 pass 12 and 10 of
+25 drafts (48% and 40%) against the local 27B's 5, DeepSeek matches Sonnet at
+40% for an eighth of the price, and Nemotron Super passes 7 at 189 messages a
+minute; the reply decision is best on the local 27B (82%) with Opus and
+DeepSeek at 78% — Sonnet's 68% is below the 4B's own triage boolean. The draft
+failures have one shape everywhere: of the failing drafts, 10–15 per model
+invent an owner-only fact (Sonnet 12 of 15, Opus 10 of 13, DeepSeek 10 of 15,
+Nemotron 15 of 18, the 27B 10 of 20), so the "ask, don't invent" prompt change
+is model-independent and comes before any prose model swap. The Converse rows
+sampled at the models' default temperature; the OpenAI-wire rows ran the
+handlers' own.
+
+#### Storyline confirm
+
+The confirm task against the gold registry, per the block above.
+`storyline.id` is the scorer's number over the items it counts — a `may` item
+is skipped unless it was filed under a forbidden slug, so the denominator is
+98 or 99 — and the rest are the replay's own rates.
+
+| date | bulk label | cards from | run file | storyline.id | gold-accept must / should | forbidden-accept | extra-accept | derived none on gold-none | low-yes | p50 ms | calls/min | msgs/min | $/1K msgs | note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-09-15 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-storyline-20260915-031444.json` | 80/98 (82%) | 47/48 (98%) / 10/15 (67%) | 17/88 (19%) | 14/300 (5%) | 26/35 (74%) | 0 | 1146 | 51.4 | 11.3 | $0.00 | shipping 4B; cards from its own tail3 run; ties 15; derived gold 50 / none 32 / other 18; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp |
+| 2026-09-15 | llamacpp/Qwen3.8-27B-Q4_K_M (as bulk) | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-20260914-223320.json` | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-storyline-20260915-045507.json` | 88/98 (90%) | 43/48 (90%) / 8/15 (53%) | 6/88 (7%) | 1/300 (0%) | 33/35 (94%) | 0 | 6373 | 9.2 | 2.0 | $0.00 | 27B in the bulk slot; cards from its own as-bulk run; ties 3; derived gold 50 / none 45 / other 5; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp |
+| 2026-09-15 | bedrock/nemotron-super-3-120b | `golden-run-bedrock-nemotron-super-3-120b-20260915-011547.json` | `golden-run-bedrock-nemotron-super-3-120b-storyline-20260915-050910.json` | 86/97 (89%) | 45/48 (94%) / 7/15 (47%) | 15/88 (17%) | 2/299 (1%) | 32/35 (91%) | 0 | 909 | 251.6 | 55.5 | $0.75 | OpenAI wire; cards from its own Phase 4 run; the failed call's item is unfiled (not attempted); 1 failed calls; ties 5; incomplete 1; derived gold 49 / none 41 / other 9; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp |
+
+**What the confirm rows say.** Handed a candidate list a person wrote, every
+model files far better than the app ever has: the shipping app's own filing
+scored 42 of 99 with no correct positive, and against the bounded list the 4B
+scores 82%, the 27B 90% and Nemotron Super 3 120B 89% — each accepting its
+gold storyline on 90–98% of `must` items. So the model half of storyline
+filing is not where the stage fails; the sweep and the shortlist that decide
+WHICH storyline the model is asked about are, and that is code. The three
+differ in what they say no to. The 4B is the loosest: it accepts 19% of the
+forbidden neighbours gold names and 5% of storylines drawn at random, and
+fifteen times it said yes with the same confidence to two storylines at once —
+so a shortlist that offers it a neighbour gets a wrong filing. The 27B is the
+strictest — 7% of neighbours, none of the random draws, 33 of 35 gold-`none`
+items filed nowhere, three ties — at nine confirmations a minute, five times
+slower than the 4B. Nemotron sits between: the 27B's precision on the random
+draws and the gold-`none` items, the 4B's looseness on the named neighbours
+(17%), 250 confirmations a minute for 75 cents a thousand messages; one of its
+453 answers was not valid JSON and that item is left unfiled, and its numbers
+moved two to three points between two passes at temperature 0 where both local
+rows reproduced exactly. `should` items are where all three decline (47–67%
+accepted), which the scorer forgives. Two caveats ride on every row: thirteen
+gold candidates were judged with an empty People line because the set holds no
+other thread of theirs, which is a lower bound on recall, and 22 of the 30
+charters are cut at the task's 400-character clamp, so a longer charter budget
+is a follow-up worth measuring before a model swap.
+
+### Recommendations (golden set, 2026-09)
+
+Everything below rests on the rows above: eighteen ledger rows and three
+confirm rows, keep-only, the second of two passes except where a row's note
+says one, one judge for every rubric number. The `## Recommendations` section
+further down is the fictional-corpus bakeoff's, about runtimes and quants;
+this one is about models per stage on real traffic, and where the two overlap
+they agree — keep the 4B, keep the 27B. Three reading rules travel with the
+numbers. Candidates are read against the REPLAYED 4B, not the stored baseline
+(the stored run is one sample of the same model on a different day's thread).
+Rubric numbers are read against other rubric numbers under the same judge,
+never as absolutes — the same stored summaries score 54% under one reader and
+37% under the other. And a difference under four points is not a finding:
+triage at its shipping temperature moves one to three points between identical
+passes, and the one Bedrock row that was run twice at temperature zero moved
+two to three.
+
+**Per stage, the best of each kind.** Keep-only accuracy, the rubric fields
+that stage owns, the stage's p50, and the run's throughput and price.
+Throughput is the whole three-stage run for a bulk row (K=1 local, K=4 cloud),
+so it is comparable down a column and not across slots.
+
+| stage | the shipping 4B, replayed | best local | best cloud |
+| --- | --- | --- | --- |
+| triage | category 89 · urgency 89 · needs_action 66 · reply_expected 70; label 84 · action items 67 · summary 39; p50 2.4 s; 8.9 msgs/min; $0 | the 4B itself. The 27B as bulk is the ceiling (92 / 95 / 72 / 84; label 89, summary 41) at 13.4 s and 1.5 msgs/min; Qwen3.5-4B gains reply_expected (83) and loses the text (summary 16, action items 53) | Nemotron Super 3 120B: 91 / 95 / 74 / 75; label 87 · action items 67 · summary 47; p50 1.3 s; 70.7 msgs/min; $0.69 / 1K |
+| needs-you | verdict 92; evidence 27; p50 1.6 s | the 4B. The 27B's 93 is one point; its evidence (39) is the only gain | Nemotron Super 93 (evidence 19); Haiku 4.5 92 with the best evidence of any row (48) at $8.27 / 1K |
+| extraction | intent 75 · importance 39 · project 66 · topics 26 · people 87; evidence 25; p50 2.0 s | the 27B as bulk: 86 / 74 / 58 / 32 / 93, evidence 41, at 13.9 s. Qwen3.5-4B: 79 / 66 / 63 / 29 / 88, evidence 33, at 2.7 s | Nemotron Super: 83 / 79 / 70 / 37 / 93, evidence 41, p50 1.2 s, $0.69 / 1K. GLM 4.7 Flash has the best project (87) and importance (82) with weak evidence (28) |
+| reply decision | the 4B's triage boolean for the same question: 70 (tail3), 75 (none, one pass) | the 27B on the dedicated task: 82% at 6.6 s | none beats it: Opus 5 78, DeepSeek V3.2 78, Sonnet 5 68, Nemotron Super 66 |
+| drafts (25 reply-rubric items) | — | the 27B: 5 of 25 (20%) at 16.6 s | Opus 5 12 of 25 (48%) at 5.4 s, $17.17 / 1K; Sonnet 5 10 (40%) at 4.4 s, $6.80; DeepSeek V3.2 10 (40%) at 3.0 s, $0.84; Nemotron Super 7 (28%) at 1.3 s, $0.24 |
+| storyline confirm | the 4B: 82%; accepts 19% of named neighbours and 5% of random draws; 15 ties; 1.1 s a call, 51 calls/min | the 27B: 90%; 7% and 0%; 3 ties; 6.4 s a call, 9 calls/min | Nemotron Super: 89%; 17% and 1%; 5 ties; 0.9 s a call, 251.6 calls/min, $0.75 / 1K |
+
+**1. Bulk slot: keep Qwen3-4B-Instruct Q8_0. There is no local swap worth
+making.** The same verdict the fictional corpus gave, for a better reason: the
+candidates that classify better write worse, and the label and summary are
+what the user reads. Qwen3.5-4B passes 16% of summaries against the 4B's 39%
+and Qwen3.5-9B 24%; and the drain bench of 2026-09-13 (not a golden number;
+`make drain`, K=6, same llama.cpp build) has the Qwen3.5-4B at about 70% of
+the 4B's throughput (36 against 51 messages a minute) and the 9B at a third.
+The 27B in the bulk slot is a ceiling, not a slot: it beats the 4B on every
+enum but project (58 against 66) and on label and both evidence fields, with
+summary and action items inside the floor, at six times the time per message
+and 1.5 messages a minute, and the bulk slot's defining workload is the drain.
+What the 4B leaves on the table is now a number rather than a feeling —
+importance 39 against a ceiling of 74, needs_action 66 against 72, and summary
+39 against 41, which is inside the floor — and the cheapest way to close most
+of it is in the prompts (item 7), not in the model.
+
+**2. Needs-you stays local on every tier.** The verdict is 92% on the 4B, 93
+on the 27B and on the 120B, 92 on Haiku; nothing beats the shipping model
+beyond the noise floor, and part of that recall is the deterministic floor,
+which costs no model at all. The models differ on the evidence sentence (27 on
+the 4B, 39 on the 27B, 48 on Haiku), which is a shown sentence and worth a
+prompt experiment, not a model swap for a one-point verdict.
+
+**3. If a cloud bulk model is ever wanted, it is Nemotron Super 3 120B and no
+other.** It is the first candidate that beats the 4B on needs_action (74
+against 66) while matching it on needs_you (93 against 92, inside the floor),
+it matches or exceeds the local 27B ceiling on every enum but reply_expected
+(75 against 84), it writes the best summaries of any non-Claude row (47%), and
+it does so at 70 messages a minute for $0.69 per thousand messages — four
+cents for a sixty-message day. The others each lose on one axis that matters:
+Haiku 4.5 is the best writer of any bulk row (label 95, summary 53) at twelve
+times the price and with the weakest importance of the cloud rows (63);
+DeepSeek V3.2 has the best category (96) and the best label of the non-Claude
+rows (91) and is 2.7x slower and 3.5x dearer for no gain on the booleans;
+Gemma 3 12B and GLM 4.7 Flash classify well and write badly (needs-you
+evidence 5 and 22); Nemotron Nano 3 is worse than the 4B on every rubric
+field. Using Nemotron Super for bulk work would break the speed design's rule
+2 — cloud is never used for triage or extraction and never in a drain — and
+that rule is about consent and what leaves the machine, so a bakeoff does not
+amend it and this round does not. What the numbers do is price the rule:
+staying local costs about forty points of importance, eight of needs_action
+and eight of summary against the one cloud model worth having. If the rule is
+ever reopened for the tiers that cannot hold the 27B (item 8), this is the
+model the amendment would name, and this is what it would buy; that is a
+product decision not taken here.
+
+**4. Prose slot: the 27B keeps the reply decision; drafts are where cloud
+pays.** The dedicated decision on the 27B scores 82% against gold and no cloud
+model reaches it — Opus 5 and DeepSeek 78, Sonnet 68, which is below the 4B's
+own triage boolean. Drafts are the opposite picture: the 27B passes 5 of 25,
+Opus 5 passes 12, Sonnet 5 and DeepSeek V3.2 10 each, Nemotron Super 7. That
+is the speed design's §4 conclusion measured: the opt-in "better draft" should
+be **Claude Opus 5** (the best pass rate, about three cents a draft at the
+design's 5K-in / 300-out shape, $17 per thousand messages in the ledger's
+accounting), with **Sonnet 5** as the cheaper option at 40% of the price and
+40% of drafts passing. DeepSeek V3.2 matching Sonnet at an eighth of the price
+is a fact worth keeping; whether a second provider belongs on the consent
+screen is a product call, not a bakeoff call. Two caveats sit on the whole
+column. Every model's draft failures have the same shape — of the failing
+drafts, 10 to 15 per model invent a fact only the owner knows — so the "ask,
+don't invent" rule in the draft prompt precedes any swap and any escalation,
+and the four prose rows are re-run after it. And the replay drafts from the
+message and its tail alone, with no directory pack, style examples, about-me
+or storyline summary, so every pass rate here is a floor on what the app would
+produce.
+
+**5. The reply decision on the 4B is one run away.** The speed design wants
+the decision off the 27B and onto the fast slot behind an A/B. The set now
+holds half of that A/B: the dedicated decision on the 27B is 82%, and the 4B's
+triage answer to the same question is 70% (75% without the tail, on one pass).
+The half that is missing is `ReplyDecisionTask` itself on the 4B:
+
+```sh
+make golden-prose PROSE_URL=http://localhost:8082/v1/chat/completions \
+                  PROSE_MODEL=<the bulk model name> PROSE_LABEL='llamacpp/Qwen3-4B (decision)'
+```
+
+Seventy-six decisions and twenty-five drafts, a few minutes; only the decision
+number needs reading, and the drafts need not be judged. Within four points of
+82 and the 27B leaves the per-message path, as the design hopes; near 70 and
+the decision stays on the 27B at its measured 6.6 s, which the design's
+per-message budget already absorbs.
+
+**6. Storyline filing: fix the code, then choose the model.** Handed a
+candidate list a person wrote, every model files far better than the app has
+ever filed — 82%, 90% and 89% against the app's 42 of 99 with no correct
+positive, each accepting its gold storyline on 90–98% of `must` items. The
+confirm task is therefore not where filing fails; the sweep that proposes
+storylines and the shortlist that picks the candidate are, and both are code.
+The rework of those two comes before any model decision, and the confirm
+replay is its before-and-after. What the rows say about the model half, for
+when that day comes: the confirm runs on the fast client today, and the 4B is
+the loosest judge of the three — it accepts 19% of the neighbours gold names
+as traps and tied with itself fifteen times — so a shortlist that offers it a
+plausible neighbour gets a wrong filing. The 27B is the strictest (7% of
+neighbours, none of the random draws, 33 of 35 gold-`none` items filed
+nowhere) and a confirm is one call per assignment rather than per message, so
+its 6.4 s is affordable off the critical path; the 120B is 27B-like on random
+draws and gold-`none` and 4B-like on neighbours, at 250 confirmations a
+minute. Before either, one measurement is free: 22 of the 30 real charters are
+cut at the task's 400-character clamp, and `make golden-storyline` against a
+longer clamp says what the missing half of a charter is worth.
+
+**7. The context ladder: the tail as given does not help the 4B, and
+compression was not measurable.** On the shipping model the thread tail lowers
+needs_action (75% alone, 66% with it) and reply_expected (75, 70), on the
+items whose gold label needs the tail as much as on the rest; action items
+rise without it (71 against 67) and summaries fall (34 against 39); the
+needs-you verdict and extraction do not move, though the needs-you evidence sentence
+does (34 / 27 / 25 for `none` / `tail3` / `compressed`, a nine-point spread on
+a rubric field). The `none` and `compressed` rows are single passes and
+triage's noise floor is three points, so the nine on needs_action is outside
+the noise and still wants a second pass before anything acts on it. The
+`compressed` rung (needs_action 68, reply_expected 74, summary 33) is a lower
+bound and says nothing about compression itself: the digest rides in as the
+third of three thread slots and is clipped to 300 characters like any thread
+message, and the median digest is about 670, so the model saw the head of most
+digests and nothing more. What real compression would buy is unmeasurable
+until the digest is its own unclipped prompt field, which is a prompt change
+and the first experiment of the follow-up round. Two more rows would cost
+minutes: `none` on Nemotron Super (every cloud row ran at `tail3`), and
+extraction with a thread at all — it has never seen one, and no knob for it
+was built this round.
+
+**8. The local/cloud split by machine tier**, as the speed design's §2.3 table
+now reads with the set's numbers beside it. The 64 GB row is measured; the 32
+GB and 16 GB rows reuse its bulk numbers, because the bulk slot is the same
+model with a smaller context; the 8 GB row is the one tier whose bulk model
+the set measured separately.
+
+| machine | bulk | prose | what the set measured | cloud, opt-in |
+| --- | --- | --- | --- | --- |
+| 64 GB | 4B | 27B + MTP | triage 89 / 89 / 66 / 70, needs-you 92, extraction importance 39, decision 82, drafts 20%, confirm 82% on the 4B / 90% on the 27B | drafts on Opus 5 (48%) or Sonnet 5 (40%). Nothing else beats local beyond noise except extraction's importance and the summary field, and both are cheaper to move in the prompt than in the model |
+| 32 GB | 4B, ctx 8K | none local | the 64 GB bulk numbers; no local decision, draft or recap | drafts on Opus 5 or Sonnet 5; the decision on the 4B if item 5 holds, else Opus 5 or DeepSeek V3.2 (78); confirm on the 4B, loose, so the shortlist fix matters most here |
+| 16 GB | 4B, ctx 8K | cloud on demand | as above | as above. Nemotron Super (70 msgs/min, $0.69 / 1K) is the only cloud bulk model that beats the 4B on needs_action, but using it for bulk work needs rule 2 amended first (item 3), which this round does not do |
+| 8 GB | Qwen3.5-4B Q4 | cloud on demand | triage 91 / 89 / 66 / 83, needs-you 87, summaries 16%, action items 53 — better enums, far worse text than the 4B | as the 16 GB row |
+
+The tiers below 64 GB were sized, not measured, in the speed design; the table
+above is the first measurement any of them has, and the 8 GB row's summary
+number is the honest caveat the installer's "Your Mac" step should carry.
+
+**9. What the set could not measure.** The gates: Tier 1 and 2 need mail
+headers the set does not carry, so the gate verdict (76 of 100) is what the
+app did on 2026-09-12 and no candidate was asked; the model-side proxy — does
+triage call a gold-drop item a `notification` — is in every all-items pass and
+was not read this round. The storyline sweep, the embedding shortlist, the
+recruit laps and the chaining: the confirm replay hands the model a list a
+human wrote. Drafts without the directory pack, style examples, about-me or
+storyline summary, so the draft column is a floor. `thread_state`, which is
+computed rather than asked. Attachment digests and this machine's custom
+needs-you rules, both left out of the needs-you replay on purpose. The judge's
+family bias: the rubrics were written with Claude's help and the judge is
+Claude, so the rubric column compares rows and states no truth. The Converse
+rows sampled at the models' default temperature. And two caveats on every
+confirm row: thirteen gold candidates were judged with an empty People line,
+and 22 of 30 charters were clipped. One more, about the harness: before commit
+20ce25f a constrained answer that was not JSON was counted as `ok` on the
+OpenAI wire, so the failure line of every bulk and prose row above may
+under-count that case; their run files omit the section honestly and the scorer read
+it as not attempted, so no accuracy number is affected.
+
+**10. What to change next, in order.**
+
+1. **A prompt-and-budget round with a golden before and after**, because every
+   item in it is model-independent and so precedes every swap: summaries,
+   where 46 to 60 of 76 items omit a required fact while the traps fire on 0
+   to 4 and the text averages 113–129 characters against a 500-character cap;
+   the draft prompt's "ask, don't invent" rule, since 10 to 15 of the failing
+   drafts per model invent an owner-only fact; the thread digest as its own
+   unclipped field for triage and needs-you and, for the first time,
+   extraction, with `none` as the control and a second pass on both; the
+   confirm task's 400-character charter clamp. The first two have their
+   commands already (`make golden`, `make golden-prose`, then the judge); the
+   digest field and the charter clamp each need a code change first — the
+   clamp is a constant inside the task, and no extraction-context knob exists
+   — and then `make golden` and `make golden-storyline` are their
+   before-and-after.
+2. **The reply decision on the 4B**, item 5: one `make golden-prose` run
+   decides the speed design's §1.3 item 2.
+3. **The storyline sweep and shortlist rework**, item 6 — code, with the app's
+   own 42 of 99 as the before and the confirm replay as the after.
+4. **Cloud escalation** (speed design §4) with Opus 5 as the default "better
+   draft" and Sonnet 5 as the cheaper option — after the prompt round, not
+   before, so the consent screen promises a measured number.
+5. **The gate fixes the set already encodes**: the `gate-drop-missed` (9),
+   `gate-edge` (7) and `gate-keep-trap` (12) strata are tests waiting to be
+   written against a gate that scores 76 of 100 today.
+6. **Harness housekeeping**, none of it urgent: two of the golden fixtures
+   (the set loader and the registry loader) carry their own copies of the
+   JSON-shape helpers; the storyline run parses a `GOLDEN_CTX` it ignores;
+   `calls_per_min` divides the planned call count rather than the made one; a
+   decode error escapes the loaders without the file's path; a pseudonymised
+   public fixture; and whether `golden/tools/` should be versioned separately
+   from the data it sits beside.
+
 
 ## oMLX
 
@@ -205,7 +959,9 @@ server started differently from the default.
 Appended after each run, second-run numbers only (see the protocol). Prose
 rows quote the draft_reply p50 in the "p50 triage ms" column's place — marked
 (draft) — since prose runs never triage. gen t/s is wall-clock throughout;
-llama.cpp rows also carry a server-clock rate in their JSON.
+llama.cpp rows also carry a server-clock rate in their JSON. The accuracy
+column here is measured on the fictional corpus; accuracy against real traffic
+lives in the golden ledger above.
 
 | date | label | result json | gen t/s | p50 ms | accuracy | drain msgs/min K=1/3/6 | verdict |
 | --- | --- | --- | --- | --- | --- | --- | --- |

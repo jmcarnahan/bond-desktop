@@ -196,6 +196,45 @@ void main() {
       expect(seen.single.outcome, 'format');
     });
 
+    test('a constrained answer whose content is not JSON reports format',
+        () async {
+      // The envelope is a perfectly good chat completion; only the CONTENT is
+      // not the object the schema asked for — what a model that overran its
+      // token budget mid-object hands back. The observer must record the
+      // call as `format`, not `ok`: a run that lost an item this way once
+      // printed `failures: 0` because the decode happened one frame above
+      // the instrumented try (golden storyline replay, 2026-09-15).
+      final client = watching(() async => http.Response(
+            jsonEncode({
+              'choices': [
+                {
+                  'message': {
+                    'role': 'assistant',
+                    'content': '{"evidence": "the thread and the story',
+                  }
+                }
+              ],
+              'usage': {'prompt_tokens': 600, 'completion_tokens': 512},
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          ));
+
+      await expectLater(
+        client.completeJson(
+          system: 's',
+          user: 'u',
+          schema: const {'type': 'object'},
+          schemaName: 'storyline_membership',
+        ),
+        throwsA(isA<LlmFormatException>()),
+      );
+
+      expect(seen.single.label, 'storyline_membership');
+      expect(seen.single.outcome, 'format');
+      expect(seen.single.error, contains('did not answer with JSON'));
+    });
+
     test('the observer fires once per round trip, never twice', () async {
       final client = watching(() async => completion());
 

@@ -114,7 +114,7 @@ Future<String?> writeBenchResult({
   // question is always "was that before or after the flag change?", and a
   // filename that answered only the first would need a notebook beside it.
   final name = '$bench-${slug(collectors.isEmpty ? bench : collectors.first.label)}'
-      '-${_stamp(finishedAt.toUtc())}.json';
+      '-${stamp(finishedAt.toUtc())}.json';
   final path = '$dir${Platform.pathSeparator}$name';
   await File(path)
       .writeAsString(const JsonEncoder.withIndent('  ').convert(json));
@@ -123,7 +123,11 @@ Future<String?> writeBenchResult({
 
 /// `20260903-141205`, UTC — sortable, and the same instant whichever machine
 /// ran it.
-String _stamp(DateTime utc) {
+///
+/// Public because it is not this file's alone: `golden_run.dart` writes the
+/// other half of a golden run and must name it the same way, and two copies of
+/// a filename convention drift the day one of them is edited.
+String stamp(DateTime utc) {
   String two(int v) => v.toString().padLeft(2, '0');
   return '${utc.year}${two(utc.month)}${two(utc.day)}'
       '-${two(utc.hour)}${two(utc.minute)}${two(utc.second)}';
