@@ -28,6 +28,7 @@ depends on a server being up, and each `make` target below runs it with
 | `make golden-score R=…` | Scores a golden run file, keep-only first and all items second. See "The golden set". |
 | `make golden` | The golden set through triage, needs-you and extraction on the bulk slot — the run behind a golden-ledger row. Writes the run file and the timing/cost JSON. |
 | `make golden-prose` | Reply decisions for every gold-keep item and drafts for the reply-rubric items, on the prose slot. |
+| `make golden-gate` | Offline, no server: the golden set through the app's own gates — direction, sender address and body. Tier 2 (headers) and the Teams ingest gates are not in the set and go unmeasured. `GOLDEN_RUN=` adds the model's `notification` proxy column. See "The golden set". |
 
 The knobs, all `?=` in the `Makefile` and all overridable on the command line
 (or durably in a git-ignored `local.mk`):
@@ -461,6 +462,43 @@ make golden-storyline GOLDEN_RUN=… BENCH_URL=… BENCH_MODEL=… BENCH_LABEL=�
 make golden-score R=tmp/bench/golden-run-<bulk>-storyline-….json           # storyline.id, must/should/forbidden rules
 ```
 
+**The gates, replayed offline.** `make golden-gate` needs no server at all:
+the app's gates are pure functions, so the run replays them over the set
+itself — each item's direction through `triageStatusOnInsert`, its sender
+address and its body through `gateFor`, the same two calls the ingest makes.
+It prints verdict agreement, the drops it caught, the keeps it kept and the
+misses on the `gate-keep-trap` stratum, a breakdown per stratum and a count
+per drop-reason slug, and it writes a run file whose `gate.verdict`
+`make golden-score` reads like any other.
+
+Two things go UNMEASURED, and the run says so on its own line rather than
+counting them as passes. The mail header gates — `newsletter` and
+`auto_generated`, Tier 2 — read headers the set does not carry, so a
+header-only gold drop is KEPT here. The Teams bot and self gates are decided
+at ingest from Graph fields the set does not carry either. A third is
+unmeasurable in principle rather than by omission: the per-sender `drop` rule
+is data the owner writes, and a replay with no `sender_prefs` behind it reads
+every gate of that kind as a miss. That is exactly why
+this number and `make golden-baseline`'s gate number are two different
+questions and are recorded side by side, never compared as if one beat the
+other: the baseline is what the shipping app did on 2026-09-12 with headers in
+front of it, and this is what the set alone can ask.
+
+`GOLDEN_RUN=` adds one column and moves no verdict: triage's own `category`
+per item from a bulk run file, which is the model's `notification` verdict
+read as a proxy. It fired on 0 of 24 gold drops when it was measured on
+2026-09-16, which is why there is no `notification` gate reason and no code
+path — the decision is recorded in `docs/pipeline/03-triage.md` — and the
+column is here so a prompt change can be re-read against it. It is read, never
+enforced. The replay is deterministic, so the house rule about running a row
+twice is the only reason to run it twice.
+
+```sh
+make golden-gate                                   # the app's gates, offline
+make golden-gate GOLDEN_RUN=tmp/bench/golden-run-<bulk>-….json   # + the notification proxy
+make golden-score R=tmp/bench/golden-run-app-gates-….json BREAKDOWN=stratum
+```
+
 ### Golden ledger
 
 Keep-only numbers, per the population rule above. Rubric columns come from the
@@ -608,6 +646,34 @@ gold candidates were judged with an empty People line because the set holds no
 other thread of theirs, which is a lower bound on recall, and 22 of the 30
 charters are cut at the task's 400-character clamp, so a longer charter budget
 is a follow-up worth measuring before a model swap.
+
+### Gate replay ledger
+
+What `make golden-gate` measures is the app's gate FUNCTIONS against the set,
+offline and with no server: each item's direction through
+`triageStatusOnInsert` and its sender and body through `gateFor`. That is a
+narrower question than the baseline row above asks, and the two numbers are
+recorded side by side rather than compared. The baseline is what the shipping
+app did on 2026-09-12 with mail headers and the Teams ingest's own gates in
+front of it; the replay is what the set alone can ask, and the header gates
+(`newsletter`, `auto_generated`) and the Teams bot and self gates go
+unmeasured in it by construction. A data rule — the per-sender `drop` — cannot
+show in a replay either: the set carries no `sender_prefs`, so every gate the
+owner would have written by hand reads here as a miss.
+
+| date | gates at | run file | gate.verdict /100 | gate.reason on caught drops | drops caught /24 | keeps kept /76 | trap misses /12 | model proxy notification: drops / keeps / trap | note |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-09-12 | the shipping app, Tier 1 + Tier 2 + Teams ingest, as stored | none — `--baseline` | 76 | 6 / 11 | — | — | — | — | headers were in front of the app; not comparable to the replay rows |
+| 2026-09-16 | `main @ 982f21f` (prefix regex + direction) | `golden-run-app-gates-20260916-162650.json` | 80 | 4 / 7 | 7 | 73 | 3 | `0 / 24 · 1 / 76 · 0 / 12` | the 17 missed drops by gold reason: `newsletter` 3 and `auto_generated` 2 (header-only, Tier 2 — the set carries no headers, and the app catches 4 of these 5 live); `monitoring` 2 and `machine_sender` 1 (the shapes round A adds); `ticket_system` 2, `identity_service` 2, `share_notification` 2, `cold_outreach` 1 and `no_reply` 1 (tenant-specific senders and one loose shape — data, not a name rule); `empty` 1 (a Teams post whose stored block is not blank in the set). The 3 trap misses are all `no_reply`-prefix humans |
+| 2026-09-16 | `feat/pipeline-round-a` (`noreply` anywhere — compact substring, punctuated token — `monitoring`, `machine_sender`, `sender_rule`) | `golden-run-app-gates-20260916-164818.json` | 83 | 5 / 10 | 10 | 73 | 3 | `0 / 24 · 1 / 76 · 0 / 12` | second of two identical passes. The three new catches: both `monitoring` shapes (one gold `monitoring`; one gold `machine_sender` sent from a monitoring mailbox, which the reason column scores as a miss) and one compact `noreply` buried in a twenty-letter local part (gold `monitoring`, so also a reason miss — the delimited-token rule alone scored 82 and this one item is why the compact word is a bare substring). Trap misses unchanged at 3. The sender rule is data and cannot show in a replay that has no `sender_prefs`. The 14 remaining misses: Tier 2 (5 — `newsletter` 3, `auto_generated` 2), tenant data (8 — `ticket_system` 2, `identity_service` 2, `share_notification` 2, `cold_outreach` 1, `no_reply` 1 on a person-shaped address) and one Teams post (`empty`). Per stratum only `gate-drop-missed` moved, 0/9 → 3/9 |
+
+Per stratum on the 2026-09-16 `main` row, `gate.verdict`: gate-drop-clear 4/8,
+gate-drop-missed 0/9, gate-edge 3/7, gate-keep-trap 9/12, needsyou-hard 8/8,
+storyline-core 23/23, storyline-trap 12/12, thread-recap 6/6, triage-spread
+15/15. Three of the four `no_reply` catches on that row carry a gold slug that
+is not `no_reply` — `identity_service`, `machine_sender` and
+`teams_missed_activity_digest` — which is why the verdict column counts them
+and the reason column does not.
 
 ### Recommendations (golden set, 2026-09)
 
@@ -833,6 +899,27 @@ OpenAI wire, so the failure line of every bulk and prose row above may
 under-count that case; their run files omit the section honestly and the scorer read
 it as not attempted, so no accuracy number is affected.
 
+**Where the app's own 76 comes from, and where the next points are.** The
+stored baseline's 24 errors split 12 misses, 11 overreaches and 1 unknown (a
+row still `pending` when the set was packed). The overreaches are gold keeps
+the app dropped: 4 under `newsletter` headers and 3 under `auto_generated`
+headers, 3 under the `no_reply` prefix, 1 as `backlog` — and 9 of the 11 are
+`gate-keep-trap` items, human prose arriving under machine headers. Folding
+the replay's new catches into the stored verdicts projects the live gate at
+80 of 100 after round A (the four gold drops the app kept that the new shapes
+catch; the trap unchanged, since the app already dropped those three). So the
+larger remaining gate loss is Tier 2 overreach on the trap, not missed drops,
+and it is header-side — a name rule cannot reach it, and the set cannot
+replay it. That is a candidate for a later round, measured through
+`make golden-baseline` after a live re-sync rather than through this replay.
+
+**Measured 2026-09-16 (round A):** the notification proxy is 0 of 24 on gold
+drops, 1 of 76 on gold keeps and 0 of 12 on the trap, identical across five 4B
+runs; as a gate it would catch nothing and lose one keep, so it was not built
+(`docs/pipeline/03-triage.md`). `make golden-gate` now replays the gates
+offline and prints the proxy on every run; Tier 2 and the Teams ingest gates
+remain unmeasured by the set.
+
 **10. What to change next, in order.**
 
 1. **A prompt-and-budget round with a golden before and after**, because every
@@ -859,7 +946,10 @@ it as not attempted, so no accuracy number is affected.
    before, so the consent screen promises a measured number.
 5. **The gate fixes the set already encodes**: the `gate-drop-missed` (9),
    `gate-edge` (7) and `gate-keep-trap` (12) strata are tests waiting to be
-   written against a gate that scores 76 of 100 today.
+   written against a gate that scores 76 of 100 today — done 2026-09-16
+   (round A): `make golden-gate` replays the gate strata offline; 80 → 83
+   of 100 on the replay with the trap's misses unchanged at 3; see the gate
+   replay ledger.
 6. **Harness housekeeping**, none of it urgent: two of the golden fixtures
    (the set loader and the registry loader) carry their own copies of the
    JSON-shape helpers; the storyline run parses a `GOLDEN_CTX` it ignores;

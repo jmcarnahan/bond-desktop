@@ -151,9 +151,15 @@ class AttentionTuning {
 /// [latestIntent] is the intent from the newest inbound message's extraction,
 /// null when nothing has extracted it yet. [senderReplyRate] is a 0..1 fraction
 /// and is clamped, so a caller cannot push a thread up by handing over a rate
-/// of 40. [senderPref] is `'keep'`, `'later'`, or null. [latestNeedsAction],
-/// [latestDeadline], [addressedMe] and [needsYouVerdict] all describe that same
-/// newest inbound message.
+/// of 40. [senderPref] is `'keep'`, `'later'`, `'drop'` or null.
+/// [latestNeedsAction], [latestDeadline], [addressedMe] and [needsYouVerdict]
+/// all describe that same newest inbound message.
+/// Whether a sender disposition quiets the sender's existing threads: `later`
+/// and `drop` both do, and everything in this file that asks the question
+/// asks it here. What `drop` adds — the gate at triage — is not this file's.
+bool quietsSender(String? disposition) =>
+    disposition == 'later' || disposition == 'drop';
+
 double attentionScore({
   required Conversation conversation,
   String? latestIntent,
@@ -168,7 +174,7 @@ double attentionScore({
 }) {
   // Both hard zeros, checked before anything else: a thread the user has
   // dismissed must not be able to climb back up on a fresh timestamp.
-  if (senderPref == 'later') return 0;
+  if (quietsSender(senderPref)) return 0;
   if (conversation.state == ConversationState.done) return 0;
 
   // Every clause is a separate reason to leave the thread alone, so every one
@@ -265,7 +271,9 @@ double _recencyFactor(String? lastMessageAt, DateTime now) {
 /// In order:
 /// - A sender rule wins outright, in both directions. It is a person's
 ///   standing instruction, and the model does not get to overrule it by being
-///   confident.
+///   confident. A DROPPED sender's existing threads go quiet exactly as a
+///   deferred one's do — what the third disposition changes is the gate at
+///   triage, which is that file's business and not this one's.
 /// - A thread holding an OPEN ASK — a message the needs-you stage judged yes
 ///   that the user has not answered — is never deferred by the automatic rule.
 ///   Later is where quiet mail goes, and an ask the owner has not answered is
@@ -283,7 +291,7 @@ String? bucketFor({
   required bool needsReply,
   bool? needsYouVerdict,
 }) {
-  if (senderPref == 'later') return 'later';
+  if (quietsSender(senderPref)) return 'later';
   if (senderPref == 'keep') return null;
   if (needsYouVerdict == true) return null;
   if (needsReply) return null;
@@ -300,4 +308,4 @@ String? bucketFor({
 /// buckets it wrote (`low_value`) and never touches one a person asked for
 /// (`sender_pref`).
 String bucketReasonFor(String? senderPref) =>
-    senderPref == 'later' ? 'sender_pref' : 'low_value';
+    quietsSender(senderPref) ? 'sender_pref' : 'low_value';

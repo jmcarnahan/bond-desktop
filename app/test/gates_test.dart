@@ -47,7 +47,11 @@ void main() {
     });
   });
 
-  group('no_reply', () {
+  /// Which addresses the name rules take and which they leave alone. WHICH
+  /// slug each one comes back with is the `reasons` group below — the two are
+  /// separate questions, and the replay of these gates against the golden set
+  /// scores both.
+  group('sender shapes', () {
     const gated = [
       'no-reply@x.com',
       'noreply@x.com',
@@ -64,24 +68,57 @@ void main() {
       'bounce@x.com',
       'bounces@x.com',
       'NoReply@X.com',
+      // The token rule: the word says itself in the middle of a local part,
+      // and every one of these was reaching the model under the old anchor.
+      'orders-noreply@example.com',
+      'noreply+billing@example.com',
+      'noreply2@example.com',
+      // The compact word needs no delimiter at all: nothing a person is named
+      // contains it, and a real mailbox buried it in a longer run of letters.
+      'opsnoreplyrelay@example.com',
+      'donotreplyservice@example.com',
+      // Contrived as an address, and gated all the same: a rule that had to
+      // keep this one out is a rule that let the three above through.
+      'not-a-noreply@x.com',
+      // Monitoring.
+      'monitoring@example.com',
+      'monitoring-eu@example.com',
+      'prod-monitoring@example.com',
+      // Build and service mailboxes.
+      'svc-deploy@example.com',
+      'build-bot@example.com',
+      'bot-relay@example.com',
+      'ci@example.com',
+      'builds@example.com',
+      'pipelines@example.com',
     ];
 
     for (final address in gated) {
       test('$address gates', () {
-        expect(gateFor(message(from: address), userAddress: null), 'no_reply');
+        expect(gateFor(message(from: address), userAddress: null), isNotNull);
       });
     }
 
-    // The prefix anchor doing its job. Every one of these is a plausible
+    // The delimiters doing their job. Every one of these is a plausible
     // human or product mailbox that a substring match would have swallowed.
     const allowed = [
-      'not-a-noreply@x.com',
       'nota@x.com',
       'renotify@x.com',
       'salerts@x.com',
       'no@x.com',
       'sarah@x.com',
       'rebounce@x.com',
+      'nota@example.com',
+      'renotify@example.com',
+      'salerts@example.com',
+      'abbott@example.com',
+      'remonitoring@example.com',
+      'cicd-team@example.com',
+      // An issue tracker and a code host, deliberately ungated: the same
+      // shape is a gold drop and a gold keep on the set, so the thing that
+      // separates them is the tenant, not the name.
+      'jira@example.com',
+      'github@example.com',
     ];
 
     for (final address in allowed) {
@@ -95,6 +132,112 @@ void main() {
         gateFor(message(from: 'sarah@noreply.com'), userAddress: null),
         isNull,
       );
+    });
+  });
+
+  /// The exact slug per shape, and it is exact on purpose: these are the
+  /// golden set's own drop-reason names, so a replay of the gates scores the
+  /// reason column and not only the verdict.
+  group('reasons', () {
+    const reasons = {
+      'noreply@example.com': 'no_reply',
+      'no.reply@x.com': 'no_reply',
+      'NoReply@X.com': 'no_reply',
+      'donotreplyservice@example.com': 'no_reply',
+      'orders-noreply@example.com': 'no_reply',
+      'noreply+billing@example.com': 'no_reply',
+      'noreply2@example.com': 'no_reply',
+      'opsnoreplyrelay@example.com': 'no_reply',
+      'not-a-noreply@x.com': 'no_reply',
+      'notifications@example.com': 'no_reply',
+      'alerts@example.com': 'no_reply',
+      'mailer-daemon@example.com': 'no_reply',
+      'postmaster@example.com': 'no_reply',
+      'bounces@example.com': 'no_reply',
+      'monitoring@example.com': 'monitoring',
+      'monitoring-eu@example.com': 'monitoring',
+      'prod-monitoring@example.com': 'monitoring',
+      'svc-deploy@example.com': 'machine_sender',
+      'build-bot@example.com': 'machine_sender',
+      'bot-relay@example.com': 'machine_sender',
+      'ci@example.com': 'machine_sender',
+      'builds@example.com': 'machine_sender',
+      'pipelines@example.com': 'machine_sender',
+    };
+
+    reasons.forEach((address, reason) {
+      test('$address is $reason', () {
+        expect(gateFor(message(from: address), userAddress: null), reason);
+      });
+    });
+  });
+
+  /// The owner's own standing rule, which is data rather than a pattern: it
+  /// arrives as an argument and the call site is what read the table.
+  group('sender_rule', () {
+    test('a drop rule gates an ordinary human address', () {
+      expect(
+        gateFor(
+          message(from: 'sarah@example.com'),
+          userAddress: null,
+          senderDisposition: 'drop',
+        ),
+        'sender_rule',
+      );
+    });
+
+    test('and is asked before every name rule below it', () {
+      // The reason a reader would recognise is the one they wrote, not the
+      // one the address happens to also earn.
+      expect(
+        gateFor(
+          message(from: 'noreply@example.com'),
+          userAddress: null,
+          senderDisposition: 'drop',
+        ),
+        'sender_rule',
+      );
+    });
+
+    test("but never before self — the owner's own mail is still their own",
+        () {
+      expect(
+        gateFor(
+          message(from: 'lo@bond.com'),
+          userAddress: 'lo@bond.com',
+          senderDisposition: 'drop',
+        ),
+        'self',
+      );
+    });
+
+    test('every other disposition changes nothing', () {
+      for (final disposition in [null, 'later', 'keep']) {
+        expect(
+          gateFor(
+            message(from: 'sarah@example.com'),
+            userAddress: null,
+            senderDisposition: disposition,
+          ),
+          isNull,
+          reason: 'disposition $disposition',
+        );
+      }
+    });
+
+    test('a chat from a dropped sender is gated too', () {
+      final chat = Message(
+        id: 'c1',
+        source: 'teams',
+        outbound: false,
+        fromAddress: 'teams:user-1',
+        bodyText: 'can you send the CD?',
+      );
+      expect(
+        gateFor(chat, userAddress: null, senderDisposition: 'drop'),
+        'sender_rule',
+      );
+      expect(gateFor(chat, userAddress: null), isNull);
     });
   });
 
@@ -331,6 +474,55 @@ void main() {
         ),
         ('pending', null),
       );
+    });
+  });
+
+  /// The one thing in `gates.dart` that never gates anything: a loose read of
+  /// a local part, used to decide whether a failed detail fetch is worth one
+  /// more attempt before the message is classified with no headers at all.
+  group('suspectMachineSender', () {
+    test('the machine mailboxes whose headers are worth waiting for', () {
+      for (final local in [
+        'svc-monitoring',
+        'prod-alerts',
+        'ops-digest',
+        'noreply',
+        'orders-noreply',
+        'digest',
+        'build-bot',
+        'bot-relay',
+        'ci',
+        'postmaster',
+        'system-notifier',
+        'mailer',
+      ]) {
+        expect(suspectMachineSender(local), isTrue, reason: local);
+      }
+    });
+
+    test('a person is not a machine, and neither is a word containing one', () {
+      for (final local in [
+        'sarah.chen',
+        // `bot` mid-word with no delimiter either side — the whole reason the
+        // pattern asks for one.
+        'abbott',
+        'robin',
+        '',
+        'cicd-team',
+      ]) {
+        expect(suspectMachineSender(local), isFalse, reason: local);
+      }
+    });
+
+    test('it is wider than the gates, deliberately', () {
+      // `prod-alerts@` is a machine mailbox every delimited gate refuses —
+      // `alerts` is prefix-anchored — which is exactly the message whose
+      // headers decide it.
+      expect(
+        gateFor(message(from: 'prod-alerts@example.com'), userAddress: null),
+        isNull,
+      );
+      expect(suspectMachineSender('prod-alerts'), isTrue);
     });
   });
 }

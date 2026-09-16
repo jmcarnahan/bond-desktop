@@ -252,6 +252,10 @@ class StorylineBlock {
 
   bool get blockedByUser => blockedBy == 'user';
 
+  /// A gate's eviction — every inbound in the thread was gated. Neither the
+  /// owner's word nor the re-check's, so it is labelled as its own thing.
+  bool get blockedByGate => blockedBy == 'gate';
+
   factory StorylineBlock.fromRow(Map<String, Object?> row) {
     return StorylineBlock(
       storylineId: row['storyline_id'] as String? ?? '',

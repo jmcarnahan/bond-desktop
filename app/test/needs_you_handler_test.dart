@@ -754,7 +754,11 @@ void main() {
 
   group('drain order', () {
     test('the verdict is on the row before extraction reads it', () async {
-      await seed();
+      // Triaged, and it has to be: the worker is not handed a `needs_you` or
+      // an `extract` item while its message is still `pending`
+      // (`MessageStore.claimPendingWork`). The drain this test is about only
+      // happens after triage has spoken.
+      await seed(triageStatus: 'triaged');
       await store.upsertConversation({
         'source': 'teams',
         'conversation_key': 'chat-1',

@@ -1533,6 +1533,20 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   static String _threads(int n) => n == 1 ? '1 thread' : '$n threads';
 
+  /// The sender of the newest inbound message with an address, or null.
+  static String? _newestInboundSender(List<Message> messages) {
+    Message? newest;
+    for (final message in messages) {
+      if (message.outbound) continue;
+      if (message.fromAddress?.isNotEmpty != true) continue;
+      if (newest == null ||
+          (message.receivedAt ?? '').compareTo(newest.receivedAt ?? '') >= 0) {
+        newest = message;
+      }
+    }
+    return newest?.fromAddress;
+  }
+
   Future<void> _keepSender(String address, String source) async {
     final notifier = ref.read(conversationsProvider.notifier);
     // Captured BEFORE the write. The undo restores this exact value, including
@@ -1552,6 +1566,25 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _toast(
       '$address goes to Later — ${_threads(affected)} moved.',
       onUndo: () => notifier.restoreSenderPref(address, previous, source: source),
+    );
+  }
+
+  /// The owner's own gate on a sender, offered beside Later in the same menu.
+  ///
+  /// [_laterSender]'s shape exactly, including the capture BEFORE the write:
+  /// the undo puts the rule back to whatever it was, and "there was no rule"
+  /// is a different state from "the rule was later". The toast says both
+  /// halves of what just happened, because they are different halves — new
+  /// mail is gated from now on, and the threads already here moved.
+  Future<void> _dropSender(String address, String source) async {
+    final notifier = ref.read(conversationsProvider.notifier);
+    final previous = await notifier.senderPref(address);
+    final affected = await notifier.dropSender(address, source: source);
+    _toast(
+      '$address is dropped — new mail from them is gated; '
+      '${_threads(affected)} moved to Later.',
+      onUndo: () =>
+          notifier.restoreSenderPref(address, previous, source: source),
     );
   }
 
@@ -3395,6 +3428,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       );
     }
 
+    // The address a drop rule is keyed on: whoever sent the newest inbound
+    // message, not the first participant folded into the row. On a
+    // multi-party thread those differ, and a gate on the wrong one is a
+    // standing rule about somebody who did not send the mail being dropped.
+    final dropAddress = _newestInboundSender(shown) ?? selected.primaryEmail;
     final panel = ThreadDetailPanel(
       key: ValueKey(selected.id),
       conversation: selected,
@@ -3469,6 +3507,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // every anonymous sender at once.
       onSendToLater: selected.primaryEmail?.isNotEmpty == true
           ? () => _laterSender(selected.primaryEmail!, selected.source)
+          : null,
+      onDropSender: dropAddress?.isNotEmpty == true
+          ? () => _dropSender(dropAddress!, selected.source)
           : null,
       onKeepInInbox: () => _keepThread(selected.source, selected.id),
       // Compose is a whole pane, which a thread being read BESIDE something

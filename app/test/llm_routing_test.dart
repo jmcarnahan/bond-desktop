@@ -101,6 +101,23 @@ void main() {
       'participants_json': '[{"name":"Sarah Chen"}]',
     });
     if (vector == null) return;
+    // The message the vector implies. An embedding is written by extraction,
+    // which does not run until triage has spoken, so a conversation with a
+    // vector and nothing kept behind it is a shape the app cannot produce —
+    // and one the assign pass now closes as `AssignOutcome.gated` before it
+    // asks any client anything, which is not what these tests are about.
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'kept-$key',
+      'conversation_key': key,
+      'direction': 'inbound',
+      'subject': 'Subject for $key',
+      'from_name': 'Sarah',
+      'from_address': 'sarah@example.com',
+      'received_at': lastMessageAt ?? '2026-08-28T10:00:00Z',
+      'body_text': 'body of kept-$key',
+      'triage_status': 'triaged',
+    });
     await store.upsertConversationAi(
       'email',
       key,

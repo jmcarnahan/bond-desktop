@@ -75,6 +75,13 @@ class MessageHistoryScreen extends StatefulWidget {
   /// confirmation the house pattern allows.
   final VoidCallback? onIgnore;
 
+  /// Writes the owner's standing gate on this message's sender: nothing from
+  /// that address reaches the model again. Shown only when the HOST decides
+  /// the owner has Ignored this sender often enough to be asked — the screen
+  /// does not count anything. A quiet button among the others and not a
+  /// prompt: the moment is right for the offer, not for a question.
+  final VoidCallback? onDropSender;
+
   /// Opens the pane that picks which storyline this thread joins. A pane and
   /// not a menu, so it comes back to this screen when it is done.
   final VoidCallback? onAddToStoryline;
@@ -125,6 +132,7 @@ class MessageHistoryScreen extends StatefulWidget {
     this.onRetry,
     this.onRejudge,
     this.onIgnore,
+    this.onDropSender,
     this.onAddToStoryline,
     this.onRemoveFromStoryline,
     this.onAllowAgain,
@@ -141,6 +149,8 @@ class MessageHistoryScreen extends StatefulWidget {
   static const ValueKey<String> retryKey = ValueKey('history-retry');
   static const ValueKey<String> rejudgeKey = ValueKey('history-rejudge');
   static const ValueKey<String> ignoreKey = ValueKey('history-ignore');
+  static const ValueKey<String> dropSenderKey =
+      ValueKey('history-drop-sender');
   static const ValueKey<String> addToStorylineKey =
       ValueKey('history-add-to-storyline');
   static const ValueKey<String> keepKey = ValueKey('history-keep');
@@ -152,6 +162,13 @@ class MessageHistoryScreen extends StatefulWidget {
   /// several more, so a bare key would name four buttons at once.
   static ValueKey<String> removeKey(String storylineId) =>
       ValueKey('history-remove-$storylineId');
+
+  /// Who wrote a block, in the words the storyline's own section uses.
+  static String _removedBy(ThreadBlock block) => block.blockedByUser
+      ? 'by you'
+      : block.blockedByGate
+          ? 'by a gate'
+          : 'by re-check';
 
   static ValueKey<String> allowAgainKey(String storylineId) =>
       ValueKey('history-allow-again-$storylineId');
@@ -170,6 +187,15 @@ class MessageHistoryScreen extends StatefulWidget {
 class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
   /// Whether Ignore has been pressed once and is waiting for the second tap.
   bool _confirmingIgnore = false;
+
+  /// The same two-step for the drop offer: it writes a standing gate, and it
+  /// renders into the slot Ignore vacates, where a stray second click lands.
+  bool _confirmingDropSender = false;
+
+  /// Set once the offer is taken, so the button is gone on the same frame
+  /// rather than a fast second tap writing the rule twice while the host
+  /// re-reads whether to offer it.
+  bool _dropSenderTaken = false;
 
   /// Which membership's Remove is armed, or null. One at a time on purpose:
   /// arming a second question while the first is open is how a person answers
@@ -194,6 +220,7 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
     setState(() {
       _confirmingIgnore = false;
       _confirmingRemoveId = null;
+      _confirmingDropSender = false;
     });
   }
 
@@ -543,6 +570,7 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
                       setState(() {
                         _confirmingRemoveId = membership.storylineId;
                         _confirmingIgnore = false;
+                        _confirmingDropSender = false;
                       });
                       return;
                     }
@@ -589,7 +617,7 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            'Removed ${block.blockedByUser ? 'by you' : 'by re-check'} from '
+            'Removed ${MessageHistoryScreen._removedBy(block)} from '
             '${title.isEmpty ? '(a storyline that no longer exists)' : title}'
             '${evidence.isEmpty ? '' : ' — $evidence'}',
             style: BondType.small,
@@ -692,6 +720,7 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
     final retry = widget.onRetry;
     final rejudge = widget.onRejudge;
     final ignore = widget.onIgnore;
+    final dropSender = widget.onDropSender;
     final addToStoryline = widget.onAddToStoryline;
     final keep = widget.onKeepInInbox;
     final later = widget.onSendToLater;
@@ -725,11 +754,37 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
               setState(() {
                 _confirmingIgnore = true;
                 _confirmingRemoveId = null;
+                _confirmingDropSender = false;
               });
               return;
             }
             setState(() => _confirmingIgnore = false);
             ignore();
+          },
+        ),
+      // Deliberately NOT gated on `dropped`: the moment the host offers this
+      // is the moment after an Ignore, which is exactly when the row it sits
+      // on has just become a dropped one.
+      if (dropSender != null && !_dropSenderTaken)
+        _quietButton(
+          _confirmingDropSender
+              ? 'Really drop this sender?'
+              : 'Drop every message from this sender',
+          key: MessageHistoryScreen.dropSenderKey,
+          onPressed: () {
+            if (!_confirmingDropSender) {
+              setState(() {
+                _confirmingDropSender = true;
+                _confirmingIgnore = false;
+                _confirmingRemoveId = null;
+              });
+              return;
+            }
+            setState(() {
+              _confirmingDropSender = false;
+              _dropSenderTaken = true;
+            });
+            dropSender();
           },
         ),
       if (addToStoryline != null && !dropped)

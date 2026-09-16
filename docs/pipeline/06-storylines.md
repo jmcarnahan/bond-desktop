@@ -16,7 +16,13 @@ are the authority on sequencing.
    pass (`memberContextRows`, `blockedStorylineIdsFor`), so filing one thread
    costs the same against a mailbox of fifty storylines as against two. On
    join, it *queues* a refresh rather than naming inline — under the gate in
-   the next section.
+   the next section. A conversation with **zero kept inbound messages** never
+   gets that far: the pass returns `AssignOutcome.gated` before it looks for a
+   vector, so no embedding is written and no model is asked, and the handler
+   closes the storyline stage `skipped` rather than `done` — nothing was
+   judged, so there is no verdict to claim. `_reembed` carries the same guard
+   as a belt, since it is the only place outside extraction that writes a
+   conversation embedding.
 2. **Sweep** (`StorylineSweepHandler` → `sweep`) — clusters *unassigned*
    threads by embedding similarity (gate: 2 similar threads form a proposal),
    names the proposal, then confirms each member individually. Pair-discovery
@@ -447,7 +453,8 @@ message's thread is in — with the storyline's title, the `evidence` behind the
 filing, *filed by you* where `added_by = 'user'`, and the storyline's own
 status where it is no longer live — and under them every `storyline_member_blocks`
 row. The blocks are ONE list here, each entry saying which pass removed it:
-*Removed by you* or *Removed by re-check*. The four buttons beside them —
+*Removed by you*, *Removed by a gate* or *Removed by re-check*. The four
+buttons beside them —
 *Remove* (two taps, as it is on the card), *Allow again* and *Add back*
 on every entry whose storyline is still live, whichever pass wrote the block,
 and *Add to storyline…* which opens the same picker pane the thread view opens
@@ -579,6 +586,21 @@ sentence came from which thread, so nothing short of the clear could get the
 departed thread out of it. An addition clears nothing: new mail adds facts, it
 never invalidates the ones already written, and continuity is the point there.
 
+**The gate is the third remover.** Three things take a thread out, and the
+`blocked_by` on the block says which: the owner (`'user'`, an audit queued
+behind it, the block read back as a negative example), the re-check
+(`'audit'`, never shown to a model), and a gate that spoke late (`'gate'`).
+The last is `StorylineService.evictGatedThread`, called when every inbound
+message in a thread has been gated: it does all the bookkeeping above, writes
+the fixed evidence `every inbound message in this thread was gated` rather
+than the member's own, queues no audit — a gate says nothing about whether the
+model got this group right — and leaves a `user` membership exactly where it
+is, because the owner filed that thread by hand. Like an audit block, a gate
+block is lifted only by the owner's *Allow again*: a Restore does not lift it,
+and neither does a later kept reply in the same thread, so the thread can join
+other storylines but not return to this one on its own. See
+[02-gates.md](02-gates.md).
+
 **Audit blocks are never shown to the model, and only the owner lifts them.**
 They stay out of both example fences, and no pass clears them; a thread the
 re-check took out stays out until a person says otherwise, which is what stops
@@ -586,9 +608,9 @@ the audit and the recruit trading the same thread back and forth across drains.
 
 **On screen**, the block leads the **Messages** tab, above the first card and
 under a rule of its own: first ***Re-check members*** as a real outlined
-button with its one-line caption beside it, then the two lists — **REMOVED BY
-YOU** and **REMOVED BY RE-CHECK**, each rendering only when it has something
-in it. It led from the foot first, and the foot of a long spine is where
+button with its one-line caption beside it, then the lists — **REMOVED BY
+YOU**, **REMOVED BY A GATE** and **REMOVED BY RE-CHECK**, each rendering only
+when it has something in it. It led from the foot first, and the foot of a long spine is where
 nobody looks; a reference tab is not where a reader doubting three cards would
 go either. One caption stands above both lists: *Add back puts a thread on the
 spine again. Allow again only lifts the block — the model may file the thread
@@ -629,6 +651,29 @@ hand-filed member, the model's own sentence for an automatic one, and nothing
 at all where an automatic row has none. "Grouped automatically." was filler.
 
 ## How the sweep finds its pairs
+
+**The pool is kept-inbound conversations, not the embedding table.**
+`MessageStore.conversationsWithEmbeddings` — the one query both the sweep and
+the recruit lap draw their candidates from — requires a conversation to hold
+at least one inbound message the gates KEPT (`keptMessageSql`: not `skipped`,
+or `skipped` under `teams_source`). A stored vector is not evidence that a
+thread is worth grouping. A conversation whose every inbound message was gated
+has one only because something embedded it before the gates spoke, and one
+sender's gated mail looks alike enough to cluster into a proposal about mail
+nobody was ever going to read. The vec0 index can lag the durable table for a
+sweep — it is diff-backfilled from `conversation_ai` — but that changes
+nothing: `_indexedLinks` maps every probe hit back through the candidate rows
+and ignores a neighbour that is not among them. The card's message-side data
+(`newestInboundCardData`) prefers a kept inbound too, falling back to a gated
+one only when there is nothing else, so a no-reply autoresponder landing on a
+live thread cannot become the sentence that thread is clustered by. The same
+query feeds each episode card's one-line summary on the storyline screen
+(`storylines_provider.dart`), so that line moves with it: an episode whose
+newest inbound is a bounce is summarised by the last message a person sent,
+while the spine still lists every row. Ordering
+is what makes any of this hold: a message is never extracted, and so never
+embedded, before triage has spoken about it — see
+[04-extraction.md](04-extraction.md) for the claim rule that enforces it.
 
 Clustering is two halves, and only one of them moved. **Forming** the clusters
 is single-link greedy agglomeration in `StorylineService._clusterBy` — each

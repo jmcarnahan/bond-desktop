@@ -38,6 +38,7 @@ import '../services/draft_handler.dart';
 import '../services/drain_gate.dart';
 import '../services/embed_handler.dart';
 import '../services/extract_handler.dart';
+import '../services/gate_repair_service.dart';
 import '../services/graph_attachment_backend.dart';
 import '../services/graph_auth.dart';
 import '../services/graph_mail.dart';
@@ -554,6 +555,11 @@ final syncServiceProvider = Provider<MailSync>(
     // of every pass — the whole mechanism by which a directory stays level
     // with the disk without a file-system watcher.
     contextStore: ref.watch(contextStoreProvider),
+    // The one-shot over the threads that were filed and embedded before the
+    // gates could speak first. `read` inside the closure, for the reason the
+    // pumps elsewhere in this file give.
+    repairGatedConversations: () =>
+        ref.read(gateRepairServiceProvider).repairAll(),
   ),
 );
 
@@ -665,6 +671,21 @@ final fastLlmClientProvider = Provider<LlmClient>(
 /// One instance for the app, or it would serialize nothing — see [DrainGate].
 final drainGateProvider = Provider<DrainGate>((ref) => DrainGate());
 
+/// What a gate that speaks late has to undo — see [GateRepairService].
+///
+/// Reaching forward to [storylineServiceProvider], declared further down this
+/// file, is ordinary Riverpod: a provider resolves where it is READ, which is
+/// inside this callback. There is no cycle to worry about — the storyline
+/// service takes the store, the clients, the log, the embeddings, the
+/// recorder and the context library, and none of them is a drain.
+final gateRepairServiceProvider = Provider<GateRepairService>(
+  (ref) => GateRepairService(
+    ref.watch(messageStoreProvider),
+    ref.watch(storylineServiceProvider),
+    activityLog: ref.watch(activityLogProvider),
+  ),
+);
+
 /// The triage worker. Exactly one for the whole app: it is one queue over
 /// shared rows, and a second instance would claim the same messages.
 final triageQueueProvider = Provider<TriageQueue>((ref) {
@@ -679,6 +700,28 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     gate: ref.watch(drainGateProvider),
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
+    // The knock on the worker's door. Extraction and needs-you are no longer
+    // handed a message triage has not spoken about, so a worker drain that
+    // won the gate first leaves them pending and would sit on them until the
+    // next sync — this is what makes it walk again the moment the gates have
+    // answered. Reaching forward to [aiWorkerProvider], declared further down
+    // this file, is ordinary Riverpod: a provider resolves where it is READ,
+    // which is inside this callback, long after both exist. Unawaited because
+    // a worker drain is minutes of model time and the triage pump that fires
+    // it must not wait for it; the guard is for the read itself, which throws
+    // against a torn-down container.
+    onDrained: () async {
+      try {
+        unawaited(ref.read(aiWorkerProvider).pump());
+      } catch (_) {}
+    },
+    // A gate landing on a message whose thread has nothing kept left in it
+    // leaves an embedding, storyline memberships and a queued filing behind.
+    // `read` inside the closure, on the same precedent as the pumps above:
+    // this is called long after the body returns.
+    onGated: (source, id) => ref
+        .read(gateRepairServiceProvider)
+        .afterGate(source, id, reason: 'extracted_then_gated'),
   );
   ref.onDispose(queue.dispose);
   return queue;
@@ -808,6 +851,10 @@ final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
     pumpWork: () => ref.read(aiWorkerProvider).pump(),
     // For the settle backstop a Retry runs when a row owes no stage at all.
     threshold: attentionThresholdReader(ref.watch(messageStoreProvider)),
+    // An Ignore is a gate arriving after the pipeline has already run.
+    onGated: (source, id) => ref
+        .read(gateRepairServiceProvider)
+        .afterGate(source, id, reason: 'ignored'),
     activityLog: ref.watch(activityLogProvider),
   ),
 );
@@ -1098,3 +1145,37 @@ final updaterProvider = Provider<Updater>((_) => const ChannelUpdater());
 final updaterStatusProvider = FutureProvider.autoDispose<UpdaterStatus>(
   (ref) => ref.watch(updaterProvider).status(),
 );
+
+/// How many explicit Ignores of one sender it takes before the app offers to
+/// drop them altogether.
+///
+/// Offered, never automatic. Three is the point at which a person has said the
+/// same thing three times, which is enough to ask a question and nowhere near
+/// enough to answer it for them: a sender rule gates everything that address
+/// ever sends, and nothing but the owner gets to write one.
+const int senderDropOfferAfter = 3;
+
+/// Whether the "Drop every message from this sender" offer belongs on this
+/// address's story right now.
+///
+/// A provider because the answer is two store reads and a widget build cannot
+/// await one — the same reason [storylineMembersProvider] is one. False while
+/// the read is in flight, which is the right way round: a button that appears
+/// a frame late is better than one that flickers away.
+///
+/// False once the rule exists, so the offer disappears the moment it is taken
+/// rather than inviting the owner to write a rule they already wrote. The
+/// caller invalidates it after an Ignore and after a drop — see
+/// `MessageHistoryHost`.
+final senderDropOfferProvider =
+    FutureProvider.autoDispose.family<bool, String>((ref, address) async {
+  final store = ref.watch(messageStoreProvider);
+  // No offer where a rule already stands: `drop` because it is taken, `keep`
+  // because offering to gate a sender the owner explicitly kept would be the
+  // app arguing with a standing instruction. A `later` sender is still asked
+  // — deferring and dropping are different sizes of the same answer.
+  final rule = await store.getSenderPref(address);
+  if (rule == 'drop' || rule == 'keep') return false;
+  final ignores = await store.explicitIgnoreCountForSender(address);
+  return ignores >= senderDropOfferAfter;
+});

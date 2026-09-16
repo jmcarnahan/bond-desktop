@@ -91,6 +91,7 @@ class ActivityLogPanel extends StatefulWidget {
     'embed_fail': 'Embeddings',
     'restore': 'Restore',
     'ignore': 'Ignore',
+    'gate_repair': 'Gate repair',
     'attachment_text': 'Read attachment',
     'attachment_digest': 'Attachment digest',
     'context_reconcile': 'Read directory',
@@ -130,6 +131,7 @@ class ActivityLogPanel extends StatefulWidget {
     'malformed_entity': 'the queued row named nothing',
     'nothing_to_brief': 'no notes and no summaries yet',
     'unchanged': 'nothing the brief reads has changed',
+    'headerless': 'headers did not arrive — retried',
   };
 
   static String _label(String kind) => _kindLabels[kind] ?? kind;
@@ -181,9 +183,15 @@ class ActivityLogPanel extends StatefulWidget {
         return text == null ? '$label failed' : '$label failed — $text';
       case 'retry':
         final attempts = detail['attempts'];
-        return attempts is num
+        final sentence = attempts is num
             ? '$label retry (attempt ${attempts.toInt()})'
             : '$label retry';
+        // A retry usually carries the error it is retrying, and the error
+        // rides the detail rather than the sentence. A retry with a REASON is
+        // the other kind — nothing failed about the message, something it
+        // needed did not arrive — and that is worth the words.
+        final reason = _reason(detail['reason']);
+        return reason.isEmpty ? sentence : '$sentence — $reason';
       case 'skipped':
         final reason = _reason(detail['reason']);
         return reason.isEmpty ? '$label skipped' : '$label skipped — $reason';
@@ -260,6 +268,52 @@ class ActivityLogPanel extends StatefulWidget {
         return 'Restored a filtered message';
       case 'ignore':
         return 'Ignored a message';
+      // What a gate that spoke late took back: the memberships, the vector,
+      // and the count of messages the model had already read before a gate
+      // decided they were never worth reading. A row with nothing but the
+      // counter is written too, and it is the one that says how much of this
+      // the app used to do.
+      case 'gate_repair':
+        final oneShot = detail['reason'] == 'one_shot';
+        final extracted = detail['extracted'];
+        // The one-shot's count is the whole database's history, not what
+        // this pass found, and the sentence has to say so.
+        final extractedText = extracted is num && extracted > 0
+            ? '${extracted.toInt()} '
+                '${extracted == 1 ? 'message' : 'messages'}'
+                '${oneShot ? ' in the database' : ''} extracted before '
+                '${extracted == 1 ? 'its' : 'their'} gate'
+            : '';
+        final cleared = detail['embeddings_cleared'];
+        final clearedText = detail['embedding_cleared'] == true
+            ? 'embedding cleared'
+            : cleared is num && cleared > 0
+                ? '${cleared.toInt()} '
+                    '${cleared == 1 ? 'embedding' : 'embeddings'} cleared'
+                : '';
+        final count = e.count ?? 0;
+        // The one-shot's own two numbers: how many threads it walked, and how
+        // many it could not finish. Without the second a sweep that failed on
+        // every thread would read as a clean database.
+        final conversations = detail['conversations'];
+        final failed = detail['failed'];
+        final parts = [
+          if (oneShot && conversations is num && conversations > 0)
+            '${conversations.toInt()} '
+                '${conversations == 1 ? 'thread' : 'threads'} walked',
+          if (count > 0)
+            'removed $count storyline '
+                '${count == 1 ? 'membership' : 'memberships'}',
+          if (extractedText.isNotEmpty) extractedText,
+          if (clearedText.isNotEmpty) clearedText,
+          if (failed is num && failed > 0) '${failed.toInt()} failed',
+        ];
+        if (parts.isEmpty) {
+          return oneShot ? '$label — one-shot: nothing to repair' : label;
+        }
+        return oneShot
+            ? '$label — one-shot: ${parts.join('; ')}'
+            : '$label — ${parts.join('; ')}';
       case 'storyline_sweep':
         final proposed = detail['proposed'];
         final confirmed = detail['confirmed'];

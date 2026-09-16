@@ -574,6 +574,104 @@ void main() {
       );
     });
 
+    test('a gate repair says what it took back', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'gate_repair',
+          entityId: 'm1',
+          count: 2,
+          detail: const {
+            'reason': 'extracted_then_gated',
+            'extracted': 1,
+            'storylines': 2,
+            'embedding_cleared': true,
+          },
+        )),
+        allOf(
+          contains('2 storyline memberships'),
+          contains('1 message extracted before its gate'),
+          contains('embedding cleared'),
+        ),
+      );
+      // Nothing moved, and the counter is the whole row: what the app used to
+      // do before the gates could speak first.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'gate_repair',
+          count: 0,
+          detail: const {
+            'reason': 'ignored',
+            'extracted': 1,
+            'storylines': 0,
+            'embedding_cleared': false,
+          },
+        )),
+        'Gate repair — 1 message extracted before its gate',
+      );
+      // The one-shot says so, because "the database was like this" is a
+      // different sentence from "a gate just landed".
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'gate_repair',
+          count: 3,
+          detail: const {
+            'reason': 'one_shot',
+            'conversations': 4,
+            'extracted': 5,
+            'storylines': 3,
+            'embeddings_cleared': 4,
+          },
+        )),
+        allOf(
+          contains('one-shot:'),
+          contains('4 threads walked'),
+          contains('3 storyline memberships'),
+          contains('5 messages in the database extracted before their gate'),
+          contains('4 embeddings cleared'),
+        ),
+      );
+      // A sweep that walked threads and finished none of them is not a clean
+      // database, and must not read as one.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'gate_repair',
+          count: 0,
+          detail: const {
+            'reason': 'one_shot',
+            'conversations': 4,
+            'extracted': 0,
+            'storylines': 0,
+            'embeddings_cleared': 0,
+            'failed': 4,
+          },
+        )),
+        allOf(contains('4 threads walked'), contains('4 failed')),
+      );
+    });
+
+    test('a triage retry names the reason when it has one', () {
+      // The headerless defer: nothing failed about the message, something it
+      // needed did not arrive.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'triage',
+          status: 'retry',
+          detail: const {'reason': 'headerless', 'attempts': 1},
+        )),
+        'Triage retry (attempt 1) — headers did not arrive — retried',
+      );
+      // And an ordinary model retry, which carries an error rather than a
+      // reason, reads exactly as it always did.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'triage',
+          status: 'retry',
+          detail: const {'error': 'bad json', 'attempts': 1},
+        )),
+        'Triage retry (attempt 1)',
+      );
+    });
+
     test('a reconcile names what the delta feed skipped', () {
       // The row exists only because it found something, so the sentence has no
       // "nothing new" form to write — it says what was missing instead.

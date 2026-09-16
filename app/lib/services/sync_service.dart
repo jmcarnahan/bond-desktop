@@ -143,6 +143,11 @@ class SyncService implements MailSync {
   /// the feature. Null means the tail below enqueues nothing.
   final ContextStore? _context;
 
+  /// The one-shot gate repair, or null on a build wired without it — which is
+  /// every test that does not care and every caller from before it existed.
+  /// In the app: `GateRepairService.repairAll`.
+  final Future<({int repaired, bool complete})> Function()? _repairGated;
+
   SyncService(
     this._mail,
     this._store, {
@@ -151,8 +156,10 @@ class SyncService implements MailSync {
     Future<String?> Function()? userAddress,
     Future<double> Function()? attentionThreshold,
     ContextStore? contextStore,
+    Future<({int repaired, bool complete})> Function()? repairGatedConversations,
     this._lookbackDays,
   })  : _log = activityLog ?? ActivityLog.disabled(),
+        _repairGated = repairGatedConversations,
         _context = contextStore,
         _progress = progress ?? const PipelineProgress.disabled(),
         _userAddressReader = userAddress,
@@ -397,6 +404,36 @@ class SyncService implements MailSync {
         await _store.setPref('thread_state_refold', '1');
       }
 
+      // The threads that were extracted, embedded and filed before a gate
+      // could speak first — every inbound in them gated, and the thread still
+      // sitting in the clustering pool, some of them inside a storyline. Same
+      // one-shot idiom, and it runs BEFORE the sweep is requeued below so the
+      // sweep reads the pool this just cleaned. Null when the build was wired
+      // without the repair service, and then the pref is left unset too: a
+      // test build must not consume the one-shot the app is owed.
+      //
+      // The pref is written only after the repair returns. A repair that threw
+      // never ran, and a one-shot that never ran is owed again on the next
+      // sync — where one that ran and found nothing is not. The sync around
+      // it is healthy either way, so a failure is a line in the console and
+      // not a banner over an inbox that just synced fine.
+      int? repairedGated;
+      final repairGated = _repairGated;
+      if (repairGated != null &&
+          await _store.getPref('gated_conversation_repair') == null) {
+        try {
+          final sweep = await repairGated();
+          repairedGated = sweep.repaired;
+          // A capped pass leaves the pref unset, so the next sync walks the
+          // next slice; only a pass that came back short closes the one-shot.
+          if (sweep.complete) {
+            await _store.setPref('gated_conversation_repair', '1');
+          }
+        } catch (e) {
+          debugPrint('sync: the gate repair one-shot failed: $e');
+        }
+      }
+
       // The per-message search vectors, over the same window and on the same
       // `OR IGNORE` idempotence — new mail is queued, and a backlog that
       // predates the search feature refills itself without anyone asking.
@@ -488,6 +525,7 @@ class SyncService implements MailSync {
           'stripped_sender_tips': ?strippedSenderTips,
           'named_participants': ?namedParticipants,
           'refolded_threads': ?refoldedThreads,
+          'repaired_gated_conversations': ?repairedGated,
           if (contextDirs > 0) 'context_dirs': contextDirs,
           if (inboxResync || sentResync) 'resync': true,
         },

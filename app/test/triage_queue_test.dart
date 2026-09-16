@@ -348,6 +348,37 @@ void main() {
       expect(row['gate_reason'], 'no_reply');
     });
 
+    test('a drop rule gates at tier one, under its own reason', () async {
+      // Data, not a pattern: the address is an ordinary human one and only
+      // the owner's standing rule says anything about it.
+      await seedMessage(id: 'm1', from: 'dana@example.com');
+      await store.setSenderPref('dana@example.com', 'drop');
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect(llm.userMessages, isEmpty);
+      final row = await messageRow('m1');
+      expect(row['triage_status'], 'skipped');
+      expect(row['gate_reason'], 'sender_rule');
+    });
+
+    test('a restored message from a dropped sender still reaches the model',
+        () async {
+      // Restore is the escape hatch from EVERY gate, and the sender rule is
+      // one of them: the owner pulling one message back outranks their own
+      // standing rule about the address it came from.
+      await seedMessage(id: 'm1', from: 'dana@example.com');
+      await store.setSenderPref('dana@example.com', 'drop');
+      await store.restoreMessage('email', 'm1');
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect(llm.userMessages, hasLength(1));
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+    });
+
     test('the self gate uses the address set after sign-in', () async {
       await seedMessage(id: 'm1', from: 'lo@bond.com');
       final llm = FakeLlm([answer()]);
@@ -401,6 +432,258 @@ void main() {
 
       expect(llm.userMessages.length, 1);
       expect((await messageRow('real'))['triage_status'], 'triaged');
+    });
+  });
+
+  /// The knock the queue gives the gate repair, at both tiers.
+  ///
+  /// What it is for is elsewhere — see `gate_repair_service_test.dart`. What
+  /// is pinned here is only that the queue calls it, once, on a verdict rather
+  /// than on a pass through the model, and that the verdict is on the row by
+  /// the time it does.
+  group('onGated', () {
+    test('a sender gate tells it, with the verdict already written', () async {
+      await seedMessage(id: 'm1', from: 'noreply@example.com');
+      final gated = <(String, String)>[];
+      final statusInside = <Object?>[];
+
+      await TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onGated: (source, id) async {
+          gated.add((source, id));
+          statusInside.add((await messageRow(id))['triage_status']);
+        },
+      ).pump();
+
+      expect(gated, [('email', 'm1')]);
+      // Before the progress emit, which is what "already written" buys: the
+      // reload the rails do behind that tick reads the repaired state.
+      expect(statusInside, ['skipped']);
+    });
+
+    test('a header gate tells it too', () async {
+      await seedMessage(
+        id: 'm1',
+        withBody: false,
+        bodyPreview: 'This week in rates',
+      );
+      final fetch = FakeDetailFetch(
+        store,
+        bodyText: 'Body',
+        headers: const {'list-unsubscribe': '<mailto:stop@example.com>'},
+      );
+      final gated = <(String, String)>[];
+
+      await TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        ensureBody: fetch.call,
+        onGated: (source, id) async => gated.add((source, id)),
+      ).pump();
+
+      expect((await messageRow('m1'))['gate_reason'], 'newsletter');
+      expect(gated, [('email', 'm1')]);
+    });
+
+    test('a message that reaches the model is not a gate', () async {
+      await seedMessage(id: 'm1');
+      final gated = <(String, String)>[];
+
+      await TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onGated: (source, id) async => gated.add((source, id)),
+      ).pump();
+
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+      expect(gated, isEmpty);
+    });
+
+    test('a callback that throws does not cost the drain its verdict',
+        () async {
+      await seedMessage(id: 'm1', from: 'noreply@example.com');
+      await seedMessage(
+        id: 'm2',
+        conversationKey: 'conv-2',
+        receivedAt: '2026-08-29T09:00:00Z',
+      );
+
+      await TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onGated: (source, id) async => throw StateError('repair is down'),
+      ).pump();
+
+      expect((await messageRow('m1'))['triage_status'], 'skipped');
+      // And the message behind it is still triaged: the callback's failure is
+      // not the drain's.
+      expect((await messageRow('m2'))['triage_status'], 'triaged');
+    });
+  });
+
+  /// A failed detail fetch on a machine-shaped sender, which is the one shape
+  /// of degraded fetch where classifying from the preview throws away the
+  /// verdict that mattered: the header gates would have caught exactly this
+  /// mail, and they have nothing to read.
+  group('headerless defer', () {
+    /// A no-headers message from a machine mailbox no gate deliberately
+    /// catches — `alerts` is prefix-anchored — plus a fetch that always fails.
+    Future<FakeDetailFetch> seedDeferrable({
+      String id = 'm1',
+      String from = 'prod-alerts@example.com',
+    }) async {
+      await seedMessage(id: id, from: from, bodyText: 'Disk usage at 91%.');
+      return FakeDetailFetch(store, error: Exception('graph down'));
+    }
+
+    /// The newest `triage` row with this status, as its raw columns plus its
+    /// decoded detail. Raw rather than [ActivityEvent] because this file
+    /// imports `database.dart`, whose generated row class owns that name.
+    Future<Map<String, Object?>> triageRow(String status) async {
+      final row = (await store.recentActivity(limit: 20)).firstWhere(
+        (r) => r['kind'] == 'triage' && r['status'] == status,
+      );
+      return {
+        ...row,
+        'detail': jsonDecode(row['detail_json'] as String) as Map,
+      };
+    }
+
+    test('two drains defer, the third classifies headerless', () async {
+      final fetch = await seedDeferrable();
+      final llm = FakeLlm([answer()]);
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      TriageQueue queue() => TriageQueue(
+            store,
+            llm,
+            ensureBody: fetch.call,
+            activityLog: log,
+          );
+
+      await queue().pump();
+
+      var row = await messageRow('m1');
+      expect(row['triage_status'], 'pending');
+      expect(row['triage_attempts'], 1);
+      expect(llm.userMessages, isEmpty, reason: 'nothing was classified yet');
+      expect(fetch.fetched, ['m1'], reason: 'one fetch, not a tight loop');
+      final retry = await triageRow('retry');
+      expect(retry['entity_id'], 'm1');
+      final detail = retry['detail'] as Map;
+      expect(detail['reason'], 'headerless');
+      expect(detail['attempts'], 1);
+
+      await queue().pump();
+
+      row = await messageRow('m1');
+      expect(row['triage_status'], 'pending');
+      expect(row['triage_attempts'], 2);
+      expect(llm.userMessages, isEmpty);
+
+      await queue().pump();
+
+      // Bounded means bounded: at the ceiling the message is classified from
+      // its preview with no headers, exactly as it always was.
+      row = await messageRow('m1');
+      expect(row['triage_status'], 'triaged');
+      expect(row['triage_attempts'], 2);
+      expect(llm.userMessages.length, 1);
+    });
+
+    test('a drain stops claiming once it has set aside the store\'s cap',
+        () async {
+      // One more deferrable message than `claimPendingTriage` will exclude.
+      // Past the cap the newest set-aside row would be handed straight back
+      // and its second attempt spent in this drain — so the drain stops.
+      const cap = MessageStore.maxTriageExclusions;
+      for (var i = 0; i <= cap; i++) {
+        await seedMessage(
+          id: 'm$i',
+          conversationKey: 'conv-$i',
+          from: 'prod-alerts@example.com',
+          receivedAt: '2026-08-29T10:${i.toString().padLeft(2, '0')}:00Z',
+          bodyText: 'Disk usage at 91%.',
+        );
+      }
+      final fetch = FakeDetailFetch(store, error: Exception('graph down'));
+      final llm = FakeLlm([answer()]);
+
+      // Concurrency 1 makes the count exact. With more, the claims already in
+      // flight when the cap is reached defer too — still one attempt each and
+      // never re-claimed, only more of them.
+      await TriageQueue(store, llm, ensureBody: fetch.call, concurrency: 1)
+          .pump();
+
+      var deferred = 0;
+      var untouched = 0;
+      for (var i = 0; i <= cap; i++) {
+        final row = await messageRow('m$i');
+        expect(row['triage_status'], 'pending');
+        switch ((row['triage_attempts'] as num).toInt()) {
+          case 1:
+            deferred++;
+          case 0:
+            untouched++;
+          default:
+            fail('m$i spent a second attempt in one drain');
+        }
+      }
+      expect(deferred, cap);
+      expect(untouched, 1, reason: 'the oldest waits for the next pump');
+      expect(fetch.fetched.length, cap, reason: 'one fetch per deferral');
+      expect(llm.userMessages, isEmpty);
+    });
+
+    test('a person is classified headerless on the first failure', () async {
+      final fetch = await seedDeferrable(from: 'sarah@example.com');
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+
+      // The deferral is about the gates that never got to speak, and no gate
+      // was ever going to fire on a colleague.
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+      expect(llm.userMessages.length, 1);
+    });
+
+    test('the message behind a deferred one is still triaged in that drain',
+        () async {
+      // The machine one is NEWER, so it is what the claim's ordering hands
+      // back first — and would keep handing back, without the exclusion.
+      final fetch = FakeDetailFetch(store, error: Exception('graph down'));
+      await seedMessage(
+        id: 'machine',
+        from: 'prod-alerts@example.com',
+        receivedAt: '2026-08-29T12:00:00Z',
+      );
+      await seedMessage(
+        id: 'human',
+        conversationKey: 'conv-2',
+        receivedAt: '2026-08-29T11:00:00Z',
+      );
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+
+      expect((await messageRow('human'))['triage_status'], 'triaged');
+      final machine = await messageRow('machine');
+      expect(machine['triage_status'], 'pending');
+      expect(machine['triage_attempts'], 1);
+    });
+
+    test('a chat is never deferred — there is no detail fetch to retry',
+        () async {
+      await seedChat(id: 'c1', bodyText: 'Deploy finished.');
+      final fetch = FakeDetailFetch(store, error: Exception('graph down'));
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+
+      expect(fetch.fetched, isEmpty);
+      expect((await messageRow('c1', source: 'teams'))['triage_status'],
+          'triaged');
     });
   });
 
@@ -1457,6 +1740,161 @@ void main() {
       expect(last!.done, 2);
       expect(last!.remaining, 0);
       expect(last!.counts, {'triaged': 1, 'skipped': 1});
+    });
+  });
+
+  /// The knock on the AI worker's door. Extraction and needs-you are not
+  /// handed a message triage has not spoken about, so a worker drain that won
+  /// the shared gate first leaves them pending — this callback is what makes
+  /// it walk again once the verdicts are written.
+  group('onDrained', () {
+    test('fires once after a drain that triaged something', () async {
+      await seedMessage(id: 'm1');
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
+      var called = 0;
+      final queue = TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onDrained: () async => called++,
+      );
+
+      await queue.pump();
+
+      // Once per DRAIN, not once per message: the worker walks its whole
+      // queue when it runs, so a second knock would be a second drain over
+      // the same rows.
+      expect(called, 1);
+      expect(await store.triageCounts(), {'triaged': 2});
+    });
+
+    test('is not called after a dispose that cut the drain short', () async {
+      await seedMessage(id: 'm1');
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
+      var called = 0;
+      final queue = TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        concurrency: 1,
+        onDrained: () async => called++,
+      );
+
+      final drain = queue.pump();
+      // Torn down while the first message is at the model — waited for on the
+      // store, not on a timer, so the claim has really been taken. The verdict
+      // it was waiting on still lands — that answer is paid for — but a knock
+      // on a worker that has just handed back its own claims would start a
+      // drain on a pair the app has already thrown away.
+      while ((await store.triageCounts())['processing'] != 1) {
+        await Future<void>.delayed(const Duration(milliseconds: 1));
+      }
+      await queue.dispose();
+      await drain;
+
+      expect(called, 0);
+      expect(
+        (await store.triageCounts())['triaged'],
+        greaterThanOrEqualTo(1),
+        reason: 'the in-flight verdict was written; only the knock was held',
+      );
+    });
+
+    test('fires after a drain that only gated things', () async {
+      // A gate is a verdict too, and the items behind it still have to be
+      // closed — the handlers write them `done` with a `skipped` note.
+      await seedMessage(id: 'm1', from: 'noreply@example.com');
+      var called = 0;
+      final queue = TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onDrained: () async => called++,
+      );
+
+      await queue.pump();
+
+      expect(called, 1);
+      expect(await store.triageCounts(), {'skipped': 1});
+    });
+
+    test('is not called when nothing was pending', () async {
+      var called = 0;
+      final queue = TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onDrained: () async => called++,
+      );
+
+      await queue.pump();
+
+      expect(called, 0);
+    });
+
+    test('is not called when the drain parked', () async {
+      // The model server is down. Nothing was decided, so there is nothing
+      // for the worker to come and collect — and waking it onto the same dead
+      // servers is the last thing that moment needs.
+      await seedMessage(id: 'm1');
+      var called = 0;
+      final queue = TriageQueue(
+        store,
+        FakeLlm([const LlmUnavailableException('off')]),
+        onDrained: () async => called++,
+      );
+
+      await queue.pump();
+
+      expect(called, 0);
+      expect(await store.triageCounts(), {'pending': 1});
+    });
+
+    test('is not called when the drain only spent messages into error',
+        () async {
+      // A 400 is this app's schema being wrong and is fatal on the first
+      // attempt, so the message ends `error` inside one drain. That IS a
+      // terminal status and the worker may now claim its items — but the
+      // knock is deliberately withheld: this drain was failing through the
+      // model, and waking a second drain onto the same servers is the last
+      // thing that moment needs. The next sync's pump collects the row.
+      await seedMessage(id: 'm1');
+      var called = 0;
+      final queue = TriageQueue(
+        store,
+        FakeLlm([const LlmException('JSON schema conversion failed', 400)]),
+        onDrained: () async => called++,
+      );
+
+      await queue.pump();
+
+      expect(called, 0);
+      expect(await store.triageCounts(), {'error': 1});
+    });
+
+    test('a second drain that writes nothing does not knock again', () async {
+      await seedMessage(id: 'm1');
+      var called = 0;
+      final queue = TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onDrained: () async => called++,
+      );
+
+      await queue.pump();
+      await queue.pump();
+
+      expect(called, 1, reason: 'the counter is reset per drain, not summed');
+    });
+
+    test('a callback that throws does not fail the pump', () async {
+      await seedMessage(id: 'm1');
+      final queue = TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onDrained: () async => throw StateError('the worker blew up'),
+      );
+
+      await expectLater(queue.pump(), completes);
+      // The verdicts are written and kept: re-running them would cost a
+      // second set of model calls for the same answers.
+      expect(await store.triageCounts(), {'triaged': 1});
     });
   });
 

@@ -9,11 +9,49 @@ strings and headers.
 
 ## Tier 1 — sender-only, on delta fields
 
-Before fetching anything: the user's own outbound messages, and no-reply
-local-parts (`no-reply`, `notifications`, `alerts`, …) are gated out.
-`gateFor` in `app/lib/services/gates.dart` dispatches to `_emailGate` /
-`_teamsGate` per source. Driven from the claim loop in
+Before fetching anything, five questions about the address, in this order, and
+the first answer wins. `gateFor` in `app/lib/services/gates.dart` dispatches to
+`_emailGate` / `_teamsGate` per source, driven from the claim loop in
 `app/lib/services/triage_queue.dart`.
+
+| reason | what it catches |
+| --- | --- |
+| `self` | the user's own address, however the message came back to them |
+| `sender_rule` | an address the owner dropped by hand — below |
+| `no_reply` | `noreply` / `donotreply` anywhere in the local part — the compact word as a plain substring (`noreply@`, `orders-noreply@`, `noreply+billing@`, `noreply2@`, `opsnoreplyrelay@`), the punctuated spellings (`no-reply`, `do.not.reply`) as delimited TOKENS — plus the prefix family `notifications?`, `alerts?`, `mailer-daemon`, `postmaster`, `bounces?` |
+| `monitoring` | `monitoring@`, `monitoring-eu@`, `prod-monitoring@` |
+| `machine_sender` | `svc-…@`, `bot-…@`, `…-bot@`, and the exact local parts `pipelines@`, `builds@`, `ci@` |
+
+The punctuated `no_reply` forms are delimited on both sides and the rest are
+anchored or exact, which is the whole of their precision: `nota@`, `renotify@`,
+`salerts@`, `abbott@`, `cicd-team@` and `remonitoring@` all reach the model.
+The compact `noreply` needs no boundary because no name contains it — on the
+golden set the bare substring adds one gold drop and no gold keep.
+The last two slugs are the golden set's own drop-reason names, not names
+invented here, so `make golden-gate` scores the REASON column and not only the
+verdict.
+
+**The sender rule is data, and it is the only per-tenant gate.** It comes from
+`sender_prefs.disposition = 'drop'`, which the owner writes through **Drop this
+sender** in the thread's overflow menu or through the quiet offer the message
+story makes once the owner has Ignored three different messages from one
+address (`senderDropOfferAfter`, in `app/lib/providers/app_providers.dart` —
+counted per message, offered, never automatic, and never for a sender the
+owner has already ruled `keep` or `drop`). It is asked immediately after `self`, because a person's
+standing instruction outranks every pattern below it while the owner's own mail
+is still their own. It is skipped for a restored row exactly as the other gates
+are. `gateFor` stays pure: the disposition arrives as an argument, read once per
+claim by `_triageClaimed` and handed to both tiers. Undo is the one the sender
+corrections already have — `restoreSenderPref`, which puts the previous rule
+back and re-files the threads from it.
+
+**One gate deliberately does not exist here**, beside the two the header block
+below names: issue trackers and code hosts sending from their bare local parts
+(`jira@`, `github@`, …). On the golden set that exact shape is two gold drops
+AND two gold keeps — the same address sends the digest nobody reads and the
+mention addressed to the reader — so no name rule can split them. What
+separates the two populations is which tenant is talking, which is the sender
+rule above or a header, never a pattern compiled into the app.
 
 ## Detail fetch (mail only)
 
@@ -21,6 +59,16 @@ local-parts (`no-reply`, `notifications`, `alerts`, …) are gated out.
 *degrades* (triage proceeds on what it has) rather than parks — except
 `NotSignedIn` / `ReconsentRequired`, which park the queue until the session is
 usable again. See `triage_queue.dart`.
+
+One shape of failure is DEFERRED instead: a fetch that failed leaving no
+headers at all, on a sender whose local part looks like a machine
+(`suspectMachineSender` in `gates.dart` — wide, anywhere in the local part,
+and explicitly NOT a gate). The message goes back to `pending` with a
+`triage_attempts` bump and a `triage` / `retry` activity row carrying
+`reason: headerless`, and the drain excludes it from its own later claims so
+it moves on to the message behind it. The bound is `_maxAttempts`, shared with
+the model failures: after two attempts the message is classified headerless
+exactly as it always was.
 
 ## Tier 2 — header gates
 
@@ -87,8 +135,8 @@ for the ingest half and the one-shot repair.
 ## Reading the file
 
 The header comment in `gates.dart` is the real documentation: it explains the
-two-tier split, an anchoring subtlety in the local-part regexes, and — most
-usefully — two gates that deliberately do **not** exist. Keep that comment
+two-tier split, a delimiter subtlety in the local-part regexes, and — most
+usefully — three gates that deliberately do **not** exist. Keep that comment
 authoritative; this page is the map to it.
 
 A gated message is not hidden: it lands with a drop reason, visible under the
@@ -106,6 +154,10 @@ row, and `capPendingTriage` exempts it from the backlog demotion a first-run
 sync would otherwise apply. The gate functions in `gates.dart` stay pure —
 the override lives at the call site, because it is a fact about what the
 user did, not a judgement about the message.
+
+The sender rule is bypassed with the rest: a stamped row skips both `gateFor`
+calls, so restoring one message from an address the owner dropped brings that
+message back without touching the rule about the address.
 
 `RestoreService` (`app/lib/services/restore_service.dart`) runs the whole
 sequence: reset the message row and the `message_progress` cascade, fetch
@@ -136,11 +188,13 @@ the owner has already thrown out. And a triage answer that lands after the
 Ignore is discarded: `writeTriage` refuses a row that is `skipped` under
 `gate_reason = 'user'`.
 
-Nothing that was already queued has to be cancelled: the handlers all skip a
-gated row on their own, so whatever is on a queue for this message reads the
-new `triage_status` and declines. The thread stops holding an open ask for the
-same reason — the open-ask predicate excludes gated rows — which is why the
-verdict itself is deliberately left alone. `needs_you_verdict` is what the
+Almost nothing that was already queued has to be cancelled: the handlers all
+skip a gated row on their own, so whatever is on a queue for this message reads
+the new `triage_status` and declines. The exception is the thread's own pending
+`storyline` row, which the late-verdict repair below deletes when the Ignore
+leaves the thread with nothing kept in it. The thread stops holding an open
+ask for the same reason — the open-ask predicate excludes gated rows — which
+is why the verdict itself is deliberately left alone. `needs_you_verdict` is what the
 judge decided about the words, and an Ignore is the owner saying they do not
 want the message, not that the judge misread it.
 
@@ -149,3 +203,66 @@ ignored carries both facts, and the history screen shows both. Restore
 reverses an Ignore exactly as it reverses any other gate — the reason is a
 `gate_reason` like the rest — which is what makes the pair on the history
 screen safe to press.
+
+## A late verdict and what it repairs
+
+A gate normally speaks before anything is built — see 03-triage.md for the
+claim invariant. Three things break that order, and all three call
+`GateRepairService.afterGate` / `.repairAll`
+(`app/lib/services/gate_repair_service.dart`):
+
+- the triage drain's own gates, at either tier (`onGated` on `TriageQueue`);
+- the owner's Ignore, after `dropMessage` (`onGated` on
+  `PipelineRepairService`);
+- the one-shot over the whole database, behind the `gated_conversation_repair`
+  pref from the mail sync (01-sync-ingest.md) — in slices of 200 threads per
+  sync, the pref set only when a slice comes back short.
+
+The test is the store's own: `keptInboundCount(source, key) == 0`, the same
+"kept" spelling the thread refold uses. A conversation with zero kept inbound
+messages is one the app must stop describing — every inbound in it was gated,
+so nothing in it was ever meant for a model.
+
+What moves, for such a thread:
+
+- **storyline memberships** whose `added_by <> 'user'` are evicted through
+  `StorylineService.evictGatedThread`, which does everything an owner's
+  removal does — member row gone, member hash recomputed, recap text and
+  watermark cleared, thread pointer re-stamped onto whatever membership is
+  left, `storyline_refresh` requeued — and writes the block as
+  `blocked_by = 'gate'` with the fixed evidence `every inbound message in this
+  thread was gated`. A `user` membership is left alone: the owner filed that
+  thread by hand and a gate does not overrule a person.
+- **the conversation's embedding**, cleared with its hash and model tag
+  (`clearConversationEmbedding`), which is what takes the thread out of the
+  vec0 clustering index at the next sweep's backfill.
+- **the pending `storyline` work row** for that key, deleted rather than
+  parked — `requeueWork` revives only `done` and `error`, so a parked row
+  would block that key's queue forever.
+
+**No audit is queued.** An audit means "the owner says the model got this
+group wrong"; a gate says nothing about the model's reasoning, because the
+thread should never have reached it. For the same reason a `gate` block never
+enters a prompt: the confirm prompt reads `blocksOf(blockedBy: 'user')`, and
+only the owner's "no" is a lesson. Nothing lifts a `gate` block automatically:
+not a Restore, and not a later genuine reply landing kept in the same thread.
+The thread may still be filed into any OTHER storyline, or seed a new one; for
+the storyline it was evicted from, "Allow again" is the owner's word. The
+asymmetry is deliberate — a block that came and went with the kept count would
+let a thread flap in and out of a group's recap.
+
+The one-shot has a cost worth naming. Every storyline that loses a thread has
+its recap text and watermark cleared, exactly as an owner's removal clears
+them, so the first sync after the upgrade queues a refresh and a recap for
+each affected storyline — one model pass per storyline, proportional to how
+many the pre-invariant races had filed, and once. The 200-thread slice is
+what bounds that burst per sync. In the storyline's About block and on the
+message story such an eviction is listed as *Removed by a gate*, apart from
+the owner's removals and the re-check's, with the same two ways back.
+
+The counter the pipeline roadmap asks for is `extracted_then_gated`: whenever
+a gate lands on a message that already has `message_ai.extraction_json`, the
+`gate_repair` activity row carries `extracted: 1`, and the one-shot's row
+carries the DB-wide count from `extractedThenGatedCount()`. A gate on an
+unextracted message in a thread with nothing built writes no row at all — that
+is the common case, and it is not news.

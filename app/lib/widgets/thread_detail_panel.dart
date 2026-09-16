@@ -96,6 +96,12 @@ class ThreadDetailPanel extends StatefulWidget {
   /// Null hides the item.
   final VoidCallback? onSendToLater;
 
+  /// Stops this thread's sender reaching the model at all — a gate the owner
+  /// writes rather than one the app guessed. Sender-scoped like
+  /// [onSendToLater] and a step past it: Later quiets what is already here,
+  /// this refuses what comes next. Null hides the item.
+  final VoidCallback? onDropSender;
+
   /// Brings a deferred thread back. Only shown when the thread is actually in
   /// a bucket — an "undo" for something that never happened is a menu item
   /// that reads as broken.
@@ -201,6 +207,7 @@ class ThreadDetailPanel extends StatefulWidget {
     this.onBack,
     this.onAddToStoryline,
     this.onSendToLater,
+    this.onDropSender,
     this.onKeepInInbox,
     this.afterTranscript,
     this.suggestionFor,
@@ -695,12 +702,25 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
             onTap: widget.onSendToLater,
             dividerBefore: widget.onAddToStoryline != null,
           ),
+        // The same correction as Later, said harder, so no rule between the
+        // two — but it takes Later's divider when Later is not there, so the
+        // sender corrections still sit apart from the storyline item.
+        if (widget.onDropSender != null)
+          RoomMenuItem(
+            value: _dropSenderValue,
+            label: 'Drop this sender',
+            onTap: widget.onDropSender,
+            dividerBefore: widget.onAddToStoryline != null &&
+                widget.onSendToLater == null,
+          ),
         if (showKeep)
           RoomMenuItem(
             value: _keepInInboxValue,
             label: 'Keep in inbox',
+            dividerBefore: widget.onAddToStoryline != null &&
+                widget.onSendToLater == null &&
+                widget.onDropSender == null,
             onTap: widget.onKeepInInbox,
-            dividerBefore: widget.onAddToStoryline != null && widget.onSendToLater == null,
           ),
       ],
     );
@@ -708,5 +728,6 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
 
   static const String _addToStorylineValue = '__add_to_storyline__';
   static const String _sendToLaterValue = '__send_to_later__';
+  static const String _dropSenderValue = '__drop_sender__';
   static const String _keepInInboxValue = '__keep_in_inbox__';
 }

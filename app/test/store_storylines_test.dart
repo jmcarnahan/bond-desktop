@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/message_models.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -24,6 +25,7 @@ void main() {
     String? lastMessageAt = '2026-08-28T10:00:00Z',
     String? subject,
     String source = 'email',
+    bool keptInbound = false,
   }) async {
     await store.upsertConversation({
       'source': source,
@@ -32,6 +34,23 @@ void main() {
       'state': state,
       'last_message_at': lastMessageAt,
     });
+    // Opt-in, for the readers that ask a conversation whether the gates left
+    // anything in it — [MessageStore.conversationsWithEmbeddings] is the pool
+    // the sweep draws from and wants a kept inbound message, not a vector.
+    if (keptInbound) {
+      await store.upsertMessage({
+        'source': source,
+        'source_message_id': 'kept-$key',
+        'conversation_key': key,
+        'direction': 'inbound',
+        'subject': subject ?? key,
+        'from_name': 'Sarah',
+        'from_address': 'sarah@example.com',
+        'received_at': lastMessageAt,
+        'body_text': 'body of kept-$key',
+        'triage_status': 'triaged',
+      });
+    }
   }
 
   Future<void> seedMessage(
@@ -1140,9 +1159,12 @@ void main() {
 
   group('conversationsWithEmbeddings', () {
     test('returns only rows with a vector from the model asked for', () async {
-      await seedConversation('c1', lastMessageAt: '2026-08-03T00:00:00Z');
-      await seedConversation('c2', lastMessageAt: '2026-08-02T00:00:00Z');
-      await seedConversation('c3', lastMessageAt: '2026-08-01T00:00:00Z');
+      await seedConversation('c1',
+          lastMessageAt: '2026-08-03T00:00:00Z', keptInbound: true);
+      await seedConversation('c2',
+          lastMessageAt: '2026-08-02T00:00:00Z', keptInbound: true);
+      await seedConversation('c3',
+          lastMessageAt: '2026-08-01T00:00:00Z', keptInbound: true);
       await store.upsertConversationAi('email', 'c1',
           embedding: Uint8List.fromList(const [0, 0, 0, 0]),
           embedModel: 'model-a');
@@ -1160,6 +1182,182 @@ void main() {
       expect(rows.single['subject'], 'c1');
       expect(rows.single['state'], 'waiting');
       expect(rows.single['last_message_at'], '2026-08-03T00:00:00Z');
+    });
+
+    /// The pool is conversations, not vectors. A stored embedding is not
+    /// evidence that a thread is worth grouping: a thread whose every inbound
+    /// message was gated has one only because something embedded it before
+    /// the gates spoke, and one sender's gated mail clusters into a proposal
+    /// about mail nobody was ever going to read.
+    group('the pool is kept-inbound conversations', () {
+      Future<void> embed(String key) => store.upsertConversationAi(
+            'email',
+            key,
+            embedding: Uint8List.fromList(const [0, 0, 0, 0]),
+            embedModel: 'model-a',
+          );
+
+      Future<List<String>> pool() async => [
+            for (final row
+                in await store.conversationsWithEmbeddings(embedModel: 'model-a'))
+              row['conversation_key'] as String,
+          ];
+
+      test('a thread whose only inbound was gated is not in it', () async {
+        await seedConversation('c1');
+        await seedMessage('c1', 'm1',
+            receivedAt: '2026-08-28T10:00:00Z',
+            triageStatus: 'skipped',
+            gateReason: 'no_reply');
+        await embed('c1');
+
+        expect(await pool(), isEmpty);
+      });
+
+      test('a legacy teams_source chat is kept, and so is its thread',
+          () async {
+        // The tolerance every kept clause carries: a chat stored before chats
+        // were triaged is `skipped` for a pipeline that did not exist yet,
+        // not for anything anyone judged.
+        await seedConversation('c1');
+        await seedMessage('c1', 'm1',
+            receivedAt: '2026-08-28T10:00:00Z',
+            triageStatus: 'skipped',
+            gateReason: 'teams_source');
+        await embed('c1');
+
+        expect(await pool(), ['c1']);
+      });
+
+      test('one kept inbound beside a gated one is enough', () async {
+        await seedConversation('c1');
+        await seedMessage('c1', 'kept',
+            receivedAt: '2026-08-27T10:00:00Z', triageStatus: 'triaged');
+        await seedMessage('c1', 'gated',
+            receivedAt: '2026-08-28T10:00:00Z',
+            triageStatus: 'skipped',
+            gateReason: 'no_reply');
+        await embed('c1');
+
+        expect(await pool(), ['c1']);
+      });
+
+      test('the user\'s own replies do not make a gated thread kept',
+          () async {
+        // Outbound is born `skipped`/`outbound`, and counting it would make
+        // every thread the user answered look kept. Inbound only.
+        await seedConversation('c1');
+        await seedMessage('c1', 'in',
+            receivedAt: '2026-08-27T10:00:00Z',
+            triageStatus: 'skipped',
+            gateReason: 'newsletter');
+        await seedMessage('c1', 'out',
+            receivedAt: '2026-08-28T10:00:00Z',
+            direction: 'outbound',
+            triageStatus: 'skipped',
+            gateReason: 'outbound');
+        await embed('c1');
+
+        expect(await pool(), isEmpty);
+      });
+
+      test('a thread with no messages at all is not in it', () async {
+        await seedConversation('c1');
+        await embed('c1');
+
+        expect(await pool(), isEmpty);
+      });
+    });
+  });
+
+  group('keptInboundCount', () {
+    test('counts the inbound messages the gates left', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'a',
+          receivedAt: '2026-08-26T10:00:00Z', triageStatus: 'triaged');
+      await seedMessage('c1', 'b',
+          receivedAt: '2026-08-27T10:00:00Z', triageStatus: 'pending');
+      await seedMessage('c1', 'c',
+          receivedAt: '2026-08-28T10:00:00Z',
+          triageStatus: 'skipped',
+          gateReason: 'no_reply');
+
+      // `pending` counts: triage has not spoken, and a message nobody has
+      // judged yet is not a message anybody threw out.
+      expect(await store.keptInboundCount('email', 'c1'), 2);
+    });
+
+    test('an all-gated thread counts zero, outbound included', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'in',
+          receivedAt: '2026-08-27T10:00:00Z',
+          triageStatus: 'skipped',
+          gateReason: 'newsletter');
+      await seedMessage('c1', 'out',
+          receivedAt: '2026-08-28T10:00:00Z',
+          direction: 'outbound',
+          triageStatus: 'skipped',
+          gateReason: 'outbound');
+
+      expect(await store.keptInboundCount('email', 'c1'), 0);
+    });
+
+    test('a thread that does not exist counts zero rather than throwing',
+        () async {
+      expect(await store.keptInboundCount('email', 'nope'), 0);
+    });
+  });
+
+  group('newestInboundCardData', () {
+    /// The card is what a thread is embedded and compared as, so a gated
+    /// message landing on a live thread — an autoresponder on a real
+    /// conversation — must not become the sentence it is clustered by.
+    Future<void> summarise(String id, String summary) => store.writeTriage(
+          'email',
+          id,
+          status: 'triaged',
+          result: TriageResult(
+            urgency: 'normal',
+            category: 'work',
+            summary: summary,
+            needsAction: false,
+            actionItems: const [],
+          ),
+        );
+
+    test('a newer gated inbound does not displace the kept one', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'kept', receivedAt: '2026-08-27T10:00:00Z');
+      await summarise('kept', 'Sarah is asking whether Thursday holds.');
+      await seedMessage('c1', 'gated', receivedAt: '2026-08-28T10:00:00Z');
+      await summarise('gated', 'Out of office until Monday.');
+      await store.writeTriage('email', 'gated',
+          status: 'skipped', gateReason: 'auto_generated');
+
+      final card = await store.newestInboundCardData('email', 'c1');
+      expect(card?['summary'], 'Sarah is asking whether Thursday holds.');
+    });
+
+    test('a gated message is still better than no card at all', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'gated', receivedAt: '2026-08-28T10:00:00Z');
+      await summarise('gated', 'Out of office until Monday.');
+      await store.writeTriage('email', 'gated',
+          status: 'skipped', gateReason: 'auto_generated');
+
+      expect((await store.newestInboundCardData('email', 'c1'))?['summary'],
+          'Out of office until Monday.');
+    });
+
+    test('among kept inbound messages the newest still wins', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'older', receivedAt: '2026-08-27T10:00:00Z');
+      await summarise('older', 'The first question.');
+      await seedMessage('c1', 'newer', receivedAt: '2026-08-28T10:00:00Z');
+      await summarise('newer', 'The second question.');
+
+      expect((await store.newestInboundCardData('email', 'c1'))?['summary'],
+          'The second question.');
     });
   });
 }

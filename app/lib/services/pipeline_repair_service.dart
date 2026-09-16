@@ -41,12 +41,19 @@ class PipelineRepairService {
   /// have used.
   final Future<double> Function()? _threshold;
 
+  /// Told after an Ignore drops a message. In the app:
+  /// `GateRepairService.afterGate`. An Ignore is a gate arriving after the
+  /// whole pipeline has already run on the message, and what that leaves
+  /// behind is the repair service's business rather than this one's.
+  final Future<void> Function(String source, String sourceMessageId)? _onGated;
+
   PipelineRepairService(
     this._store, {
     this._progress = const PipelineProgress.disabled(),
     this._pumpTriage,
     this._pumpWork,
     this._threshold,
+    this._onGated,
     ActivityLog? activityLog,
   }) : _log = activityLog ?? ActivityLog.disabled();
 
@@ -179,7 +186,10 @@ class PipelineRepairService {
   ///
   /// No pump, because an Ignore queues nothing. Whatever was already queued
   /// for the message drains as a skip, since the extract and needs-you
-  /// handlers both refuse a gated row.
+  /// handlers both refuse a gated row. What the thread had already BUILT is a
+  /// different question — its embedding, its automatic storyline memberships,
+  /// a `storyline` row that would file it again — and that is the gate repair
+  /// service's, called here.
   ///
   /// Swallows its own failures, like everything else here: the screen fires
   /// this from a button.
@@ -189,6 +199,15 @@ class PipelineRepairService {
       if (!dropped) return false;
       await _progress.noteIgnored(source, sourceMessageId);
       await _log.record('ignore', source: source, entityId: sourceMessageId);
+      // AFTER the Ignore is written down, so the panel reads cause before
+      // effect: the repair's own row lands above this one, and a `gate_repair`
+      // above an Ignore that explains it is the order a person can follow.
+      // A callback that throws must not turn a completed Ignore into a false:
+      // the message is dropped either way, and the repair has a one-shot
+      // behind it.
+      try {
+        await _onGated?.call(source, sourceMessageId);
+      } catch (_) {}
       return true;
     } catch (e) {
       debugPrint('ignore: $source/$sourceMessageId failed: $e');

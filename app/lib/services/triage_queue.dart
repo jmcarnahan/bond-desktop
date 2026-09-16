@@ -53,6 +53,9 @@ class TriageProgress {
 /// 1. the gates that read only what a delta page already carried — who sent
 ///    it. A no-reply sender is a no-reply sender whatever its body says, and
 ///    catching it here means the bulk mail never costs a Graph round trip.
+///    One of those gates is not a pattern at all: the sender's standing rule,
+///    read from the store once per claim and handed to both calls, so an
+///    address the owner dropped by hand is gated exactly where a no-reply is.
 /// 2. the per-message detail fetch, then the gates again, then the model. A
 ///    delta page carries a ~255-character preview and no headers at all, so
 ///    without this step triage would classify from a snippet and the
@@ -69,10 +72,28 @@ class TriageProgress {
 /// its row pending and its attempt count untouched. Signing back in and
 /// syncing pumps it again.
 ///
+/// One narrow case is DEFERRED rather than degraded, and it is the one where
+/// classifying from the preview would be worst: a failed fetch that leaves a
+/// machine-shaped sender ([suspectMachineSender]) with no headers at all. The
+/// header gates are the gates that catch exactly that mail, and they have
+/// nothing to read. So the message goes back to `pending` with an attempt
+/// spent and the next drain re-fetches it; after [_maxAttempts] it is
+/// classified headerless exactly as it always was. The drain carries on with
+/// the message behind it either way.
+///
 /// The queue owns no timer. [pump] is called after each sync, is a no-op while
 /// a drain is already running, and stops on its own when nothing is pending.
 /// A drain that ends because the model server is down leaves its row pending
 /// and lets the next poll try again.
+///
+/// This drain runs FIRST, and that is now an invariant of the pipeline rather
+/// than the order two pumps happened to be fired in. A message is never
+/// extracted or judged for needs-you before triage has spoken about it:
+/// `MessageStore.claimPendingWork` refuses to hand the AI worker an `extract`
+/// or `needs_you` item whose message is still `pending` or `processing`, so
+/// whichever drain wins the shared [DrainGate], the gates decide first. What
+/// this queue owes the worker in return is a knock on the door when it is
+/// done — see [_onDrained].
 class TriageQueue {
   /// Every connector whose messages this queue drains. One queue rather than
   /// one per source: a chat message and an email are the same question —
@@ -129,6 +150,48 @@ class TriageQueue {
   /// their results before deciding what is still claimed.
   final Set<Future<void>> _inFlight = {};
 
+  /// Told once at the end of a drain that wrote at least one verdict, so the
+  /// AI worker walks its queue again. In the app: `aiWorker.pump()`.
+  ///
+  /// This exists because of the invariant above. `app_providers` fires
+  /// `triageQueue.pump(); aiWorker.pump()` back to back — at the supervisor's
+  /// `onReady` and again on every sync — and the worker can win the shared
+  /// [DrainGate], because this queue awaits an `_emit()` before it asks for
+  /// the gate at all. The worker then finds every `extract` and `needs_you`
+  /// row ineligible, leaves them pending, and nothing re-pumps it until the
+  /// next sync: a first sync's whole backlog would sit unextracted for as
+  /// long as the user did not sync again. This callback is what gets the
+  /// worker to walk once triage has actually spoken.
+  ///
+  /// Called OUTSIDE the gate on purpose — the worker's own pump queues on the
+  /// same [DrainGate], so calling it from inside would deadlock — and not at
+  /// all when a drain wrote nothing, which is a park or an empty queue.
+  final Future<void> Function()? _onDrained;
+
+  /// Told after either gate tier writes `skipped`, before the progress emit.
+  /// In the app: `GateRepairService.afterGate`.
+  ///
+  /// What a gate that lands late has to undo lives there, not here — the
+  /// thread's embedding, its automatic storyline memberships, the work rows
+  /// that would file it again. This queue judges; it does not clean up.
+  final Future<void> Function(String source, String sourceMessageId)? _onGated;
+
+  /// Messages this drain deliberately put back `pending`, so it does not
+  /// immediately claim them again.
+  ///
+  /// It has to exist because of the ordering: [MessageStore.claimPendingTriage]
+  /// takes the NEWEST pending row, and a message deferred a moment ago is
+  /// usually exactly that. Without the exclusion the drain would spin on one
+  /// message until its attempts ran out, re-fetching in a tight loop. Cleared
+  /// per drain, because the deferral is about this drain rather than about
+  /// the message: the next pump is meant to try the fetch again.
+  final Set<({String source, String id})> _deferred = {};
+
+  /// Verdicts this drain wrote: `triaged` and `skipped`, the two statuses
+  /// that move a message past triage for good. Reset when a drain starts, so
+  /// it describes the drain that just ended rather than the session.
+  int _drainWrote = 0;
+
   String? _userAddress;
   bool _running = false;
   bool _stopped = false;
@@ -142,6 +205,8 @@ class TriageQueue {
     this._concurrency = 3,
     ActivityLog? activityLog,
     PipelineProgress progress = const PipelineProgress.disabled(),
+    this._onDrained,
+    this._onGated,
   })  : _gate = gate ?? DrainGate(),
         _log = activityLog ?? ActivityLog.disabled(),
         _pipeline = progress;
@@ -218,6 +283,20 @@ class TriageQueue {
     await _emit();
     try {
       await _gate.run(_drain);
+      // After the gate is released and before the drain flag is: the worker
+      // this wakes takes the very gate we are standing outside of. Not after
+      // a stop or a dispose, either: `AiWorker._drainAll` clears its own stop
+      // flag on entry, so a knock landing on a torn-down pair could restart a
+      // worker that had just handed back its claims. A drain cut short has
+      // the next sync's pump to fall back on.
+      if (_drainWrote > 0 && !_stopped) {
+        // A callback that throws is the caller's problem, never this drain's:
+        // the messages are already written and re-running them would cost a
+        // second set of model calls for the same verdicts.
+        try {
+          await _onDrained?.call();
+        } catch (_) {}
+      }
     } finally {
       _running = false;
     }
@@ -232,10 +311,20 @@ class TriageQueue {
   /// the same row: whichever claim lands second finds nothing pending to match
   /// and comes back null.
   Future<void> _drain() async {
+    _drainWrote = 0;
+    _deferred.clear();
     var parked = false;
     while (!_stopped && !parked) {
       while (_inFlight.length < _concurrency && !_stopped && !parked) {
-        final row = await _store.claimPendingTriage(sources: sources);
+        // Past the store's exclusion cap a deferred row would be handed
+        // straight back — its second attempt spent in this drain rather than
+        // the next, which is the opposite of what a deferral is for. So the
+        // drain stops claiming here and the next pump carries on.
+        if (_deferred.length >= MessageStore.maxTriageExclusions) break;
+        final row = await _store.claimPendingTriage(
+          sources: sources,
+          excluding: _deferred.toList(),
+        );
         if (row == null) break;
         _claimed.add(_claimKey(row));
         late final Future<void> future;
@@ -311,10 +400,24 @@ class TriageQueue {
     // about what the user did with it. That belongs at the call site.
     final overridden = (current['gate_override'] as String?) == 'user';
 
+    // One read per claim, reused by both tiers: the rule is the owner's word
+    // about a sender and nothing inside a claim changes it. Skipped for a
+    // restored row for the same reason the gates are — Restore is the escape
+    // hatch from every gate, this one included.
+    final from = message.fromAddress ?? '';
+    final senderDisposition = overridden || from.isEmpty
+        ? null
+        : await _store.getSenderPref(from);
+
     // Tier one, on the delta page's own fields. Free, and it is what keeps
     // the fetch below off every no-reply and every message the user sent.
-    final senderGate =
-        overridden ? null : gateFor(message, userAddress: _userAddress);
+    final senderGate = overridden
+        ? null
+        : gateFor(
+            message,
+            userAddress: _userAddress,
+            senderDisposition: senderDisposition,
+          );
     if (senderGate != null) {
       // No activity row, here or at the header gate below. A `triage` row
       // means the model was consulted, and a gate is the mechanism that keeps
@@ -333,6 +436,7 @@ class TriageQueue {
       // BEFORE `_emit()`, so the reload the rails do behind that tick reads
       // the state this just wrote rather than the one it replaced.
       await _store.refoldThreadState(source, id, restored: false);
+      await _notifyGated(source, id);
       await _emit();
       return true;
     }
@@ -346,6 +450,7 @@ class TriageQueue {
     // fetch that cannot succeed. A chat message's body already arrived whole
     // at ingest — there is no second Graph call that would improve it.
     final fetch = _ensureBody;
+    var fetchFailed = false;
     if (fetch != null &&
         source == 'email' &&
         (message.bodyText?.isNotEmpty != true || message.headers.isEmpty)) {
@@ -359,15 +464,45 @@ class TriageQueue {
         return _parkForSession(source, id, sw.elapsedMilliseconds);
       } catch (_) {
         // Degraded, not parked: this message is classified from its preview
-        // and the drain carries on.
+        // and the drain carries on — unless the deferral below applies.
+        fetchFailed = true;
       }
+    }
+
+    // The one shape of degraded fetch worth another attempt. Decided after the
+    // catch rather than inside it, so the branch reads as what it is: the
+    // fetch failed, and now the message is judged on what it left behind.
+    if (fetchFailed &&
+        message.headers.isEmpty &&
+        _deferHeaderless(current, message)) {
+      final attempts = ((current['triage_attempts'] as num?)?.toInt() ?? 0) + 1;
+      // BEFORE the write, so no claim in this drain can pick the row back up
+      // between the two: it is about to be the newest pending message again.
+      _deferred.add((source: source, id: id));
+      await _writeTriage(source, id, status: 'pending', attempts: attempts);
+      await _log.record(
+        'triage',
+        status: 'retry',
+        source: source,
+        entityId: id,
+        durationMs: sw.elapsedMilliseconds,
+        detail: {'reason': 'headerless', 'attempts': attempts},
+      );
+      await _emit();
+      // The drain is healthy; only this one fetch was not.
+      return true;
     }
 
     // Again, because the gates that read headers had nothing to read a moment
     // ago. Re-running the sender gate too is free and keeps this one call
     // the single place a gate decision is made.
-    final headerGate =
-        overridden ? null : gateFor(message, userAddress: _userAddress);
+    final headerGate = overridden
+        ? null
+        : gateFor(
+            message,
+            userAddress: _userAddress,
+            senderDisposition: senderDisposition,
+          );
     if (headerGate != null) {
       await _writeTriage(
         source,
@@ -379,6 +514,7 @@ class TriageQueue {
       // chat gate, which reaches here too: a message that stripped down to
       // nothing is a message the model will never read.
       await _store.refoldThreadState(source, id, restored: false);
+      await _notifyGated(source, id);
       await _emit();
       return true;
     }
@@ -487,6 +623,38 @@ class TriageQueue {
     }
   }
 
+  /// Whether a failed fetch on this message is worth one more attempt instead
+  /// of a headerless classification.
+  ///
+  /// Three conditions, and each narrows it: mail only (a chat has no detail
+  /// fetch to retry), a sender whose local part looks like a machine (the mail
+  /// whose verdict the missing headers would actually have changed), and an
+  /// attempt still left.
+  ///
+  /// The counter is [_maxAttempts], shared with the model failures, on
+  /// purpose. Bounded means bounded: a message the fetch keeps failing on and
+  /// a message the model keeps refusing to parse are the same message from the
+  /// queue's point of view — one that has had its turns. A second constant
+  /// would be a second thing to reason about for no behaviour anyone wants.
+  bool _deferHeaderless(Map<String, Object?> row, Message message) {
+    if (message.source != 'email') return false;
+    final from = message.fromAddress?.toLowerCase() ?? '';
+    if (from.isEmpty) return false;
+    final at = from.indexOf('@');
+    if (!suspectMachineSender(at >= 0 ? from.substring(0, at) : from)) {
+      return false;
+    }
+    return ((row['triage_attempts'] as num?)?.toInt() ?? 0) < _maxAttempts;
+  }
+
+  /// A callback that throws is not this drain's problem: the verdict is
+  /// already written, and the repair it names has its own one-shot behind it.
+  Future<void> _notifyGated(String source, String id) async {
+    try {
+      await _onGated?.call(source, id);
+    } catch (_) {}
+  }
+
   /// Every write that ends this queue's interest in a message, and the claim
   /// release that goes with it.
   ///
@@ -526,6 +694,13 @@ class TriageQueue {
       urgency: result?.urgency,
       gateReason: gateReason,
     );
+    // The two statuses that mean triage REACHED a verdict, which is what the
+    // AI worker was waiting to hear. A park writes `pending` and is not a
+    // verdict at all. A spent `error` is terminal and does make the message
+    // claimable, but it is not counted here: it arrives on a drain the model
+    // was failing through, and waking a second drain onto the same servers is
+    // the last thing that moment needs. The next sync's pump picks it up.
+    if (status == 'triaged' || status == 'skipped') _drainWrote++;
     _claimed.remove('$source|$id');
   }
 

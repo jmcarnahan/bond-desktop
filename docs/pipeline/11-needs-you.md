@@ -82,10 +82,16 @@ A model failure — including the server being down — **propagates**. The verd
 stays NULL, the row stays on the worklist, and the worker's park-and-retry
 machinery owns what happens next.
 
-**This stage never reads triage's verdicts.** The queue hands over rows whose
-`triage_status` is still `pending`, so `reply_expected` and `needs_action` may
-not have been written yet; waiting on them would make the verdict depend on
-which drain got there first. The handler reads the message body and the thread
+**This stage never reads triage's verdicts.** The queue now hands over only
+rows triage has finished with — `MessageStore.claimPendingWork` holds a
+`needs_you` item back while its message is `pending` or `processing`, so what
+arrives here is `triaged`, `skipped`, `error`, or a message that has been
+deleted (see [04-extraction.md](04-extraction.md) for the claim rule). So
+`reply_expected` and `needs_action` are usually sitting right there, and this
+pass still does not look at them: a verdict built on another model's verdict
+inherits its mistakes, and the one case a per-message judgement exists for —
+a busy thread where the owner gets one direct question — is the case triage's
+thread-level answer loses. The handler reads the message body and the thread
 behind it, and nothing else. (The one thing it does read from triage is the
 `skipped` **gate**, which is a guard against judging a newsletter, not a
 judgement it defers to.)

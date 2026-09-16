@@ -1,5 +1,7 @@
-@Skip('live — needs the golden set and a server. Run: make golden (bulk), '
-    'make golden-prose (prose) or make golden-storyline (storyline confirm)')
+@Skip('live — needs the golden set, and a server for all of it but the gate '
+    'replay. Run: make golden (bulk), make golden-prose (prose), '
+    'make golden-storyline (storyline confirm) or make golden-gate (the '
+    "app's own gates, offline)")
 library;
 
 import 'package:bond_inbox/models/storyline_models.dart';
@@ -17,6 +19,7 @@ import 'package:http/http.dart' as http;
 import 'fixtures/bench_report.dart';
 import 'fixtures/bench_stats.dart';
 import 'fixtures/bench_target.dart';
+import 'fixtures/golden_gate.dart';
 import 'fixtures/golden_harness.dart';
 import 'fixtures/golden_prices.dart';
 import 'fixtures/golden_registry.dart';
@@ -32,6 +35,11 @@ import 'fixtures/golden_storyline.dart';
 /// accuracy, and the ordinary bench timing JSON beside it for speed and cost.
 /// Two passes would be two different sets of answers timed separately, which
 /// is one more thing a ledger row could be wrong about.
+///
+/// **One of the four tests needs no server at all.** `make golden-gate`
+/// replays the app's own gates, which are pure functions over what the set
+/// carries, so that one has no warmup, no timing JSON and no cost block —
+/// `fixtures/golden_gate.dart` states what it can and cannot see.
 ///
 /// **Nothing here judges correctness.** The scorer of record is Python and the
 /// rubric judge is a later phase; a Dart opinion about what "right" means would
@@ -964,6 +972,206 @@ void main() {
     // may answer in twenty seconds a call.
     timeout: const Timeout(Duration(minutes: 90)),
   );
+
+  /// The golden set through the app's own GATES, and nothing else.
+  ///
+  /// The odd one out in this file: no server, no model, no warmup, no clock.
+  /// The gates are pure, so this replays them over the set and reports what
+  /// they answered — see `fixtures/golden_gate.dart` for the three things the
+  /// set cannot ask (Tier 2 mail headers, and the two Teams ingest gates) and
+  /// why this number is not the same measurement as `make golden-baseline`'s.
+  ///
+  /// `GOLDEN_RUN=<bulk run file>` is optional and adds one column: triage's
+  /// own `category` per item, so the standing question "would the model's
+  /// `notification` verdict make a gate" can be re-read after a prompt change.
+  /// It is printed and recorded, never applied.
+  test(
+    'the golden set through the gates',
+    () async {
+      final (set, _) = await _loadOrFail();
+
+      // Optional on purpose: the verdicts below do not depend on it, so a run
+      // without a bulk run file to hand is a run with one column fewer rather
+      // than a failure.
+      final categories = GoldenDefines.runPath.isEmpty
+          ? const <String, String>{}
+          : await loadGoldenTriageCategories(GoldenDefines.runPath);
+
+      final entries = <GoldenRunEntry>[];
+      final replayed = <(GoldenItem, GoldenGateOut)>[];
+      final lines = <String>[];
+      for (final item in set.items) {
+        final out = gateReplay(
+          item,
+          ownerAddress: GoldenDefines.ownerAddress,
+          modelCategory: categories[item.id],
+        );
+        entries.add(
+          GoldenRunEntry(
+            id: item.id,
+            stratum: item.stratum,
+            difficulty: item.difficulty,
+          )..gate = out,
+        );
+        replayed.add((item, out));
+        // A gold KEEP's reason is prose an annotator wrote, so only a drop's
+        // — which is a slug from the taxonomy — is printed. Ids and enums,
+        // like every other line in this file.
+        final goldReason =
+            item.gold.gateVerdict == 'drop' ? _goldGateReason(item) : null;
+        lines.add(
+          '${item.id}  '
+          '${out.verdict}${out.reason == null ? '' : '/${out.reason}'}  '
+          'gold ${item.gold.gateVerdict}'
+          '${goldReason == null ? '' : '/$goldReason'}'
+          '${out.modelCategory == null ? '' : '  model ${out.modelCategory}'}',
+        );
+      }
+
+      // Every denominator comes off the set that was loaded. A literal here
+      // would be a number about the set somebody had in September, quietly
+      // surviving the next repack.
+      final total = set.items.length;
+      var agree = 0;
+      var goldDrops = 0;
+      var dropsCaught = 0;
+      var goldKeeps = 0;
+      var keepsKept = 0;
+      var trapItems = 0;
+      var trapMisses = 0;
+      final perStratum = <String, int>{};
+      final agreePerStratum = <String, int>{};
+      final dropReasons = <String, int>{};
+      for (final (item, out) in replayed) {
+        final gold = item.gold.gateVerdict;
+        final agreed = out.verdict == gold;
+        if (agreed) agree++;
+        if (gold == 'drop') {
+          goldDrops++;
+          if (out.verdict == 'drop') dropsCaught++;
+        }
+        if (gold == 'keep') {
+          goldKeeps++;
+          if (out.verdict == 'keep') keepsKept++;
+        }
+        if (item.stratum == _trapStratum) {
+          trapItems++;
+          if (out.verdict == 'drop') trapMisses++;
+        }
+        perStratum[item.stratum] = (perStratum[item.stratum] ?? 0) + 1;
+        if (agreed) {
+          agreePerStratum[item.stratum] =
+              (agreePerStratum[item.stratum] ?? 0) + 1;
+        }
+        if (out.verdict == 'drop') {
+          final reason = out.reason ?? 'unnamed';
+          dropReasons[reason] = (dropReasons[reason] ?? 0) + 1;
+        }
+      }
+
+      final strataTable = [
+        for (final stratum in perStratum.keys.toList()..sort())
+          '  $stratum  ${agreePerStratum[stratum] ?? 0}/${perStratum[stratum]}',
+      ];
+      final reasonLine = dropReasons.isEmpty
+          ? 'drop reasons: none — the replay gated nothing'
+          : 'drop reasons: ${[
+              for (final reason in dropReasons.keys.toList()..sort())
+                '$reason ${dropReasons[reason]}',
+            ].join(' · ')}';
+
+      final String proxyLine;
+      if (categories.isEmpty) {
+        proxyLine = 'model proxy: not read (pass GOLDEN_RUN=<bulk run file> '
+            'for the notification column)';
+      } else {
+        var onDrops = 0;
+        var onKeeps = 0;
+        var onTrap = 0;
+        var missing = 0;
+        for (final (item, out) in replayed) {
+          final category = out.modelCategory;
+          if (category == null) {
+            missing++;
+            continue;
+          }
+          if (category != _notificationCategory) continue;
+          if (item.gold.gateVerdict == 'drop') onDrops++;
+          if (item.gold.gateVerdict == 'keep') onKeeps++;
+          if (item.stratum == _trapStratum) onTrap++;
+        }
+        proxyLine = 'model proxy (notification, from GOLDEN_RUN): '
+            'on drops $onDrops/$goldDrops · on keeps $onKeeps/$goldKeeps · '
+            'on trap $onTrap/$trapItems · no category for $missing items';
+      }
+
+      // ignore: avoid_print
+      print(
+        '\n${lines.join('\n')}\n'
+        '\ngates: verdict $agree/$total · drops caught $dropsCaught/$goldDrops'
+        ' · keeps kept $keepsKept/$goldKeeps'
+        ' · trap misses $trapMisses/$trapItems\n'
+        'unmeasured: tier 2 (mail headers are not in the set), teams ingest '
+        'gates (bot, self — decided from Graph fields the set does not carry)'
+        '\n\n${strataTable.join('\n')}\n'
+        '\n$reasonLine\n'
+        '$proxyLine\n',
+      );
+
+      // A run file and no timing JSON: nothing here is timed, and a timing
+      // row of zeros beside the real ones would be a row a reader compares.
+      final runPath = BenchTarget.outDir.isEmpty
+          ? null
+          : await writeGoldenRun(
+              [
+                for (final entry in entries)
+                  if (entry.attempted) entry,
+              ],
+              bench: 'golden-gate',
+              label: 'app-gates',
+              outDir: BenchTarget.outDir,
+            );
+      _printPaths(runPath, null);
+
+      // Shape, never accuracy — the same rule as every other bench in this
+      // repo. Whether the gates agree with gold is the scorer's question and
+      // the ledger's, not this file's.
+      expect(entries, hasLength(set.items.length));
+      for (final entry in entries) {
+        final out = entry.gate!;
+        expect(out.verdict, anyOf('keep', 'drop'));
+        if (out.verdict == 'drop') {
+          expect(out.reason, isNotNull);
+          expect(out.reason, isNotEmpty);
+        } else {
+          expect(out.reason, isNull);
+        }
+      }
+    },
+    // A hundred pure function calls. The two minutes are for loading the set.
+    timeout: const Timeout(Duration(minutes: 2)),
+  );
+}
+
+/// The stratum drawn to be gated wrongly — machine-shaped mail a person
+/// actually wrote. A drop here is the expensive kind of mistake, so the run
+/// counts it on its own line rather than letting it average out.
+const String _trapStratum = 'gate-keep-trap';
+
+/// Triage's category the proxy column asks about. Named once: the question is
+/// "would this verdict have made a gate", and a typo would answer "no".
+const String _notificationCategory = 'notification';
+
+/// The gold drop reason for [item], or null when gold names none.
+///
+/// Read off the raw gold block rather than through a field on [GoldenGold]:
+/// the reason is scored by Python on drops alone, and this is the one line in
+/// this file that wants it.
+String? _goldGateReason(GoldenItem item) {
+  final gate = item.gold.raw['gate'];
+  if (gate is! Map) return null;
+  final reason = gate['reason'];
+  return reason is String ? reason : null;
 }
 
 /// The set and the rung both halves run on, or a failure that says what to run.
@@ -974,8 +1182,8 @@ void main() {
 Future<(GoldenSet, GoldenCtx)> _loadOrFail() async {
   if (GoldenDefines.setPath.isEmpty) {
     fail('GOLDEN_SET is not defined — run via make golden / make golden-prose '
-        '/ make golden-storyline (the Makefile passes it); a bare flutter '
-        'test cannot find the set');
+        '/ make golden-storyline / make golden-gate (the Makefile passes it); '
+        'a bare flutter test cannot find the set');
   }
   final set = await loadGoldenSet(GoldenDefines.setPath);
   if (set.items.isEmpty) {

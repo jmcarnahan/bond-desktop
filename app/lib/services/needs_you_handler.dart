@@ -38,11 +38,17 @@ typedef OwnerLookup = Future<({String? name, String? address})?> Function();
 /// so an edit mid-drain reaches the rest of the drain, and memoized on its own
 /// text, so an unchanged pref costs no rebuilt prompt.
 ///
-/// It reads the message, never triage's verdicts. The queue in front of this
-/// handler takes rows whose `triage_status` is still `pending`, so
-/// `reply_expected` and `needs_action` may not have been written yet — and
-/// waiting on them would make the verdict depend on which drain got there
-/// first. The body is what this pass judges.
+/// It reads the message, never triage's verdicts — and that is a choice, not
+/// an accident of timing. The queue in front of this handler now hands over
+/// only rows triage has finished with (`MessageStore.claimPendingWork` holds
+/// a `needs_you` item back while its message is `pending` or `processing`, so
+/// what arrives here is `triaged`, `skipped`, `error`, or a message that has
+/// been deleted), which means `reply_expected` and `needs_action` are usually
+/// sitting right there. This pass still does not read them: a verdict built
+/// on another model's verdict inherits its mistakes, and the one case a
+/// per-message needs-you judgement exists for — a busy thread where the owner
+/// gets one direct question — is the case triage's thread-level answer loses.
+/// The body is what this pass judges.
 ///
 /// This handler deliberately has NO arm in [AiWorker]'s `_park` and
 /// `_recordFailure` per-kind ladders. Those ladders exist for one reason: a

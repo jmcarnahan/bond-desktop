@@ -595,6 +595,22 @@ void main() {
         'state': 'waiting',
         'last_message_at': '2026-08-28T10:00:00Z',
       });
+      // One kept inbound message, because the assign pass will not look at a
+      // thread the gates emptied — it returns `AssignOutcome.gated` before it
+      // asks for a vector. A conversation row with an embedding and no
+      // messages behind it is exactly that shape.
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'msg-$key',
+        'conversation_key': key,
+        'direction': 'inbound',
+        'subject': 'Subject for $key',
+        'from_name': 'Sarah',
+        'from_address': 'sarah@example.com',
+        'received_at': '2026-08-28T10:00:00Z',
+        'body_text': 'Body for $key',
+        'triage_status': 'triaged',
+      });
       await store.upsertConversationAi(
         'email',
         key,
@@ -653,6 +669,25 @@ void main() {
       expect(row.status, 'skipped');
       expect(row.entityId, 'c1');
       expect(row.detail['outcome'], 'rejected');
+    });
+
+    test('a thread the gates emptied says so, and says nothing else',
+        () async {
+      // No model call happened at all here — the pass declined to look. The
+      // row exists so that a thread quietly dropped from the storyline pool
+      // is something the panel can account for.
+      await seedThread('c1', const [1.0, 0.0]);
+      await store.writeTriage('email', 'msg-c1',
+          status: 'skipped', gateReason: 'no_reply');
+      final llm = FakeLlm([<String, dynamic>{}]);
+
+      await pumpStoryline('c1', llm);
+
+      final row = (await rows('storyline')).single;
+      expect(row.status, 'skipped');
+      expect(row.entityId, 'c1');
+      expect(row.detail['outcome'], 'gated');
+      expect(await store.workCounts('storyline'), {'done': 1});
     });
 
     test('one row per item, not one per handler pass', () async {

@@ -186,6 +186,108 @@ void main() {
     });
   });
 
+  /// A message is never extracted or judged before triage has spoken about it.
+  /// The rule lives at the claim rather than in the two handlers, because the
+  /// two drains race for one gate: whichever wins, `extract` and `needs_you`
+  /// are simply not on offer until the gates have decided.
+  group('claimPendingWork holds extraction and needs-you behind triage', () {
+    Future<void> seedPending(String id, {String status = 'pending'}) =>
+        store.upsertMessage(messageRow(id: id, triageStatus: status));
+
+    for (final kind in const ['extract', 'needs_you']) {
+      test('$kind is not claimed while its message is pending', () async {
+        await seedPending('m1');
+        await store.enqueueWork(kind, 'email', 'm1');
+
+        expect(await store.claimPendingWork(kind), isNull);
+        // Still pending, not consumed — the next drain after triage gets it.
+        expect(await store.workCounts(kind), {'pending': 1});
+      });
+
+      test('$kind is not claimed while its message is being triaged', () async {
+        await seedPending('m1', status: 'processing');
+        await store.enqueueWork(kind, 'email', 'm1');
+
+        expect(await store.claimPendingWork(kind), isNull);
+        expect(await store.workCounts(kind), {'pending': 1});
+      });
+
+      test('$kind is claimed once triage has spoken, however it spoke',
+          () async {
+        // `error` is in the list deliberately: it means both gate tiers let
+        // the message through and only the model failed. The bar is "the
+        // gates have decided", not "the model succeeded".
+        for (final status in const ['triaged', 'skipped', 'error']) {
+          await seedPending('m-$status', status: status);
+          await store.enqueueWork(kind, 'email', 'm-$status');
+
+          expect(
+            (await store.claimPendingWork(kind))?['entity_id'],
+            'm-$status',
+            reason: 'a $status message is past triage',
+          );
+        }
+      });
+
+      test('$kind is claimed when the message row is gone', () async {
+        // Nothing is ever coming for it, so holding the item back would hold
+        // the queue open forever. The handler's `deleted` branch closes it.
+        await store.enqueueWork(kind, 'email', 'vanished');
+
+        expect((await store.claimPendingWork(kind))?['entity_id'], 'vanished');
+      });
+    }
+
+    test('a pending message holds back only those two kinds', () async {
+      await seedPending('m1');
+      for (final kind in const ['embed_message', 'storyline', 'draft']) {
+        await store.enqueueWork(kind, 'email', 'm1');
+      }
+
+      for (final kind in const ['embed_message', 'storyline', 'draft']) {
+        expect((await store.claimPendingWork(kind))?['entity_id'], 'm1',
+            reason: '$kind reads no triage verdict');
+      }
+    });
+
+    test('the newest claimable row is taken, not the newest row', () async {
+      await seedPending('untriaged');
+      await store.upsertMessage(messageRow(id: 'ready', triageStatus: 'triaged'));
+      await store.enqueueWork('extract', 'email', 'ready');
+      await store.enqueueWork('extract', 'email', 'untriaged');
+      await stampCreated('extract', 'ready', '2026-08-20T10:00:00Z');
+      await stampCreated('extract', 'untriaged', '2026-08-28T10:00:00Z');
+
+      expect((await store.claimPendingWork('extract'))?['entity_id'], 'ready');
+    });
+
+    test('a held-back row is still pending work as far as the counts go',
+        () async {
+      // The bar on the home screen counts rows, not eligibility: a message
+      // waiting for triage is work that has not happened yet, and showing it
+      // as finished would be a lie the next drain corrects.
+      await seedPending('m1');
+      await store.enqueueWork('extract', 'email', 'm1');
+
+      expect(await store.claimPendingWork('extract'), isNull);
+      expect(await store.workCounts('extract'), {'pending': 1});
+      expect((await store.nextPendingWork('extract'))?['entity_id'], 'm1');
+    });
+
+    test('a message of another source does not hold the row back', () async {
+      // The clause joins on BOTH columns. A teams row with the same id as an
+      // email one is a different message, and reading it would gate the wrong
+      // queue.
+      await store.upsertMessage(
+        messageRow(source: 'teams', id: 'm1', triageStatus: 'pending'),
+      );
+      await store.upsertMessage(messageRow(id: 'm1', triageStatus: 'triaged'));
+      await store.enqueueWork('extract', 'email', 'm1');
+
+      expect((await store.claimPendingWork('extract'))?['entity_id'], 'm1');
+    });
+  });
+
   group('writeWork', () {
     test('records status, error and attempts, and stamps updated_at', () async {
       await store.enqueueWork('extract', 'email', 'm1');
@@ -644,6 +746,206 @@ void main() {
           'h-email');
       expect((await store.getConversationAi('teams', 'shared'))!['embedded_hash'],
           'h-teams');
+    });
+  });
+
+  group('the late-gate repair reads', () {
+    Uint8List bytes(List<int> values) => Uint8List.fromList(values);
+
+    /// One message, with whatever the gates did to it.
+    Future<void> seedMessage({
+      required String id,
+      String source = 'email',
+      String conversationKey = 'conv-1',
+      String direction = 'inbound',
+      String triageStatus = 'triaged',
+      String? gateReason,
+    }) async {
+      await store.upsertMessage({
+        'source': source,
+        'source_message_id': id,
+        'conversation_key': conversationKey,
+        'direction': direction,
+        'subject': 'Launch date',
+        'from_name': 'Sarah Chen',
+        'from_address': 'sarah@example.com',
+        'received_at': '2026-08-28T10:00:00Z',
+        'body_text': 'Body of $id',
+        'triage_status': triageStatus,
+        'gate_reason': gateReason,
+      });
+    }
+
+    Future<void> seedEmbedded(String key, {String source = 'email'}) =>
+        store.upsertConversationAi(
+          source,
+          key,
+          embedding: bytes([1, 2, 3, 4]),
+          embeddedHash: 'h-$key',
+          embedModel: 'model-a',
+        );
+
+    test('clearConversationEmbedding takes the vector, the hash and the tag',
+        () async {
+      await seedEmbedded('conv-1');
+      // The attention columns are a different pass's, and a repair that took
+      // them would be undoing a decision it knows nothing about.
+      await db.customUpdate(
+        'UPDATE conversation_ai SET bucket = ?, bucket_reason = ?, '
+        'attention_score = ?, snoozed_until = ? '
+        "WHERE source = 'email' AND conversation_key = 'conv-1'",
+        variables: [
+          Variable('now'),
+          Variable('the launch date moved'),
+          Variable(0.87),
+          Variable('2026-09-01T00:00:00Z'),
+        ],
+      );
+
+      await store.clearConversationEmbedding('email', 'conv-1');
+
+      final row = (await store.getConversationAi('email', 'conv-1'))!;
+      expect(row['embedding'], isNull);
+      expect(row['embedded_hash'], isNull);
+      expect(row['embed_model'], isNull);
+      expect(row['bucket'], 'now');
+      expect(row['bucket_reason'], 'the launch date moved');
+      expect(row['attention_score'], 0.87);
+      expect(row['snoozed_until'], '2026-09-01T00:00:00Z');
+    });
+
+    test('clearing a thread that has no AI row writes nothing', () async {
+      await store.clearConversationEmbedding('email', 'never-embedded');
+
+      expect(await store.getConversationAi('email', 'never-embedded'), isNull);
+    });
+
+    test('deletePendingWork takes the pending row and leaves the rest',
+        () async {
+      await store.enqueueWork('storyline', 'email', 'conv-1');
+      await store.enqueueWork('storyline', 'email', 'conv-2');
+      await store.enqueueWork('storyline', 'email', 'conv-3');
+      await store.enqueueWork('embed', 'email', 'conv-1');
+      await store.writeWork('storyline', 'email', 'conv-2', status: 'processing');
+      await store.writeWork('storyline', 'email', 'conv-3', status: 'done');
+
+      expect(await store.deletePendingWork('storyline', 'email', 'conv-1'), 1);
+      // A worker is holding the processing row, and the done row is a record.
+      expect(await store.deletePendingWork('storyline', 'email', 'conv-2'), 0);
+      expect(await store.deletePendingWork('storyline', 'email', 'conv-3'), 0);
+
+      expect(await store.workStatusOf('storyline', 'email', 'conv-1'), isNull);
+      expect(await store.workStatusOf('storyline', 'email', 'conv-2'),
+          'processing');
+      expect(await store.workStatusOf('storyline', 'email', 'conv-3'), 'done');
+      // Another kind under the same key is another queue's business.
+      expect(await store.workStatusOf('embed', 'email', 'conv-1'), 'pending');
+    });
+
+    test('hasExtraction answers yes only for a stored extraction', () async {
+      expect(await store.hasExtraction('email', 'm1'), isFalse);
+
+      await store.writeExtraction('email', 'm1', '{"evidence":"first"}');
+
+      expect(await store.hasExtraction('email', 'm1'), isTrue);
+      expect(await store.hasExtraction('teams', 'm1'), isFalse);
+    });
+
+    test('extractedThenGatedCount counts model calls the gates undid',
+        () async {
+      // Gated, extracted: the whole point of the counter.
+      await seedMessage(
+          id: 'gated', triageStatus: 'skipped', gateReason: 'no_reply');
+      await store.writeExtraction('email', 'gated', '{"a":1}');
+      // Kept and extracted: the normal case, and never counted.
+      await seedMessage(id: 'kept', conversationKey: 'conv-2');
+      await store.writeExtraction('email', 'kept', '{"a":1}');
+      // A chat born skipped under `teams_source` is a kept message.
+      await seedMessage(
+        id: 'chat',
+        source: 'teams',
+        conversationKey: 'chat-1',
+        triageStatus: 'skipped',
+        gateReason: 'teams_source',
+      );
+      await store.writeExtraction('teams', 'chat', '{"a":1}');
+      // Outbound is born skipped and is nobody's wasted model call.
+      await seedMessage(
+        id: 'sent',
+        conversationKey: 'conv-3',
+        direction: 'outbound',
+        triageStatus: 'skipped',
+        gateReason: 'outbound',
+      );
+      await store.writeExtraction('email', 'sent', '{"a":1}');
+      // Gated but never extracted: the common case, and not a wasted call.
+      await seedMessage(
+          id: 'bulk', triageStatus: 'skipped', gateReason: 'newsletter');
+      // Skipped with no reason recorded, and extracted: still a wasted call.
+      // `NOT keptMessageSql` would have lost this row to SQL's three-valued
+      // logic, which is why the counter spells "not kept" positively.
+      await seedMessage(
+          id: 'bare',
+          conversationKey: 'conv-5',
+          triageStatus: 'skipped',
+          gateReason: null);
+      await store.writeExtraction('email', 'bare', '{"a":1}');
+
+      expect(await store.extractedThenGatedCount(), 2);
+    });
+
+    test('conversationsWithEmbeddingAndNoKeptInbound finds the all-gated '
+        'threads and nothing else', () async {
+      // All gated, embedded: exactly what the repair walks.
+      await seedMessage(
+          id: 'g1', triageStatus: 'skipped', gateReason: 'no_reply');
+      await seedEmbedded('conv-1');
+      // A second one, to pin the ordering.
+      await seedMessage(
+        id: 'g2',
+        conversationKey: 'conv-2',
+        triageStatus: 'skipped',
+        gateReason: 'newsletter',
+      );
+      await seedEmbedded('conv-2');
+      // One kept inbound left: the thread still says something.
+      await seedMessage(id: 'k1', conversationKey: 'conv-3');
+      await seedEmbedded('conv-3');
+      // All gated but never embedded: nothing here to take back.
+      await seedMessage(
+        id: 'g3',
+        conversationKey: 'conv-4',
+        triageStatus: 'skipped',
+        gateReason: 'no_reply',
+      );
+      // Outbound only, and carrying an embedding: not this repair's business,
+      // because "every inbound was gated" is not true of a thread with none.
+      await seedMessage(
+        id: 's1',
+        conversationKey: 'conv-5',
+        direction: 'outbound',
+        triageStatus: 'skipped',
+        gateReason: 'outbound',
+      );
+      await seedEmbedded('conv-5');
+      // A chat born skipped under `teams_source`, embedded: kept by the one
+      // spelling of kept, so a legacy chat thread is never swept out.
+      await seedMessage(
+        id: 'c1',
+        source: 'teams',
+        conversationKey: 'chat-1',
+        triageStatus: 'skipped',
+        gateReason: 'teams_source',
+      );
+      await seedEmbedded('chat-1', source: 'teams');
+
+      final found = await store.conversationsWithEmbeddingAndNoKeptInbound();
+
+      expect(
+        [for (final pair in found) pair.conversationKey],
+        ['conv-1', 'conv-2'],
+      );
+      expect(found.first.source, 'email');
     });
   });
 }

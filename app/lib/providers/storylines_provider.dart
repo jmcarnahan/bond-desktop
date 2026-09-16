@@ -581,6 +581,10 @@ class StorylineTimelineNotifier extends StateNotifier<StorylineTimelineState> {
       }
 
       for (final draft in drafts.values) {
+        // Kept inbound first, newest second — the store's own order, shared
+        // with the embedding card. So an episode whose newest inbound is a
+        // gated autoresponder is summarised by the last message a person
+        // sent, not by the bounce; the strip below still lists every row.
         final card = await _store.newestInboundCardData(
           draft.source,
           draft.conversationKey,

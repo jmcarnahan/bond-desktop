@@ -4,6 +4,21 @@
 (`app/lib/services/extract_handler.dart`, run by `AiWorker`) pulls stable
 facts out of each message, then fans out three cheap follow-ons:
 
+"After triage" is enforced, not hoped for. `extract` and `needs_you` rows are
+enqueued at sync time, while every fresh message is still `pending`, and the
+triage drain and the worker drain race for the same drain gate — so the rule
+lives at the claim. `MessageStore.claimPendingWork` will not hand the worker
+an `extract` or `needs_you` item whose message row is still `pending` or
+`processing`: the item is claimed only once `triage_status` is `triaged`,
+`skipped` or `error`, or the message row is gone. `error` counts as spoken
+because both gate tiers passed and only the model failed — the bar is "the
+gates have decided", not "the model succeeded" — and a missing row counts
+because nothing is coming for it, which is what the handler's `deleted`
+branch closes. Whichever drain wins the gate, the gates decide first. The
+handler's own `skipped` check stays as the belt, for an Ignore that lands
+between the claim and the run and for rows an older build enqueued. Every
+other work kind is untouched by the clause.
+
 1. **Bucket filing** (`_fileBucket`) — the extraction's read of the message
    files low-value mail into Later, unless a standing per-sender rule or an
    explicit "keep this in my inbox" overrides it. Nothing automatic overturns

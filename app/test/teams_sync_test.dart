@@ -1463,12 +1463,18 @@ void main() {
     test('the queued teams rows drain alongside email', () async {
       graph.messages['chat-1'] = [_message(id: 'm1')];
       await build().syncNow();
+      // Triage has spoken about the chat row, because the worker is not
+      // handed an `extract` item while its message is still `pending` — see
+      // `MessageStore.claimPendingWork`. What this test is about is the
+      // worker's SOURCES, not the order of the two drains.
+      await store.writeTriage('teams', 'm1', status: 'triaged');
       // An email row of the same kind, as the control.
       await store.upsertMessage({
         'source_message_id': 'e1',
         'conversation_key': 'c1',
         'direction': 'inbound',
         'received_at': _iso(const Duration(days: 1)),
+        'triage_status': 'triaged',
       });
       await store.enqueueExtractBacklog(sinceIso: _iso(const Duration(days: 7)));
 

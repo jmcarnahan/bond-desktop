@@ -63,6 +63,15 @@ void main() {
       );
     });
 
+    test('a dropped sender scores nothing either', () {
+      // The third disposition quiets a thread exactly as the second does.
+      // What separates them is the gate at triage, not the score here.
+      expect(
+        _score(urgency: CtaUrgency.urgent, intent: 'request', senderPref: 'drop'),
+        0,
+      );
+    });
+
     test('a done thread scores nothing', () {
       expect(_score(state: ConversationState.done), 0);
     });
@@ -574,6 +583,21 @@ void main() {
       );
     });
 
+    test('a drop rule defers like a later one, whatever the model thinks', () {
+      for (final needsReply in [true, false]) {
+        expect(
+          bucketFor(
+            senderPref: 'drop',
+            intent: 'request',
+            importance: 'high',
+            needsReply: needsReply,
+          ),
+          'later',
+          reason: 'needsReply $needsReply',
+        );
+      }
+    });
+
     test('a keep rule keeps it, whatever the model thinks', () {
       expect(
         bucketFor(
@@ -708,6 +732,7 @@ void main() {
   group('bucketReasonFor', () {
     test('names the rule when a rule did it', () {
       expect(bucketReasonFor('later'), 'sender_pref');
+      expect(bucketReasonFor('drop'), 'sender_pref');
     });
 
     test('and the guess when the model did', () {

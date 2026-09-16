@@ -108,6 +108,7 @@ Future<void> _pump(
   VoidCallback? onRetry,
   VoidCallback? onRejudge,
   VoidCallback? onIgnore,
+  VoidCallback? onDropSender,
   VoidCallback? onAddToStoryline,
   void Function(String)? onRemoveFromStoryline,
   void Function(String)? onAllowAgain,
@@ -131,6 +132,7 @@ Future<void> _pump(
         onRetry: onRetry,
         onRejudge: onRejudge,
         onIgnore: onIgnore,
+        onDropSender: onDropSender,
         onAddToStoryline: onAddToStoryline,
         onRemoveFromStoryline: onRemoveFromStoryline,
         onAllowAgain: onAllowAgain,
@@ -309,6 +311,52 @@ void main() {
     expect(find.text('Ignore this message'), findsOneWidget);
   });
 
+  testWidgets('the drop-sender offer is absent until the host makes it',
+      (tester) async {
+    // The screen counts nothing. Whether the owner has Ignored this sender
+    // often enough to be asked is the host's question.
+    await _pump(tester, AsyncValue.data(_history()), onIgnore: () {});
+
+    expect(find.byKey(MessageHistoryScreen.dropSenderKey), findsNothing);
+  });
+
+  testWidgets('and is two taps, the second the whole confirmation, then gone',
+      (tester) async {
+    var dropped = 0;
+    await _pump(
+      tester,
+      AsyncValue.data(_history()),
+      onDropSender: () => dropped++,
+    );
+
+    // A standing gate on a sender is not written by one stray click into
+    // the slot Ignore just vacated.
+    await tester.tap(find.byKey(MessageHistoryScreen.dropSenderKey));
+    await tester.pump();
+    expect(dropped, 0);
+    expect(find.text('Really drop this sender?'), findsOneWidget);
+
+    await tester.tap(find.byKey(MessageHistoryScreen.dropSenderKey));
+    await tester.pump();
+    expect(dropped, 1);
+    // Taken, so gone at once — a fast third tap has nothing to press while
+    // the host re-reads whether to offer it.
+    expect(find.byKey(MessageHistoryScreen.dropSenderKey), findsNothing);
+  });
+
+  testWidgets('a dropped row still carries the offer', (tester) async {
+    // The moment it is offered is the moment after an Ignore, which is
+    // exactly when the row it sits on has just become a dropped one.
+    await _pump(
+      tester,
+      AsyncValue.data(_history(row: _row(dropped: true, dropReason: 'user'))),
+      onDropSender: () {},
+    );
+
+    expect(find.byKey(MessageHistoryScreen.dropSenderKey), findsOneWidget);
+    expect(find.byKey(MessageHistoryScreen.ignoreKey), findsNothing);
+  });
+
   testWidgets('arming one question disarms the other', (tester) async {
     // Two open questions on one screen is how a person answers the wrong one.
     await _pump(
@@ -366,6 +414,33 @@ void main() {
     await tester.tap(find.byKey(MessageHistoryScreen.removeKey('s1')));
     await tester.pump();
     expect(removed, ['s1']);
+  });
+
+  testWidgets('a gate\'s eviction says so, and keeps both ways back',
+      (tester) async {
+    await _pump(
+      tester,
+      AsyncValue.data(_history(
+        blocks: const [
+          {
+            'storyline_id': 's3',
+            'title': 'Vendor updates',
+            'status': 'active',
+            'blocked_by': 'gate',
+            'evidence': 'every inbound message in this thread was gated',
+          },
+        ],
+      )),
+      onAllowAgain: (_) {},
+      onAddBack: (_) {},
+    );
+
+    expect(find.textContaining('Removed by a gate from Vendor updates'),
+        findsOneWidget);
+    expect(find.textContaining('by re-check'), findsNothing);
+    expect(find.byKey(MessageHistoryScreen.allowAgainKey('s3')),
+        findsOneWidget);
+    expect(find.byKey(MessageHistoryScreen.addBackKey('s3')), findsOneWidget);
   });
 
   testWidgets('both buttons are offered on every live block, whichever pass '

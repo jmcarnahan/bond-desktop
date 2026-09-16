@@ -523,6 +523,18 @@ void main() {
       expect(await reasonOf('c1'), 'sender_pref');
     });
 
+    test('a drop rule files the thread the same way a later one does',
+        () async {
+      // The sweep does not know the difference and should not: dropping a
+      // sender quiets the threads already here, and gates only what is next.
+      await seed('c1', intent: 'request', importance: 'high');
+      await store.setSenderPref('eric@x.com', 'drop');
+      await service.recomputeAll(now: now);
+
+      expect(await bucketOf('c1'), 'later');
+      expect(await reasonOf('c1'), 'sender_pref');
+    });
+
     test('a keep rule beats the model and clears a low_value bucket', () async {
       await seed('c1', intent: 'fyi', importance: 'low');
       await service.recomputeAll(now: now);
