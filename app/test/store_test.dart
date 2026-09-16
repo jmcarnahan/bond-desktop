@@ -552,6 +552,45 @@ void main() {
           reason: 'no sources means no queue, never every queue');
     });
 
+    test('an excluded message is passed over for the next one', () async {
+      await store.upsertMessage(
+          messageRow(id: 'newest', receivedAt: '2026-08-29T10:00:00Z'));
+      await store.upsertMessage(
+          messageRow(id: 'older', receivedAt: '2026-08-28T10:00:00Z'));
+
+      // What a drain that deliberately deferred the newest message needs:
+      // without this it would be handed the same row again, every time.
+      expect(
+        (await store.claimPendingTriage(excluding: ['newest']))
+            ?['source_message_id'],
+        'older',
+      );
+      // And an empty list is the statement exactly as it was.
+      expect(
+        (await store.claimPendingTriage(excluding: []))?['source_message_id'],
+        'newest',
+      );
+    });
+
+    test('only the first fifty exclusions are honoured', () async {
+      for (var i = 0; i < 52; i++) {
+        await store.upsertMessage(messageRow(
+          id: 'm$i',
+          // Oldest first, so the list below runs newest-first as the claim
+          // reads it: m51 is the newest pending row.
+          receivedAt: '2026-08-01T${(i ~/ 3).toString().padLeft(2, '0')}:'
+              '${(i % 60).toString().padLeft(2, '0')}:00Z',
+        ));
+      }
+
+      // Newest first, which is the order the claim considers them in. The
+      // 51st entry is past the cap, so that message is still claimable.
+      final deferred = [for (var i = 51; i >= 0; i--) 'm$i'];
+      final claimed = await store.claimPendingTriage(excluding: deferred);
+
+      expect(claimed?['source_message_id'], deferred[50]);
+    });
+
     test('reviveErroredTriage flips errors below the ceiling back to pending',
         () async {
       await store.upsertMessage(messageRow(id: 'healable'));

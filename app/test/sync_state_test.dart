@@ -179,7 +179,10 @@ void main() {
 
   tearDown(() async => db.close());
 
-  SyncService syncReaching(int lookbackDays) {
+  SyncService syncReaching(
+    int lookbackDays, {
+    Future<int> Function()? repairGatedConversations,
+  }) {
     final tokens = InMemoryTokenStore();
     tokens.values['refresh_token'] = 'rt-initial';
     tokens.values['granted_scopes'] = _grantedScopes;
@@ -190,6 +193,7 @@ void main() {
       // Wired, because the one-shot below reports itself in the `sync_mail`
       // row's detail and nowhere else.
       activityLog: ActivityLog(store),
+      repairGatedConversations: repairGatedConversations,
       lookbackDays: () => lookbackDays,
     );
   }
@@ -342,6 +346,74 @@ void main() {
       await syncReaching(14).syncNow();
       expect(await reportedRefolds(), 1,
           reason: 'exactly one sync_mail row ever names the repair');
+    });
+
+    /// How many `sync_mail` rows name the gate repair at all — the twin of
+    /// [reportedRefolds], and the honest question when a later pass is quiet
+    /// enough to write no row of its own.
+    Future<int> reportedGateRepairs() async {
+      final rows = await db
+          .customSelect(
+            "SELECT COUNT(*) AS n FROM activity_events WHERE kind = 'sync_mail' "
+            "AND detail_json LIKE '%repaired_gated_conversations%'",
+          )
+          .getSingle();
+      return (rows.data['n'] as num).toInt();
+    }
+
+    test('the gate repair runs once and reports what it repaired', () async {
+      var calls = 0;
+      Future<int> repair() async {
+        calls++;
+        return 3;
+      }
+
+      await syncReaching(14, repairGatedConversations: repair).syncNow();
+
+      expect(calls, 1);
+      expect(await store.getPref('gated_conversation_repair'), '1');
+      expect((await syncMailDetail())['repaired_gated_conversations'], 3);
+
+      graph.requests.clear();
+      await syncReaching(14, repairGatedConversations: repair).syncNow();
+
+      expect(calls, 1, reason: 'the pref is what makes it a one-shot');
+      // Named on exactly one row, ever. A later pass omits the key rather
+      // than reporting a zero, which would read as a repair that ran and
+      // found nothing.
+      expect(await reportedGateRepairs(), 1);
+    });
+
+    test('a sweep that failed is owed again, and the sync around it is fine',
+        () async {
+      var calls = 0;
+      Future<int> repair() async {
+        calls++;
+        if (calls == 1) throw StateError('the database went away');
+        return 2;
+      }
+
+      // The pref is written only after the sweep returns: a one-shot that
+      // never ran must not be marked as done by the sync that watched it fail.
+      await syncReaching(14, repairGatedConversations: repair).syncNow();
+      expect(calls, 1);
+      expect(await store.getPref('gated_conversation_repair'), isNull);
+      expect(await reportedGateRepairs(), 0);
+
+      graph.requests.clear();
+      await syncReaching(14, repairGatedConversations: repair).syncNow();
+      expect(calls, 2);
+      expect(await store.getPref('gated_conversation_repair'), '1');
+      expect((await syncMailDetail())['repaired_gated_conversations'], 2);
+    });
+
+    test('a build wired without the repair does not consume the one-shot',
+        () async {
+      await syncReaching(14).syncNow();
+
+      // A test build must leave the pref for the app that is owed the sweep.
+      expect(await store.getPref('gated_conversation_repair'), isNull);
+      expect(await reportedGateRepairs(), 0);
     });
   });
 

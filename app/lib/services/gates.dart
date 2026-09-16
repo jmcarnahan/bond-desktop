@@ -44,6 +44,33 @@ final RegExp _machineSender = RegExp(
   caseSensitive: false,
 );
 
+/// The one thing in this file that is NOT a gate, and it is here because it is
+/// the same question asked for a different purpose.
+///
+/// [suspectMachineSender] never decides whether a message reaches the model.
+/// It decides whether a detail fetch that FAILED is worth one more attempt
+/// before the message is classified from its preview with no headers at all —
+/// which is exactly the case where the header gates would have had something
+/// to say. So it is wide where [_machineSender] is narrow: a false positive
+/// costs one deferred triage, where a false positive in [gateFor] costs the
+/// message.
+///
+/// Anywhere in the local part rather than prefix-anchored, for the same
+/// reason. `svc-monitoring`, `prod-alerts` and `orders-noreply` are all
+/// machine mailboxes whose shape the gate's anchor deliberately refuses, and
+/// each is a mailbox whose headers are worth waiting for.
+final RegExp _suspectMachineSender = RegExp(
+  r'no[-._]?reply|do[-._]?not[-._]?reply|notif|alert|monitor|digest'
+  r'|newsletter|mailer|bounce|robot|automat|system|postmaster|daemon'
+  r'|\bsvc\b|(^|[-._])bot([-._]|$)|^(pipelines|builds|ci)$',
+  caseSensitive: false,
+);
+
+/// Whether a sender's local part LOOKS like a machine, loosely — wide on
+/// purpose, and NOT a gate. See [_suspectMachineSender] for what it is for.
+bool suspectMachineSender(String localPart) =>
+    localPart.isNotEmpty && _suspectMachineSender.hasMatch(localPart);
+
 /// `Precedence` values that mean "sent to a list, not to you". `first-class`
 /// and `normal` are ordinary mail and are deliberately absent.
 const Set<String> _bulkPrecedence = {'bulk', 'list', 'junk', 'auto_reply'};

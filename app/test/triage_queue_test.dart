@@ -404,6 +404,214 @@ void main() {
     });
   });
 
+  /// The knock the queue gives the gate repair, at both tiers.
+  ///
+  /// What it is for is elsewhere — see `gate_repair_service_test.dart`. What
+  /// is pinned here is only that the queue calls it, once, on a verdict rather
+  /// than on a pass through the model, and that the verdict is on the row by
+  /// the time it does.
+  group('onGated', () {
+    test('a sender gate tells it, with the verdict already written', () async {
+      await seedMessage(id: 'm1', from: 'noreply@example.com');
+      final gated = <(String, String)>[];
+      final statusInside = <Object?>[];
+
+      await TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onGated: (source, id) async {
+          gated.add((source, id));
+          statusInside.add((await messageRow(id))['triage_status']);
+        },
+      ).pump();
+
+      expect(gated, [('email', 'm1')]);
+      // Before the progress emit, which is what "already written" buys: the
+      // reload the rails do behind that tick reads the repaired state.
+      expect(statusInside, ['skipped']);
+    });
+
+    test('a header gate tells it too', () async {
+      await seedMessage(
+        id: 'm1',
+        withBody: false,
+        bodyPreview: 'This week in rates',
+      );
+      final fetch = FakeDetailFetch(
+        store,
+        bodyText: 'Body',
+        headers: const {'list-unsubscribe': '<mailto:stop@example.com>'},
+      );
+      final gated = <(String, String)>[];
+
+      await TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        ensureBody: fetch.call,
+        onGated: (source, id) async => gated.add((source, id)),
+      ).pump();
+
+      expect((await messageRow('m1'))['gate_reason'], 'newsletter');
+      expect(gated, [('email', 'm1')]);
+    });
+
+    test('a message that reaches the model is not a gate', () async {
+      await seedMessage(id: 'm1');
+      final gated = <(String, String)>[];
+
+      await TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onGated: (source, id) async => gated.add((source, id)),
+      ).pump();
+
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+      expect(gated, isEmpty);
+    });
+
+    test('a callback that throws does not cost the drain its verdict',
+        () async {
+      await seedMessage(id: 'm1', from: 'noreply@example.com');
+      await seedMessage(
+        id: 'm2',
+        conversationKey: 'conv-2',
+        receivedAt: '2026-08-29T09:00:00Z',
+      );
+
+      await TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onGated: (source, id) async => throw StateError('repair is down'),
+      ).pump();
+
+      expect((await messageRow('m1'))['triage_status'], 'skipped');
+      // And the message behind it is still triaged: the callback's failure is
+      // not the drain's.
+      expect((await messageRow('m2'))['triage_status'], 'triaged');
+    });
+  });
+
+  /// A failed detail fetch on a machine-shaped sender, which is the one shape
+  /// of degraded fetch where classifying from the preview throws away the
+  /// verdict that mattered: the header gates would have caught exactly this
+  /// mail, and they have nothing to read.
+  group('headerless defer', () {
+    /// A no-headers message from a machine mailbox the prefix-anchored gate
+    /// deliberately does not catch, plus a fetch that always fails.
+    Future<FakeDetailFetch> seedDeferrable({
+      String id = 'm1',
+      String from = 'svc-monitoring@example.com',
+    }) async {
+      await seedMessage(id: id, from: from, bodyText: 'Disk usage at 91%.');
+      return FakeDetailFetch(store, error: Exception('graph down'));
+    }
+
+    /// The newest `triage` row with this status, as its raw columns plus its
+    /// decoded detail. Raw rather than [ActivityEvent] because this file
+    /// imports `database.dart`, whose generated row class owns that name.
+    Future<Map<String, Object?>> triageRow(String status) async {
+      final row = (await store.recentActivity(limit: 20)).firstWhere(
+        (r) => r['kind'] == 'triage' && r['status'] == status,
+      );
+      return {
+        ...row,
+        'detail': jsonDecode(row['detail_json'] as String) as Map,
+      };
+    }
+
+    test('two drains defer, the third classifies headerless', () async {
+      final fetch = await seedDeferrable();
+      final llm = FakeLlm([answer()]);
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      TriageQueue queue() => TriageQueue(
+            store,
+            llm,
+            ensureBody: fetch.call,
+            activityLog: log,
+          );
+
+      await queue().pump();
+
+      var row = await messageRow('m1');
+      expect(row['triage_status'], 'pending');
+      expect(row['triage_attempts'], 1);
+      expect(llm.userMessages, isEmpty, reason: 'nothing was classified yet');
+      expect(fetch.fetched, ['m1'], reason: 'one fetch, not a tight loop');
+      final retry = await triageRow('retry');
+      expect(retry['entity_id'], 'm1');
+      final detail = retry['detail'] as Map;
+      expect(detail['reason'], 'headerless');
+      expect(detail['attempts'], 1);
+
+      await queue().pump();
+
+      row = await messageRow('m1');
+      expect(row['triage_status'], 'pending');
+      expect(row['triage_attempts'], 2);
+      expect(llm.userMessages, isEmpty);
+
+      await queue().pump();
+
+      // Bounded means bounded: at the ceiling the message is classified from
+      // its preview with no headers, exactly as it always was.
+      row = await messageRow('m1');
+      expect(row['triage_status'], 'triaged');
+      expect(row['triage_attempts'], 2);
+      expect(llm.userMessages.length, 1);
+    });
+
+    test('a person is classified headerless on the first failure', () async {
+      final fetch = await seedDeferrable(from: 'sarah@example.com');
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+
+      // The deferral is about the gates that never got to speak, and no gate
+      // was ever going to fire on a colleague.
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+      expect(llm.userMessages.length, 1);
+    });
+
+    test('the message behind a deferred one is still triaged in that drain',
+        () async {
+      // The machine one is NEWER, so it is what the claim's ordering hands
+      // back first — and would keep handing back, without the exclusion.
+      final fetch = FakeDetailFetch(store, error: Exception('graph down'));
+      await seedMessage(
+        id: 'machine',
+        from: 'prod-alerts@example.com',
+        receivedAt: '2026-08-29T12:00:00Z',
+      );
+      await seedMessage(
+        id: 'human',
+        conversationKey: 'conv-2',
+        receivedAt: '2026-08-29T11:00:00Z',
+      );
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+
+      expect((await messageRow('human'))['triage_status'], 'triaged');
+      final machine = await messageRow('machine');
+      expect(machine['triage_status'], 'pending');
+      expect(machine['triage_attempts'], 1);
+    });
+
+    test('a chat is never deferred — there is no detail fetch to retry',
+        () async {
+      await seedChat(id: 'c1', bodyText: 'Deploy finished.');
+      final fetch = FakeDetailFetch(store, error: Exception('graph down'));
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+
+      expect(fetch.fetched, isEmpty);
+      expect((await messageRow('c1', source: 'teams'))['triage_status'],
+          'triaged');
+    });
+  });
+
   /// The owner's override, at both tiers.
   ///
   /// A gate is a judgement the claim re-derives every time, so clearing a

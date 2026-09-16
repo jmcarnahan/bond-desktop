@@ -308,6 +308,45 @@ void main() {
       expect(await activity(), isEmpty);
     });
 
+    test('the gate repair is told, with the drop already written', () async {
+      await seed();
+      final gated = <(String, String)>[];
+      final statusInside = <Object?>[];
+      final kindsInside = <Iterable<String>>[];
+      final service = PipelineRepairService(
+        store,
+        activityLog: ActivityLog(store),
+        onGated: (source, id) async {
+          gated.add((source, id));
+          statusInside.add(
+              (await store.getMessageRow(source, id))!['triage_status']);
+          kindsInside.add((await activity()).map((e) => e.kind));
+        },
+      );
+
+      expect(await service.ignore('email', 'm1'), isTrue);
+
+      // An Ignore is a gate arriving after the whole pipeline has run, so
+      // what the thread built is the repair service's to take back.
+      expect(gated, [('email', 'm1')]);
+      expect(statusInside, ['skipped']);
+      // Told AFTER the Ignore is written down, so the repair's own row lands
+      // above the Ignore that explains it — cause before effect in the panel.
+      expect(kindsInside.single, contains('ignore'));
+      expect((await activity()).map((e) => e.kind), contains('ignore'));
+    });
+
+    test('nothing stored under the keys tells nobody', () async {
+      final gated = <(String, String)>[];
+      final service = PipelineRepairService(
+        store,
+        onGated: (source, id) async => gated.add((source, id)),
+      );
+
+      expect(await service.ignore('email', 'ghost'), isFalse);
+      expect(gated, isEmpty);
+    });
+
     test('no pump: an ignore queues nothing', () async {
       await seed();
       final pumped = <String>[];

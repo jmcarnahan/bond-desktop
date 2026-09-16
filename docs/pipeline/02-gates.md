@@ -22,6 +22,16 @@ local-parts (`no-reply`, `notifications`, `alerts`, …) are gated out.
 `NotSignedIn` / `ReconsentRequired`, which park the queue until the session is
 usable again. See `triage_queue.dart`.
 
+One shape of failure is DEFERRED instead: a fetch that failed leaving no
+headers at all, on a sender whose local part looks like a machine
+(`suspectMachineSender` in `gates.dart` — wide, anywhere in the local part,
+and explicitly NOT a gate). The message goes back to `pending` with a
+`triage_attempts` bump and a `triage` / `retry` activity row carrying
+`reason: headerless`, and the drain excludes it from its own later claims so
+it moves on to the message behind it. The bound is `_maxAttempts`, shared with
+the model failures: after two attempts the message is classified headerless
+exactly as it always was.
+
 ## Tier 2 — header gates
 
 With headers in hand, the list/auto-generated checks run: `List-Unsubscribe`
@@ -136,11 +146,13 @@ the owner has already thrown out. And a triage answer that lands after the
 Ignore is discarded: `writeTriage` refuses a row that is `skipped` under
 `gate_reason = 'user'`.
 
-Nothing that was already queued has to be cancelled: the handlers all skip a
-gated row on their own, so whatever is on a queue for this message reads the
-new `triage_status` and declines. The thread stops holding an open ask for the
-same reason — the open-ask predicate excludes gated rows — which is why the
-verdict itself is deliberately left alone. `needs_you_verdict` is what the
+Almost nothing that was already queued has to be cancelled: the handlers all
+skip a gated row on their own, so whatever is on a queue for this message reads
+the new `triage_status` and declines. The exception is the thread's own pending
+`storyline` row, which the late-verdict repair below deletes when the Ignore
+leaves the thread with nothing kept in it. The thread stops holding an open
+ask for the same reason — the open-ask predicate excludes gated rows — which
+is why the verdict itself is deliberately left alone. `needs_you_verdict` is what the
 judge decided about the words, and an Ignore is the owner saying they do not
 want the message, not that the judge misread it.
 
@@ -149,3 +161,62 @@ ignored carries both facts, and the history screen shows both. Restore
 reverses an Ignore exactly as it reverses any other gate — the reason is a
 `gate_reason` like the rest — which is what makes the pair on the history
 screen safe to press.
+
+## A late verdict and what it repairs
+
+A gate normally speaks before anything is built — see 03-triage.md for the
+claim invariant. Three things break that order, and all three call
+`GateRepairService.afterGate` / `.repairAll`
+(`app/lib/services/gate_repair_service.dart`):
+
+- the triage drain's own gates, at either tier (`onGated` on `TriageQueue`);
+- the owner's Ignore, after `dropMessage` (`onGated` on
+  `PipelineRepairService`);
+- the one-shot over the whole database, run once per install behind the
+  `gated_conversation_repair` pref from the mail sync (01-sync-ingest.md).
+
+The test is the store's own: `keptInboundCount(source, key) == 0`, the same
+"kept" spelling the thread refold uses. A conversation with zero kept inbound
+messages is one the app must stop describing — every inbound in it was gated,
+so nothing in it was ever meant for a model.
+
+What moves, for such a thread:
+
+- **storyline memberships** whose `added_by <> 'user'` are evicted through
+  `StorylineService.evictGatedThread`, which does everything an owner's
+  removal does — member row gone, member hash recomputed, recap text and
+  watermark cleared, thread pointer re-stamped onto whatever membership is
+  left, `storyline_refresh` requeued — and writes the block as
+  `blocked_by = 'gate'` with the fixed evidence `every inbound message in this
+  thread was gated`. A `user` membership is left alone: the owner filed that
+  thread by hand and a gate does not overrule a person.
+- **the conversation's embedding**, cleared with its hash and model tag
+  (`clearConversationEmbedding`), which is what takes the thread out of the
+  vec0 clustering index at the next sweep's backfill.
+- **the pending `storyline` work row** for that key, deleted rather than
+  parked — `requeueWork` revives only `done` and `error`, so a parked row
+  would block that key's queue forever.
+
+**No audit is queued.** An audit means "the owner says the model got this
+group wrong"; a gate says nothing about the model's reasoning, because the
+thread should never have reached it. For the same reason a `gate` block never
+enters a prompt: the confirm prompt reads `blocksOf(blockedBy: 'user')`, and
+only the owner's "no" is a lesson. Nothing lifts a `gate` block automatically:
+not a Restore, and not a later genuine reply landing kept in the same thread.
+The thread may still be filed into any OTHER storyline, or seed a new one; for
+the storyline it was evicted from, "Allow again" is the owner's word. The
+asymmetry is deliberate — a block that came and went with the kept count would
+let a thread flap in and out of a group's recap.
+
+The one-shot has a cost worth naming. Every storyline that loses a thread has
+its recap text and watermark cleared, exactly as an owner's removal clears
+them, so the first sync after the upgrade queues a refresh and a recap for
+each affected storyline — one model pass per storyline, proportional to how
+many the pre-invariant races had filed, and once.
+
+The counter the pipeline roadmap asks for is `extracted_then_gated`: whenever
+a gate lands on a message that already has `message_ai.extraction_json`, the
+`gate_repair` activity row carries `extracted: 1`, and the one-shot's row
+carries the DB-wide count from `extractedThenGatedCount()`. A gate on an
+unextracted message in a thread with nothing built writes no row at all — that
+is the common case, and it is not news.

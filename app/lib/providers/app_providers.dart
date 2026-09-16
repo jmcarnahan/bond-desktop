@@ -38,6 +38,7 @@ import '../services/draft_handler.dart';
 import '../services/drain_gate.dart';
 import '../services/embed_handler.dart';
 import '../services/extract_handler.dart';
+import '../services/gate_repair_service.dart';
 import '../services/graph_attachment_backend.dart';
 import '../services/graph_auth.dart';
 import '../services/graph_mail.dart';
@@ -554,6 +555,11 @@ final syncServiceProvider = Provider<MailSync>(
     // of every pass — the whole mechanism by which a directory stays level
     // with the disk without a file-system watcher.
     contextStore: ref.watch(contextStoreProvider),
+    // The one-shot over the threads that were filed and embedded before the
+    // gates could speak first. `read` inside the closure, for the reason the
+    // pumps elsewhere in this file give.
+    repairGatedConversations: () =>
+        ref.read(gateRepairServiceProvider).repairAll(),
   ),
 );
 
@@ -665,6 +671,21 @@ final fastLlmClientProvider = Provider<LlmClient>(
 /// One instance for the app, or it would serialize nothing — see [DrainGate].
 final drainGateProvider = Provider<DrainGate>((ref) => DrainGate());
 
+/// What a gate that speaks late has to undo — see [GateRepairService].
+///
+/// Reaching forward to [storylineServiceProvider], declared further down this
+/// file, is ordinary Riverpod: a provider resolves where it is READ, which is
+/// inside this callback. There is no cycle to worry about — the storyline
+/// service takes the store, the clients, the log, the embeddings, the
+/// recorder and the context library, and none of them is a drain.
+final gateRepairServiceProvider = Provider<GateRepairService>(
+  (ref) => GateRepairService(
+    ref.watch(messageStoreProvider),
+    ref.watch(storylineServiceProvider),
+    activityLog: ref.watch(activityLogProvider),
+  ),
+);
+
 /// The triage worker. Exactly one for the whole app: it is one queue over
 /// shared rows, and a second instance would claim the same messages.
 final triageQueueProvider = Provider<TriageQueue>((ref) {
@@ -694,6 +715,13 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
         unawaited(ref.read(aiWorkerProvider).pump());
       } catch (_) {}
     },
+    // A gate landing on a message whose thread has nothing kept left in it
+    // leaves an embedding, storyline memberships and a queued filing behind.
+    // `read` inside the closure, on the same precedent as the pumps above:
+    // this is called long after the body returns.
+    onGated: (source, id) => ref
+        .read(gateRepairServiceProvider)
+        .afterGate(source, id, reason: 'extracted_then_gated'),
   );
   ref.onDispose(queue.dispose);
   return queue;
@@ -823,6 +851,10 @@ final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
     pumpWork: () => ref.read(aiWorkerProvider).pump(),
     // For the settle backstop a Retry runs when a row owes no stage at all.
     threshold: attentionThresholdReader(ref.watch(messageStoreProvider)),
+    // An Ignore is a gate arriving after the pipeline has already run.
+    onGated: (source, id) => ref
+        .read(gateRepairServiceProvider)
+        .afterGate(source, id, reason: 'ignored'),
     activityLog: ref.watch(activityLogProvider),
   ),
 );

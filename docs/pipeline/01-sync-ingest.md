@@ -139,6 +139,14 @@ written before the fold learned to wait for the gate, walking every
 `needs_reply` thread on every connector with the lowering rule and reporting
 `refolded_threads` on the `sync_mail` event.
 
+A second one-shot beside it, `gated_conversation_repair`, walks what a late
+gate leaves BUILT rather than what it leaves said: every conversation carrying
+an embedding whose inbound messages were all gated loses that embedding, its
+automatic storyline memberships and its pending `storyline` row. It runs
+before the sweep is requeued, so the sweep reads the cleaned pool, and reports
+`repaired_gated_conversations` on the `sync_mail` event. See
+[02-gates.md](02-gates.md).
+
 **Threading.** Everything downstream keys threads by `(source,
 conversationKey)` — a mail thread and a chat with colliding keys can never
 interleave (PR #9).

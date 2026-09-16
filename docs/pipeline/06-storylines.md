@@ -585,6 +585,21 @@ sentence came from which thread, so nothing short of the clear could get the
 departed thread out of it. An addition clears nothing: new mail adds facts, it
 never invalidates the ones already written, and continuity is the point there.
 
+**The gate is the third remover.** Three things take a thread out, and the
+`blocked_by` on the block says which: the owner (`'user'`, an audit queued
+behind it, the block read back as a negative example), the re-check
+(`'audit'`, never shown to a model), and a gate that spoke late (`'gate'`).
+The last is `StorylineService.evictGatedThread`, called when every inbound
+message in a thread has been gated: it does all the bookkeeping above, writes
+the fixed evidence `every inbound message in this thread was gated` rather
+than the member's own, queues no audit — a gate says nothing about whether the
+model got this group right — and leaves a `user` membership exactly where it
+is, because the owner filed that thread by hand. Like an audit block, a gate
+block is lifted only by the owner's *Allow again*: a Restore does not lift it,
+and neither does a later kept reply in the same thread, so the thread can join
+other storylines but not return to this one on its own. See
+[02-gates.md](02-gates.md).
+
 **Audit blocks are never shown to the model, and only the owner lifts them.**
 They stay out of both example fences, and no pass clears them; a thread the
 re-check took out stays out until a person says otherwise, which is what stops

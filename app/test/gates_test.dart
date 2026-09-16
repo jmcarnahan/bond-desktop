@@ -333,4 +333,51 @@ void main() {
       );
     });
   });
+
+  /// The one thing in `gates.dart` that never gates anything: a loose read of
+  /// a local part, used to decide whether a failed detail fetch is worth one
+  /// more attempt before the message is classified with no headers at all.
+  group('suspectMachineSender', () {
+    test('the machine mailboxes whose headers are worth waiting for', () {
+      for (final local in [
+        'svc-monitoring',
+        'prod-alerts',
+        'noreply',
+        'orders-noreply',
+        'digest',
+        'build-bot',
+        'bot-relay',
+        'ci',
+        'postmaster',
+        'system-notifier',
+        'mailer',
+      ]) {
+        expect(suspectMachineSender(local), isTrue, reason: local);
+      }
+    });
+
+    test('a person is not a machine, and neither is a word containing one', () {
+      for (final local in [
+        'sarah.chen',
+        // `bot` mid-word with no delimiter either side — the whole reason the
+        // pattern asks for one.
+        'abbott',
+        'robin',
+        '',
+        'cicd-team',
+      ]) {
+        expect(suspectMachineSender(local), isFalse, reason: local);
+      }
+    });
+
+    test('it is wider than the gate, deliberately', () {
+      // `svc-monitoring@` is a machine mailbox the prefix-anchored gate
+      // refuses, which is exactly the message whose headers decide it.
+      expect(
+        gateFor(message(from: 'svc-monitoring@example.com'), userAddress: null),
+        isNull,
+      );
+      expect(suspectMachineSender('svc-monitoring'), isTrue);
+    });
+  });
 }

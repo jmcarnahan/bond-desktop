@@ -69,6 +69,15 @@ class TriageProgress {
 /// its row pending and its attempt count untouched. Signing back in and
 /// syncing pumps it again.
 ///
+/// One narrow case is DEFERRED rather than degraded, and it is the one where
+/// classifying from the preview would be worst: a failed fetch that leaves a
+/// machine-shaped sender ([suspectMachineSender]) with no headers at all. The
+/// header gates are the gates that catch exactly that mail, and they have
+/// nothing to read. So the message goes back to `pending` with an attempt
+/// spent and the next drain re-fetches it; after [_maxAttempts] it is
+/// classified headerless exactly as it always was. The drain carries on with
+/// the message behind it either way.
+///
 /// The queue owns no timer. [pump] is called after each sync, is a no-op while
 /// a drain is already running, and stops on its own when nothing is pending.
 /// A drain that ends because the model server is down leaves its row pending
@@ -156,6 +165,25 @@ class TriageQueue {
   /// all when a drain wrote nothing, which is a park or an empty queue.
   final Future<void> Function()? _onDrained;
 
+  /// Told after either gate tier writes `skipped`, before the progress emit.
+  /// In the app: `GateRepairService.afterGate`.
+  ///
+  /// What a gate that lands late has to undo lives there, not here — the
+  /// thread's embedding, its automatic storyline memberships, the work rows
+  /// that would file it again. This queue judges; it does not clean up.
+  final Future<void> Function(String source, String sourceMessageId)? _onGated;
+
+  /// Messages this drain deliberately put back `pending`, so it does not
+  /// immediately claim them again.
+  ///
+  /// It has to exist because of the ordering: [MessageStore.claimPendingTriage]
+  /// takes the NEWEST pending row, and a message deferred a moment ago is
+  /// usually exactly that. Without the exclusion the drain would spin on one
+  /// message until its attempts ran out, re-fetching in a tight loop. Cleared
+  /// per drain, because the deferral is about this drain rather than about
+  /// the message: the next pump is meant to try the fetch again.
+  final Set<String> _deferred = {};
+
   /// Verdicts this drain wrote: `triaged` and `skipped`, the two statuses
   /// that move a message past triage for good. Reset when a drain starts, so
   /// it describes the drain that just ended rather than the session.
@@ -175,6 +203,7 @@ class TriageQueue {
     ActivityLog? activityLog,
     PipelineProgress progress = const PipelineProgress.disabled(),
     this._onDrained,
+    this._onGated,
   })  : _gate = gate ?? DrainGate(),
         _log = activityLog ?? ActivityLog.disabled(),
         _pipeline = progress;
@@ -280,10 +309,14 @@ class TriageQueue {
   /// and comes back null.
   Future<void> _drain() async {
     _drainWrote = 0;
+    _deferred.clear();
     var parked = false;
     while (!_stopped && !parked) {
       while (_inFlight.length < _concurrency && !_stopped && !parked) {
-        final row = await _store.claimPendingTriage(sources: sources);
+        final row = await _store.claimPendingTriage(
+          sources: sources,
+          excluding: _deferred.toList(),
+        );
         if (row == null) break;
         _claimed.add(_claimKey(row));
         late final Future<void> future;
@@ -381,6 +414,7 @@ class TriageQueue {
       // BEFORE `_emit()`, so the reload the rails do behind that tick reads
       // the state this just wrote rather than the one it replaced.
       await _store.refoldThreadState(source, id, restored: false);
+      await _notifyGated(source, id);
       await _emit();
       return true;
     }
@@ -394,6 +428,7 @@ class TriageQueue {
     // fetch that cannot succeed. A chat message's body already arrived whole
     // at ingest — there is no second Graph call that would improve it.
     final fetch = _ensureBody;
+    var fetchFailed = false;
     if (fetch != null &&
         source == 'email' &&
         (message.bodyText?.isNotEmpty != true || message.headers.isEmpty)) {
@@ -407,8 +442,33 @@ class TriageQueue {
         return _parkForSession(source, id, sw.elapsedMilliseconds);
       } catch (_) {
         // Degraded, not parked: this message is classified from its preview
-        // and the drain carries on.
+        // and the drain carries on — unless the deferral below applies.
+        fetchFailed = true;
       }
+    }
+
+    // The one shape of degraded fetch worth another attempt. Decided after the
+    // catch rather than inside it, so the branch reads as what it is: the
+    // fetch failed, and now the message is judged on what it left behind.
+    if (fetchFailed &&
+        message.headers.isEmpty &&
+        _deferHeaderless(current, message)) {
+      final attempts = ((current['triage_attempts'] as num?)?.toInt() ?? 0) + 1;
+      // BEFORE the write, so no claim in this drain can pick the row back up
+      // between the two: it is about to be the newest pending message again.
+      _deferred.add(id);
+      await _writeTriage(source, id, status: 'pending', attempts: attempts);
+      await _log.record(
+        'triage',
+        status: 'retry',
+        source: source,
+        entityId: id,
+        durationMs: sw.elapsedMilliseconds,
+        detail: {'reason': 'headerless', 'attempts': attempts},
+      );
+      await _emit();
+      // The drain is healthy; only this one fetch was not.
+      return true;
     }
 
     // Again, because the gates that read headers had nothing to read a moment
@@ -427,6 +487,7 @@ class TriageQueue {
       // chat gate, which reaches here too: a message that stripped down to
       // nothing is a message the model will never read.
       await _store.refoldThreadState(source, id, restored: false);
+      await _notifyGated(source, id);
       await _emit();
       return true;
     }
@@ -533,6 +594,38 @@ class TriageQueue {
         sw.elapsedMilliseconds,
       );
     }
+  }
+
+  /// Whether a failed fetch on this message is worth one more attempt instead
+  /// of a headerless classification.
+  ///
+  /// Three conditions, and each narrows it: mail only (a chat has no detail
+  /// fetch to retry), a sender whose local part looks like a machine (the mail
+  /// whose verdict the missing headers would actually have changed), and an
+  /// attempt still left.
+  ///
+  /// The counter is [_maxAttempts], shared with the model failures, on
+  /// purpose. Bounded means bounded: a message the fetch keeps failing on and
+  /// a message the model keeps refusing to parse are the same message from the
+  /// queue's point of view — one that has had its turns. A second constant
+  /// would be a second thing to reason about for no behaviour anyone wants.
+  bool _deferHeaderless(Map<String, Object?> row, Message message) {
+    if (message.source != 'email') return false;
+    final from = message.fromAddress?.toLowerCase() ?? '';
+    if (from.isEmpty) return false;
+    final at = from.indexOf('@');
+    if (!suspectMachineSender(at >= 0 ? from.substring(0, at) : from)) {
+      return false;
+    }
+    return ((row['triage_attempts'] as num?)?.toInt() ?? 0) < _maxAttempts;
+  }
+
+  /// A callback that throws is not this drain's problem: the verdict is
+  /// already written, and the repair it names has its own one-shot behind it.
+  Future<void> _notifyGated(String source, String id) async {
+    try {
+      await _onGated?.call(source, id);
+    } catch (_) {}
   }
 
   /// Every write that ends this queue's interest in a message, and the claim

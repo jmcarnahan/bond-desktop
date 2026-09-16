@@ -155,9 +155,10 @@ class HeldSecondClaimStore extends MessageStore {
   @override
   Future<Map<String, Object?>?> claimPendingTriage({
     List<String> sources = const ['email'],
+    List<String> excluding = const [],
   }) async {
     if (++_claims == 2) await holdSecond.future;
-    return super.claimPendingTriage(sources: sources);
+    return super.claimPendingTriage(sources: sources, excluding: excluding);
   }
 }
 

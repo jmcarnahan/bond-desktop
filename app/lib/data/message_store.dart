@@ -1132,6 +1132,65 @@ WHERE source = ? AND conversation_key = ?
     return (row.data['n'] as num?)?.toInt() ?? 0;
   }
 
+  /// How many messages the pipeline extracted and a gate then threw out.
+  ///
+  /// The roadmap's counter, and it reads the two tables against each other
+  /// rather than a column nobody would keep honest: an `extraction_json` for
+  /// an inbound message that is no longer kept ([keptMessageSql]) is a model
+  /// call spent on a message the gates decided was never worth one.
+  ///
+  /// On a database triaged since the claim invariant landed this should read
+  /// zero — nothing is extracted before triage speaks — so what it counts is
+  /// what history left: the owner's Ignores, and the races that happened
+  /// before the invariant existed.
+  Future<int> extractedThenGatedCount() async {
+    final row = await db
+        .customSelect(
+          'SELECT COUNT(*) AS n FROM message_ai a '
+          'JOIN messages m ON m.source = a.source '
+          '  AND m.source_message_id = a.source_message_id '
+          'WHERE a.extraction_json IS NOT NULL '
+          "AND m.direction = 'inbound' AND NOT ${keptMessageSql('m')}",
+        )
+        .getSingle();
+    return (row.data['n'] as num?)?.toInt() ?? 0;
+  }
+
+  /// The threads carrying an embedding that nothing kept justifies any more.
+  ///
+  /// What the one-shot gate repair walks: a conversation whose every inbound
+  /// message was gated still has the vector extraction wrote for it, and the
+  /// clustering sweep is still comparing a thread nobody was ever meant to
+  /// read against the ones that matter.
+  ///
+  /// The `EXISTS inbound` clause is load-bearing rather than defensive. "Every
+  /// inbound in this thread was gated" is only true when there WAS an inbound:
+  /// an outbound-only thread — the user wrote to somebody and nobody has
+  /// answered — has nothing gated about it and is not this repair's business.
+  Future<List<({String source, String conversationKey})>>
+      conversationsWithEmbeddingAndNoKeptInbound() async {
+    final rows = await db
+        .customSelect(
+          'SELECT a.source, a.conversation_key FROM conversation_ai a '
+          'WHERE a.embedding IS NOT NULL '
+          'AND EXISTS (SELECT 1 FROM messages m WHERE m.source = a.source '
+          '  AND m.conversation_key = a.conversation_key '
+          "  AND m.direction = 'inbound') "
+          'AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.source = a.source '
+          '  AND m.conversation_key = a.conversation_key '
+          "  AND m.direction = 'inbound' AND ${keptMessageSql('m')}) "
+          'ORDER BY a.source, a.conversation_key',
+        )
+        .get();
+    return [
+      for (final row in rows)
+        (
+          source: row.data['source'] as String? ?? 'email',
+          conversationKey: row.data['conversation_key'] as String? ?? '',
+        ),
+    ];
+  }
+
   /// Re-derives one thread's state from the messages the gate KEPT, in ONE
   /// direction, and says which state it wrote (null when nothing moved).
   ///
@@ -1574,10 +1633,22 @@ WHERE source = ? AND conversation_key = ?
   /// The `rowid` subquery is what carries the ordering — `LIMIT` on the UPDATE
   /// itself needs a compile flag sqlite is not usually built with — and it
   /// mirrors [nextPendingTriage] exactly, so the two always pick the same row.
+  ///
+  /// [excluding] names message ids this caller has already set aside during
+  /// the drain it is running — a message put back `pending` on purpose, which
+  /// the ordering would otherwise hand straight back as the newest pending
+  /// row. Only the first 50 are honoured: a drain sets aside a handful, never
+  /// hundreds, and a caller that has accumulated more than that has a problem
+  /// an unbounded IN list would hide rather than fix.
   Future<Map<String, Object?>?> claimPendingTriage({
     List<String> sources = const ['email'],
+    List<String> excluding = const [],
   }) async {
     if (sources.isEmpty) return null;
+    final skip = excluding.take(50).toList();
+    final notIn = skip.isEmpty
+        ? ''
+        : 'AND source_message_id NOT IN (${_placeholders(skip.length)}) ';
     final claimed = await db.customWriteReturning(
       '''
 UPDATE messages SET triage_status = 'processing', updated_at = ?
@@ -1585,11 +1656,12 @@ WHERE rowid IN (
   SELECT rowid FROM messages
   WHERE triage_status = 'pending' AND direction = 'inbound'
     AND source IN (${_placeholders(sources.length)})
+    $notIn
   ORDER BY received_at DESC LIMIT 1
 )
 RETURNING *
 ''',
-      variables: _args([_nowIso(), ...sources]),
+      variables: _args([_nowIso(), ...sources, ...skip]),
     );
     if (claimed.isEmpty) return null;
     return Map<String, Object?>.from(claimed.first.data);
@@ -2525,6 +2597,31 @@ RETURNING *
     return rows.isEmpty ? null : rows.first.data['status'] as String?;
   }
 
+  /// Takes one kind's PENDING rows for [entityId] off the queue, and says how
+  /// many it deleted.
+  ///
+  /// Deleted, not parked, and the statuses are the reason. A work row is
+  /// `pending|processing|done|error`, and [requeueWork] revives only `done`
+  /// and `error` — so a row parked under some fifth status would sit in front
+  /// of this entity's queue forever, and a Restore that wanted the work done
+  /// again would find it un-revivable. The row never ran, so there is no
+  /// record in it to lose.
+  ///
+  /// A `processing` row is deliberately left alone: a worker is holding it,
+  /// and the handler's own gated outcome closes it out.
+  Future<int> deletePendingWork(
+    String kind,
+    String source,
+    String entityId,
+  ) {
+    return db.customUpdate(
+      'DELETE FROM work_items '
+      "WHERE task_kind = ? AND source = ? AND entity_id = ? "
+      "AND status = 'pending'",
+      variables: _args([kind, source, entityId]),
+    );
+  }
+
   /// Every queue row behind one message: its own, its thread's storyline row,
   /// and its attachments'.
   ///
@@ -2830,6 +2927,20 @@ RETURNING *
     return result.first.data['extraction_json'] as String?;
   }
 
+  /// Whether the model ever extracted this message — the question a gate that
+  /// speaks late asks, and it wants a yes or no rather than the blob.
+  Future<bool> hasExtraction(String source, String sourceMessageId) async {
+    final result = await db
+        .customSelect(
+          'SELECT 1 FROM message_ai '
+          'WHERE source = ? AND source_message_id = ? '
+          'AND extraction_json IS NOT NULL LIMIT 1',
+          variables: _args([source, sourceMessageId]),
+        )
+        .get();
+    return result.isNotEmpty;
+  }
+
   /// One message by its key, or null when the row is gone.
   ///
   /// [Message.fromRow] alone, with no attachment hydration: the callers are
@@ -2938,6 +3049,35 @@ RETURNING *
         .get();
     if (result.isEmpty) return null;
     return Map<String, Object?>.from(result.first.data);
+  }
+
+  /// Takes one thread's vector back out of the corpus: the embedding, the
+  /// hash it was taken over, and the model tag that made it comparable.
+  ///
+  /// Its own statement rather than an [upsertConversationAi] call because that
+  /// one cannot express this: it only ever SETs a non-null hash or model, for
+  /// the reason its doc gives — a row with an embedding and no hash would
+  /// re-embed on every pass — and a cleared embedding beside a stale hash is
+  /// exactly that row.
+  ///
+  /// `bucket`, `bucket_reason`, `attention_score` and `snoozed_until` are
+  /// deliberately untouched. They are attention state, written by a different
+  /// pass on a different schedule, and one of them is a person's own decision.
+  ///
+  /// Clearing the durable row is also what takes the thread out of the vec0
+  /// index: `ConversationVectorIndex.backfill` reads the conversations whose
+  /// `embedding IS NOT NULL` under the current model tag and deletes every
+  /// index row that is not among them, so the next sweep drops this one.
+  Future<void> clearConversationEmbedding(
+    String source,
+    String conversationKey,
+  ) async {
+    await db.customUpdate(
+      'UPDATE conversation_ai SET embedding = NULL, embedded_hash = NULL, '
+      'embed_model = NULL, updated_at = ? '
+      'WHERE source = ? AND conversation_key = ?',
+      variables: _args([_nowIso(), source, conversationKey]),
+    );
   }
 
   /// Files one thread into a bucket, or takes it out of every bucket.

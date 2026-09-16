@@ -5192,4 +5192,95 @@ void main() {
       await db.close();
     });
   });
+
+  /// A gate's removal, beside the owner's. The two do the same bookkeeping to
+  /// the storyline — that is the property, and the reason this group reads as
+  /// a comparison rather than a list of assertions — and differ in exactly
+  /// three places: whose block it is, that no audit follows, and that a
+  /// membership the owner made by hand survives it.
+  group('evictGatedThread', () {
+    Future<void> storylineWith(
+      String id, {
+      String key = 'c1',
+      String addedBy = 'auto',
+    }) async {
+      await store.insertStoryline(
+        id: id,
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+        memberHash: 'stale-hash',
+      );
+      await store.addStorylineMember(
+        id,
+        'email',
+        key,
+        addedBy: addedBy,
+        evidence: 'Both concern the website redesign.',
+      );
+      await store.updateStoryline(
+        id,
+        recapText: 'The studio is reviewing the homepage copy.',
+        recapThrough: '2026-08-28T10:00:00Z',
+      );
+    }
+
+    test('it does everything a removal does, and blocks in its own name',
+        () async {
+      await seed(store, 'c1');
+      await seedMessage(store, 'c1', 'm1');
+      await storylineWith('sl-1');
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      expect(await service.evictGatedThread('email', 'c1'), 1);
+
+      expect(await store.membersOf('sl-1'), isEmpty);
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.memberHash, memberHashOf(const []));
+      expect(storyline.recapText, isNull);
+      expect(storyline.recapThrough, isNull);
+      expect(await pointerOf('m1'), isNull);
+      expect((await store.nextPendingWork('storyline_refresh'))?['entity_id'],
+          'sl-1');
+
+      // The block is a gate's, with a sentence about the thread rather than
+      // the model's own evidence — and no audit, because a gate says nothing
+      // about whether the model got this group right.
+      final block = (await store.blocksOf('sl-1')).single;
+      expect(block.blockedBy, 'gate');
+      expect(block.evidence, 'every inbound message in this thread was gated');
+      expect(await store.nextPendingWork('storyline_audit'), isNull);
+    });
+
+    test('the same thread in two storylines leaves both', () async {
+      await seed(store, 'c1');
+      await storylineWith('sl-1');
+      await storylineWith('sl-2');
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      expect(await service.evictGatedThread('email', 'c1'), 2);
+
+      expect(await store.membersOf('sl-1'), isEmpty);
+      expect(await store.membersOf('sl-2'), isEmpty);
+    });
+
+    test('a thread the owner filed by hand is not a gate\'s to take', () async {
+      await seed(store, 'c1');
+      await storylineWith('sl-1', addedBy: 'user');
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      expect(await service.evictGatedThread('email', 'c1'), 0);
+
+      expect((await store.membersOf('sl-1')).single.addedBy, 'user');
+      expect(await store.blocksOf('sl-1'), isEmpty);
+      expect(await store.nextPendingWork('storyline_refresh'), isNull);
+    });
+
+    test('a thread in nothing is a no-op', () async {
+      await seed(store, 'c1');
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      expect(await service.evictGatedThread('email', 'c1'), 0);
+    });
+  });
 }

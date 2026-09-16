@@ -2341,6 +2341,70 @@ class StorylineService {
     await _store.requeueWork('storyline_audit', _workSource, id);
   }
 
+  /// A gate's removal of one thread from every live storyline it is in, and
+  /// how many memberships that came to.
+  ///
+  /// The sibling of [removeThread], and everything that method does to keep a
+  /// storyline honest about its members is done here too: the member row goes,
+  /// a block goes in its place, the member hash is recomputed, the recap and
+  /// its watermark are cleared for the reason [removeThread] spells out, the
+  /// per-thread pointer is re-stamped onto whatever membership is left, and a
+  /// refresh is queued because a group that lost a thread describes something
+  /// slightly different now.
+  ///
+  /// Three things differ, and each of them is the point:
+  ///
+  /// - `blocked_by: 'gate'` with an explicit evidence string. A block's
+  ///   evidence defaults to the MEMBER's own — what the model thought when it
+  ///   filed the thread — and that is the wrong sentence here, because this
+  ///   removal is not a judgement about the group at all. The block says why
+  ///   the thread left: nothing in it was ever meant for a model.
+  /// - no audit. [removeThread] queues one because the owner removing a thread
+  ///   is the owner saying the model got this group wrong, and the threads the
+  ///   same reasoning filed here deserve re-judging. A gate says nothing about
+  ///   the model's reasoning — the thread should never have reached it — so
+  ///   there is no lesson to spread.
+  /// - a `user`-added membership is left exactly where it is. The owner filed
+  ///   that thread by hand, and a gate does not overrule a person.
+  ///
+  /// The block outlives a Restore, deliberately. Restoring one message puts it
+  /// back in front of the model; whether its thread belongs in this storyline
+  /// is a separate question, and "Allow again" is where the owner answers it.
+  Future<int> evictGatedThread(String source, String key) async {
+    var evicted = 0;
+    for (final id in await _store.storylineIdsFor(source, key)) {
+      final member = (await _store.membersOf(id)).where(
+        (m) => m.source == source && m.conversationKey == key,
+      );
+      if (member.isEmpty) continue;
+      if (member.first.addedBy == 'user') continue;
+      await _store.removeStorylineMember(
+        id,
+        source,
+        key,
+        block: true,
+        blockedBy: 'gate',
+        evidence: 'every inbound message in this thread was gated',
+      );
+      await _store.updateStoryline(
+        id,
+        memberHash: await _memberHashOf(id),
+        recapThrough: null,
+        recapText: null,
+        recapOpenJson: null,
+        recapDecisionsJson: null,
+      );
+      _progress.noteStorylineLink(
+        source,
+        await _store.stampStorylineId(source, key, clearingStorylineId: id),
+      );
+      await _stampPointer(source, key);
+      await _store.requeueWork('storyline_refresh', _workSource, id);
+      evicted++;
+    }
+    return evicted;
+  }
+
   /// Lifts a block and nothing else — "Allow again".
   ///
   /// The thread is NOT re-filed: the owner is withdrawing a veto, not making a

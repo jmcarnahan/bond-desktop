@@ -51,6 +51,28 @@ documents the degrade-vs-park policy and the concurrency economics. An
 unreachable fast server parks the queue; the backlog resumes when the server
 comes up, with the `Triaging N remaining…` counter in the rail.
 
+**The headerless defer.** A degraded detail fetch that leaves no headers at
+all, on a machine-shaped sender, is the one case where classifying from the
+preview throws away the verdict that mattered — the header gates would have
+caught exactly that mail. Such a message is written back to `pending` with an
+attempt spent and a `triage` / `retry` row (`reason: headerless`), and the
+drain excludes it from its own later claims so it carries on with the next
+message rather than spinning on this one. Bounded by `_maxAttempts`, shared
+with the model failures, after which it classifies headerless as before. See
+02-gates.md.
+
 **Shared prompt across sources.** Mail and Teams run the *same* system prompt
 per task, pinned by parity tests (PR #8) — a change to the triage prompt is a
 change for both connectors.
+
+**The model's `notification` verdict as a gate — measured 2026-09-16, not
+shipped.** The golden set was joined against five 4B bulk run files (counts
+only): triage's `category = notification` fires on 0 of 24 gold-drop items in
+every run and on 1 of 76 gold-keep items (the same item every time, outside
+the `gate-keep-trap` stratum; the trap's 12 items are clean). The stricter
+rule (`notification` and `needs_action = false` and no `reply_expected`) gives
+the identical 0 / 1; the 4B calls 23 of the 24 drops `work`. The gate would
+catch nothing and lose one keep, so there is no `notification` gate reason and
+no code path. The offline gate replay planned for phase 3 of this round
+(`make golden-gate`, not yet in the Makefile) will report the proxy, so a
+prompt change can be re-read against it.
