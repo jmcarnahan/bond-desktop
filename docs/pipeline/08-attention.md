@@ -53,6 +53,14 @@ writer since the migration that added it — is now what Later's "when" is store
 in. UTC ISO in `MessageStore.isoStamp`'s exact six-digit shape, because every
 comparison against it is lexicographic over that one form.
 
+**Three dispositions, two behaviours here.** `sender_prefs.disposition` is
+`keep`, `later` or `drop`, and this file knows only two of those apart: `drop`
+scores, buckets and sweeps exactly as `later` does, because dropping a sender
+quiets the threads already here the same way deferring them would. What the
+third one adds is a gate at triage, which is chapter 2's business and not this
+one's — `attentionScore`, `bucketFor`, `bucketReasonFor` and `_sweepBucket` all
+read the two together.
+
 **Only per-thread deferrals carry a date.** `sendThreadToLater(source, key,
 {until})` writes one; `keepThreadInInbox` clears it; `sendSenderToLater`,
 `rebucketSender` and `restoreSenderPref` write none at all. A standing rule

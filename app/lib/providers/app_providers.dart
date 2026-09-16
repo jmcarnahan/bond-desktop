@@ -1145,3 +1145,32 @@ final updaterProvider = Provider<Updater>((_) => const ChannelUpdater());
 final updaterStatusProvider = FutureProvider.autoDispose<UpdaterStatus>(
   (ref) => ref.watch(updaterProvider).status(),
 );
+
+/// How many explicit Ignores of one sender it takes before the app offers to
+/// drop them altogether.
+///
+/// Offered, never automatic. Three is the point at which a person has said the
+/// same thing three times, which is enough to ask a question and nowhere near
+/// enough to answer it for them: a sender rule gates everything that address
+/// ever sends, and nothing but the owner gets to write one.
+const int senderDropOfferAfter = 3;
+
+/// Whether the "Drop every message from this sender" offer belongs on this
+/// address's story right now.
+///
+/// A provider because the answer is two store reads and a widget build cannot
+/// await one — the same reason [storylineMembersProvider] is one. False while
+/// the read is in flight, which is the right way round: a button that appears
+/// a frame late is better than one that flickers away.
+///
+/// False once the rule exists, so the offer disappears the moment it is taken
+/// rather than inviting the owner to write a rule they already wrote. The
+/// caller invalidates it after an Ignore and after a drop — see
+/// `MessageHistoryHost`.
+final senderDropOfferProvider =
+    FutureProvider.autoDispose.family<bool, String>((ref, address) async {
+  final store = ref.watch(messageStoreProvider);
+  if (await store.getSenderPref(address) == 'drop') return false;
+  final ignores = await store.explicitIgnoreCountForSender(address);
+  return ignores >= senderDropOfferAfter;
+});

@@ -107,8 +107,10 @@ class AttentionService {
   /// - `user` — someone deferred this one thread by hand. Nothing here touches
   ///   it, in either direction. It is the most specific instruction anyone has
   ///   given about this thread.
-  /// - `sender_pref` — a standing rule about the sender. Rewritten from the
-  ///   rule itself, so removing the rule removes the bucket.
+  /// - `sender_pref` — a standing rule about the sender, either `later` or
+  ///   `drop`; both file the thread the same way, because a sender the owner
+  ///   dropped is a sender whose existing threads should go quiet. Rewritten
+  ///   from the rule itself, so removing the rule removes the bucket.
   /// - `low_value` — this pass's own guess, and the only bucket it will clear
   ///   on the strength of a new guess.
   ///
@@ -124,7 +126,7 @@ class AttentionService {
   }) async {
     if (reason == 'user') return;
 
-    if (senderPref == 'later') {
+    if (senderPref == 'later' || senderPref == 'drop') {
       await _file(conversation, 'later', 'sender_pref');
       return;
     }

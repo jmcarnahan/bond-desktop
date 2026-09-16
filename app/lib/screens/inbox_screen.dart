@@ -1555,6 +1555,25 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
+  /// The owner's own gate on a sender, offered beside Later in the same menu.
+  ///
+  /// [_laterSender]'s shape exactly, including the capture BEFORE the write:
+  /// the undo puts the rule back to whatever it was, and "there was no rule"
+  /// is a different state from "the rule was later". The toast says both
+  /// halves of what just happened, because they are different halves — new
+  /// mail is gated from now on, and the threads already here moved.
+  Future<void> _dropSender(String address, String source) async {
+    final notifier = ref.read(conversationsProvider.notifier);
+    final previous = await notifier.senderPref(address);
+    final affected = await notifier.dropSender(address, source: source);
+    _toast(
+      '$address is dropped — new mail from them is gated; '
+      '${_threads(affected)} moved to Later.',
+      onUndo: () =>
+          notifier.restoreSenderPref(address, previous, source: source),
+    );
+  }
+
   /// A deferred thread's date, rewritten to the day the reader just picked.
   ///
   /// It goes through [ConversationsNotifier.sendThreadToLater] rather than
@@ -3469,6 +3488,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // every anonymous sender at once.
       onSendToLater: selected.primaryEmail?.isNotEmpty == true
           ? () => _laterSender(selected.primaryEmail!, selected.source)
+          : null,
+      onDropSender: selected.primaryEmail?.isNotEmpty == true
+          ? () => _dropSender(selected.primaryEmail!, selected.source)
           : null,
       onKeepInInbox: () => _keepThread(selected.source, selected.id),
       // Compose is a whole pane, which a thread being read BESIDE something

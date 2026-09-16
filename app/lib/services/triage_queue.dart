@@ -53,6 +53,9 @@ class TriageProgress {
 /// 1. the gates that read only what a delta page already carried — who sent
 ///    it. A no-reply sender is a no-reply sender whatever its body says, and
 ///    catching it here means the bulk mail never costs a Graph round trip.
+///    One of those gates is not a pattern at all: the sender's standing rule,
+///    read from the store once per claim and handed to both calls, so an
+///    address the owner dropped by hand is gated exactly where a no-reply is.
 /// 2. the per-message detail fetch, then the gates again, then the model. A
 ///    delta page carries a ~255-character preview and no headers at all, so
 ///    without this step triage would classify from a snippet and the
@@ -392,10 +395,24 @@ class TriageQueue {
     // about what the user did with it. That belongs at the call site.
     final overridden = (current['gate_override'] as String?) == 'user';
 
+    // One read per claim, reused by both tiers: the rule is the owner's word
+    // about a sender and nothing inside a claim changes it. Skipped for a
+    // restored row for the same reason the gates are — Restore is the escape
+    // hatch from every gate, this one included.
+    final from = message.fromAddress ?? '';
+    final senderDisposition = overridden || from.isEmpty
+        ? null
+        : await _store.getSenderPref(from);
+
     // Tier one, on the delta page's own fields. Free, and it is what keeps
     // the fetch below off every no-reply and every message the user sent.
-    final senderGate =
-        overridden ? null : gateFor(message, userAddress: _userAddress);
+    final senderGate = overridden
+        ? null
+        : gateFor(
+            message,
+            userAddress: _userAddress,
+            senderDisposition: senderDisposition,
+          );
     if (senderGate != null) {
       // No activity row, here or at the header gate below. A `triage` row
       // means the model was consulted, and a gate is the mechanism that keeps
@@ -474,8 +491,13 @@ class TriageQueue {
     // Again, because the gates that read headers had nothing to read a moment
     // ago. Re-running the sender gate too is free and keeps this one call
     // the single place a gate decision is made.
-    final headerGate =
-        overridden ? null : gateFor(message, userAddress: _userAddress);
+    final headerGate = overridden
+        ? null
+        : gateFor(
+            message,
+            userAddress: _userAddress,
+            senderDisposition: senderDisposition,
+          );
     if (headerGate != null) {
       await _writeTriage(
         source,

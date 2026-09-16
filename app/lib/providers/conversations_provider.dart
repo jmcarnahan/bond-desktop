@@ -643,6 +643,38 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     return affected;
   }
 
+  /// Every message from this sender, from now on, is the owner's own gate.
+  /// Returns how many of their threads moved to Later, like the other two.
+  ///
+  /// Three things follow, and they are worth keeping apart. NEW mail from the
+  /// address is gated at triage with `sender_rule`: it never reaches the
+  /// model, and it lands under Dropped where any gate's verdict lands, with
+  /// Restore as the way back for one message. EXISTING threads go quiet
+  /// exactly as [sendSenderToLater] leaves them — filed to Later under
+  /// `sender_pref`, which a later [keepSenderInInbox] or [restoreSenderPref]
+  /// undoes. And messages already triaged are NOT re-judged: the rule is a
+  /// gate, and a gate only ever speaks about a message on its way past.
+  ///
+  /// [source] as on [keepSenderInInbox].
+  Future<int> dropSender(String address, {String source = 'email'}) async {
+    await _store.recordFeedback(
+      scope: 'sender',
+      scopeKey: address.toLowerCase(),
+      direction: 'down',
+      origin: 'explicit',
+    );
+    await _store.setSenderPref(address, 'drop');
+    final affected =
+        await _store.rebucketSender(address, bucket: 'later', source: source);
+    await load(syncFirst: false);
+    return affected;
+  }
+
+  /// Whether a disposition is one of the two that quiet a sender's threads.
+  /// `drop` differs from `later` at the gate, not here.
+  bool _quiets(String? disposition) =>
+      disposition == 'later' || disposition == 'drop';
+
   /// Puts one sender's rule back where it was, and re-files their threads from
   /// the restored rule. What UNDO calls.
   ///
@@ -661,13 +693,13 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       // An undo is itself a correction, in the opposite direction of whatever
       // it is undoing. Recording it keeps the event log honest: the history
       // says what the person actually did, mistakes included.
-      direction: disposition == 'later' ? 'down' : 'up',
+      direction: _quiets(disposition) ? 'down' : 'up',
       origin: 'explicit',
     );
     await _store.setSenderPref(address, disposition);
     await _store.rebucketSender(
       address,
-      bucket: disposition == 'later' ? 'later' : null,
+      bucket: _quiets(disposition) ? 'later' : null,
       source: source,
     );
     await load(syncFirst: false);

@@ -348,6 +348,37 @@ void main() {
       expect(row['gate_reason'], 'no_reply');
     });
 
+    test('a drop rule gates at tier one, under its own reason', () async {
+      // Data, not a pattern: the address is an ordinary human one and only
+      // the owner's standing rule says anything about it.
+      await seedMessage(id: 'm1', from: 'dana@example.com');
+      await store.setSenderPref('dana@example.com', 'drop');
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect(llm.userMessages, isEmpty);
+      final row = await messageRow('m1');
+      expect(row['triage_status'], 'skipped');
+      expect(row['gate_reason'], 'sender_rule');
+    });
+
+    test('a restored message from a dropped sender still reaches the model',
+        () async {
+      // Restore is the escape hatch from EVERY gate, and the sender rule is
+      // one of them: the owner pulling one message back outranks their own
+      // standing rule about the address it came from.
+      await seedMessage(id: 'm1', from: 'dana@example.com');
+      await store.setSenderPref('dana@example.com', 'drop');
+      await store.restoreMessage('email', 'm1');
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect(llm.userMessages, hasLength(1));
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+    });
+
     test('the self gate uses the address set after sign-in', () async {
       await seedMessage(id: 'm1', from: 'lo@bond.com');
       final llm = FakeLlm([answer()]);
@@ -496,11 +527,11 @@ void main() {
   /// verdict that mattered: the header gates would have caught exactly this
   /// mail, and they have nothing to read.
   group('headerless defer', () {
-    /// A no-headers message from a machine mailbox the prefix-anchored gate
-    /// deliberately does not catch, plus a fetch that always fails.
+    /// A no-headers message from a machine mailbox no gate deliberately
+    /// catches — `alerts` is prefix-anchored — plus a fetch that always fails.
     Future<FakeDetailFetch> seedDeferrable({
       String id = 'm1',
-      String from = 'svc-monitoring@example.com',
+      String from = 'prod-alerts@example.com',
     }) async {
       await seedMessage(id: id, from: from, bodyText: 'Disk usage at 91%.');
       return FakeDetailFetch(store, error: Exception('graph down'));

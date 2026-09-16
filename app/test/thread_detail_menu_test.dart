@@ -10,6 +10,7 @@ void main() {
     String? bucket,
     VoidCallback? onAddToStoryline,
     VoidCallback? onSendToLater,
+    VoidCallback? onDropSender,
     VoidCallback? onKeepInInbox,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
@@ -26,6 +27,7 @@ void main() {
           onMarkDone: () {},
           onAddToStoryline: onAddToStoryline,
           onSendToLater: onSendToLater,
+          onDropSender: onDropSender,
           onKeepInInbox: onKeepInInbox,
         ),
       ),
@@ -78,6 +80,43 @@ void main() {
 
     expect(find.text('Add to storyline…'), findsOneWidget);
     expect(find.text('New storyline…'), findsNothing);
+  });
+
+  testWidgets('Drop this sender is absent until a host wires it',
+      (tester) async {
+    // The item writes a standing gate on an address. A host with no address
+    // to key one on gets no item rather than a rule on the empty string.
+    await pump(tester, onSendToLater: () {});
+    await openMenu(tester);
+
+    expect(find.text('Drop this sender'), findsNothing);
+  });
+
+  testWidgets('and sits directly under Send to Later once it is',
+      (tester) async {
+    // The order is the escalation: quiet this sender, then stop them.
+    await pump(tester, onSendToLater: () {}, onDropSender: () {});
+    await openMenu(tester);
+
+    final later = tester.getTopLeft(find.text('Send to Later')).dy;
+    final drop = tester.getTopLeft(find.text('Drop this sender')).dy;
+    expect(drop, greaterThan(later));
+  });
+
+  testWidgets('Drop this sender fires its own callback', (tester) async {
+    var dropped = 0;
+    var later = 0;
+    await pump(
+      tester,
+      onSendToLater: () => later++,
+      onDropSender: () => dropped++,
+    );
+
+    await openMenu(tester);
+    await tester.tap(find.text('Drop this sender'));
+    await tester.pumpAndSettle();
+
+    expect((dropped, later), (1, 0));
   });
 
   testWidgets('each item fires only its own callback', (tester) async {

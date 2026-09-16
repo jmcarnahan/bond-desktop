@@ -132,6 +132,74 @@ void main() {
     });
   });
 
+  /// The count behind the "drop this sender" offer. A `message`-scoped event
+  /// is keyed by the message, so the sender is only reachable through a join.
+  group('explicitIgnoreCountForSender', () {
+    Future<void> ignore(String id, {String origin = 'explicit'}) =>
+        store.recordFeedback(
+          scope: 'message',
+          scopeKey: 'email/$id',
+          direction: 'down',
+          origin: origin,
+        );
+
+    setUp(() async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', from: 'a@example.com');
+      await seedMessage('c1', 'm2', from: 'A@Example.com');
+      await seedConversation('c2');
+      await seedMessage('c2', 'm3', from: 'b@example.com');
+    });
+
+    test('counts the messages the owner ignored, not the presses', () async {
+      await ignore('m1');
+      // Said twice about the same message is said once: the offer asks
+      // whether a SENDER should go, and one message cannot make that case
+      // three times over.
+      await ignore('m1');
+      await ignore('m2');
+
+      expect(await store.explicitIgnoreCountForSender('a@example.com'), 2);
+      expect(await store.explicitIgnoreCountForSender('b@example.com'), 0);
+    });
+
+    test('and nothing else in the table', () async {
+      await ignore('m1');
+      // An implicit signal is not someone saying it: they are far noisier and
+      // far more numerous, and three of them mean nothing.
+      await ignore('m2', origin: 'implicit');
+      // A sender-scoped correction is a different event about a different
+      // thing, and its key is an address rather than a message.
+      await store.recordFeedback(
+        scope: 'sender',
+        scopeKey: 'a@example.com',
+        direction: 'down',
+        origin: 'explicit',
+      );
+      // An up is the opposite of the thing being counted.
+      await store.recordFeedback(
+        scope: 'message',
+        scopeKey: 'email/m2',
+        direction: 'up',
+        origin: 'explicit',
+      );
+
+      expect(await store.explicitIgnoreCountForSender('a@example.com'), 1);
+    });
+
+    test('folds casing on both sides, as sender rules do', () async {
+      await ignore('m1');
+      await ignore('m2');
+
+      expect(await store.explicitIgnoreCountForSender('A@EXAMPLE.COM'), 2);
+    });
+
+    test('the empty address is nobody, not everybody', () async {
+      await ignore('m1');
+      expect(await store.explicitIgnoreCountForSender(''), 0);
+    });
+  });
+
   group('app_prefs', () {
     test('set then get', () async {
       await store.setPref('attention_threshold', '0.7');

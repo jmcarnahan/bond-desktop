@@ -209,6 +209,61 @@ void main() {
     expect(kept, ('email', 'c1'));
   });
 
+  /// The offer the host decides on its own: three explicit Ignores of one
+  /// sender, and the story starts asking whether every message from them
+  /// should go. Nothing automatic — the button is the whole of it.
+  group('the drop-sender offer', () {
+    /// One Ignore each on [n] DIFFERENT messages from the seeded sender —
+    /// the count is per message, so pressing Ignore on one message [n] times
+    /// would not earn the offer, and this must not look as if it had.
+    Future<void> ignoreTimes(int n) async {
+      for (var i = 1; i <= n; i++) {
+        final id = 'm$i';
+        if (i > 1) await seed(id: id);
+        await store.recordFeedback(
+          scope: 'message',
+          scopeKey: 'email/$id',
+          direction: 'down',
+          origin: 'explicit',
+        );
+      }
+    }
+
+    testWidgets('appears once the owner has said it three times',
+        (tester) async {
+      await seed();
+      await ignoreTimes(senderDropOfferAfter);
+      await pumpHost(tester);
+
+      expect(find.byKey(MessageHistoryScreen.dropSenderKey), findsOneWidget);
+    });
+
+    testWidgets('and not before', (tester) async {
+      await seed();
+      await ignoreTimes(senderDropOfferAfter - 1);
+      await pumpHost(tester);
+
+      expect(find.byKey(MessageHistoryScreen.dropSenderKey), findsNothing);
+    });
+
+    testWidgets('taking it writes the rule and withdraws the offer',
+        (tester) async {
+      await seed();
+      await ignoreTimes(senderDropOfferAfter);
+      await pumpHost(tester);
+
+      await tester.tap(find.byKey(MessageHistoryScreen.dropSenderKey));
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(milliseconds: 300));
+      }
+
+      expect(await store.getSenderPref('dana@example.com'), 'drop');
+      // Asking again for something the owner has already done reads as a
+      // button that did not work.
+      expect(find.byKey(MessageHistoryScreen.dropSenderKey), findsNothing);
+    });
+  });
+
   testWidgets('a lever the host did not wire is not drawn', (tester) async {
     await seed();
     await store.setConversationBucket(

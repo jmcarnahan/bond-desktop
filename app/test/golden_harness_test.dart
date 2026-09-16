@@ -10,6 +10,7 @@ import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/bench_stats.dart';
+import 'fixtures/golden_gate.dart';
 import 'fixtures/golden_harness.dart';
 import 'fixtures/golden_prices.dart';
 import 'fixtures/golden_run.dart';
@@ -36,6 +37,146 @@ void main() {
     set = GoldenSet.fromJson(
       jsonDecode(File(fixturePath).readAsStringSync()) as Map<String, dynamic>,
     );
+  });
+
+  // ── the app's own gates, replayed offline ─────────────────────────────
+  group('the gate replay answers from what the set carries', () {
+    GoldenItem itemOf(String id) =>
+        set.items.firstWhere((item) => item.id == id);
+
+    test('the owner\'s own message is dropped before a gate reads it', () {
+      final out = gateReplay(itemOf('email:fx-outbound'), ownerAddress: null);
+      expect(out.verdict, 'drop');
+      expect(out.reason, 'outbound');
+    });
+
+    test('a chat with nothing left in it is empty', () {
+      final out = gateReplay(itemOf('teams:fx-empty-body'), ownerAddress: null);
+      expect(out.verdict, 'drop');
+      expect(out.reason, 'empty');
+    });
+
+    test('a named human asking a question is kept, and names no reason', () {
+      final out = gateReplay(itemOf('email:fx-keep-tail'), ownerAddress: null);
+      expect(out.verdict, 'keep');
+      expect(out.reason, isNull);
+    });
+
+    test('a header-only gold drop is kept — tier 2 is not in the set', () {
+      // The gold calls this one a newsletter on its List-Unsubscribe, and the
+      // set carries no headers, so `gateFor` reaches the header block with an
+      // empty map. The replay KEEPS it, and that is the whole point of the
+      // unmeasured line the run prints: this is the input's limit, not a gate
+      // that regressed.
+      final out = gateReplay(
+        itemOf('email:fx-drop-notification'),
+        ownerAddress: null,
+      );
+      expect(out.verdict, 'keep');
+      expect(out.reason, isNull);
+    });
+
+    test('mail from the owner\'s own address is self', () {
+      final item = itemOf('email:fx-keep-tail');
+      final owner = item.message.fromAddress;
+      expect(owner, isNotNull,
+          reason: 'the fixture item is the one that carries a sender');
+      final out = gateReplay(item, ownerAddress: owner);
+      expect(out.verdict, 'drop');
+      expect(out.reason, 'self');
+    });
+
+    test('the model calling it a notification does not move the verdict', () {
+      final out = gateReplay(
+        itemOf('email:fx-keep-tail'),
+        ownerAddress: null,
+        modelCategory: 'notification',
+      );
+      expect(out.verdict, 'keep');
+      expect(out.reason, isNull);
+      // Carried into the run file for a reader, and nowhere else.
+      expect(out.modelCategory, 'notification');
+    });
+
+    test('every item gets a verdict, and only a drop names a reason', () {
+      for (final item in set.items) {
+        final out = gateReplay(item, ownerAddress: null);
+        expect(out.verdict, anyOf('keep', 'drop'));
+        if (out.verdict == 'drop') {
+          expect(out.reason, isNotNull, reason: item.id);
+          expect(out.reason, isNotEmpty, reason: item.id);
+        } else {
+          expect(out.reason, isNull, reason: item.id);
+        }
+      }
+    });
+
+    test('a row with only a gate is attempted, and carries three keys', () {
+      final entry = GoldenRunEntry(
+        id: 'email:fx-keep-tail',
+        stratum: 'storyline-core',
+        difficulty: 'easy',
+      )..gate = const GoldenGateOut(verdict: 'keep');
+
+      expect(entry.attempted, isTrue);
+      final json = entry.toScoreRunJson();
+      final gate = json['gate']! as Map<String, Object?>;
+      expect(
+        gate.keys,
+        unorderedEquals(<String>['verdict', 'reason', 'model_category']),
+      );
+      expect(gate['verdict'], 'keep');
+      // Null rather than absent: the scorer reads either as "not attempted"
+      // on a keep, and a reader should see that the replay answered.
+      expect(gate['reason'], isNull);
+      expect(gate['model_category'], isNull);
+      expect(json.containsKey('triage'), isFalse);
+    });
+
+    test('a run file gives up its categories, and a row without triage is '
+        'skipped', () async {
+      final dir = await Directory.systemTemp.createTemp('golden-gate-');
+      addTearDown(() => dir.delete(recursive: true));
+      final file = File('${dir.path}/run.json');
+      await file.writeAsString(jsonEncode(<Object?>[
+        {
+          'id': 'email:one',
+          'triage': {'category': 'work'},
+        },
+        {
+          'id': 'email:two',
+          'triage': {'category': 'notification'},
+        },
+        {'id': 'email:three'},
+        'not a row at all',
+      ]));
+
+      expect(
+        await loadGoldenTriageCategories(file.path),
+        {'email:one': 'work', 'email:two': 'notification'},
+      );
+    });
+
+    test('a path with no run file says what to pass', () async {
+      await expectLater(
+        loadGoldenTriageCategories(
+          '${Directory.systemTemp.path}/golden-gate-absent-run.json',
+        ),
+        throwsStateError,
+      );
+    });
+
+    test('a JSON object is not a run file', () async {
+      final dir = await Directory.systemTemp.createTemp('golden-gate-');
+      addTearDown(() => dir.delete(recursive: true));
+      final file = File('${dir.path}/run.json');
+      await file.writeAsString(jsonEncode({'id': 'email:one'}));
+
+      await expectLater(
+        loadGoldenTriageCategories(file.path),
+        throwsStateError,
+      );
+    });
   });
 
   // ── results into run-file sections ────────────────────────────────────
@@ -493,6 +634,7 @@ void main() {
     // prevent — so the rule is a whitelist of one.
     final text = [
       'test/llm_golden_live_test.dart',
+      'test/fixtures/golden_gate.dart',
       'test/fixtures/golden_harness.dart',
       'test/fixtures/golden_prices.dart',
     ].map((path) => File(path).readAsStringSync()).join('\n');

@@ -113,7 +113,7 @@ RESET  := \033[0m
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ab ab-membership drain bench-compare \
         golden-check golden-baseline golden-score golden golden-prose \
-        golden-storyline \
+        golden-storyline golden-gate \
         golden-judge-pack golden-judge-tally \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
         dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
@@ -152,6 +152,7 @@ help:
 	@printf "  make golden        → the golden set through triage/needs-you/extraction on the bulk slot (GOLDEN_CTX=none|tail3|compressed, GOLDEN_K=…)\n"
 	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
 	@printf "  make golden-storyline GOLDEN_RUN=<run.json> → storyline confirm for every golden item against the gold registry, on the bulk slot\n"
+	@printf "  make golden-gate   → the golden set through the app's gates, offline (GOLDEN_RUN=<run.json> adds the model's notification proxy)\n"
 	@printf "  make golden-baseline → what the shipping app scores on the golden set (needs golden/)\n"
 	@printf "  make golden-score R=<run.json> → score a golden run file (BREAKDOWN= per-bucket tables, JSON= the tallies)\n"
 	@printf "  make golden-judge-pack R=<run.json> → packets for the Claude Code rubric judge (NAME=, GOLDEN_BATCH=)\n"
@@ -944,6 +945,9 @@ bench-compare:
 # is the model-quality number a ledger row quotes; the all-items pass below it
 # is the second opinion, and printing every bucket of it too would double the
 # output for a copy nobody reads.
+#
+# golden-gate is the exception to all of that: it needs no server, because the
+# app's gates are pure functions, and it still needs the set.
 
 # The golden set's own check, on BOTH files the round needs: the set, and the
 # storyline registry. score_run.py opens the registry at import time, so a
@@ -1002,6 +1006,30 @@ golden-storyline: golden-check
 	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'storyline' $(BENCH_DEFINES)
+
+# The gate half, and the only golden target with no server in it: the app's
+# gates are pure, so this replays them over the set offline — the item's
+# direction, its sender address and its body, through the same `gateFor` and
+# `triageStatusOnInsert` the ingest calls. No bench-verify, because there is
+# nothing to verify a contract with, and no timing JSON, because nothing here
+# is timed.
+#
+# Two of the app's three tiers go UNMEASURED and the run says so on its own
+# line: the mail header gates (Tier 2) read headers the set does not carry,
+# and the Teams bot and self gates are decided at ingest from Graph fields it
+# does not carry either. So this number and `make golden-baseline`'s gate
+# number are two different questions and are recorded side by side, never as
+# one beating the other.
+#
+# GOLDEN_RUN= is optional and adds one column: triage's own `category` per
+# item from a bulk run file, which is the model's `notification` verdict read
+# as a proxy — reported, never applied. Writes
+# golden-run-app-gates-<stamp>.json to $(BENCH_OUT); `make golden-score R=…`
+# reads its gate.verdict. Deterministic, so the house rule about running a row
+# twice is the only reason to run it twice.
+golden-gate: golden-check
+	@$(if $(GOLDEN_RUN),test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; },:)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'gates' $(BENCH_DEFINES)
 
 # The rubric fields — label, summary, action items, the two evidence sentences
 # and a drafted reply — need a READER, and the middle step here is deliberately

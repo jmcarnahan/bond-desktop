@@ -9,11 +9,48 @@ strings and headers.
 
 ## Tier 1 — sender-only, on delta fields
 
-Before fetching anything: the user's own outbound messages, and no-reply
-local-parts (`no-reply`, `notifications`, `alerts`, …) are gated out.
-`gateFor` in `app/lib/services/gates.dart` dispatches to `_emailGate` /
-`_teamsGate` per source. Driven from the claim loop in
+Before fetching anything, five questions about the address, in this order, and
+the first answer wins. `gateFor` in `app/lib/services/gates.dart` dispatches to
+`_emailGate` / `_teamsGate` per source, driven from the claim loop in
 `app/lib/services/triage_queue.dart`.
+
+| reason | what it catches |
+| --- | --- |
+| `self` | the user's own address, however the message came back to them |
+| `sender_rule` | an address the owner dropped by hand — below |
+| `no_reply` | `noreply` / `donotreply` anywhere in the local part — the compact word as a plain substring (`noreply@`, `orders-noreply@`, `noreply+billing@`, `noreply2@`, `opsnoreplyrelay@`), the punctuated spellings (`no-reply`, `do.not.reply`) as delimited TOKENS — plus the prefix family `notifications?`, `alerts?`, `mailer-daemon`, `postmaster`, `bounces?` |
+| `monitoring` | `monitoring@`, `monitoring-eu@`, `prod-monitoring@` |
+| `machine_sender` | `svc-…@`, `bot-…@`, `…-bot@`, and the exact local parts `pipelines@`, `builds@`, `ci@` |
+
+The punctuated `no_reply` forms are delimited on both sides and the rest are
+anchored or exact, which is the whole of their precision: `nota@`, `renotify@`,
+`salerts@`, `abbott@`, `cicd-team@` and `remonitoring@` all reach the model.
+The compact `noreply` needs no boundary because no name contains it — on the
+golden set the bare substring adds one gold drop and no gold keep.
+The last two slugs are the golden set's own drop-reason names, not names
+invented here, so `make golden-gate` scores the REASON column and not only the
+verdict.
+
+**The sender rule is data, and it is the only per-tenant gate.** It comes from
+`sender_prefs.disposition = 'drop'`, which the owner writes through **Drop this
+sender** in the thread's overflow menu or through the quiet offer the message
+story makes once the owner has Ignored three different messages from one
+address (`senderDropOfferAfter`, in `app/lib/providers/app_providers.dart` —
+counted per message, offered, never automatic). It is asked immediately after `self`, because a person's
+standing instruction outranks every pattern below it while the owner's own mail
+is still their own. It is skipped for a restored row exactly as the other gates
+are. `gateFor` stays pure: the disposition arrives as an argument, read once per
+claim by `_triageClaimed` and handed to both tiers. Undo is the one the sender
+corrections already have — `restoreSenderPref`, which puts the previous rule
+back and re-files the threads from it.
+
+**One gate deliberately does not exist here**, beside the two the header block
+below names: issue trackers and code hosts sending from their bare local parts
+(`jira@`, `github@`, …). On the golden set that exact shape is two gold drops
+AND two gold keeps — the same address sends the digest nobody reads and the
+mention addressed to the reader — so no name rule can split them. What
+separates the two populations is which tenant is talking, which is the sender
+rule above or a header, never a pattern compiled into the app.
 
 ## Detail fetch (mail only)
 
@@ -97,8 +134,8 @@ for the ingest half and the one-shot repair.
 ## Reading the file
 
 The header comment in `gates.dart` is the real documentation: it explains the
-two-tier split, an anchoring subtlety in the local-part regexes, and — most
-usefully — two gates that deliberately do **not** exist. Keep that comment
+two-tier split, a delimiter subtlety in the local-part regexes, and — most
+usefully — three gates that deliberately do **not** exist. Keep that comment
 authoritative; this page is the map to it.
 
 A gated message is not hidden: it lands with a drop reason, visible under the
@@ -116,6 +153,10 @@ row, and `capPendingTriage` exempts it from the backlog demotion a first-run
 sync would otherwise apply. The gate functions in `gates.dart` stay pure —
 the override lives at the call site, because it is a fact about what the
 user did, not a judgement about the message.
+
+The sender rule is bypassed with the rest: a stamped row skips both `gateFor`
+calls, so restoring one message from an address the owner dropped brings that
+message back without touching the rule about the address.
 
 `RestoreService` (`app/lib/services/restore_service.dart`) runs the whole
 sequence: reset the message row and the `message_progress` cascade, fetch

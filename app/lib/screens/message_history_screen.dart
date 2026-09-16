@@ -75,6 +75,13 @@ class MessageHistoryScreen extends StatefulWidget {
   /// confirmation the house pattern allows.
   final VoidCallback? onIgnore;
 
+  /// Writes the owner's standing gate on this message's sender: nothing from
+  /// that address reaches the model again. Shown only when the HOST decides
+  /// the owner has Ignored this sender often enough to be asked — the screen
+  /// does not count anything. A quiet button among the others and not a
+  /// prompt: the moment is right for the offer, not for a question.
+  final VoidCallback? onDropSender;
+
   /// Opens the pane that picks which storyline this thread joins. A pane and
   /// not a menu, so it comes back to this screen when it is done.
   final VoidCallback? onAddToStoryline;
@@ -125,6 +132,7 @@ class MessageHistoryScreen extends StatefulWidget {
     this.onRetry,
     this.onRejudge,
     this.onIgnore,
+    this.onDropSender,
     this.onAddToStoryline,
     this.onRemoveFromStoryline,
     this.onAllowAgain,
@@ -141,6 +149,8 @@ class MessageHistoryScreen extends StatefulWidget {
   static const ValueKey<String> retryKey = ValueKey('history-retry');
   static const ValueKey<String> rejudgeKey = ValueKey('history-rejudge');
   static const ValueKey<String> ignoreKey = ValueKey('history-ignore');
+  static const ValueKey<String> dropSenderKey =
+      ValueKey('history-drop-sender');
   static const ValueKey<String> addToStorylineKey =
       ValueKey('history-add-to-storyline');
   static const ValueKey<String> keepKey = ValueKey('history-keep');
@@ -692,6 +702,7 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
     final retry = widget.onRetry;
     final rejudge = widget.onRejudge;
     final ignore = widget.onIgnore;
+    final dropSender = widget.onDropSender;
     final addToStoryline = widget.onAddToStoryline;
     final keep = widget.onKeepInInbox;
     final later = widget.onSendToLater;
@@ -731,6 +742,15 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
             setState(() => _confirmingIgnore = false);
             ignore();
           },
+        ),
+      // Deliberately NOT gated on `dropped`: the moment the host offers this
+      // is the moment after an Ignore, which is exactly when the row it sits
+      // on has just become a dropped one.
+      if (dropSender != null)
+        _quietButton(
+          'Drop every message from this sender',
+          key: MessageHistoryScreen.dropSenderKey,
+          onPressed: dropSender,
         ),
       if (addToStoryline != null && !dropped)
         _quietButton(

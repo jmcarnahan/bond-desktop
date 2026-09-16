@@ -83,6 +83,20 @@ class MessageHistoryHost extends ConsumerWidget {
     final threadKey = value?.conversationKey ?? '';
     final threaded = threadKey.isNotEmpty;
 
+    // The sender the offer would be about, and whether it has been earned.
+    // Watched rather than read: it is the one prop on this screen that changes
+    // because of something the reader just did here, and the invalidations
+    // below are what make it change in the same pane.
+    // Lowercased, so the provider family has one entry per sender rather
+    // than one per spelling — every sender API folds case the same way.
+    final address = (value?.fromAddress ?? '').toLowerCase();
+    final offerDrop = address.isNotEmpty &&
+        (ref.watch(senderDropOfferProvider(address)).valueOrNull ?? false);
+
+    void refreshOffer() {
+      if (address.isNotEmpty) ref.invalidate(senderDropOfferProvider(address));
+    }
+
     final addToStoryline = onAddToStoryline;
     final keepInInbox = onKeepInInbox;
 
@@ -104,8 +118,22 @@ class MessageHistoryHost extends ConsumerWidget {
           unawaited(repair.retryOwed(source, id).then((_) => reload())),
       onRejudge: () =>
           unawaited(repair.rejudgeNeedsYou(source, id).then((_) => reload())),
-      onIgnore: () =>
-          unawaited(repair.ignore(source, id).then((_) => reload())),
+      onIgnore: () => unawaited(repair.ignore(source, id).then((_) {
+        // The third Ignore is what earns the offer, so the count is re-read
+        // the moment one lands rather than on the next visit to this pane.
+        // Mount-guarded, for this file's own reason: the reader can leave
+        // while the write is in flight, and a `ref` touched after that throws.
+        if (context.mounted) refreshOffer();
+        reload();
+      })),
+      onDropSender: offerDrop
+          ? () => unawaited(
+                conversations.dropSender(address, source: source).then((_) {
+                  if (context.mounted) refreshOffer();
+                  reload();
+                }),
+              )
+          : null,
       onAddToStoryline: threaded && addToStoryline != null
           ? () => addToStoryline(source, threadKey)
           : null,

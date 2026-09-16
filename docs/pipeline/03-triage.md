@@ -73,6 +73,6 @@ the `gate-keep-trap` stratum; the trap's 12 items are clean). The stricter
 rule (`notification` and `needs_action = false` and no `reply_expected`) gives
 the identical 0 / 1; the 4B calls 23 of the 24 drops `work`. The gate would
 catch nothing and lose one keep, so there is no `notification` gate reason and
-no code path. The offline gate replay planned for phase 3 of this round
-(`make golden-gate`, not yet in the Makefile) will report the proxy, so a
-prompt change can be re-read against it.
+no code path. The offline gate replay (`make golden-gate
+GOLDEN_RUN=<bulk run file>`) reports the proxy on every run, so a prompt
+change can be re-read against it.

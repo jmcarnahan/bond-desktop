@@ -108,6 +108,7 @@ Future<void> _pump(
   VoidCallback? onRetry,
   VoidCallback? onRejudge,
   VoidCallback? onIgnore,
+  VoidCallback? onDropSender,
   VoidCallback? onAddToStoryline,
   void Function(String)? onRemoveFromStoryline,
   void Function(String)? onAllowAgain,
@@ -131,6 +132,7 @@ Future<void> _pump(
         onRetry: onRetry,
         onRejudge: onRejudge,
         onIgnore: onIgnore,
+        onDropSender: onDropSender,
         onAddToStoryline: onAddToStoryline,
         onRemoveFromStoryline: onRemoveFromStoryline,
         onAllowAgain: onAllowAgain,
@@ -307,6 +309,44 @@ void main() {
     await tester.pump();
     expect(ignored, 1);
     expect(find.text('Ignore this message'), findsOneWidget);
+  });
+
+  testWidgets('the drop-sender offer is absent until the host makes it',
+      (tester) async {
+    // The screen counts nothing. Whether the owner has Ignored this sender
+    // often enough to be asked is the host's question.
+    await _pump(tester, AsyncValue.data(_history()), onIgnore: () {});
+
+    expect(find.byKey(MessageHistoryScreen.dropSenderKey), findsNothing);
+  });
+
+  testWidgets('and is one tap, with no confirmation in front of it',
+      (tester) async {
+    var dropped = 0;
+    await _pump(
+      tester,
+      AsyncValue.data(_history()),
+      onDropSender: () => dropped++,
+    );
+
+    await tester.tap(find.byKey(MessageHistoryScreen.dropSenderKey));
+    await tester.pump();
+
+    expect(dropped, 1);
+    expect(find.text('Drop every message from this sender'), findsOneWidget);
+  });
+
+  testWidgets('a dropped row still carries the offer', (tester) async {
+    // The moment it is offered is the moment after an Ignore, which is
+    // exactly when the row it sits on has just become a dropped one.
+    await _pump(
+      tester,
+      AsyncValue.data(_history(row: _row(dropped: true, dropReason: 'user'))),
+      onDropSender: () {},
+    );
+
+    expect(find.byKey(MessageHistoryScreen.dropSenderKey), findsOneWidget);
+    expect(find.byKey(MessageHistoryScreen.ignoreKey), findsNothing);
   });
 
   testWidgets('arming one question disarms the other', (tester) async {

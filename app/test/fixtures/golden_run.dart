@@ -19,6 +19,26 @@ import 'bench_report.dart';
 /// to claim "this message named no deadline" — a null there reads as a stage
 /// that never ran.
 
+/// The gate's answer for one item — the offline replay's whole output.
+///
+/// No [GoldenCall] rides beside it: the gates are pure and the replay that
+/// fills this in never speaks to a server, so there is nothing to time and
+/// nothing that can fail.
+class GoldenGateOut {
+  /// `keep` or `drop`.
+  final String verdict;
+
+  /// The gate reason slug on a drop; null on a keep (keep reasons are prose
+  /// in the gold, and the scorer reads `gate.reason` on gold drops only).
+  final String? reason;
+
+  /// Triage's `category` for this item from a bulk run file, when the replay
+  /// was given one. Recorded for the reader, never used for the verdict.
+  final String? modelCategory;
+
+  const GoldenGateOut({required this.verdict, this.reason, this.modelCategory});
+}
+
 /// Triage's answer for one item.
 class GoldenTriageOut {
   final String category;
@@ -155,6 +175,11 @@ class GoldenRunEntry {
   final String stratum;
   final String difficulty;
 
+  /// What the app's own gates answered, from an offline replay. Absent on
+  /// every run that talks to a model: the gates are not a stage a candidate
+  /// competes on.
+  GoldenGateOut? gate;
+
   GoldenTriageOut? triage;
   GoldenExtractOut? extract;
   GoldenNeedsYouOut? needsYou;
@@ -176,6 +201,7 @@ class GoldenRunEntry {
   /// the scorer reads its missing sections as "not attempted" either way.
   bool get attempted =>
       calls.isNotEmpty ||
+      gate != null ||
       triage != null ||
       extract != null ||
       needsYou != null ||
@@ -204,6 +230,16 @@ class GoldenRunEntry {
         'id': id,
         'stratum': stratum,
         'difficulty': difficulty,
+        // `reason` and `model_category` are written as null rather than left
+        // out: the scorer reads a missing reason on a gold drop as "not
+        // attempted" either way, and a reader of the file should be able to
+        // see that the replay answered.
+        if (gate != null)
+          'gate': {
+            'verdict': gate!.verdict,
+            'reason': gate!.reason,
+            'model_category': gate!.modelCategory,
+          },
         if (triage != null)
           'triage': {
             'category': triage!.category,

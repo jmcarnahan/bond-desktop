@@ -7,7 +7,7 @@ import '../models/message_models.dart';
 /// notification has no urgency and asks the reader for nothing. The
 /// gates are pure — no I/O, no clock — so the whole set is table-testable.
 ///
-/// Two gates deliberately do NOT exist:
+/// Three gates deliberately do NOT exist:
 /// - an internal-domain gate. Mail from a colleague is exactly the mail that
 ///   blocks the reader's own work, and skipping it would hide the requests
 ///   this app exists to surface.
@@ -16,6 +16,22 @@ import '../models/message_models.dart';
 ///   invite from a message. Adding one would mean a second Graph field on
 ///   every page of every sync, for a class of mail the newsletter and
 ///   auto-generated gates already catch most of.
+/// - an issue-tracker or code-host gate on the bare local parts those systems
+///   send from (`jira@`, `github@`, …). On the golden set that exact shape is
+///   two gold drops AND two gold keeps — the same address sends the digest
+///   nobody reads and the mention that is addressed to the reader — so no
+///   name rule can split them. What separates those two populations is which
+///   tenant is talking, which is data (the sender rule below) or a header,
+///   never a pattern compiled into this file.
+///
+/// One gate here is not a judgement about the message at all. `sender_rule`
+/// comes from `sender_prefs.disposition = 'drop'`, which the owner writes
+/// through "Drop this sender" — a standing instruction about one address,
+/// and the only per-tenant gate this app has. It sits immediately after
+/// `self`, because a person's own word beats every name rule below it while
+/// the owner's own mail is still their own mail. The gate stays pure: the
+/// disposition arrives as an argument, and the call site in
+/// `triage_queue.dart` is what reads the table.
 ///
 /// The gates are called TWICE per message, and the split is the point. A
 /// delta page carries the sender but no headers, so the first call can only
@@ -31,16 +47,61 @@ import '../models/message_models.dart';
 /// call; refusing to classify anything until Graph cooperates would cost the
 /// whole feature.
 
+/// `noreply` anywhere in the local part: the compact spellings as plain
+/// substrings, the punctuated ones as delimited TOKENS.
+///
+/// Wider than the prefix rule it was split out of, and deliberately so: real
+/// mailboxes spell the word in the middle (`orders-noreply`, `noreply+billing`,
+/// `noreply2`, and one twenty-letter run with `noreply` buried in it) and
+/// every one of them was passing the anchored rule live. The split in the
+/// pattern is about ambiguity, not width. `noreply` and `donotreply` are not
+/// substrings of any word a person's mailbox is named after — on the golden
+/// set a bare substring match adds one gold drop and no gold keep — so they
+/// need no boundary. The punctuated forms (`no-reply`, `do.not.reply`) do:
+/// `no` and `reply` are ordinary syllables, and a boundary either side is what
+/// keeps `nota` and `renotify` on their way to the model.
+final RegExp _noReplyToken = RegExp(
+  r'noreply|donotreply'
+  r'|(^|[-._+])(no[-._]?reply|do[-._]?not[-._]?reply)([-._+]|$|\d)',
+  caseSensitive: false,
+);
+
 /// Sender local-parts that are machine mailboxes by construction.
 ///
-/// PREFIX-anchored, which is the entire subtlety here: `notifications?` must
-/// match `notifications@` without matching `not-a-noreply@`, and it does
-/// because after `not` the pattern demands `ifications`. Anchoring also keeps
-/// `salerts@` and `renotify@` — plausible human or product addresses — out of
-/// the gate.
+/// PREFIX-anchored, which is the entire subtlety here: the anchor is what
+/// keeps `salerts@` and `renotify@` — plausible human or product
+/// addresses — out of the gate, since a substring match would have
+/// swallowed both. The
+/// `noreply` family moved to [_noReplyToken], which needs a delimiter rather
+/// than the start of the string; these words do not, because nothing spells a
+/// person's mailbox with `postmaster` in the middle of it.
 final RegExp _machineSender = RegExp(
-  r'^(no[-._]?reply|do[-._]?not[-._]?reply|notifications?|alerts?'
-  r'|mailer-daemon|postmaster|bounces?)',
+  r'^(notifications?|alerts?|mailer-daemon|postmaster|bounces?)',
+  caseSensitive: false,
+);
+
+/// The monitoring mailbox: whatever watches the servers, talking to a person
+/// who is not on call.
+///
+/// The slug it returns is `monitoring` — the golden set's own taxonomy, not a
+/// name invented here — so a replay of the gates scores the REASON column and
+/// not just the verdict. Delimited like every other shape in this file:
+/// `monitoring@`, `monitoring-eu@` and `prod-monitoring@` are gated, and
+/// `remonitoring@` is a word that happens to contain one.
+final RegExp _monitoringSender = RegExp(
+  r'^monitoring$|^monitoring[-._]|[-._]monitoring$',
+  caseSensitive: false,
+);
+
+/// The build and service mailboxes — a pipeline reporting on itself.
+///
+/// `machine_sender` for the same reason [_monitoringSender] returns
+/// `monitoring`: it is the gold slug, so the reason a replay reads is the
+/// reason the set wrote down. The delimiter is required on the prefixes and
+/// the suffix, which is why `abbott@` is a person and `cicd-team@` is a team;
+/// the three bare words are exact, so nothing longer than them matches.
+final RegExp _serviceSender = RegExp(
+  r'^svc[-._]|^bot[-._]|[-._]bot$|^(pipelines|builds|ci)$',
   caseSensitive: false,
 );
 
@@ -51,14 +112,14 @@ final RegExp _machineSender = RegExp(
 /// It decides whether a detail fetch that FAILED is worth one more attempt
 /// before the message is classified from its preview with no headers at all —
 /// which is exactly the case where the header gates would have had something
-/// to say. So it is wide where [_machineSender] is narrow: a false positive
+/// to say. So it is wide where the gates are narrow: a false positive
 /// costs one deferred triage, where a false positive in [gateFor] costs the
 /// message.
 ///
-/// Anywhere in the local part rather than prefix-anchored, for the same
-/// reason. `svc-monitoring`, `prod-alerts` and `orders-noreply` are all
-/// machine mailboxes whose shape the gate's anchor deliberately refuses, and
-/// each is a mailbox whose headers are worth waiting for.
+/// Anywhere in the local part rather than delimited, for the same reason.
+/// `prod-alerts` and `ops-digest` are machine mailboxes whose shape every gate
+/// above deliberately refuses — `alerts` is prefix-anchored and `digest` is no
+/// gate at all — and each is a mailbox whose headers are worth waiting for.
 final RegExp _suspectMachineSender = RegExp(
   r'no[-._]?reply|do[-._]?not[-._]?reply|notif|alert|monitor|digest'
   r'|newsletter|mailer|bounce|robot|automat|system|postmaster|daemon'
@@ -80,10 +141,18 @@ const Set<String> _bulkPrecedence = {'bulk', 'list', 'junk', 'auto_reply'};
 /// The switch is the seam a second connector lands on: a Teams message has
 /// its own notion of a bot sender and gets its own gate rather than being
 /// squeezed through the email one.
-String? gateFor(Message message, {required String? userAddress}) =>
+///
+/// [senderDisposition] is this sender's standing rule as the store holds it,
+/// or null when there is none and when the caller has a reason not to ask.
+/// Passed in rather than read here, so the gates stay pure.
+String? gateFor(
+  Message message, {
+  required String? userAddress,
+  String? senderDisposition,
+}) =>
     switch (message.source) {
-      'email' => _emailGate(message, userAddress),
-      'teams' => _teamsGate(message),
+      'email' => _emailGate(message, userAddress, senderDisposition),
+      'teams' => _teamsGate(message, senderDisposition),
       _ => null,
     };
 
@@ -117,28 +186,35 @@ String? gateFor(Message message, {required String? userAddress}) =>
   return ('pending', null);
 }
 
-/// One check, and that is the honest size of it.
+/// Two checks, and that is the honest size of it.
 ///
 /// Everything the email gates work out from an address or a header is already
 /// decided by the time a chat message is stored: `TeamsSync` knows who the
 /// user is (so `self` is the message's own `direction`) and knows a bot from a
 /// person (`from.application`), and it writes both as the row's `gate_reason`
-/// at ingest. What is left is the case nothing upstream can see — a message
-/// whose body stripped down to nothing, which is what a lone emoji reaction or
-/// an image-only post leaves behind.
+/// at ingest. What is left is the owner's own standing rule about this sender,
+/// and the case nothing upstream can see — a message whose body stripped down
+/// to nothing, which is what a lone emoji reaction or an image-only post
+/// leaves behind.
 ///
-/// That single check is therefore the WHOLE chat gate, and it runs on every
-/// chat message the triage queue claims: bot and self exclusion happened at
-/// ingest, so anything reaching here is a person talking to the user and the
-/// only reason to refuse it the model is having nothing to read.
-String? _teamsGate(Message message) {
+/// Those two are therefore the WHOLE chat gate, and they run on every chat
+/// message the triage queue claims: bot and self exclusion happened at ingest,
+/// so anything reaching here is a person talking to the user, and the only
+/// reasons to refuse it the model are the owner having said so and the message
+/// having nothing to read.
+String? _teamsGate(Message message, String? senderDisposition) {
+  if (senderDisposition == 'drop') return 'sender_rule';
   final body = message.bodyText ?? message.bodyPreview ?? '';
   return body.trim().isEmpty ? 'empty' : null;
 }
 
 /// First match wins, and the order is the order of confidence: who sent it
 /// beats what it claims about itself.
-String? _emailGate(Message message, String? userAddress) {
+String? _emailGate(
+  Message message,
+  String? userAddress,
+  String? senderDisposition,
+) {
   final from = message.fromAddress?.toLowerCase() ?? '';
 
   // The user's own mail, arriving in the inbox because they were
@@ -148,11 +224,18 @@ String? _emailGate(Message message, String? userAddress) {
     if (from.isNotEmpty && from == userAddress.toLowerCase()) return 'self';
   }
 
+  // The owner's own word about this address, which outranks every pattern
+  // below: they have already answered the question the name rules guess at.
+  if (senderDisposition == 'drop') return 'sender_rule';
+
   if (from.isNotEmpty) {
     final at = from.indexOf('@');
     final localPart = at >= 0 ? from.substring(0, at) : from;
-    if (localPart.isNotEmpty && _machineSender.hasMatch(localPart)) {
-      return 'no_reply';
+    if (localPart.isNotEmpty) {
+      if (_noReplyToken.hasMatch(localPart)) return 'no_reply';
+      if (_machineSender.hasMatch(localPart)) return 'no_reply';
+      if (_monitoringSender.hasMatch(localPart)) return 'monitoring';
+      if (_serviceSender.hasMatch(localPart)) return 'machine_sender';
     }
   }
 

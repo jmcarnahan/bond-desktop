@@ -3958,6 +3958,34 @@ SELECT conversation_key FROM (
     };
   }
 
+  /// How many of [address]'s messages the owner has explicitly Ignored.
+  ///
+  /// The count behind the "Drop every message from this sender" offer: an
+  /// Ignore is recorded as a `message`-scoped `down` event keyed `source/id`,
+  /// so the join back to the sender goes through the message row. DISTINCT on
+  /// the key, so it counts messages and not presses — three Ignores of one
+  /// message are one thing said once. Lowercased on both sides, as sender
+  /// rules are. The sender's keys are gathered first so the probe into
+  /// `feedback_events` runs on `ix_feedback_scope` rather than scanning it.
+  ///
+  /// An empty address is answered without a query. It is not a sender nobody
+  /// has ignored — it is every anonymous row at once, and the offer keyed on
+  /// it would be a rule about the empty string.
+  Future<int> explicitIgnoreCountForSender(String address) async {
+    if (address.isEmpty) return 0;
+    final row = await db
+        .customSelect(
+          'SELECT COUNT(DISTINCT f.scope_key) AS n FROM feedback_events f '
+          "WHERE f.scope = 'message' AND f.direction = 'down' "
+          "AND f.origin = 'explicit' AND f.scope_key IN ("
+          "SELECT m.source || '/' || m.source_message_id FROM messages m "
+          'WHERE LOWER(m.from_address) = ?)',
+          variables: _args([address.toLowerCase()]),
+        )
+        .getSingle();
+    return (row.data['n'] as num?)?.toInt() ?? 0;
+  }
+
   /// One app-level setting, or null when it has never been set. Values are TEXT
   /// whatever they mean — a threshold is stored as its `toString()` and parsed
   /// back by the one reader that knows what it is.

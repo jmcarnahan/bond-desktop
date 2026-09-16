@@ -163,6 +163,67 @@ void main() {
     });
   });
 
+  group('dropSender', () {
+    test('records the event, writes the rule, quiets the threads', () async {
+      await seed('c1');
+      await seed('c2');
+      await seed('c3', from: 'dana@y.com');
+      final n = notifier();
+      await n.load();
+
+      final affected = await n.dropSender('eric@x.com');
+
+      expect(affected, 2);
+      expect(await store.getSenderPref('eric@x.com'), 'drop');
+
+      final event = (await events()).single;
+      expect(event['scope'], 'sender');
+      expect(event['scope_key'], 'eric@x.com');
+      expect(event['direction'], 'down');
+      expect(event['origin'], 'explicit');
+
+      // The same move Later makes, on the threads already here. The half a
+      // drop adds is a gate, and a gate only speaks on the way past.
+      expect(rowFor(n, 'c1').bucket, 'later');
+      expect(rowFor(n, 'c2').bucket, 'later');
+      expect(rowFor(n, 'c3').bucket, isNull);
+    });
+
+    test('undo puts back "there was no rule"', () async {
+      await seed('c1');
+      final n = notifier();
+      await n.load();
+
+      final previous = await n.senderPref('eric@x.com');
+      await n.dropSender('eric@x.com');
+
+      await n.restoreSenderPref('eric@x.com', previous);
+
+      expect(await store.getSenderPref('eric@x.com'), isNull);
+      expect(rowFor(n, 'c1').bucket, isNull);
+    });
+
+    test('and restoring a drop rule re-quiets them, recorded as a down',
+        () async {
+      await seed('c1');
+      final n = notifier();
+      await n.load();
+      await n.dropSender('eric@x.com');
+
+      final previous = await n.senderPref('eric@x.com');
+      await n.keepSenderInInbox('eric@x.com');
+      await n.restoreSenderPref('eric@x.com', previous);
+
+      expect(await store.getSenderPref('eric@x.com'), 'drop');
+      expect(rowFor(n, 'c1').bucket, 'later');
+      // down (drop), up (keep), down (the undo of the keep).
+      expect(
+        (await events()).map((e) => e['direction']),
+        ['down', 'up', 'down'],
+      );
+    });
+  });
+
   group('keepSenderInInbox', () {
     test('records, sets keep, and brings the threads back', () async {
       await seed('c1');
