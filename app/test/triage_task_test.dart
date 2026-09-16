@@ -477,6 +477,17 @@ void main() {
       expect(task.systemPrompt, isNot(contains('Today is')));
       expect(task.systemPrompt, isNot(contains('2026')));
     });
+
+    test('the summary rule asks for the specifics and forbids guessing', () {
+      // The golden set said the failure was omission, not invention: most kept
+      // items left out a fact the item turned on while the forbidden-fact
+      // traps almost never fired, so the rule names what the sentence must
+      // carry instead of only how long it may be.
+      expect(task.systemPrompt, contains('one or two plain-text sentences'));
+      expect(task.systemPrompt, contains('never a guessed date or figure'));
+      expect(task.systemPrompt, contains('Never a restatement of the label'));
+      expect(task.systemPrompt, isNot(contains('ONE sentence, plain text')));
+    });
   });
 
   group('schema', () {

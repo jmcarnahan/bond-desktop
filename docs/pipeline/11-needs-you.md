@@ -66,6 +66,19 @@ cases, so what reaches this call is the ambiguous residue. Locating the
 sentence that points at the owner *is* the work, and the boolean should fall
 out of having written it.
 
+The judged evidence sentence passes 27–28% on the golden set, because it
+names a category where the rubric checks for the specific ask. On 2026-09-16
+two rewordings asked for the quoted words instead, and both were measured and
+not shipped: one lifted the sentence to 36% but put 27 of 64 sentences at the
+300-character clamp and cost the verdict 92% to 89%, and a short-sentence
+version kept every sentence under the clamp and scored 9% with the verdict at
+86%. The verdict is the chip the owner sees and the sentence sits behind it,
+so the original wording stays; the rows are in the bakeoff ledger
+(`docs/model-bakeoff.md`, "Golden ledger"). The schema's `evidence`
+description and this bullet say the same thing, and a future rewording must
+move both together: a Converse-wire target reads the description as the tool
+spec.
+
 **The raise policy.** The handler writes
 
 ```

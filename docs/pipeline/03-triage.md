@@ -17,7 +17,7 @@ through `refoldThreadState` before it emits, because the state machine folded
 | Task | `TriageTask` — `app/lib/services/llm/triage_task.dart` |
 | Prompt | `_triageRules` at the top of that file, composed with the shared untrusted-data fence (`prompt_guard.dart`) |
 | Schema | `triage` — flat; **key order is load-bearing** (the doc comment above the schema explains why) |
-| Output | urgency, category, 2–4 word label, one-sentence summary, `needs_action`, action items, `addressed_me`, `reply_expected`, `deadline` |
+| Output | urgency, category, 2–4 word label, one- or two-sentence summary, `needs_action`, action items, `addressed_me`, `reply_expected`, `deadline` |
 | Slot | **fast / bulk** (`fastLlmClientProvider`, wired in `app_providers.dart`) |
 | Params | temperature 0.2, maxTokens 512 (the `json_task.dart` defaults) |
 | Concurrency | 3 in-flight requests |
@@ -30,6 +30,25 @@ confirm" demands are named as fraud red flags whose only correct action item
 is independent verification. `reply_expected` and `deadline` are judged last,
 after the summary is written. The doc comment above the prompt records why it
 is shaped this way — read it before editing the prompt.
+
+**The summary rule (2026-09-16).** The summary must carry the specifics: the
+concrete thing the message is about, what it asks of the reader or that it
+asks nothing, and the date, amount, place or name the matter turns on. Only
+what the message states — a guessed date or figure is forbidden — and never a
+restatement of the label or the category. The rule reads that way because the
+golden set said the failure was omission rather than invention: 46–60 of 76
+kept items had a summary that left out a fact the item turned on, the
+forbidden-fact traps fired on 0–4, and summaries ran 113–129 characters
+against a 500-character cap — on every model tried, which makes it a prompt
+problem and not a model one. Measured, the rule moved the judged summary from
+39% to 63% of kept golden items on the same judge (the second of two passes),
+with the forbidden-fact traps at 4 items against 3. The summary is clamped at
+500 characters with a hard cut, and 1 of the 76 golden summaries reached it
+under the new rule; a summary that reaches the clamp is cut mid-word, which is
+why the rule asks for one or two sentences and not more. The rule also made
+the model more conservative about action items — 67% to 60% on the rubric, and
+51 to 45 kept items carrying any — recorded as a trade in the ledger. The rows
+are in the bakeoff ledger (`docs/model-bakeoff.md`, "Golden ledger").
 
 **The Attachments line.** When the message carries non-inline attachments,
 the user message gains one line after the directness line and OUTSIDE every

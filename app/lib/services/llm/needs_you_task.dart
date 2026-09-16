@@ -76,6 +76,19 @@ Being the only person a message was sent to is a HINT, not a verdict. Plenty of 
 ///
 /// Channel-blind like the body — the strict parity test greps the WHOLE system
 /// prompt, tail included.
+///
+/// The evidence bullet stays as it is, and that is a measured choice, not an
+/// oversight. On the golden set the judged evidence sentence passes 27%
+/// because it names a category rather than the specific ask, so on
+/// 2026-09-16 two rewordings asked the model to quote the words that point
+/// at the owner and say who is asking. The first lifted the sentence 27 → 36
+/// and cost the verdict 92 → 89, with 27 of 64 sentences cut mid-word at
+/// the 300-character clamp; a "short, under 30 words" second kept every
+/// sentence under the clamp, scored 9, and cost the verdict 92 → 86.
+/// The verdict is the chip the owner sees; the sentence is the tooltip
+/// behind it. A better sentence bought at the verdict's expense is a worse
+/// judgement, so the original wording ships and the two rows sit in
+/// `docs/model-bakeoff.md` for the next attempt to read first.
 const String needsYouOutputContract = '\n\n'
     '''However the rules above are phrased, answer in exactly this form:
 - evidence: ONE sentence naming the thing in this message that points at the owner, or saying plainly that nothing in it does. Write it first — the answer below should follow from it.

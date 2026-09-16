@@ -509,6 +509,9 @@ not in date order.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-09-12 | — | the shipping app, as stored | tail3 | none — `--baseline` | 94% / 88% / 68% / 77% / 94% / 84% / 45% / 67% / 31% / 86% | Opus 4.5 judge: label 86% · action items 59% · summary 54% · needs-you evidence 37% · extract evidence 24% — Claude Code subagent judge: label 82% · action items 54% · summary 37% · needs-you evidence 29% · extract evidence 22% | — | — | — | — | the shipping app's stored output; gate 76/100, storyline 42/99 with no correct positive |
 | 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | 89% / 89% / 66% / 70% / 92% / 75% / 39% / 66% / 26% / 87% | label 84% · action items 67% · summary 39% · needs-you evidence 27% · extract evidence 25% | 2436 / 1616 / 1950 (triage / needs_you / extraction) | 41.4 | 8.9 | $0.00 | the shipping bulk model, replayed; second of two passes |
+| 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-184707.json` | 88% / 88% / 72% / 75% / 89% / 75% / 39% / 66% / 26% / 87% | label 86% · action items 60% · summary 66% · needs-you evidence 36% · extract evidence 25% | 7321 / 4809 / 5399 (triage / needs_you / extraction) | 16.9 | 12.4 | $0.00 | round B phase 1, summary rule + needs-you evidence bullet v1 ("naming the specific words… and who is asking") — the bullet is NOT shipped: 27 of 64 evidence sentences reached the 300-character clamp (1 before) and the verdict fell 92 → 89; second of two passes (first: summary 63, evidence 34, traps 5); K=4 on 4 slots, so p50s include batching and msgs/min is not comparable with the K=1 rows; traps 4 items |
+| 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-192254.json` | 88% / 88% / 71% / 74% / 86% / 75% / 39% / 66% / 26% / 87% | label 88% · action items 60% · summary 63% · needs-you evidence 9% · extract evidence 25% | 7669 / 3006 / 5454 (triage / needs_you / extraction) | 16.1 | 13.1 | $0.00 | round B phase 1, summary rule + evidence bullet v2 ("ONE short sentence, under 30 words, quoting…") — NOT shipped: the verdict fell to 86 and the sentence to 9%; evidence avg 121 chars, none at the cap; second of two passes; K=4; traps 4 items |
+| 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-194031.json` | 88% / 88% / 71% / 72% / 92% / 75% / 39% / 66% / 26% / 87% | label 86% · action items 60% · summary 63% · needs-you evidence 28% · extract evidence 25% | 7563 / 3569 / 5891 (triage / needs_you / extraction) | 16.2 | 12.5 | $0.00 | ROW OF RECORD for round B phase 1: the summary rule alone, the evidence bullet as it was; second of two passes (first: 71 / 74 / 92, not judged); K=4 on 4 slots, so p50s include batching and msgs/min is not comparable with the K=1 rows; traps 4 items (3 on the before row); summaries avg 237 / median 212 chars, 1 of 76 at the 500 cap (before avg 128, none at the cap); kept items carrying any action item 45 (before 51) |
 | 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | none | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-032602.json` | 88% / 91% / 78% / 78% / 93% / 75% / 39% / 66% / 26% / 87% | pass 1 judge: label 83% · action items 71% · summary 34% · needs-you evidence 34% · extract evidence 24% (pass 2 not judged) | 2232 / 1513 / 2113 (triage / needs_you / extraction) | 40.3 | 8.9 | $0.00 | context ladder: message alone; second of two passes — pass 1 (2026-09-14) read needs_action 75 / reply_expected 75; 4 slots at 4096 tokens each, no failures |
 | 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | compressed | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-181030.json` | 89% / 89% / 68% / 74% / 91% / 75% / 39% / 66% / 26% / 87% | label 80% · action items 62% · summary 33% · needs-you evidence 25% · extract evidence 24% | 2452 / 1684 / 2028 (triage / needs_you / extraction) | 40.4 | 8.7 | $0.00 | context ladder: digest + two newest tail messages, 300-char clip — lower bound (one pass) |
 | 2026-09-14 | bulk | llamacpp/Qwen3.5-4B-UD-Q4_K_XL | tail3 | `golden-run-llamacpp-qwen3-5-4b-ud-q4-k-xl-20260914-190503.json` | 91% / 89% / 66% / 83% / 87% / 79% / 66% / 63% / 29% / 88% | label 82% · action items 53% · summary 16% · needs-you evidence 23% · extract evidence 33% | 2838 / 1716 / 2745 (triage / needs_you / extraction) | 36.9 | 7.5 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
@@ -608,6 +611,49 @@ Nemotron 15 of 18, the 27B 10 of 20), so the "ask, don't invent" prompt change
 is model-independent and comes before any prose model swap. The Converse rows
 sampled at the models' default temperature; the OpenAI-wire rows ran the
 handlers' own.
+
+**Prompt round (2026-09-16), phase 1 — the summary rule, and an evidence
+sentence that was measured and not shipped.** The triage prompt's summary
+bullet now names what the sentence must carry — the concrete thing the message
+is about, what it asks of the reader or that it asks nothing, and the date,
+amount, place or name the matter turns on — and forbids both guessing a fact
+the message does not state and restating the label. The before is the replayed
+4B `tail3` row of 2026-09-14 (`…174707`, K=1) and the row of record is
+`…194031`, the second of two passes at K=4 with the summary rule alone; K is
+the one setting that differs between the pair, and it is not what moved the
+numbers, because extraction and the needs-you verdict reproduced the K=1 row
+exactly at K=4. Keep-only, the summary went 39% to 63% on the row of record
+and read 66 / 63 / 63 / 63 across the four judged runs of the phase, so the
+gain is twenty-plus points and stable, well outside any move the judge has
+shown between identical passes. needs_action went 66 to 71 (71–72 across the
+runs) and reply_expected 70 to 72 (72–76); category and urgency went 89 to 88,
+inside the floor; needs_you is unchanged at 92; extraction is unchanged by
+construction, its prompt having not changed. The forbidden-fact traps fired on
+4 items against 3 before — one first pass reached 5, which is above the
+ceiling of 4 the phase set for itself and is recorded here as such. Summaries
+nearly doubled in length, an average of 237 characters against 128, with 1 of
+76 reaching the 500-character hard clamp on the row of record and 2 to 4 on
+the other passes; a summary that reaches the clamp is cut mid-word. The cost
+is action items, 67% to 60% (58–60 across the four runs), which is 3 of 45
+judged items and outside the four-point guard the round set. The mechanism is
+in the counts rather than guessed at: kept items carrying any action item fell
+from 51 to 45 (42 on the two runs that also carried evidence bullet v1), the
+rubric points the action items now miss are required steps (10 to 14 missing
+points) rather than invented ones ("none for the owner" failures went 6 to 5),
+and the same conservatism is what lifted `needs_action` — recorded as the
+trade the phase shipped, with the action-items bullet itself untouched and the
+next experiment. The needs-you evidence sentence (recommendation item 2) was
+run and is NOT shipped: a bullet asking for the specific words that point at
+the owner lifted the judged sentence 27 to 36 but put 27 of 64 sentences at
+the 300-character clamp against 1 before, and cost the verdict 92 to 89, while
+a second wording asking for one short sentence under thirty words kept every
+sentence under the clamp at an average of 121 characters and scored 9% with
+the verdict at 86. The verdict is the chip the owner sees and the sentence
+sits behind it, so the original bullet ships — 28% on the row of record,
+inside the noise of its 27 — and both rows stay in the ledger for the next
+attempt to read first. The lesson is worth its own sentence: a rubric pass
+rate does not see a clamp, so every prompt change that lengthens a shown field
+now gets an at-the-cap count on the same tally.
 
 #### Storyline confirm
 
@@ -722,12 +768,25 @@ importance 39 against a ceiling of 74, needs_action 66 against 72, and summary
 39 against 41, which is inside the floor — and the cheapest way to close most
 of it is in the prompts (item 7), not in the model.
 
+**Measured 2026-09-16 (round B, phase 1):** the summary rule alone moved the
+judged summary from 39 to 63 on the same judge — 66 / 63 / 63 / 63 across the
+four judged runs of the phase — with the forbidden-fact traps at 4 items
+against 3 and needs_action 66 to 71; action items fell 67 to 60, which is the
+trade the prompt-round paragraph in the ledger above sets out. The row of
+record is `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-194031.json`.
+
 **2. Needs-you stays local on every tier.** The verdict is 92% on the 4B, 93
 on the 27B and on the 120B, 92 on Haiku; nothing beats the shipping model
 beyond the noise floor, and part of that recall is the deterministic floor,
 which costs no model at all. The models differ on the evidence sentence (27 on
 the 4B, 39 on the 27B, 48 on Haiku), which is a shown sentence and worth a
-prompt experiment, not a model swap for a one-point verdict.
+prompt experiment, not a model swap for a one-point verdict. **Measured 2026-09-16
+(round B, phase 1):** the prompt experiment was run twice and is not shipped.
+Asking the bullet to quote the words that point at the owner lifted the
+sentence 27 to 36, but put 27 of 64 sentences at the 300-character clamp and
+cost the verdict 92 to 89; a short-sentence wording scored 9 with the verdict
+at 86. The original bullet stays, at 28 and 92 (`…184707`, `…192254`,
+`…194031`).
 
 **3. If a cloud bulk model is ever wanted, it is Nemotron Super 3 120B and no
 other.** It is the first candidate that beats the 4B on needs_action (74
@@ -935,7 +994,12 @@ remain unmeasured by the set.
    digest field and the charter clamp each need a code change first — the
    clamp is a constant inside the task, and no extraction-context knob exists
    — and then `make golden` and `make golden-storyline` are their
-   before-and-after.
+   before-and-after. Summaries: done 2026-09-16 (round B,
+   phase 1) — 39 → 63 on the same judge, action items 67 → 60 as the cost. The
+   needs-you evidence sentence: measured twice the same day and not shipped
+   (36 with a third of the sentences clamped, or 9 kept short; the verdict
+   fell either way). The drafts, the digest field and the charter clamp follow
+   in phases 2 and 3.
 2. **The reply decision on the 4B**, item 5 — done 2026-09-16: 64%, so the
    decision stays on the 27B and the speed design's §1.3 item 2 is settled the
    slow way.
