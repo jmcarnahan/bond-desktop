@@ -1,6 +1,7 @@
 @Skip('live — needs the 27B llama-server on :8080. Run: make bench-prose')
 library;
 
+import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
@@ -175,12 +176,12 @@ void main() {
               now: DateTime.now(),
             ),
             // Exactly `DraftHandler`'s parameters — temperature 0 and the
-            // 1536-token ceiling a reply needs. A bench of parameters the app
-            // does not use benches nothing: at the default 512 a 150-word
-            // draft comes back grammar-valid and cut off mid-sentence, which
-            // would read here as the model writing badly.
+            // handler's own token ceiling, read off it rather than repeated. A
+            // bench of parameters the app does not use benches nothing: at the
+            // default 512 a 150-word draft comes back grammar-valid and cut off
+            // mid-sentence, which would read here as the model writing badly.
             temperature: 0,
-            maxTokens: 1536,
+            maxTokens: DraftHandler.draftMaxTokens,
             think: BenchTarget.allowReasoning,
           );
 

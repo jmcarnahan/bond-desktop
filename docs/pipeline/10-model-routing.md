@@ -322,7 +322,9 @@ what Bond is would be the app asking for credentials as its opening line.
   `LlmUnavailableException`; `AiWorker` (`app/lib/services/ai_worker.dart`)
   parks only that *kind* of work, and a dead session parks the whole drain.
   Work resumes when the server comes up.
-- Per-request timeout 120 s (`llm_client.dart`). 5xx → unavailable/park;
+- Per-request timeout, per slot (`llm_client.dart`): **90 s on the prose
+  client** (`LlmClient.proseTimeout`), **120 s on the bulk one**. 5xx →
+  unavailable/park;
   429 (a throttled cloud server) → unavailable/park as well; timeout →
   counted against the item; HTTP 400 → fatal, never retried — which
   is what a model name the server does not have looks like.
@@ -346,3 +348,21 @@ a schema-constrained call whose defaults are temperature 0.2 / maxTokens 512,
 overridden per call site (see each stage's page). Decoding is
 grammar-constrained; `make bench-verify` asserts the server honours the
 schema before any bench run trusts it.
+
+**The two timeouts are one number each, sized to the longest legitimate call
+on that slot.** The prose client gets 90 s, and there are two worst cases to
+clear. An ordinary directory-fed draft with every input at its cap is about
+14K characters of prompt, prefilling in roughly 26 s, plus 768 generated
+tokens in roughly 43 s with speculative decoding: 69 s. A draft whose pack
+expanded a section is larger — the passages take their 8,700 ceiling and the
+storyline summary its 600 — about 20K characters, roughly 5K tokens, so
+roughly 37 s of prefill and the same 43 s of generation: about 80 s. Both fit
+under 90, with about ten seconds of headroom on the expanded case, and 60
+would cut BOTH off mid-sentence. The fast client keeps the generic 120: its
+calls answer in seconds, so the number only ever describes how long a dead
+server is waited on, and there is nothing to be gained by tightening it. The
+bench clients pass no timeout at all and so inherit that same 120
+(`app/test/fixtures/bench_target.dart`), which is deliberate: a prose bench
+can pass where the app itself would have given up at 90, and a candidate
+runtime slower than the app's ceiling shows up as a p50 above about 90 s in
+the table rather than as a failed run.

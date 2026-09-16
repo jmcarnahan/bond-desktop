@@ -5,6 +5,7 @@
 library;
 
 import 'package:bond_inbox/models/storyline_models.dart';
+import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
@@ -472,7 +473,7 @@ void main() {
                     now: item.now,
                   ),
                   temperature: 0,
-                  maxTokens: 1536,
+                  maxTokens: DraftHandler.draftMaxTokens,
                   think: BenchTarget.allowReasoning,
                 ),
                 onRetry: () => retries++,
@@ -620,6 +621,7 @@ void main() {
     () async {
       final (set, _) = await _loadOrFail();
       final k = checkK(GoldenDefines.k);
+      final charterCap = checkCharterCap(GoldenDefines.charterCap);
       const target = BenchTarget.bulk;
 
       if (GoldenDefines.registryPath.isEmpty) {
@@ -696,12 +698,6 @@ void main() {
                 excludingConversation: item.conversationKey,
               ).isEmpty)
           .length;
-      // The task clamps a charter at 400 characters at prompt time. Stated as
-      // a literal rather than read off the task, whose cap is private: what
-      // this line reports is how many charters the reader should expect to see
-      // truncated, and a test reaching into a private static to say so would
-      // be the worse of the two couplings.
-      const charterCap = 400;
       final overCap = registry.storylines
           .where((storyline) => storyline.charter.length > charterCap)
           .length;
@@ -747,7 +743,7 @@ void main() {
           await retryingUnavailable(
             () => runTask(
               warmupClient,
-              const ConfirmMembershipTask(),
+              ConfirmMembershipTask(charterCap: charterCap),
               ConfirmInput(
                 storyline: storylines[firstCandidates.first]!,
                 storylineParticipants: participantsFor(
@@ -804,7 +800,7 @@ void main() {
               result = await retryingUnavailable(
                 () => runTask(
                   client,
-                  const ConfirmMembershipTask(),
+                  ConfirmMembershipTask(charterCap: charterCap),
                   ConfirmInput(
                     storyline: storylines[slug]!,
                     // Per candidate, not per slug: this thread is never among
@@ -890,7 +886,8 @@ void main() {
           '\n${lines.whereType<String>().join('\n')}\n'
           '\n${tally.table()}\n'
           '\n${_failureLine(master, retries)}\n'
-          'k $k, $items items, $calls calls in ${wall.inSeconds}s, '
+          'k $k, charter cap $charterCap, $items items, $calls calls in '
+          '${wall.inSeconds}s, '
           '${msgsPerMinute(items, wall).toStringAsFixed(1)} msgs/min, '
           '${msgsPerMinute(calls, wall).toStringAsFixed(1)} calls/min\n'
           '\n${_costBlock(cost, target.url)}\n',
@@ -938,6 +935,7 @@ void main() {
                 'anti': registry.antiSlugs.length,
                 'storylines_without_items': storylinesWithoutItems,
                 'gold_people_empty': goldPeopleEmpty,
+                'charter_cap': charterCap,
                 'charters_over_cap': overCap,
                 'cards_from_run': carded,
               },

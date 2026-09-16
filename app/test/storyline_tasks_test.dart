@@ -2,13 +2,28 @@ import 'dart:convert';
 
 import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
+import 'package:bond_inbox/services/storyline_service.dart'
+    show StorylineTuning;
 import 'package:flutter_test/flutter_test.dart';
 
 Storyline storyline({
   String title = 'Website redesign',
   String? summary = 'Waiting on the homepage copy review.',
+  String? charter,
 }) =>
-    Storyline(id: 'sl-1', title: title, summary: summary, status: 'active');
+    Storyline(
+      id: 'sl-1',
+      title: title,
+      summary: summary,
+      charter: charter,
+      status: 'active',
+    );
+
+/// The `Charter:` line of a confirm prompt, without its label.
+String charterOf(String user) => user
+    .split('\n')
+    .firstWhere((line) => line.startsWith('Charter: '))
+    .substring('Charter: '.length);
 
 Map<String, dynamic> confirmAnswer({
   Object? evidence = 'Both threads concern the website redesign.',
@@ -225,6 +240,12 @@ void main() {
       expect('An empty list is an honest answer'.allMatches(recap.systemPrompt),
           hasLength(2));
       expect(recap.systemPrompt, contains('Never invent.'));
+      // The two shapes an honest empty list turns into a dishonest entry:
+      // "nothing needed from you" written up as an open item, and an
+      // obligation handed to the wrong person.
+      expect(recap.systemPrompt, contains('never move an obligation'));
+      expect(recap.systemPrompt,
+          contains('Never turn "nothing needed from you" into an open item'));
       expect(recap.systemPrompt,
           contains('No name, date, amount, or commitment'));
       expect(recap.systemPrompt, contains('is one you leave out'));
@@ -337,7 +358,49 @@ void main() {
     });
   });
 
+  group('the measured budgets', () {
+    test('the recap runs at its own ceiling, not runTask\'s generic one', () {
+      // Measured: the longest recap anything has written is 263 completion
+      // tokens, so 384 is half again as much. The 512 it used to run at was
+      // never a decision about recaps.
+      expect(StorylineRecapTask.maxTokens, 384);
+    });
+
+    test('the confirm task clamps a charter at the tuning\'s number', () {
+      // Two facts in one line: the app's clamp is 400, and it reaches the
+      // task as a parameter rather than a constant the task owns.
+      expect(StorylineTuning.charterCap, 400);
+      expect(const ConfirmMembershipTask().charterCap, 400);
+    });
+  });
+
   group('ConfirmMembershipTask user message', () {
+    test('the charter is clamped to the cap the caller passed', () {
+      // Most real charters run past 400 characters, so this clamp decides how
+      // much of the membership criteria the model is judging against — which
+      // is why it is a parameter the golden replay can move.
+      final long = List.generate(1000, (i) => 'abcdefghij'[i % 10]).join();
+
+      final wide = const ConfirmMembershipTask(charterCap: 800)
+          .buildUserMessage(ConfirmInput(
+        storyline: storyline(charter: long),
+        storylineParticipants: const ['Sarah Chen'],
+        candidateCard: 'Homepage copy | Sarah Chen | |',
+      ));
+      final narrow = confirm.buildUserMessage(ConfirmInput(
+        storyline: storyline(charter: long),
+        storylineParticipants: const ['Sarah Chen'],
+        candidateCard: 'Homepage copy | Sarah Chen | |',
+      ));
+
+      expect(charterOf(wide), hasLength(800));
+      expect(charterOf(wide), long.substring(0, 800));
+      expect(charterOf(narrow), hasLength(400));
+      // And the summary never rides alongside it: two descriptions of the
+      // group invite the model to pick whichever one agrees with it.
+      expect(wide, isNot(contains('Summary:')));
+    });
+
     test('fences the storyline and the candidate separately', () {
       final user = confirm.buildUserMessage(ConfirmInput(
         storyline: storyline(),

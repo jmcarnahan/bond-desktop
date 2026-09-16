@@ -204,6 +204,24 @@ well" is what someone coming back from a week away most wants to be told —
 which is why an empty `open_items` list is stated in the prompt as an honest
 answer rather than a failure to find something.
 
+**And the empty list has two ways of being spoiled**, both now named in the
+prompt (2026-09-16): turning "nothing needed from you" into an open item, and
+moving an obligation from one person to another. Either one puts work in front
+of a reader who does not owe it, which is the exact failure a recap that leads
+the screen must not have.
+
+**The recap runs at 384 completion tokens** (`StorylineRecapTask.maxTokens`),
+measured rather than inherited. Live `storyline_recap` rows: median 189, p90
+214, max 263 over 28 of them; `storyline_refresh`, which writes the same shape
+of answer, 145 / 169 / 171 over 16. So 384 is half again as much as the
+longest recap anything has written. The 512 it ran at before was never a
+decision about recaps at all — it is `runTask`'s generic ceiling, which every
+task that names no budget lands on. Like the draft budget, this one is a bound
+rather than a speed-up: `bench-prose` on 2026-09-16 generated about 179 tokens
+a recap against the 384 ceiling, and its recap p50 is unchanged from the run
+before the budget existed within that bench's own noise (12.7 s in round 0,
+11.7 s today).
+
 **The window** is `MessageStore.recentStorylineMessages(id, limit: 12)`: the
 newest messages across *every* member thread, merged into one chronology by
 `received_at DESC LIMIT ?` and reversed by the service so the model reads them
@@ -801,6 +819,30 @@ varies, so the constant part first is what keeps the server's prefix cache warm
 across the eight confirmations a lap makes. The examples are always passed *in*
 by the caller and never read from the storyline's id inside the task, because
 the sweep judges candidates against an unsaved proposal.
+
+**The charter clamp is a parameter** (`StorylineTuning.charterCap`, default
+400, passed at every call site). It was a private constant until 2026-09-16,
+and it bites more often than it looks: the golden confirm found 22 of the 30
+gold charters longer than 400 characters, so what the model usually judges
+against is the opening of a description rather than the whole of one. The
+golden replay ran the same cards at 400 / 800 / 1200 to say what that costs —
+`make golden-storyline GOLDEN_CHARTER_CAP=…`, which also records the cap it
+ran at in the timing JSON beside `charters_over_cap`.
+
+**Measured 2026-09-16, and the cap stays 400.** On the 4B, two token-identical
+passes per clamp: `storyline.id` 81% at 400, 78% at 800, 77% at 1200. The
+column that explains it is forbidden-accept, which climbs 20% → 25% → 26%
+while the gold-`none` items the model correctly files nowhere fall 26 → 24 →
+23 of 35; gold-accept barely moves (47 → 46 → 46 of 48 on `must`). More
+charter is more surface for a candidate to match against, and the 4B matches
+on it — so the clamp that was cutting 22 of the 30 charters was not costing
+accuracy, it was buying it. 400 is therefore what ships, which is the value
+every row before this ran at anyway. The 27B was not re-run: its 400 row
+already stands at 90% with forbidden-accept 6 of 88, a temperature-0 replay of
+the same cards reproduces token for token, and the 4B's 400 row reproduced the
+previous harness's within one item. The parameter and the `GOLDEN_CHARTER_CAP`
+knob stay, so a future model can be asked the same question without a code
+change.
 
 **NameStorylineTask** — same file, schema `storyline_name`, **prose / 27B
 slot**, **temperature 0**. Names a group of threads: evidence sentence, a

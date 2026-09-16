@@ -203,6 +203,30 @@ class LlmClient {
   /// catch a wedged server, not a slow one.
   static const Duration _defaultTimeout = Duration(seconds: 120);
 
+  /// The ceiling for the prose server, which is the only client whose worst
+  /// legitimate call is long. There are two of those worst cases and 90 has to
+  /// clear both.
+  ///
+  /// The ordinary one is a draft with every input at its cap: thread 3,000 +
+  /// attachment excerpts 2,500 + guidance 2,500 + directory passages 3,000 +
+  /// style 1,500 + brief 700 + about-me 600 ≈ 14K characters ≈ 3.5K tokens,
+  /// which prefills in about 26 s at 135 tok/s; the 768-token answer then
+  /// generates in about 43 s at 18 tok/s with speculative decoding. 69
+  /// seconds.
+  ///
+  /// The larger one is a draft whose pack expanded a section: the passages
+  /// take their 8,700 ceiling instead of 3,000 and the storyline summary adds
+  /// its 600, so ≈ 20K characters ≈ 5K tokens — about 37 s of prefill and the
+  /// same 43 s of generation, about 80 s. That is the case the headroom is
+  /// for, and it leaves roughly ten seconds of it. 60 would cut BOTH off
+  /// mid-sentence; 90 leaves them room and still catches a wedged server a
+  /// good half-minute sooner than the old ceiling did.
+  ///
+  /// [_defaultTimeout] stays 120 for the bulk client, where it costs nothing:
+  /// those calls answer in seconds, so the number only ever describes how long
+  /// a dead server is waited on.
+  static const Duration proseTimeout = Duration(seconds: 90);
+
   /// Where this client points when nothing resolves for it — the constructor's
   /// arguments, which is what every test that subclasses this passes.
   final String _baseUrl;

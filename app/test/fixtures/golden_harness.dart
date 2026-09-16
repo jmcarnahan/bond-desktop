@@ -4,6 +4,10 @@ import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/llm/reply_decision_task.dart';
+// `show`: the one thing this file wants from the storyline service is the
+// charter clamp the app ships, so the harness default cannot drift from it.
+import 'package:bond_inbox/services/storyline_service.dart'
+    show StorylineTuning;
 
 import 'bench_stats.dart';
 import 'golden_prices.dart';
@@ -58,6 +62,16 @@ class GoldenDefines {
   /// card than the app sends.
   static const String runPath = String.fromEnvironment('GOLDEN_RUN');
 
+  /// How much of a storyline's charter the confirm reads, in characters. The
+  /// default IS the app's own `StorylineTuning.charterCap`, read off it rather
+  /// than copied, so a replay nobody passed a define to measures the clamp the
+  /// app ships. The define exists so one set of cards can be replayed at
+  /// several caps.
+  static const int charterCap = int.fromEnvironment(
+    'GOLDEN_CHARTER_CAP',
+    defaultValue: StorylineTuning.charterCap,
+  );
+
   /// The owner's name, or null when the define is empty or only whitespace.
   /// Null and not the empty string: `NeedsYouInput` takes a `String?` and
   /// omits the owner line entirely for null, which is the honest rendering of
@@ -80,6 +94,21 @@ int checkK(int k) {
     throw ArgumentError.value(k, 'GOLDEN_K', 'must be a positive integer');
   }
   return k;
+}
+
+/// [cap] if it names a charter clamp, or a thrown [ArgumentError]. Loud rather
+/// than clamped for [checkK]'s reason: a cap of zero would send the confirm a
+/// storyline with no description at all and record the result as a measurement
+/// of the cap somebody typed.
+int checkCharterCap(int cap) {
+  if (cap < 1) {
+    throw ArgumentError.value(
+      cap,
+      'GOLDEN_CHARTER_CAP',
+      'must be a positive integer',
+    );
+  }
+  return cap;
 }
 
 /// Triage's answer, as the run file records it.

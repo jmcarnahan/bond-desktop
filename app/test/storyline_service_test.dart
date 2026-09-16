@@ -15,6 +15,10 @@ import 'package:bond_inbox/services/activity_log.dart';
 // function behind both storyline hash recipes.
 import 'package:bond_inbox/services/extract_handler.dart' show cardHash;
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
+// `show`: the one thing this file wants from the storyline tasks is the
+// recap's own measured token ceiling.
+import 'package:bond_inbox/services/llm/storyline_tasks.dart'
+    show StorylineRecapTask;
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/progress_bus.dart';
@@ -41,6 +45,10 @@ class FakeLlm extends LlmClient {
   final List<String> userMessages = [];
   final List<double> temperatures = [];
 
+  /// The completion budget each call was made with, by schema name. Recorded
+  /// because a task that measured its own ceiling has to be run at it.
+  final Map<String, int> budgets = {};
+
   FakeLlm(this.scripts) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
 
   int callsFor(String schemaName) =>
@@ -59,6 +67,7 @@ class FakeLlm extends LlmClient {
     schemas.add(schemaName);
     userMessages.add(user);
     temperatures.add(temperature);
+    budgets[schemaName] = maxTokens;
     await Future<void>.delayed(const Duration(milliseconds: 1));
 
     final script = scripts[schemaName];
@@ -4136,6 +4145,8 @@ void main() {
       await StorylineService(store, llm).recap('sl-1');
 
       expect(llm.schemas, ['storyline_recap']);
+      // At the task's own measured ceiling, not runTask's generic 512.
+      expect(llm.budgets['storyline_recap'], StorylineRecapTask.maxTokens);
       final user = llm.userMessages.single;
       // Both threads, and in the order they were said rather than the order
       // the store handed them over: "where does this stand now" is a question

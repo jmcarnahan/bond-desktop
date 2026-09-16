@@ -529,6 +529,12 @@ not in date order.
 | 2026-09-15 | prose | bedrock/claude-opus-5 | tail (fixed) | `golden-run-bedrock-claude-opus-5-20260915-014610.json` | — / — / — / 78% / — / — / — / — / — / — | draft 48% | 2162 / 5365 (reply_decision / draft_reply) | 51.9 | 56.8 | $17.17 | Converse, no temperature; K=4 |
 | 2026-09-15 | prose | bedrock/nemotron-super-3-120b | tail (fixed) | `golden-run-bedrock-nemotron-super-3-120b-20260915-014735.json` | — / — / — / 66% / — / — / — / — / — / — | draft 28% | 760 / 1319 (reply_decision / draft_reply) | 70.7 | 189.1 | $0.24 | OpenAI wire; K=4 |
 | 2026-09-15 | prose | bedrock/deepseek-v3.2 | tail (fixed) | `golden-run-bedrock-deepseek-v3-2-20260915-015039.json` | — / — / — / 78% / — / — / — / — / — / — | draft 40% | 1045 / 3011 (reply_decision / draft_reply) | 20.7 | 64.0 | $0.84 | OpenAI wire; K=4 |
+| 2026-09-16 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260916-210618.json` | — / — / — / 82% / — / — / — / — / — / — | draft 32% | 6138 / 12324 (reply_decision / draft_reply) | 8.2 | 5.0 | $0.00 | invention rules v2, draft budget 768, K=1 with MTP; invented 11 of 17 failing; second of two passes |
+| 2026-09-16 | prose | bedrock/claude-opus-5 | tail (fixed) | `golden-run-bedrock-claude-opus-5-20260916-211138.json` | — / — / — / 78% / — / — / — / — / — / — | draft 48% | 2586 / 6324 (reply_decision / draft_reply) | 44.1 | 34.5 | $17.85 | invention rules v2, draft budget 768; invented 11 of 13 failing; 25 throttle retries, all recovered; Converse, no temperature; K=4 |
+| 2026-09-16 | prose | bedrock/claude-sonnet-5 | tail (fixed) | `golden-run-bedrock-claude-sonnet-5-20260916-211454.json` | — / — / — / 67% / — / — / — / — / — / — | draft 68% | 2416 / 4498 (reply_decision / draft_reply) | 48.0 | 59.8 | $7.02 | invention rules v2, draft budget 768; invented 6 of 8 failing; Converse, no temperature; K=4 |
+| 2026-09-16 | prose | bedrock/deepseek-v3.2 | tail (fixed) | `golden-run-bedrock-deepseek-v3-2-20260916-211815.json` | — / — / — / 72% / — / — / — / — / — / — | draft 36% | 961 / 2095 (reply_decision / draft_reply) | 35.2 | 109.3 | $0.90 | invention rules v2, draft budget 768; invented 9 of 16 failing; OpenAI wire; K=4 |
+| 2026-09-16 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260916-214911.json` | — / — / — / 82% / — / — / — / — / — / — | draft 24% | 6077 / 13269 (reply_decision / draft_reply) | 8.2 | 5.0 | $0.00 | invention rules v3 SHIPPED, draft budget 768, K=1 with MTP; invented 14 of 19 failing; identical drafts to pass 1, which a second judge run scored 32% / invented 12 — judge noise ±2 |
+| 2026-09-16 | prose | bedrock/claude-opus-5 | tail (fixed) | `golden-run-bedrock-claude-opus-5-20260916-215244.json` | — / — / — / 75% / — / — / — / — / — / — | draft 68% | 2252 / 5606 (reply_decision / draft_reply) | 50.9 | 55.6 | $17.98 | invention rules v3 SHIPPED, draft budget 768; invented 6 of 8 failing; Converse, no temperature; K=4 |
 
 **What the first rows say** (2026-09-14, all at `GOLDEN_K=1`, keep-only, every
 row the second of two passes unless its note says otherwise; the 2026-09-16
@@ -655,6 +661,80 @@ attempt to read first. The lesson is worth its own sentence: a rubric pass
 rate does not see a clamp, so every prompt change that lengthens a shown field
 now gets an at-the-cap count on the same tally.
 
+**Prompt round (2026-09-16), phase 2 — drafts that ask instead of invent, and
+the budgets.** The draft prompt's invention rule became invention *rules*.
+Version 2 added four bullets: a fact only the owner knows is never supplied
+and is asked for or left as a bracketed placeholder; the owner's own next step
+is not an invention; the whole of what the sender proposed is answered, never
+half of it; and the reply matches the sender's register. All four prose models
+were re-run and re-judged on v2, none met the round's exit of three or fewer
+invented per model, and the plan's one allowed revision was spent the same
+day. Version 3, which ships, changes three things: the two-options bullet now
+says that two answers differing only by a fact the owner has not given are one
+option that asks; the owner-only bullet asks the model to enumerate the
+missing owner-only facts before it writes and states outright that accepting
+or declining what the sender proposed IS supplying such a fact; and the
+next-step bullet no longer licenses proposing a time — it permits asking to
+set one up, as long as it names no time. Per the plan, v3 was re-run on the
+27B and on the worst cloud model under v2, which was Opus 5; Sonnet 5 and
+DeepSeek V3.2 are measured on v2 only. Drafts passing of the 25 reply-rubric
+items, baseline → v2 → v3: the 27B 5 → 8 → 6, Opus 5 12 → 12 → 17, Sonnet 5
+10 → 17, DeepSeek V3.2 10 → 9. Invented, counted over each row's failing
+drafts: the 27B 10 of 20 → 11 of 17 → 14 of 19, Opus 10 of 13 → 11 of 13 → 6
+of 8, Sonnet 12 of 15 → 6 of 8, DeepSeek 10 of 15 → 9 of 16. So the exit was
+missed on every model and the best any row reached is six — Opus on v3 and
+Sonnet on v2 — twice the number the round set out to hit, and the shipped
+change is worth five drafts on Opus and nothing on the local model.
+
+The per-item counts say why, and they are the finding of the phase. On the
+27B the same nine items are flagged invented under baseline, v2 and v3 — plus
+two more under v2 and three under v3 — while 24 of the 25 draft texts changed
+under v2, so the model rewrote almost everything and went on supplying the
+same facts. On Opus the overlap is real but moves: v2 flagged the same eight
+items baseline did plus three, and v3 flagged six, all of them among v2's
+eleven. The shapes agree. Drafts containing a question, baseline → v2 → v3,
+were 9 → 4 → 3 on the 27B and 13 of 25 on Opus v3; drafts offering two options
+went 10 → 17 → 14 on the 27B and 14 of 25 on Opus v3; and not one 27B draft in
+any pass left a bracketed placeholder, against none on Opus v3 either. A local
+model that writes fewer questions under a rule telling it to ask more is not
+failing to understand the wording, and no further wording is likely to move
+it: the next lever on the 27B is structural — a separate owner-only-facts step
+that runs before drafting and hands the writer the list — which is a Round C
+or F item, not a prompt edit.
+
+Three caveats travel with the numbers. The judge has a noise floor of its own
+and this phase measured it: the 27B's v3 pass 1 (`…213355`) produced drafts
+byte-identical to the row of record on all 25 items, and a second judge run
+over those identical drafts scored 8 of 25 with invented 12, against the row
+of record's 6 and 14 — two either way on both counts, so no two-point
+difference in this paragraph is a finding. The decision stage did not change
+and its prompt was untouched: the 27B reproduced 82% on every pass, while the
+cloud rows sample at their default temperature and DeepSeek's decision moved
+six items between its own two passes today (78 then 72) and Sonnet's five, so
+cloud decision numbers carry a floor of about six points and none of today's
+decision movement is a prompt effect. And the local row is K=1 while every
+cloud row is K=4. On budgets the round is clean: no run's draft reached 700
+completion tokens — the largest is 655, on Opus v3 — so the 768 ceiling holds
+with room, and the evidence sentence reached its 300-character clamp on one
+Opus draft under v2 and one under v3 and on nothing else. Draft p50 on the 27B
+is 12.3 s on v2 and 13.3 s on v3 against the 2026-09-14 row's 16.6 s, and
+that gap is MTP rather than the budget — the 2026-09-14 row is pre-MTP. The
+budget bought no speed at all, which `bench-prose` says plainly: today's row
+(`prose-…-223602.json`, third of three passes, the second identical to within
+3 ms) reads draft p50 15.7 s, recap 11.7 s and name 8.6 s against round 0's
+16.1 s kept / 14.9 s first pass, 12.7 s and 8.5 s — unchanged within that
+bench's own noise. The reason is that neither ceiling is ever reached: the
+bench's drafts generated about 221 tokens each against 768, and its recaps
+about 179 against 384. What a smaller ceiling buys is the WORST case. A
+rambling or wedged generation now stops at 768 tokens, roughly 43 s of
+generation, where 1,536 would have run to about 86 s — and that, not any p50,
+is what lets the prose timeout come down from 120 s to 90 s. The phase's other
+budget went the same way: the confirm task's charter clamp was raised to 800
+and 1200 against the same cards and made the 4B worse both times —
+`storyline.id` 81 / 78 / 77%, forbidden-accept 20 / 25 / 26% — so the cap
+stays at 400 and only the knob that measured it is new. The confirm rows carry
+that ladder in full.
+
 #### Storyline confirm
 
 The confirm task against the gold registry, per the block above.
@@ -667,6 +747,9 @@ is skipped unless it was filed under a forbidden slug, so the denominator is
 | 2026-09-15 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-storyline-20260915-031444.json` | 80/98 (82%) | 47/48 (98%) / 10/15 (67%) | 17/88 (19%) | 14/300 (5%) | 26/35 (74%) | 0 | 1146 | 51.4 | 11.3 | $0.00 | shipping 4B; cards from its own tail3 run; ties 15; derived gold 50 / none 32 / other 18; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp |
 | 2026-09-15 | llamacpp/Qwen3.8-27B-Q4_K_M (as bulk) | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-20260914-223320.json` | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-storyline-20260915-045507.json` | 88/98 (90%) | 43/48 (90%) / 8/15 (53%) | 6/88 (7%) | 1/300 (0%) | 33/35 (94%) | 0 | 6373 | 9.2 | 2.0 | $0.00 | 27B in the bulk slot; cards from its own as-bulk run; ties 3; derived gold 50 / none 45 / other 5; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp |
 | 2026-09-15 | bedrock/nemotron-super-3-120b | `golden-run-bedrock-nemotron-super-3-120b-20260915-011547.json` | `golden-run-bedrock-nemotron-super-3-120b-storyline-20260915-050910.json` | 86/97 (89%) | 45/48 (94%) / 7/15 (47%) | 15/88 (17%) | 2/299 (1%) | 32/35 (91%) | 0 | 909 | 251.6 | 55.5 | $0.75 | OpenAI wire; cards from its own Phase 4 run; the failed call's item is unfiled (not attempted); 1 failed calls; ties 5; incomplete 1; derived gold 49 / none 41 / other 9; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp |
+| 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-storyline-20260916-220403.json` | 79/98 (81%) | 47/48 (98%) / 10/15 (67%) | 18/88 (20%) | 14/300 (5%) | 26/35 (74%) | 0 | 2685 | 87.5 | 19.3 | $0.00 | charter cap 400 — the new-harness control, reproduces the 2026-09-15 row within one item; K=4, p50 not comparable with the K=1 rows; cards from the 4B's tail3 run; ties 16; derived gold 49 / none 32 / other 19; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp; second of two identical passes |
+| 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-storyline-20260916-221503.json` | 76/98 (78%) | 46/48 (96%) / 9/15 (60%) | 22/88 (25%) | 16/300 (5%) | 24/35 (69%) | 0 | 2774 | 84.6 | 18.7 | $0.00 | charter cap 800; K=4, p50 not comparable with the K=1 rows; cards from the 4B's tail3 run; ties 15; derived gold 49 / none 30 / other 21; 4 storylines without items, 13 gold candidates with an empty People line, 1 charter over the clamp; second of two identical passes |
+| 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-storyline-20260916-222606.json` | 75/98 (77%) | 46/48 (96%) / 9/15 (60%) | 23/88 (26%) | 15/300 (5%) | 23/35 (66%) | 0 | 2829 | 83.7 | 18.5 | $0.00 | charter cap 1200; K=4, p50 not comparable with the K=1 rows; cards from the 4B's tail3 run; ties 15; derived gold 49 / none 29 / other 22; 4 storylines without items, 13 gold candidates with an empty People line, 0 charters over the clamp; second of two identical passes |
 
 **What the confirm rows say.** Handed a candidate list a person wrote, every
 model files far better than the app ever has: the shipping app's own filing
@@ -692,6 +775,33 @@ gold candidates were judged with an empty People line because the set holds no
 other thread of theirs, which is a lower bound on recall, and 22 of the 30
 charters are cut at the task's 400-character clamp, so a longer charter budget
 is a follow-up worth measuring before a model swap.
+
+**The charter cap, measured (2026-09-16).** The follow-up above was run: the
+same cards through the 4B at clamps of 400, 800 and 1200, two passes each,
+every pair token-identical. It went the other way. `storyline.id` falls as the
+model reads more of the charter — 81%, 78%, 77% — and the reason is visible in
+the column beside it: forbidden-accept climbs 20%, 25%, 26%, and the gold-none
+items the model leaves unfiled fall 26, 24, 23 of 35. Gold-accept barely moves
+(47, 46, 46 of 48 on `must`). More charter is more surface for a candidate to
+match against, and the 4B matches on it. **Decision 7's rule therefore gives
+cap 400**, which is the value the app already shipped: 400 has the best
+`storyline.id` outright, and 800 is three points below it on the id and four
+worse on forbidden-accept. The clamp stays a parameter with a
+`GOLDEN_CHARTER_CAP` knob so a different model can be asked the same question.
+
+The 400 row doubles as the new harness's control, and it passes: 79 of 98
+against the 2026-09-15 row's 80, forbidden-accept 18 of 88 against 17, ties 16
+against 15 — within one item on every count, at K=4 where that row ran K=1.
+Accuracy is comparable across K and p50 is not, which is why the 2,685 ms here
+sits beside that row's 1,146 without being read against it. **The 27B
+confirmation run was skipped, deliberately.** The chosen cap is the existing
+default, the 27B's own 400 row is already on the ledger at 90% with
+forbidden-accept 6 of 88, a temperature-0 rerun on the same cards reproduces
+token for token, and the 4B control shows the new harness reproduces — so the
+forty-nine minutes would have bought no information. One thing the ladder
+settles for item 6: the missing half of a charter is not what the 4B's 19%
+forbidden-accept is made of, because giving it the missing half made that
+number worse.
 
 ### Gate replay ledger
 
@@ -831,6 +941,22 @@ message and its tail alone, with no directory pack, style examples, about-me
 or storyline summary, so every pass rate here is a floor on what the app would
 produce.
 
+**Measured 2026-09-16 (round B, phase 2):** the "ask, don't invent" rule was
+written, measured, revised and measured again, and it does not change this
+item's conclusion. Drafts passing of 25, baseline → shipped v3: the 27B 5 → 6,
+Opus 5 12 → 17; on v2 only, Sonnet 5 10 → 17 and DeepSeek V3.2 10 → 9.
+Invented over each row's failing drafts fell on every cloud model — Opus 10 of
+13 → 6 of 8, Sonnet 12 of 15 → 6 of 8 — and rose on the local one, 10 of 20 →
+14 of 19. So Opus 5 stays the default "better draft" and its measured number
+for the consent screen is 17 of 25 rather than 12. Sonnet 5 also reached 17 of
+25, at 40% of the price — a fact to record with its caveat, since that is
+Sonnet on v2 against Opus on v3 and Sonnet has no v3 run; what the escalation
+ships is not this phase's call. The rule did NOT precede the swap in the way this item
+assumed it would: it is worth five drafts on the best cloud model and nothing
+on the 27B, whose inventions are the same nine items under every wording. The
+decision half is unchanged — the prompt did not move and the 27B reproduced
+82% on every pass.
+
 **5. The reply decision on the 4B is one run away.** The speed design wants
 the decision off the 27B and onto the fast slot behind an A/B. The set now
 holds half of that A/B: the dedicated decision on the 27B is 82%, and the 4B's
@@ -883,6 +1009,20 @@ draws and gold-`none` and 4B-like on neighbours, at 250 confirmations a
 minute. Before either, one measurement is free: 22 of the 30 real charters are
 cut at the task's 400-character clamp, and `make golden-storyline` against a
 longer clamp says what the missing half of a charter is worth.
+
+**Measured 2026-09-16 (round B, phase 2):** the free measurement above is now
+runnable. The clamp was a private constant inside `ConfirmMembershipTask`; it
+is a constructor parameter, the app passes `StorylineTuning.charterCap` at
+every call site, and the harness carries `GOLDEN_CHARTER_CAP` so one set of
+cards replays at several clamps — `make golden-storyline GOLDEN_CHARTER_CAP=…`,
+which records the clamp it ran at beside `charters_over_cap` in the timing
+JSON. The three-clamp replay was then run on the 4B, and it answers this
+item's free measurement in the negative: 400 / 800 / 1200 give `storyline.id`
+81 / 78 / 77% with forbidden-accept 20 / 25 / 26% and gold-none left unfiled
+26 / 24 / 23 of 35, so the cap stays at 400. The missing half of a charter is
+not what the 4B's looseness on named neighbours is made of — handed the
+missing half, it accepted more of them. The confirm rows above carry the
+detail, including why the 27B confirmation run was skipped.
 
 **7. The context ladder: the tail as given does not help the 4B, and
 compression was not measurable.** On the shipping model the thread tail lowers
@@ -998,8 +1138,20 @@ remain unmeasured by the set.
    phase 1) — 39 → 63 on the same judge, action items 67 → 60 as the cost. The
    needs-you evidence sentence: measured twice the same day and not shipped
    (36 with a third of the sentences clamped, or 9 kept short; the verdict
-   fell either way). The drafts, the digest field and the charter clamp follow
-   in phases 2 and 3.
+   fell either way). The drafts: done 2026-09-16 (round B, phase 2) — the
+   invention rules went to v2, missed the round's exit of three or fewer
+   invented per model on all four, were revised once and shipped as v3. Of 25,
+   baseline → shipped: the 27B 5 → 6 and Opus 5 12 → 17, with Sonnet 5 10 → 17
+   and DeepSeek V3.2 10 → 9 on v2 only. Invented over the failing drafts fell
+   on every cloud model and rose on the 27B (10 of 20 → 14 of 19), whose nine
+   invented items are the same nine under every wording — so the local model's
+   next lever is a separate owner-only-facts step before drafting, not more
+   prompt text. The charter clamp: also done in phase 2 — it is a parameter
+   with a `GOLDEN_CHARTER_CAP` knob now, and the replay at 400 / 800 / 1200
+   gave `storyline.id` 81 / 78 / 77% with forbidden-accept 20 / 25 / 26%, so
+   it stays at 400 and a longer charter is not the improvement this item
+   guessed it might be. The digest field is the only half of this item still
+   open, and it follows in phase 3.
 2. **The reply decision on the 4B**, item 5 — done 2026-09-16: 64%, so the
    decision stays on the 27B and the speed design's §1.3 item 2 is settled the
    slow way.
@@ -1164,6 +1316,7 @@ lives in the golden ledger above.
 | 2026-09-04 | omlx/Qwen3.8-27B-4bit | `prose-…-045218.json` | 10.5 | 22233 (draft) | prose read by hand | — | draft speed tie with the baseline; naming −18% — nothing measurable to switch for |
 | 2026-09-04 | llamacpp/R1-Distill-Qwen-14B-Q4_K_M (BENCH_THINK=1) | none — bench cannot complete | — | — | — | — | **disqualified for bulk**: contract verify passes, but reasoning consumes the production token budget and the JSON answer truncates mid-object (reproduced twice). In production that exact failure drops mail |
 | 2026-09-16 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-…-20260916-023304.json` | 10.2 (12.1 srv) draft · 13.2 (15.3 srv) name · 14.2 (17.0 srv) recap | 16083 (draft) · 8460 (name) · 12733 (recap) | prose read by hand; MTP draft acceptance 66–77%, mean accepted run ~3.2 tokens | — | names and recaps are the clear win — name p50 8.5s against ~12s and recap 12.7s against ~22.6s in the app's activity log; the draft row is muddied by one 35s call (p95 35010ms) in the kept pass — the first pass read draft p50 14933ms, 13.4 tok/s (16.8 srv), p95 18783 — taken with the machine at 15GB of compressor and under 200MB unused; adopted in `local.mk`; re-bench drafts once the prose work is off the per-message critical path and the machine is not swapping |
+| 2026-09-16 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260916-223602.json` | 14.0 (17.0 srv) draft | 15722 (draft) · 8609 (name) · 11679 (recap) | prose read by hand | — | round B phase 2 — draft budget 768, recap 384, invention rules v3; third of three passes, second identical; drafts ≈ 221 tokens and recaps ≈ 179, so neither budget was reached and the p50s are round 0's within noise; the budgets bound the worst case, which is what the 90 s prose timeout rests on |
 | 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K (4096 per slot, 4 slots) | `triage-extract-…-20260916-023642.json` | 54.3 (62.9 srv) | 2234 | cat 81% · label 88% · needs_action 100% (16 items, 0 format failures, same three category misses as the 2026-09-04 baseline) | — (see the drain row below) | unchanged against the 2026-09-04 baseline (p50 2176, 54.8 tok/s) — halving the context to 4096 tokens a slot costs nothing on the fictional corpus; extraction p50 1808ms, 50.8 tok/s (61.1 srv) |
 | 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K, 4 slots (drain) | `drain-…-k-{1,3}-20260916-023910.json` | 52.8 at K=1 · 21.9 per stream at K=3 | 2164 (K=1) · 5479 (K=3) | — | 26.6 / 31.1 / — (K=6 not run: the shipping FAST_SLOTS is 4) | K=1 matches the baseline (26.1); K=3 is 31.1 against the baseline's 25.3 on 6 slots — 1.17x over K=1, queue-wait 47ms; the K=6 champion figure (56.9) needs `FAST_SLOTS=6` and was not re-measured this round |
 

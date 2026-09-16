@@ -647,6 +647,9 @@ GOLDEN_CTX ?= tail3
 # summary build each storyline candidate card, the way the app's card carries
 # the newest inbound message's; required by golden-storyline.
 GOLDEN_RUN ?=
+# The confirm task's charter clamp for golden-storyline; the app's default is
+# 400, and the replay runs 400 / 800 / 1200 against the same cards to choose it.
+GOLDEN_CHARTER_CAP ?= 400
 
 # Single-quoted values, every one: a label carries spaces and parentheses, and
 # an unquoted --dart-define would hand the shell a second word to run.
@@ -675,6 +678,7 @@ BENCH_DEFINES := \
   --dart-define=GOLDEN_K='$(GOLDEN_K)' \
   --dart-define=GOLDEN_CTX='$(GOLDEN_CTX)' \
   --dart-define=GOLDEN_RUN='$(if $(GOLDEN_RUN),$(abspath $(GOLDEN_RUN)),)' \
+  --dart-define=GOLDEN_CHARTER_CAP='$(GOLDEN_CHARTER_CAP)' \
   --dart-define=BENCH_WIRE='$(BENCH_WIRE)' \
   --dart-define=PROSE_WIRE='$(PROSE_WIRE)' \
   --dart-define=BENCH_BEARER="$$(grep -m1 '^BEDROCK_API_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)"
@@ -1000,9 +1004,11 @@ golden-prose: golden-check
 # the cards: a run file from `make golden`, whose extraction topics and triage
 # summary are what the app's own candidate card carries. Writes the same two
 # files as the other halves; score the run file with `make golden-score R=…`,
-# which reads its `storyline.id`.
+# which reads its `storyline.id`. GOLDEN_CHARTER_CAP sets how much of each
+# storyline's charter the confirm reads, so the same cards can be replayed at
+# several caps to choose the one the app ships.
 golden-storyline: golden-check
-	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-storyline GOLDEN_RUN=<golden-run-….json from make golden> [BENCH_URL=… BENCH_MODEL=… BENCH_LABEL=… GOLDEN_K=…]\n"; exit 1; }
+	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-storyline GOLDEN_RUN=<golden-run-….json from make golden> [BENCH_URL=… BENCH_MODEL=… BENCH_LABEL=… GOLDEN_K=… GOLDEN_CHARTER_CAP=…]\n"; exit 1; }
 	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'storyline' $(BENCH_DEFINES)
