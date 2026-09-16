@@ -592,6 +592,50 @@ void main() {
       expect(llm.userMessages.length, 1);
     });
 
+    test('a drain stops claiming once it has set aside the store\'s cap',
+        () async {
+      // One more deferrable message than `claimPendingTriage` will exclude.
+      // Past the cap the newest set-aside row would be handed straight back
+      // and its second attempt spent in this drain — so the drain stops.
+      const cap = MessageStore.maxTriageExclusions;
+      for (var i = 0; i <= cap; i++) {
+        await seedMessage(
+          id: 'm$i',
+          conversationKey: 'conv-$i',
+          from: 'prod-alerts@example.com',
+          receivedAt: '2026-08-29T10:${i.toString().padLeft(2, '0')}:00Z',
+          bodyText: 'Disk usage at 91%.',
+        );
+      }
+      final fetch = FakeDetailFetch(store, error: Exception('graph down'));
+      final llm = FakeLlm([answer()]);
+
+      // Concurrency 1 makes the count exact. With more, the claims already in
+      // flight when the cap is reached defer too — still one attempt each and
+      // never re-claimed, only more of them.
+      await TriageQueue(store, llm, ensureBody: fetch.call, concurrency: 1)
+          .pump();
+
+      var deferred = 0;
+      var untouched = 0;
+      for (var i = 0; i <= cap; i++) {
+        final row = await messageRow('m$i');
+        expect(row['triage_status'], 'pending');
+        switch ((row['triage_attempts'] as num).toInt()) {
+          case 1:
+            deferred++;
+          case 0:
+            untouched++;
+          default:
+            fail('m$i spent a second attempt in one drain');
+        }
+      }
+      expect(deferred, cap);
+      expect(untouched, 1, reason: 'the oldest waits for the next pump');
+      expect(fetch.fetched.length, cap, reason: 'one fetch per deferral');
+      expect(llm.userMessages, isEmpty);
+    });
+
     test('a person is classified headerless on the first failure', () async {
       final fetch = await seedDeferrable(from: 'sarah@example.com');
       final llm = FakeLlm([answer()]);

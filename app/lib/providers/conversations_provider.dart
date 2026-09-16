@@ -672,8 +672,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
 
   /// Whether a disposition is one of the two that quiet a sender's threads.
   /// `drop` differs from `later` at the gate, not here.
-  bool _quiets(String? disposition) =>
-      disposition == 'later' || disposition == 'drop';
+  bool _quiets(String? disposition) => quietsSender(disposition);
 
   /// Puts one sender's rule back where it was, and re-files their threads from
   /// the restored rule. What UNDO calls.

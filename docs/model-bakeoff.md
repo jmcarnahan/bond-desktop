@@ -899,6 +899,20 @@ OpenAI wire, so the failure line of every bulk and prose row above may
 under-count that case; their run files omit the section honestly and the scorer read
 it as not attempted, so no accuracy number is affected.
 
+**Where the app's own 76 comes from, and where the next points are.** The
+stored baseline's 24 errors split 12 misses, 11 overreaches and 1 unknown (a
+row still `pending` when the set was packed). The overreaches are gold keeps
+the app dropped: 4 under `newsletter` headers and 3 under `auto_generated`
+headers, 3 under the `no_reply` prefix, 1 as `backlog` — and 9 of the 11 are
+`gate-keep-trap` items, human prose arriving under machine headers. Folding
+the replay's new catches into the stored verdicts projects the live gate at
+80 of 100 after round A (the four gold drops the app kept that the new shapes
+catch; the trap unchanged, since the app already dropped those three). So the
+larger remaining gate loss is Tier 2 overreach on the trap, not missed drops,
+and it is header-side — a name rule cannot reach it, and the set cannot
+replay it. That is a candidate for a later round, measured through
+`make golden-baseline` after a live re-sync rather than through this replay.
+
 **Measured 2026-09-16 (round A):** the notification proxy is 0 of 24 on gold
 drops, 1 of 76 on gold keeps and 0 of 12 on the trap, identical across five 4B
 runs; as a gate it would catch nothing and lose one keep, so it was not built

@@ -320,7 +320,7 @@ void main() {
     expect(find.byKey(MessageHistoryScreen.dropSenderKey), findsNothing);
   });
 
-  testWidgets('and is one tap, with no confirmation in front of it',
+  testWidgets('and is two taps, the second the whole confirmation, then gone',
       (tester) async {
     var dropped = 0;
     await _pump(
@@ -329,11 +329,19 @@ void main() {
       onDropSender: () => dropped++,
     );
 
+    // A standing gate on a sender is not written by one stray click into
+    // the slot Ignore just vacated.
     await tester.tap(find.byKey(MessageHistoryScreen.dropSenderKey));
     await tester.pump();
+    expect(dropped, 0);
+    expect(find.text('Really drop this sender?'), findsOneWidget);
 
+    await tester.tap(find.byKey(MessageHistoryScreen.dropSenderKey));
+    await tester.pump();
     expect(dropped, 1);
-    expect(find.text('Drop every message from this sender'), findsOneWidget);
+    // Taken, so gone at once — a fast third tap has nothing to press while
+    // the host re-reads whether to offer it.
+    expect(find.byKey(MessageHistoryScreen.dropSenderKey), findsNothing);
   });
 
   testWidgets('a dropped row still carries the offer', (tester) async {
@@ -406,6 +414,33 @@ void main() {
     await tester.tap(find.byKey(MessageHistoryScreen.removeKey('s1')));
     await tester.pump();
     expect(removed, ['s1']);
+  });
+
+  testWidgets('a gate\'s eviction says so, and keeps both ways back',
+      (tester) async {
+    await _pump(
+      tester,
+      AsyncValue.data(_history(
+        blocks: const [
+          {
+            'storyline_id': 's3',
+            'title': 'Vendor updates',
+            'status': 'active',
+            'blocked_by': 'gate',
+            'evidence': 'every inbound message in this thread was gated',
+          },
+        ],
+      )),
+      onAllowAgain: (_) {},
+      onAddBack: (_) {},
+    );
+
+    expect(find.textContaining('Removed by a gate from Vendor updates'),
+        findsOneWidget);
+    expect(find.textContaining('by re-check'), findsNothing);
+    expect(find.byKey(MessageHistoryScreen.allowAgainKey('s3')),
+        findsOneWidget);
+    expect(find.byKey(MessageHistoryScreen.addBackKey('s3')), findsOneWidget);
   });
 
   testWidgets('both buttons are offered on every live block, whichever pass '

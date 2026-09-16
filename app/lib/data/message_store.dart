@@ -1150,7 +1150,12 @@ WHERE source = ? AND conversation_key = ?
           'JOIN messages m ON m.source = a.source '
           '  AND m.source_message_id = a.source_message_id '
           'WHERE a.extraction_json IS NOT NULL '
-          "AND m.direction = 'inbound' AND NOT ${keptMessageSql('m')}",
+          // The positive spelling of "not kept", not `NOT keptMessageSql`:
+          // that predicate is three-valued, and a skipped row with a NULL
+          // gate_reason makes it NULL, which NOT keeps NULL — and the row
+          // fell out of the very count that exists to measure it.
+          "AND m.direction = 'inbound' AND m.triage_status = 'skipped' "
+          "AND COALESCE(m.gate_reason, '') <> 'teams_source'",
         )
         .getSingle();
     return (row.data['n'] as num?)?.toInt() ?? 0;
@@ -1168,7 +1173,7 @@ WHERE source = ? AND conversation_key = ?
   /// an outbound-only thread — the user wrote to somebody and nobody has
   /// answered — has nothing gated about it and is not this repair's business.
   Future<List<({String source, String conversationKey})>>
-      conversationsWithEmbeddingAndNoKeptInbound() async {
+      conversationsWithEmbeddingAndNoKeptInbound({int? limit}) async {
     final rows = await db
         .customSelect(
           'SELECT a.source, a.conversation_key FROM conversation_ai a '
@@ -1179,7 +1184,9 @@ WHERE source = ? AND conversation_key = ?
           'AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.source = a.source '
           '  AND m.conversation_key = a.conversation_key '
           "  AND m.direction = 'inbound' AND ${keptMessageSql('m')}) "
-          'ORDER BY a.source, a.conversation_key',
+          'ORDER BY a.source, a.conversation_key'
+          '${limit == null ? '' : ' LIMIT ?'}',
+          variables: limit == null ? const [] : _args([limit]),
         )
         .get();
     return [
@@ -1634,21 +1641,26 @@ WHERE source = ? AND conversation_key = ?
   /// itself needs a compile flag sqlite is not usually built with — and it
   /// mirrors [nextPendingTriage] exactly, so the two always pick the same row.
   ///
-  /// [excluding] names message ids this caller has already set aside during
-  /// the drain it is running — a message put back `pending` on purpose, which
-  /// the ordering would otherwise hand straight back as the newest pending
-  /// row. Only the first 50 are honoured: a drain sets aside a handful, never
-  /// hundreds, and a caller that has accumulated more than that has a problem
-  /// an unbounded IN list would hide rather than fix.
+  /// [excluding] names messages — source AND id, since two connectors can
+  /// carry one id — this caller has already set aside during the drain it is
+  /// running: a message put back `pending` on purpose, which the ordering
+  /// would otherwise hand straight back as the newest pending row. Only the
+  /// first [maxTriageExclusions] are honoured: a drain sets aside a handful,
+  /// never hundreds, and a caller that has accumulated more than that has a
+  /// problem an unbounded predicate would hide rather than fix — the triage
+  /// queue stops claiming at that count for exactly this reason.
+  /// How many set-aside messages [claimPendingTriage] will exclude at once.
+  static const int maxTriageExclusions = 50;
+
   Future<Map<String, Object?>?> claimPendingTriage({
     List<String> sources = const ['email'],
-    List<String> excluding = const [],
+    List<({String source, String id})> excluding = const [],
   }) async {
     if (sources.isEmpty) return null;
-    final skip = excluding.take(50).toList();
-    final notIn = skip.isEmpty
-        ? ''
-        : 'AND source_message_id NOT IN (${_placeholders(skip.length)}) ';
+    final skip = excluding.take(maxTriageExclusions).toList();
+    final notIn = [
+      for (final _ in skip) 'AND NOT (source = ? AND source_message_id = ?) ',
+    ].join();
     final claimed = await db.customWriteReturning(
       '''
 UPDATE messages SET triage_status = 'processing', updated_at = ?
@@ -1661,7 +1673,11 @@ WHERE rowid IN (
 )
 RETURNING *
 ''',
-      variables: _args([_nowIso(), ...sources, ...skip]),
+      variables: _args([
+        _nowIso(),
+        ...sources,
+        for (final entry in skip) ...[entry.source, entry.id],
+      ]),
     );
     if (claimed.isEmpty) return null;
     return Map<String, Object?>.from(claimed.first.data);
@@ -3966,7 +3982,10 @@ SELECT conversation_key FROM (
   /// the key, so it counts messages and not presses — three Ignores of one
   /// message are one thing said once. Lowercased on both sides, as sender
   /// rules are. The sender's keys are gathered first so the probe into
-  /// `feedback_events` runs on `ix_feedback_scope` rather than scanning it.
+  /// `feedback_events` runs on `ix_feedback_scope`; the inner pass over
+  /// `messages` has no index on `from_address` and is the cost of opening a
+  /// story, bounded by the mailbox — an index is a migration, left for a
+  /// schema round.
   ///
   /// An empty address is answered without a query. It is not a sender nobody
   /// has ignored — it is every anonymous row at once, and the offer keyed on

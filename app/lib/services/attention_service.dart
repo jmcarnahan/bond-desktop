@@ -126,7 +126,7 @@ class AttentionService {
   }) async {
     if (reason == 'user') return;
 
-    if (senderPref == 'later' || senderPref == 'drop') {
+    if (quietsSender(senderPref)) {
       await _file(conversation, 'later', 'sender_pref');
       return;
     }

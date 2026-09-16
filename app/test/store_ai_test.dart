@@ -881,8 +881,17 @@ void main() {
       // Gated but never extracted: the common case, and not a wasted call.
       await seedMessage(
           id: 'bulk', triageStatus: 'skipped', gateReason: 'newsletter');
+      // Skipped with no reason recorded, and extracted: still a wasted call.
+      // `NOT keptMessageSql` would have lost this row to SQL's three-valued
+      // logic, which is why the counter spells "not kept" positively.
+      await seedMessage(
+          id: 'bare',
+          conversationKey: 'conv-5',
+          triageStatus: 'skipped',
+          gateReason: null);
+      await store.writeExtraction('email', 'bare', '{"a":1}');
 
-      expect(await store.extractedThenGatedCount(), 1);
+      expect(await store.extractedThenGatedCount(), 2);
     });
 
     test('conversationsWithEmbeddingAndNoKeptInbound finds the all-gated '

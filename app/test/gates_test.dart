@@ -141,6 +141,9 @@ void main() {
   group('reasons', () {
     const reasons = {
       'noreply@example.com': 'no_reply',
+      'no.reply@x.com': 'no_reply',
+      'NoReply@X.com': 'no_reply',
+      'donotreplyservice@example.com': 'no_reply',
       'orders-noreply@example.com': 'no_reply',
       'noreply+billing@example.com': 'no_reply',
       'noreply2@example.com': 'no_reply',

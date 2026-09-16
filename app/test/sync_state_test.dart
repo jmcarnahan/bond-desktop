@@ -181,7 +181,8 @@ void main() {
 
   SyncService syncReaching(
     int lookbackDays, {
-    Future<int> Function()? repairGatedConversations,
+    Future<({int repaired, bool complete})> Function()?
+        repairGatedConversations,
   }) {
     final tokens = InMemoryTokenStore();
     tokens.values['refresh_token'] = 'rt-initial';
@@ -363,9 +364,9 @@ void main() {
 
     test('the gate repair runs once and reports what it repaired', () async {
       var calls = 0;
-      Future<int> repair() async {
+      Future<({int repaired, bool complete})> repair() async {
         calls++;
-        return 3;
+        return (repaired: 3, complete: true);
       }
 
       await syncReaching(14, repairGatedConversations: repair).syncNow();
@@ -387,10 +388,10 @@ void main() {
     test('a sweep that failed is owed again, and the sync around it is fine',
         () async {
       var calls = 0;
-      Future<int> repair() async {
+      Future<({int repaired, bool complete})> repair() async {
         calls++;
         if (calls == 1) throw StateError('the database went away');
-        return 2;
+        return (repaired: 2, complete: true);
       }
 
       // The pref is written only after the sweep returns: a one-shot that
@@ -405,6 +406,30 @@ void main() {
       expect(calls, 2);
       expect(await store.getPref('gated_conversation_repair'), '1');
       expect((await syncMailDetail())['repaired_gated_conversations'], 2);
+    });
+
+    test('a capped pass keeps the one-shot owed until a pass comes back short',
+        () async {
+      var calls = 0;
+      Future<({int repaired, bool complete})> repair() async {
+        calls++;
+        return (repaired: calls == 1 ? 200 : 40, complete: calls > 1);
+      }
+
+      await syncReaching(14, repairGatedConversations: repair).syncNow();
+      expect(calls, 1);
+      expect(await store.getPref('gated_conversation_repair'), isNull);
+      expect((await syncMailDetail())['repaired_gated_conversations'], 200);
+
+      graph.requests.clear();
+      await syncReaching(14, repairGatedConversations: repair).syncNow();
+      expect(calls, 2);
+      expect(await store.getPref('gated_conversation_repair'), '1');
+      expect((await syncMailDetail())['repaired_gated_conversations'], 40);
+
+      graph.requests.clear();
+      await syncReaching(14, repairGatedConversations: repair).syncNow();
+      expect(calls, 2, reason: 'closed by the short pass');
     });
 
     test('a build wired without the repair does not consume the one-shot',

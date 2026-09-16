@@ -146,7 +146,7 @@ class SyncService implements MailSync {
   /// The one-shot gate repair, or null on a build wired without it — which is
   /// every test that does not care and every caller from before it existed.
   /// In the app: `GateRepairService.repairAll`.
-  final Future<int> Function()? _repairGated;
+  final Future<({int repaired, bool complete})> Function()? _repairGated;
 
   SyncService(
     this._mail,
@@ -156,7 +156,7 @@ class SyncService implements MailSync {
     Future<String?> Function()? userAddress,
     Future<double> Function()? attentionThreshold,
     ContextStore? contextStore,
-    Future<int> Function()? repairGatedConversations,
+    Future<({int repaired, bool complete})> Function()? repairGatedConversations,
     this._lookbackDays,
   })  : _log = activityLog ?? ActivityLog.disabled(),
         _repairGated = repairGatedConversations,
@@ -412,7 +412,7 @@ class SyncService implements MailSync {
       // without the repair service, and then the pref is left unset too: a
       // test build must not consume the one-shot the app is owed.
       //
-      // The pref is written only after the sweep returns. A sweep that threw
+      // The pref is written only after the repair returns. A repair that threw
       // never ran, and a one-shot that never ran is owed again on the next
       // sync — where one that ran and found nothing is not. The sync around
       // it is healthy either way, so a failure is a line in the console and
@@ -422,8 +422,13 @@ class SyncService implements MailSync {
       if (repairGated != null &&
           await _store.getPref('gated_conversation_repair') == null) {
         try {
-          repairedGated = await repairGated();
-          await _store.setPref('gated_conversation_repair', '1');
+          final sweep = await repairGated();
+          repairedGated = sweep.repaired;
+          // A capped pass leaves the pref unset, so the next sync walks the
+          // next slice; only a pass that came back short closes the one-shot.
+          if (sweep.complete) {
+            await _store.setPref('gated_conversation_repair', '1');
+          }
         } catch (e) {
           debugPrint('sync: the gate repair one-shot failed: $e');
         }

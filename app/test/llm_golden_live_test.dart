@@ -1123,7 +1123,10 @@ void main() {
       final runPath = BenchTarget.outDir.isEmpty
           ? null
           : await writeGoldenRun(
-              entries,
+              [
+                for (final entry in entries)
+                  if (entry.attempted) entry,
+              ],
               bench: 'golden-gate',
               label: 'app-gates',
               outDir: BenchTarget.outDir,

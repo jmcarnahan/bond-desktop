@@ -69,6 +69,16 @@ class GateRepairOutcome {
 /// reason the block it writes never reaches a prompt: the confirm prompt reads
 /// `blocksOf(blockedBy: 'user')`, and a `gate` block is not the owner's word.
 class GateRepairService {
+  /// How many all-gated threads one pass of [repairAll] walks.
+  ///
+  /// The sweep runs inside the mail sync with no progress signal of its own,
+  /// and every eviction queues a storyline refresh that is a model call, so a
+  /// mailbox that raced hundreds of threads before the claim invariant would
+  /// otherwise spend its first sync in here and then burst the recap queue.
+  /// A slice per sync, and the one-shot stays owed until a slice comes back
+  /// short.
+  static const int oneShotCap = 200;
+
   final MessageStore _store;
   final StorylineService _storylines;
   final ActivityLog _log;
@@ -159,9 +169,19 @@ class GateRepairService {
   /// rethrown on purpose: the caller owns the pref, and a sweep that never
   /// ran must not be marked as done. `afterGate` swallows because it runs
   /// inside a drain; this runs once, and the sync around it decides.
-  Future<int> repairAll() async {
+  /// The row's `conversations` is every thread walked, failed ones included;
+  /// `repaired` leaves the failures out. So the sync row and the activity row
+  /// can differ by exactly `failed`, and both are right about what they say.
+  Future<({int repaired, bool complete})> repairAll({
+    int cap = oneShotCap,
+  }) async {
     try {
-      final pairs = await _store.conversationsWithEmbeddingAndNoKeptInbound();
+      final pairs =
+          await _store.conversationsWithEmbeddingAndNoKeptInbound(limit: cap);
+      // Short of the cap means the listing was the whole population; a full
+      // slice means there may be more, and the caller keeps the one-shot
+      // owed until a pass comes back short.
+      final complete = pairs.length < cap;
       var storylines = 0;
       var embeddings = 0;
       var deleted = 0;
@@ -195,9 +215,10 @@ class GateRepairService {
           'embeddings_cleared': embeddings,
           if (deleted > 0) 'pending_work_deleted': deleted,
           if (failed > 0) 'failed': failed,
+          if (!complete) 'capped': cap,
         },
       );
-      return pairs.length - failed;
+      return (repaired: pairs.length - failed, complete: complete);
     } catch (e) {
       debugPrint('gate repair: the one-shot failed: $e');
       rethrow;

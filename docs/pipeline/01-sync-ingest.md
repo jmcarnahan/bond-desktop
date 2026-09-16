@@ -142,10 +142,13 @@ written before the fold learned to wait for the gate, walking every
 A second one-shot beside it, `gated_conversation_repair`, walks what a late
 gate leaves BUILT rather than what it leaves said: every conversation carrying
 an embedding whose inbound messages were all gated loses that embedding, its
-automatic storyline memberships and its pending `storyline` row. It runs
-before the sweep is requeued, so the sweep reads the cleaned pool, and reports
-`repaired_gated_conversations` on the `sync_mail` event. See
-[02-gates.md](02-gates.md).
+automatic storyline memberships and its pending `storyline` row. It walks at
+most `GateRepairService.oneShotCap` (200) threads per sync and the pref is
+set only when a pass comes back short of the cap, so a mailbox that raced
+hundreds of threads before the claim invariant heals over a few syncs rather
+than stalling one. It runs before the sweep is requeued, so the sweep reads
+the cleaned pool, and reports `repaired_gated_conversations` on the
+`sync_mail` event. See [02-gates.md](02-gates.md).
 
 **Threading.** Everything downstream keys threads by `(source,
 conversationKey)` — a mail thread and a chat with colliding keys can never

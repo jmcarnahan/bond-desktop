@@ -51,6 +51,31 @@ void main() {
       blockedAt: '2026-09-01T10:00:00Z',
     );
 
+    final gateBlock = StorylineBlock(
+      storylineId: 'sl-1',
+      conversationKey: 'c7',
+      blockedBy: 'gate',
+      evidence: 'every inbound message in this thread was gated',
+      subject: 'Weekly digest',
+      blockedAt: '2026-09-03T10:00:00Z',
+    );
+
+    testWidgets('a gate eviction has its own heading, not the re-check\'s',
+        (tester) async {
+      await pumpSection(tester, blocks: [userBlock, gateBlock, auditBlock]);
+
+      expect(find.byKey(StorylineBlocksSection.gateBlocksHeadingKey),
+          findsOneWidget);
+      expect(find.text('REMOVED BY A GATE'), findsOneWidget);
+      // One entry under each heading: the gate's block is not double-listed
+      // under the re-check, which never judged it.
+      expect(find.text('Weekly digest'), findsOneWidget);
+      expect(find.text('Interview loop'), findsOneWidget);
+      // Both ways back, like every other block.
+      expect(find.byKey(StorylineBlocksSection.addBackKeyFor('email', 'c7')),
+          findsOneWidget);
+    });
+
     testWidgets('a heading with nothing under it is absent, the button is not',
         (tester) async {
       await pumpSection(tester);

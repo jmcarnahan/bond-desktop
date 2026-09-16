@@ -154,6 +154,12 @@ class AttentionTuning {
 /// of 40. [senderPref] is `'keep'`, `'later'`, `'drop'` or null.
 /// [latestNeedsAction], [latestDeadline], [addressedMe] and [needsYouVerdict]
 /// all describe that same newest inbound message.
+/// Whether a sender disposition quiets the sender's existing threads: `later`
+/// and `drop` both do, and everything in this file that asks the question
+/// asks it here. What `drop` adds — the gate at triage — is not this file's.
+bool quietsSender(String? disposition) =>
+    disposition == 'later' || disposition == 'drop';
+
 double attentionScore({
   required Conversation conversation,
   String? latestIntent,
@@ -168,7 +174,7 @@ double attentionScore({
 }) {
   // Both hard zeros, checked before anything else: a thread the user has
   // dismissed must not be able to climb back up on a fresh timestamp.
-  if (senderPref == 'later' || senderPref == 'drop') return 0;
+  if (quietsSender(senderPref)) return 0;
   if (conversation.state == ConversationState.done) return 0;
 
   // Every clause is a separate reason to leave the thread alone, so every one
@@ -285,7 +291,7 @@ String? bucketFor({
   required bool needsReply,
   bool? needsYouVerdict,
 }) {
-  if (senderPref == 'later' || senderPref == 'drop') return 'later';
+  if (quietsSender(senderPref)) return 'later';
   if (senderPref == 'keep') return null;
   if (needsYouVerdict == true) return null;
   if (needsReply) return null;
@@ -302,4 +308,4 @@ String? bucketFor({
 /// buckets it wrote (`low_value`) and never touches one a person asked for
 /// (`sender_pref`).
 String bucketReasonFor(String? senderPref) =>
-    senderPref == 'later' || senderPref == 'drop' ? 'sender_pref' : 'low_value';
+    quietsSender(senderPref) ? 'sender_pref' : 'low_value';

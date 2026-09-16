@@ -36,7 +36,8 @@ verdict.
 sender** in the thread's overflow menu or through the quiet offer the message
 story makes once the owner has Ignored three different messages from one
 address (`senderDropOfferAfter`, in `app/lib/providers/app_providers.dart` —
-counted per message, offered, never automatic). It is asked immediately after `self`, because a person's
+counted per message, offered, never automatic, and never for a sender the
+owner has already ruled `keep` or `drop`). It is asked immediately after `self`, because a person's
 standing instruction outranks every pattern below it while the owner's own mail
 is still their own. It is skipped for a restored row exactly as the other gates
 are. `gateFor` stays pure: the disposition arrives as an argument, read once per
@@ -213,8 +214,9 @@ claim invariant. Three things break that order, and all three call
 - the triage drain's own gates, at either tier (`onGated` on `TriageQueue`);
 - the owner's Ignore, after `dropMessage` (`onGated` on
   `PipelineRepairService`);
-- the one-shot over the whole database, run once per install behind the
-  `gated_conversation_repair` pref from the mail sync (01-sync-ingest.md).
+- the one-shot over the whole database, behind the `gated_conversation_repair`
+  pref from the mail sync (01-sync-ingest.md) — in slices of 200 threads per
+  sync, the pref set only when a slice comes back short.
 
 The test is the store's own: `keptInboundCount(source, key) == 0`, the same
 "kept" spelling the thread refold uses. A conversation with zero kept inbound
@@ -253,7 +255,10 @@ The one-shot has a cost worth naming. Every storyline that loses a thread has
 its recap text and watermark cleared, exactly as an owner's removal clears
 them, so the first sync after the upgrade queues a refresh and a recap for
 each affected storyline — one model pass per storyline, proportional to how
-many the pre-invariant races had filed, and once.
+many the pre-invariant races had filed, and once. The 200-thread slice is
+what bounds that burst per sync. In the storyline's About block and on the
+message story such an eviction is listed as *Removed by a gate*, apart from
+the owner's removals and the re-check's, with the same two ways back.
 
 The counter the pipeline roadmap asks for is `extracted_then_gated`: whenever
 a gate lands on a message that already has `message_ai.extraction_json`, the

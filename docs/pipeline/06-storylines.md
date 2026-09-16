@@ -453,7 +453,8 @@ message's thread is in — with the storyline's title, the `evidence` behind the
 filing, *filed by you* where `added_by = 'user'`, and the storyline's own
 status where it is no longer live — and under them every `storyline_member_blocks`
 row. The blocks are ONE list here, each entry saying which pass removed it:
-*Removed by you* or *Removed by re-check*. The four buttons beside them —
+*Removed by you*, *Removed by a gate* or *Removed by re-check*. The four
+buttons beside them —
 *Remove* (two taps, as it is on the card), *Allow again* and *Add back*
 on every entry whose storyline is still live, whichever pass wrote the block,
 and *Add to storyline…* which opens the same picker pane the thread view opens
@@ -607,9 +608,9 @@ the audit and the recruit trading the same thread back and forth across drains.
 
 **On screen**, the block leads the **Messages** tab, above the first card and
 under a rule of its own: first ***Re-check members*** as a real outlined
-button with its one-line caption beside it, then the two lists — **REMOVED BY
-YOU** and **REMOVED BY RE-CHECK**, each rendering only when it has something
-in it. It led from the foot first, and the foot of a long spine is where
+button with its one-line caption beside it, then the lists — **REMOVED BY
+YOU**, **REMOVED BY A GATE** and **REMOVED BY RE-CHECK**, each rendering only
+when it has something in it. It led from the foot first, and the foot of a long spine is where
 nobody looks; a reference tab is not where a reader doubting three cards would
 go either. One caption stands above both lists: *Add back puts a thread on the
 spine again. Allow again only lifts the block — the model may file the thread

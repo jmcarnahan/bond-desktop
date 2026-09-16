@@ -185,7 +185,7 @@ class TriageQueue {
   /// message until its attempts ran out, re-fetching in a tight loop. Cleared
   /// per drain, because the deferral is about this drain rather than about
   /// the message: the next pump is meant to try the fetch again.
-  final Set<String> _deferred = {};
+  final Set<({String source, String id})> _deferred = {};
 
   /// Verdicts this drain wrote: `triaged` and `skipped`, the two statuses
   /// that move a message past triage for good. Reset when a drain starts, so
@@ -316,6 +316,11 @@ class TriageQueue {
     var parked = false;
     while (!_stopped && !parked) {
       while (_inFlight.length < _concurrency && !_stopped && !parked) {
+        // Past the store's exclusion cap a deferred row would be handed
+        // straight back — its second attempt spent in this drain rather than
+        // the next, which is the opposite of what a deferral is for. So the
+        // drain stops claiming here and the next pump carries on.
+        if (_deferred.length >= MessageStore.maxTriageExclusions) break;
         final row = await _store.claimPendingTriage(
           sources: sources,
           excluding: _deferred.toList(),
@@ -473,7 +478,7 @@ class TriageQueue {
       final attempts = ((current['triage_attempts'] as num?)?.toInt() ?? 0) + 1;
       // BEFORE the write, so no claim in this drain can pick the row back up
       // between the two: it is about to be the newest pending message again.
-      _deferred.add(id);
+      _deferred.add((source: source, id: id));
       await _writeTriage(source, id, status: 'pending', attempts: attempts);
       await _log.record(
         'triage',

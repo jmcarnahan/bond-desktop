@@ -1170,7 +1170,12 @@ const int senderDropOfferAfter = 3;
 final senderDropOfferProvider =
     FutureProvider.autoDispose.family<bool, String>((ref, address) async {
   final store = ref.watch(messageStoreProvider);
-  if (await store.getSenderPref(address) == 'drop') return false;
+  // No offer where a rule already stands: `drop` because it is taken, `keep`
+  // because offering to gate a sender the owner explicitly kept would be the
+  // app arguing with a standing instruction. A `later` sender is still asked
+  // — deferring and dropping are different sizes of the same answer.
+  final rule = await store.getSenderPref(address);
+  if (rule == 'drop' || rule == 'keep') return false;
   final ignores = await store.explicitIgnoreCountForSender(address);
   return ignores >= senderDropOfferAfter;
 });

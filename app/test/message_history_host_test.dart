@@ -238,6 +238,16 @@ void main() {
       expect(find.byKey(MessageHistoryScreen.dropSenderKey), findsOneWidget);
     });
 
+    testWidgets('and never for a sender the owner has ruled keep',
+        (tester) async {
+      await seed();
+      await store.setSenderPref('dana@example.com', 'keep');
+      await ignoreTimes(senderDropOfferAfter);
+      await pumpHost(tester);
+
+      expect(find.byKey(MessageHistoryScreen.dropSenderKey), findsNothing);
+    });
+
     testWidgets('and not before', (tester) async {
       await seed();
       await ignoreTimes(senderDropOfferAfter - 1);
@@ -252,6 +262,9 @@ void main() {
       await ignoreTimes(senderDropOfferAfter);
       await pumpHost(tester);
 
+      // Arm, then confirm — the screen's two-step, as for Ignore.
+      await tester.tap(find.byKey(MessageHistoryScreen.dropSenderKey));
+      await tester.pump();
       await tester.tap(find.byKey(MessageHistoryScreen.dropSenderKey));
       for (var i = 0; i < 6; i++) {
         await tester.pump(const Duration(milliseconds: 300));

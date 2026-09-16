@@ -45,6 +45,8 @@ class StorylineBlocksSection extends StatelessWidget {
       ValueKey('storyline-blocks-user-heading');
   static const Key auditBlocksHeadingKey =
       ValueKey('storyline-blocks-audit-heading');
+  static const Key gateBlocksHeadingKey =
+      ValueKey('storyline-blocks-gate-heading');
   static const Key auditButtonKey = ValueKey('storyline-audit-button');
 
   /// The two ways back, keyed by source AND key: two connectors can carry one
@@ -118,11 +120,22 @@ class StorylineBlocksSection extends StatelessWidget {
           ],
           key: userBlocksHeadingKey,
         ),
+        // A gate's eviction is neither the owner's nor the re-check's doing,
+        // and filing it under the re-check would say the re-check removed a
+        // thread it never judged.
+        ..._blockList(
+          'REMOVED BY A GATE',
+          [
+            for (final block in blocks)
+              if (block.blockedByGate) block,
+          ],
+          key: gateBlocksHeadingKey,
+        ),
         ..._blockList(
           'REMOVED BY RE-CHECK',
           [
             for (final block in blocks)
-              if (!block.blockedByUser) block,
+              if (!block.blockedByUser && !block.blockedByGate) block,
           ],
           key: auditBlocksHeadingKey,
         ),

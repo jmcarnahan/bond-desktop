@@ -561,7 +561,9 @@ void main() {
       // What a drain that deliberately deferred the newest message needs:
       // without this it would be handed the same row again, every time.
       expect(
-        (await store.claimPendingTriage(excluding: ['newest']))
+        (await store.claimPendingTriage(
+          excluding: [(source: 'email', id: 'newest')],
+        ))
             ?['source_message_id'],
         'older',
       );
@@ -585,10 +587,12 @@ void main() {
 
       // Newest first, which is the order the claim considers them in. The
       // 51st entry is past the cap, so that message is still claimable.
-      final deferred = [for (var i = 51; i >= 0; i--) 'm$i'];
+      final deferred = [
+        for (var i = 51; i >= 0; i--) (source: 'email', id: 'm$i'),
+      ];
       final claimed = await store.claimPendingTriage(excluding: deferred);
 
-      expect(claimed?['source_message_id'], deferred[50]);
+      expect(claimed?['source_message_id'], deferred[50].id);
     });
 
     test('reviveErroredTriage flips errors below the ceiling back to pending',

@@ -293,7 +293,7 @@ void main() {
       // All gated and never embedded: nothing to take back, so not counted.
       await seedMessage(id: 'g3', conversationKey: 'conv-4');
 
-      expect(await service().repairAll(), 2);
+      expect(await service().repairAll(), (repaired: 2, complete: true));
 
       expect((await store.getConversationAi('email', 'conv-1'))!['embedding'],
           isNull);
@@ -323,7 +323,7 @@ void main() {
       );
       await seedEmbedded('conv-1');
 
-      expect(await service().repairAll(), 0);
+      expect((await service().repairAll()).repaired, 0);
 
       // "Every inbound in this thread was gated" is not true of a thread with
       // no inbound at all — the user wrote to somebody and nobody answered.
@@ -369,7 +369,7 @@ void main() {
         reason: 'extracted_then_gated',
       );
       expect(outcome.allGated, isFalse);
-      expect(await service().repairAll(), 0);
+      expect((await service().repairAll()).repaired, 0);
 
       expect((await store.getConversationAi('teams', 'chat-1'))!['embedding'],
           isNotNull);
@@ -377,8 +377,28 @@ void main() {
           'pending');
     });
 
+    test('a full slice is not the end of the sweep', () async {
+      for (var i = 1; i <= 3; i++) {
+        await seedMessage(id: 'g$i', conversationKey: 'conv-$i');
+        await seedEmbedded('conv-$i');
+      }
+
+      // Two of three: a full slice, so the caller keeps the one-shot owed.
+      expect(await service().repairAll(cap: 2), (repaired: 2, complete: false));
+      expect((await repairRow())!.detail['capped'], 2);
+
+      // The remaining one, short of the cap: done.
+      expect(await service().repairAll(cap: 2), (repaired: 1, complete: true));
+      for (var i = 1; i <= 3; i++) {
+        expect(
+          (await store.getConversationAi('email', 'conv-$i'))!['embedding'],
+          isNull,
+        );
+      }
+    });
+
     test('a one-shot that found a clean database still says so', () async {
-      expect(await service().repairAll(), 0);
+      expect(await service().repairAll(), (repaired: 0, complete: true));
 
       final event = (await repairRow())!;
       expect(event.detail['conversations'], 0);

@@ -626,7 +626,7 @@ void main() {
           contains('one-shot:'),
           contains('4 threads walked'),
           contains('3 storyline memberships'),
-          contains('5 messages extracted before their gate'),
+          contains('5 messages in the database extracted before their gate'),
           contains('4 embeddings cleared'),
         ),
       );

@@ -276,9 +276,12 @@ class ActivityLogPanel extends StatefulWidget {
       case 'gate_repair':
         final oneShot = detail['reason'] == 'one_shot';
         final extracted = detail['extracted'];
+        // The one-shot's count is the whole database's history, not what
+        // this pass found, and the sentence has to say so.
         final extractedText = extracted is num && extracted > 0
             ? '${extracted.toInt()} '
-                '${extracted == 1 ? 'message' : 'messages'} extracted before '
+                '${extracted == 1 ? 'message' : 'messages'}'
+                '${oneShot ? ' in the database' : ''} extracted before '
                 '${extracted == 1 ? 'its' : 'their'} gate'
             : '';
         final cleared = detail['embeddings_cleared'];

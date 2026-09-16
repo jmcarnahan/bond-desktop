@@ -117,7 +117,9 @@ class ThreadBlock {
   final String? status;
 
   /// `user` is the owner's own removal; `audit` is the re-check pass that runs
-  /// after one. Only the owner's is a lesson.
+  /// after one; `gate` is the eviction a late gate verdict makes when every
+  /// inbound in the thread turned out to be gated. Only the owner's is a
+  /// lesson.
   final String blockedBy;
 
   final String? evidence;
@@ -142,6 +144,7 @@ class ThreadBlock {
       );
 
   bool get blockedByUser => blockedBy == 'user';
+  bool get blockedByGate => blockedBy == 'gate';
 }
 
 /// The whole story of one message, in the order a person asks it in: what it
