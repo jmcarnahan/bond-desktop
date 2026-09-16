@@ -1112,6 +1112,26 @@ WHERE source = ? AND conversation_key = ?
   static String keptMessageSql(String alias) => "($alias.triage_status "
       "<> 'skipped' OR $alias.gate_reason = 'teams_source')";
 
+  /// How many inbound messages of one conversation the gates kept.
+  ///
+  /// Zero is the interesting answer, and it means the whole thread is gated:
+  /// nothing in it was ever meant for a model, so there is nothing to embed,
+  /// nothing to file into a storyline, and no card that would say anything
+  /// true. Inbound only, for the reason [_refoldThreadByKey] gives — the
+  /// user's own sends are born `skipped`/`outbound` and counting them would
+  /// make every thread the user replied to look kept.
+  Future<int> keptInboundCount(String source, String conversationKey) async {
+    final row = await db
+        .customSelect(
+          'SELECT COUNT(*) AS n FROM messages m '
+          'WHERE m.source = ? AND m.conversation_key = ? '
+          "AND m.direction = 'inbound' AND ${keptMessageSql('m')}",
+          variables: _args([source, conversationKey]),
+        )
+        .getSingle();
+    return (row.data['n'] as num?)?.toInt() ?? 0;
+  }
+
   /// Re-derives one thread's state from the messages the gate KEPT, in ONE
   /// direction, and says which state it wrote (null when nothing moved).
   ///
@@ -2317,6 +2337,27 @@ LIMIT ?
   /// The returned row is the claimed one as it now stands: `processing`, with
   /// a fresh `updated_at`, and `attempts` untouched — which is what the
   /// worker's failure path counts from.
+  ///
+  /// Two kinds are held back: a message is never EXTRACTED or JUDGED before
+  /// triage has spoken about it. `extract` and `needs_you` are enqueued at
+  /// sync time, while every fresh message is still `pending`, and the two
+  /// drains race for the shared drain gate — so without this clause the
+  /// worker could reach a newsletter hours before the gates did, spend a
+  /// model call on it, grow an embedding from it and queue a storyline pass
+  /// around it. The clause is the belt's buckle: the handlers' own `skipped`
+  /// check stays, for an Ignore that lands between the claim and the run.
+  ///
+  /// The bar is "the gates have spoken", not "the model succeeded", so
+  /// `triaged`, `skipped` AND `error` all pass. A triage `error` means both
+  /// gate tiers let the message through and only the model failed; the
+  /// message is a real one and its facts are still worth pulling.
+  ///
+  /// A MISSING message row passes too. Nothing is ever coming for it, so
+  /// holding the item back would hold the queue open forever — the handlers'
+  /// `deleted` branch closes such a row, which is the ending that belongs to
+  /// it. Every other kind (`embed_message`, `storyline`, `draft`, the
+  /// context and storyline kinds) is untouched: none of them reads a
+  /// message's triage verdict, and most are not keyed on a message at all.
   Future<Map<String, Object?>?> claimPendingWork(
     String kind, {
     List<String> sources = const ['email'],
@@ -2329,11 +2370,16 @@ WHERE rowid IN (
   SELECT rowid FROM work_items
   WHERE task_kind = ? AND status = 'pending'
     AND source IN (${_placeholders(sources.length)})
+    AND NOT (? IN ('needs_you','extract') AND EXISTS (
+      SELECT 1 FROM messages m
+      WHERE m.source = work_items.source
+        AND m.source_message_id = work_items.entity_id
+        AND m.triage_status IN ('pending','processing')))
   ORDER BY created_at DESC, entity_id DESC LIMIT 1
 )
 RETURNING *
 ''',
-      variables: _args([_nowIso(), kind, ...sources]),
+      variables: _args([_nowIso(), kind, ...sources, kind]),
     );
     if (claimed.isEmpty) return null;
     return Map<String, Object?>.from(claimed.first.data);
@@ -4355,12 +4401,21 @@ FROM storylines s''';
     ];
   }
 
-  /// Every conversation with a comparable vector.
+  /// Every conversation with a comparable vector AND something kept to say.
   ///
   /// [embedModel] is required rather than defaulted: two vectors are only
   /// comparable when they came from the same model under the same task prefix,
   /// and a query that quietly mixed generations would return cosines that mean
   /// nothing. The caller passes `EmbeddingsClient.modelTag`.
+  ///
+  /// The kept-inbound clause makes this the storyline pool rather than the
+  /// embedding table. A stored vector is not evidence that a thread is worth
+  /// grouping: a conversation whose every inbound message was gated has one
+  /// only because something embedded it before the gates spoke, and the
+  /// vectors of one sender's newsletters look alike, so such threads cluster
+  /// into a proposal about mail nobody was ever going to read. "Kept" is
+  /// [keptMessageSql] here, as in every reader that means it — a `teams_source`
+  /// chat is kept, a settle-time `not_worthy` drop is kept.
   Future<List<Map<String, Object?>>> conversationsWithEmbeddings({
     required String embedModel,
     List<String> sources = const ['email'],
@@ -4377,6 +4432,10 @@ FROM storylines s''';
           '  ON c.source = a.source AND c.conversation_key = a.conversation_key '
           'WHERE a.embedding IS NOT NULL AND a.embed_model = ? '
           'AND a.source IN (${_placeholders(sources.length)}) '
+          'AND EXISTS (SELECT 1 FROM messages m '
+          '  WHERE m.source = a.source '
+          '  AND m.conversation_key = a.conversation_key '
+          "  AND m.direction = 'inbound' AND ${keptMessageSql('m')}) "
           'ORDER BY c.last_message_at DESC, a.conversation_key ASC',
           variables: _args([embedModel, ...sources]),
         )
@@ -5067,6 +5126,14 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
   /// One query, LEFT JOIN, so a thread whose extraction has not run yet
   /// still answers with its summary. Ties break on `source_message_id
   /// DESC`, the same way [newestInboundMessage] breaks them.
+  ///
+  /// KEPT inbound first, though, and only then newest. This card is what the
+  /// thread is embedded and compared as, so a gated message arriving on a
+  /// live thread — a no-reply autoresponder on a real conversation — would
+  /// otherwise silently become the sentence the whole thread is clustered by.
+  /// The gated rows stay eligible as a last resort rather than being excluded:
+  /// a card built from a gated summary is a poor card, and no card at all is
+  /// a thread that cannot be embedded. "Kept" is [keptMessageSql].
   Future<Map<String, Object?>?> newestInboundCardData(
     String source,
     String conversationKey,
@@ -5080,7 +5147,8 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
           '  AND ai.source_message_id = m.source_message_id '
           "WHERE m.source = ? AND m.conversation_key = ? "
           "AND m.direction = 'inbound' "
-          'ORDER BY m.received_at DESC, m.source_message_id DESC LIMIT 1',
+          'ORDER BY CASE WHEN ${keptMessageSql('m')} THEN 0 ELSE 1 END, '
+          'm.received_at DESC, m.source_message_id DESC LIMIT 1',
           variables: _args([source, conversationKey]),
         )
         .get();

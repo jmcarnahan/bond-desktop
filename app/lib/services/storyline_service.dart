@@ -99,6 +99,12 @@ enum AssignOutcome {
   /// The only storylines it could have joined are ones the user took it out
   /// of. Their "no" still holds.
   blocked,
+
+  /// Every inbound message in the conversation is gated; nothing kept is
+  /// there to file. Closed without an embedding or a model call — there is no
+  /// card that would say anything true about a thread the gates threw out,
+  /// and a vector built from one is what grows a junk storyline.
+  gated,
 }
 
 /// What one storyline's membership looks like to the two comparison passes:
@@ -226,6 +232,15 @@ class StorylineService {
     // embedding coming, so parking on it would hold the queue open forever
     // for a thread nothing can ever file.
     if (row == null) return AssignOutcome.noCandidate;
+
+    // Before the vector, so [_reembed] is never reached for such a thread and
+    // no embedding call is spent on one. A conversation whose every inbound
+    // message was gated has nothing kept to file: the card would be built out
+    // of mail the pipeline already decided was never said, and one sender's
+    // gated threads look alike enough to cluster into a proposal about them.
+    if (await _store.keptInboundCount(source, conversationKey) == 0) {
+      return AssignOutcome.gated;
+    }
 
     // Written here when the store has none — see [_reembed]. Null comes back
     // only from an embedding the server refused to give; the other two endings
@@ -2405,6 +2420,17 @@ class StorylineService {
     String conversationKey,
     Map<String, Object?> row,
   ) async {
+    // The belt to [assignConversation]'s braces, and it is here because this
+    // is the only place that WRITES an embedding outside extraction: the
+    // sweep, the recruit lap and a future caller all arrive through it. A
+    // thread with nothing kept gets no vector — `null` is this method's
+    // existing "rejected, do not park" ending, which is the right one: the
+    // answer will not change on the next drain either.
+    if (await _store.keptInboundCount(source, conversationKey) == 0) {
+      _log.note({'embed': 'gated'});
+      return null;
+    }
+
     final embeddings = _embeddings;
     if (embeddings == null) {
       // `embed`, not `reason`: the worker's park writes its own

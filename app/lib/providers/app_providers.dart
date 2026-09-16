@@ -679,6 +679,21 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     gate: ref.watch(drainGateProvider),
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
+    // The knock on the worker's door. Extraction and needs-you are no longer
+    // handed a message triage has not spoken about, so a worker drain that
+    // won the gate first leaves them pending and would sit on them until the
+    // next sync — this is what makes it walk again the moment the gates have
+    // answered. Reaching forward to [aiWorkerProvider], declared further down
+    // this file, is ordinary Riverpod: a provider resolves where it is READ,
+    // which is inside this callback, long after both exist. Unawaited because
+    // a worker drain is minutes of model time and the triage pump that fires
+    // it must not wait for it; the guard is for the read itself, which throws
+    // against a torn-down container.
+    onDrained: () async {
+      try {
+        unawaited(ref.read(aiWorkerProvider).pump());
+      } catch (_) {}
+    },
   );
   ref.onDispose(queue.dispose);
   return queue;

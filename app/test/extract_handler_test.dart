@@ -113,10 +113,14 @@ void main() {
 
   tearDown(() async => db.close());
 
+  /// [summary] writes a full triaged result; [triageStatus] alone writes just
+  /// the status, for a test whose subject is the worker's claim rather than
+  /// what triage said. Either way the row is one triage has spoken about.
   Future<void> seedMessage({
     String id = 'm1',
     String conversationKey = 'conv-1',
     String? summary,
+    String? triageStatus,
   }) async {
     await store.upsertMessage({
       'source': 'email',
@@ -142,6 +146,8 @@ void main() {
           actionItems: const ['Ship on Thursday'],
         ),
       );
+    } else if (triageStatus != null) {
+      await store.writeTriage('email', id, status: triageStatus);
     }
   }
 
@@ -669,7 +675,10 @@ void main() {
 
     test('and through the worker, the item is still done', () async {
       await seedConversation();
-      await seedMessage();
+      // Triaged, because the worker is not handed an `extract` item whose
+      // message triage has not spoken about — see
+      // `MessageStore.claimPendingWork`.
+      await seedMessage(triageStatus: 'triaged');
       await store.enqueueWork('extract', 'email', 'm1');
       final worker = AiWorker(
         store,
@@ -1150,7 +1159,10 @@ void main() {
   group('through the worker', () {
     test('a queued message is extracted, embedded and marked done', () async {
       await seedConversation();
-      await seedMessage();
+      // Triaged: the claim holds an `extract` item back while its message is
+      // still `pending`, so a fixture that never triages is a fixture the
+      // worker will not claim. See `MessageStore.claimPendingWork`.
+      await seedMessage(triageStatus: 'triaged');
       await store.enqueueWork('extract', 'email', 'm1');
       final embeddings = FakeEmbeddings();
       final worker = AiWorker(

@@ -16,7 +16,13 @@ are the authority on sequencing.
    pass (`memberContextRows`, `blockedStorylineIdsFor`), so filing one thread
    costs the same against a mailbox of fifty storylines as against two. On
    join, it *queues* a refresh rather than naming inline — under the gate in
-   the next section.
+   the next section. A conversation with **zero kept inbound messages** never
+   gets that far: the pass returns `AssignOutcome.gated` before it looks for a
+   vector, so no embedding is written and no model is asked, and the handler
+   closes the storyline stage `skipped` rather than `done` — nothing was
+   judged, so there is no verdict to claim. `_reembed` carries the same guard
+   as a belt, since it is the only place outside extraction that writes a
+   conversation embedding.
 2. **Sweep** (`StorylineSweepHandler` → `sweep`) — clusters *unassigned*
    threads by embedding similarity (gate: 2 similar threads form a proposal),
    names the proposal, then confirms each member individually. Pair-discovery
@@ -629,6 +635,29 @@ hand-filed member, the model's own sentence for an automatic one, and nothing
 at all where an automatic row has none. "Grouped automatically." was filler.
 
 ## How the sweep finds its pairs
+
+**The pool is kept-inbound conversations, not the embedding table.**
+`MessageStore.conversationsWithEmbeddings` — the one query both the sweep and
+the recruit lap draw their candidates from — requires a conversation to hold
+at least one inbound message the gates KEPT (`keptMessageSql`: not `skipped`,
+or `skipped` under `teams_source`). A stored vector is not evidence that a
+thread is worth grouping. A conversation whose every inbound message was gated
+has one only because something embedded it before the gates spoke, and one
+sender's gated mail looks alike enough to cluster into a proposal about mail
+nobody was ever going to read. The vec0 index can lag the durable table for a
+sweep — it is diff-backfilled from `conversation_ai` — but that changes
+nothing: `_indexedLinks` maps every probe hit back through the candidate rows
+and ignores a neighbour that is not among them. The card's message-side data
+(`newestInboundCardData`) prefers a kept inbound too, falling back to a gated
+one only when there is nothing else, so a no-reply autoresponder landing on a
+live thread cannot become the sentence that thread is clustered by. The same
+query feeds each episode card's one-line summary on the storyline screen
+(`storylines_provider.dart`), so that line moves with it: an episode whose
+newest inbound is a bounce is summarised by the last message a person sent,
+while the spine still lists every row. Ordering
+is what makes any of this hold: a message is never extracted, and so never
+embedded, before triage has spoken about it — see
+[04-extraction.md](04-extraction.md) for the claim rule that enforces it.
 
 Clustering is two halves, and only one of them moved. **Forming** the clusters
 is single-link greedy agglomeration in `StorylineService._clusterBy` — each

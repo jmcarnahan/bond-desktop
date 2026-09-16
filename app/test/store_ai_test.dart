@@ -186,6 +186,108 @@ void main() {
     });
   });
 
+  /// A message is never extracted or judged before triage has spoken about it.
+  /// The rule lives at the claim rather than in the two handlers, because the
+  /// two drains race for one gate: whichever wins, `extract` and `needs_you`
+  /// are simply not on offer until the gates have decided.
+  group('claimPendingWork holds extraction and needs-you behind triage', () {
+    Future<void> seedPending(String id, {String status = 'pending'}) =>
+        store.upsertMessage(messageRow(id: id, triageStatus: status));
+
+    for (final kind in const ['extract', 'needs_you']) {
+      test('$kind is not claimed while its message is pending', () async {
+        await seedPending('m1');
+        await store.enqueueWork(kind, 'email', 'm1');
+
+        expect(await store.claimPendingWork(kind), isNull);
+        // Still pending, not consumed — the next drain after triage gets it.
+        expect(await store.workCounts(kind), {'pending': 1});
+      });
+
+      test('$kind is not claimed while its message is being triaged', () async {
+        await seedPending('m1', status: 'processing');
+        await store.enqueueWork(kind, 'email', 'm1');
+
+        expect(await store.claimPendingWork(kind), isNull);
+        expect(await store.workCounts(kind), {'pending': 1});
+      });
+
+      test('$kind is claimed once triage has spoken, however it spoke',
+          () async {
+        // `error` is in the list deliberately: it means both gate tiers let
+        // the message through and only the model failed. The bar is "the
+        // gates have decided", not "the model succeeded".
+        for (final status in const ['triaged', 'skipped', 'error']) {
+          await seedPending('m-$status', status: status);
+          await store.enqueueWork(kind, 'email', 'm-$status');
+
+          expect(
+            (await store.claimPendingWork(kind))?['entity_id'],
+            'm-$status',
+            reason: 'a $status message is past triage',
+          );
+        }
+      });
+
+      test('$kind is claimed when the message row is gone', () async {
+        // Nothing is ever coming for it, so holding the item back would hold
+        // the queue open forever. The handler's `deleted` branch closes it.
+        await store.enqueueWork(kind, 'email', 'vanished');
+
+        expect((await store.claimPendingWork(kind))?['entity_id'], 'vanished');
+      });
+    }
+
+    test('a pending message holds back only those two kinds', () async {
+      await seedPending('m1');
+      for (final kind in const ['embed_message', 'storyline', 'draft']) {
+        await store.enqueueWork(kind, 'email', 'm1');
+      }
+
+      for (final kind in const ['embed_message', 'storyline', 'draft']) {
+        expect((await store.claimPendingWork(kind))?['entity_id'], 'm1',
+            reason: '$kind reads no triage verdict');
+      }
+    });
+
+    test('the newest claimable row is taken, not the newest row', () async {
+      await seedPending('untriaged');
+      await store.upsertMessage(messageRow(id: 'ready', triageStatus: 'triaged'));
+      await store.enqueueWork('extract', 'email', 'ready');
+      await store.enqueueWork('extract', 'email', 'untriaged');
+      await stampCreated('extract', 'ready', '2026-08-20T10:00:00Z');
+      await stampCreated('extract', 'untriaged', '2026-08-28T10:00:00Z');
+
+      expect((await store.claimPendingWork('extract'))?['entity_id'], 'ready');
+    });
+
+    test('a held-back row is still pending work as far as the counts go',
+        () async {
+      // The bar on the home screen counts rows, not eligibility: a message
+      // waiting for triage is work that has not happened yet, and showing it
+      // as finished would be a lie the next drain corrects.
+      await seedPending('m1');
+      await store.enqueueWork('extract', 'email', 'm1');
+
+      expect(await store.claimPendingWork('extract'), isNull);
+      expect(await store.workCounts('extract'), {'pending': 1});
+      expect((await store.nextPendingWork('extract'))?['entity_id'], 'm1');
+    });
+
+    test('a message of another source does not hold the row back', () async {
+      // The clause joins on BOTH columns. A teams row with the same id as an
+      // email one is a different message, and reading it would gate the wrong
+      // queue.
+      await store.upsertMessage(
+        messageRow(source: 'teams', id: 'm1', triageStatus: 'pending'),
+      );
+      await store.upsertMessage(messageRow(id: 'm1', triageStatus: 'triaged'));
+      await store.enqueueWork('extract', 'email', 'm1');
+
+      expect((await store.claimPendingWork('extract'))?['entity_id'], 'm1');
+    });
+  });
+
   group('writeWork', () {
     test('records status, error and attempts, and stamps updated_at', () async {
       await store.enqueueWork('extract', 'email', 'm1');

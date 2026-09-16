@@ -101,7 +101,14 @@ class ExtractHandler extends WorkHandler {
     // `skipped`. Honouring that verdict here is what keeps a newsletter from
     // costing a model call, growing an embedding, and — since one sender's
     // newsletters are all alike — clustering into a junk storyline
-    // suggestion. The `teams_source` exception is legacy tolerance: chats are
+    // suggestion.
+    //
+    // "Triage runs first" is enforced at the claim now, not hoped for: the
+    // worker is not handed an `extract` item at all while its message is
+    // `pending` or `processing` (`MessageStore.claimPendingWork`). This check
+    // is the belt to that clause's braces, and it still has work to do — an
+    // Ignore landing between the claim and this line, and rows enqueued by an
+    // older build. The `teams_source` exception is legacy tolerance: chats are
     // triaged like mail now, but a row stored before that change is `skipped`
     // for a reason no judgement stands behind, and a straggler the sync's
     // backfill window missed should still get its facts pulled.

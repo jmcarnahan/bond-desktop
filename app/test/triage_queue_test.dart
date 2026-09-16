@@ -1460,6 +1460,161 @@ void main() {
     });
   });
 
+  /// The knock on the AI worker's door. Extraction and needs-you are not
+  /// handed a message triage has not spoken about, so a worker drain that won
+  /// the shared gate first leaves them pending — this callback is what makes
+  /// it walk again once the verdicts are written.
+  group('onDrained', () {
+    test('fires once after a drain that triaged something', () async {
+      await seedMessage(id: 'm1');
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
+      var called = 0;
+      final queue = TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onDrained: () async => called++,
+      );
+
+      await queue.pump();
+
+      // Once per DRAIN, not once per message: the worker walks its whole
+      // queue when it runs, so a second knock would be a second drain over
+      // the same rows.
+      expect(called, 1);
+      expect(await store.triageCounts(), {'triaged': 2});
+    });
+
+    test('is not called after a dispose that cut the drain short', () async {
+      await seedMessage(id: 'm1');
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
+      var called = 0;
+      final queue = TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        concurrency: 1,
+        onDrained: () async => called++,
+      );
+
+      final drain = queue.pump();
+      // Torn down while the first message is at the model — waited for on the
+      // store, not on a timer, so the claim has really been taken. The verdict
+      // it was waiting on still lands — that answer is paid for — but a knock
+      // on a worker that has just handed back its own claims would start a
+      // drain on a pair the app has already thrown away.
+      while ((await store.triageCounts())['processing'] != 1) {
+        await Future<void>.delayed(const Duration(milliseconds: 1));
+      }
+      await queue.dispose();
+      await drain;
+
+      expect(called, 0);
+      expect(
+        (await store.triageCounts())['triaged'],
+        greaterThanOrEqualTo(1),
+        reason: 'the in-flight verdict was written; only the knock was held',
+      );
+    });
+
+    test('fires after a drain that only gated things', () async {
+      // A gate is a verdict too, and the items behind it still have to be
+      // closed — the handlers write them `done` with a `skipped` note.
+      await seedMessage(id: 'm1', from: 'noreply@example.com');
+      var called = 0;
+      final queue = TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onDrained: () async => called++,
+      );
+
+      await queue.pump();
+
+      expect(called, 1);
+      expect(await store.triageCounts(), {'skipped': 1});
+    });
+
+    test('is not called when nothing was pending', () async {
+      var called = 0;
+      final queue = TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onDrained: () async => called++,
+      );
+
+      await queue.pump();
+
+      expect(called, 0);
+    });
+
+    test('is not called when the drain parked', () async {
+      // The model server is down. Nothing was decided, so there is nothing
+      // for the worker to come and collect — and waking it onto the same dead
+      // servers is the last thing that moment needs.
+      await seedMessage(id: 'm1');
+      var called = 0;
+      final queue = TriageQueue(
+        store,
+        FakeLlm([const LlmUnavailableException('off')]),
+        onDrained: () async => called++,
+      );
+
+      await queue.pump();
+
+      expect(called, 0);
+      expect(await store.triageCounts(), {'pending': 1});
+    });
+
+    test('is not called when the drain only spent messages into error',
+        () async {
+      // A 400 is this app's schema being wrong and is fatal on the first
+      // attempt, so the message ends `error` inside one drain. That IS a
+      // terminal status and the worker may now claim its items — but the
+      // knock is deliberately withheld: this drain was failing through the
+      // model, and waking a second drain onto the same servers is the last
+      // thing that moment needs. The next sync's pump collects the row.
+      await seedMessage(id: 'm1');
+      var called = 0;
+      final queue = TriageQueue(
+        store,
+        FakeLlm([const LlmException('JSON schema conversion failed', 400)]),
+        onDrained: () async => called++,
+      );
+
+      await queue.pump();
+
+      expect(called, 0);
+      expect(await store.triageCounts(), {'error': 1});
+    });
+
+    test('a second drain that writes nothing does not knock again', () async {
+      await seedMessage(id: 'm1');
+      var called = 0;
+      final queue = TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onDrained: () async => called++,
+      );
+
+      await queue.pump();
+      await queue.pump();
+
+      expect(called, 1, reason: 'the counter is reset per drain, not summed');
+    });
+
+    test('a callback that throws does not fail the pump', () async {
+      await seedMessage(id: 'm1');
+      final queue = TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onDrained: () async => throw StateError('the worker blew up'),
+      );
+
+      await expectLater(queue.pump(), completes);
+      // The verdicts are written and kept: re-running them would cost a
+      // second set of model calls for the same answers.
+      expect(await store.triageCounts(), {'triaged': 1});
+    });
+  });
+
   test('stop ends the drain after the message in flight', () async {
     await seedMessage(id: 'm1', receivedAt: '2026-08-29T12:00:00Z');
     await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');

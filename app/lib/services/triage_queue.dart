@@ -73,6 +73,15 @@ class TriageProgress {
 /// a drain is already running, and stops on its own when nothing is pending.
 /// A drain that ends because the model server is down leaves its row pending
 /// and lets the next poll try again.
+///
+/// This drain runs FIRST, and that is now an invariant of the pipeline rather
+/// than the order two pumps happened to be fired in. A message is never
+/// extracted or judged for needs-you before triage has spoken about it:
+/// `MessageStore.claimPendingWork` refuses to hand the AI worker an `extract`
+/// or `needs_you` item whose message is still `pending` or `processing`, so
+/// whichever drain wins the shared [DrainGate], the gates decide first. What
+/// this queue owes the worker in return is a knock on the door when it is
+/// done — see [_onDrained].
 class TriageQueue {
   /// Every connector whose messages this queue drains. One queue rather than
   /// one per source: a chat message and an email are the same question —
@@ -129,6 +138,29 @@ class TriageQueue {
   /// their results before deciding what is still claimed.
   final Set<Future<void>> _inFlight = {};
 
+  /// Told once at the end of a drain that wrote at least one verdict, so the
+  /// AI worker walks its queue again. In the app: `aiWorker.pump()`.
+  ///
+  /// This exists because of the invariant above. `app_providers` fires
+  /// `triageQueue.pump(); aiWorker.pump()` back to back — at the supervisor's
+  /// `onReady` and again on every sync — and the worker can win the shared
+  /// [DrainGate], because this queue awaits an `_emit()` before it asks for
+  /// the gate at all. The worker then finds every `extract` and `needs_you`
+  /// row ineligible, leaves them pending, and nothing re-pumps it until the
+  /// next sync: a first sync's whole backlog would sit unextracted for as
+  /// long as the user did not sync again. This callback is what gets the
+  /// worker to walk once triage has actually spoken.
+  ///
+  /// Called OUTSIDE the gate on purpose — the worker's own pump queues on the
+  /// same [DrainGate], so calling it from inside would deadlock — and not at
+  /// all when a drain wrote nothing, which is a park or an empty queue.
+  final Future<void> Function()? _onDrained;
+
+  /// Verdicts this drain wrote: `triaged` and `skipped`, the two statuses
+  /// that move a message past triage for good. Reset when a drain starts, so
+  /// it describes the drain that just ended rather than the session.
+  int _drainWrote = 0;
+
   String? _userAddress;
   bool _running = false;
   bool _stopped = false;
@@ -142,6 +174,7 @@ class TriageQueue {
     this._concurrency = 3,
     ActivityLog? activityLog,
     PipelineProgress progress = const PipelineProgress.disabled(),
+    this._onDrained,
   })  : _gate = gate ?? DrainGate(),
         _log = activityLog ?? ActivityLog.disabled(),
         _pipeline = progress;
@@ -218,6 +251,20 @@ class TriageQueue {
     await _emit();
     try {
       await _gate.run(_drain);
+      // After the gate is released and before the drain flag is: the worker
+      // this wakes takes the very gate we are standing outside of. Not after
+      // a stop or a dispose, either: `AiWorker._drainAll` clears its own stop
+      // flag on entry, so a knock landing on a torn-down pair could restart a
+      // worker that had just handed back its claims. A drain cut short has
+      // the next sync's pump to fall back on.
+      if (_drainWrote > 0 && !_stopped) {
+        // A callback that throws is the caller's problem, never this drain's:
+        // the messages are already written and re-running them would cost a
+        // second set of model calls for the same verdicts.
+        try {
+          await _onDrained?.call();
+        } catch (_) {}
+      }
     } finally {
       _running = false;
     }
@@ -232,6 +279,7 @@ class TriageQueue {
   /// the same row: whichever claim lands second finds nothing pending to match
   /// and comes back null.
   Future<void> _drain() async {
+    _drainWrote = 0;
     var parked = false;
     while (!_stopped && !parked) {
       while (_inFlight.length < _concurrency && !_stopped && !parked) {
@@ -526,6 +574,13 @@ class TriageQueue {
       urgency: result?.urgency,
       gateReason: gateReason,
     );
+    // The two statuses that mean triage REACHED a verdict, which is what the
+    // AI worker was waiting to hear. A park writes `pending` and is not a
+    // verdict at all. A spent `error` is terminal and does make the message
+    // claimable, but it is not counted here: it arrives on a drain the model
+    // was failing through, and waking a second drain onto the same servers is
+    // the last thing that moment needs. The next sync's pump picks it up.
+    if (status == 'triaged' || status == 'skipped') _drainWrote++;
     _claimed.remove('$source|$id');
   }
 

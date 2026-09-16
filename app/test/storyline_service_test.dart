@@ -269,6 +269,7 @@ void main() {
     String? subject,
     String embedModel = EmbeddingsClient.modelTag,
     String source = 'email',
+    bool keptInbound = true,
   }) async {
     await into.upsertConversation({
       'source': source,
@@ -280,6 +281,30 @@ void main() {
           '[${participants.map((p) => '{"name":"$p"}').join(',')}]',
     });
     if (vector == null) return;
+    // A thread the gates emptied is not a candidate for anything — the assign
+    // pass returns `AssignOutcome.gated` before it looks for a vector, and the
+    // sweep pool asks for a kept inbound message too. A conversation carrying
+    // an embedding and no messages at all is exactly that shape, and it is one
+    // the app cannot produce: the embedding is written by extraction, which
+    // does not run until triage has spoken. So a seeded VECTOR brings the
+    // message it implies. Its id sorts below the ids these tests write by
+    // hand, so a test's own message is still the thread's newest inbound; the
+    // groups that read a thread's whole chronology pass `keptInbound: false`
+    // and seed their own.
+    if (keptInbound) {
+      await into.upsertMessage({
+        'source': source,
+        'source_message_id': 'kept-$key',
+        'conversation_key': key,
+        'direction': 'inbound',
+        'subject': subject ?? 'Subject for $key',
+        'from_name': 'Sarah',
+        'from_address': 'sarah@example.com',
+        'received_at': lastMessageAt,
+        'body_text': 'body of kept-$key',
+        'triage_status': 'triaged',
+      });
+    }
     await into.upsertConversationAi(
       source,
       key,
@@ -355,12 +380,17 @@ void main() {
     String memberKey = 'member',
     List<double>? memberVector,
     List<String> memberParticipants = const ['Sarah Chen'],
+    // Passed through to [seed]. The recap group reads a thread's whole
+    // chronology and seeds every message it means to read, so it turns the
+    // implied kept message off rather than counting one it did not write.
+    bool keptInbound = true,
   }) async {
     await seed(
       into,
       memberKey,
       vector: memberVector ?? vectorAt(1),
       participants: memberParticipants,
+      keptInbound: keptInbound,
     );
     await into.insertStoryline(
       id: id,
@@ -527,6 +557,10 @@ void main() {
         () async {
       await seedStoryline(store);
       await seed(store, 'c1');
+      // The thread has something kept to say — otherwise the pass closes it
+      // `gated` before it ever asks for a vector, and there is no park to
+      // pin. `seed` writes no message of its own without a vector.
+      await seedMessage(store, 'c1', 'c1-m1', triageStatus: 'triaged');
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       // The park is the point. Returning quietly wrote the work row `done`,
@@ -759,6 +793,77 @@ void main() {
       expect(
         await StorylineService(store, llm).assignConversation('email', 'gone'),
         AssignOutcome.noCandidate,
+      );
+    });
+
+    test('a thread the gates emptied is gated, before any call is made',
+        () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', keptInbound: false);
+      await seedMessage(store, 'c1', 'm1',
+          triageStatus: 'skipped', gateReason: 'no_reply');
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      // No embeddings client is given to this service, so a pass that
+      // reached the re-embed would THROW rather than return — which is what
+      // makes this assertion the proof that it did not: the guard sits
+      // before the vector, not after it.
+      expect(
+        await StorylineService(store, llm).assignConversation('email', 'c1'),
+        AssignOutcome.gated,
+      );
+      expect(llm.schemas, isEmpty, reason: 'no model was asked');
+      expect(await store.membersOf('sl-1'), hasLength(1));
+    });
+
+    test('a gated thread that still carries an embedding is gated too',
+        () async {
+      // The embedding is the residue of the race this round closed:
+      // extraction reached the message before triage did, embedded it, and
+      // the vector outlived the verdict. It is not evidence of anything.
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.95), keptInbound: false);
+      await seedMessage(store, 'c1', 'm1',
+          triageStatus: 'skipped', gateReason: 'newsletter');
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      expect(
+        await StorylineService(store, llm).assignConversation('email', 'c1'),
+        AssignOutcome.gated,
+      );
+      expect(llm.schemas, isEmpty);
+    });
+
+    test('one kept inbound is enough to be looked at again', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.95), keptInbound: false);
+      await seedMessage(store, 'c1', 'gated',
+          receivedAt: '2026-08-28T11:00:00Z',
+          triageStatus: 'skipped',
+          gateReason: 'no_reply');
+      await seedMessage(store, 'c1', 'kept', triageStatus: 'triaged');
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      expect(
+        await StorylineService(store, llm).assignConversation('email', 'c1'),
+        AssignOutcome.assigned,
+      );
+    });
+
+    test('a thread of nothing but the user\'s own sends is gated', () async {
+      // Outbound is born `skipped`/`outbound`. Counting it as kept would make
+      // every thread the user ever answered look like a candidate.
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.95), keptInbound: false);
+      await seedMessage(store, 'c1', 'mine',
+          direction: 'outbound',
+          triageStatus: 'skipped',
+          gateReason: 'outbound');
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      expect(
+        await StorylineService(store, llm).assignConversation('email', 'c1'),
+        AssignOutcome.gated,
       );
     });
   });
@@ -1078,6 +1183,42 @@ void main() {
       expect(members.map((m) => m.conversationKey).toSet(), {'c1', 'c2'});
       expect(llm.callsFor('storyline_name'), 1);
       expect(llm.callsFor('storyline_membership'), 2);
+    });
+
+    test('an all-gated thread is never proposed, embedding and all', () async {
+      // The backstop, and what it pins is the STORE's pool: the thread is
+      // excluded by `conversationsWithEmbeddings` before the sweep sees it.
+      // The index probe's own guard — a neighbour whose key is not among the
+      // candidate rows is dropped (`_indexedLinks`) — is not exercised here,
+      // because `flutter test` has no sqlite-vec extension and the sweep runs
+      // its brute-force path; that line is read, not run, in this file.
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'c2',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(store, 'gated',
+          vector: vectorAt(0.99),
+          lastMessageAt: '2026-08-29T05:00:00Z',
+          keptInbound: false);
+      await seedMessage(store, 'gated', 'g1',
+          receivedAt: '2026-08-29T05:00:00Z',
+          triageStatus: 'skipped',
+          gateReason: 'no_reply');
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer(), confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final storyline = (await store.loadStorylines()).single;
+      expect((await store.membersOf(storyline.id))
+          .map((m) => m.conversationKey)
+          .toSet(), {'c1', 'c2'});
+      // Two members, two confirmations — the gated thread was never even put
+      // to the model, which is the cost this is really about.
+      expect(llm.callsFor('storyline_membership'), 2);
+      expect(await store.storylineIdsFor('email', 'gated'), isEmpty);
     });
 
     test('a cluster becomes one suggestion with its confirmed members',
@@ -3972,8 +4113,8 @@ void main() {
     /// A storyline of two threads with messages on both, interleaved in time.
     /// The recap's whole point is that it reads them as one chronology.
     Future<void> seedTwoThreads() async {
-      await seedStoryline(store);
-      await seed(store, 'c2');
+      await seedStoryline(store, keptInbound: false);
+      await seed(store, 'c2', keptInbound: false);
       await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'user');
       await seedMessage(store, 'member', 'm1',
           receivedAt: '2026-08-01T09:00:00Z', body: 'the copy looks good');
@@ -4115,7 +4256,7 @@ void main() {
     test('a pinned document whose message aged out gets a line', () async {
       await seedTwoThreads();
       // A thread that is NOT a member, so its message is nowhere in the window.
-      await seed(store, 'c9');
+      await seed(store, 'c9', keptInbound: false);
       await seedMessage(store, 'c9', 'old-1',
           receivedAt: '2026-07-01T09:00:00Z');
       await seedDigested('old-1', 'a9',
@@ -4176,7 +4317,7 @@ void main() {
     test('a linked directory says what the project is, after the pins',
         () async {
       await seedTwoThreads();
-      await seed(store, 'c9');
+      await seed(store, 'c9', keptInbound: false);
       await seedMessage(store, 'c9', 'old-1',
           receivedAt: '2026-07-01T09:00:00Z');
       await seedDigested('old-1', 'a9',
@@ -4223,7 +4364,7 @@ void main() {
 
     test('a pinned document nobody has read is still named', () async {
       await seedTwoThreads();
-      await seed(store, 'c9');
+      await seed(store, 'c9', keptInbound: false);
       await seedMessage(store, 'c9', 'old-1',
           receivedAt: '2026-07-01T09:00:00Z');
       await store.upsertAttachments('email', 'old-1', const [
@@ -4283,7 +4424,7 @@ void main() {
     });
 
     test('a dismissed storyline gets no recap', () async {
-      await seedStoryline(store, status: 'dismissed');
+      await seedStoryline(store, status: 'dismissed', keptInbound: false);
       await seedMessage(store, 'member', 'm1');
       final llm = FakeLlm(const {});
 
@@ -4293,7 +4434,7 @@ void main() {
     });
 
     test('a storyline with nothing said in it is a quiet no-op', () async {
-      await seedStoryline(store);
+      await seedStoryline(store, keptInbound: false);
       final llm = FakeLlm(const {});
 
       await StorylineService(store, llm).recap('sl-1');
@@ -4440,7 +4581,7 @@ void main() {
     });
 
     test('a hand-filed old thread reaches the recap', () async {
-      await seedStoryline(store);
+      await seedStoryline(store, keptInbound: false);
       await seedMessage(store, 'member', 'm1',
           receivedAt: '2026-08-10T09:00:00Z', body: 'the copy looks good');
       // Recapped right up to the newest thing anyone has said.
@@ -4449,7 +4590,7 @@ void main() {
           recapThrough: '2026-08-10T09:00:00Z');
       // The thread a person went looking for, which is why every message on it
       // predates the mark.
-      await seed(store, 'c2');
+      await seed(store, 'c2', keptInbound: false);
       await seedMessage(store, 'c2', 'm2',
           receivedAt: '2026-08-01T09:00:00Z', body: 'the venue is booked');
       final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
@@ -4511,8 +4652,8 @@ void main() {
     });
 
     test('a hand-added thread recaps the storyline', () async {
-      await seedStoryline(store);
-      await seed(store, 'c2');
+      await seedStoryline(store, keptInbound: false);
+      await seed(store, 'c2', keptInbound: false);
       final llm = FakeLlm(const {});
 
       await StorylineService(store, llm).addThread('sl-1', 'email', 'c2');
@@ -4524,7 +4665,7 @@ void main() {
     });
 
     test('a refresh queues a recap behind it', () async {
-      await seedStoryline(store);
+      await seedStoryline(store, keptInbound: false);
       final llm = FakeLlm({'storyline_refresh': [refineAnswer()]});
 
       await StorylineService(store, llm).refresh('sl-1');
@@ -4536,7 +4677,7 @@ void main() {
     });
 
     test('a refresh that found nothing changed queues no recap', () async {
-      await seedStoryline(store);
+      await seedStoryline(store, keptInbound: false);
       await markDescribed('sl-1', ['member']);
       final llm = FakeLlm(const {});
 
@@ -4548,7 +4689,7 @@ void main() {
 
     test('the sweep queues a recap for a storyline that never had one',
         () async {
-      await seedStoryline(store);
+      await seedStoryline(store, keptInbound: false);
       await seedMessage(store, 'member', 'm1');
       // Described and settled: its members match what was said about them, so
       // the refresh catch-up has nothing to say, and no mail has landed since,
@@ -4566,7 +4707,7 @@ void main() {
     });
 
     test('the sweep recaps a storyline the user replied into', () async {
-      await seedStoryline(store);
+      await seedStoryline(store, keptInbound: false);
       await seedMessage(store, 'member', 'm1',
           receivedAt: '2026-08-28T10:00:00Z');
       await markDescribed('sl-1', ['member']);
@@ -4590,7 +4731,7 @@ void main() {
     });
 
     test('the sweep leaves a fully-recapped storyline alone', () async {
-      await seedStoryline(store);
+      await seedStoryline(store, keptInbound: false);
       await seedMessage(store, 'member', 'm1');
       await markDescribed('sl-1', ['member']);
       await store.updateStoryline('sl-1',
@@ -4605,9 +4746,9 @@ void main() {
 
     test('a storyline the sweep proposes is born described and recaps in its '
         'own drain', () async {
-      await seed(store, 'c1',
+      await seed(store, 'c1', keptInbound: false,
           vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
-      await seed(store, 'c2',
+      await seed(store, 'c2', keptInbound: false,
           vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
       await seedMessage(store, 'c1', 'm1');
       await seedMessage(store, 'c2', 'm2');
@@ -4640,6 +4781,9 @@ void main() {
     });
 
     test('a newborn storyline does not wake the refresh pass', () async {
+      // The one test in this group that SWEEPS, so its threads keep the
+      // implied kept inbound message: the sweep pool is kept-inbound
+      // conversations, not the embedding table.
       await seed(store, 'c1',
           vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
       await seed(store, 'c2',

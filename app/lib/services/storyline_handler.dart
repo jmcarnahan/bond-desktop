@@ -71,6 +71,17 @@ class StorylineAssignHandler extends WorkHandler {
         _log
           ..noteStatus('skipped')
           ..note({'outcome': outcome.name});
+      // `skipped`, not `done`, and the difference is the whole case. The four
+      // endings above are verdicts: something looked at this thread and
+      // decided. `gated` is the pass declining to look — every inbound
+      // message in the conversation was thrown out by the gates, so no card
+      // was built, no vector was written and no model was asked. A bar that
+      // said `done` would claim a judgement nobody made.
+      case AssignOutcome.gated:
+        await _pipeline.noteStoryline(source, key, state: 'skipped');
+        _log
+          ..noteStatus('skipped')
+          ..note({'outcome': outcome.name});
     }
   }
 }

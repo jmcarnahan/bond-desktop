@@ -306,7 +306,9 @@ void main() {
 
     test('a server that is down parks the stage, and the worker says so',
         () async {
-      await seedMessage('m1');
+      // Triaged, because the worker is not handed an `extract` item whose
+      // message triage has not spoken about — `claimPendingWork`.
+      await seedMessage('m1', triageStatus: 'triaged');
       await store.enqueueWork('extract', 'email', 'm1');
       final worker = AiWorker(
         store,
@@ -323,7 +325,7 @@ void main() {
     });
 
     test('a retry is not an error; the last attempt is', () async {
-      await seedMessage('m1');
+      await seedMessage('m1', triageStatus: 'triaged');
       await store.enqueueWork('extract', 'email', 'm1');
       final worker = AiWorker(
         store,
@@ -385,6 +387,19 @@ void main() {
       await assign(AssignOutcome.rejected);
 
       expect((await progressOf('m1'))['storyline_state'], 'done');
+    });
+
+    test('a thread the gates emptied is skipped, not done', () async {
+      // The one outcome that is not a verdict: nothing looked at this thread,
+      // because there was nothing kept in it to look at. `done` would claim a
+      // judgement nobody made.
+      await seedMessage('m1');
+
+      await assign(AssignOutcome.gated);
+
+      final row = await progressOf('m1');
+      expect(row['storyline_state'], 'skipped');
+      expect(row['storyline_id'], null);
     });
 
     test('a pass that dies for good is an error, said by the worker',

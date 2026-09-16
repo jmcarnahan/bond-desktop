@@ -127,6 +127,11 @@ void main() {
       'from_address': 'sarah@x.com',
       'received_at': '2026-08-29T10:00:00Z',
       'body_text': 'Can we still ship on Thursday?',
+      // Triaged, because the worker is not handed an `extract` item whose
+      // message triage has not spoken about yet — see
+      // `MessageStore.claimPendingWork`. Every message a real drain sees has
+      // a terminal triage status by the time the item is claimable.
+      'triage_status': 'triaged',
     });
     await store.enqueueWork('extract', 'email', id);
   }
