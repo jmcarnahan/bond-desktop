@@ -31,22 +31,34 @@ CTX_SIZE     ?= 32768
 # app actually sends concurrent requests.
 SLOTS        ?= 1
 
-# Speculative decoding seams, off by default — and MEASURED OFF on purpose.
-# This server disables speculation on grammar-constrained requests, and every
-# call the app makes is `response_format: json_schema`, so neither shape ever
-# engages for real traffic; both benched slightly SLOWER than no speculation
-# (corpus pass: 464.6s draft / 468.6s ngram vs 452.9s without). The seams stay
-# because they are one flag away for a build that lifts that limit or for
-# free-text work. Set one or the other, not both — the combination is untried.
+# Speculative decoding seams, off by default. On the installed build (Homebrew
+# 0.3.0, b10621) speculation runs under the app's `response_format:
+# json_schema` calls, so it can pay for real traffic. The shape that pays is
+# the model's own MTP head: `SPEC_TYPE = draft-mtp` on Qwen3.8-27B resolves
+# the `mtp-…` sidecar from the same ggml-org repo. The speed research measured
+# it at +50% decode on this app's prose (12 → 18 tok/s); round 0 (the
+# 2026-09-16 rows in docs/model-bakeoff.md) re-measured names 29% and recaps
+# 44% faster, and the draft leg under memory pressure without
+# reproducing the gain — draft acceptance 66–77% either way. ngram speculation
+# measured nothing on JSON prose and a separate draft model (`DRAFT_HF`) a
+# net loss. SPEC_TYPE stays empty by default because only models that ship an
+# MTP sidecar can use it: adopt it in local.mk — config, not code.
+# Set one or the other, not both — the combination is untried.
 #   make model DRAFT_HF=ggml-org/Qwen3.5-0.8B-GGUF   → draft-model speculation
+#                                                      (measured a net loss)
 #   make model SPEC_TYPE=ngram-simple                → ngram, no second model
+#   make model SPEC_TYPE=draft-mtp                   → the model's MTP head
+#                                                      (the one that paid)
 # A draft whose tokenizer does not match the target fails at startup — that
 # failure IS the compatibility check, so trying a candidate is safe.
+# llama.cpp 0.4.0 renamed the `--spec-type` vocabulary; after a Homebrew
+# upgrade check `llama-server --help` before relying on this value.
 DRAFT_HF     ?=
 SPEC_TYPE    ?=
 
-# Tokens drafted per step when DRAFT_HF is set (build default: 3). Untuned —
-# see above: no measured config made speculation pay on this workload.
+# Tokens drafted per step when DRAFT_HF is set (build default: 3). Untuned;
+# this file passes it only alongside DRAFT_HF, and the MTP head above is the
+# config that paid.
 DRAFT_MAX    ?= 12
 LOG_DIR      := tmp/logs
 WAIT_TIMEOUT ?= 120

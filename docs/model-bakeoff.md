@@ -972,6 +972,17 @@ lives in the golden ledger above.
 | 2026-09-04 | omlx/Qwen3-4B-Instruct-2507-8bit | `triage-extract-…-044023.json`, `drain-…-044436.json` | 45.5 | 2860 | cat 81% · label 88% · needs_action 100% | 22.4 / 33.4 / 30.6 | slower than the 4bit everywhere with the same accuracy — no reason to prefer it |
 | 2026-09-04 | omlx/Qwen3.8-27B-4bit | `prose-…-045218.json` | 10.5 | 22233 (draft) | prose read by hand | — | draft speed tie with the baseline; naming −18% — nothing measurable to switch for |
 | 2026-09-04 | llamacpp/R1-Distill-Qwen-14B-Q4_K_M (BENCH_THINK=1) | none — bench cannot complete | — | — | — | — | **disqualified for bulk**: contract verify passes, but reasoning consumes the production token budget and the JSON answer truncates mid-object (reproduced twice). In production that exact failure drops mail |
+| 2026-09-16 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-…-20260916-023304.json` | 10.2 (12.1 srv) draft · 13.2 (15.3 srv) name · 14.2 (17.0 srv) recap | 16083 (draft) · 8460 (name) · 12733 (recap) | prose read by hand; MTP draft acceptance 66–77%, mean accepted run ~3.2 tokens | — | names and recaps are the clear win — name p50 8.5s against ~12s and recap 12.7s against ~22.6s in the app's activity log; the draft row is muddied by one 35s call (p95 35010ms) in the kept pass — the first pass read draft p50 14933ms, 13.4 tok/s (16.8 srv), p95 18783 — taken with the machine at 15GB of compressor and under 200MB unused; adopted in `local.mk`; re-bench drafts once the prose work is off the per-message critical path and the machine is not swapping |
+| 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K (4096 per slot, 4 slots) | `triage-extract-…-20260916-023642.json` | 54.3 (62.9 srv) | 2234 | cat 81% · label 88% · needs_action 100% (16 items, 0 format failures, same three category misses as the 2026-09-04 baseline) | — (see the drain row below) | unchanged against the 2026-09-04 baseline (p50 2176, 54.8 tok/s) — halving the context to 4096 tokens a slot costs nothing on the fictional corpus; extraction p50 1808ms, 50.8 tok/s (61.1 srv) |
+| 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K, 4 slots (drain) | `drain-…-k-{1,3}-20260916-023910.json` | 52.8 at K=1 · 21.9 per stream at K=3 | 2164 (K=1) · 5479 (K=3) | — | 26.6 / 31.1 / — (K=6 not run: the shipping FAST_SLOTS is 4) | K=1 matches the baseline (26.1); K=3 is 31.1 against the baseline's 25.3 on 6 slots — 1.17x over K=1, queue-wait 47ms; the K=6 champion figure (56.9) needs `FAST_SLOTS=6` and was not re-measured this round |
+
+**Memory, round 0 (2026-09-16).** With MTP on and both chat servers at 16K
+context, the three servers' resident sizes are 22.0GB (27B + MTP sidecar),
+4.1GB (4B, 4 slots) and 0.3GB (embed) — 26.4GB, inside the speed design's
+≤ 28–30GB target for the app's servers. The machine-wide reading did not move
+(35GB wired, 15GB compressor with Docker quit, against 31GB wired with Docker
+running before the change) because other processes fill what the servers
+release; the number to hold the servers to is their own footprint.
 
 ## Recommendations
 
@@ -986,12 +997,16 @@ Revisit if oMLX's batched engine improves — the harness makes that a
 one-command check.
 
 **Prose slot: keep llama.cpp Qwen3.8-27B Q4_K_M on :8080.** All three
-candidates are a speed tie on drafts (p50 22.2–22.5s, gen t/s within ±4%),
-so the only thing left to switch for is prose quality, and that is a reading
-judgement, not a scorecard — the verbatim titles and drafts from every run
-are in the bench logs and JSONs for exactly that comparison. On the
-measurables there is no reason to move. The Unsloth UD-Q4_K_XL quant costs
-nothing to keep cached if a quality read later favors it.
+candidates were a speed tie on drafts as measured 2026-09-04, before MTP
+(p50 22.2–22.5s, gen t/s within ±4%), so the only thing left to switch for is
+prose quality, and that is a reading judgement, not a scorecard — the
+verbatim titles and drafts from every run are in the bench logs and JSONs for
+exactly that comparison. On the measurables there is no reason to move.
+Since round 0 (2026-09-16) the ggml-org Q4_K_M runs with its MTP head and a
+16K context on the maintainer's machine (`SPEC_TYPE = draft-mtp` and
+`CTX_SIZE = 16384` in the gitignored `local.mk`; a fresh clone still gets the
+Makefile defaults) — names 29% and recaps 44% faster, ledger rows above. The Unsloth UD-Q4_K_XL quant costs nothing to keep cached if a quality
+read later favors it.
 
 **R1-Distill-Qwen-14B: do not adopt for bulk work.** Not a speed judgement —
 a fit one: with thinking enabled (its only mode) it cannot reliably finish a
