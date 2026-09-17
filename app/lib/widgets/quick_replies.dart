@@ -72,6 +72,11 @@ class QuickReplyBar extends StatefulWidget {
   /// A suggestion is being written right now.
   final bool suggesting;
 
+  /// The options of the draft being written this moment, growing as they
+  /// arrive. Drawn only where there are no STORED options yet: a real pair the
+  /// reader can act on always outranks a preview of one.
+  final List<({String stance, String body})> streamingOptions;
+
   const QuickReplyBar({
     super.key,
     this.options = const [],
@@ -83,6 +88,7 @@ class QuickReplyBar extends StatefulWidget {
     this.onUndo,
     this.onSuggest,
     this.suggesting = false,
+    this.streamingOptions = const [],
   });
 
   /// The three answers to the question a card's tap asks. Keyed by INDEX
@@ -96,6 +102,9 @@ class QuickReplyBar extends StatefulWidget {
 
   static Key cancelSendKeyFor(int index) =>
       Key('quick-reply-cancel-send-$index');
+
+  /// One card of a draft still being written, by its position.
+  static Key streamingKeyFor(int index) => Key('quick-reply-streaming-$index');
 
   @override
   State<QuickReplyBar> createState() => _QuickReplyBarState();
@@ -156,6 +165,29 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
   Widget build(BuildContext context) {
     final queued = widget.pending;
     if (queued != null) return _tile(_pendingRow(queued));
+    // A pair being written, and none stored yet: the cards grow in place of
+    // the ones that are coming. Below the stored branch, never instead of it —
+    // a real suggestion outranks a preview of one.
+    if (widget.options.isEmpty && widget.streamingOptions.isNotEmpty) {
+      return _tile(
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Wrap(
+              spacing: BondSpacing.s8,
+              runSpacing: BondSpacing.s8,
+              children: [
+                for (final (i, option) in widget.streamingOptions.indexed)
+                  _streamingCard(i, option),
+              ],
+            ),
+            const SizedBox(height: BondSpacing.s4),
+            ?_replyRow(),
+          ],
+        ),
+      );
+    }
     // Nothing to offer and nothing to ask with: an inline card with no options
     // is not an empty state, it is a card that should not be there.
     if (widget.options.isEmpty) return _replyRow() ?? const SizedBox.shrink();
@@ -297,9 +329,7 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
   /// separate button — the card IS the way in, and a second control on it was
   /// how a tap and a send came to mean different things on the same words.
   ///
-  /// The question the tap asks is drawn UNDER the body rather than over it:
-  /// the reader is confirming words, and words they cannot see while they
-  /// answer are words they are not really confirming.
+  /// Where the question a tap asks is drawn, and why, is [_cardBody]'s.
   Widget _card(int index, DraftOption option) {
     return ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: _cardWidth),
@@ -321,55 +351,97 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
           },
           borderRadius: BondRadii.smAll,
           hoverColor: BondColors.primaryTint,
-          child: Container(
-            padding: const EdgeInsets.all(BondSpacing.s8),
-            decoration: BoxDecoration(
-              borderRadius: BondRadii.smAll,
-              border: Border.all(color: BondColors.border),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Row(
-                  children: [
-                    Icon(
-                      widget.onSend != null
-                          ? Icons.send_outlined
-                          : Icons.edit_outlined,
-                      size: 14,
-                      color: BondColors.primary,
-                    ),
-                    const SizedBox(width: BondSpacing.s4),
-                    Expanded(
-                      child: Text(
-                        option.stance,
-                        style: BondType.label.copyWith(
-                          fontWeight: FontWeight.w600,
-                          color: BondColors.primary,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  option.body,
-                  style: BondType.caption.copyWith(
-                    color: BondColors.ink
-                        .withValues(alpha: Composer.suggestedOpacity),
-                  ),
-                ),
-                // Both halves, on purpose: the row is only ever drawn over a
-                // callback it can call.
-                if (_confirmingSend == index && widget.onSend != null)
-                  _sendConfirmRow(index, option),
-              ],
-            ),
+          child: _cardBody(
+            icon: widget.onSend != null
+                ? Icons.send_outlined
+                : Icons.edit_outlined,
+            stance: option.stance,
+            body: option.body,
+            // Both halves, on purpose: the row is only ever drawn over a
+            // callback it can call.
+            footer: _confirmingSend == index && widget.onSend != null
+                ? _sendConfirmRow(index, option)
+                : null,
           ),
         ),
+      ),
+    );
+  }
+
+  /// What a card LOOKS like: the bordered tile, the stance under its glyph,
+  /// and the reply under that.
+  ///
+  /// Shared by the two kinds of card this bar draws, because they differ in
+  /// exactly two ways — whether there is anything to press, and whether the
+  /// words have finished arriving — and neither is a reason for a second copy
+  /// of the layout. [footer] is the question a tap asks, drawn UNDER the body
+  /// rather than over it: a reader confirming words they cannot see is not
+  /// really confirming them.
+  Widget _cardBody({
+    required IconData icon,
+    required String stance,
+    required String body,
+    Widget? footer,
+    Key? key,
+  }) {
+    return Container(
+      key: key,
+      padding: const EdgeInsets.all(BondSpacing.s8),
+      decoration: BoxDecoration(
+        borderRadius: BondRadii.smAll,
+        border: Border.all(color: BondColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 14, color: BondColors.primary),
+              const SizedBox(width: BondSpacing.s4),
+              Expanded(
+                child: Text(
+                  stance,
+                  style: BondType.label.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: BondColors.primary,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 2),
+          Text(
+            body,
+            style: BondType.caption.copyWith(
+              color:
+                  BondColors.ink.withValues(alpha: Composer.suggestedOpacity),
+            ),
+          ),
+          ?footer,
+        ],
+      ),
+    );
+  }
+
+  /// A card of words the model has not finished writing: the [_card] look with
+  /// nothing to press.
+  ///
+  /// No [InkWell], no tap, no caption offering to send. Half a reply is not a
+  /// reply, and a card that could be sent before its last clause arrived would
+  /// be the one place in this app where machine-written text goes out without
+  /// anybody having read all of it.
+  Widget _streamingCard(int index, ({String stance, String body}) option) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: _cardWidth),
+      child: _cardBody(
+        key: QuickReplyBar.streamingKeyFor(index),
+        icon: Icons.auto_awesome,
+        stance: option.stance,
+        // The block cursor is the whole of the "still being written" signal.
+        body: '${option.body}▍',
       ),
     );
   }

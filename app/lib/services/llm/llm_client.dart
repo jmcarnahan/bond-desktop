@@ -10,8 +10,11 @@ import 'model_slots.dart';
 /// The one HTTP call this app makes to the local model.
 ///
 /// llama-server speaks the OpenAI chat-completions shape, so this is a plain
-/// POST — no SDK, no streaming, no tools. Two details are load-bearing and
-/// measured rather than guessed:
+/// POST — no SDK, no tools. One call streams: [completeJsonStreamed] sets
+/// `stream: true` and reads the server-sent events back, which is how a draft's
+/// words reach the composer while they are being written. Everything else is
+/// one request and one response. Two details are load-bearing and measured
+/// rather than guessed:
 ///
 /// - `chat_template_kwargs.enable_thinking = false` is what actually stops
 ///   Qwen from thinking. `reasoning_effort` does not: the model reasons
@@ -110,6 +113,15 @@ class LlmCallRecord {
   final int? serverPromptMs;
   final int? serverPredictedMs;
 
+  /// Milliseconds from the request leaving to the first content delta
+  /// arriving. Only a streamed call sets it; null on every other one.
+  ///
+  /// The number a person actually feels on a draft they asked for: the whole
+  /// call can take half a minute, and this is how long the box stayed empty.
+  /// Prefill-bound on a local 27B, which is why it is nearly the whole wait
+  /// here and a fraction of a second on a GPU target.
+  final int? firstTokenMs;
+
   /// The model name this request actually carried, and the URL it actually
   /// went to — resolved once per call, so a record from before a settings
   /// change reports the server it really used rather than the one now
@@ -135,6 +147,7 @@ class LlmCallRecord {
     this.completionTokens,
     this.serverPromptMs,
     this.serverPredictedMs,
+    this.firstTokenMs,
     this.model,
     this.baseUrl,
     this.statusCode,
@@ -168,6 +181,8 @@ typedef _Reply = ({
   int? completionTokens,
   int? serverPromptMs,
   int? serverPredictedMs,
+  // Only [_postStreamed] ever fills this; the two plain readers pass null.
+  int? firstTokenMs,
 });
 
 class LlmClient {
@@ -388,6 +403,56 @@ class LlmClient {
     return json;
   }
 
+  /// [completeJson], with the answer's text handed to [onText] as it arrives.
+  ///
+  /// A separate METHOD rather than an optional parameter on [completeJson],
+  /// which is the shape it looks like it should be. Twenty-two test doubles
+  /// `extends LlmClient` and override `completeJson` with its exact signature,
+  /// and a Dart override must accept every named parameter of the method it
+  /// overrides — so one added parameter would be twenty-two edits to files
+  /// that have nothing to do with streaming and would behave identically
+  /// afterwards.
+  ///
+  /// The answer, the failure semantics and the observer's record are the same
+  /// as [completeJson]'s in every respect but one: the record carries
+  /// [LlmCallRecord.firstTokenMs]. The concatenated content is decoded by the
+  /// same decoder at the end, so a stream that ended early is the same format
+  /// failure a truncated plain answer is.
+  ///
+  /// On [LlmWire.bedrockConverse] there is nothing to stream — the JSON answer
+  /// is a tool call the service assembles server-side — so [onText] is never
+  /// called and the request goes out as one plain POST.
+  Future<Map<String, dynamic>> completeJsonStreamed({
+    required String system,
+    required String user,
+    required Map<String, dynamic> schema,
+    String schemaName = 'result',
+    int maxTokens = 512,
+    double temperature = 0.2,
+    bool think = false,
+    required void Function(String delta) onText,
+  }) async {
+    final reply = await _post(
+      (
+        system: system,
+        user: user,
+        maxTokens: maxTokens,
+        temperature: temperature,
+        think: think,
+        schema: schema,
+        schemaName: schemaName,
+        label: schemaName,
+      ),
+      onText: onText,
+    );
+
+    final json = reply.json;
+    if (json == null) {
+      throw LlmFormatException('$_modelNoun answered with no message content.');
+    }
+    return json;
+  }
+
   /// [reply] with its JSON decoded when [request] was a constrained call and
   /// the wire handed back text (the OpenAI wire; Converse returns the tool
   /// call's object already parsed).
@@ -410,6 +475,7 @@ class LlmClient {
       completionTokens: reply.completionTokens,
       serverPromptMs: reply.serverPromptMs,
       serverPredictedMs: reply.serverPredictedMs,
+      firstTokenMs: reply.firstTokenMs,
     );
   }
 
@@ -527,28 +593,33 @@ class LlmClient {
   ///
   /// A thin wrapper on purpose: the single try below is what instruments all
   /// of [_postInner]'s failure paths without touching any of them.
-  Future<_Reply> _post(_Request request) async {
+  ///
+  /// [onText] picks the streamed path, and only on the OpenAI wire: a Converse
+  /// request that asked to stream degrades to one plain call rather than
+  /// failing, because the wire has nothing to stream and the caller's answer
+  /// is the same either way.
+  Future<_Reply> _post(_Request request, {void Function(String)? onText}) async {
     // ONE resolution per request, for both the URL and the model name.
     final target = this.target;
     final body = switch (wire) {
       LlmWire.openAi => _openAiBody(request, target),
       LlmWire.bedrockConverse => _converseBody(request),
     };
+    final streamed = onText != null && wire == LlmWire.openAi;
+    // One closure so the instrumented try below stays a single try over either
+    // path, exactly as it was over the only path there used to be.
+    Future<_Reply> send() => streamed
+        ? _postStreamed(body, request: request, target: target, onText: onText)
+        : _postInner(body, request: request, target: target);
 
     final observer = _onCall;
     if (observer == null) {
-      return _decoded(
-        await _postInner(body, request: request, target: target),
-        request,
-      );
+      return _decoded(await send(), request);
     }
 
     final sw = Stopwatch()..start();
     try {
-      final result = _decoded(
-        await _postInner(body, request: request, target: target),
-        request,
-      );
+      final result = _decoded(await send(), request);
       observer(LlmCallRecord(
         label: request.label,
         durationMs: sw.elapsedMilliseconds,
@@ -559,6 +630,7 @@ class LlmClient {
         completionTokens: result.completionTokens,
         serverPromptMs: result.serverPromptMs,
         serverPredictedMs: result.serverPredictedMs,
+        firstTokenMs: result.firstTokenMs,
       ));
       return result;
     } on LlmUnavailableException catch (e) {
@@ -595,6 +667,54 @@ class LlmClient {
     }
   }
 
+  /// What every request carries, plain or streamed.
+  Map<String, String> get _headers => {
+        'Content-Type': 'application/json',
+        // The one place the token appears. It is never logged, never
+        // recorded, and never put into an exception message.
+        if (_bearerToken != null) 'Authorization': 'Bearer $_bearerToken',
+      };
+
+  /// NOT [LlmUnavailableException]: the server accepted the connection, so
+  /// this is one request going wrong rather than a server that is down.
+  /// Counting it against the message is what stops a single pathological
+  /// email from blocking the queue behind it forever.
+  LlmException _timeoutException() => LlmException(
+        '$_modelNoun did not answer within ${timeout.inSeconds} seconds.',
+      );
+
+  /// The one status mapping, read by the plain path and the streamed one.
+  /// Never returns — every status that reaches it is a failure.
+  Never _throwForStatus(int statusCode, String bodyText) {
+    // A 5xx is the SERVER's condition, not this request's: llama-server
+    // answers 503 for every request while its weights load. Counting that
+    // against the item would burn the whole backlog's attempts against a
+    // server that was seconds from healthy — the drain must park instead,
+    // exactly as it does for a refused connection.
+    if (statusCode >= 500) {
+      throw LlmUnavailableException(
+        '$_serverNoun is not ready (HTTP $statusCode). ${_snippet(bodyText)}',
+      );
+    }
+
+    // A 429 is the same kind of thing one step further out: Bedrock throttles
+    // with `ThrottlingException` and the request would succeed unchanged a few
+    // seconds later. So it parks and is retried rather than costing the item,
+    // exactly as a 503 does.
+    if (statusCode == 429) {
+      throw LlmUnavailableException(
+        '$_serverNoun is throttling requests '
+        '(HTTP 429). ${_snippet(bodyText)}',
+      );
+    }
+
+    throw LlmException(
+      '$_modelNoun rejected the request (HTTP $statusCode). '
+      '${_snippet(bodyText)}',
+      statusCode,
+    );
+  }
+
   Future<_Reply> _postInner(
     Map<String, dynamic> body, {
     required _Request request,
@@ -604,60 +724,18 @@ class LlmClient {
     final http.Response response;
     try {
       response = await _http
-          .post(
-            url,
-            headers: {
-              'Content-Type': 'application/json',
-              // The one place the token appears. It is never logged, never
-              // recorded, and never put into an exception message.
-              if (_bearerToken != null) 'Authorization': 'Bearer $_bearerToken',
-            },
-            body: jsonEncode(body),
-          )
+          .post(url, headers: _headers, body: jsonEncode(body))
           .timeout(timeout);
     } on SocketException {
       throw LlmUnavailableException(_unreachable(url.toString()));
     } on http.ClientException {
       throw LlmUnavailableException(_unreachable(url.toString()));
     } on TimeoutException {
-      // NOT [LlmUnavailableException]: the server accepted the connection, so
-      // this is one request going wrong rather than a server that is down.
-      // Counting it against the message is what stops a single pathological
-      // email from blocking the queue behind it forever.
-      throw LlmException(
-        '$_modelNoun did not answer within ${timeout.inSeconds} seconds.',
-      );
-    }
-
-    // A 5xx is the SERVER's condition, not this request's: llama-server
-    // answers 503 for every request while its weights load. Counting that
-    // against the item would burn the whole backlog's attempts against a
-    // server that was seconds from healthy — the drain must park instead,
-    // exactly as it does for a refused connection.
-    if (response.statusCode >= 500) {
-      throw LlmUnavailableException(
-        '$_serverNoun is not ready '
-        '(HTTP ${response.statusCode}). ${_snippet(_text(response))}',
-      );
-    }
-
-    // A 429 is the same kind of thing one step further out: Bedrock throttles
-    // with `ThrottlingException` and the request would succeed unchanged a few
-    // seconds later. So it parks and is retried rather than costing the item,
-    // exactly as a 503 does.
-    if (response.statusCode == 429) {
-      throw LlmUnavailableException(
-        '$_serverNoun is throttling requests '
-        '(HTTP 429). ${_snippet(_text(response))}',
-      );
+      throw _timeoutException();
     }
 
     if (response.statusCode != 200) {
-      throw LlmException(
-        '$_modelNoun rejected the request (HTTP ${response.statusCode}). '
-        '${_snippet(_text(response))}',
-        response.statusCode,
-      );
+      _throwForStatus(response.statusCode, _text(response));
     }
 
     final Object? decoded;
@@ -680,6 +758,205 @@ class LlmClient {
     };
   }
 
+  /// The same request with `stream: true`, read event by event.
+  ///
+  /// Everything this returns is what [_postInner] would have returned: the
+  /// concatenated content as [_Reply.text], the server's own counters, and the
+  /// same exceptions from the same helpers — so [_decoded] decodes it the same
+  /// way, the observer records it the same way, and a stream that ended early
+  /// is the same [LlmFormatException] a truncated plain answer is. The only
+  /// thing that is new is [_Reply.firstTokenMs] and the deltas handed to
+  /// [onText] on the way.
+  ///
+  /// The shape on the wire (llama.cpp b10621, probed rather than assumed; vLLM
+  /// the same minus `timings`): `data: {…"choices":[{"delta":{"content":"…"}}]}`
+  /// per token group, then a chunk with `"choices":[]` carrying `usage` and
+  /// `timings`, then `data: [DONE]`. Blank lines separate events.
+  Future<_Reply> _postStreamed(
+    Map<String, dynamic> body, {
+    required _Request request,
+    required LlmTarget target,
+    required void Function(String delta) onText,
+  }) async {
+    final url = _endpoint(target);
+    final sw = Stopwatch()..start();
+
+    final http.StreamedResponse response;
+    try {
+      final streamRequest = http.Request('POST', url)
+        ..headers.addAll(_headers)
+        ..body = jsonEncode({
+          ...body,
+          'stream': true,
+          // Without this the final chunk carries no `usage` and the call
+          // cannot be given a tokens-per-second number at all — which is half
+          // of what every bench table is.
+          'stream_options': {'include_usage': true},
+        });
+      response = await _http.send(streamRequest).timeout(timeout);
+    } on SocketException {
+      throw LlmUnavailableException(_unreachable(url.toString()));
+    } on http.ClientException {
+      throw LlmUnavailableException(_unreachable(url.toString()));
+    } on TimeoutException {
+      throw _timeoutException();
+    }
+
+    // What is left of the client's ceiling now the headers are in. Computed
+    // ONCE here and spent by whichever read follows — the error body or the
+    // answer — because the plain path's `.timeout` covers the whole round
+    // trip, and a streamed call given a fresh ceiling per stage would be
+    // waited on for a multiple of the number the setting says.
+    final spent = sw.elapsed;
+    final remaining = spent >= timeout ? Duration.zero : timeout - spent;
+
+    if (response.statusCode != 200) {
+      // Bounded like everything else: a server that answers 500 and then holds
+      // the body open is the same wedged server the ceiling exists for, and
+      // reading it unbounded would hang on the error path alone.
+      final List<int> body;
+      try {
+        body = await response.stream.toBytes().timeout(remaining);
+      } on TimeoutException {
+        throw _timeoutException();
+      }
+      _throwForStatus(
+        response.statusCode,
+        utf8.decode(body, allowMalformed: true),
+      );
+    }
+
+    final buffer = StringBuffer();
+    int? firstTokenMs;
+    int? promptTokens;
+    int? completionTokens;
+    int? serverPromptMs;
+    int? serverPredictedMs;
+    var reasoningNoted = false;
+
+    // Answers true when the line ENDED the answer. `[DONE]` is the server
+    // saying there is nothing more, and waiting for the socket to close after
+    // it is waiting on a proxy's keep-alive for an answer already in hand.
+    bool readLine(String line) {
+      if (!line.startsWith('data:')) return false;
+      final payload = line.substring(5).trim();
+      if (payload == '[DONE]') return true;
+      if (payload.isEmpty) return false;
+      final Object? chunk;
+      try {
+        chunk = jsonDecode(payload);
+      } on FormatException {
+        // A tolerant reader beats a whole draft lost to one bad line. This
+        // server never sends one; a proxy in front of it might.
+        return false;
+      }
+      if (chunk is! Map) return false;
+
+      // llama-server reports a mid-stream failure as an `error` object on a
+      // chunk rather than as a status — the request was already 200 by then.
+      if (chunk['error'] != null) {
+        throw LlmException(
+          '$_modelNoun failed mid-stream: ${_snippet(payload)}',
+        );
+      }
+
+      // Read off whichever chunk carries them: llama.cpp puts both on the
+      // choices-less final chunk, vLLM sends usage there and no timings.
+      final usage = _usageOf(chunk['usage']);
+      promptTokens = usage.prompt ?? promptTokens;
+      completionTokens = usage.completion ?? completionTokens;
+      final timings = _timingsOf(chunk['timings']);
+      serverPromptMs = timings.promptMs ?? serverPromptMs;
+      serverPredictedMs = timings.predictedMs ?? serverPredictedMs;
+
+      final choices = chunk['choices'];
+      if (choices is! List || choices.isEmpty) return false;
+      final delta = choices.first is Map
+          ? (choices.first as Map)['delta']
+          : null;
+      if (delta is! Map) return false;
+
+      // Tripped once per call, not once per token: a thinking model would
+      // otherwise fire the tripwire hundreds of times on one answer.
+      final reasoning = delta['reasoning_content'];
+      if (!reasoningNoted &&
+          reasoning is String &&
+          reasoning.trim().isNotEmpty) {
+        reasoningNoted = true;
+        _checkReasoningLeak(reasoning, think: request.think);
+      }
+
+      final content = delta['content'];
+      if (content is! String || content.isEmpty) return false;
+      firstTokenMs ??= sw.elapsedMilliseconds;
+      buffer.write(content);
+      try {
+        onText(content);
+      } catch (e) {
+        // The observer must never break the observed — [EventBus]'s rule, one
+        // layer down. A listener that threw costs its own preview, not the
+        // draft.
+        debugPrint('LlmClient: onText threw: $e');
+      }
+      return false;
+    }
+
+    // The WHOLE read runs under the client's timeout, not just the headers: a
+    // server that answered and then stalled mid-answer is exactly the wedged
+    // case the ceiling exists to catch, and an unguarded `await for` would
+    // wait on it forever.
+    final done = Completer<void>();
+    final subscription = response.stream
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen(
+      (line) {
+        try {
+          // `[DONE]` is the end of the answer, and the read ends with it —
+          // the cancel in the `finally` below releases the socket rather than
+          // waiting for a server or a proxy to close it.
+          if (readLine(line) && !done.isCompleted) done.complete();
+        } catch (e) {
+          if (!done.isCompleted) done.completeError(e);
+        }
+      },
+      onError: (Object e) {
+        if (done.isCompleted) return;
+        done.completeError(
+          e is SocketException || e is http.ClientException
+              ? LlmUnavailableException(_unreachable(url.toString()))
+              : e,
+        );
+      },
+      onDone: () {
+        if (!done.isCompleted) done.complete();
+      },
+      cancelOnError: false,
+    );
+
+    try {
+      await done.future.timeout(remaining);
+    } on TimeoutException {
+      throw _timeoutException();
+    } finally {
+      // Every exit, not just the timeout: the `[DONE]` that ended the answer,
+      // an error mid-stream, and the ceiling all leave a live subscription
+      // behind otherwise — a socket reading into a future nobody is waiting
+      // on any more.
+      unawaited(subscription.cancel());
+    }
+
+    return (
+      text: buffer.isEmpty ? null : buffer.toString(),
+      json: null,
+      promptTokens: promptTokens,
+      completionTokens: completionTokens,
+      serverPromptMs: serverPromptMs,
+      serverPredictedMs: serverPredictedMs,
+      firstTokenMs: firstTokenMs,
+    );
+  }
+
   /// The OpenAI answer: one choice, one message, and llama-server's own
   /// counters beside it.
   ///
@@ -694,37 +971,54 @@ class LlmClient {
       throw LlmFormatException('$_modelNoun answered with no message content.');
     }
 
-    // A tripwire, not a failure: the app still works, it just runs at half
-    // speed. It fires when a model swap ignores enable_thinking, which is the
-    // kind of regression that otherwise shows up only as "triage got slow".
-    if (!think) {
-      final reasoning = message['reasoning_content'];
-      if (reasoning is String && reasoning.trim().isNotEmpty) {
-        _noteReasoningLeak();
-      }
-    }
+    _checkReasoningLeak(message['reasoning_content'], think: think);
 
     final content = message['content'];
-    final usage = decoded['usage'];
-    // `timings` is llama-server's, not OpenAI's, and its milliseconds arrive
-    // as doubles — hence `as num?` before `.toInt()`, the same defensiveness
-    // the token counts get. A runtime that sends no such block reads as null
-    // rather than zero, because "did not say" and "took no time" have to stay
-    // distinguishable to anything averaging these.
-    final timings = decoded['timings'];
+    final usage = _usageOf(decoded['usage']);
+    final timings = _timingsOf(decoded['timings']);
     return (
       text: content is String ? content : null,
       json: null,
-      promptTokens:
-          usage is Map ? (usage['prompt_tokens'] as num?)?.toInt() : null,
-      completionTokens:
-          usage is Map ? (usage['completion_tokens'] as num?)?.toInt() : null,
-      serverPromptMs:
-          timings is Map ? (timings['prompt_ms'] as num?)?.toInt() : null,
-      serverPredictedMs:
-          timings is Map ? (timings['predicted_ms'] as num?)?.toInt() : null,
+      promptTokens: usage.prompt,
+      completionTokens: usage.completion,
+      serverPromptMs: timings.promptMs,
+      serverPredictedMs: timings.predictedMs,
+      firstTokenMs: null,
     );
   }
+
+  /// A tripwire, not a failure: the app still works, it just runs at half
+  /// speed. It fires when a model swap ignores enable_thinking, which is the
+  /// kind of regression that otherwise shows up only as "triage got slow".
+  ///
+  /// Read off the message on a plain answer and off a delta on a streamed one
+  /// — the same field either way, which is why it is one check.
+  void _checkReasoningLeak(Object? reasoning, {required bool think}) {
+    if (think) return;
+    if (reasoning is String && reasoning.trim().isNotEmpty) {
+      _noteReasoningLeak();
+    }
+  }
+
+  /// The token counts off an OpenAI `usage` block, wherever it arrived — in
+  /// the body of a plain answer, or on whichever streamed chunk carried it.
+  static ({int? prompt, int? completion}) _usageOf(Object? usage) => (
+        prompt: usage is Map ? (usage['prompt_tokens'] as num?)?.toInt() : null,
+        completion:
+            usage is Map ? (usage['completion_tokens'] as num?)?.toInt() : null,
+      );
+
+  /// `timings` is llama-server's, not OpenAI's, and its milliseconds arrive as
+  /// doubles — hence `as num?` before `.toInt()`, the same defensiveness the
+  /// token counts get. A runtime that sends no such block reads as null rather
+  /// than zero, because "did not say" and "took no time" have to stay
+  /// distinguishable to anything averaging these.
+  static ({int? promptMs, int? predictedMs}) _timingsOf(Object? timings) => (
+        promptMs:
+            timings is Map ? (timings['prompt_ms'] as num?)?.toInt() : null,
+        predictedMs:
+            timings is Map ? (timings['predicted_ms'] as num?)?.toInt() : null,
+      );
 
   /// The Converse answer: a list of content blocks, one of which is the one
   /// this request asked for.
@@ -801,6 +1095,7 @@ class LlmClient {
           usage is Map ? (usage['outputTokens'] as num?)?.toInt() : null,
       serverPromptMs: null,
       serverPredictedMs: null,
+      firstTokenMs: null,
     );
   }
 

@@ -22,6 +22,7 @@ LlmCallRecord call({
   int? completionTokens,
   int? serverPromptMs,
   int? serverPredictedMs,
+  int? firstTokenMs,
 }) =>
     LlmCallRecord(
       label: label,
@@ -31,6 +32,7 @@ LlmCallRecord call({
       completionTokens: completionTokens,
       serverPromptMs: serverPromptMs,
       serverPredictedMs: serverPredictedMs,
+      firstTokenMs: firstTokenMs,
     );
 
 TaskMetrics metricsOf(List<LlmCallRecord> records, {String task = 'triage'}) {
@@ -236,21 +238,27 @@ void main() {
       final c = CallCollector(label: 'x', url: 'y', model: 'z');
       c.record(call(label: 'triage', durationMs: 1000, completionTokens: 10));
       c.record(call(label: 'extraction', durationMs: 500));
+      // The one streamed kind: its first-token stamp fills the column every
+      // other row leaves as a dash.
+      c.record(call(label: 'draft_reply', durationMs: 900, firstTokenMs: 250));
 
       final table = c.table();
       final rows = table.split('\n');
 
       expect(
         rows.first,
-        '| task | n | fail | p50 ms | p95 ms | mean ms | total s '
+        '| task | n | fail | p50 ms | ttft p50 | p95 ms | mean ms | total s '
         '| prompt tok | gen tok | gen t/s | gen t/s (srv) | prompt t/s |',
       );
-      expect(rows[2], startsWith('| triage | 1 | 0 | 1000 |'));
+      // Nothing streamed, so time-to-first-token is a dash and not a 0 that
+      // would read as an instant answer.
+      expect(rows[2], startsWith('| triage | 1 | 0 | 1000 | — |'));
       // No server timings anywhere and no prompt tokens, so those cells are
       // dashes rather than a confident 0.0.
       expect(rows[2], contains('| 10.0 | — | — |'));
-      expect(rows[3], startsWith('| extraction | 1 | 0 | 500 |'));
+      expect(rows[3], startsWith('| extraction | 1 | 0 | 500 | — |'));
       expect(rows[3], endsWith('| — | — | — |'));
+      expect(rows[4], startsWith('| draft_reply | 1 | 0 | 900 | 250 |'));
     });
   });
 

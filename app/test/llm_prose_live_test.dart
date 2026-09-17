@@ -34,6 +34,12 @@ import 'fixtures/prose_cases.dart';
 /// service reads as "the model had nothing to say" and refuses to store, and an
 /// empty reply body is the exact failure `DraftHandler` retries on.
 ///
+/// The draft leg STREAMS, which is what populates the `ttft p50` column: the
+/// deltas are thrown away here — nobody is watching a bench — and the point is
+/// the record's `firstTokenMs`, the number a person waiting on a draft actually
+/// feels. Streaming must not move the draft p50 itself; that is checked by
+/// reading this table against the rows before it.
+///
 /// The recap's two LISTS are printed and not asserted at all, empty included:
 /// the prompt says an empty `open_items` is an honest answer, and a test that
 /// wanted one item would be asking the model to invent an open question for a
@@ -186,12 +192,19 @@ void main() {
             temperature: 0,
             maxTokens: DraftHandler.draftMaxTokens,
             think: BenchTarget.allowReasoning,
+            // The app's own draft call streams, so the bench's does too — a
+            // bench of a request the app does not send measures nothing. The
+            // deltas go nowhere; what is wanted is the record they stamp.
+            onText: (_) {},
           );
 
-          final ms = collector.lastFor('draft_reply')!.durationMs;
+          final record = collector.lastFor('draft_reply')!;
+          final ms = record.durationMs;
+          final ttft = record.firstTokenMs;
 
           lines.add(
             '\n${draftCase.id.padRight(24)} ${ms.toString().padLeft(6)}ms  '
+            '(first token ${ttft ?? '—'}ms)  '
             '(${thread.length} message${thread.length == 1 ? '' : 's'})\n'
             '  evidence: ${result.evidence}\n'
             '${result.options.isEmpty ? '  options:  (none)\n' : result.options.map((o) => '  option:   ${o.stance}: ${o.body}\n').join()}'

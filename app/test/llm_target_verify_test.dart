@@ -1,6 +1,8 @@
 @Skip('live — verifies a target server\'s contract. Run: make bench-verify')
 library;
 
+import 'dart:convert';
+
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/extract_handler.dart'
     show buildConversationCard;
@@ -83,8 +85,6 @@ List<Probe> _bulkProbes() {
 /// and a runtime that grammar-compiles the four flat schemas and chokes on the
 /// fifth must fail HERE rather than three quarters of the way through a drain.
 List<Probe> _proseProbes() {
-  final now = DateTime.now();
-  final entry = corpusById['friday-dinner']!;
   return [
     Probe(
       const NameStorylineTask(),
@@ -105,19 +105,28 @@ List<Probe> _proseProbes() {
         ),
       ]),
     ),
-    Probe(
-      const DraftTask(),
-      DraftInput(
-        thread: [entry.message],
-        replyTo: entry.message,
-        now: now,
-      ),
-      // The handler's own budget, read off it rather than repeated. A verify
-      // that probed a reply at 512 would pass against a server the real draft
-      // truncates on.
-      maxTokens: DraftHandler.draftMaxTokens,
-    ),
+    _draftProbe(),
   ];
+}
+
+/// The draft probe, built in one place because two checks use it: the contract
+/// check above and the streaming check at the bottom of this file. A streaming
+/// check that probed a different call would prove nothing about the one the
+/// contract check verified.
+Probe _draftProbe() {
+  final entry = corpusById['friday-dinner']!;
+  return Probe(
+    const DraftTask(),
+    DraftInput(
+      thread: [entry.message],
+      replyTo: entry.message,
+      now: DateTime.now(),
+    ),
+    // The handler's own budget, read off it rather than repeated. A verify
+    // that probed a reply at 512 would pass against a server the real draft
+    // truncates on.
+    maxTokens: DraftHandler.draftMaxTokens,
+  );
 }
 
 /// The synthetic schema the enum probe is decoded against. Nothing in the app
@@ -307,5 +316,125 @@ void main() {
     'prose slot upholds the contract',
     () => verifySlot(BenchTarget.prose, _proseProbes()),
     timeout: const Timeout(Duration(minutes: 10)),
+  );
+
+  // The name must START with 'prose slot': `make bench-verify-prose` filters
+  // with `--plain-name 'prose slot'`, which is a substring match, and a check
+  // outside it would never run.
+  test(
+    'prose slot streams the same answer it writes plain',
+    () => _verifyProseStreams(),
+    timeout: const Timeout(Duration(minutes: 10)),
+  );
+}
+
+/// The draft call, made twice against the prose slot: once plain, once
+/// streamed. What is checked is that streaming changed the DELIVERY and
+/// nothing else.
+///
+/// Byte-identity is asserted only where the runtime reports its own timings —
+/// llama.cpp, whose temperature-0 decode is deterministic enough that 25 of 25
+/// golden drafts reproduce. A runtime that reports none (vLLM, whose
+/// speculative decoding is not bit-exact under batching — see
+/// `docs/model-bakeoff.md`, row 2026-09-17 FP8+MTP) has never promised that,
+/// so the comparison is PRINTED there rather than asserted: failing a server
+/// for a guarantee it does not make is the same mistake as a bench with an
+/// accuracy threshold.
+Future<void> _verifyProseStreams() async {
+  final target = BenchTarget.prose;
+  final collector = target.collector();
+  final client = target.client(onCall: collector.record);
+  final probe = _draftProbe();
+  final task = probe.task;
+
+  // ONE user message, built once and sent twice: a second `buildUserMessage`
+  // would carry a second `DateTime.now()`, and the two answers would differ
+  // for a reason that has nothing to do with streaming.
+  final user = task.buildUserMessage(probe.input);
+
+  final plain = await client.completeJson(
+    system: task.systemPrompt,
+    user: user,
+    schema: task.schema,
+    schemaName: task.schemaName,
+    temperature: 0,
+    maxTokens: probe.maxTokens,
+    think: BenchTarget.allowReasoning,
+  );
+
+  var deltas = 0;
+  final assembled = StringBuffer();
+  final streamed = await client.completeJsonStreamed(
+    system: task.systemPrompt,
+    user: user,
+    schema: task.schema,
+    schemaName: task.schemaName,
+    temperature: 0,
+    maxTokens: probe.maxTokens,
+    think: BenchTarget.allowReasoning,
+    onText: (delta) {
+      deltas++;
+      assembled.write(delta);
+    },
+  );
+
+  final required = Set<String>.from(task.schema['required'] as List);
+  expect(
+    streamed.keys.toSet(),
+    required,
+    reason: '${target.label} did not honour the ${task.schemaName} schema on a '
+        'STREAMED call, whatever it does on a plain one.',
+  );
+
+  // Two or more, because one is what a server that buffered the whole answer
+  // and sent it as a single event would report — which is not streaming.
+  expect(
+    deltas,
+    greaterThanOrEqualTo(2),
+    reason: '${target.label} sent the answer in $deltas content delta(s), so '
+        'nothing arrives before the call ends and there is no first token to '
+        'measure.',
+  );
+
+  // The concatenation IS the answer: if these differ the SSE reader lost or
+  // reordered a chunk, and the object above came from somewhere else.
+  expect(jsonDecode(assembled.toString()), streamed);
+
+  final record = collector.lastFor(task.schemaName)!;
+  expect(
+    record.promptTokens,
+    isNotNull,
+    reason: '${target.label} reported no usage in stream mode, so a streamed '
+        'call cannot be given a throughput number.',
+  );
+  expect(record.completionTokens, isNotNull);
+  expect(record.firstTokenMs, isNotNull);
+  expect(record.firstTokenMs!, lessThanOrEqualTo(record.durationMs));
+
+  final identical = jsonEncode(plain) == jsonEncode(streamed);
+  final notes = <String>[
+    'streamed in $deltas deltas',
+    'first token ${record.firstTokenMs} ms of ${record.durationMs} ms',
+  ];
+  if (record.serverPredictedMs != null) {
+    notes.add('streamed == plain: ${identical ? 'yes' : 'no'}');
+    expect(
+      jsonEncode(streamed),
+      jsonEncode(plain),
+      reason: '${target.label} answered the same prompt differently streamed '
+          'and plain at temperature 0. On a runtime that reports server '
+          'timings the decode is deterministic, so this is a defect in the '
+          'streamed path rather than sampling.',
+    );
+  } else {
+    notes.add('streamed == plain: ${identical ? 'yes' : 'no'} (not asserted: '
+        'no server timings, decode not promised bit-exact)');
+  }
+
+  // ignore: avoid_print
+  print(
+    '\n${notes.join('\n')}\n'
+    '\n${collector.banner}\n'
+    '\n${collector.table()}\n',
   );
 }

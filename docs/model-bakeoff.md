@@ -19,7 +19,7 @@ depends on a server being up, and each `make` target below runs it with
 | Target | What it measures |
 | --- | --- |
 | `make bench` | The bulk slot: the fixture corpus through triage and extraction, with a latency and throughput table. |
-| `make bench-prose` | The prose slot: five storylines named, three recapped and five replies drafted, printed verbatim. No scorecard — a title, a recap and a draft are judged by reading them. |
+| `make bench-prose` | The prose slot: five storylines named, three recapped and five replies drafted, printed verbatim. The draft leg streams, so its row carries a `ttft p50` column — how long the box stayed empty, beside how long the whole call took. No scorecard — a title, a recap and a draft are judged by reading them. |
 | `make ab` | The same corpus through triage and extraction on **both** slots, printing where they disagree and what each cost. |
 | `make ab-membership` | The membership eval set through the confirm task on both slots, against the answer a person would give. |
 | `make drain` | The drain concurrency race: one round per concurrency in `BENCH_K` over the same backlog. The only bench that can see batching. |
@@ -80,7 +80,20 @@ Follow this or the numbers are decoration.
    this app's request body, honours a JSON schema, actually constrains
    decoding, or reports the token counts a throughput number is divided by. A
    candidate that fails it is not slow, it is wrong, and its numbers mean
-   nothing.
+   nothing. The prose slot has a second check beside the contract one
+   (`prose slot streams the same answer it writes plain`): the draft prompt at
+   temperature 0, sent once plain and once streamed, must come back as the same
+   object, in at least two deltas, with usage reported and a first-token stamp.
+   Byte-identity is ASSERTED only where the runtime reports its own `timings` —
+   llama.cpp, whose temperature-0 decode reproduces 25 of 25 golden drafts. A
+   runtime that reports none (vLLM, whose speculative decoding is not bit-exact
+   under batching — see the 2026-09-17 FP8+MTP row) has never promised that, so
+   there the comparison is printed rather than asserted. First run, 2026-09-17:
+   llama.cpp (27B Q4_K_M + MTP) streamed the draft in 229 deltas, first token
+   205–216 ms of 13.4 s on a warm prefix, usage and timings present, streamed
+   == plain byte-identical; vLLM on the box (27B FP8, same day) streamed in 84
+   deltas, first token 695 ms of 5.0 s, usage present, no timings, and the two
+   answers were identical there too.
 2. **Warm up.** `BENCH_WARMUP` handles this automatically, and it matters more
    than it sounds: llama.cpp measured 6.8 tok/s cold against 130 warm on this
    machine, and one cold call in a small sample replaces the median rather
@@ -1484,7 +1497,9 @@ server started differently from the default.
 
 Appended after each run, second-run numbers only (see the protocol). Prose
 rows quote the draft_reply p50 in the "p50 triage ms" column's place — marked
-(draft) — since prose runs never triage. gen t/s is wall-clock throughout;
+(draft) — since prose runs never triage; from 2026-09-17 a prose row may also
+carry `ttft N` in that cell, which is the streamed draft's time to first
+token (`first_token_p50_ms` in the run JSON). gen t/s is wall-clock throughout;
 llama.cpp rows also carry a server-clock rate in their JSON. The accuracy
 column here is measured on the fictional corpus; accuracy against real traffic
 lives in the golden ledger above.
@@ -1501,6 +1516,7 @@ lives in the golden ledger above.
 | 2026-09-16 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-…-20260916-023304.json` | 10.2 (12.1 srv) draft · 13.2 (15.3 srv) name · 14.2 (17.0 srv) recap | 16083 (draft) · 8460 (name) · 12733 (recap) | prose read by hand; MTP draft acceptance 66–77%, mean accepted run ~3.2 tokens | — | names and recaps are the clear win — name p50 8.5s against ~12s and recap 12.7s against ~22.6s in the app's activity log; the draft row is muddied by one 35s call (p95 35010ms) in the kept pass — the first pass read draft p50 14933ms, 13.4 tok/s (16.8 srv), p95 18783 — taken with the machine at 15GB of compressor and under 200MB unused; adopted in `local.mk`; re-bench drafts once the prose work is off the per-message critical path and the machine is not swapping |
 | 2026-09-16 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260916-223602.json` | 14.0 (17.0 srv) draft | 15722 (draft) · 8609 (name) · 11679 (recap) | prose read by hand | — | round B phase 2 — draft budget 768, invention rules v3; the recap leg ran at the generic 512 (the harness did not pass the 384 — found on the whole-branch review, fixed, re-run below); third of three passes, second identical; drafts ≈ 221 tokens and recaps ≈ 179 |
 | 2026-09-17 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260917-012727.json` | 13.9 (16.9 srv) draft | 16062 (draft) · 8605 (name) · 11833 (recap) | prose read by hand | — | ROW OF RECORD for round B's budgets — draft 768 AND recap 384 both in force, invention rules v3; second of two passes (first 16344 / 8383 / 11528); drafts 1,104 tokens over 5 (≈ 221) and recaps 537 over 3 (≈ 179), identical totals to the 512 run, so neither budget was reached and the p50s are round 0's within noise; the budgets bound the worst case, which is what the 90 s prose timeout rests on |
+| 2026-09-17 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260917-232905.json` | 14.2 (17.0 srv) draft | 17624 (draft, ttft 2955) · 8340 (name) · 11568 (recap) | prose read by hand | — | Round C phase 3 — the draft leg STREAMS; second of two passes (first 17614 / 8307 / 11548, ttft 2959). Names and recaps sit on the row of record (8605 / 11833) with identical token counts (523 / 537); the draft p50 is +1.6 s because the five drafts came out LONGER — 1,332 generated tokens against 1,104 at 14.2 tok/s against 13.9 — the date anchor in the user message moved by a day between the two runs, which is enough to change a temperature-0 draft's wording. Streaming itself costs nothing: the verify check's same-prompt pair ran plain at 17.2 tok/s (server clock) and streamed at 17.4, and on the box 5,037 ms plain against 5,000 ms streamed. TTFT per case 534 / 4,484 / 2,726 / 2,955 / 4,482 ms — the system prompt is prefix-cached, so the first token waits only on the per-message part of the prompt (1.1K tokens here); a full app draft carries 2–5K tokens of thread, passages and style, so its first words land later than these |
 | 2026-09-17 | vllm-g6e/Qwen3.8-27B-FP8 (AWS g6e.xlarge, one L40S, vLLM 0.29.0, no MTP, 32K ctx) | `prose-vllm-g6e-qwen3-8-27b-fp8-20260917-045218.json` | 24.6 draft · 23.6 name · 24.1 recap (wall; no server clock) | 10795 (draft) · 4415 (name) · 7362 (recap) | prose read by hand | — | GPU spike, one stream through an SSH tunnel; against the local MTP row above (16062 / 8605 / 11833) drafts 1.5×, names 1.9×, recaps 1.6× faster on wall p50 and 1.8× per token (24.6 against 13.9) — the FP8 model writes longer drafts here, 1,364 tokens over five (≈ 273 against ≈ 221) and 568 over three recaps (≈ 189 against ≈ 179); second of two passes, first 10764 / 4419 / 7364 |
 | 2026-09-17 | vllm-g6e/Qwen3.8-27B-FP8+MTP (same box, `--speculative-config '{"method":"mtp","num_speculative_tokens":2}'`) | `prose-vllm-g6e-qwen3-8-27b-fp8-mtp-20260917-064055.json` | 46.5 draft · 43.8 name · 46.4 recap (wall) | 5730 (draft) · 2363 (name) · 3627 (recap) | prose read by hand | — | GPU spike, the MTP head the FP8 repo ships, ~6.5 min of recompile to load; against the same box without MTP drafts 1.9×, names 1.9×, recaps 2.0× faster, and against the local MTP row 2.8× / 3.6× / 3.3×; 1,390 draft tokens over five, 538 over three recaps; second of two passes, first 5736 / 2363 / 3622 at 46.4 / 43.4 / 46.5 tok/s; vLLM warns that speculative decoding caps `max_num_scheduled_tokens` at 2048, left as is |
 | 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K (4096 per slot, 4 slots) | `triage-extract-…-20260916-023642.json` | 54.3 (62.9 srv) | 2234 | cat 81% · label 88% · needs_action 100% (16 items, 0 format failures, same three category misses as the 2026-09-04 baseline) | — (see the drain row below) | unchanged against the 2026-09-04 baseline (p50 2176, 54.8 tok/s) — halving the context to 4096 tokens a slot costs nothing on the fictional corpus; extraction p50 1808ms, 50.8 tok/s (61.1 srv) |

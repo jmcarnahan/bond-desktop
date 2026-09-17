@@ -160,6 +160,53 @@ expanded one with about ten seconds to spare, and 60 would cut either off
 mid-sentence. The bulk client keeps 120, where it costs nothing — see
 [10-model-routing.md](10-model-routing.md).
 
+### Streaming
+
+**The draft call is the one call in this app that streams** (Round C, phase 3,
+2026-09-17). `DraftHandler` asks for it through `runTask(onText:)`, which picks
+`LlmClient.completeJsonStreamed`; the body carries `"stream": true` and
+`"stream_options": {"include_usage": true}` on the same OpenAI wire llama.cpp
+and vLLM both speak, and the answer comes back as `data:` events, one per token
+group, then a choices-less chunk carrying `usage` (and, on llama.cpp,
+`timings`), then `data: [DONE]`. Bedrock's Converse wire has nothing to stream —
+a JSON answer there is a tool call the service assembles — so a streamed request
+on that wire degrades to one plain call and `onText` is never invoked.
+
+**What is published, and what is not.** `PartialJsonStrings`
+(`app/lib/services/llm/partial_json.dart`) reads the string VALUES out of the
+growing object and reports them with their paths. The handler publishes three of
+them on the `DraftStreamBus`: `reply_body`, `options[i].stance` and
+`options[i].reply_body`. `evidence` is never published — it is the model's note
+to the app about what it read, and nobody watches that being typed. A `done`
+event follows the stored row, on every exit the call has: written, empty, or
+failed.
+
+**What the reader sees.** A `Drafting…` preview grows ABOVE the reply box in the
+suggestion's own dress, and the option cards fill in as non-tappable cards with
+a trailing block cursor. Nothing streamed ever enters the text controller, which
+is what keeps two older rules true without a special case: a sentence typed
+while waiting survives the draft arriving, and the finished suggestion stages
+through exactly the quiet-staging path it always did, once the row exists. Half
+a reply is not a reply, so a streaming card cannot be tapped or sent.
+
+**What it costs and what it does not buy.** Streaming makes the wait visible,
+not shorter. On this Mac the 27B prefills at about 135 tok/s, and the system
+prompt is prefix-cached, so the first token waits on the per-message part of the
+prompt alone: a 1K-token user message shows its first words in about 3 s
+(`make bench-prose`, 2026-09-17: 0.5–4.5 s across five cases), a full app draft
+with 2–5K tokens of thread, passages and style in roughly 15–35 s, against a
+complete draft at 25–35 s. The sub-second time-to-first-token in the speed
+design is a GPU or cloud target — about 0.65 s on the L40S box measured on
+2026-09-17 — and not this machine. The p50 of the call itself does not move
+(measured 2026-09-17: the same prompt at 17.2 tok/s plain and 17.4 streamed on
+the server clock); `make bench-prose` carries a `ttft p50` column so both
+numbers are on the same row, and `make bench-verify` checks that a streamed
+answer is the same answer (see `docs/model-bakeoff.md`).
+
+**The prefetched drafts stream too**, and nobody is watching them. That is not
+waste: the publish is a broadcast onto a bus with no subscriber for that
+conversation, which costs a parse of text the call was already receiving.
+
 ### The invention rules (v3, 2026-09-16; v4, 2026-09-17)
 
 The golden rubric judge found that every prose model's draft failures shared

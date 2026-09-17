@@ -10,10 +10,12 @@ import 'ai_worker.dart';
 import 'attachments/attachment_markers.dart';
 import 'attachments/attachment_retriever.dart';
 import 'context/context_retriever.dart';
+import 'draft_stream.dart';
 import 'llm/draft_task.dart';
 import 'llm/embeddings_client.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
+import 'llm/partial_json.dart';
 import 'llm/reply_decision_task.dart';
 import 'pipeline_progress.dart';
 
@@ -30,6 +32,16 @@ import 'pipeline_progress.dart';
 /// pre-gate; this is where the model that will do the writing reads the actual
 /// conversation and says whether writing is warranted. A `no` costs one small
 /// call and stores nothing.
+///
+/// The draft call STREAMS when this handler was given a live [DraftStreamBus]
+/// — which the app always does and no test does unless it is testing the
+/// stream. What goes on the bus is the text a person is waiting to read, as it
+/// is written: the reply body and the short options, never the evidence
+/// sentence. What does NOT change is everything else. The prompt, the schema,
+/// the token budget, the retry policy and the stored row are what they were,
+/// the row is written once when the call finishes, and a `done` event says the
+/// call has ended — written, skipped or failed — so a listener drops its
+/// preview and reads the row instead.
 ///
 /// It only ever writes to the `drafts` table. Nothing in this class — and
 /// nothing this class calls — touches Microsoft Graph: a suggestion is text in
@@ -105,6 +117,12 @@ class DraftHandler extends WorkHandler {
   /// recorder, so a test that builds this handler writes nothing extra.
   final PipelineProgress _progress;
 
+  /// Where the draft's words go while they are being written. Disabled by
+  /// default, and a disabled bus is not merely silent — the handler passes no
+  /// `onText` at all, so the call is byte-identical to the one it made before
+  /// streaming existed.
+  final DraftStreamBus _stream;
+
   DraftHandler(
     this._store,
     this._client, {
@@ -118,6 +136,7 @@ class DraftHandler extends WorkHandler {
     EmbeddingsClient? embeddings,
     this._progress = const PipelineProgress.disabled(),
     this._concurrency,
+    this._stream = const DraftStreamBus.disabled(),
   })  :
         // ignore: prefer_initializing_formals
         _contextDirs = contextDirs,
@@ -287,131 +306,194 @@ class DraftHandler extends WorkHandler {
       return _skip(source, id, 'no_reply_needed', why: decision.reason);
     }
 
-    final result = await runTask(
-      _client,
-      const DraftTask(),
-      DraftInput(
-        thread: thread,
-        replyTo: replyTo,
-        // Mail only. `recentOutboundToSender` matches on `to_json`, which a
-        // chat never writes ('[]'), so the skip only makes explicit what the
-        // LIKE would answer anyway — and a chat needs it less: the thread tail
-        // already carries the owner's own chat voice, turn by turn.
-        //
-        // And mail only when the owner has not already spoken in THIS thread —
-        // in the part of it the prompt will actually show. Their own turn, on
-        // this subject, to this person, is a better tone sample than two old
-        // replies to someone else about something else — so when the rendered
-        // tail carries one the examples are dropped, and the prompt is shorter
-        // for it. The window is [DraftTask.maxThreadMessages], the newest
-        // turns; an owner turn older than that is not in the prompt, so it
-        // cannot stand in for the examples and they stay.
-        styleExamples: source == 'email' && !_shownTail(thread).any((m) => m.outbound)
-            ? await _styleExamplesFor(source, replyTo.fromAddress)
-            : const [],
-        storylineSummary: await _storylineSummaryFor(source, key),
-        aboutMe: aboutMe,
-        attachmentExcerpts: excerpts,
-        directories: pack,
-        now: DateTime.now(),
-      ),
-      // Zero, like extraction: pressing Regenerate should change the draft
-      // because the thread changed, not because the sampler rolled differently.
-      temperature: 0,
-      maxTokens: draftMaxTokens,
-    );
+    // One reader per draft, because the paths it reports are positions in THIS
+    // answer's object and nothing else. Null when nobody is listening, which
+    // is what keeps the call itself unchanged.
+    final reader = _stream.enabled ? PartialJsonStrings() : null;
 
-    if (result.replyBody.isEmpty) {
-      // A retryable failure, deliberately. An empty answer from a local model
-      // is usually a one-off, and the worker's retry-once policy is exactly the
-      // right response — writing the blank draft instead would put an empty
-      // composer in front of the user as though it were a suggestion.
-      throw const LlmFormatException('The local model drafted an empty reply.');
-    }
-
-    // What this reply was written from, distinct and in ranked order. Three
-    // passages of one contract are one document to a reader, and three
-    // passages of one analysis are three places in one file — so the
-    // documents collapse by name and the directory files collapse by the
-    // triple that names a place.
-    final documents = <String>[];
-    for (final excerpt in excerpts) {
-      final name = excerpt.name.isEmpty ? 'a file' : excerpt.name;
-      if (!documents.contains(name)) documents.add(name);
-    }
-    final files = <({String dir, String path, String locator, int? fileId})>[];
-    final directoryFiles = <String>[];
-    for (final excerpt in pack.excerpts) {
-      final entry = (
-        dir: excerpt.dirName,
-        path: excerpt.relPath,
-        locator: excerpt.locator,
-        // The row id, so the composer's chip can open the file rather than
-        // only name it.
-        fileId: excerpt.fileId,
+    try {
+      final result = await runTask(
+        _client,
+        const DraftTask(),
+        DraftInput(
+          thread: thread,
+          replyTo: replyTo,
+          // Mail only. `recentOutboundToSender` matches on `to_json`, which a
+          // chat never writes ('[]'), so the skip only makes explicit what the
+          // LIKE would answer anyway — and a chat needs it less: the thread
+          // tail already carries the owner's own chat voice, turn by turn.
+          //
+          // And mail only when the owner has not already spoken in THIS
+          // thread — in the part of it the prompt will actually show. Their
+          // own turn, on this subject, to this person, is a better tone sample
+          // than two old replies to someone else about something else — so
+          // when the rendered tail carries one the examples are dropped, and
+          // the prompt is shorter for it. The window is
+          // [DraftTask.maxThreadMessages], the newest turns; an owner turn
+          // older than that is not in the prompt, so it cannot stand in for
+          // the examples and they stay.
+          styleExamples:
+              source == 'email' && !_shownTail(thread).any((m) => m.outbound)
+                  ? await _styleExamplesFor(source, replyTo.fromAddress)
+                  : const [],
+          storylineSummary: await _storylineSummaryFor(source, key),
+          aboutMe: aboutMe,
+          attachmentExcerpts: excerpts,
+          directories: pack,
+          now: DateTime.now(),
+        ),
+        // Zero, like extraction: pressing Regenerate should change the draft
+        // because the thread changed, not because the sampler rolled
+        // differently.
+        temperature: 0,
+        maxTokens: draftMaxTokens,
+        // Null when nobody is listening, which is what makes the streamed and
+        // unstreamed calls the same call.
+        onText: reader == null
+            ? null
+            : (delta) => _publishDeltas(reader, delta, source, key, id),
       );
-      if (!files.contains(entry)) files.add(entry);
-      if (!directoryFiles.contains(excerpt.relPath)) {
-        directoryFiles.add(excerpt.relPath);
-      }
-    }
-    final provenance = DraftProvenance(
-      documents: documents,
-      // A pack that rendered nothing named nothing, whatever its own list
-      // says. The retriever is the layer that decides which directories
-      // contributed and it already answers that way; this is the belt to its
-      // braces, because the one thing the caption must never do is tell a
-      // person their reply was drafted from a project the model never read.
-      directories: pack.isEmpty ? const [] : pack.directories,
-      files: files,
-      skills: pack.skills,
-    );
 
-    await _store.upsertDraft(
+      if (result.replyBody.isEmpty) {
+        // A retryable failure, deliberately. An empty answer from a local
+        // model is usually a one-off, and the worker's retry-once policy is
+        // exactly the right response — writing the blank draft instead would
+        // put an empty composer in front of the user as though it were a
+        // suggestion.
+        throw const LlmFormatException(
+          'The local model drafted an empty reply.',
+        );
+      }
+
+      // What this reply was written from, distinct and in ranked order. Three
+      // passages of one contract are one document to a reader, and three
+      // passages of one analysis are three places in one file — so the
+      // documents collapse by name and the directory files collapse by the
+      // triple that names a place.
+      final documents = <String>[];
+      for (final excerpt in excerpts) {
+        final name = excerpt.name.isEmpty ? 'a file' : excerpt.name;
+        if (!documents.contains(name)) documents.add(name);
+      }
+      final files =
+          <({String dir, String path, String locator, int? fileId})>[];
+      final directoryFiles = <String>[];
+      for (final excerpt in pack.excerpts) {
+        final entry = (
+          dir: excerpt.dirName,
+          path: excerpt.relPath,
+          locator: excerpt.locator,
+          // The row id, so the composer's chip can open the file rather than
+          // only name it.
+          fileId: excerpt.fileId,
+        );
+        if (!files.contains(entry)) files.add(entry);
+        if (!directoryFiles.contains(excerpt.relPath)) {
+          directoryFiles.add(excerpt.relPath);
+        }
+      }
+      final provenance = DraftProvenance(
+        documents: documents,
+        // A pack that rendered nothing named nothing, whatever its own list
+        // says. The retriever is the layer that decides which directories
+        // contributed and it already answers that way; this is the belt to its
+        // braces, because the one thing the caption must never do is tell a
+        // person their reply was drafted from a project the model never read.
+        directories: pack.isEmpty ? const [] : pack.directories,
+        files: files,
+        skills: pack.skills,
+      );
+
+      await _store.upsertDraft(
+        source: source,
+        conversationKey: key,
+        replyToMessageId: replyTo.id,
+        body: result.replyBody,
+        evidence: result.evidence,
+        // Null rather than `[]`: "the model offered no short replies" and "the
+        // options were read and there were none" are the same thing to every
+        // reader, and one of the two spellings is shorter.
+        optionsJson: result.options.isEmpty
+            ? null
+            : jsonEncode([
+                for (final option in result.options)
+                  {'stance': option.stance, 'body': option.body},
+              ]),
+        // The inventory of what went into the prompt, stored WITH the draft
+        // rather than only in the activity row — the composer's caption names
+        // what was read, and a caption assembled from the activity log would be
+        // a join against a table that gets pruned.
+        contextJson: provenance.isEmpty ? null : provenance.encode(),
+        status: 'suggested',
+      );
+      await _progress.noteDraft(source, id, state: 'done');
+      _log.note({
+        'chars': result.replyBody.length,
+        // Why there is no decision call on this row's timeline: a person asked
+        // for it, so the judgement was theirs.
+        if (request.asked) 'decision': 'asked',
+        // The activity row keeps its own copy, which is not a duplicate of the
+        // stored provenance: a person reading the log is asking what the app
+        // DID, and the row has to answer after the draft it belongs to has been
+        // sent, edited or thrown away.
+        if (consulted > 0) 'consulted': consulted,
+        if (provenance.documents.isNotEmpty) 'documents': provenance.documents,
+        if (provenance.directories.isNotEmpty)
+          'directories': provenance.directories,
+        if (directoryFiles.isNotEmpty) 'directory_files': directoryFiles,
+        if (pack.skills.isNotEmpty) 'skills': pack.skills,
+        // How many sections the model asked to read whole, and — when it could
+        // not be asked at all — why. The second is not a failure of the draft:
+        // the pack below it is the pack there would have been anyway, and this
+        // is what says the closer read was the thing that did not happen.
+        if (pack.expanded.isNotEmpty) 'expanded': pack.expanded.length,
+        if (pack.selectError != null) 'select_error': pack.selectError,
+      });
+    } finally {
+      // ONE exit for the word "done", covering all of them: the answer
+      // written, the answer empty, the call thrown, the row refusing to store.
+      // It runs after the body, so on the path that matters — a draft that
+      // landed — the listener is told only once the row it will re-read is
+      // there.
+      _publishStreamDone(source, key, id);
+    }
+  }
+
+  /// Feeds one chunk of the streamed answer to the reader and publishes the
+  /// parts of it a person is waiting to read.
+  ///
+  /// Everything else the object carries is dropped here rather than filtered
+  /// by the listener, because a bus is a promise about what is on it: the
+  /// evidence sentence is the model's note to the app about what it read, and
+  /// nobody watches that being typed.
+  void _publishDeltas(
+    PartialJsonStrings reader,
+    String delta,
+    String source,
+    String key,
+    String id,
+  ) {
+    for (final part in reader.feed(delta)) {
+      if (!DraftStreamEvent.isVisible(part.path)) continue;
+      _stream.publish(DraftStreamEvent(
+        source: source,
+        conversationKey: key,
+        sourceMessageId: id,
+        path: part.path,
+        delta: part.delta,
+      ));
+    }
+  }
+
+  /// The draft call has ended, however it ended. A no-op when nobody is
+  /// listening.
+  void _publishStreamDone(String source, String key, String id) {
+    if (!_stream.enabled) return;
+    _stream.publish(DraftStreamEvent.done(
       source: source,
       conversationKey: key,
-      replyToMessageId: replyTo.id,
-      body: result.replyBody,
-      evidence: result.evidence,
-      // Null rather than `[]`: "the model offered no short replies" and "the
-      // options were read and there were none" are the same thing to every
-      // reader, and one of the two spellings is shorter.
-      optionsJson: result.options.isEmpty
-          ? null
-          : jsonEncode([
-              for (final option in result.options)
-                {'stance': option.stance, 'body': option.body},
-            ]),
-      // The inventory of what went into the prompt, stored WITH the draft
-      // rather than only in the activity row — the composer's caption names
-      // what was read, and a caption assembled from the activity log would be
-      // a join against a table that gets pruned.
-      contextJson: provenance.isEmpty ? null : provenance.encode(),
-      status: 'suggested',
-    );
-    await _progress.noteDraft(source, id, state: 'done');
-    _log.note({
-      'chars': result.replyBody.length,
-      // Why there is no decision call on this row's timeline: a person asked
-      // for it, so the judgement was theirs.
-      if (request.asked) 'decision': 'asked',
-      // The activity row keeps its own copy, which is not a duplicate of the
-      // stored provenance: a person reading the log is asking what the app
-      // DID, and the row has to answer after the draft it belongs to has been
-      // sent, edited or thrown away.
-      if (consulted > 0) 'consulted': consulted,
-      if (provenance.documents.isNotEmpty) 'documents': provenance.documents,
-      if (provenance.directories.isNotEmpty)
-        'directories': provenance.directories,
-      if (directoryFiles.isNotEmpty) 'directory_files': directoryFiles,
-      if (pack.skills.isNotEmpty) 'skills': pack.skills,
-      // How many sections the model asked to read whole, and — when it could
-      // not be asked at all — why. The second is not a failure of the draft:
-      // the pack below it is the pack there would have been anyway, and this
-      // is what says the closer read was the thing that did not happen.
-      if (pack.expanded.isNotEmpty) 'expanded': pack.expanded.length,
-      if (pack.selectError != null) 'select_error': pack.selectError,
-    });
+      sourceMessageId: id,
+    ));
   }
 
   /// The passages the two prompts read, or none.

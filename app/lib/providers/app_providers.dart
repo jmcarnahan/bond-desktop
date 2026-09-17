@@ -36,6 +36,7 @@ import '../services/context/context_reconcile_handler.dart';
 import '../services/context/context_retriever.dart';
 import '../services/context/directory_access.dart';
 import '../services/draft_handler.dart';
+import '../services/draft_stream.dart';
 import '../services/drain_gate.dart';
 import '../services/embed_handler.dart';
 import '../services/extract_handler.dart';
@@ -368,6 +369,17 @@ final activityLogProvider = Provider<ActivityLog>((ref) {
 /// subscription it already has or its table would freeze mid-sync.
 final progressBusProvider = Provider<ProgressBus>((ref) {
   final bus = ProgressBus();
+  ref.onDispose(bus.dispose);
+  return bus;
+});
+
+/// Where a draft's words are announced while the model is writing them.
+///
+/// Beside [progressBusProvider] and watching nothing, for exactly its reason:
+/// a composer open across a backend switch has to keep the subscription it
+/// already has, or the preview it is showing would stop growing mid-sentence.
+final draftStreamBusProvider = Provider<DraftStreamBus>((ref) {
+  final bus = DraftStreamBus();
   ref.onDispose(bus.dispose);
   return bus;
 });
@@ -1220,6 +1232,9 @@ final Provider<AiWorker> draftWorkerProvider = Provider<AiWorker>((ref) {
         // `watch`: a width change must move the next draft, not rebuild the
         // worker holding the drain that is writing this one.
         concurrency: () => ref.read(appPrefsProvider).proseParallel,
+        // The live bus, so the draft streams. Every other build of this
+        // handler takes the disabled default and makes the plain call.
+        stream: ref.watch(draftStreamBusProvider),
       ),
     ],
     gate: ref.watch(draftDrainGateProvider),

@@ -34,6 +34,7 @@ void main() {
     VoidCallback? onUndo,
     VoidCallback? onSuggest,
     bool suggesting = false,
+    List<({String stance, String body})> streamingOptions = const [],
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -49,6 +50,7 @@ void main() {
           onUndo: onUndo,
           onSuggest: onSuggest,
           suggesting: suggesting,
+          streamingOptions: streamingOptions,
         ),
       ),
     ));
@@ -591,6 +593,82 @@ void main() {
 
       expect(find.text('Sending…'), findsOneWidget);
       expect(find.text('Undo'), findsOneWidget);
+    });
+  });
+
+  group('the cards being written', () {
+    const growing = [
+      (stance: 'Confirm Friday', body: 'Friday works — see'),
+      (stance: 'Prop', body: ''),
+    ];
+
+    testWidgets('draws one card per option, with nothing to press',
+        (tester) async {
+      await pumpBar(
+        tester,
+        options: const [],
+        streamingOptions: growing,
+        onSend: (_) {},
+      );
+
+      expect(find.byKey(QuickReplyBar.streamingKeyFor(0)), findsOneWidget);
+      expect(find.byKey(QuickReplyBar.streamingKeyFor(1)), findsOneWidget);
+      expect(find.text('Confirm Friday'), findsOneWidget);
+      expect(find.text('Friday works — see▍'), findsOneWidget);
+      // Half a reply is not a reply: there is nothing here that could send
+      // words the reader has not finished reading.
+      expect(
+        find.descendant(
+          of: find.byKey(QuickReplyBar.streamingKeyFor(0)),
+          matching: find.byType(InkWell),
+        ),
+        findsNothing,
+      );
+      expect(find.text('Tap a reply to send it — you can edit it first.'),
+          findsNothing);
+    });
+
+    testWidgets('gives way the moment real options arrive', (tester) async {
+      await pumpBar(
+        tester,
+        options: const [_confirm, _propose],
+        streamingOptions: growing,
+        onSend: (_) {},
+      );
+
+      expect(find.byKey(QuickReplyBar.streamingKeyFor(0)), findsNothing);
+      expect(find.text(_confirm.body), findsOneWidget);
+    });
+
+    testWidgets('and to the undo row, which is about something already done',
+        (tester) async {
+      await pumpBar(
+        tester,
+        options: const [],
+        streamingOptions: growing,
+        pending: (
+          body: 'Friday works.',
+          sendsAt: DateTime.now().add(const Duration(seconds: 5)),
+        ),
+        onUndo: () {},
+      );
+
+      expect(find.byKey(QuickReplyBar.streamingKeyFor(0)), findsNothing);
+      expect(find.text('Undo'), findsOneWidget);
+    });
+
+    testWidgets('the ask-for-one button still sits under them',
+        (tester) async {
+      await pumpBar(
+        tester,
+        options: const [],
+        streamingOptions: growing,
+        onSuggest: () {},
+        suggesting: true,
+      );
+
+      expect(find.byKey(QuickReplyBar.streamingKeyFor(0)), findsOneWidget);
+      expect(find.text('Drafting…'), findsOneWidget);
     });
   });
 }

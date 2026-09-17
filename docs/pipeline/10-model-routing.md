@@ -90,6 +90,21 @@ opt-in cloud drafts. On Converse a JSON answer is a forced tool call rather
 than a `response_format`, `temperature` is not sent, and the response carries
 no server timings.
 
+**One streamed call.** `LlmClient.completeJsonStreamed` is the same request with
+`"stream": true` and `"stream_options": {"include_usage": true}`, read back as
+server-sent events and handed to the caller delta by delta. It exists for one
+caller — the draft, see [07-replies.md](07-replies.md) — and it is a separate
+METHOD rather than a flag on `completeJson` because twenty-two test doubles
+override that method with its exact signature. Everything but the delivery is
+shared with the plain path: the same status mapping (5xx and 429 park, anything
+else non-200 is fatal), the same timeout over the WHOLE read rather than just
+the headers, the same `usage` and `timings` readers, the same reasoning
+tripwire, the same decode at the end — so a stream that stopped mid-object is
+the format failure a truncated plain answer is, and the observer sees exactly
+one record. That record carries one field the plain path leaves null:
+`firstTokenMs`. Streaming is OpenAI-wire only; on Converse the call degrades to
+one plain POST.
+
 ## Managed mode: one router
 
 Everything above describes the app talking to servers somebody else started.
@@ -420,7 +435,10 @@ Every chat task implements `JsonTask` (`app/lib/services/llm/json_task.dart`):
 a schema-constrained call whose defaults are temperature 0.2 / maxTokens 512,
 overridden per call site (see each stage's page). Decoding is
 grammar-constrained; `make bench-verify` asserts the server honours the
-schema before any bench run trusts it.
+schema before any bench run trusts it. `runTask(onText:)` is what picks the
+streamed method instead of the plain one, and `DraftHandler` is the only caller
+in `lib/` that passes it — every other stage, every test double and every bench
+goes through `completeJson` unchanged.
 
 **The two timeouts are one number each, sized to the longest legitimate call
 on that slot.** The prose client gets 90 s, and there are two worst cases to

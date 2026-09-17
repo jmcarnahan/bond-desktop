@@ -12,6 +12,7 @@ import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/attachments/attachment_retriever.dart';
 import 'package:bond_inbox/services/context/context_retriever.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
+import 'package:bond_inbox/services/draft_stream.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
@@ -57,6 +58,78 @@ class FakeLlm extends LlmClient {
     return Map<String, dynamic>.from(step as Map);
   }
 }
+
+/// A store whose `upsertDraft` refuses. Everything else is the real thing:
+/// the handler reads a real thread out of it and only the write fails, which
+/// is the shape of a disk that filled up between the answer and the row.
+class RefusingStore extends MessageStore {
+  RefusingStore(super.db);
+
+  @override
+  Future<void> upsertDraft({
+    required String source,
+    required String conversationKey,
+    required String replyToMessageId,
+    required String body,
+    String? evidence,
+    String? optionsJson,
+    String? contextJson,
+    String status = 'suggested',
+  }) async {
+    throw StateError('the disk is full');
+  }
+}
+
+/// A [FakeLlm] whose DRAFT call streams, in chunks that split the answer in
+/// awkward places — mid-key, mid-word, mid-escape.
+///
+/// It overrides only the new method. `completeJson` is inherited untouched, so
+/// the decision call still runs exactly as it does in every other test here,
+/// and a handler given no bus still reaches the inherited one.
+class StreamingFakeLlm extends FakeLlm {
+  StreamingFakeLlm(super.script, {this.chunks = draftChunks, this.throws});
+
+  /// The draft, in pieces. Concatenated they are the whole answer.
+  final List<String> chunks;
+
+  /// Thrown after the last chunk, for the failure case.
+  final Object? throws;
+
+  int streamedCalls = 0;
+
+  @override
+  Future<Map<String, dynamic>> completeJsonStreamed({
+    required String system,
+    required String user,
+    required Map<String, dynamic> schema,
+    String schemaName = 'result',
+    int maxTokens = 512,
+    double temperature = 0.2,
+    bool think = false,
+    required void Function(String delta) onText,
+  }) async {
+    streamedCalls++;
+    userMessages.add(user);
+    schemaNames.add(schemaName);
+    temperatures.add(temperature);
+    tokenBudgets.add(maxTokens);
+    for (final chunk in chunks) {
+      onText(chunk);
+      await Future<void>.delayed(Duration.zero);
+    }
+    final failure = throws;
+    if (failure != null) throw failure;
+    return jsonDecode(chunks.join()) as Map<String, dynamic>;
+  }
+}
+
+/// One draft answer, cut into three.
+const List<String> draftChunks = [
+  '{"evidence":"Sarah is waiting on a date.","options":[{"stance":"Conf',
+  'irm","reply_body":"Thursday still works."},{"stance":"Push","reply_bo'
+      'dy":"Friday is safer."}],"reply_body":"Hi Sarah — Thursday',
+  ' still works. I will send the addendum today."}',
+];
 
 /// The reply-decision call's answer. It comes FIRST in every script: the
 /// handler asks whether a reply is owed before it spends anything writing one.
@@ -1601,6 +1674,168 @@ void main() {
       expect(handler.concurrency, 2);
       width = 8;
       expect(handler.concurrency, 8);
+    });
+  });
+
+  group('streaming', () {
+    test('publishes the words a person reads, and nothing else', () async {
+      await seedInbound();
+      final bus = DraftStreamBus();
+      addTearDown(bus.dispose);
+      final events = <DraftStreamEvent>[];
+      Map<String, Object?>? rowWhenDone;
+      final sub = bus.stream.listen((event) async {
+        events.add(event);
+        if (event.done) {
+          rowWhenDone = await store.getDraftForMessage('email', 'm2');
+        }
+      });
+      addTearDown(sub.cancel);
+
+      await runOne(
+        DraftHandler(
+          store,
+          StreamingFakeLlm([decision()]),
+          progress: progress,
+          stream: bus,
+        ),
+      );
+      // Let the listener's own read land.
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final deltas = events.where((e) => !e.done).toList();
+      expect(deltas, isNotEmpty);
+      for (final event in deltas) {
+        expect(event.source, 'email');
+        expect(event.conversationKey, 'conv-1');
+        expect(event.sourceMessageId, 'm2');
+      }
+
+      String textOf(String path) => deltas
+          .where((e) => e.path == path)
+          .map((e) => e.delta)
+          .join();
+
+      expect(textOf('reply_body'),
+          'Hi Sarah — Thursday still works. I will send the addendum today.');
+      expect(textOf('options[0].stance'), 'Confirm');
+      expect(textOf('options[0].reply_body'), 'Thursday still works.');
+      expect(textOf('options[1].stance'), 'Push');
+      expect(textOf('options[1].reply_body'), 'Friday is safer.');
+      // Never the evidence: it is the model's note to the app about what it
+      // read, and nobody watches that being typed.
+      expect(deltas.map((e) => e.path), isNot(contains('evidence')));
+
+      // Exactly one, and only once the row it points at exists.
+      expect(events.where((e) => e.done).length, 1);
+      expect(events.last.done, isTrue);
+      expect(rowWhenDone, isNotNull);
+    });
+
+    test('a handler with no bus makes the plain call it always made',
+        () async {
+      await seedInbound();
+      final llm = StreamingFakeLlm([decision(), answer()]);
+
+      await runOne(DraftHandler(store, llm, progress: progress));
+
+      expect(llm.streamedCalls, 0);
+      // Decision then draft, both through `completeJson` — which is what every
+      // other test in this file, and every other fake in the suite, relies on.
+      expect(llm.schemaNames.length, 2);
+      expect(llm.schemaNames.last, 'draft_reply');
+      expect((await store.getDraftForMessage('email', 'm2'))!['body'],
+          startsWith('Hi Sarah — Friday works.'));
+    });
+
+    test('a draft call that fails still says it has stopped', () async {
+      await seedInbound();
+      final bus = DraftStreamBus();
+      addTearDown(bus.dispose);
+      final events = <DraftStreamEvent>[];
+      final sub = bus.stream.listen(events.add);
+      addTearDown(sub.cancel);
+
+      await expectLater(
+        runOne(
+          DraftHandler(
+            store,
+            StreamingFakeLlm(
+              [decision()],
+              throws: const LlmFormatException('cut off mid-object'),
+            ),
+            progress: progress,
+            stream: bus,
+          ),
+        ),
+        throwsA(isA<LlmFormatException>()),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      // The listener's rule is "done, so read the row". A failed call wrote no
+      // row, and the preview has to stop either way.
+      expect(events.last.done, isTrue);
+      expect(await store.getDraftForMessage('email', 'm2'), isNull);
+    });
+
+    test('a row that refuses to store still says the draft has stopped',
+        () async {
+      // The `finally` is the whole point: the reader is watching a preview,
+      // and every way this can end has to take it away — including the ways
+      // that are nobody's fault but the disk's.
+      final refusing = RefusingStore(db);
+      await seedInbound();
+      final bus = DraftStreamBus();
+      addTearDown(bus.dispose);
+      final events = <DraftStreamEvent>[];
+      final sub = bus.stream.listen(events.add);
+      addTearDown(sub.cancel);
+
+      await expectLater(
+        runOne(
+          DraftHandler(
+            refusing,
+            StreamingFakeLlm([decision()]),
+            progress: progress,
+            stream: bus,
+          ),
+        ),
+        throwsA(isA<StateError>()),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(events.where((e) => e.done).length, 1);
+      expect(events.last.done, isTrue);
+    });
+
+    test('an empty reply is a failure that still says it has stopped',
+        () async {
+      await seedInbound();
+      final bus = DraftStreamBus();
+      addTearDown(bus.dispose);
+      final events = <DraftStreamEvent>[];
+      final sub = bus.stream.listen(events.add);
+      addTearDown(sub.cancel);
+
+      await expectLater(
+        runOne(
+          DraftHandler(
+            store,
+            StreamingFakeLlm(
+              [decision()],
+              chunks: const [
+                '{"evidence":"nothing to say","options":[],"reply_body":""}',
+              ],
+            ),
+            progress: progress,
+            stream: bus,
+          ),
+        ),
+        throwsA(isA<LlmFormatException>()),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(events.last.done, isTrue);
     });
   });
 }

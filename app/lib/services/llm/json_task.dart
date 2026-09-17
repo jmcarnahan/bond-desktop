@@ -45,6 +45,13 @@ abstract class JsonTask<T> {
 /// fact about the model as a defect. Under `BENCH_THINK` the benches pass true,
 /// which drops `chat_template_kwargs` from the body entirely: the request stops
 /// claiming otherwise, and the leak count stops being a gate.
+///
+/// [onText] is what makes a call STREAM, and it is opt-in for a reason that is
+/// about the rest of the app rather than about this function: every caller in
+/// `lib/` but the draft handler leaves it null, so every one of them — and
+/// every test double, and every bench — goes through [LlmClient.completeJson]
+/// exactly as before. The answer is identical either way; the difference is
+/// that a streamed call hands over the text as it is written.
 Future<T> runTask<T>(
   LlmClient client,
   JsonTask<T> task,
@@ -52,15 +59,27 @@ Future<T> runTask<T>(
   double temperature = 0.2,
   int maxTokens = 512,
   bool think = false,
+  void Function(String delta)? onText,
 }) async {
-  final json = await client.completeJson(
-    system: task.systemPrompt,
-    user: task.buildUserMessage(input),
-    schema: task.schema,
-    schemaName: task.schemaName,
-    temperature: temperature,
-    maxTokens: maxTokens,
-    think: think,
-  );
+  final json = onText == null
+      ? await client.completeJson(
+          system: task.systemPrompt,
+          user: task.buildUserMessage(input),
+          schema: task.schema,
+          schemaName: task.schemaName,
+          temperature: temperature,
+          maxTokens: maxTokens,
+          think: think,
+        )
+      : await client.completeJsonStreamed(
+          system: task.systemPrompt,
+          user: task.buildUserMessage(input),
+          schema: task.schema,
+          schemaName: task.schemaName,
+          temperature: temperature,
+          maxTokens: maxTokens,
+          think: think,
+          onText: onText,
+        );
   return task.validate(json);
 }
