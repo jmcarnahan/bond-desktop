@@ -105,11 +105,34 @@ class ExtractionResult {
 /// One message to extract from, plus the day it is being read on. [now] is
 /// injected for the same reason `TriageInput.now` is: so a test can pin the
 /// date anchor, and so the anchor is the reader's local day.
+///
+/// The thread and the digest are CONTEXT and nothing more. The facts this
+/// stage pulls out come from the judged message alone — a topic, a person or a
+/// project read off an older turn is a fact about the thread rather than about
+/// this message, and the prompt says so between the fences.
 class ExtractionInput {
   final Message message;
   final DateTime now;
 
-  const ExtractionInput(this.message, this.now);
+  /// The messages BEFORE this one on its conversation, oldest first, quoted
+  /// the way triage quotes them. Empty is what the app passes today: extraction
+  /// sees the message alone, and what a thread buys it is measured on its own
+  /// axis before anything changes.
+  final List<Message> thread;
+
+  /// A digest of the thread before [thread], oldest first, as the golden
+  /// harness's `buildThreadDigest` (`test/fixtures/thread_digest.dart`)
+  /// renders one. Null is the normal case: the ladder was measured on
+  /// 2026-09-17 and shipped the digest to no stage, so nothing in the app
+  /// builds one today.
+  final String? threadDigest;
+
+  const ExtractionInput(
+    this.message,
+    this.now, {
+    this.thread = const [],
+    this.threadDigest,
+  });
 }
 
 /// Pulls the durable facts out of one inbound message — mail or chat: what it
@@ -195,12 +218,46 @@ class ExtractTask implements JsonTask<ExtractionResult> {
   /// Mirrors `TriageTask.buildUserMessage` deliberately, down to sharing
   /// [buildMessageBlock] with it: the date anchor sits outside the fence
   /// because it is ours, and every line of the message — headers included —
-  /// sits inside it because all of it is the sender's text.
+  /// sits inside it because all of it is the sender's text. Reading order is
+  /// the same too: digest, then tail, then the message being extracted from.
+  ///
+  /// **With neither a digest nor a thread the output is byte-identical to what
+  /// this task has always built** — the date line and one fence, with no label
+  /// between them. That is deliberate rather than incidental: the no-context
+  /// prompt is the measured control for this stage, and a label line added to
+  /// it would move every number the control is compared against.
   @override
   String buildUserMessage(ExtractionInput input) {
-    return 'Today is ${_date.format(input.now)} '
-        '(${_weekday.format(input.now)}).\n'
-        '${wrapUntrusted('inbound_message', buildMessageBlock(input.message))}';
+    final digest = input.threadDigest?.trim() ?? '';
+    final threadText = buildThreadTailText(input.thread);
+    final buffer = StringBuffer()
+      ..writeln('Today is ${_date.format(input.now)} '
+          '(${_weekday.format(input.now)}).');
+    if (digest.isNotEmpty) {
+      buffer
+        ..writeln('A digest of the thread before those messages, oldest '
+            'first, for context:')
+        ..writeln(wrapUntrusted(
+          'thread_digest',
+          fitThreadDigest(digest, threadDigestCap),
+        ));
+    }
+    if (threadText.isNotEmpty) {
+      buffer
+        ..writeln('Earlier messages on this thread, oldest first, for context:')
+        ..writeln(wrapUntrusted('thread', threadText));
+    }
+    // Only when something above it was written: with no context there is
+    // nothing to tell the model to extract from ONLY this message instead of.
+    if (digest.isNotEmpty || threadText.isNotEmpty) {
+      buffer.writeln('Extract from ONLY this message:');
+    }
+    return (buffer
+          ..write(wrapUntrusted(
+            'inbound_message',
+            buildMessageBlock(input.message),
+          )))
+        .toString();
   }
 
   /// Clamps every field, and re-checks both enums in Dart.

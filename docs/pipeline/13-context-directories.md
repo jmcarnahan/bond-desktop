@@ -934,10 +934,13 @@ locally, committing them only at the end. So a throw half way through leaves
 the excerpts, the skills and the guidance exactly as the ranking left them,
 and `ContextPack.selectError` carries the sentence for the activity row.
 
-**The fence grows, on the draft side only.** `directory_excerpts` is 8,700 in
-`draft_task.dart`: 2,500 of ranked passages plus exactly two 3,000-character
-sections and the two bracket lines the render writes above them. It is a
-ceiling for a pack that asked to read closer, not a target.
+**The fence grows, on the draft side only, and only for a pack that expanded
+something.** `directory_excerpts` in `draft_task.dart` has two caps and the
+pack chooses between them: **3,000** ordinarily, and **8,700** when
+`ContextPack.expanded` is non-empty — 2,500 of ranked passages plus exactly
+two 3,000-character sections and the two bracket lines the render writes above
+them. The larger number is a ceiling for a pack that asked to read closer, not
+a target, and `07-replies.md` carries the arithmetic for both.
 `reply_decision_task.dart` stays at **800** — the decision reads the head of
 the first section, which is the most relevant text there is, and a yes-or-no
 about whether a reply is owed needs no more than that.

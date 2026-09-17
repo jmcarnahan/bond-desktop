@@ -281,6 +281,42 @@ void main() {
       expect(llm.temperatures, [0.0]);
     });
 
+    test('extraction sees the message alone even when the thread has history',
+        () async {
+      // The context ladder measured on 2026-09-17 tried a thread for
+      // extraction on both rungs and neither shipped: the tail bought intent
+      // 75 -> 78 but lost people 87 -> 75 and project 66 -> 53, and the digest
+      // lost people 87 -> 66. `ExtractionInput` still takes `thread` and
+      // `threadDigest`; this pins that the handler passes neither, which is
+      // also what keeps the prompt byte-identical to every measured 4B row.
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'earlier',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'subject': 'Re: Launch date',
+        'from_name': 'Sarah',
+        'from_address': 'sarah@example.com',
+        'received_at': '2026-08-29T09:00:00Z',
+        'body_text': 'The build cut is scheduled for Wednesday night.',
+      });
+      await seedMessage();
+      await seedConversation();
+      final llm = FakeLlm([answer()]);
+
+      await runOne(ExtractHandler(store, llm, FakeEmbeddings().client));
+
+      final sent = llm.userMessages.single;
+      expect(sent, contains('<untrusted_data source="inbound_message">'));
+      expect(sent, isNot(contains('source="thread"')));
+      expect(sent, isNot(contains('thread_digest')));
+      expect(sent, isNot(contains('Extract from ONLY this message:')));
+      expect(
+        sent,
+        isNot(contains('The build cut is scheduled for Wednesday night.')),
+      );
+    });
+
     test('a message that vanished is done, not failed', () async {
       final llm = FakeLlm([answer()]);
 

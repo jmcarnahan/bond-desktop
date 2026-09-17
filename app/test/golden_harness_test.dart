@@ -7,6 +7,8 @@ import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/llm/reply_decision_task.dart';
+import 'package:bond_inbox/services/storyline_service.dart'
+    show StorylineTuning;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/bench_stats.dart';
@@ -529,6 +531,68 @@ void main() {
         reason: 'k=$bad',
       );
     }
+  });
+
+  test('GOLDEN_CHARTER_CAP must name a clamp somebody could run', () {
+    // Loud rather than clamped, for checkK's reason: a zero would send the
+    // confirm a storyline with no description and record the answer as a
+    // measurement of the cap that was typed.
+    expect(checkCharterCap(800), 800);
+    expect(checkCharterCap(1), 1);
+    for (final bad in const [0, -1]) {
+      expect(
+        () => checkCharterCap(bad),
+        throwsA(isA<ArgumentError>()
+            .having((e) => e.name, 'name', contains('GOLDEN_CHARTER_CAP'))),
+        reason: 'cap=$bad',
+      );
+    }
+  });
+
+  group('GOLDEN_EXTRACT_CTX names a rung extraction could actually be shown',
+      () {
+    test('the three rungs, in any case and with room around them', () {
+      expect(parseExtractCtx('none'), GoldenCtx.none);
+      expect(parseExtractCtx('TAIL3'), GoldenCtx.tail3);
+      expect(parseExtractCtx(' digest '), GoldenCtx.digest);
+    });
+
+    test('compressed is refused — extraction has no thread to ride in', () {
+      // That rung carries the digest as a synthetic thread message, and
+      // extraction has never quoted a thread. Accepting the name would
+      // quietly measure `none` under another label.
+      expect(
+        () => parseExtractCtx('compressed'),
+        throwsA(isA<ArgumentError>()
+            .having((e) => e.name, 'name', contains('GOLDEN_EXTRACT_CTX'))),
+      );
+    });
+
+    test('and so is anything else somebody typed', () {
+      for (final bad in const ['tail', '']) {
+        expect(
+          () => parseExtractCtx(bad),
+          throwsA(isA<ArgumentError>()),
+          reason: 'raw "$bad"',
+        );
+      }
+    });
+
+    test('with no define extraction reads the message alone', () {
+      // A bare `flutter test` passes none, and `none` is what the app itself
+      // gives extraction today — the control every extraction number so far
+      // was measured at.
+      expect(GoldenDefines.extractCtxRaw, 'none');
+      expect(parseExtractCtx(GoldenDefines.extractCtxRaw), GoldenCtx.none);
+    });
+  });
+
+  test("with no define the charter cap is the app's own", () {
+    // A bare `flutter test` passes no define, so this is the fallback the
+    // harness runs at. Pinned against the app's constant rather than a
+    // literal: the harness default tracks whatever the app ships, so moving
+    // `StorylineTuning.charterCap` moves the replay's control with it.
+    expect(GoldenDefines.charterCap, StorylineTuning.charterCap);
   });
 
   // ── a throttled call is retried, everything else is not ───────────────

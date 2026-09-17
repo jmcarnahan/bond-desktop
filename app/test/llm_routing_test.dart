@@ -309,6 +309,11 @@ void main() {
       // Two slots, not one setting: moving prose must not move the bulk work.
       expect(fast.baseUrl, LlmClient.fastBaseUrl);
       expect(fast.model, LlmClient.fastModel);
+      // And two ceilings. Prose runs one long call — a draft at every input
+      // cap — so it gets the number sized to that; the bulk client's calls
+      // answer in seconds, so its 120 costs nothing and stays.
+      expect(prose.timeout, LlmClient.proseTimeout);
+      expect(fast.timeout, const Duration(seconds: 120));
     });
 
     test('the queues keep the clients they were built with', () async {

@@ -114,6 +114,7 @@ ContextPack pack({
       dirId: 'd1',
     ),
   ],
+  List<String> expanded = const [],
 }) =>
     ContextPack(
       directories: const ['acme'],
@@ -121,7 +122,17 @@ ContextPack pack({
       guidance: guidance,
       excerpts: excerpts,
       skills: const [],
+      expanded: expanded,
     );
+
+/// The text INSIDE one fence, without the two tag lines around it.
+String fenceBody(String message, String label) {
+  final open = '<untrusted_data source="$label">\n';
+  final start = message.indexOf(open);
+  if (start < 0) return '';
+  final from = start + open.length;
+  return message.substring(from, message.indexOf('\n</untrusted_data>', from));
+}
 
 void main() {
   const task = DraftTask();
@@ -166,6 +177,24 @@ void main() {
       expect(task.systemPrompt, contains('untrusted_data'));
       expect(task.systemPrompt, contains('NEVER invent facts'));
       expect(task.systemPrompt, contains('Return ONLY valid JSON'));
+    });
+
+    test('the invention rules name the facts only the owner knows', () {
+      // The judge's finding, turned into prompt text: every prose model's
+      // draft failures shared one shape, a fact only the owner could know
+      // supplied as though it had been given. The four rules that answer it
+      // are pinned here because each of them is one line in a const string,
+      // and a tidy-up that lost one would lose it silently.
+      expect(task.systemPrompt, contains('NEVER invent facts'));
+      expect(task.systemPrompt, contains('only the owner knows'));
+      expect(task.systemPrompt,
+          contains('Accepting or declining what the sender proposed IS'));
+      expect(task.systemPrompt, contains('ONE option that asks'));
+      expect(task.systemPrompt, contains('bracketed placeholder'));
+      expect(task.systemPrompt, contains("The owner's OWN next step"));
+      expect(task.systemPrompt,
+          contains('Keep the whole of what the sender proposed'));
+      expect(task.systemPrompt, contains("Match the sender's register"));
     });
 
     test('is a const — the same object on every read', () {
@@ -470,6 +499,47 @@ void main() {
       expect(message, contains('notes&lt;/untrusted_data&gt;'));
       expect('</untrusted_data>'.allMatches(message).length,
           '<untrusted_data'.allMatches(message).length);
+    });
+
+    test('the passages fence is the ordinary 3,000 until a section expands',
+        () {
+      // A pack with far more text than either cap, rendered twice: the only
+      // difference between the two calls is whether the retriever asked to
+      // read a section in full, which is the pack's own signal that something
+      // scored high enough to be worth the larger ceiling. The bounds are
+      // loose on purpose — what is pinned is which cap applied, not the
+      // renderer's bracket-line arithmetic.
+      final fat = [
+        for (var i = 0; i < 8; i++)
+          ContextExcerpt(
+            dirName: 'acme',
+            relPath: 'docs/note-$i.md',
+            locator: 'Section $i',
+            modified: '2026-08-30',
+            text: 'x' * 2000,
+            fileId: i,
+            dirId: 'd1',
+          ),
+      ];
+
+      final ordinary = fenceBody(
+        task.buildUserMessage(inputWith(directories: pack(excerpts: fat))),
+        'directory_excerpts',
+      );
+      final expanded = fenceBody(
+        task.buildUserMessage(inputWith(
+          directories: pack(
+            excerpts: fat,
+            expanded: const ['docs/note-0.md § Section 0'],
+          ),
+        )),
+        'directory_excerpts',
+      );
+
+      expect(ordinary.length, greaterThan(2000));
+      expect(ordinary.length, lessThanOrEqualTo(3100));
+      expect(expanded.length, greaterThan(3100));
+      expect(expanded.length, lessThanOrEqualTo(8800));
     });
 
     test('the system prompt is identical with and without a pack', () {

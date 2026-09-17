@@ -66,6 +66,7 @@ NeedsYouInput inputWith({
   String? ownerName,
   String? ownerAddress,
   List<String> attachmentDigests = const [],
+  String? threadDigest,
 }) =>
     NeedsYouInput(
       message: message ?? mail(),
@@ -74,6 +75,7 @@ NeedsYouInput inputWith({
       ownerName: ownerName,
       ownerAddress: ownerAddress,
       now: DateTime(2026, 8, 29),
+      threadDigest: threadDigest,
     );
 
 void main() {
@@ -420,6 +422,103 @@ void main() {
       task.buildUserMessage(
         inputWith(attachmentDigests: const ['Lease.pdf: It rises.']),
       );
+
+      expect(identical(task.systemPrompt, before), isTrue);
+    });
+  });
+
+  // The THREAD digest, which is a different thing from the attachment digests
+  // the group above pins: that one is what the files say, this one is what the
+  // conversation said before the turns quoted here.
+  group('thread digest', () {
+    String fenced(String prompt) {
+      const open = '<untrusted_data source="thread_digest">\n';
+      final start = prompt.indexOf(open) + open.length;
+      return prompt.substring(
+        start,
+        prompt.indexOf('\n</untrusted_data>', start),
+      );
+    }
+
+    test('thread digest — no fence when the caller passes none', () {
+      final prompt = task.buildUserMessage(inputWith(thread: [sent()]));
+
+      expect(prompt, isNot(contains('thread_digest')));
+      expect(prompt, isNot(contains('A digest of the thread')));
+    });
+
+    test('thread digest — an empty one renders nothing either', () {
+      for (final empty in const ['', '  ']) {
+        expect(
+          task.buildUserMessage(inputWith(threadDigest: empty)),
+          isNot(contains('thread_digest')),
+          reason: 'digest "$empty"',
+        );
+      }
+    });
+
+    test('thread digest — fenced, under a label of ours', () {
+      final prompt = task.buildUserMessage(inputWith(
+        threadDigest: '2026-08-01 · Priya Natarajan: The sheet went to print.',
+      ));
+
+      final label = prompt.indexOf('A digest of the thread before those '
+          'messages, oldest first, for context:');
+      expect(label, greaterThan(0));
+      expect(
+        label,
+        lessThan(prompt.indexOf('<untrusted_data source="thread_digest">')),
+      );
+      expect(fenced(prompt),
+          '2026-08-01 · Priya Natarajan: The sheet went to print.');
+    });
+
+    test('thread digest — after the owner line, before the quoted turns', () {
+      final prompt = task.buildUserMessage(inputWith(
+        thread: [sent()],
+        ownerName: 'Alex Rivera',
+        ownerAddress: userAddress,
+        threadDigest: 'older still',
+      ));
+
+      // The owner line is the app's own statement and stays above every fence;
+      // the digest is the oldest of the quoted things and leads them.
+      expect(
+        prompt.indexOf('The owner of this inbox is'),
+        lessThan(prompt.indexOf('A digest of the thread')),
+      );
+      expect(
+        prompt.indexOf('source="thread_digest"'),
+        lessThan(prompt.indexOf('source="thread"')),
+      );
+      expect(
+        prompt.indexOf('source="thread"'),
+        lessThan(prompt.indexOf('Judge ONLY this message:')),
+      );
+    });
+
+    test('thread digest — a long one is fitted to 900 characters', () {
+      final digest = [
+        '(thread has 90 earlier messages; 30 quoted below)',
+        for (var i = 0; i < 30; i++)
+          '2026-08-${(i % 28) + 1} · Priya Natarajan: ${'turn $i, ' * 12}',
+      ].join('\n');
+      expect(digest.length, greaterThan(2000));
+
+      final inside = fenced(task.buildUserMessage(
+        inputWith(threadDigest: digest),
+      ));
+
+      expect(inside.length, lessThanOrEqualTo(900));
+      expect(inside, startsWith('(thread has 90 earlier messages;'));
+      expect(inside, contains('turn 29,'));
+      expect(inside, isNot(contains('turn 0,')));
+    });
+
+    test('thread digest — the system prompt does not move for it', () {
+      final before = task.systemPrompt;
+      task.buildUserMessage(inputWith());
+      task.buildUserMessage(inputWith(threadDigest: 'older still'));
 
       expect(identical(task.systemPrompt, before), isTrue);
     });

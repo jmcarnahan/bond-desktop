@@ -40,9 +40,31 @@ class DraftHandler extends WorkHandler {
 
   /// A reply is longer than a label. The default 512 is enough to truncate a
   /// 150-word draft mid-sentence, and a cut-off draft is grammar-valid, so
-  /// nothing downstream would notice. The answer now carries the two short
-  /// options as well as the long form, so the ceiling went up with it.
-  static const int _maxTokens = 1536;
+  /// nothing downstream would notice. The answer carries the two short options
+  /// as well as the long form, so the ceiling has to clear both.
+  ///
+  /// 768 is that ceiling, measured rather than guessed. Completion tokens on
+  /// the golden drafts: the 27B median 155, p90 270, max 316; Opus 5 median
+  /// 355, p90 521, max 584. The live activity log's `draft` rows over 57
+  /// entries: median 182, p90 244, max 301. So 768 is 2.4× the largest LOCAL
+  /// draft ever measured (316 tokens on the 27B) and 1.2× the largest cloud
+  /// one (655, Opus 5 on the shipped rules; 584 before this round) — room over
+  /// the model that does the work, and a real ceiling over the ones that do
+  /// not. The old 1,536 was five times the local maximum and bought nothing
+  /// but more time for a wedged model to ramble.
+  ///
+  /// Public because the live benches (`llm_golden_live_test.dart`,
+  /// `llm_prose_live_test.dart`) draft at the handler's budget; a bench that
+  /// repeats the number instead of reading it measures a prompt this app does
+  /// not send.
+  static const int draftMaxTokens = 768;
+
+  /// The newest turns of [thread] that `DraftTask` renders — the same window
+  /// it cuts, so a rule about "what the prompt shows" reads the same list.
+  static List<Message> _shownTail(List<Message> thread) =>
+      thread.length > DraftTask.maxThreadMessages
+          ? thread.sublist(thread.length - DraftTask.maxThreadMessages)
+          : thread;
 
   /// A yes/no and one sentence. Room for the sentence to run long, and no room
   /// for the model to start drafting inside the decision.
@@ -264,7 +286,16 @@ class DraftHandler extends WorkHandler {
         // chat never writes ('[]'), so the skip only makes explicit what the
         // LIKE would answer anyway — and a chat needs it less: the thread tail
         // already carries the owner's own chat voice, turn by turn.
-        styleExamples: source == 'email'
+        //
+        // And mail only when the owner has not already spoken in THIS thread —
+        // in the part of it the prompt will actually show. Their own turn, on
+        // this subject, to this person, is a better tone sample than two old
+        // replies to someone else about something else — so when the rendered
+        // tail carries one the examples are dropped, and the prompt is shorter
+        // for it. The window is [DraftTask.maxThreadMessages], the newest
+        // turns; an owner turn older than that is not in the prompt, so it
+        // cannot stand in for the examples and they stay.
+        styleExamples: source == 'email' && !_shownTail(thread).any((m) => m.outbound)
             ? await _styleExamplesFor(source, replyTo.fromAddress)
             : const [],
         storylineSummary: await _storylineSummaryFor(source, key),
@@ -276,7 +307,7 @@ class DraftHandler extends WorkHandler {
       // Zero, like extraction: pressing Regenerate should change the draft
       // because the thread changed, not because the sampler rolled differently.
       temperature: 0,
-      maxTokens: _maxTokens,
+      maxTokens: draftMaxTokens,
     );
 
     if (result.replyBody.isEmpty) {

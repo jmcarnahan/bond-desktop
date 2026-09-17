@@ -46,8 +46,9 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
 - `BENCH_VERIFY` — `0` skips the contract check that otherwise runs before
   every bench.
 - `BENCH_K` — the concurrencies `make drain` races, in order (e.g. `1,3,6`).
-- `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_K`, `GOLDEN_OWNER_NAME` /
-  `GOLDEN_OWNER_ADDRESS` — see "The golden set".
+- `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_EXTRACT_CTX`, `GOLDEN_K`,
+  `GOLDEN_CHARTER_CAP`, `GOLDEN_OWNER_NAME` / `GOLDEN_OWNER_ADDRESS` — see
+  "The golden set".
 
 Name the weights in a label, not just the runtime: two quantizations of one
 model otherwise produce two identical-looking tables. Once two runs have
@@ -179,27 +180,42 @@ phase, by a judge that grades the baseline and every candidate alike.
 **The context ladder.** The set exists partly because the pipeline is
 inconsistent about thread context: triage and needs-you see the last three
 messages at 300 characters each, extraction sees the judged message completely
-alone. So every item carries three rungs, and `GOLDEN_CTX` picks which one the
+alone. So every item carries four rungs, and `GOLDEN_CTX` picks which one the
 replay shows triage and needs-you:
 
 | rung | what the thread carries |
 |---|---|
 | `none` | the message alone |
 | `tail3` | the last three messages, 300 characters each — what ships today |
-| `compressed` | the tail, led by an extractive digest of everything earlier |
+| `compressed` | the tail, led by an extractive digest of everything earlier as a synthetic thread message (the superseded 2026-09-14 form) |
+| `digest` | the tail, plus the digest as its own `thread_digest` fence, 900 characters, trimmed by whole lines from the old end (2026-09-16; supersedes `compressed`) |
 
 The digest is extractive, never generated: a model inside the fixture would
-make it irreproducible, and a generated summary leaks the answer. It rides in
-as one synthetic leading thread message rather than as a new prompt field,
-because a measurement round does not edit the prompts it measures. Two
-consequences follow from riding in that fence. Triage and needs-you keep only
-the newest three thread messages, so at this rung the digest takes one of the
-three slots and the two newest tail messages take the others — a fourth would
-push the digest, the oldest, straight out. **And both clip a thread message at
-300 characters, so what they actually see of a digest is its head**: the
-median digest in the set is about 670 characters, so the clip bites on roughly
-two thirds of them. The `compressed` rung is therefore a lower bound on what
-real compression would buy, and any row run at it says so.
+make it irreproducible, and a generated summary leaks the answer. `compressed`
+rode it in as one synthetic leading thread message rather than as a new prompt
+field, on the principle that a measurement round does not edit the prompts it
+measures. Two consequences followed from riding in that fence. Triage and
+needs-you keep only the newest three thread messages, so at that rung the
+digest takes one of the three slots and the two newest tail messages take the
+others — a fourth would push the digest, the oldest, straight out. **And both
+clip a thread message at 300 characters, so what they actually saw of a digest
+was its head**: the median digest in the set is about 670 characters, so the
+clip bit on roughly two thirds of them. The `compressed` rung is therefore a
+lower bound on what real compression would buy, and any row run at it says so.
+`digest` is what replaced it: the three tasks gained a `threadDigest` field of
+their own, so the digest is no longer a thread message, no longer clipped to
+300, and no longer stealing a tail slot — it is its own fence above the tail,
+capped at 900 characters by `fitThreadDigest`, which drops whole lines from the
+OLD end and keeps the header line. Prefer `digest`; `compressed` stays only so
+older rows can be read.
+
+`GOLDEN_EXTRACT_CTX` is extraction's own axis — `none` (the default, what
+ships), `tail3` or `digest` — because extraction's question is not triage's
+and the two stages had never been measured apart. It is recorded as
+`extra.extract_ctx` in the timing JSON, and every run prints a
+`digests: N items carry one, M trimmed to 900` line so a reader knows how much
+of the set the rung actually touched.
+
 Gold records, per stage, which rung a label needs, so
 `BREAKDOWN=derivable_from` answers the question the ladder was built for: what
 does context buy, and where.
@@ -214,7 +230,8 @@ carry.
 ```sh
 make golden                               # bulk slot, tail3 — the shipping rung
 make golden GOLDEN_CTX=none               # the same, message alone
-make golden GOLDEN_CTX=compressed         # the digest rung, with its caveat
+make golden GOLDEN_CTX=digest GOLDEN_EXTRACT_CTX=digest   # the digest as its own fence, extraction on the same rung
+make golden GOLDEN_CTX=compressed         # the digest rung, with its caveat (superseded)
 make golden BENCH_URL=… BENCH_LABEL=…     # point it at a candidate
 make golden-prose                         # prose slot: decisions + drafts
 ```
@@ -509,6 +526,12 @@ not in date order.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-09-12 | — | the shipping app, as stored | tail3 | none — `--baseline` | 94% / 88% / 68% / 77% / 94% / 84% / 45% / 67% / 31% / 86% | Opus 4.5 judge: label 86% · action items 59% · summary 54% · needs-you evidence 37% · extract evidence 24% — Claude Code subagent judge: label 82% · action items 54% · summary 37% · needs-you evidence 29% · extract evidence 22% | — | — | — | — | the shipping app's stored output; gate 76/100, storyline 42/99 with no correct positive |
 | 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | 89% / 89% / 66% / 70% / 92% / 75% / 39% / 66% / 26% / 87% | label 84% · action items 67% · summary 39% · needs-you evidence 27% · extract evidence 25% | 2436 / 1616 / 1950 (triage / needs_you / extraction) | 41.4 | 8.9 | $0.00 | the shipping bulk model, replayed; second of two passes |
+| 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-184707.json` | 88% / 88% / 72% / 75% / 89% / 75% / 39% / 66% / 26% / 87% | label 86% · action items 60% · summary 66% · needs-you evidence 36% · extract evidence 25% | 7321 / 4809 / 5399 (triage / needs_you / extraction) | 16.9 | 12.4 | $0.00 | round B phase 1, summary rule + needs-you evidence bullet v1 ("naming the specific words… and who is asking") — the bullet is NOT shipped: 27 of 64 evidence sentences reached the 300-character clamp (1 before) and the verdict fell 92 → 89; second of two passes (first: summary 63, evidence 34, traps 5); K=4 on 4 slots, so p50s include batching and msgs/min is not comparable with the K=1 rows; traps 4 items |
+| 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-192254.json` | 88% / 88% / 71% / 74% / 86% / 75% / 39% / 66% / 26% / 87% | label 88% · action items 60% · summary 63% · needs-you evidence 9% · extract evidence 25% | 7669 / 3006 / 5454 (triage / needs_you / extraction) | 16.1 | 13.1 | $0.00 | round B phase 1, summary rule + evidence bullet v2 ("ONE short sentence, under 30 words, quoting…") — NOT shipped: the verdict fell to 86 and the sentence to 9%; evidence avg 121 chars, none at the cap; second of two passes; K=4; traps 4 items |
+| 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-194031.json` | 88% / 88% / 71% / 72% / 92% / 75% / 39% / 66% / 26% / 87% | label 86% · action items 60% · summary 63% · needs-you evidence 28% · extract evidence 25% | 7563 / 3569 / 5891 (triage / needs_you / extraction) | 16.2 | 12.5 | $0.00 | ROW OF RECORD for round B phase 1: the summary rule alone, the evidence bullet as it was; second of two passes (first: 71 / 74 / 92, not judged); K=4 on 4 slots, so p50s include batching and msgs/min is not comparable with the K=1 rows; traps 4 items (3 on the before row); summaries avg 237 / median 212 chars, 1 of 76 at the 500 cap (before avg 128, none at the cap); kept items carrying any action item 45 (before 51) |
+| 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | none | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-233417.json` | 84% / 91% / 70% / 68% / 93% / 75% / 39% / 66% / 26% / 87% | label 82% · action items 56% · summary 64% · needs-you evidence 34% · extract evidence 25% | 6713 / 3317 / 5189 (triage / needs_you / extraction) | 17.0 | 13.4 | $0.00 | round B phase 3 ladder, run A: `none` under the Phase 1 prompt, extract ctx none; second of two passes (first `…232638`: 70 / 70 / 93, not judged); extraction identical to every prior 4B row; K=4; summaries avg 236 chars, 3 of 76 at the cap; against round 0's `none` (78 / 78, old prompt) the summary rule changed what the message alone buys |
+| 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | digest | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-235139.json` | 88% / 88% / 70% / 74% / 92% / 76% / 37% / 53% / 30% / 66% | label 89% · action items 62% · summary 68% · needs-you evidence 30% · extract evidence 26% | 8518 / 3825 / 5942 (triage / needs_you / extraction) | 15.9 | 11.9 | $0.00 | round B phase 3 ladder, run B: the digest as its own 900-char fence above the tail (39 items carry one, 17 trimmed), extract ctx digest; second of two passes (first `…234306`: 67 / 70 / 92, not judged); NOT SHIPPED — the booleans did not move by 4 against none or tail3 while label / summary / action items rose 82 → 89 / 64 → 68 / 56 → 62 and needs-you evidence fell 34 → 30; extraction with digest + tail loses people 87 → 66 and project 66 → 53; K=4; summaries avg 245 chars, 6 of 76 at the cap |
+| 2026-09-17 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json` | 88% / 88% / 71% / 72% / 92% / 78% / 39% / 53% / 25% / 75% | — | 7467 / 3791 / 5703 (triage / needs_you / extraction) | 16.4 | 12.6 | $0.00 | round B phase 3 ladder, run C: a third `tail3` sample of the Phase 1 prompt for triage / needs-you (matches the `…194031` record within the floor; first pass `…000012`: 72 / 75 / 92), extract ctx tail3 — extraction WITH the tail, NOT SHIPPED: intent 75 → 78, people 87 → 75, project 66 → 53; not judged (the record row is the judged tail3 point); K=4 |
 | 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | none | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-032602.json` | 88% / 91% / 78% / 78% / 93% / 75% / 39% / 66% / 26% / 87% | pass 1 judge: label 83% · action items 71% · summary 34% · needs-you evidence 34% · extract evidence 24% (pass 2 not judged) | 2232 / 1513 / 2113 (triage / needs_you / extraction) | 40.3 | 8.9 | $0.00 | context ladder: message alone; second of two passes — pass 1 (2026-09-14) read needs_action 75 / reply_expected 75; 4 slots at 4096 tokens each, no failures |
 | 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | compressed | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-181030.json` | 89% / 89% / 68% / 74% / 91% / 75% / 39% / 66% / 26% / 87% | label 80% · action items 62% · summary 33% · needs-you evidence 25% · extract evidence 24% | 2452 / 1684 / 2028 (triage / needs_you / extraction) | 40.4 | 8.7 | $0.00 | context ladder: digest + two newest tail messages, 300-char clip — lower bound (one pass) |
 | 2026-09-14 | bulk | llamacpp/Qwen3.5-4B-UD-Q4_K_XL | tail3 | `golden-run-llamacpp-qwen3-5-4b-ud-q4-k-xl-20260914-190503.json` | 91% / 89% / 66% / 83% / 87% / 79% / 66% / 63% / 29% / 88% | label 82% · action items 53% · summary 16% · needs-you evidence 23% · extract evidence 33% | 2838 / 1716 / 2745 (triage / needs_you / extraction) | 36.9 | 7.5 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
@@ -526,6 +549,14 @@ not in date order.
 | 2026-09-15 | prose | bedrock/claude-opus-5 | tail (fixed) | `golden-run-bedrock-claude-opus-5-20260915-014610.json` | — / — / — / 78% / — / — / — / — / — / — | draft 48% | 2162 / 5365 (reply_decision / draft_reply) | 51.9 | 56.8 | $17.17 | Converse, no temperature; K=4 |
 | 2026-09-15 | prose | bedrock/nemotron-super-3-120b | tail (fixed) | `golden-run-bedrock-nemotron-super-3-120b-20260915-014735.json` | — / — / — / 66% / — / — / — / — / — / — | draft 28% | 760 / 1319 (reply_decision / draft_reply) | 70.7 | 189.1 | $0.24 | OpenAI wire; K=4 |
 | 2026-09-15 | prose | bedrock/deepseek-v3.2 | tail (fixed) | `golden-run-bedrock-deepseek-v3-2-20260915-015039.json` | — / — / — / 78% / — / — / — / — / — / — | draft 40% | 1045 / 3011 (reply_decision / draft_reply) | 20.7 | 64.0 | $0.84 | OpenAI wire; K=4 |
+| 2026-09-16 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260916-210618.json` | — / — / — / 82% / — / — / — / — / — / — | draft 32% | 6138 / 12324 (reply_decision / draft_reply) | 8.2 | 5.0 | $0.00 | invention rules v2, draft budget 768, K=1 with MTP; invented 11 of 17 failing; second of two passes |
+| 2026-09-16 | prose | bedrock/claude-opus-5 | tail (fixed) | `golden-run-bedrock-claude-opus-5-20260916-211138.json` | — / — / — / 78% / — / — / — / — / — / — | draft 48% | 2586 / 6324 (reply_decision / draft_reply) | 44.1 | 34.5 | $17.85 | invention rules v2, draft budget 768; invented 11 of 13 failing; 25 throttle retries, all recovered; Converse, no temperature; K=4 |
+| 2026-09-16 | prose | bedrock/claude-sonnet-5 | tail (fixed) | `golden-run-bedrock-claude-sonnet-5-20260916-211454.json` | — / — / — / 67% / — / — / — / — / — / — | draft 68% | 2416 / 4498 (reply_decision / draft_reply) | 48.0 | 59.8 | $7.02 | invention rules v2, draft budget 768; invented 6 of 8 failing; Converse, no temperature; K=4 |
+| 2026-09-16 | prose | bedrock/deepseek-v3.2 | tail (fixed) | `golden-run-bedrock-deepseek-v3-2-20260916-211815.json` | — / — / — / 72% / — / — / — / — / — / — | draft 36% | 961 / 2095 (reply_decision / draft_reply) | 35.2 | 109.3 | $0.90 | invention rules v2, draft budget 768; invented 9 of 16 failing; OpenAI wire; K=4 |
+| 2026-09-16 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260916-214911.json` | — / — / — / 82% / — / — / — / — / — / — | draft 24% | 6077 / 13269 (reply_decision / draft_reply) | 8.2 | 5.0 | $0.00 | invention rules v3 SHIPPED, draft budget 768, K=1 with MTP; invented 14 of 19 failing; identical drafts to pass 1, which a second judge run scored 32% / invented 12 — judge noise ±2 |
+| 2026-09-16 | prose | bedrock/claude-opus-5 | tail (fixed) | `golden-run-bedrock-claude-opus-5-20260916-215244.json` | — / — / — / 75% / — / — / — / — / — / — | draft 68% | 2252 / 5606 (reply_decision / draft_reply) | 50.9 | 55.6 | $17.98 | invention rules v3 SHIPPED, draft budget 768; invented 6 of 8 failing; Converse, no temperature; K=4 |
+| 2026-09-17 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260917-020022.json` | — / — / — / 82% / — / — / — / — / — / — | draft 20% | 6110 / 12453 (reply_decision / draft_reply) | 8.4 | 4.9 | $0.00 | invention rules v4 SHIPPED (the two-options example no longer contradicts the owner-only bullet); 5 of 25 against v3's 6, inside the judge's ±2; invented 14 of 20 — the SAME 14 items as v3, none new, none cleared, with 21 of 25 texts changed; drafts asking a question 3 → 8; max completion 322; MTP; K=1; pass 2 `…021535` byte-identical on all 25 drafts and every decision (this row cites the judged pass 1) |
+| 2026-09-17 | prose | bedrock/claude-opus-5 | tail (fixed) | `golden-run-bedrock-claude-opus-5-20260917-014357.json` | — / — / — / 78% / — / — / — / — / — / — | draft 68% | 2264 / 5580 (reply_decision / draft_reply) | 50.5 | 55.1 | $18.03 | invention rules v4 SHIPPED; 17 of 25 with invented 6 of 8, identical to v3; ONE pass (Converse, no temperature — a noisier read than the local row by design of the budget); max completion 672; K=4 |
 
 **What the first rows say** (2026-09-14, all at `GOLDEN_K=1`, keep-only, every
 row the second of two passes unless its note says otherwise; the 2026-09-16
@@ -538,8 +569,10 @@ context ladder on the 4B is the row worth re-reading: the thread tail lowers
 needs-action (75% alone → 66% with it) and reply-expected (75 → 70; the
 `none` rung's second pass of 2026-09-16 reads 78 and 78, item 7), on the
 items whose gold label needs the tail as much as on the rest, and the digest
-rung sits between the two. Extraction is identical across rungs by
-construction — it has no thread field. The 27B doing bulk work is the ceiling
+rung sits between the two. Extraction was identical across those rungs by
+construction — it had no thread field until round B phase 3, and since then
+it reads its own knob (`GOLDEN_EXTRACT_CTX`), so a `GOLDEN_CTX` rung still
+moves nothing in it. The 27B doing bulk work is the ceiling
 for these prompts (needs-action 72, reply-expected 84, needs-you 93) at six
 times the shipping model's time per message. On the prose slot the dedicated
 reply decision scores 82% against gold reply-expected, twelve points above the
@@ -609,6 +642,163 @@ is model-independent and comes before any prose model swap. The Converse rows
 sampled at the models' default temperature; the OpenAI-wire rows ran the
 handlers' own.
 
+**Prompt round (2026-09-16), phase 1 — the summary rule, and an evidence
+sentence that was measured and not shipped.** The triage prompt's summary
+bullet now names what the sentence must carry — the concrete thing the message
+is about, what it asks of the reader or that it asks nothing, and the date,
+amount, place or name the matter turns on — and forbids both guessing a fact
+the message does not state and restating the label. The before is the replayed
+4B `tail3` row of 2026-09-14 (`…174707`, K=1) and the row of record is
+`…194031`, the second of two passes at K=4 with the summary rule alone; K is
+the one setting that differs between the pair, and it is not what moved the
+numbers, because extraction and the needs-you verdict reproduced the K=1 row
+exactly at K=4. Keep-only, the summary went 39% to 63% on the row of record
+and read 66 / 63 / 63 / 63 across the four judged runs of the phase, so the
+gain is twenty-plus points and stable, well outside any move the judge has
+shown between identical passes. needs_action went 66 to 71 (71–72 across the
+runs) and reply_expected 70 to 72 (72–76); category and urgency went 89 to 88,
+inside the floor; needs_you is unchanged at 92; extraction is unchanged by
+construction, its prompt having not changed. The forbidden-fact traps fired on
+4 items against 3 before — one first pass reached 5, which is above the
+ceiling of 4 the phase set for itself and is recorded here as such. Summaries
+nearly doubled in length, an average of 237 characters against 128, with 1 of
+76 reaching the 500-character hard clamp on the row of record and 2 to 4 on
+the other passes; a summary that reaches the clamp is cut mid-word. The cost
+is action items, 67% to 60% (58–60 across the four runs), which is 3 of 45
+judged items and outside the four-point guard the round set. The mechanism is
+in the counts rather than guessed at: kept items carrying any action item fell
+from 51 to 45 (42 on the two runs that also carried evidence bullet v1), the
+rubric points the action items now miss are required steps (10 to 14 missing
+points) rather than invented ones ("none for the owner" failures went 6 to 5),
+and the same conservatism is what lifted `needs_action` — recorded as the
+trade the phase shipped, with the action-items bullet itself untouched and the
+next experiment. The needs-you evidence sentence (recommendation item 2) was
+run and is NOT shipped: a bullet asking for the specific words that point at
+the owner lifted the judged sentence 27 to 36 but put 27 of 64 sentences at
+the 300-character clamp against 1 before, and cost the verdict 92 to 89, while
+a second wording asking for one short sentence under thirty words kept every
+sentence under the clamp at an average of 121 characters and scored 9% with
+the verdict at 86. The verdict is the chip the owner sees and the sentence
+sits behind it, so the original bullet ships — 28% on the row of record,
+inside the noise of its 27 — and both rows stay in the ledger for the next
+attempt to read first. The lesson is worth its own sentence: a rubric pass
+rate does not see a clamp, so every prompt change that lengthens a shown field
+now gets an at-the-cap count on the same tally.
+
+**Prompt round (2026-09-16), phase 2 — drafts that ask instead of invent, and
+the budgets.** The draft prompt's invention rule became invention *rules*.
+Version 2 added four bullets: a fact only the owner knows is never supplied
+and is asked for or left as a bracketed placeholder; the owner's own next step
+is not an invention; the whole of what the sender proposed is answered, never
+half of it; and the reply matches the sender's register. All four prose models
+were re-run and re-judged on v2, none met the round's exit of three or fewer
+invented per model, and the plan's one allowed revision was spent the same
+day. Version 3, which ships, changes three things: the two-options bullet now
+says that two answers differing only by a fact the owner has not given are one
+option that asks; the owner-only bullet asks the model to enumerate the
+missing owner-only facts before it writes and states outright that accepting
+or declining what the sender proposed IS supplying such a fact; and the
+next-step bullet no longer licenses proposing a time — it permits asking to
+set one up, as long as it names no time. Per the plan, v3 was re-run on the
+27B and on the worst cloud model under v2, which was Opus 5; Sonnet 5 and
+DeepSeek V3.2 are measured on v2 only. Drafts passing of the 25 reply-rubric
+items, baseline → v2 → v3: the 27B 5 → 8 → 6, Opus 5 12 → 12 → 17, Sonnet 5
+10 → 17, DeepSeek V3.2 10 → 9. Invented, counted over each row's failing
+drafts: the 27B 10 of 20 → 11 of 17 → 14 of 19, Opus 10 of 13 → 11 of 13 → 6
+of 8, Sonnet 12 of 15 → 6 of 8, DeepSeek 10 of 15 → 9 of 16. So the exit was
+missed on every model and the best any row reached is six — Opus on v3 and
+Sonnet on v2 — twice the number the round set out to hit, and the shipped
+change is worth five drafts on Opus and nothing on the local model.
+
+The per-item counts say why, and they are the finding of the phase. On the
+27B the same nine items are flagged invented under baseline, v2 and v3 — plus
+two more under v2 and three under v3 — while 24 of the 25 draft texts changed
+under v2, so the model rewrote almost everything and went on supplying the
+same facts. On Opus the overlap is real but moves: v2 flagged the same eight
+items baseline did plus three, and v3 flagged six, all of them among v2's
+eleven. The shapes agree. Drafts containing a question, baseline → v2 → v3,
+were 9 → 4 → 3 on the 27B and 13 of 25 on Opus v3; drafts offering two options
+went 10 → 17 → 14 on the 27B and 14 of 25 on Opus v3; and not one 27B draft in
+any pass left a bracketed placeholder, against none on Opus v3 either. A local
+model that writes fewer questions under a rule telling it to ask more is not
+failing to understand the wording, and no further wording is likely to move
+it: the next lever on the 27B is structural — a separate owner-only-facts step
+that runs before drafting and hands the writer the list — which is a Round C
+or F item, not a prompt edit.
+
+Three caveats travel with the numbers. The judge has a noise floor of its own
+and this phase measured it: the 27B's v3 pass 1 (`…213355`) produced drafts
+byte-identical to the row of record on all 25 items, and a second judge run
+over those identical drafts scored 8 of 25 with invented 12, against the row
+of record's 6 and 14 — two either way on both counts, so no two-point
+difference in this paragraph is a finding. The decision stage did not change
+and its prompt was untouched: the 27B reproduced 82% on every pass, while the
+cloud rows sample at their default temperature and DeepSeek's decision moved
+six items between its own two passes today (78 then 72) and Sonnet's five, so
+cloud decision numbers carry a floor of about six points and none of today's
+decision movement is a prompt effect. And the local row is K=1 while every
+cloud row is K=4. On budgets the round is clean: no run's draft reached 700
+completion tokens — the largest is 655, on Opus v3 — so the 768 ceiling holds
+with room, and the evidence sentence reached its 300-character clamp on one
+Opus draft under v2 and one under v3 and on nothing else. Draft p50 on the 27B
+is 12.3 s on v2 and 13.3 s on v3 against the 2026-09-14 row's 16.6 s, and
+that gap is MTP rather than the budget — the 2026-09-14 row is pre-MTP. The
+budget bought no speed at all, which `bench-prose` says plainly: the row of
+record (`prose-…-20260917-012727.json`, second of two passes, re-run on the
+round's whole-branch review because the 2026-09-16 row's recap leg had run
+at the generic 512 while saying 384 — a harness gap, since fixed) reads draft
+p50 16.1 s, recap 11.8 s and name 8.6 s against round 0's 16.1 s kept /
+14.9 s first pass, 12.7 s and 8.5 s — unchanged within that bench's own
+noise. The reason is that neither ceiling is ever reached: the bench's drafts
+generated 1,104 tokens over five, about 221 each against 768, and its recaps
+537 over three, about 179 against 384 — the same token totals to the digit as
+the 512 run, which is what "the budget binds nothing" looks like at
+temperature 0. What a smaller ceiling buys is the WORST case. A
+rambling or wedged generation now stops at 768 tokens, roughly 43 s of
+generation, where 1,536 would have run to about 86 s — and that, not any p50,
+is what lets the prose timeout come down from 120 s to 90 s. The phase's other
+budget went the same way: the confirm task's charter clamp was raised to 800
+and 1200 against the same cards and made the 4B worse both times —
+`storyline.id` 81 / 78 / 77%, forbidden-accept 20 / 25 / 26% — so the cap
+stays at 400 and only the knob that measured it is new. The confirm rows carry
+that ladder in full. The v3 text carries one contradiction its measurement did not resolve, found on the round's whole-branch review: the two-options bullet still offers "accepting versus declining" as its example and the stance examples read "Confirm Friday" / "Decline politely", while the owner-only bullet says accepting or declining what the sender proposed IS supplying a fact only the owner holds. A model reading both is being told two things, which is a plausible part of why the 27B's nine flagged items never moved. v4 is the fix, measured the same day: the example replaced by two answers the thread can support, the conjunct "AND the thread already holds what each one needs" added, and "accepting or declining what was proposed" added to the one-option-that-asks list — under a rule written first (27B within 2 drafts of v3's 6 and within 2 invented of 14; Opus within 3 of 17): Opus 5 read 17 of 25 with 6 of 8 invented, identical; the 27B read 5 of 25 with the same 14 items flagged, none new and none cleared, across 21 changed texts (fourteen against the nine above: nine is the set flagged under baseline, v2 and v3 alike, fourteen is v3's whole flagged set). v4 shipped — the contradiction gone at no measured cost — and the local model's invention is now known not to hinge on that example either.
+
+**Prompt round (2026-09-16/17), phase 3 — the digest as its own fence,
+extraction's first thread, and the ladder decided.** What was built: a
+`threadDigest` field on all three bulk tasks, rendered as its own
+`thread_digest` fence above the tail and capped at 900 characters by
+`fitThreadDigest`, which trims whole lines from the OLD end and keeps the
+header; a shared `buildThreadTailText` so triage, needs-you and extraction
+render a tail the same way; a `digest` rung that supersedes `compressed`; a
+`GOLDEN_EXTRACT_CTX` knob giving extraction its own axis; and a Dart port of
+the packer's digest builder, kept in `app/test/fixtures/thread_digest.dart`
+because no stage ships one. The design was six passes on the 4B at
+`GOLDEN_K=4` under Phase 1's prompt, keep-only (76 items), second pass kept:
+run A `none` / `none`, run B `digest` / `digest`, run C `tail3` / `tail3`,
+with `none` as the control and the temperature-0 stages reproducing token for
+token inside each pair. The rule was pre-registered — the message alone had to
+beat the tail by 4 points on `needs_action` or `reply_expected` before triage
+would drop the tail, and only then would the digest be tried — and it failed:
+`none` read 70 / 70 then 70 / 68 against `tail3`'s 72 / 75 then 71 / 72 and a
+record of 71 / 72, so triage keeps the tail and the digest branch was never
+reached (against `none` the digest moved needs_action −3 / 0 and
+reply_expected 0 / +6, which would have failed it anyway). Needs-you keeps the
+tail as well, on verdict 92 against 93 and judged evidence 30 against 34; and
+extraction stays message-alone, because the tail buys intent 75 → 78 but costs
+people 87 → 75 and project 66 → 53, while the digest costs people 87 → 66 and
+project 66 → 53. So no stage ships the digest. What it DID move is the reason
+the fields stay: on triage the judged label went 82 → 89, the summary 64 → 68
+and action items 56 → 62 (against the tail3 record's 86 / 63 / 60), and
+`reply_expected` on the 21 keep items whose gold label needs the thread went
+10 → 13 of 21 — bought at needs-you evidence 34 → 30, the extraction losses
+above, triage p50 +27% at K=4 and throughput 13.4 → 11.9 messages a minute,
+with the judge's own noise floor at 2 points. Round 0's finding that `none`
+beat `tail3` by 12 and 8 does not survive Phase 1's summary rule: under the
+new prompt `none` reads 70 / 70 where round 0 read 78 / 78 on the old one, so
+a context result is valid only for the prompt it was measured with. The
+follow-up candidate is a triage-only digest judged on summary and label; the
+27B never saw the digest, because the bulk stages run on the 4B.
+
 #### Storyline confirm
 
 The confirm task against the gold registry, per the block above.
@@ -621,6 +811,9 @@ is skipped unless it was filed under a forbidden slug, so the denominator is
 | 2026-09-15 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-storyline-20260915-031444.json` | 80/98 (82%) | 47/48 (98%) / 10/15 (67%) | 17/88 (19%) | 14/300 (5%) | 26/35 (74%) | 0 | 1146 | 51.4 | 11.3 | $0.00 | shipping 4B; cards from its own tail3 run; ties 15; derived gold 50 / none 32 / other 18; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp |
 | 2026-09-15 | llamacpp/Qwen3.8-27B-Q4_K_M (as bulk) | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-20260914-223320.json` | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-storyline-20260915-045507.json` | 88/98 (90%) | 43/48 (90%) / 8/15 (53%) | 6/88 (7%) | 1/300 (0%) | 33/35 (94%) | 0 | 6373 | 9.2 | 2.0 | $0.00 | 27B in the bulk slot; cards from its own as-bulk run; ties 3; derived gold 50 / none 45 / other 5; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp |
 | 2026-09-15 | bedrock/nemotron-super-3-120b | `golden-run-bedrock-nemotron-super-3-120b-20260915-011547.json` | `golden-run-bedrock-nemotron-super-3-120b-storyline-20260915-050910.json` | 86/97 (89%) | 45/48 (94%) / 7/15 (47%) | 15/88 (17%) | 2/299 (1%) | 32/35 (91%) | 0 | 909 | 251.6 | 55.5 | $0.75 | OpenAI wire; cards from its own Phase 4 run; the failed call's item is unfiled (not attempted); 1 failed calls; ties 5; incomplete 1; derived gold 49 / none 41 / other 9; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp |
+| 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-storyline-20260916-220403.json` | 79/98 (81%) | 47/48 (98%) / 10/15 (67%) | 18/88 (20%) | 14/300 (5%) | 26/35 (74%) | 0 | 2685 | 87.5 | 19.3 | $0.00 | charter cap 400 — the new-harness control, reproduces the 2026-09-15 row within one item; K=4, p50 not comparable with the K=1 rows; cards from the 4B's tail3 run; ties 16; derived gold 49 / none 32 / other 19; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp; second of two identical passes |
+| 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-storyline-20260916-221503.json` | 76/98 (78%) | 46/48 (96%) / 9/15 (60%) | 22/88 (25%) | 16/300 (5%) | 24/35 (69%) | 0 | 2774 | 84.6 | 18.7 | $0.00 | charter cap 800; K=4, p50 not comparable with the K=1 rows; cards from the 4B's tail3 run; ties 15; derived gold 49 / none 30 / other 21; 4 storylines without items, 13 gold candidates with an empty People line, 1 charter over the clamp; second of two identical passes |
+| 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-storyline-20260916-222606.json` | 75/98 (77%) | 46/48 (96%) / 9/15 (60%) | 23/88 (26%) | 15/300 (5%) | 23/35 (66%) | 0 | 2829 | 83.7 | 18.5 | $0.00 | charter cap 1200; K=4, p50 not comparable with the K=1 rows; cards from the 4B's tail3 run; ties 15; derived gold 49 / none 29 / other 22; 4 storylines without items, 13 gold candidates with an empty People line, 0 charters over the clamp; second of two identical passes |
 
 **What the confirm rows say.** Handed a candidate list a person wrote, every
 model files far better than the app ever has: the shipping app's own filing
@@ -646,6 +839,33 @@ gold candidates were judged with an empty People line because the set holds no
 other thread of theirs, which is a lower bound on recall, and 22 of the 30
 charters are cut at the task's 400-character clamp, so a longer charter budget
 is a follow-up worth measuring before a model swap.
+
+**The charter cap, measured (2026-09-16).** The follow-up above was run: the
+same cards through the 4B at clamps of 400, 800 and 1200, two passes each,
+every pair token-identical. It went the other way. `storyline.id` falls as the
+model reads more of the charter — 81%, 78%, 77% — and the reason is visible in
+the column beside it: forbidden-accept climbs 20%, 25%, 26%, and the gold-none
+items the model leaves unfiled fall 26, 24, 23 of 35. Gold-accept barely moves
+(47, 46, 46 of 48 on `must`). More charter is more surface for a candidate to
+match against, and the 4B matches on it. **Decision 7's rule therefore gives
+cap 400**, which is the value the app already shipped: 400 has the best
+`storyline.id` outright, and 800 is three points below it on the id and four
+worse on forbidden-accept. The clamp stays a parameter with a
+`GOLDEN_CHARTER_CAP` knob so a different model can be asked the same question.
+
+The 400 row doubles as the new harness's control, and it passes: 79 of 98
+against the 2026-09-15 row's 80, forbidden-accept 18 of 88 against 17, ties 16
+against 15 — within one item on every count, at K=4 where that row ran K=1.
+Accuracy is comparable across K and p50 is not, which is why the 2,685 ms here
+sits beside that row's 1,146 without being read against it. **The 27B
+confirmation run was skipped, deliberately.** The chosen cap is the existing
+default, the 27B's own 400 row is already on the ledger at 90% with
+forbidden-accept 6 of 88, a temperature-0 rerun on the same cards reproduces
+token for token, and the 4B control shows the new harness reproduces — so the
+forty-nine minutes would have bought no information. One thing the ladder
+settles for item 6: the missing half of a charter is not what the 4B's 19%
+forbidden-accept is made of, because giving it the missing half made that
+number worse.
 
 ### Gate replay ledger
 
@@ -722,12 +942,25 @@ importance 39 against a ceiling of 74, needs_action 66 against 72, and summary
 39 against 41, which is inside the floor — and the cheapest way to close most
 of it is in the prompts (item 7), not in the model.
 
+**Measured 2026-09-16 (round B, phase 1):** the summary rule alone moved the
+judged summary from 39 to 63 on the same judge — 66 / 63 / 63 / 63 across the
+four judged runs of the phase — with the forbidden-fact traps at 4 items
+against 3 and needs_action 66 to 71; action items fell 67 to 60, which is the
+trade the prompt-round paragraph in the ledger above sets out. The row of
+record is `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-194031.json`.
+
 **2. Needs-you stays local on every tier.** The verdict is 92% on the 4B, 93
 on the 27B and on the 120B, 92 on Haiku; nothing beats the shipping model
 beyond the noise floor, and part of that recall is the deterministic floor,
 which costs no model at all. The models differ on the evidence sentence (27 on
 the 4B, 39 on the 27B, 48 on Haiku), which is a shown sentence and worth a
-prompt experiment, not a model swap for a one-point verdict.
+prompt experiment, not a model swap for a one-point verdict. **Measured 2026-09-16
+(round B, phase 1):** the prompt experiment was run twice and is not shipped.
+Asking the bullet to quote the words that point at the owner lifted the
+sentence 27 to 36, but put 27 of 64 sentences at the 300-character clamp and
+cost the verdict 92 to 89; a short-sentence wording scored 9 with the verdict
+at 86. The original bullet stays, at 28 and 92 (`…184707`, `…192254`,
+`…194031`).
 
 **3. If a cloud bulk model is ever wanted, it is Nemotron Super 3 120B and no
 other.** It is the first candidate that beats the 4B on needs_action (74
@@ -771,6 +1004,22 @@ and the four prose rows are re-run after it. And the replay drafts from the
 message and its tail alone, with no directory pack, style examples, about-me
 or storyline summary, so every pass rate here is a floor on what the app would
 produce.
+
+**Measured 2026-09-16 (round B, phase 2):** the "ask, don't invent" rule was
+written, measured, revised and measured again, and it does not change this
+item's conclusion. Drafts passing of 25, baseline → shipped v3: the 27B 5 → 6,
+Opus 5 12 → 17; on v2 only, Sonnet 5 10 → 17 and DeepSeek V3.2 10 → 9.
+Invented over each row's failing drafts fell on every cloud model — Opus 10 of
+13 → 6 of 8, Sonnet 12 of 15 → 6 of 8 — and rose on the local one, 10 of 20 →
+14 of 19. So Opus 5 stays the default "better draft" and its measured number
+for the consent screen is 17 of 25 rather than 12 (v4, 2026-09-17, re-read the same 17 of 25 and 6 of 8). Sonnet 5 also reached 17 of
+25, at 40% of the price — a fact to record with its caveat, since that is
+Sonnet on v2 against Opus on v3 and Sonnet has no v3 run; what the escalation
+ships is not this phase's call. The rule did NOT precede the swap in the way this item
+assumed it would: it is worth five drafts on the best cloud model and nothing
+on the 27B, whose inventions are the same nine items under every wording. The
+decision half is unchanged — the prompt did not move and the 27B reproduced
+82% on every pass.
 
 **5. The reply decision on the 4B is one run away.** The speed design wants
 the decision off the 27B and onto the fast slot behind an A/B. The set now
@@ -825,6 +1074,20 @@ minute. Before either, one measurement is free: 22 of the 30 real charters are
 cut at the task's 400-character clamp, and `make golden-storyline` against a
 longer clamp says what the missing half of a charter is worth.
 
+**Measured 2026-09-16 (round B, phase 2):** the free measurement above is now
+runnable. The clamp was a private constant inside `ConfirmMembershipTask`; it
+is a constructor parameter, the app passes `StorylineTuning.charterCap` at
+every call site, and the harness carries `GOLDEN_CHARTER_CAP` so one set of
+cards replays at several clamps — `make golden-storyline GOLDEN_CHARTER_CAP=…`,
+which records the clamp it ran at beside `charters_over_cap` in the timing
+JSON. The three-clamp replay was then run on the 4B, and it answers this
+item's free measurement in the negative: 400 / 800 / 1200 give `storyline.id`
+81 / 78 / 77% with forbidden-accept 20 / 25 / 26% and gold-none left unfiled
+26 / 24 / 23 of 35, so the cap stays at 400. The missing half of a charter is
+not what the 4B's looseness on named neighbours is made of — handed the
+missing half, it accepted more of them. The confirm rows above carry the
+detail, including why the 27B confirmation run was skipped.
+
 **7. The context ladder: the tail as given does not help the 4B, and
 compression was not measurable.** On the shipping model the thread tail lowers
 needs_action (75% alone, 66% with it) and reply_expected (75, 70), on the
@@ -861,6 +1124,26 @@ next" below — takes `none` as its control, and a triage prompt without the
 tail is a live candidate for shipping, pending that round's before-and-after.
 The rubric side of the ladder still rests on pass 1: the summary and
 needs-you-evidence fields were not re-judged on this pass.
+
+**Measured 2026-09-17 (round B, phase 3):** both gaps are closed. The digest
+is now its own unclipped `thread_digest` field on all three bulk tasks, capped
+at 900 characters and trimmed by whole lines from the old end, and extraction
+has its own knob (`GOLDEN_EXTRACT_CTX`). Six passes on the 4B at `GOLDEN_K=4`
+under Phase 1's prompt settled it and nothing ships: triage keeps the tail
+(`none` 70 / 70 then 70 / 68 against `tail3` 72 / 75 then 71 / 72, never the 4
+points the rule asked for), needs-you keeps the tail (verdict 92 against 93,
+judged evidence 30 against 34), and extraction stays message-alone (the tail
+buys intent 75 → 78 and costs people 87 → 75 and project 66 → 53; the digest
+costs people 87 → 66 and project 66 → 53). Two things did move, and they are
+why the fields stay: triage's judged label / summary / action items rose 82 →
+89 / 64 → 68 / 56 → 62 against the tail3 record's 86 / 63 / 60, and
+`reply_expected` on the 21 keep items whose gold label needs the thread went
+10 → 13 of 21 — costing needs-you evidence 34 → 30, triage p50 +27% at K=4 and
+throughput 13.4 → 11.9 messages a minute. The pass-1/pass-2 finding above is
+also superseded: under the new prompt `none` reads 70 / 70 where it read 78 /
+78 on the old one, so a triage prompt without the tail is no longer a
+candidate. The open follow-up is a triage-only digest, judged on summary and
+label rather than on the booleans.
 
 **8. The local/cloud split by machine tier**, as the speed design's §2.3 table
 now reads with the set's numbers beside it. The 64 GB row is measured; the 32
@@ -935,7 +1218,36 @@ remain unmeasured by the set.
    digest field and the charter clamp each need a code change first — the
    clamp is a constant inside the task, and no extraction-context knob exists
    — and then `make golden` and `make golden-storyline` are their
-   before-and-after.
+   before-and-after. Summaries: done 2026-09-16 (round B,
+   phase 1) — 39 → 63 on the same judge, action items 67 → 60 as the cost. The
+   needs-you evidence sentence: measured twice the same day and not shipped
+   (36 with a third of the sentences clamped, or 9 kept short; the verdict
+   fell either way). The drafts: done 2026-09-16 (round B, phase 2) — the
+   invention rules went to v2, missed the round's exit of three or fewer
+   invented per model on all four, were revised once and shipped as v3. Of 25,
+   baseline → shipped: the 27B 5 → 6 and Opus 5 12 → 17, with Sonnet 5 10 → 17
+   and DeepSeek V3.2 10 → 9 on v2 only. Invented over the failing drafts fell
+   on every cloud model and rose on the 27B (10 of 20 → 14 of 19), whose nine
+   invented items are the same nine under every wording — so the local model's
+   next lever is a separate owner-only-facts step before drafting, not more
+   prompt text. v4 (2026-09-17) removed the two-options example that
+   contradicted the owner-only bullet and re-measured: Opus 17 of 25 and 6 of 8
+   invented, identical; the 27B 5 of 25 with the same fourteen items flagged
+   (v3's whole set; the nine are the ones common to every wording since the
+   baseline) across 21 changed texts — shipped, and the structural conclusion
+   stands. The charter clamp: also done in phase 2 — it is a parameter
+   with a `GOLDEN_CHARTER_CAP` knob now, and the replay at 400 / 800 / 1200
+   gave `storyline.id` 81 / 78 / 77% with forbidden-accept 20 / 25 / 26%, so
+   it stays at 400 and a longer charter is not the improvement this item
+   guessed it might be. The digest field: done 2026-09-17 (round B, phase 3) —
+   measured on the 4B at all three rungs, two passes each, `none` re-run under
+   the new prompt; no rung ships (triage keeps the tail, needs-you keeps the
+   tail, extraction stays message-alone); the digest lifted triage's judged
+   label / summary / action items 82 → 89 / 64 → 68 / 56 → 62 and
+   `reply_expected` on thread-dependent items 10 → 13 of 21 while costing
+   needs-you evidence 34 → 30 and extraction people 87 → 66 — a triage-only
+   digest is the follow-up. With that, every half of this item has a done
+   note.
 2. **The reply decision on the 4B**, item 5 — done 2026-09-16: 64%, so the
    decision stays on the 27B and the speed design's §1.3 item 2 is settled the
    slow way.
@@ -1100,6 +1412,8 @@ lives in the golden ledger above.
 | 2026-09-04 | omlx/Qwen3.8-27B-4bit | `prose-…-045218.json` | 10.5 | 22233 (draft) | prose read by hand | — | draft speed tie with the baseline; naming −18% — nothing measurable to switch for |
 | 2026-09-04 | llamacpp/R1-Distill-Qwen-14B-Q4_K_M (BENCH_THINK=1) | none — bench cannot complete | — | — | — | — | **disqualified for bulk**: contract verify passes, but reasoning consumes the production token budget and the JSON answer truncates mid-object (reproduced twice). In production that exact failure drops mail |
 | 2026-09-16 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-…-20260916-023304.json` | 10.2 (12.1 srv) draft · 13.2 (15.3 srv) name · 14.2 (17.0 srv) recap | 16083 (draft) · 8460 (name) · 12733 (recap) | prose read by hand; MTP draft acceptance 66–77%, mean accepted run ~3.2 tokens | — | names and recaps are the clear win — name p50 8.5s against ~12s and recap 12.7s against ~22.6s in the app's activity log; the draft row is muddied by one 35s call (p95 35010ms) in the kept pass — the first pass read draft p50 14933ms, 13.4 tok/s (16.8 srv), p95 18783 — taken with the machine at 15GB of compressor and under 200MB unused; adopted in `local.mk`; re-bench drafts once the prose work is off the per-message critical path and the machine is not swapping |
+| 2026-09-16 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260916-223602.json` | 14.0 (17.0 srv) draft | 15722 (draft) · 8609 (name) · 11679 (recap) | prose read by hand | — | round B phase 2 — draft budget 768, invention rules v3; the recap leg ran at the generic 512 (the harness did not pass the 384 — found on the whole-branch review, fixed, re-run below); third of three passes, second identical; drafts ≈ 221 tokens and recaps ≈ 179 |
+| 2026-09-17 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260917-012727.json` | 13.9 (16.9 srv) draft | 16062 (draft) · 8605 (name) · 11833 (recap) | prose read by hand | — | ROW OF RECORD for round B's budgets — draft 768 AND recap 384 both in force, invention rules v3; second of two passes (first 16344 / 8383 / 11528); drafts 1,104 tokens over 5 (≈ 221) and recaps 537 over 3 (≈ 179), identical totals to the 512 run, so neither budget was reached and the p50s are round 0's within noise; the budgets bound the worst case, which is what the 90 s prose timeout rests on |
 | 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K (4096 per slot, 4 slots) | `triage-extract-…-20260916-023642.json` | 54.3 (62.9 srv) | 2234 | cat 81% · label 88% · needs_action 100% (16 items, 0 format failures, same three category misses as the 2026-09-04 baseline) | — (see the drain row below) | unchanged against the 2026-09-04 baseline (p50 2176, 54.8 tok/s) — halving the context to 4096 tokens a slot costs nothing on the fictional corpus; extraction p50 1808ms, 50.8 tok/s (61.1 srv) |
 | 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K, 4 slots (drain) | `drain-…-k-{1,3}-20260916-023910.json` | 52.8 at K=1 · 21.9 per stream at K=3 | 2164 (K=1) · 5479 (K=3) | — | 26.6 / 31.1 / — (K=6 not run: the shipping FAST_SLOTS is 4) | K=1 matches the baseline (26.1); K=3 is 31.1 against the baseline's 25.3 on 6 slots — 1.17x over K=1, queue-wait 47ms; the K=6 champion figure (56.9) needs `FAST_SLOTS=6` and was not re-measured this round |
 

@@ -617,6 +617,9 @@ final llmClientProvider = Provider<LlmClient>(
   (ref) => LlmClient(
     resolveTarget: () => ref.read(appPrefsProvider).proseTarget,
     onCall: ref.watch(activityLogProvider).noteLlmCall,
+    // Sized to the longest draft this app can legitimately ask for; see
+    // [LlmClient.proseTimeout] for the arithmetic.
+    timeout: LlmClient.proseTimeout,
   ),
 );
 

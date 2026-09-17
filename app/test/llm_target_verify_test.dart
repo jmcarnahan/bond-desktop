@@ -1,6 +1,7 @@
 @Skip('live — verifies a target server\'s contract. Run: make bench-verify')
 library;
 
+import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/extract_handler.dart'
     show buildConversationCard;
 import 'package:bond_inbox/services/llm/draft_task.dart';
@@ -111,10 +112,10 @@ List<Probe> _proseProbes() {
         replyTo: entry.message,
         now: now,
       ),
-      // The handler's own budget (`DraftHandler._maxTokens`). A verify that
-      // probed a reply at 512 would pass against a server the real draft
+      // The handler's own budget, read off it rather than repeated. A verify
+      // that probed a reply at 512 would pass against a server the real draft
       // truncates on.
-      maxTokens: 1536,
+      maxTokens: DraftHandler.draftMaxTokens,
     ),
   ];
 }

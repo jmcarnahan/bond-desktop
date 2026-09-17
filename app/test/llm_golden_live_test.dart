@@ -5,10 +5,13 @@
 library;
 
 import 'package:bond_inbox/models/storyline_models.dart';
+import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/message_block.dart'
+    show threadDigestCap;
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
@@ -67,6 +70,14 @@ const String _compressedCaveat =
 const String _noneCaveat =
     'ctx none: triage and needs-you saw the message alone';
 
+/// The caveat every `digest` row is quoted with. The digest is no longer
+/// clipped to a thread message's 300 characters — it rides in its own fence
+/// at [threadDigestCap] — so this rung is a measurement of compression rather
+/// than of a clipped head of one, and the extraction half is on its own knob.
+const String _digestCaveat =
+    'ctx digest: the digest as its own $threadDigestCap-character fence above '
+    'the tail; extraction reads the rung GOLDEN_EXTRACT_CTX names';
+
 /// The caveat a Converse row is quoted with, for [_compressedCaveat]'s reason:
 /// `temperature` is the one handler parameter that wire cannot carry, so a
 /// reader comparing this row with a local one has to know it sampled
@@ -80,8 +91,31 @@ void main() {
     'the golden set through triage, needs-you and extraction',
     () async {
       final (set, ctx) = await _loadOrFail();
+      // Extraction's rung is its own knob, read HERE rather than in
+      // `_loadOrFail`: the prose, storyline and gate tests share that helper
+      // and none of them runs an extraction.
+      final extractCtx = parseExtractCtx(GoldenDefines.extractCtxRaw);
       final k = checkK(GoldenDefines.k);
       const target = BenchTarget.bulk;
+
+      // What the digest rung actually carried, counted once over the set
+      // rather than guessed from the rung's name: an item with no earlier
+      // thread has no digest, and a digest over the fence's cap is read only
+      // in part. Both numbers are printed, because a rung that moved nothing
+      // on two thirds of the set is a different result from one that did.
+      // Counted only when a digest reached a prompt: at `none`, `tail3` and
+      // `compressed` (which clips at 300, not 900) the line would describe a
+      // fence the run never wrote.
+      final digestRung =
+          ctx == GoldenCtx.digest || extractCtx == GoldenCtx.digest;
+      final carried = !digestRung
+          ? null
+          : set.items.where((item) => item.digest != null).length;
+      final trimmed = !digestRung
+          ? null
+          : set.items
+              .where((item) => (item.digest?.length ?? 0) > threadDigestCap)
+              .length;
 
       // Built up front, in set order, so the run file's rows come out in the
       // order the set lists them whatever order the pool finishes in.
@@ -159,6 +193,7 @@ void main() {
                   item.message,
                   item.now,
                   thread: item.threadFor(ctx),
+                  threadDigest: item.digestFor(ctx),
                   attachments: item.attachmentRows,
                 ),
                 think: BenchTarget.allowReasoning,
@@ -184,6 +219,7 @@ void main() {
                   NeedsYouInput(
                     message: item.message,
                     thread: item.threadFor(ctx),
+                    threadDigest: item.digestFor(ctx),
                     ownerName: GoldenDefines.ownerName,
                     ownerAddress: GoldenDefines.ownerAddress,
                     now: item.now,
@@ -207,7 +243,12 @@ void main() {
               () => runTask(
                 client,
                 const ExtractTask(),
-                ExtractionInput(item.message, item.now),
+                ExtractionInput(
+                  item.message,
+                  item.now,
+                  thread: item.threadFor(extractCtx),
+                  threadDigest: item.digestFor(extractCtx),
+                ),
                 temperature: 0,
                 think: BenchTarget.allowReasoning,
               ),
@@ -262,7 +303,9 @@ void main() {
           '\n${master.table()}\n'
           '\n${lines.whereType<String>().join('\n')}\n'
           '\n${_failureLine(master, retries)}\n'
-          '${_ctxLine(ctx, k, items, wall)}\n'
+          '${_ctxLine(ctx, extractCtx, k, items, wall)}\n'
+          '${carried == null ? '' : 'digests: $carried items carry one, '
+              '$trimmed trimmed to $threadDigestCap\n'}'
           '\n${_costBlock(cost, target.url)}\n',
         );
 
@@ -288,6 +331,9 @@ void main() {
           extra: {
             'run_file': runPath,
             'ctx': ctx.name,
+            'extract_ctx': extractCtx.name,
+            'digests_carried': ?carried,
+            'digests_trimmed': ?trimmed,
             'k': k,
             'wire': target.wireName,
             'retries': retries,
@@ -472,7 +518,7 @@ void main() {
                     now: item.now,
                   ),
                   temperature: 0,
-                  maxTokens: 1536,
+                  maxTokens: DraftHandler.draftMaxTokens,
                   think: BenchTarget.allowReasoning,
                 ),
                 onRetry: () => retries++,
@@ -620,6 +666,7 @@ void main() {
     () async {
       final (set, _) = await _loadOrFail();
       final k = checkK(GoldenDefines.k);
+      final charterCap = checkCharterCap(GoldenDefines.charterCap);
       const target = BenchTarget.bulk;
 
       if (GoldenDefines.registryPath.isEmpty) {
@@ -696,12 +743,6 @@ void main() {
                 excludingConversation: item.conversationKey,
               ).isEmpty)
           .length;
-      // The task clamps a charter at 400 characters at prompt time. Stated as
-      // a literal rather than read off the task, whose cap is private: what
-      // this line reports is how many charters the reader should expect to see
-      // truncated, and a test reaching into a private static to say so would
-      // be the worse of the two couplings.
-      const charterCap = 400;
       final overCap = registry.storylines
           .where((storyline) => storyline.charter.length > charterCap)
           .length;
@@ -747,7 +788,7 @@ void main() {
           await retryingUnavailable(
             () => runTask(
               warmupClient,
-              const ConfirmMembershipTask(),
+              ConfirmMembershipTask(charterCap: charterCap),
               ConfirmInput(
                 storyline: storylines[firstCandidates.first]!,
                 storylineParticipants: participantsFor(
@@ -804,7 +845,7 @@ void main() {
               result = await retryingUnavailable(
                 () => runTask(
                   client,
-                  const ConfirmMembershipTask(),
+                  ConfirmMembershipTask(charterCap: charterCap),
                   ConfirmInput(
                     storyline: storylines[slug]!,
                     // Per candidate, not per slug: this thread is never among
@@ -890,7 +931,8 @@ void main() {
           '\n${lines.whereType<String>().join('\n')}\n'
           '\n${tally.table()}\n'
           '\n${_failureLine(master, retries)}\n'
-          'k $k, $items items, $calls calls in ${wall.inSeconds}s, '
+          'k $k, charter cap $charterCap, $items items, $calls calls in '
+          '${wall.inSeconds}s, '
           '${msgsPerMinute(items, wall).toStringAsFixed(1)} msgs/min, '
           '${msgsPerMinute(calls, wall).toStringAsFixed(1)} calls/min\n'
           '\n${_costBlock(cost, target.url)}\n',
@@ -938,6 +980,7 @@ void main() {
                 'anti': registry.antiSlugs.length,
                 'storylines_without_items': storylinesWithoutItems,
                 'gold_people_empty': goldPeopleEmpty,
+                'charter_cap': charterCap,
                 'charters_over_cap': overCap,
                 'cards_from_run': carded,
               },
@@ -1246,11 +1289,19 @@ String _failureLine(CallCollector master, int retries) =>
     // for, so the two numbers overlap and the line has to say so.
     '${retries == 0 ? '' : ' (each retried attempt is counted among the failures above)'}';
 
-String _ctxLine(GoldenCtx ctx, int k, int items, Duration wall) {
-  final head = 'ctx ${ctx.name}, k $k, $items items in ${wall.inSeconds}s, '
+String _ctxLine(
+  GoldenCtx ctx,
+  GoldenCtx extractCtx,
+  int k,
+  int items,
+  Duration wall,
+) {
+  final head = 'ctx ${ctx.name}, extract ctx ${extractCtx.name}, k $k, '
+      '$items items in ${wall.inSeconds}s, '
       '${msgsPerMinute(items, wall).toStringAsFixed(1)} msgs/min';
   return switch (ctx) {
     GoldenCtx.compressed => '$head\n$_compressedCaveat',
+    GoldenCtx.digest => '$head\n$_digestCaveat',
     GoldenCtx.none => '$head\n$_noneCaveat',
     GoldenCtx.tail3 => head,
   };

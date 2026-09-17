@@ -149,9 +149,9 @@ help:
 	@printf "  make ab-membership → membership eval, 27B vs fast model (needs both up)\n"
 	@printf "  make drain        → drain concurrency race, BENCH_K rounds (needs make fast up)\n"
 	@printf "  make bench-compare A=<a.json> B=<b.json> → diff two bench results\n"
-	@printf "  make golden        → the golden set through triage/needs-you/extraction on the bulk slot (GOLDEN_CTX=none|tail3|compressed, GOLDEN_K=…)\n"
+	@printf "  make golden        → the golden set through triage/needs-you/extraction on the bulk slot (GOLDEN_CTX=none|tail3|compressed|digest, GOLDEN_EXTRACT_CTX=none|tail3|digest, GOLDEN_K=…)\n"
 	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
-	@printf "  make golden-storyline GOLDEN_RUN=<run.json> → storyline confirm for every golden item against the gold registry, on the bulk slot\n"
+	@printf "  make golden-storyline GOLDEN_RUN=<run.json> → storyline confirm for every golden item against the gold registry, on the bulk slot (GOLDEN_CHARTER_CAP=…)\n"
 	@printf "  make golden-gate   → the golden set through the app's gates, offline (GOLDEN_RUN=<run.json> adds the model's notification proxy)\n"
 	@printf "  make golden-baseline → what the shipping app scores on the golden set (needs golden/)\n"
 	@printf "  make golden-score R=<run.json> → score a golden run file (BREAKDOWN= per-bucket tables, JSON= the tallies)\n"
@@ -641,12 +641,18 @@ GOLDEN_K   ?= 1
 # How many items ride in one rubric-judge packet; one Claude Code agent reads
 # one packet, so this is really "how much work per agent".
 GOLDEN_BATCH ?= 10
-# Which context rung triage and needs-you see: none | tail3 | compressed.
+# Which context rung triage and needs-you see: none | tail3 | compressed | digest.
 GOLDEN_CTX ?= tail3
 # The bulk run file (from `make golden`) whose extraction topics and triage
 # summary build each storyline candidate card, the way the app's card carries
 # the newest inbound message's; required by golden-storyline.
 GOLDEN_RUN ?=
+# The confirm task's charter clamp for golden-storyline; the app's default is
+# 400, and the replay runs 400 / 800 / 1200 against the same cards to choose it.
+GOLDEN_CHARTER_CAP ?= 400
+# Which context rung EXTRACTION sees, on its own axis: none | tail3 | digest.
+# The app gives extraction no thread today; the replay prices giving it one.
+GOLDEN_EXTRACT_CTX ?= none
 
 # Single-quoted values, every one: a label carries spaces and parentheses, and
 # an unquoted --dart-define would hand the shell a second word to run.
@@ -674,7 +680,9 @@ BENCH_DEFINES := \
   --dart-define=GOLDEN_OWNER_ADDRESS='$(GOLDEN_OWNER_ADDRESS)' \
   --dart-define=GOLDEN_K='$(GOLDEN_K)' \
   --dart-define=GOLDEN_CTX='$(GOLDEN_CTX)' \
+  --dart-define=GOLDEN_EXTRACT_CTX='$(GOLDEN_EXTRACT_CTX)' \
   --dart-define=GOLDEN_RUN='$(if $(GOLDEN_RUN),$(abspath $(GOLDEN_RUN)),)' \
+  --dart-define=GOLDEN_CHARTER_CAP='$(GOLDEN_CHARTER_CAP)' \
   --dart-define=BENCH_WIRE='$(BENCH_WIRE)' \
   --dart-define=PROSE_WIRE='$(PROSE_WIRE)' \
   --dart-define=BENCH_BEARER="$$(grep -m1 '^BEDROCK_API_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)"
@@ -978,9 +986,11 @@ golden-score: golden-check
 # extraction) — the run that produces a ledger row. Writes two files to
 # $(BENCH_OUT): golden-run-<label>-<stamp>.json (score it with
 # `make golden-score R=…`; the test prints the exact command) and the
-# golden-bulk timing/cost JSON beside it. GOLDEN_CTX picks the context rung;
-# GOLDEN_K > 1 needs the server started with FAST_SLOTS >= K, or the pool
-# measures queue-wait dressed up as throughput.
+# golden-bulk timing/cost JSON beside it. GOLDEN_CTX picks the context rung
+# triage and needs-you see and GOLDEN_EXTRACT_CTX the one extraction sees —
+# two knobs because the app's two halves differ today. GOLDEN_K > 1 needs the
+# server started with FAST_SLOTS >= K, or the pool measures queue-wait dressed
+# up as throughput.
 golden: golden-check
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'triage' $(BENCH_DEFINES)
@@ -1000,9 +1010,11 @@ golden-prose: golden-check
 # the cards: a run file from `make golden`, whose extraction topics and triage
 # summary are what the app's own candidate card carries. Writes the same two
 # files as the other halves; score the run file with `make golden-score R=…`,
-# which reads its `storyline.id`.
+# which reads its `storyline.id`. GOLDEN_CHARTER_CAP sets how much of each
+# storyline's charter the confirm reads, so the same cards can be replayed at
+# several caps to choose the one the app ships.
 golden-storyline: golden-check
-	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-storyline GOLDEN_RUN=<golden-run-….json from make golden> [BENCH_URL=… BENCH_MODEL=… BENCH_LABEL=… GOLDEN_K=…]\n"; exit 1; }
+	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-storyline GOLDEN_RUN=<golden-run-….json from make golden> [BENCH_URL=… BENCH_MODEL=… BENCH_LABEL=… GOLDEN_K=… GOLDEN_CHARTER_CAP=…]\n"; exit 1; }
 	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'storyline' $(BENCH_DEFINES)

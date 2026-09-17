@@ -449,6 +449,132 @@ void main() {
     });
   });
 
+  group('thread digest', () {
+    // The lines a digest is made of, long enough that the 900-character fence
+    // has to choose between them.
+    String digestOf(int lines) => [
+          '(thread has 90 earlier messages; $lines quoted below)',
+          for (var i = 0; i < lines; i++)
+            '2026-08-${(i % 28) + 1} · Priya Anand: ${'turn $i, ' * 12}',
+        ].join('\n');
+
+    /// What the model reads inside the digest fence, with nothing around it.
+    String fenced(String user) {
+      const open = '<untrusted_data source="thread_digest">\n';
+      final start = user.indexOf(open) + open.length;
+      return user.substring(start, user.indexOf('\n</untrusted_data>', start));
+    }
+
+    test('no digest means no digest fence at all', () {
+      final user = task.buildUserMessage(
+        TriageInput(
+          email(),
+          DateTime(2026, 8, 29),
+          thread: [email(id: 't1', bodyText: 'The old one.')],
+        ),
+      );
+
+      expect(user, isNot(contains('thread_digest')));
+      expect(user, isNot(contains('A digest of the thread')));
+    });
+
+    test('an empty digest is no digest — the fence would claim history', () {
+      for (final empty in const ['', '   ', '\n']) {
+        expect(
+          task.buildUserMessage(
+            TriageInput(email(), DateTime(2026, 8, 29), threadDigest: empty),
+          ),
+          isNot(contains('thread_digest')),
+          reason: 'digest "$empty"',
+        );
+      }
+    });
+
+    test('the digest rides in its own fence, under a label of ours', () {
+      final user = task.buildUserMessage(
+        TriageInput(
+          email(),
+          DateTime(2026, 8, 29),
+          threadDigest: '2026-08-01 · Priya Anand: The survey came back short.',
+        ),
+      );
+
+      // The sentence is the app's and sits outside; the digest is other
+      // people's words and sits inside.
+      final label = user.indexOf('A digest of the thread before those '
+          'messages, oldest first, for context:');
+      expect(label, greaterThan(0));
+      expect(
+        label,
+        lessThan(user.indexOf('<untrusted_data source="thread_digest">')),
+      );
+      expect(fenced(user),
+          '2026-08-01 · Priya Anand: The survey came back short.');
+    });
+
+    test('the digest comes before the tail, and both before the question', () {
+      final user = task.buildUserMessage(
+        TriageInput(
+          email(id: 'now', bodyText: 'The new one.'),
+          DateTime(2026, 8, 29),
+          thread: [email(id: 't1', bodyText: 'The old one.')],
+          threadDigest: 'older still',
+        ),
+      );
+
+      // Oldest context first, then the tail, then the thing being judged.
+      expect(
+        user.indexOf('<untrusted_data source="thread_digest">'),
+        lessThan(user.indexOf('<untrusted_data source="thread">')),
+      );
+      expect(
+        user.indexOf('<untrusted_data source="thread">'),
+        lessThan(user.indexOf('Judge ONLY this message:')),
+      );
+      expect(
+        user.indexOf('Judge ONLY this message:'),
+        lessThan(user.indexOf('<untrusted_data source="inbound_message">')),
+      );
+      // Three fences now: the digest, the tail, and the message.
+      expect('</untrusted_data>'.allMatches(user).length, 3);
+    });
+
+    test('a digest sits after the attachment line, which is also ours', () {
+      final user = task.buildUserMessage(
+        TriageInput(
+          email(),
+          DateTime(2026, 8, 29),
+          attachments: const [
+            {'name': 'Survey.pdf', 'size': 48000, 'is_inline': 0},
+          ],
+          threadDigest: 'older still',
+        ),
+      );
+
+      expect(
+        user.indexOf('Attachments:'),
+        lessThan(user.indexOf('A digest of the thread')),
+      );
+    });
+
+    test('a long digest is fitted to 900 characters inside the fence', () {
+      final digest = digestOf(30);
+      expect(digest.length, greaterThan(2000));
+
+      final user = task.buildUserMessage(
+        TriageInput(email(), DateTime(2026, 8, 29), threadDigest: digest),
+      );
+
+      final inside = fenced(user);
+      expect(inside.length, lessThanOrEqualTo(900));
+      // Trimmed by whole lines from the OLD end, header kept: the newest turn
+      // is what an open ask lives in.
+      expect(inside, startsWith('(thread has 90 earlier messages;'));
+      expect(inside, contains('turn 29,'));
+      expect(inside, isNot(contains('turn 0,')));
+    });
+  });
+
   group('system prompt', () {
     test('is byte-identical across instances — the prefix cache depends on it',
         () {
@@ -476,6 +602,17 @@ void main() {
     test('carries no date — that would invalidate the cache every day', () {
       expect(task.systemPrompt, isNot(contains('Today is')));
       expect(task.systemPrompt, isNot(contains('2026')));
+    });
+
+    test('the summary rule asks for the specifics and forbids guessing', () {
+      // The golden set said the failure was omission, not invention: most kept
+      // items left out a fact the item turned on while the forbidden-fact
+      // traps almost never fired, so the rule names what the sentence must
+      // carry instead of only how long it may be.
+      expect(task.systemPrompt, contains('one or two plain-text sentences'));
+      expect(task.systemPrompt, contains('never a guessed date or figure'));
+      expect(task.systemPrompt, contains('Never a restatement of the label'));
+      expect(task.systemPrompt, isNot(contains('ONE sentence, plain text')));
     });
   });
 

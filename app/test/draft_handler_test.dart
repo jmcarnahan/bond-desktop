@@ -351,7 +351,7 @@ void main() {
       // reply twice. The budgets differ because the answers do — a yes/no and
       // a sentence, then a reply long enough to send.
       expect(llm.temperatures, [0.0, 0.0]);
-      expect(llm.tokenBudgets, [256, 1536]);
+      expect(llm.tokenBudgets, [256, DraftHandler.draftMaxTokens]);
     });
 
     test('the draft stage lands done and stamps the row', () async {
@@ -447,7 +447,12 @@ void main() {
 
   group('what goes into the drafting prompt', () {
     test('the user\'s past replies to this sender, as a tone sample', () async {
-      await seedOutbound(body: 'Sounds good — I will confirm by noon. — Jo');
+      // On an OLDER thread to the same person: a past reply is a sample only
+      // when it is not already in the thread being answered.
+      await seedOutbound(
+        key: 'conv-0',
+        body: 'Sounds good — I will confirm by noon. — Jo',
+      );
       await seedInbound();
 
       final llm = FakeLlm([decision(), answer()]);
@@ -458,13 +463,84 @@ void main() {
     });
 
     test('and nothing when the user has never written to them', () async {
-      await seedOutbound(to: 'someone.else@x.com');
+      await seedOutbound(key: 'conv-0', to: 'someone.else@x.com');
       await seedInbound();
 
       final llm = FakeLlm([decision(), answer()]);
       await runOne(DraftHandler(store, llm, progress: progress));
 
       expect(llm.userMessages.last, isNot(contains('style_examples')));
+    });
+
+    test("the owner's own turn in the thread replaces the style examples",
+        () async {
+      // The owner has replied to this sender before, on an older thread — so
+      // the sample exists and the fence appears. Put their own turn INTO the
+      // thread being answered and it goes away: a reply they wrote on this
+      // subject, to this person, is the better tone sample, and it is already
+      // in the prompt.
+      await seedOutbound(
+        key: 'conv-0',
+        body: 'Sounds good — I will confirm by noon. — Jo',
+      );
+      await seedInbound();
+
+      final quiet = FakeLlm([decision(), answer()]);
+      await runOne(DraftHandler(store, quiet, progress: progress));
+      expect(quiet.userMessages.last, contains('style_examples'));
+
+      // A second thread with the same two people, and the owner has spoken in
+      // it. Its own message is answered, so the first thread's draft is not in
+      // the way.
+      await seedOutbound(
+        id: 'o2',
+        key: 'conv-2',
+        receivedAt: '2026-08-28T10:00:00Z',
+        body: 'Checking with the team now. — Jo',
+      );
+      await seedInbound(id: 'm3', key: 'conv-2');
+
+      final spoken = FakeLlm([decision(), answer()]);
+      await runOne(DraftHandler(store, spoken, progress: progress), id: 'm3');
+
+      expect(spoken.userMessages.last, isNot(contains('style_examples')));
+      expect(spoken.userMessages.last, contains('Checking with the team now.'));
+    });
+
+    test("an owner turn older than the rendered tail does not drop the examples",
+        () async {
+      // The prompt shows only the newest five turns. An owner reply six turns
+      // back is not in it, so it cannot stand in for the style examples — the
+      // rule reads the window the prompt renders, not the whole thread.
+      await seedOutbound(key: 'conv-0', body: 'Yes, noon works. — Jo');
+      await seedOutbound(
+        id: 'o3',
+        key: 'conv-3',
+        receivedAt: '2026-08-28T08:00:00Z',
+        body: 'Looping in the team now. — Jo',
+      );
+      for (var i = 0; i < 5; i++) {
+        await seedInbound(
+          id: 'm3$i',
+          key: 'conv-3',
+          receivedAt: '2026-08-28T${(9 + i).toString().padLeft(2, '0')}:00:00Z',
+          body: 'Follow-up number $i about the venue.',
+        );
+      }
+
+      final llm = FakeLlm([decision(), answer()]);
+      await runOne(DraftHandler(store, llm, progress: progress), id: 'm34');
+
+      final prompt = llm.userMessages.last;
+      expect(prompt, contains('style_examples'));
+      // The owner's older turn is not in the rendered thread — it shows up,
+      // correctly, as one of the style examples instead.
+      final thread = prompt.substring(
+        prompt.indexOf('<untrusted_data source="thread">'),
+        prompt.indexOf('</untrusted_data>', prompt.indexOf('source="thread"')),
+      );
+      expect(thread, isNot(contains('Looping in the team now.')));
+      expect('Follow-up number'.allMatches(thread).length, 5);
     });
 
     test('the about-me preference, read from the store', () async {
@@ -512,7 +588,10 @@ void main() {
     });
 
     test('the email channel note, alongside the style fence', () async {
-      await seedOutbound(body: 'Sounds good — I will confirm by noon. — Jo');
+      await seedOutbound(
+        key: 'conv-0',
+        body: 'Sounds good — I will confirm by noon. — Jo',
+      );
       await seedInbound();
 
       final llm = FakeLlm([decision(), answer()]);
@@ -526,6 +605,7 @@ void main() {
       // A style example is a sample the model imitates, so a `[[att:…]]` in
       // one is a token it would learn to write.
       await seedOutbound(
+        key: 'conv-0',
         body: 'Signed copy [[att:file-1]] attached — Jo',
       );
       await seedInbound();

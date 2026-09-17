@@ -38,13 +38,138 @@ explains why it asks only one question. A "no" closes the draft stage
 | Task | `DraftTask` — `app/lib/services/llm/draft_task.dart` |
 | Schema | `draft_reply` |
 | Slot | **prose / 27B** |
-| Params | temperature 0, maxTokens 1536 |
+| Params | temperature 0, maxTokens 768 (`DraftHandler.draftMaxTokens`) |
 
 Writes a first-person reply on the owner's behalf: an evidence sentence, one
 or two genuinely different short options with imperative stances, and a full
 plain-text reply body. The load-bearing rule is **invention**: never fabricate
 facts, numbers, dates, names or commitments — if the thread lacks what's
 needed, ask the single clarifying question instead.
+
+**The 768 is measured, not guessed** (2026-09-16). Completion tokens on the
+golden drafts: the 27B median 155, p90 270, max 316; Opus 5 median 355, p90
+521, max 584. The live activity log's `draft` rows over 57 entries: median
+182, p90 244, max 301. So the budget is 2.4× the largest LOCAL draft ever
+measured (316 tokens on the 27B) and 1.2× the largest cloud one (655, Opus 5
+on rules v3; 584 before this round). It used to be 1,536, which was five times
+the local maximum and
+bought nothing but more time for a wedged model to ramble. The live benches
+read `DraftHandler.draftMaxTokens` rather than repeating the number, so a
+bench cannot measure a prompt the app does not send.
+
+**The budget is a bound, not an accelerator**, and it is worth being plain
+about that because the numbers around it invite the other reading. A typical
+draft never comes near either ceiling — `bench-prose` on 2026-09-17 generated
+about 221 tokens a draft against 768 — so its p50 did not move: 16.1 s against
+round 0's 16.1 s kept and 14.9 s first pass, which is that bench's own noise.
+The golden draft p50 did fall, 16.6 s on 2026-09-14 to 12.3 s and 13.3 s on
+the two rounds of prompt rules, and that is **MTP**: the 2026-09-14 row ran
+before speculative decoding was adopted. What 768 changes is the worst case. A
+rambling or wedged generation stops after roughly 43 s of output where 1,536
+would have run to about 86 s, and that is the whole reason the prose timeout
+below can be 90 seconds rather than 120.
+
+**The prose client's own ceiling is 90 seconds** (`LlmClient.proseTimeout`),
+and this call is why it is the number it is. There are two worst cases. An
+ordinary draft with every input at its cap is about 14K characters of prompt,
+prefilling in roughly 26 s, and the 768-token answer then generates in roughly
+43 s with speculative decoding: 69 s. A draft whose directory pack expanded a
+section is bigger — the passages take the 8,700 ceiling and the storyline
+summary its 600 — about 20K characters, roughly 5K tokens, so roughly 37 s of
+prefill and the same 43 s of generation: about 80 s. Both clear 90, the
+expanded one with about ten seconds to spare, and 60 would cut either off
+mid-sentence. The bulk client keeps 120, where it costs nothing — see
+[10-model-routing.md](10-model-routing.md).
+
+### The invention rules (v3, 2026-09-16; v4, 2026-09-17)
+
+The golden rubric judge found that every prose model's draft failures shared
+one shape, and it was not the one the old single rule named. The failing
+drafts were not inventing prices out of the air; they were supplying a fact
+**only the owner could know** — whether they were free on Tuesday, what
+something cost, what they had decided, what a third party would do — as though
+the thread had given it. So `_draftRules` now carries a set of rules rather
+than one, each of them a single line in the same `const` string:
+
+- **Enumerate the owner-only facts first.** Before writing, the model finds
+  every fact the reply would need that only the owner knows and the thread does
+  not show, and the rule lists the kinds: free or not, cost, decided or not,
+  agrees or not, what a third party will do, whether a document exists. For
+  each one the reply asks for it, defers it ("I'll check and confirm"), or
+  leaves a bracketed placeholder such as `[date]` or `[amount]` — it never
+  states it. "Tuesday at 3 works" is allowed only when the thread shows the
+  owner said so.
+- **Accepting or declining IS supplying such a fact.** The sentence that took
+  the most measuring. A model told not to invent will still answer yes or no
+  to a proposal, because a yes does not feel like a fabricated fact; this says
+  in the prompt that it is one.
+- **Two answers that differ only by a missing owner fact are one option.** The
+  two-options bullet's third clause. Yes-or-no to a time, a price or a plan —
+  and, since v4, accepting or declining what was proposed — is not two stances
+  the owner can pick between; it is one option that asks. v4 also replaced the
+  bullet's example: v3 still offered "accepting versus declining" as the
+  canonical two-option case, which contradicted the bullet above it. The
+  example is now two answers the thread can support — answer now versus ask
+  for the one missing detail, send the offered document versus point to it —
+  the bullet gained the conjunct "AND the thread already holds what each one
+  needs", which tightens when two options are allowed at all, and the stance
+  examples read "Ask which day" / "Send the summary" / "Answer the question"
+  instead of "Confirm Friday" / "Decline politely".
+- **The owner's own next step is not an invention**, narrowly. The model may
+  offer to send something, say what the owner will do next, or **ask to set up
+  a time, as long as it names no time**. The earlier wording licensed
+  proposing a time to talk, which is how a rule against inventing dates leaked
+  dates.
+- **Keep the whole proposal.** If the sender offered a swap or a set of
+  conditions, the reply accepts, declines or questions all of it — never half
+  of it, silently dropped.
+- **Match the sender's register.** Contractions and first-name warmth for
+  friends, family and close colleagues; plain and courteous for everyone else.
+
+`draft_task_test.dart` pins these, because each is one line in a `const`
+string that a tidy-up could lose without breaking anything visible.
+
+**What they measured** (25 reply-rubric items, judged; full rows in
+`docs/model-bakeoff.md`). Drafts passing, baseline → v2 → shipped v3: the 27B
+5 → 8 → 6, Opus 5 12 → 12 → 17. Sonnet 5 went 10 → 17 and DeepSeek V3.2 10 → 9
+on v2; per the round's plan only the 27B and the worst cloud model under v2
+were re-run on v3, so those two carry no v3 number. Invented, counted over
+each row's failing drafts: Opus 10 of 13 → 11 of 13 → 6 of 8, Sonnet 12 of 15
+→ 6 of 8, DeepSeek 10 of 15 → 9 of 16, the 27B 10 of 20 → 11 of 17 → 14 of 19.
+The round's exit was three or fewer invented per model and **it was missed on
+every model**; the best any row reached is six. The honest reading is that the
+rules are worth five drafts on the best cloud model and nothing on the local
+one: the same nine 27B items are flagged invented under all three wordings
+even though 24 of its 25 draft texts changed, and no 27B draft in any pass
+left a placeholder. The next lever there is structural, not textual — an
+owner-only-facts step that runs before drafting.
+
+**v4, measured 2026-09-17 before it shipped.** The example change was found on
+the round's whole-branch review and measured under a rule written first: ship
+if the 27B's drafts passing stayed within 2 of v3's 6 and its invented count
+within 2 of 14, and Opus 5 stayed within 3 of 17. Opus 5 read 17 of 25 with 6
+of 8 invented, identical to v3
+(`golden-run-bedrock-claude-opus-5-20260917-014357.json`, one pass). The 27B
+read 5 of 25
+(`golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260917-020022.json`) with the
+same 14 items flagged invented as under v3 — none new, none cleared; fourteen
+rather than the nine above because nine is the set common to baseline, v2 and
+v3 while fourteen is v3's whole flagged set — while 21 of its 25 draft texts
+changed; drafts that ask a question went 3 → 8. So v4 ships: the contradiction
+is gone at no measured cost, and the local model's invention is now known not
+to hinge on that example either.
+
+Two caveats belong on those numbers: the local rows are K=1 and the cloud rows
+K=4, and the judge's own noise floor is ±2 on both counts, measured here by
+re-judging a set of byte-identical 27B drafts and getting 8 of 25 with
+invented 12 against 6 and 14.
+
+**Style examples are dropped when the owner has already spoken in the
+thread.** The `style_examples` fence carries two of the owner's past replies to
+this sender, found on other threads; when their own turn is already in the
+thread being answered, that turn is the better tone sample — same subject,
+same person, right there in the prompt — so the handler skips the lookup
+entirely and the prompt is shorter for it.
 
 **A prompt-cache constraint worth knowing before editing:** channel style
 rules (email vs chat) live in the *user* message (`_emailChannelNote` /
@@ -407,7 +532,18 @@ is — `digest (a model's summary of this file)`.
 |---|---|---|---|
 | `directory_brief` | 700 | 300 | `«name»: about`, `Facts:`, `Terms:` |
 | `directory_guidance` | 2,500 (`ContextTuning.guidanceBudget`, and the retriever has already FITTED the blocks to it — see `13-context-directories.md`) | — | `[guidance]`, `[CLAUDE.md]`, `[docs/CLAUDE.md]`, `[SKILL vendor-replies]`, `[rule pricing.md]` |
-| `directory_excerpts` | 8,700 (2,500 ranked + two 3,000-character sections and their bracket lines) | 800 | `[acme/docs/pricing.md, Pricing > Q4 rates, modified 2026-08-30]` then the passage |
+| `directory_excerpts` | 3,000, or 8,700 when the pack expanded a section | 800 | `[acme/docs/pricing.md, Pricing > Q4 rates, modified 2026-08-30]` then the passage |
+
+**Two caps on the passages, and the pack chooses between them** (2026-09-16).
+The ordinary one is 3,000: the ranked passages are trimmed to 2,500 in the
+retriever anyway, so 3,000 is that budget said once with room for the bracket
+lines, and a reply under 150 words does not need more text in front of it than
+the thread itself gets. The 8,700 is the EXPANDED case's ceiling — 2,500
+ranked plus two sections at the retriever's `expandedSectionCap` of 3,000 plus
+the two bracket lines above them — and it applies only when
+`ContextPack.expanded` is non-empty, which is the pack's own signal that a
+section scored high enough to be read whole. `DraftTask.buildUserMessage`
+picks by that list; nothing else changes.
 
 The decision gets no guidance fence at all: it answers one yes-or-no question,
 and instructions about how a reply should READ have nothing to say about

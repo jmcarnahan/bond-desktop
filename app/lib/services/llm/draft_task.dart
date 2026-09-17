@@ -18,18 +18,59 @@ import 'prompt_guard.dart';
 /// date or a commitment writes a reply that reads perfectly and is false, and
 /// the person about to press Send is the last line of defence — so the prompt
 /// pushes the model toward asking rather than filling in.
+///
+/// The golden judge found that every prose model's draft failures shared one
+/// shape: a fact only the owner knows, supplied as though it had been given
+/// (27B 10 of 20 failing drafts, Opus 5 10 of 13, Sonnet 5 12 of 15,
+/// DeepSeek V3.2 10 of 15, measured 2026-09-15). So the rules now name that
+/// class outright and tell the model to ask the one question or leave a
+/// bracketed placeholder rather than fill the gap.
+///
+/// Those rules were measured the day they were written and revised once into
+/// v3; what is above is v4, which differs from v3 only in the two-options
+/// bullet (below). v3 is worth five drafts on the best cloud model and
+/// nothing on the local one: Opus 5 went from 12 of 25 to 17 with its invented
+/// count 11 down to 6, while the 27B stayed where it was — the same 9 items
+/// flagged invented under every wording, even though 24 of its 25 draft texts
+/// changed. Which is the useful thing this comment can say to whoever edits
+/// the string next: for the 27B the wording is where prompt text stops
+/// helping, and the next lever is a separate owner-only-facts step before the
+/// draft rather than another bullet here.
+///
+/// v4 (2026-09-17) touched the two-options bullet and the stance examples,
+/// three edits in one bullet: v3 still offered "accepting versus declining"
+/// as the canonical two-option case while the owner-only bullet below said
+/// that accepting or declining IS an owner-only fact — one prompt, two
+/// instructions. So (1) the example now names two answers the thread can
+/// support (answer now versus ask for the one missing detail; send the
+/// offered document versus point to it); (2) the bullet gained the
+/// conjunct "AND the thread already holds what each one needs", which
+/// tightens when two options are allowed at all; (3) "accepting or declining
+/// what was proposed" joined the one-option-that-asks list. The stance
+/// examples followed. Measured before shipping: Opus 5 17 of 25 with 6 of 8
+/// invented, identical to v3; the 27B 5 of 25 (v3 read 6, inside the judge's
+/// ±2) with the SAME 14 items flagged invented — none new, none cleared —
+/// while 21 of 25 texts changed. (Fourteen, not the nine above: nine is the
+/// set flagged under baseline, v2 AND v3 alike; fourteen is v3's whole
+/// flagged set, and v4 reproduced it exactly.) The contradiction is gone at
+/// no measured cost, and the local model's invention is now known not to
+/// depend on this example either.
 const String _draftRules = '''
 You are drafting a reply on behalf of the inbox's owner. You write as them, in the first person. The message may be an email or an instant chat message; a channel note in each request says which, and its style rules are part of the task.
 
 Rules:
 - evidence: ONE sentence naming what the sender needs and what your reply commits to. Write it first — the reply below should follow from it.
 - options: one or two SHORT replies, ready to send as they stand. The first is the one you would send if you had to send one right now.
-- Give TWO options ONLY when the message genuinely has two reasonable answers that commit to different things — accepting versus declining, confirming Friday versus proposing another day. Two rewordings of the same answer are ONE option.
-- stance: two to four words naming what the option does, phrased as an instruction ("Confirm Friday", "Propose Tuesday", "Decline politely").
-- Every option obeys the invention rule below. A short reply is not a licence to guess.
+- Give TWO options ONLY when the message genuinely has two reasonable answers that commit to different things AND the thread already holds what each one needs — answering the question now versus asking for the one detail it turns on, sending the document the owner already offered versus pointing to where it was shared. Two rewordings of the same answer are ONE option. Two answers that differ only by a fact the owner has not given — yes or no to a time, a price, a plan, accepting or declining what was proposed — are not two options either: they are ONE option that asks.
+- stance: two to four words naming what the option does, phrased as an instruction ("Ask which day", "Send the summary", "Answer the question").
+- Every option obeys the invention rules below. A short reply is not a licence to guess.
 - reply_body: the reply itself, as plain text. No markdown. It may expand on the first option.
 - Follow the channel note's style rules for length, greeting and sign-off exactly.
 - NEVER invent facts, numbers, dates, names, or commitments that are not present in the thread or in the owner's reference directory. No made-up prices, no made-up dates, no promises about what someone else will do.
+- Before you write, find every fact the reply would need that only the owner knows and the thread does not show: whether they are free, what something costs, what they have decided, whether they agree, what a third party will do, whether a document exists. Accepting or declining what the sender proposed IS supplying such a fact. For each one the reply asks for it, defers it ("I'll check and confirm"), or leaves a bracketed placeholder such as [date] or [amount] where it would go — it never states it. "Tuesday at 3 works" is allowed only when the thread shows the owner said so.
+- The owner's OWN next step is not an invention: you may offer to send something, say what the owner will do next, or ask to set up a time — as long as it names no time, commits nobody else and states no fact you were not given.
+- Keep the whole of what the sender proposed. If they offered a swap or a set of conditions, the reply accepts, declines or questions all of it — never half of it, silently dropped.
+- Match the sender's register: contractions and first-name warmth for friends, family and close colleagues; plain and courteous for everyone else.
 - When a fact comes from the owner's reference directory, name the file it came from in the reply.
 - If the thread does not contain what is needed to answer, do not guess: write a short reply that asks the one clarifying question that would unblock it.
 - When past replies are provided, match their tone, greeting and sign-off.
@@ -163,7 +204,7 @@ class DraftTask implements JsonTask<DraftResult> {
   /// The newest few messages, and no more. A thread's older turns say what it
   /// is about; its newest ones say what is being asked, and only the second
   /// kind changes the reply.
-  static const int _maxThreadMessages = 5;
+  static const int maxThreadMessages = 5;
 
   /// Total characters of thread. Past this the model is reading quoted
   /// signatures rather than context.
@@ -186,16 +227,20 @@ class DraftTask implements JsonTask<DraftResult> {
   /// standing fact and gets the least; the guidance is instructions the reply
   /// is asked to follow and gets more than the brief.
   ///
-  /// The passages get the documents' own budget PLUS room for two sections
-  /// read in full. The ranked passages are still trimmed to 2,500 in the
-  /// retriever, exactly as they were; the extra 6,200 is two sections at the
-  /// retriever's own `expandedSectionCap` PLUS the two bracket lines the
-  /// render writes above them, which cost about eighty characters each and
-  /// are not in the retriever's arithmetic. Without that allowance the worst
-  /// case lands just over the cap and the last ranked passage is trimmed for
-  /// no reason. So this is a ceiling for a pack that asked to read closer,
-  /// never a target — the ordinary directory-fed draft is the same size it
-  /// always was.
+  /// The passages get two caps, and which one applies is the pack's own
+  /// answer to "did a section score high enough to read whole". An ordinary
+  /// pack gets 3,000: a reply under 150 words does not need 8,700 characters
+  /// of passages in front of it, and the ranked passages are trimmed to 2,500
+  /// in the retriever anyway, so 3,000 is that budget said once with room for
+  /// the render's bracket lines. A pack whose `expanded` list is non-empty
+  /// gets the larger ceiling, which is where the 8,700 arithmetic lives: two
+  /// sections at the retriever's own `expandedSectionCap` of 3,000 PLUS the
+  /// ranked 2,500 PLUS the two bracket lines the render writes above them,
+  /// which cost about eighty characters each and are not in the retriever's
+  /// arithmetic. Without that allowance the expanded worst case lands just
+  /// over the cap and the last ranked passage is trimmed for no reason. So
+  /// the larger number is a ceiling for a pack that asked to read closer,
+  /// never a target.
   static const int _directoryBriefCap = 700;
 
   /// The guidance fence is the retriever's own ceiling, said once. The
@@ -203,7 +248,8 @@ class DraftTask implements JsonTask<DraftResult> {
   /// what the provenance names is what the model read; a second, smaller
   /// number here would silently drop the blocks it had already promised.
   static const int _directoryGuidanceCap = ContextTuning.guidanceBudget;
-  static const int _directoryExcerptsCap = 8700;
+  static const int _directoryExcerptsCap = 3000;
+  static const int _directoryExcerptsExpandedCap = 8700;
   static const int _evidenceCap = 300;
 
   /// A stance is a label on a card. Two to four words is what the prompt asks
@@ -327,7 +373,12 @@ class DraftTask implements JsonTask<DraftResult> {
               'run):')
           ..writeln(wrapUntrusted('directory_guidance', guidance));
       }
-      final passages = renderContextExcerpts(pack, _directoryExcerptsCap);
+      final passages = renderContextExcerpts(
+        pack,
+        pack.expanded.isNotEmpty
+            ? _directoryExcerptsExpandedCap
+            : _directoryExcerptsCap,
+      );
       if (passages.isNotEmpty) {
         buffer
           ..writeln("Passages from the owner's reference directory, nearest "
@@ -374,8 +425,8 @@ class DraftTask implements JsonTask<DraftResult> {
   /// the message being replied to, which is the one piece of the thread the
   /// draft cannot be written without.
   static String _threadText(DraftInput input) {
-    final recent = input.thread.length > _maxThreadMessages
-        ? input.thread.sublist(input.thread.length - _maxThreadMessages)
+    final recent = input.thread.length > maxThreadMessages
+        ? input.thread.sublist(input.thread.length - maxThreadMessages)
         : List<Message>.from(input.thread);
     // A thread whose messages are not stored (a store read that came back
     // empty) still has the message being answered.

@@ -66,6 +66,19 @@ cases, so what reaches this call is the ambiguous residue. Locating the
 sentence that points at the owner *is* the work, and the boolean should fall
 out of having written it.
 
+The judged evidence sentence passes 27–28% on the golden set, because it
+names a category where the rubric checks for the specific ask. On 2026-09-16
+two rewordings asked for the quoted words instead, and both were measured and
+not shipped: one lifted the sentence to 36% but put 27 of 64 sentences at the
+300-character clamp and cost the verdict 92% to 89%, and a short-sentence
+version kept every sentence under the clamp and scored 9% with the verdict at
+86%. The verdict is the chip the owner sees and the sentence sits behind it,
+so the original wording stays; the rows are in the bakeoff ledger
+(`docs/model-bakeoff.md`, "Golden ledger"). The schema's `evidence`
+description and this bullet say the same thing, and a future rewording must
+move both together: a Converse-wire target reads the description as the tool
+spec.
+
 **The raise policy.** The handler writes
 
 ```
@@ -127,11 +140,21 @@ is stated in the user message.
 The user message layers, in order: the date anchor, the directness line, the
 **owner-identity line** (`The owner of this inbox is NAME <ADDRESS>.` — the
 app's own statement, outside every fence, and what lets "the message names the
-owner" bind to a person), the thread's newest three turns, and last the judged
-message. Two fences, both `wrapUntrusted`: the thread and the judged message,
+owner" bind to a person), an optional `thread_digest` fence, the thread's
+newest three turns, and last the judged message. The app's prompt still
+carries two fences, both `wrapUntrusted`: the thread and the judged message,
 which is fenced as `inbound_message`, the same tag every other task uses. The
-owner's rules are **not** in the user message at all — moving them into the
-system prompt is what took the injection surface here from three fences to two.
+`thread_digest` fence sits between the owner line and the thread fence and is
+present only when a caller passes `NeedsYouInput.threadDigest`, which the
+handler does not — it is capped at 900 characters by `fitThreadDigest` and
+exists for the golden harness. Measured on 2026-09-17 on the 4B, the digest
+read the verdict at 92% against 93% for the message alone (the tail's own
+sample was 92%) and dropped judged evidence from 34% to 30%, so it ships to
+no stage and needs-you keeps the tail; the
+pin is `needs-you sends the thread and never a digest` in
+`app/test/needs_you_handler_test.dart`. The owner's rules are **not** in the
+user message at all — moving them into the system prompt is what took the
+injection surface here from three fences to two.
 
 The owner identity comes from an `OwnerLookup` callback, asked **once** per
 handler: it is a keychain read, and the answer only changes on sign-out, which

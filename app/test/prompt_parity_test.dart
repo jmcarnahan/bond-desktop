@@ -485,6 +485,49 @@ void main() {
       }
     });
 
+    test('every stage that reads a thread digest fences it as thread_digest',
+        () {
+      // One tag across three prompts and both channels. A per-task spelling is
+      // how the fence would come to mean something slightly different in each
+      // of them — and the fence is what tells the model this is data.
+      const digest = '2026-08-01 · Priya Anand: The survey came back short.';
+      for (final message in [emailMessage, chatMessage]) {
+        expect(
+          triage.buildUserMessage(
+            TriageInput(message, now, threadDigest: digest),
+          ),
+          contains('<untrusted_data source="thread_digest">'),
+          reason: 'triage ${message.source}',
+        );
+        expect(
+          needsYou.buildUserMessage(
+            NeedsYouInput(message: message, now: now, threadDigest: digest),
+          ),
+          contains('<untrusted_data source="thread_digest">'),
+          reason: 'needs-you ${message.source}',
+        );
+        expect(
+          extract.buildUserMessage(
+            ExtractionInput(message, now, threadDigest: digest),
+          ),
+          contains('<untrusted_data source="thread_digest">'),
+          reason: 'extraction ${message.source}',
+        );
+      }
+    });
+
+    test('extraction fences a thread as thread, like every other stage', () {
+      for (final message in [emailMessage, chatMessage]) {
+        expect(
+          extract.buildUserMessage(
+            ExtractionInput(message, now, thread: [message]),
+          ),
+          contains('<untrusted_data source="thread">'),
+          reason: message.source,
+        );
+      }
+    });
+
     test('the digest fences the covering message and the document apart', () {
       for (final message in [emailMessage, chatMessage]) {
         final built = attachmentDigest.buildUserMessage(digestInput(message));

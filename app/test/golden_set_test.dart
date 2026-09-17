@@ -307,11 +307,39 @@ void main() {
     expect(item.conversationKey, 'email:fx-conv-lease');
   });
 
+  test('the digest rung keeps the whole tail and carries the digest apart', () {
+    // Unlike `compressed`, the digest does not take a thread slot: it rides in
+    // its own prompt fence, so all three tail messages survive.
+    final item = byId['email:fx-keep-tail']!;
+    expect(item.threadFor(GoldenCtx.digest), same(item.tail));
+    expect(item.digestFor(GoldenCtx.digest), item.digest);
+    expect(item.digestFor(GoldenCtx.digest), isNotNull);
+  });
+
+  test('every other rung carries no digest of its own', () {
+    final item = byId['email:fx-keep-tail']!;
+    for (final ctx in const [
+      GoldenCtx.none,
+      GoldenCtx.tail3,
+      GoldenCtx.compressed,
+    ]) {
+      expect(item.digestFor(ctx), isNull, reason: ctx.name);
+    }
+  });
+
+  test('an item with no digest carries none at the digest rung either', () {
+    final item = byId['email:fx-reply']!;
+    expect(item.digest, isNull);
+    expect(item.digestFor(GoldenCtx.digest), isNull);
+    expect(item.threadFor(GoldenCtx.digest), same(item.tail));
+  });
+
   // ── the ctx knob ──────────────────────────────────────────────────────
-  test('parseGoldenCtx reads the three rungs in any case', () {
+  test('parseGoldenCtx reads the four rungs in any case', () {
     expect(parseGoldenCtx('none'), GoldenCtx.none);
     expect(parseGoldenCtx('TAIL3'), GoldenCtx.tail3);
     expect(parseGoldenCtx(' Compressed '), GoldenCtx.compressed);
+    expect(parseGoldenCtx('digest'), GoldenCtx.digest);
   });
 
   test('parseGoldenCtx refuses a rung nobody defined', () {

@@ -75,6 +75,24 @@ class StorylineTuning {
   /// by cosine, a candidate was not close enough for a missed-thread hunt to
   /// be the pass that finds it.
   static const int recruitMaxCandidates = 8;
+
+  /// How much of a storyline's charter the confirm task is judged against, in
+  /// characters. The clamp bites often — most real charters are longer than
+  /// this, so what the model reads is usually the opening of a description
+  /// rather than the whole of one — which made it look like something worth
+  /// raising.
+  ///
+  /// Measured 2026-09-16, the 4B, the same cards at 400 / 800 / 1200: the
+  /// scorer's `storyline.id` went 81% / 78% / 77% and forbidden-accept went
+  /// 20% / 25% / 26%. So a longer charter did not buy recall, it cost
+  /// precision: more charter is more surface for a candidate to match
+  /// against, and the 4B matched on it. The cap stays at 400.
+  ///
+  /// It stays a PARAMETER of the task rather than going back to a constant
+  /// inside it, and `GOLDEN_CHARTER_CAP` stays with it: this answer is one
+  /// model's, and the 27B or whatever replaces it can be asked the same
+  /// question without a code change.
+  static const int charterCap = 400;
 }
 
 /// What one pass of [StorylineService.assignConversation] concluded.
@@ -320,7 +338,7 @@ class StorylineService {
 
     final result = await runTask(
       _confirmClient,
-      const ConfirmMembershipTask(),
+      const ConfirmMembershipTask(charterCap: StorylineTuning.charterCap),
       ConfirmInput(
         storyline: best,
         storylineParticipants: await _participantsOfStoryline(best.id),
@@ -661,6 +679,9 @@ class StorylineService {
       // must read the same, or a re-run after a park would rewrite the block
       // a user is looking at for no reason they could see.
       temperature: 0,
+      // Named rather than left to `runTask`'s generic ceiling: the task
+      // measured what a recap actually costs, so the budget is the task's.
+      maxTokens: StorylineRecapTask.maxTokens,
     );
 
     // A model with nothing to say must not blank a good recap: the stored text
@@ -1190,7 +1211,7 @@ class StorylineService {
 
         final result = await runTask(
           _confirmClient,
-          const ConfirmMembershipTask(),
+          const ConfirmMembershipTask(charterCap: StorylineTuning.charterCap),
           ConfirmInput(
             storyline: storyline,
             storylineParticipants: storylineParticipants,
@@ -1325,7 +1346,7 @@ class StorylineService {
 
       final result = await runTask(
         _confirmClient,
-        const ConfirmMembershipTask(),
+        const ConfirmMembershipTask(charterCap: StorylineTuning.charterCap),
         ConfirmInput(
           storyline: storyline,
           storylineParticipants: participants,
@@ -1874,7 +1895,7 @@ class StorylineService {
 
       final confirm = await runTask(
         _confirmClient,
-        const ConfirmMembershipTask(),
+        const ConfirmMembershipTask(charterCap: StorylineTuning.charterCap),
         // No examples: the proposal has no user members and no blocks by
         // construction.
         ConfirmInput(
@@ -2062,7 +2083,9 @@ class StorylineService {
 
             final confirm = await runTask(
               _confirmClient,
-              const ConfirmMembershipTask(),
+              const ConfirmMembershipTask(
+                charterCap: StorylineTuning.charterCap,
+              ),
               // No examples: the proposal has no user members and no blocks
               // by construction.
               ConfirmInput(

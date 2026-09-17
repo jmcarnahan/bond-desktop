@@ -44,9 +44,9 @@ class TriageProgress {
 /// server started with matching slots, the aggregate is worth roughly 2.5-3x a
 /// serial drain. The trade reverses past a small K — every request in a batch
 /// gets individually slower — and two things here care about ONE request
-/// rather than the aggregate: [LlmClient]'s 120-second timeout, which is
-/// sized to catch a wedged server rather than a batched one, and the person
-/// waiting for the first triaged message to appear.
+/// rather than the aggregate: [LlmClient]'s timeout, which is sized to catch
+/// a wedged server rather than a batched one, and the person waiting for the
+/// first triaged message to appear.
 ///
 /// Each message goes through two tiers, in this order for a reason:
 ///

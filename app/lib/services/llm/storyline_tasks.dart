@@ -134,7 +134,7 @@ You are an assistant keeping a running recap of one storyline for the person who
 Rules:
 - evidence: ONE sentence naming the single most consequential thing in the newest messages. Write it first — everything below should follow from it.
 - recap: two to four sentences saying where this stands RIGHT NOW for a reader who has been away — the state of the conversation, who is waiting on whom, and what happens next. Present tense. Not a list of the messages, and not a summary of each one in turn.
-- open_items: one short entry per question still open or reply still owed, naming who owes whom what, in the words the people involved use. An empty list is an honest answer when nothing is outstanding.
+- open_items: one short entry per question still open or reply still owed, naming who owes whom what, in the words the people involved use. An empty list is an honest answer when nothing is outstanding. Never turn "nothing needed from you" into an open item, and never move an obligation from one person to another.
 - decisions: one short entry per decision these threads have actually settled recently. An empty list is an honest answer when nothing was decided.
 - You may be given the previous recap. Carry forward what is still true, drop what has since resolved, and never repeat a decision that has already been acted on as if it were news.
 - Never invent. No name, date, amount, or commitment may appear that is not in the messages. An open question you are not sure of is one you leave out.
@@ -207,12 +207,22 @@ class ConfirmResult {
 
 /// Judges whether one thread belongs to an existing storyline.
 class ConfirmMembershipTask implements JsonTask<ConfirmResult> {
-  const ConfirmMembershipTask();
+  const ConfirmMembershipTask({this.charterCap = 400});
+
+  /// How much of the storyline's charter this task is judged against, in
+  /// characters. A parameter rather than a private constant because the number
+  /// was under measurement: the golden confirm found 22 of 30 real charters
+  /// longer than 400 characters, so the clamp cuts the description most of the
+  /// time, and the golden replay ran 400 / 800 / 1200 against the same cards
+  /// to say what that cost. It cost precision — on the 4B, `storyline.id` 81%
+  /// / 78% / 77% with forbidden-accept 20% / 25% / 26% — so 400 stays, and the
+  /// parameter stays with it so another model can be asked the same question.
+  /// The app passes `StorylineTuning.charterCap`.
+  final int charterCap;
 
   static const int _evidenceCap = 300;
   static const int _cardCap = 1200;
   static const int _summaryCap = 400;
-  static const int _charterCap = 400;
   static const int _participantsCap = 400;
   static const int _titleCap = 120;
 
@@ -274,7 +284,7 @@ class ConfirmMembershipTask implements JsonTask<ConfirmResult> {
     // people. Never both lines: two descriptions of the group invite the
     // model to pick whichever one agrees with it.
     final description = charter.isNotEmpty
-        ? 'Charter: ${_clamp(charter, _charterCap)}'
+        ? 'Charter: ${_clamp(charter, charterCap)}'
         : 'Summary: ${_clamp(storyline.summary ?? '', _summaryCap)}';
     // Clamped like everything else here: user text is stored unbounded and
     // bounded only at prompt time. An overlong title would otherwise ride
@@ -673,6 +683,15 @@ class RecapResult {
 /// Says where a storyline stands right now, for a reader who has been away.
 class StorylineRecapTask implements JsonTask<RecapResult> {
   const StorylineRecapTask();
+
+  /// The completion budget this task is run at, measured rather than
+  /// inherited. Live `storyline_recap` rows: median 189, p90 214, max 263
+  /// over 28 of them; `storyline_refresh`, which writes the same shape of
+  /// answer, 145 / 169 / 171 over 16. So 384 is 1.5× the largest recap
+  /// anything has written. The 512 it ran at before was not a decision about
+  /// recaps at all — it is [runTask]'s generic ceiling, which every task that
+  /// names no budget lands on.
+  static const int maxTokens = 384;
 
   static const int _evidenceCap = 300;
 
