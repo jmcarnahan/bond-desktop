@@ -537,6 +537,7 @@ not in date order.
 | 2026-09-14 | bulk | llamacpp/Qwen3.5-4B-UD-Q4_K_XL | tail3 | `golden-run-llamacpp-qwen3-5-4b-ud-q4-k-xl-20260914-190503.json` | 91% / 89% / 66% / 83% / 87% / 79% / 66% / 63% / 29% / 88% | label 82% · action items 53% · summary 16% · needs-you evidence 23% · extract evidence 33% | 2838 / 1716 / 2745 (triage / needs_you / extraction) | 36.9 | 7.5 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
 | 2026-09-14 | bulk | llamacpp/Qwen3.5-9B-Q4_K_M | tail3 | `golden-run-llamacpp-qwen3-5-9b-q4-k-m-20260914-200430.json` | 91% / 93% / 64% / 70% / 83% / 82% / 74% / 64% / 24% / 83% | label 78% · action items 62% · summary 24% · needs-you evidence 25% · extract evidence 38% | 4394 / 2648 / 4444 (triage / needs_you / extraction) | 22.8 | 4.6 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
 | 2026-09-14 | bulk | llamacpp/Qwen3.8-27B-Q4_K_M (as bulk) | tail3 | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-20260914-223320.json` | 92% / 95% / 72% / 84% / 93% / 86% / 74% / 58% / 32% / 93% | label 89% · action items 64% · summary 41% · needs-you evidence 39% · extract evidence 41% | 13412 / 8969 / 13907 (triage / needs_you / extraction) | 7.1 | 1.5 | $0.00 | accuracy ceiling for these prompts: the prose model doing bulk work, 1 slot, no MTP; second of two passes |
+| 2026-09-17 | bulk | vllm-g6e/Qwen3.8-27B-FP8 (as bulk) | tail3 | `golden-run-vllm-g6e-qwen3-8-27b-fp8-as-bulk-20260917-054258.json` | 89% / 95% / 71% / 79% / 93% / 87% / 70% / 62% / 32% / 93% | label 93% · action items 64% · summary 71% · needs-you evidence 42% · extract evidence 34% | 5583 / 3034 / 5733 (triage / needs_you / extraction) | 22.0 | 4.2 | $7.31 | GPU spike: the FP8 27B on vLLM doing the bulk work, one L40S, one stream, no MTP, through an SSH tunnel; against the 2026-09-14 ceiling row above every prompt-stable enum is within 4 points (needs_you 0, intent +1, importance −4, project +4 — the last two on the edge; topics 0, people 0; category −3 and urgency 0 inside their floor) while needs_action −1 / reply_expected −5 are not cleanly comparable — the ceiling row predates Round B's summary rule, which moved the 4B's booleans +5 / +2 and lifts summary 41 → 71 here; extract evidence 41 → 34 is the one rubric field that fell beyond judge noise (the 4B reads 25 there); second of two passes — needs-you and extraction identical on all 100 items, triage (sampled at 0.2) identical on 7; summaries avg 198 chars, none at the cap; priced at $1.86/h at 4.24 msgs/min |
 | 2026-09-14 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260914-230921.json` | — / — / — / 82% / — / — / — / — / — / — | draft 20% | 6578 / 16589 (reply_decision / draft_reply) | 7.1 | 4.4 | $0.00 | prose slot: reply decision for the 76 gold-keep items (scored as reply_expected) + 25 drafts for the reply-rubric items, judged in Phase 3; message + tail only; second of two passes |
 | 2026-09-16 | prose | llamacpp/Qwen3-4B (decision) | tail (fixed) | `golden-run-llamacpp-qwen3-4b-decision-20260916-031409.json` | — / — / — / 64% / — / — / — / — / — / — | drafts not judged | 1158 / 2715 (reply_decision / draft_reply) | 38.6 | 26.2 | $0.00 | the 4B on ReplyDecisionTask, served by the bulk model on :8082 (4 slots at 4096): reply decision for the 76 gold-keep items (scored as reply_expected) + 25 drafts; message + tail only; second of two passes, both 64% at temperature 0; recommendation item 5's missing half |
 | 2026-09-15 | bulk | bedrock/nemotron-nano-3-30b | tail3 | `golden-run-bedrock-nemotron-nano-3-30b-20260915-011152.json` | 88% / 88% / 64% / 65% / 79% / 69% / 69% / 65% / 31% / 80% | label 72% · action items 36% · summary 19% · needs-you evidence 8% · extract evidence 15% | 1129 / 847 / 1226 (triage / needs_you / extraction) | 86.8 | 70.7 | $0.28 | OpenAI wire; K=4 |
@@ -556,6 +557,10 @@ not in date order.
 | 2026-09-16 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260916-214911.json` | — / — / — / 82% / — / — / — / — / — / — | draft 24% | 6077 / 13269 (reply_decision / draft_reply) | 8.2 | 5.0 | $0.00 | invention rules v3 SHIPPED, draft budget 768, K=1 with MTP; invented 14 of 19 failing; identical drafts to pass 1, which a second judge run scored 32% / invented 12 — judge noise ±2 |
 | 2026-09-16 | prose | bedrock/claude-opus-5 | tail (fixed) | `golden-run-bedrock-claude-opus-5-20260916-215244.json` | — / — / — / 75% / — / — / — / — / — / — | draft 68% | 2252 / 5606 (reply_decision / draft_reply) | 50.9 | 55.6 | $17.98 | invention rules v3 SHIPPED, draft budget 768; invented 6 of 8 failing; Converse, no temperature; K=4 |
 | 2026-09-17 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260917-020022.json` | — / — / — / 82% / — / — / — / — / — / — | draft 20% | 6110 / 12453 (reply_decision / draft_reply) | 8.4 | 4.9 | $0.00 | invention rules v4 SHIPPED (the two-options example no longer contradicts the owner-only bullet); 5 of 25 against v3's 6, inside the judge's ±2; invented 14 of 20 — the SAME 14 items as v3, none new, none cleared, with 21 of 25 texts changed; drafts asking a question 3 → 8; max completion 322; MTP; K=1; pass 2 `…021535` byte-identical on all 25 drafts and every decision (this row cites the judged pass 1) |
+| 2026-09-17 | prose | vllm-g6e/Qwen3.8-27B-FP8 | tail (fixed) | `golden-run-vllm-g6e-qwen3-8-27b-fp8-20260917-044752.json` | — / — / — / 82% / — / — / — / — / — / — | draft 24% | 1947 / 6606 (reply_decision / draft_reply) | 22.9 | 13.6 | $2.28 | GPU spike: the same 27B as `Qwen/Qwen3.8-27B-FP8` on vLLM 0.29.0, one L40S (AWS g6e.xlarge), no MTP, 32K ctx, one stream, reached through an SSH tunnel (~50 ms a call, nothing against these p50s); invention rules v4, draft budget 768, K=1; 6 of 25 against the local row's 5 with invented 10 of 19 failing against 14 of 20 — the favourable side of judge noise plus FP8 text drift, recorded as a tie; second of two passes, the first (`…044212`) identical on all 76 decisions and all 25 drafts; wall-clock tok/s (vLLM sends no timings block); priced at the box's $1.86/h on-demand rate at the measured msgs/min, not per token — the harness itself prices a localhost URL at $0.00 |
+| 2026-09-17 | prose | vllm-g6e/Qwen3.8-27B-FP8 | tail (fixed) | `golden-run-vllm-g6e-qwen3-8-27b-fp8-20260917-045439.json` | — / — / — / 82% / — / — / — / — / — / — | — | 2377 / 7382 (reply_decision / draft_reply) | 18.6 | 43.1 | $0.72 | GPU spike, throughput read only — one pass, not judged; its own decision read 82 as well, but the judged accuracy is the K=1 row's; four streams lift throughput 3.2× while the p50s rise 22% / 12%, which is what batching on one GPU looks like; priced at $1.86/h at 43.1 msgs/min; K=4 |
+| 2026-09-17 | prose | vllm-g6e/Qwen3.8-27B-FP8+MTP | tail (fixed) | `golden-run-vllm-g6e-qwen3-8-27b-fp8-mtp-20260917-064431.json` | — / — / — / 83% / — / — / — / — / — / — | draft 28% | 1313 / 3711 (reply_decision / draft_reply) | 37.6 | 21.6 | $1.43 | GPU spike, the FP8 repo's MTP head loaded (`--speculative-config '{"method":"mtp","num_speculative_tokens":2}'`, ~6.5 min of recompile): one pass; 7 of 25 against the no-MTP row's 6, invented 10 of 18 failing; 75 of 76 decisions and 9 of 25 drafts byte-identical to the no-MTP row — vLLM's speculation is not bit-exact under FP8, so the drafts were judged on their own; draft p50 3.7 s against 12.5 s locally (3.4×), decode 37.6 tok/s against 8.4; priced at $1.86/h at 21.6 msgs/min |
+| 2026-09-17 | prose | vllm-g6e/Qwen3.8-27B-FP8+MTP | tail (fixed) | `golden-run-vllm-g6e-qwen3-8-27b-fp8-mtp-20260917-064603.json` | — / — / — / 82% / — / — / — / — / — / — | — | 2196 / 5144 (reply_decision / draft_reply) | 23.2 | 54.6 | $0.57 | GPU spike, MTP on, throughput read only — one pass, not judged; 54.6 msgs/min is Opus 5's 55.1 at $0.57 against $18.03; the concurrency figure Round C's C1 reads for a GPU-served prose slot; priced at $1.86/h at 54.6 msgs/min; K=4 |
 | 2026-09-17 | prose | bedrock/claude-opus-5 | tail (fixed) | `golden-run-bedrock-claude-opus-5-20260917-014357.json` | — / — / — / 78% / — / — / — / — / — / — | draft 68% | 2264 / 5580 (reply_decision / draft_reply) | 50.5 | 55.1 | $18.03 | invention rules v4 SHIPPED; 17 of 25 with invented 6 of 8, identical to v3; ONE pass (Converse, no temperature — a noisier read than the local row by design of the budget); max completion 672; K=4 |
 
 **What the first rows say** (2026-09-14, all at `GOLDEN_K=1`, keep-only, every
@@ -799,6 +804,72 @@ a context result is valid only for the prompt it was measured with. The
 follow-up candidate is a triage-only digest judged on summary and label; the
 27B never saw the digest, because the bulk stages run on the 4B.
 
+**GPU spike (2026-09-17) — the 27B on an L40S, apples to apples.** The
+question was whether `Qwen/Qwen3.8-27B-FP8` on vLLM 0.29.0 on an AWS
+`g6e.xlarge` (one L40S, $1.86 an hour on-demand, us-east-2 — the only one of
+the three regions tried with g6e capacity on 2026-09-16) gives the same accuracy as the local 27B
+(llama.cpp Q4_K_M with MTP, one slot) with better throughput: roadmap Round E
+item E3, run early between Rounds B and C so the later rounds read its
+numbers, with no harness, prompt or configuration change and nothing adopted.
+Same targets, same knobs but a 32K context against the Mac's 16K, the v4
+prompts, two passes with the second kept for every row of record (the two
+K=4 rows and the MTP golden row are single passes and say so), the same
+Opus judge; the box reached through an SSH tunnel on a local port
+(about 50 ms a call, nothing against these p50s); tok/s wall-clock because
+vLLM sends no timings block; every price the box's hourly rate at the
+measured throughput, never a per-token tariff, because the harness prices a
+localhost URL at $0.00. The read rules were written before the runs
+(`tmp/PLAN-gpu-spike.md`, decision 3): decision within 4 of 82, drafts
+within 3 of 5 and invented within 3 of 14, every prompt-stable as-bulk enum
+within 4 of the 2026-09-14 ceiling row. What came back, box against local:
+the reply decision **82% against 82%**, identical; drafts passing **6 of 25
+against 5** (inside its band), invented **10 of 19 failing against 14 of
+20** — four fewer, one past the pre-registered ±3 band on the favourable
+side, with the judge's own re-read noise at ±2 on this count; recorded as a
+tie, not a gain; draft p50 **6.6 s against 12.5 s** on the golden run (1.9×) and **10.8 s
+against 16.1 s** on `bench-prose` (1.5×, where the FP8 model wrote longer
+drafts, ≈ 273 tokens against ≈ 221); decode **22.9 against 8.4 tok/s** on the
+golden run (2.7×) and 24.6 against 13.9 on the bench (1.8×); names 4.4 s
+against 8.6, recaps 7.4 s against 11.8; throughput **13.6 against 4.9
+messages a minute** single-stream (2.8×) and **43.1 at K=4** with p50s up
+only 22% / 12%; price **$2.28 per thousand messages at K=1, $0.72 at K=4**
+against $0.00 local and $18.03 for Opus 5. Then the MTP head the FP8 repo
+ships, which vLLM loads after ~6.5 min of recompile: drafts **5.7 s** on the
+bench at 46.5 tok/s and **3.7 s** on the golden run, names 2.4 s, recaps
+3.6 s — 2.8× / 3.6× / 3.3× the local MTP row — with **21.6 messages a minute
+single-stream and 54.6 at K=4**, which is Opus 5's 55.1 at $0.57 per
+thousand; the decision read 83%, and because only 9 of 25 drafts came back
+byte-identical to the no-MTP pass (speculation under FP8 is not bit-exact)
+the MTP drafts were judged on their own: **7 of 25, invented
+10 of 18 failing**. As bulk, the FP8 27B read 89 / 95 / 71 / 79 / 93 / 87 / 70 / 62
+/ 32 / 93 against the local ceiling's 92 / 95 / 72 / 84 / 93 / 86 / 74 / 58
+/ 32 / 93: every prompt-stable enum within the 4-point band (needs_you 0,
+intent +1, importance −4, project +4 — the last two on its edge — topics 0,
+people 0), category −3 and urgency 0 inside their floor, and the two booleans −1 / −5 not cleanly comparable, because the
+ceiling row predates Round B's summary rule — the rule that moved the 4B's
+booleans +5 / +2 and its summary 39 → 63, and that lifts summary 41 → 71
+here;
+judged label 89 → 93, action items 64 → 64, needs-you evidence 39 → 42, and
+extract evidence 41 → 34, the one rubric field that fell beyond judge noise
+(the 4B reads 25 there). The confirm task read `storyline.id` 87% against the
+local 27B's 90%, forbidden accepts 9% against 7%, at 4.3 messages a minute
+against 2.0. Reproducibility on the box: the two
+prose passes identical on all 76 decisions and 25 drafts, needs-you and
+extraction identical on all 100 items, triage (sampled at 0.2) identical on
+7, the two confirm passes identical on every count. **Decision (E3): (a).**
+The box is a valid prose target — the same accuracy: decision and drafts
+inside their pre-registered bands, invention one past its band on the
+favourable side, every prompt-stable as-bulk enum within 4 — and with the
+MTP head, the optional configuration, it clears the 2× per-stream bar (2.8× on drafts,
+3.4× on the golden draft leg) while four streams give eleven times the Mac's
+throughput at $0.57 per thousand messages; without MTP it is 1.5–1.9× per
+stream — between the rule's letters (≥ 2× for (a), < 1.5× for (c)) — and its
+case is concurrency alone. Round E's E1 makes it a
+first-class target behind consent, with MTP on in its serve script; Round
+C's C1 sizes prose parallelism from the K=4 rows; nothing is adopted now —
+`local.mk` and Settings stay on the Mac, and the roadmap's economics
+paragraph still holds for one user.
+
 #### Storyline confirm
 
 The confirm task against the gold registry, per the block above.
@@ -810,6 +881,7 @@ is skipped unless it was filed under a forbidden slug, so the denominator is
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-09-15 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-storyline-20260915-031444.json` | 80/98 (82%) | 47/48 (98%) / 10/15 (67%) | 17/88 (19%) | 14/300 (5%) | 26/35 (74%) | 0 | 1146 | 51.4 | 11.3 | $0.00 | shipping 4B; cards from its own tail3 run; ties 15; derived gold 50 / none 32 / other 18; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp |
 | 2026-09-15 | llamacpp/Qwen3.8-27B-Q4_K_M (as bulk) | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-20260914-223320.json` | `golden-run-llamacpp-qwen3-8-27b-q4-k-m-as-bulk-storyline-20260915-045507.json` | 88/98 (90%) | 43/48 (90%) / 8/15 (53%) | 6/88 (7%) | 1/300 (0%) | 33/35 (94%) | 0 | 6373 | 9.2 | 2.0 | $0.00 | 27B in the bulk slot; cards from its own as-bulk run; ties 3; derived gold 50 / none 45 / other 5; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp |
+| 2026-09-17 | vllm-g6e/Qwen3.8-27B-FP8 (as bulk) | `golden-run-vllm-g6e-qwen3-8-27b-fp8-as-bulk-20260917-054258.json` | `golden-run-vllm-g6e-qwen3-8-27b-fp8-as-bulk-storyline-20260917-062927.json` | 85/98 (87%) | 41/48 (85%) / 7/15 (47%) | 8/88 (9%) | 0/300 (0%) | 33/35 (94%) | 0 | 2964 | 19.7 | 4.3 | $7.14 | GPU spike: the FP8 27B on vLLM in the bulk slot, one L40S, one stream, charter cap 400; cards from its own as-bulk run; against the local 27B's 2026-09-15 row (90% / 90% / 53% / 7%) within 3 on `storyline.id` (gold-accept must 43 → 41 of 48, should 8 → 7 of 15, forbidden 6 → 8 of 88) at 2.2× the throughput; ties 3; derived gold 46 / none 48 / other 6; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp; second of two passes, the first (`…060618`) identical on `storyline.id` and every derived count; priced at $1.86/h at 4.34 msgs/min |
 | 2026-09-15 | bedrock/nemotron-super-3-120b | `golden-run-bedrock-nemotron-super-3-120b-20260915-011547.json` | `golden-run-bedrock-nemotron-super-3-120b-storyline-20260915-050910.json` | 86/97 (89%) | 45/48 (94%) / 7/15 (47%) | 15/88 (17%) | 2/299 (1%) | 32/35 (91%) | 0 | 909 | 251.6 | 55.5 | $0.75 | OpenAI wire; cards from its own Phase 4 run; the failed call's item is unfiled (not attempted); 1 failed calls; ties 5; incomplete 1; derived gold 49 / none 41 / other 9; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp |
 | 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-storyline-20260916-220403.json` | 79/98 (81%) | 47/48 (98%) / 10/15 (67%) | 18/88 (20%) | 14/300 (5%) | 26/35 (74%) | 0 | 2685 | 87.5 | 19.3 | $0.00 | charter cap 400 — the new-harness control, reproduces the 2026-09-15 row within one item; K=4, p50 not comparable with the K=1 rows; cards from the 4B's tail3 run; ties 16; derived gold 49 / none 32 / other 19; 4 storylines without items, 13 gold candidates with an empty People line, 22 charters over the clamp; second of two identical passes |
 | 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-storyline-20260916-221503.json` | 76/98 (78%) | 46/48 (96%) / 9/15 (60%) | 22/88 (25%) | 16/300 (5%) | 24/35 (69%) | 0 | 2774 | 84.6 | 18.7 | $0.00 | charter cap 800; K=4, p50 not comparable with the K=1 rows; cards from the 4B's tail3 run; ties 15; derived gold 49 / none 30 / other 21; 4 storylines without items, 13 gold candidates with an empty People line, 1 charter over the clamp; second of two identical passes |
@@ -1391,7 +1463,8 @@ server started differently from the default.
 | 4 | bulk | oMLX, Qwen3-4B-Instruct 4bit (then 8bit) | `make omlx`, then `make bench BENCH_URL=http://localhost:8090/v1/chat/completions BENCH_MODEL='mlx-community--Qwen3-4B-Instruct-2507-4bit' BENCH_LABEL='omlx/Qwen3-4B-Instruct-2507-4bit'` and the same three defines on `make drain BENCH_K=1,3,6`. The 8bit variant swaps `-4bit` → `-8bit` in `BENCH_MODEL` and `BENCH_LABEL` |
 | 5 | prose | oMLX, Qwen3.8-27B 4bit (same `:8090` server) | `make bench-prose PROSE_URL=http://localhost:8090/v1/chat/completions PROSE_MODEL='mlx-community--Qwen3.8-27B-4bit' PROSE_LABEL='omlx/Qwen3.8-27B-4bit'` |
 | 6 | bulk | llama.cpp, DeepSeek-R1-Distill-Qwen-14B Q4_K_M, `:8083` | `make fast FAST_PORT=8083 FAST_HF=unsloth/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q4_K_M FAST_SLOTS=6`, then `make bench BENCH_URL=http://localhost:8083/v1/chat/completions BENCH_LABEL='llamacpp/R1-Distill-Qwen-14B-Q4_K_M' BENCH_THINK=1` — always reasoning, so `BENCH_THINK=1` stops sending `enable_thinking:false` and relaxes the leak gate |
-| 7 | — | further candidates | Added here as they come up, one command per row. What is worth trying is best judged after the rows above have numbers |
+| 7 | prose (and as bulk) | vLLM 0.29.0 on an AWS `g6e.xlarge` (one L40S), `Qwen/Qwen3.8-27B-FP8` (served as the alias `qwen3.8` by `--served-model-name qwen3.8` on the box's vLLM command), served on the box's loopback :8000 and reached through `ssh -N -L 18100:127.0.0.1:8000 ubuntu@<box>` (local 18100, never 8000) | `make bench-prose PROSE_URL=http://localhost:18100/v1/chat/completions PROSE_MODEL=qwen3.8 PROSE_LABEL=vllm-g6e/Qwen3.8-27B-FP8` and the same three defines on `make golden-prose`; as bulk, the `BENCH_*` triple with `BENCH_LABEL='vllm-g6e/Qwen3.8-27B-FP8 (as bulk)'` on `make golden` and `make golden-storyline`; the MTP head with `/opt/bond/serve.sh --speculative-config '{"method":"mtp","num_speculative_tokens":2}'` on the box (label `…-FP8+MTP`). The harness prices a localhost URL at $0.00, so these rows carry the box's hourly rate by hand (`1000 / (msgs_per_min × 60) × $1.86`) |
+| 8 | — | further candidates | Added here as they come up, one command per row. What is worth trying is best judged after the rows above have numbers |
 
 ## Ledger
 
@@ -1414,6 +1487,8 @@ lives in the golden ledger above.
 | 2026-09-16 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-…-20260916-023304.json` | 10.2 (12.1 srv) draft · 13.2 (15.3 srv) name · 14.2 (17.0 srv) recap | 16083 (draft) · 8460 (name) · 12733 (recap) | prose read by hand; MTP draft acceptance 66–77%, mean accepted run ~3.2 tokens | — | names and recaps are the clear win — name p50 8.5s against ~12s and recap 12.7s against ~22.6s in the app's activity log; the draft row is muddied by one 35s call (p95 35010ms) in the kept pass — the first pass read draft p50 14933ms, 13.4 tok/s (16.8 srv), p95 18783 — taken with the machine at 15GB of compressor and under 200MB unused; adopted in `local.mk`; re-bench drafts once the prose work is off the per-message critical path and the machine is not swapping |
 | 2026-09-16 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260916-223602.json` | 14.0 (17.0 srv) draft | 15722 (draft) · 8609 (name) · 11679 (recap) | prose read by hand | — | round B phase 2 — draft budget 768, invention rules v3; the recap leg ran at the generic 512 (the harness did not pass the 384 — found on the whole-branch review, fixed, re-run below); third of three passes, second identical; drafts ≈ 221 tokens and recaps ≈ 179 |
 | 2026-09-17 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260917-012727.json` | 13.9 (16.9 srv) draft | 16062 (draft) · 8605 (name) · 11833 (recap) | prose read by hand | — | ROW OF RECORD for round B's budgets — draft 768 AND recap 384 both in force, invention rules v3; second of two passes (first 16344 / 8383 / 11528); drafts 1,104 tokens over 5 (≈ 221) and recaps 537 over 3 (≈ 179), identical totals to the 512 run, so neither budget was reached and the p50s are round 0's within noise; the budgets bound the worst case, which is what the 90 s prose timeout rests on |
+| 2026-09-17 | vllm-g6e/Qwen3.8-27B-FP8 (AWS g6e.xlarge, one L40S, vLLM 0.29.0, no MTP, 32K ctx) | `prose-vllm-g6e-qwen3-8-27b-fp8-20260917-045218.json` | 24.6 draft · 23.6 name · 24.1 recap (wall; no server clock) | 10795 (draft) · 4415 (name) · 7362 (recap) | prose read by hand | — | GPU spike, one stream through an SSH tunnel; against the local MTP row above (16062 / 8605 / 11833) drafts 1.5×, names 1.9×, recaps 1.6× faster on wall p50 and 1.8× per token (24.6 against 13.9) — the FP8 model writes longer drafts here, 1,364 tokens over five (≈ 273 against ≈ 221) and 568 over three recaps (≈ 189 against ≈ 179); second of two passes, first 10764 / 4419 / 7364 |
+| 2026-09-17 | vllm-g6e/Qwen3.8-27B-FP8+MTP (same box, `--speculative-config '{"method":"mtp","num_speculative_tokens":2}'`) | `prose-vllm-g6e-qwen3-8-27b-fp8-mtp-20260917-064055.json` | 46.5 draft · 43.8 name · 46.4 recap (wall) | 5730 (draft) · 2363 (name) · 3627 (recap) | prose read by hand | — | GPU spike, the MTP head the FP8 repo ships, ~6.5 min of recompile to load; against the same box without MTP drafts 1.9×, names 1.9×, recaps 2.0× faster, and against the local MTP row 2.8× / 3.6× / 3.3×; 1,390 draft tokens over five, 538 over three recaps; second of two passes, first 5736 / 2363 / 3622 at 46.4 / 43.4 / 46.5 tok/s; vLLM warns that speculative decoding caps `max_num_scheduled_tokens` at 2048, left as is |
 | 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K (4096 per slot, 4 slots) | `triage-extract-…-20260916-023642.json` | 54.3 (62.9 srv) | 2234 | cat 81% · label 88% · needs_action 100% (16 items, 0 format failures, same three category misses as the 2026-09-04 baseline) | — (see the drain row below) | unchanged against the 2026-09-04 baseline (p50 2176, 54.8 tok/s) — halving the context to 4096 tokens a slot costs nothing on the fictional corpus; extraction p50 1808ms, 50.8 tok/s (61.1 srv) |
 | 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K, 4 slots (drain) | `drain-…-k-{1,3}-20260916-023910.json` | 52.8 at K=1 · 21.9 per stream at K=3 | 2164 (K=1) · 5479 (K=3) | — | 26.6 / 31.1 / — (K=6 not run: the shipping FAST_SLOTS is 4) | K=1 matches the baseline (26.1); K=3 is 31.1 against the baseline's 25.3 on 6 slots — 1.17x over K=1, queue-wait 47ms; the K=6 champion figure (56.9) needs `FAST_SLOTS=6` and was not re-measured this round |
 
@@ -1447,7 +1522,7 @@ Since round 0 (2026-09-16) the ggml-org Q4_K_M runs with its MTP head and a
 16K context on the maintainer's machine (`SPEC_TYPE = draft-mtp` and
 `CTX_SIZE = 16384` in the gitignored `local.mk`; a fresh clone still gets the
 Makefile defaults) — names 29% and recaps 44% faster, ledger rows above. The Unsloth UD-Q4_K_XL quant costs nothing to keep cached if a quality
-read later favors it.
+read later favors it. GPU spike (2026-09-17): the same 27B as `Qwen/Qwen3.8-27B-FP8` on vLLM on one L40S matched the local 27B on the reply decision (82% against 82%) and the drafts (6 of 25 against 5), with invention four fewer (10 against 14) and every prompt-stable as-bulk enum within 4 points, at 1.5–1.9× the per-stream draft speed without its MTP head and 2.8× with it, and 43.1 / 54.6 messages a minute at K=4 without / with MTP — rows above, decision in the roadmap's E3; not adopted, `local.mk` and Settings unchanged.
 
 **R1-Distill-Qwen-14B: do not adopt for bulk work.** Not a speed judgement —
 a fit one: with thinking enabled (its only mode) it cannot reliably finish a
