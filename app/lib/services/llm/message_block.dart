@@ -147,6 +147,14 @@ const int threadDigestCap = 900;
 /// whatever else goes: without it a trimmed digest reads as the whole thread.
 /// It stays first, and the lines that survive keep their original order.
 ///
+/// A digest with no header of its own was quoted whole by its builder, so a
+/// trim here is the first thing that leaves anything out — and it says so,
+/// with a synthesized header naming how many older lines went, whenever the
+/// budget can carry that line AND at least one whole line beneath it. Under a
+/// budget too small for both, the newest lines win and the trim is silent:
+/// a header that ate the last whole turn would be a worse prompt than no
+/// header.
+///
 /// A digest already under the cap comes back byte for byte. When not even the
 /// newest single line fits beside the header, that line is clipped from its
 /// END so the result is exactly [cap] characters — half a line of the newest
@@ -156,23 +164,45 @@ String fitThreadDigest(String digest, int cap) {
 
   final lines = digest.split('\n');
   final hasHeader = lines.first.startsWith('(thread has ');
-  final header = hasHeader ? lines.first : null;
   final rest = hasHeader ? lines.sublist(1) : lines;
 
-  var used = header?.length ?? 0;
-  final kept = <String>[];
-  for (var i = rest.length - 1; i >= 0; i--) {
-    final line = rest[i];
-    // The newline that joins this line to whatever is already above it. The
-    // very first piece of the result carries none.
-    final extra =
-        (header == null && kept.isEmpty) ? line.length : line.length + 1;
-    // The first line that does not fit ends it: older lines are shorter only
-    // by accident, and skipping one to squeeze in an older one would print a
-    // history with a hole in it that nothing names.
-    if (used + extra > cap) break;
-    used += extra;
-    kept.insert(0, line);
+  // The newest lines of [rest] that fit under [header], oldest first.
+  List<String> keep(String? header) {
+    var used = header?.length ?? 0;
+    final kept = <String>[];
+    for (var i = rest.length - 1; i >= 0; i--) {
+      final line = rest[i];
+      // The newline that joins this line to whatever is already above it. The
+      // very first piece of the result carries none.
+      final extra =
+          (header == null && kept.isEmpty) ? line.length : line.length + 1;
+      // The first line that does not fit ends it: older lines are shorter
+      // only by accident, and skipping one to squeeze in an older one would
+      // print a history with a hole in it that nothing names.
+      if (used + extra > cap) break;
+      used += extra;
+      kept.insert(0, line);
+    }
+    return kept;
+  }
+
+  var header = hasHeader ? lines.first : null;
+  var kept = keep(header);
+  if (header == null && kept.isNotEmpty && kept.length < rest.length) {
+    // Re-fit under the synthesized line; its length depends on the count's
+    // digits, so once more if the count moved, and never more than a couple.
+    var dropped = rest.length - kept.length;
+    for (var pass = 0; pass < 3; pass++) {
+      final announced = keep(_trimHeader(dropped));
+      if (announced.isEmpty) break; // too tight to say so: stay silent
+      final droppedNow = rest.length - announced.length;
+      if (droppedNow == dropped) {
+        header = _trimHeader(dropped);
+        kept = announced;
+        break;
+      }
+      dropped = droppedNow;
+    }
   }
 
   if (kept.isNotEmpty) {
@@ -191,6 +221,10 @@ String fitThreadDigest(String digest, int cap) {
   }
   return '$header\n${rest.last.substring(0, cap - header.length - 1)}';
 }
+
+/// The line a trimmed header-less digest is given, in the packer's own idiom.
+String _trimHeader(int dropped) =>
+    '(thread digest trimmed to fit; $dropped older lines omitted)';
 
 /// The thread tail as a transcript: who spoke, then what they said.
 ///

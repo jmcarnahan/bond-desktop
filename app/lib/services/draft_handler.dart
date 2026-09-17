@@ -59,6 +59,13 @@ class DraftHandler extends WorkHandler {
   /// not send.
   static const int draftMaxTokens = 768;
 
+  /// The newest turns of [thread] that `DraftTask` renders — the same window
+  /// it cuts, so a rule about "what the prompt shows" reads the same list.
+  static List<Message> _shownTail(List<Message> thread) =>
+      thread.length > DraftTask.maxThreadMessages
+          ? thread.sublist(thread.length - DraftTask.maxThreadMessages)
+          : thread;
+
   /// A yes/no and one sentence. Room for the sentence to run long, and no room
   /// for the model to start drafting inside the decision.
   static const int _decisionMaxTokens = 256;
@@ -280,12 +287,15 @@ class DraftHandler extends WorkHandler {
         // LIKE would answer anyway — and a chat needs it less: the thread tail
         // already carries the owner's own chat voice, turn by turn.
         //
-        // And mail only when the owner has not already spoken in THIS thread.
-        // Their own turn, on this subject, to this person, is a better tone
-        // sample than two old replies to someone else about something else —
-        // so when the thread carries one the examples are dropped, and the
-        // prompt is shorter for it.
-        styleExamples: source == 'email' && !thread.any((m) => m.outbound)
+        // And mail only when the owner has not already spoken in THIS thread —
+        // in the part of it the prompt will actually show. Their own turn, on
+        // this subject, to this person, is a better tone sample than two old
+        // replies to someone else about something else — so when the rendered
+        // tail carries one the examples are dropped, and the prompt is shorter
+        // for it. The window is [DraftTask.maxThreadMessages], the newest
+        // turns; an owner turn older than that is not in the prompt, so it
+        // cannot stand in for the examples and they stay.
+        styleExamples: source == 'email' && !_shownTail(thread).any((m) => m.outbound)
             ? await _styleExamplesFor(source, replyTo.fromAddress)
             : const [],
         storylineSummary: await _storylineSummaryFor(source, key),

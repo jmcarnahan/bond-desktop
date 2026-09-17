@@ -217,10 +217,11 @@ of answer, 145 / 169 / 171 over 16. So 384 is half again as much as the
 longest recap anything has written. The 512 it ran at before was never a
 decision about recaps at all — it is `runTask`'s generic ceiling, which every
 task that names no budget lands on. Like the draft budget, this one is a bound
-rather than a speed-up: `bench-prose` on 2026-09-16 generated about 179 tokens
-a recap against the 384 ceiling, and its recap p50 is unchanged from the run
+rather than a speed-up: `bench-prose` on 2026-09-17, with the 384 in force,
+generated 537 tokens over three recaps — about 179 each, the same total to
+the digit as the run at 512 — and its recap p50 is unchanged from the run
 before the budget existed within that bench's own noise (12.7 s in round 0,
-11.7 s today).
+11.8 s now).
 
 **The window** is `MessageStore.recentStorylineMessages(id, limit: 12)`: the
 newest messages across *every* member thread, merged into one chronology by

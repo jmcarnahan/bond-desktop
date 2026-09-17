@@ -507,6 +507,42 @@ void main() {
       expect(spoken.userMessages.last, contains('Checking with the team now.'));
     });
 
+    test("an owner turn older than the rendered tail does not drop the examples",
+        () async {
+      // The prompt shows only the newest five turns. An owner reply six turns
+      // back is not in it, so it cannot stand in for the style examples — the
+      // rule reads the window the prompt renders, not the whole thread.
+      await seedOutbound(key: 'conv-0', body: 'Yes, noon works. — Jo');
+      await seedOutbound(
+        id: 'o3',
+        key: 'conv-3',
+        receivedAt: '2026-08-28T08:00:00Z',
+        body: 'Looping in the team now. — Jo',
+      );
+      for (var i = 0; i < 5; i++) {
+        await seedInbound(
+          id: 'm3$i',
+          key: 'conv-3',
+          receivedAt: '2026-08-28T${(9 + i).toString().padLeft(2, '0')}:00:00Z',
+          body: 'Follow-up number $i about the venue.',
+        );
+      }
+
+      final llm = FakeLlm([decision(), answer()]);
+      await runOne(DraftHandler(store, llm, progress: progress), id: 'm34');
+
+      final prompt = llm.userMessages.last;
+      expect(prompt, contains('style_examples'));
+      // The owner's older turn is not in the rendered thread — it shows up,
+      // correctly, as one of the style examples instead.
+      final thread = prompt.substring(
+        prompt.indexOf('<untrusted_data source="thread">'),
+        prompt.indexOf('</untrusted_data>', prompt.indexOf('source="thread"')),
+      );
+      expect(thread, isNot(contains('Looping in the team now.')));
+      expect('Follow-up number'.allMatches(thread).length, 5);
+    });
+
     test('the about-me preference, read from the store', () async {
       await seedInbound();
       await store.setPref(aboutMeKey, 'I own the website redesign and the launch.');

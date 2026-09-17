@@ -52,10 +52,51 @@ void main() {
     });
 
     test('without a header the newest lines are still what is kept', () {
+      // Too tight to announce the trim as well: the two newest whole lines
+      // beat a header over a stub of one.
       final digest = ['x' * 40, 'y' * 40, 'z' * 40].join('\n');
       final fitted = fitThreadDigest(digest, 81);
 
       expect(fitted, '${'y' * 40}\n${'z' * 40}');
+    });
+
+    test('a trimmed digest with no header of its own gets one that counts',
+        () {
+      // Ten lines of a hundred, a budget of six hundred: five fit on their
+      // own, and still fit under the line that says five went — so the
+      // reader is told, the way the packer's own header tells them.
+      final digest = [for (var i = 0; i < 10; i++) 'l$i${'.' * 97}'].join('\n');
+      final fitted = fitThreadDigest(digest, 600);
+      final lines = fitted.split('\n');
+
+      expect(lines.first,
+          '(thread digest trimmed to fit; 5 older lines omitted)');
+      expect(lines.skip(1).map((l) => l.substring(0, 2)),
+          ['l5', 'l6', 'l7', 'l8', 'l9']);
+      expect(fitted.length, lessThanOrEqualTo(600));
+    });
+
+    test('the synthesized header gives way when it would cost the last whole line',
+        () {
+      // One line fits, but not one line plus the announcement — the
+      // announcement is dropped rather than the line, and the count it would
+      // have carried is never wrong because it is never shown.
+      final digest = [for (var i = 0; i < 4; i++) 'r$i${'-' * 58}'].join('\n');
+      final fitted = fitThreadDigest(digest, 100);
+
+      expect(fitted, 'r3${'-' * 58}');
+    });
+
+    test('the announcement outranks a second whole line when one still fits',
+        () {
+      // Two lines would fit in silence; the header plus the newest line fits
+      // too, and that is what the reader gets — being told that history is
+      // missing is worth one older line at any budget that can afford it.
+      final digest = [for (var i = 0; i < 4; i++) 'r$i${'-' * 58}'].join('\n');
+      final fitted = fitThreadDigest(digest, 121);
+
+      expect(fitted,
+          '(thread digest trimmed to fit; 3 older lines omitted)\nr3${'-' * 58}');
     });
 
     test('a single over-long line is clipped from its END, under the header',

@@ -184,7 +184,7 @@ class DraftTask implements JsonTask<DraftResult> {
   /// The newest few messages, and no more. A thread's older turns say what it
   /// is about; its newest ones say what is being asked, and only the second
   /// kind changes the reply.
-  static const int _maxThreadMessages = 5;
+  static const int maxThreadMessages = 5;
 
   /// Total characters of thread. Past this the model is reading quoted
   /// signatures rather than context.
@@ -405,8 +405,8 @@ class DraftTask implements JsonTask<DraftResult> {
   /// the message being replied to, which is the one piece of the thread the
   /// draft cannot be written without.
   static String _threadText(DraftInput input) {
-    final recent = input.thread.length > _maxThreadMessages
-        ? input.thread.sublist(input.thread.length - _maxThreadMessages)
+    final recent = input.thread.length > maxThreadMessages
+        ? input.thread.sublist(input.thread.length - maxThreadMessages)
         : List<Message>.from(input.thread);
     // A thread whose messages are not stored (a store read that came back
     // empty) still has the message being answered.

@@ -124,12 +124,15 @@ void main() {
               previousRecap: recapCase.previousRecap,
               messageLines: recapCase.messageLines,
             ),
-            // As the service runs it. Zero matters more here than anywhere
-            // else in this file: the same window recapped twice is what the
-            // staleness gate lets happen after a park, and a block that
-            // re-words itself under a reader who did not touch it is the one
-            // thing this pass must not do.
+            // As the service runs it, both parameters. Zero matters more here
+            // than anywhere else in this file: the same window recapped twice
+            // is what the staleness gate lets happen after a park, and a block
+            // that re-words itself under a reader who did not touch it is the
+            // one thing this pass must not do. The budget is the service's
+            // too — the 2026-09-16 row ran this leg at `runTask`'s generic
+            // 512 and said 384; fixed on the round's whole-branch review.
             temperature: 0,
+            maxTokens: StorylineRecapTask.maxTokens,
             think: BenchTarget.allowReasoning,
           );
 

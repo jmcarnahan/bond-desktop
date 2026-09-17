@@ -59,8 +59,8 @@ bench cannot measure a prompt the app does not send.
 
 **The budget is a bound, not an accelerator**, and it is worth being plain
 about that because the numbers around it invite the other reading. A typical
-draft never comes near either ceiling — `bench-prose` on 2026-09-16 generated
-about 221 tokens a draft against 768 — so its p50 did not move: 15.7 s against
+draft never comes near either ceiling — `bench-prose` on 2026-09-17 generated
+about 221 tokens a draft against 768 — so its p50 did not move: 16.1 s against
 round 0's 16.1 s kept and 14.9 s first pass, which is that bench's own noise.
 The golden draft p50 did fall, 16.6 s on 2026-09-14 to 12.3 s and 13.3 s on
 the two rounds of prompt rules, and that is **MTP**: the 2026-09-14 row ran

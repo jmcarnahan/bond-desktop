@@ -47,7 +47,8 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
   every bench.
 - `BENCH_K` — the concurrencies `make drain` races, in order (e.g. `1,3,6`).
 - `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_EXTRACT_CTX`, `GOLDEN_K`,
-  `GOLDEN_OWNER_NAME` / `GOLDEN_OWNER_ADDRESS` — see "The golden set".
+  `GOLDEN_CHARTER_CAP`, `GOLDEN_OWNER_NAME` / `GOLDEN_OWNER_ADDRESS` — see
+  "The golden set".
 
 Name the weights in a label, not just the runtime: two quantizations of one
 model otherwise produce two identical-looking tables. Once two runs have
@@ -566,8 +567,10 @@ context ladder on the 4B is the row worth re-reading: the thread tail lowers
 needs-action (75% alone → 66% with it) and reply-expected (75 → 70; the
 `none` rung's second pass of 2026-09-16 reads 78 and 78, item 7), on the
 items whose gold label needs the tail as much as on the rest, and the digest
-rung sits between the two. Extraction is identical across rungs by
-construction — it has no thread field. The 27B doing bulk work is the ceiling
+rung sits between the two. Extraction was identical across those rungs by
+construction — it had no thread field until round B phase 3, and since then
+it reads its own knob (`GOLDEN_EXTRACT_CTX`), so a `GOLDEN_CTX` rung still
+moves nothing in it. The 27B doing bulk work is the ceiling
 for these prompts (needs-action 72, reply-expected 84, needs-you 93) at six
 times the shipping model's time per message. On the prose slot the dedicated
 reply decision scores 82% against gold reply-expected, twelve points above the
@@ -738,13 +741,17 @@ with room, and the evidence sentence reached its 300-character clamp on one
 Opus draft under v2 and one under v3 and on nothing else. Draft p50 on the 27B
 is 12.3 s on v2 and 13.3 s on v3 against the 2026-09-14 row's 16.6 s, and
 that gap is MTP rather than the budget — the 2026-09-14 row is pre-MTP. The
-budget bought no speed at all, which `bench-prose` says plainly: today's row
-(`prose-…-223602.json`, third of three passes, the second identical to within
-3 ms) reads draft p50 15.7 s, recap 11.7 s and name 8.6 s against round 0's
-16.1 s kept / 14.9 s first pass, 12.7 s and 8.5 s — unchanged within that
-bench's own noise. The reason is that neither ceiling is ever reached: the
-bench's drafts generated about 221 tokens each against 768, and its recaps
-about 179 against 384. What a smaller ceiling buys is the WORST case. A
+budget bought no speed at all, which `bench-prose` says plainly: the row of
+record (`prose-…-20260917-012727.json`, second of two passes, re-run on the
+round's whole-branch review because the 2026-09-16 row's recap leg had run
+at the generic 512 while saying 384 — a harness gap, since fixed) reads draft
+p50 16.1 s, recap 11.8 s and name 8.6 s against round 0's 16.1 s kept /
+14.9 s first pass, 12.7 s and 8.5 s — unchanged within that bench's own
+noise. The reason is that neither ceiling is ever reached: the bench's drafts
+generated 1,104 tokens over five, about 221 each against 768, and its recaps
+537 over three, about 179 against 384 — the same token totals to the digit as
+the 512 run, which is what "the budget binds nothing" looks like at
+temperature 0. What a smaller ceiling buys is the WORST case. A
 rambling or wedged generation now stops at 768 tokens, roughly 43 s of
 generation, where 1,536 would have run to about 86 s — and that, not any p50,
 is what lets the prose timeout come down from 120 s to 90 s. The phase's other
@@ -752,7 +759,7 @@ budget went the same way: the confirm task's charter clamp was raised to 800
 and 1200 against the same cards and made the 4B worse both times —
 `storyline.id` 81 / 78 / 77%, forbidden-accept 20 / 25 / 26% — so the cap
 stays at 400 and only the knob that measured it is new. The confirm rows carry
-that ladder in full.
+that ladder in full. The v3 text carries one contradiction its measurement did not resolve, found on the round's whole-branch review: the two-options bullet still offers "accepting versus declining" as its example and the stance examples read "Confirm Friday" / "Decline politely", while the owner-only bullet says accepting or declining what the sender proposed IS supplying a fact only the owner holds. A model reading both is being told two things, which is a plausible part of why the 27B's nine flagged items never moved. It was left as measured — a prompt edit without its two runs would break this round's rule — and it is the first v4 experiment: replace the example with two answers that differ in something the thread does show.
 
 **Prompt round (2026-09-16/17), phase 3 — the digest as its own fence,
 extraction's first thread, and the ladder decided.** What was built: a
@@ -1398,7 +1405,8 @@ lives in the golden ledger above.
 | 2026-09-04 | omlx/Qwen3.8-27B-4bit | `prose-…-045218.json` | 10.5 | 22233 (draft) | prose read by hand | — | draft speed tie with the baseline; naming −18% — nothing measurable to switch for |
 | 2026-09-04 | llamacpp/R1-Distill-Qwen-14B-Q4_K_M (BENCH_THINK=1) | none — bench cannot complete | — | — | — | — | **disqualified for bulk**: contract verify passes, but reasoning consumes the production token budget and the JSON answer truncates mid-object (reproduced twice). In production that exact failure drops mail |
 | 2026-09-16 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-…-20260916-023304.json` | 10.2 (12.1 srv) draft · 13.2 (15.3 srv) name · 14.2 (17.0 srv) recap | 16083 (draft) · 8460 (name) · 12733 (recap) | prose read by hand; MTP draft acceptance 66–77%, mean accepted run ~3.2 tokens | — | names and recaps are the clear win — name p50 8.5s against ~12s and recap 12.7s against ~22.6s in the app's activity log; the draft row is muddied by one 35s call (p95 35010ms) in the kept pass — the first pass read draft p50 14933ms, 13.4 tok/s (16.8 srv), p95 18783 — taken with the machine at 15GB of compressor and under 200MB unused; adopted in `local.mk`; re-bench drafts once the prose work is off the per-message critical path and the machine is not swapping |
-| 2026-09-16 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260916-223602.json` | 14.0 (17.0 srv) draft | 15722 (draft) · 8609 (name) · 11679 (recap) | prose read by hand | — | round B phase 2 — draft budget 768, recap 384, invention rules v3; third of three passes, second identical; drafts ≈ 221 tokens and recaps ≈ 179, so neither budget was reached and the p50s are round 0's within noise; the budgets bound the worst case, which is what the 90 s prose timeout rests on |
+| 2026-09-16 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260916-223602.json` | 14.0 (17.0 srv) draft | 15722 (draft) · 8609 (name) · 11679 (recap) | prose read by hand | — | round B phase 2 — draft budget 768, invention rules v3; the recap leg ran at the generic 512 (the harness did not pass the 384 — found on the whole-branch review, fixed, re-run below); third of three passes, second identical; drafts ≈ 221 tokens and recaps ≈ 179 |
+| 2026-09-17 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260917-012727.json` | 13.9 (16.9 srv) draft | 16062 (draft) · 8605 (name) · 11833 (recap) | prose read by hand | — | ROW OF RECORD for round B's budgets — draft 768 AND recap 384 both in force, invention rules v3; second of two passes (first 16344 / 8383 / 11528); drafts 1,104 tokens over 5 (≈ 221) and recaps 537 over 3 (≈ 179), identical totals to the 512 run, so neither budget was reached and the p50s are round 0's within noise; the budgets bound the worst case, which is what the 90 s prose timeout rests on |
 | 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K (4096 per slot, 4 slots) | `triage-extract-…-20260916-023642.json` | 54.3 (62.9 srv) | 2234 | cat 81% · label 88% · needs_action 100% (16 items, 0 format failures, same three category misses as the 2026-09-04 baseline) | — (see the drain row below) | unchanged against the 2026-09-04 baseline (p50 2176, 54.8 tok/s) — halving the context to 4096 tokens a slot costs nothing on the fictional corpus; extraction p50 1808ms, 50.8 tok/s (61.1 srv) |
 | 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K, 4 slots (drain) | `drain-…-k-{1,3}-20260916-023910.json` | 52.8 at K=1 · 21.9 per stream at K=3 | 2164 (K=1) · 5479 (K=3) | — | 26.6 / 31.1 / — (K=6 not run: the shipping FAST_SLOTS is 4) | K=1 matches the baseline (26.1); K=3 is 31.1 against the baseline's 25.3 on 6 slots — 1.17x over K=1, queue-wait 47ms; the K=6 champion figure (56.9) needs `FAST_SLOTS=6` and was not re-measured this round |
 

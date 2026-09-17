@@ -45,8 +45,8 @@ class TriageProgress {
 /// serial drain. The trade reverses past a small K — every request in a batch
 /// gets individually slower — and two things here care about ONE request
 /// rather than the aggregate: [LlmClient]'s timeout, which is sized to catch
-/// a wedged server rather than a batched one, and the person
-/// waiting for the first triaged message to appear.
+/// a wedged server rather than a batched one, and the person waiting for the
+/// first triaged message to appear.
 ///
 /// Each message goes through two tiers, in this order for a reason:
 ///

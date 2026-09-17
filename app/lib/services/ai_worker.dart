@@ -88,8 +88,8 @@ enum _RunOutcome {
 /// like K times the wall clock of one — the aggregate is worth roughly 2.5-3x
 /// a serial drain. K is small and per handler because the trade runs the other
 /// way past a point: each individual request gets slower as the batch grows,
-/// and both the client's timeout and the person watching for the
-/// first result care about one request's latency, not the aggregate.
+/// and both the client's timeout and the person watching for the first
+/// result care about one request's latency, not the aggregate.
 ///
 /// The kinds still drain in handler ORDER rather than interleaved, and that
 /// has never been about the server: extraction writes the embeddings both
