@@ -81,7 +81,7 @@ expanded one with about ten seconds to spare, and 60 would cut either off
 mid-sentence. The bulk client keeps 120, where it costs nothing — see
 [10-model-routing.md](10-model-routing.md).
 
-### The invention rules (v3, 2026-09-16)
+### The invention rules (v3, 2026-09-16; v4, 2026-09-17)
 
 The golden rubric judge found that every prose model's draft failures shared
 one shape, and it was not the one the old single rule named. The failing
@@ -104,8 +104,17 @@ than one, each of them a single line in the same `const` string:
   to a proposal, because a yes does not feel like a fabricated fact; this says
   in the prompt that it is one.
 - **Two answers that differ only by a missing owner fact are one option.** The
-  two-options bullet's third clause. Yes-or-no to a time, a price or a plan is
-  not two stances the owner can pick between — it is one option that asks.
+  two-options bullet's third clause. Yes-or-no to a time, a price or a plan —
+  and, since v4, accepting or declining what was proposed — is not two stances
+  the owner can pick between; it is one option that asks. v4 also replaced the
+  bullet's example: v3 still offered "accepting versus declining" as the
+  canonical two-option case, which contradicted the bullet above it. The
+  example is now two answers the thread can support — answer now versus ask
+  for the one missing detail, send the offered document versus point to it —
+  the bullet gained the conjunct "AND the thread already holds what each one
+  needs", which tightens when two options are allowed at all, and the stance
+  examples read "Ask which day" / "Send the summary" / "Answer the question"
+  instead of "Confirm Friday" / "Decline politely".
 - **The owner's own next step is not an invention**, narrowly. The model may
   offer to send something, say what the owner will do next, or **ask to set up
   a time, as long as it names no time**. The earlier wording licensed
@@ -134,6 +143,21 @@ one: the same nine 27B items are flagged invented under all three wordings
 even though 24 of its 25 draft texts changed, and no 27B draft in any pass
 left a placeholder. The next lever there is structural, not textual — an
 owner-only-facts step that runs before drafting.
+
+**v4, measured 2026-09-17 before it shipped.** The example change was found on
+the round's whole-branch review and measured under a rule written first: ship
+if the 27B's drafts passing stayed within 2 of v3's 6 and its invented count
+within 2 of 14, and Opus 5 stayed within 3 of 17. Opus 5 read 17 of 25 with 6
+of 8 invented, identical to v3
+(`golden-run-bedrock-claude-opus-5-20260917-014357.json`, one pass). The 27B
+read 5 of 25
+(`golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260917-020022.json`) with the
+same 14 items flagged invented as under v3 — none new, none cleared; fourteen
+rather than the nine above because nine is the set common to baseline, v2 and
+v3 while fourteen is v3's whole flagged set — while 21 of its 25 draft texts
+changed; drafts that ask a question went 3 → 8. So v4 ships: the contradiction
+is gone at no measured cost, and the local model's invention is now known not
+to hinge on that example either.
 
 Two caveats belong on those numbers: the local rows are K=1 and the cloud rows
 K=4, and the judge's own noise floor is ±2 on both counts, measured here by

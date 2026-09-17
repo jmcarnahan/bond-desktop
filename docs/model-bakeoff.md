@@ -555,6 +555,8 @@ not in date order.
 | 2026-09-16 | prose | bedrock/deepseek-v3.2 | tail (fixed) | `golden-run-bedrock-deepseek-v3-2-20260916-211815.json` | — / — / — / 72% / — / — / — / — / — / — | draft 36% | 961 / 2095 (reply_decision / draft_reply) | 35.2 | 109.3 | $0.90 | invention rules v2, draft budget 768; invented 9 of 16 failing; OpenAI wire; K=4 |
 | 2026-09-16 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260916-214911.json` | — / — / — / 82% / — / — / — / — / — / — | draft 24% | 6077 / 13269 (reply_decision / draft_reply) | 8.2 | 5.0 | $0.00 | invention rules v3 SHIPPED, draft budget 768, K=1 with MTP; invented 14 of 19 failing; identical drafts to pass 1, which a second judge run scored 32% / invented 12 — judge noise ±2 |
 | 2026-09-16 | prose | bedrock/claude-opus-5 | tail (fixed) | `golden-run-bedrock-claude-opus-5-20260916-215244.json` | — / — / — / 75% / — / — / — / — / — / — | draft 68% | 2252 / 5606 (reply_decision / draft_reply) | 50.9 | 55.6 | $17.98 | invention rules v3 SHIPPED, draft budget 768; invented 6 of 8 failing; Converse, no temperature; K=4 |
+| 2026-09-17 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260917-020022.json` | — / — / — / 82% / — / — / — / — / — / — | draft 20% | 6110 / 12453 (reply_decision / draft_reply) | 8.4 | 4.9 | $0.00 | invention rules v4 SHIPPED (the two-options example no longer contradicts the owner-only bullet); 5 of 25 against v3's 6, inside the judge's ±2; invented 14 of 20 — the SAME 14 items as v3, none new, none cleared, with 21 of 25 texts changed; drafts asking a question 3 → 8; max completion 322; MTP; K=1; pass 2 `…021535` byte-identical on all 25 drafts and every decision (this row cites the judged pass 1) |
+| 2026-09-17 | prose | bedrock/claude-opus-5 | tail (fixed) | `golden-run-bedrock-claude-opus-5-20260917-014357.json` | — / — / — / 78% / — / — / — / — / — / — | draft 68% | 2264 / 5580 (reply_decision / draft_reply) | 50.5 | 55.1 | $18.03 | invention rules v4 SHIPPED; 17 of 25 with invented 6 of 8, identical to v3; ONE pass (Converse, no temperature — a noisier read than the local row by design of the budget); max completion 672; K=4 |
 
 **What the first rows say** (2026-09-14, all at `GOLDEN_K=1`, keep-only, every
 row the second of two passes unless its note says otherwise; the 2026-09-16
@@ -759,7 +761,7 @@ budget went the same way: the confirm task's charter clamp was raised to 800
 and 1200 against the same cards and made the 4B worse both times —
 `storyline.id` 81 / 78 / 77%, forbidden-accept 20 / 25 / 26% — so the cap
 stays at 400 and only the knob that measured it is new. The confirm rows carry
-that ladder in full. The v3 text carries one contradiction its measurement did not resolve, found on the round's whole-branch review: the two-options bullet still offers "accepting versus declining" as its example and the stance examples read "Confirm Friday" / "Decline politely", while the owner-only bullet says accepting or declining what the sender proposed IS supplying a fact only the owner holds. A model reading both is being told two things, which is a plausible part of why the 27B's nine flagged items never moved. It was left as measured — a prompt edit without its two runs would break this round's rule — and it is the first v4 experiment: replace the example with two answers that differ in something the thread does show.
+that ladder in full. The v3 text carries one contradiction its measurement did not resolve, found on the round's whole-branch review: the two-options bullet still offers "accepting versus declining" as its example and the stance examples read "Confirm Friday" / "Decline politely", while the owner-only bullet says accepting or declining what the sender proposed IS supplying a fact only the owner holds. A model reading both is being told two things, which is a plausible part of why the 27B's nine flagged items never moved. v4 is the fix, measured the same day: the example replaced by two answers the thread can support, the conjunct "AND the thread already holds what each one needs" added, and "accepting or declining what was proposed" added to the one-option-that-asks list — under a rule written first (27B within 2 drafts of v3's 6 and within 2 invented of 14; Opus within 3 of 17): Opus 5 read 17 of 25 with 6 of 8 invented, identical; the 27B read 5 of 25 with the same 14 items flagged, none new and none cleared, across 21 changed texts (fourteen against the nine above: nine is the set flagged under baseline, v2 and v3 alike, fourteen is v3's whole flagged set). v4 shipped — the contradiction gone at no measured cost — and the local model's invention is now known not to hinge on that example either.
 
 **Prompt round (2026-09-16/17), phase 3 — the digest as its own fence,
 extraction's first thread, and the ladder decided.** What was built: a
@@ -1010,7 +1012,7 @@ Opus 5 12 → 17; on v2 only, Sonnet 5 10 → 17 and DeepSeek V3.2 10 → 9.
 Invented over each row's failing drafts fell on every cloud model — Opus 10 of
 13 → 6 of 8, Sonnet 12 of 15 → 6 of 8 — and rose on the local one, 10 of 20 →
 14 of 19. So Opus 5 stays the default "better draft" and its measured number
-for the consent screen is 17 of 25 rather than 12. Sonnet 5 also reached 17 of
+for the consent screen is 17 of 25 rather than 12 (v4, 2026-09-17, re-read the same 17 of 25 and 6 of 8). Sonnet 5 also reached 17 of
 25, at 40% of the price — a fact to record with its caveat, since that is
 Sonnet on v2 against Opus on v3 and Sonnet has no v3 run; what the escalation
 ships is not this phase's call. The rule did NOT precede the swap in the way this item
@@ -1228,7 +1230,12 @@ remain unmeasured by the set.
    on every cloud model and rose on the 27B (10 of 20 → 14 of 19), whose nine
    invented items are the same nine under every wording — so the local model's
    next lever is a separate owner-only-facts step before drafting, not more
-   prompt text. The charter clamp: also done in phase 2 — it is a parameter
+   prompt text. v4 (2026-09-17) removed the two-options example that
+   contradicted the owner-only bullet and re-measured: Opus 17 of 25 and 6 of 8
+   invented, identical; the 27B 5 of 25 with the same fourteen items flagged
+   (v3's whole set; the nine are the ones common to every wording since the
+   baseline) across 21 changed texts — shipped, and the structural conclusion
+   stands. The charter clamp: also done in phase 2 — it is a parameter
    with a `GOLDEN_CHARTER_CAP` knob now, and the replay at 400 / 800 / 1200
    gave `storyline.id` 81 / 78 / 77% with forbidden-accept 20 / 25 / 26%, so
    it stays at 400 and a longer charter is not the improvement this item

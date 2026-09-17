@@ -26,8 +26,9 @@ import 'prompt_guard.dart';
 /// class outright and tell the model to ask the one question or leave a
 /// bracketed placeholder rather than fill the gap.
 ///
-/// Those rules were measured the day they were written and revised once. What
-/// is above is v3, and it is worth five drafts on the best cloud model and
+/// Those rules were measured the day they were written and revised once into
+/// v3; what is above is v4, which differs from v3 only in the two-options
+/// bullet (below). v3 is worth five drafts on the best cloud model and
 /// nothing on the local one: Opus 5 went from 12 of 25 to 17 with its invented
 /// count 11 down to 6, while the 27B stayed where it was — the same 9 items
 /// flagged invented under every wording, even though 24 of its 25 draft texts
@@ -35,14 +36,33 @@ import 'prompt_guard.dart';
 /// the string next: for the 27B the wording is where prompt text stops
 /// helping, and the next lever is a separate owner-only-facts step before the
 /// draft rather than another bullet here.
+///
+/// v4 (2026-09-17) touched the two-options bullet and the stance examples,
+/// three edits in one bullet: v3 still offered "accepting versus declining"
+/// as the canonical two-option case while the owner-only bullet below said
+/// that accepting or declining IS an owner-only fact — one prompt, two
+/// instructions. So (1) the example now names two answers the thread can
+/// support (answer now versus ask for the one missing detail; send the
+/// offered document versus point to it); (2) the bullet gained the
+/// conjunct "AND the thread already holds what each one needs", which
+/// tightens when two options are allowed at all; (3) "accepting or declining
+/// what was proposed" joined the one-option-that-asks list. The stance
+/// examples followed. Measured before shipping: Opus 5 17 of 25 with 6 of 8
+/// invented, identical to v3; the 27B 5 of 25 (v3 read 6, inside the judge's
+/// ±2) with the SAME 14 items flagged invented — none new, none cleared —
+/// while 21 of 25 texts changed. (Fourteen, not the nine above: nine is the
+/// set flagged under baseline, v2 AND v3 alike; fourteen is v3's whole
+/// flagged set, and v4 reproduced it exactly.) The contradiction is gone at
+/// no measured cost, and the local model's invention is now known not to
+/// depend on this example either.
 const String _draftRules = '''
 You are drafting a reply on behalf of the inbox's owner. You write as them, in the first person. The message may be an email or an instant chat message; a channel note in each request says which, and its style rules are part of the task.
 
 Rules:
 - evidence: ONE sentence naming what the sender needs and what your reply commits to. Write it first — the reply below should follow from it.
 - options: one or two SHORT replies, ready to send as they stand. The first is the one you would send if you had to send one right now.
-- Give TWO options ONLY when the message genuinely has two reasonable answers that commit to different things — accepting versus declining, confirming Friday versus proposing another day. Two rewordings of the same answer are ONE option. Two answers that differ only by a fact the owner has not given — yes or no to a time, a price, a plan — are not two options either: they are ONE option that asks.
-- stance: two to four words naming what the option does, phrased as an instruction ("Confirm Friday", "Propose Tuesday", "Decline politely").
+- Give TWO options ONLY when the message genuinely has two reasonable answers that commit to different things AND the thread already holds what each one needs — answering the question now versus asking for the one detail it turns on, sending the document the owner already offered versus pointing to where it was shared. Two rewordings of the same answer are ONE option. Two answers that differ only by a fact the owner has not given — yes or no to a time, a price, a plan, accepting or declining what was proposed — are not two options either: they are ONE option that asks.
+- stance: two to four words naming what the option does, phrased as an instruction ("Ask which day", "Send the summary", "Answer the question").
 - Every option obeys the invention rules below. A short reply is not a licence to guess.
 - reply_body: the reply itself, as plain text. No markdown. It may expand on the first option.
 - Follow the channel note's style rules for length, greeting and sign-off exactly.
