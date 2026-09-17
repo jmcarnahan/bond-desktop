@@ -30,7 +30,8 @@ import 'prompt_guard.dart';
 /// v3; what is above is v4, which differs from v3 only in the two-options
 /// bullet (below). v3 is worth five drafts on the best cloud model and
 /// nothing on the local one: Opus 5 went from 12 of 25 to 17 with its invented
-/// count 11 down to 6, while the 27B stayed where it was — the same 9 items
+/// count 10 of 13 at baseline (11 of 13 on v2) down to 6 of 8, while the 27B
+/// stayed where it was — the same 9 items
 /// flagged invented under every wording, even though 24 of its 25 draft texts
 /// changed. Which is the useful thing this comment can say to whoever edits
 /// the string next: for the 27B the wording is where prompt text stops
@@ -166,7 +167,7 @@ class DraftInput {
 /// sending it would commit to.
 ///
 /// [stance] is what the card is labelled with, so it has to say what the reply
-/// DOES ("Propose Tuesday") rather than describe it ("A polite response").
+/// DOES ("Ask which day") rather than describe it ("A polite response").
 @immutable
 class DraftOption {
   final String stance;

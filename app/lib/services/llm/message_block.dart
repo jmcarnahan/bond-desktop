@@ -145,7 +145,9 @@ const int threadDigestCap = 900;
 ///
 /// The `(thread has N earlier messages; M quoted below)` header is kept
 /// whatever else goes: without it a trimmed digest reads as the whole thread.
-/// It stays first, and the lines that survive keep their original order.
+/// It stays first, its M is rewritten to the number of lines that actually
+/// survive (so it never claims more than the reader gets), and the lines that
+/// survive keep their original order.
 ///
 /// A digest with no header of its own was quoted whole by its builder, so a
 /// trim here is the first thing that leaves anything out — and it says so,
@@ -188,6 +190,17 @@ String fitThreadDigest(String digest, int cap) {
 
   var header = hasHeader ? lines.first : null;
   var kept = keep(header);
+  if (header != null && kept.length < rest.length) {
+    // The packer's header counts what IT quoted; once lines are dropped here
+    // that count overstates what the reader gets, so it is rewritten to the
+    // lines that survive — one when only a clipped newest line does. The
+    // packer writes one line per quoted message, so the count only falls and
+    // the rewritten header is never longer; the guard is for a header that
+    // does not match its own lines, which is left as it came rather than
+    // risk a join one character over the cap.
+    final requoted = _requote(header, kept.isEmpty ? 1 : kept.length);
+    if (requoted.length <= header.length) header = requoted;
+  }
   if (header == null && kept.isNotEmpty && kept.length < rest.length) {
     // Re-fit under the synthesized line; its length depends on the count's
     // digits, so once more if the count moved, and never more than a couple.
@@ -223,8 +236,15 @@ String fitThreadDigest(String digest, int cap) {
 }
 
 /// The line a trimmed header-less digest is given, in the packer's own idiom.
-String _trimHeader(int dropped) =>
-    '(thread digest trimmed to fit; $dropped older lines omitted)';
+String _trimHeader(int dropped) => '(thread digest trimmed to fit; '
+    '$dropped older line${dropped == 1 ? '' : 's'} omitted)';
+
+/// The packer's `(thread has N earlier messages; M quoted below)` with M
+/// replaced by [quoted]. A header not in that shape comes back unchanged.
+String _requote(String header, int quoted) => header.replaceFirstMapped(
+      RegExp(r'; \d+ quoted below\)$'),
+      (_) => '; $quoted quoted below)',
+    );
 
 /// The thread tail as a transcript: who spoke, then what they said.
 ///

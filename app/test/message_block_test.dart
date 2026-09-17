@@ -47,8 +47,64 @@ void main() {
       // Room for the header and two of the three lines.
       final fitted = fitThreadDigest(digest, header.length + 2 * 51);
 
-      expect(fitted, '$header\n${'b' * 50}\n${'c' * 50}');
+      // The header's own count is rewritten to what survived: it said the
+      // packer quoted 12, and a reader here gets 2.
+      const requoted = '(thread has 40 earlier messages; 2 quoted below)';
+      expect(fitted, '$requoted\n${'b' * 50}\n${'c' * 50}');
       expect(fitted.length, lessThanOrEqualTo(header.length + 2 * 51));
+    });
+
+    test('a header whose lines all survive keeps its count', () {
+      // Exactly at the cap is the identity, header and all. Above the cap
+      // with a header, every line surviving is unreachable by construction:
+      // the fit's total is the digest's own length, so something always goes.
+      final digest = '$header\n${'a' * 30}\n${'b' * 30}';
+      expect(fitThreadDigest(digest, digest.length), same(digest));
+    });
+
+    test('a header that does not match its own lines is not made longer', () {
+      // The packer writes one line per quoted message, so M never has fewer
+      // digits than the survivor count. A header that lies about that would
+      // get a LONGER rewrite, and a longer header could push the join past
+      // the cap the lines were fitted under — so it is left as it came.
+      const liar = '(thread has 40 earlier messages; 5 quoted below)';
+      final digest = [
+        liar,
+        // Fixed-width labels, so every line is 22 characters.
+        for (var i = 0; i < 12; i++) 'w${i.toString().padLeft(2, '0')}${'.' * 19}',
+      ].join('\n');
+      final cap = liar.length + 10 * 23; // room for ten of the twelve lines
+      final fitted = fitThreadDigest(digest, cap);
+
+      expect(fitted.split('\n').first, liar);
+      expect(fitted.split('\n').length, 11);
+      expect(fitted.length, lessThanOrEqualTo(cap));
+    });
+
+    test('the synthesized count survives crossing a digit boundary', () {
+      // Twenty lines of sixty. Silently, eleven fit (nine dropped); under the
+      // one-digit header only ten do, which makes it ten dropped and a
+      // two-digit header — the re-fit has to settle on a header that names
+      // the lines actually missing.
+      final digest = [for (var i = 0; i < 20; i++) 'k$i${'.' * 57}'].join('\n');
+      final fitted = fitThreadDigest(digest, 700);
+      final lines = fitted.split('\n');
+
+      expect(lines.first,
+          '(thread digest trimmed to fit; 10 older lines omitted)');
+      expect(lines.length, 11);
+      expect(lines[1], startsWith('k10'));
+      expect(fitted.length, lessThanOrEqualTo(700));
+    });
+
+    test('one omitted line is announced in the singular', () {
+      // Two long lines and a short one: the oldest long line goes, the
+      // announcement fits, and it says "line", not "lines".
+      final digest = ['o${'.' * 119}', 'p${'.' * 119}', 'q${'.' * 59}'].join('\n');
+      final fitted = fitThreadDigest(digest, 250);
+
+      expect(fitted.split('\n').first,
+          '(thread digest trimmed to fit; 1 older line omitted)');
     });
 
     test('without a header the newest lines are still what is kept', () {
@@ -106,7 +162,11 @@ void main() {
       final digest = '$header\n${'q' * 500}';
       final fitted = fitThreadDigest(digest, header.length + 20);
 
-      expect(fitted, '$header\n${'q' * 19}');
+      // The count is rewritten to the one (clipped) line the reader gets,
+      // which is a character shorter than "12" — so one more character of
+      // the line fits and the result still lands exactly on the cap.
+      const requoted = '(thread has 40 earlier messages; 1 quoted below)';
+      expect(fitted, '$requoted\n${'q' * 20}');
       expect(fitted.length, header.length + 20);
     });
 
