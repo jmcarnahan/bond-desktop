@@ -23,6 +23,13 @@ MODEL_HF     ?= ggml-org/Qwen3.8-27B-GGUF:Q4_K_M
 # ~2GB KV cache; raise later for long agent trajectories.
 CTX_SIZE     ?= 32768
 
+# The context the PROSE server is launched with, when it wants a different
+# total from CTX_SIZE. llama.cpp splits -c across --parallel slots, so
+# SLOTS = 2 at 16384 is 8K a slot — and an expanded draft prompt (~5K plus 768
+# generated) barely fits. Widening the total is how a second slot is bought
+# without narrowing either one: `make model SLOTS=2 MODEL_CTX=32768`.
+MODEL_CTX    ?= $(CTX_SIZE)
+
 # Explicit rather than the new auto default, which resolved to 4 slots — and
 # four slots against this app's strictly-serial client is slot roulette: the
 # LRU/LCP slot picker bounces consecutive requests across slots, so the
@@ -111,7 +118,7 @@ RESET  := \033[0m
         embed embed-stop fast fast-stop omlx omlx-stop _wait-omlx \
         app-install app-run app-test app-gen app-migrations app-analyze \
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
-        ab ab-membership drain bench-compare \
+        ab ab-membership drain bench-pipeline bench-compare \
         golden-check golden-baseline golden-score golden golden-prose \
         golden-storyline golden-gate \
         golden-judge-pack golden-judge-tally \
@@ -148,6 +155,7 @@ help:
 	@printf "  make ab           → 27B vs fast model, side by side (needs both up)\n"
 	@printf "  make ab-membership → membership eval, 27B vs fast model (needs both up)\n"
 	@printf "  make drain        → drain concurrency race, BENCH_K rounds (needs make fast up)\n"
+	@printf "  make bench-pipeline → the backlog end to end, PIPE_SHAPE=single|lanes (needs fast + model up)\n"
 	@printf "  make bench-compare A=<a.json> B=<b.json> → diff two bench results\n"
 	@printf "  make golden        → the golden set through triage/needs-you/extraction on the bulk slot (GOLDEN_CTX=none|tail3|compressed|digest, GOLDEN_EXTRACT_CTX=none|tail3|digest, GOLDEN_K=…)\n"
 	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
@@ -169,7 +177,9 @@ help:
 	@printf "The Bedrock bearer comes from BEDROCK_API_KEY in \$$(BEDROCK_ENV).\n"
 	@printf "Each run writes JSON to $(BENCH_OUT); PROSE_* points the other slot.\n"
 	@printf "BENCH_VERIFY=0 skips the contract check; BENCH_K=1,3,6 picks the drain\n"
-	@printf "rounds (start the server with FAST_SLOTS >= max(K)).\n\n"
+	@printf "rounds (start the server with FAST_SLOTS >= max(K)).\n"
+	@printf "PIPE_COPIES/PIPE_WIDTH/PIPE_SHAPE/PIPE_LATE tune the pipeline bench;\n"
+	@printf "MODEL_CTX widens the prose server's total context for SLOTS > 1.\n\n"
 	@printf "First run downloads ~19GB of weights before the port binds —\n"
 	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n\n"
 	@printf "Ship it (macOS installer, see docs/distribution.md):\n"
@@ -263,7 +273,7 @@ setup:
 # wires the weights: without it macOS pages the mmap'd 16GB out during idle,
 # and the first prefill after a quiet stretch measured 6.8 tok/s against 130
 # warm (the bare mlock mode drops mmap; the old --mlock flag is deprecated).
-MODEL_FLAGS := --jinja -ngl 99 -c $(CTX_SIZE) -fa on --load-mode mmap+mlock \
+MODEL_FLAGS := --jinja -ngl 99 -c $(MODEL_CTX) -fa on --load-mode mmap+mlock \
   --parallel $(SLOTS)
 ifneq ($(strip $(DRAFT_HF)),)
 MODEL_FLAGS += -hfd $(DRAFT_HF) --spec-draft-n-max $(DRAFT_MAX) \
@@ -303,7 +313,7 @@ model:
 	   esac; \
 	 fi; \
 	 mkdir -p $(LOG_DIR); \
-	 printf "→ llama-server on :$(MODEL_PORT)  ($(MODEL_HF), ctx $(CTX_SIZE))\n"; \
+	 printf "→ llama-server on :$(MODEL_PORT)  ($(MODEL_HF), ctx $(MODEL_CTX))\n"; \
 	 nohup llama-server -hf $(MODEL_HF) $(MODEL_FLAGS) --port $(MODEL_PORT) \
 	   > $(LOG_DIR)/model-$(MODEL_PORT).log 2>&1 &
 	@$(MAKE) --no-print-directory _wait-model
@@ -604,6 +614,26 @@ BENCH_VERIFY ?= 1
 # thing being measured.
 BENCH_K      ?= 1,3
 
+# ── the pipeline bench: how the backlog behaves end to end ─────────────
+# How many copies of the fixture corpus `make bench-pipeline` seeds. 3 is ~66
+# messages, which is the backlog size the roadmap's targets are written about.
+PIPE_COPIES  ?= 3
+# How many drafts are at the prose server at once — the app's
+# AppPrefs.proseParallel, as a define so a bench can measure a width the
+# shipping default is not. The server must have been started with at least this
+# many slots or the extra requests queue rather than batch.
+PIPE_WIDTH   ?= 1
+# single | lanes. `single` is the pre-Round-C shape: one worker holding
+# needs-you, extraction and drafting, sharing the triage gate. `lanes` is the
+# shipping shape: a fast worker on the triage gate and a draft worker on its
+# own. Both are measured on the same tree the same day, which is a cleaner
+# before/after than two trees a week apart.
+PIPE_SHAPE   ?= lanes
+# Whether the late-arrival leg runs: one more message upserted at the moment
+# the first draft call starts, timed from upsert to its extraction being done.
+# 0 skips it.
+PIPE_LATE    ?= 1
+
 # ── the bakeoff: Bedrock as a target ────────────────────────────────────
 # Two wires. Most Bedrock models speak the OpenAI shape at
 # $(BEDROCK_OPENAI_URL) with the app's body unchanged; Anthropic models are
@@ -674,6 +704,10 @@ BENCH_DEFINES := \
   --dart-define=BENCH_WARMUP=$(BENCH_WARMUP) \
   --dart-define=BENCH_THINK=$(if $(filter-out 0,$(BENCH_THINK)),true,false) \
   --dart-define=BENCH_K='$(BENCH_K)' \
+  --dart-define=PIPE_COPIES='$(PIPE_COPIES)' \
+  --dart-define=PIPE_WIDTH='$(PIPE_WIDTH)' \
+  --dart-define=PIPE_SHAPE='$(PIPE_SHAPE)' \
+  --dart-define=PIPE_LATE=$(if $(filter-out 0,$(PIPE_LATE)),true,false) \
   --dart-define=GOLDEN_SET='$(GOLDEN)' \
   --dart-define=GOLDEN_REGISTRY='$(GOLDEN_REGISTRY)' \
   --dart-define=GOLDEN_OWNER_NAME='$(GOLDEN_OWNER_NAME)' \
@@ -934,6 +968,19 @@ ab-membership:
 drain:
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_drain_live_test.dart --run-skipped $(BENCH_DEFINES)
+
+# The whole backlog through the real queues, both shapes: PIPE_COPIES copies of
+# the fixture corpus through triage, needs-you and extraction on the bulk
+# server and the drafts they queue on the prose one. What `drain` measures is
+# triage's batching; what this measures is the thing a person feels — when the
+# inbox is usable, when the drafts are done, and how long a message that
+# arrives mid-backlog waits (PIPE_LATE).
+#
+# BOTH servers are verified, because both are measured — `ab`'s reasoning.
+bench-pipeline:
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_pipeline_live_test.dart --run-skipped $(BENCH_DEFINES)
 
 # Two runs, side by side. The benches above each leave a JSON file in
 # $(BENCH_OUT); this is what turns two of them into a decision.

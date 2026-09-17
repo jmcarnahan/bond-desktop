@@ -18,6 +18,13 @@ import 'dart:async';
 /// — a user's Regenerate click pumps the AI worker whenever it lands — so the
 /// two drains share this gate, and whichever starts second waits.
 ///
+/// Since Round C there are THREE of these, one per lane, and the paragraph
+/// above is about the FAST one: the triage drain and the fast worker share it
+/// because they share the fast server. The storyline and draft lanes hold
+/// their own, which is what lets a recap or a draft run beside a new message's
+/// triage instead of in front of it — see `AiWorker`'s header for how the
+/// lanes are cut.
+///
 /// A plain FIFO chain: each [run] starts after every earlier [run] has
 /// settled. Errors do not break the chain — a failed drain must not wedge
 /// every drain after it.

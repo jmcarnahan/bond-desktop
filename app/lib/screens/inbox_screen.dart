@@ -2237,6 +2237,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ModelSlot.embed => Future<void>.value(),
           }),
       onSlotReset: (slot) => unawaited(notifier.clearSlotTarget(slot)),
+      proseParallel: prefs.proseParallel,
+      onProseParallelChanged: (width) =>
+          unawaited(notifier.setProseParallel(width)),
       localServerSummary: SettingsLocalServerBody.summary(
         serverState,
         managed: prefs.managedServer,

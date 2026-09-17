@@ -9,6 +9,13 @@ are the authority on sequencing.
 
 ## The six passes, in drain order
 
+Since Round C (2026-09) all six drain on a LANE OF THEIR OWN
+(`storylineWorkerProvider`, its own `DrainGate`) rather than in the middle of
+one long list — off the fast lane so a 12–23 second recap never sits in front
+of a new message's triage, and all six together because the order below is an
+argument rather than a habit: refresh before recruit, audit between them,
+recap after the sweep. See [10-model-routing.md](10-model-routing.md).
+
 1. **Assign** (`StorylineAssignHandler` → `assignConversation`) — when a
    conversation's card changes, cosine-shortlist it against live storyline
    centroids, then ask the model to confirm the best candidate. Every

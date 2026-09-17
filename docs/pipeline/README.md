@@ -35,6 +35,18 @@ is always the authority when they disagree.
 
 \* embeddings call the embedding server, but no chat model.
 
+**Stage numbers are the order inside a lane, not a single queue.** Since Round
+C (2026-09) the work queue drains through THREE `AiWorker` instances on three
+gates: a fast lane (stages 6–10b, plus triage's own queue in front of it on
+the same gate), a storyline lane (stage 11) and a draft lane (stages 12–13).
+Within a lane the order above is exactly the order the work happens in; ACROSS
+lanes, a stage reaches the next one by enqueuing a row and waking the lane that
+owns it. What that buys is stage 5's seconds: a new message's triage,
+needs-you verdict and extraction no longer wait behind a storyline recap or a
+draft. The lanes, their gates and the two writers that ride the storyline gate
+are in [10-model-routing.md](10-model-routing.md); `make bench-pipeline`
+measures the whole thing end to end.
+
 The attachment row sits here because this is where the two handlers register:
 `AttachmentTextHandler` and `AttachmentDigestHandler` go on the drain between
 Embed and StorylineAssign (`app_providers.dart`), so a document is read before

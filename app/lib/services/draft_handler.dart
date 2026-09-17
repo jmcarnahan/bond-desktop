@@ -116,6 +116,7 @@ class DraftHandler extends WorkHandler {
     ContextRetriever? contextDirs,
     EmbeddingsClient? embeddings,
     this._progress = const PipelineProgress.disabled(),
+    this._concurrency,
   })  :
         // ignore: prefer_initializing_formals
         _contextDirs = contextDirs,
@@ -125,6 +126,22 @@ class DraftHandler extends WorkHandler {
 
   @override
   String get kind => 'draft';
+
+  /// How wide the prose server was started, read at every launch decision.
+  ///
+  /// A CLOSURE and not a number, because the width is a SETTING
+  /// (`AppPrefs.proseParallel`, Settings › Models › Drafts in flight) and the
+  /// worker re-reads `concurrency` before launching each item — so moving the
+  /// control moves the next draft rather than waiting for a relaunch.
+  ///
+  /// One when nobody says otherwise, which is what every test, every bench and
+  /// a single-slot llama-server gets. Drafts are the one prose kind that may
+  /// go wider at all: they are independent of one another, where a recap and a
+  /// refresh both write the storyline they are about.
+  final int Function()? _concurrency;
+
+  @override
+  int get concurrency => _concurrency?.call() ?? 1;
 
   @override
   Future<void> run(Map<String, Object?> item) async {

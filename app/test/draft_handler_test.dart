@@ -1469,4 +1469,30 @@ void main() {
       expect((await progressOf('m2'))['draft_state'], 'pending');
     });
   });
+
+  group('concurrency', () {
+    test('one at a time when nobody says otherwise', () {
+      // What every test in this file, every bench and a single-slot
+      // llama-server gets.
+      expect(DraftHandler(store, FakeLlm([decision()])).concurrency, 1);
+    });
+
+    test('it reads the closure, every time it is asked', () {
+      // The width is a SETTING — Settings › Models › Drafts in flight — and
+      // `AiWorker._drainAll` asks before each launch. A handler that cached
+      // the number would leave a change waiting for the next launch of the
+      // app; `ai_worker_lanes_test.dart` pins the other half, that the worker
+      // re-reads it mid-drain.
+      var width = 2;
+      final handler = DraftHandler(
+        store,
+        FakeLlm([decision()]),
+        concurrency: () => width,
+      );
+
+      expect(handler.concurrency, 2);
+      width = 8;
+      expect(handler.concurrency, 8);
+    });
+  });
 }

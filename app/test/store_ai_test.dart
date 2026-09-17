@@ -350,6 +350,59 @@ void main() {
     });
   });
 
+  group('requeueWork', () {
+    test('a revived row keeps its place in the drain by default', () async {
+      await store.enqueueWork('draft', 'email', 'old');
+      await stampCreated('draft', 'old', '2026-09-01T09:00:00Z');
+      await store.writeWork('draft', 'email', 'old', status: 'done');
+      await store.enqueueWork('draft', 'email', 'new');
+      await stampCreated('draft', 'new', '2026-09-17T09:00:00Z');
+
+      await store.requeueWork('draft', 'email', 'old');
+
+      // Unchanged, which is what every background requeue depends on: the
+      // needs-you re-judge revives up to two hundred rows at once, and
+      // stamping them all with one `now` would jump the whole batch in front
+      // of new mail.
+      expect((await workRow('draft', 'old'))['created_at'],
+          '2026-09-01T09:00:00Z');
+      final first = await store.claimPendingWork('draft');
+      expect(first!['entity_id'], 'new');
+    });
+
+    test('refreshCreatedAt hands the revived row over first', () async {
+      await store.enqueueWork('draft', 'email', 'old');
+      await stampCreated('draft', 'old', '2026-09-01T09:00:00Z');
+      await store.writeWork('draft', 'email', 'old', status: 'done');
+      await store.enqueueWork('draft', 'email', 'new');
+      await stampCreated('draft', 'new', '2026-09-17T09:00:00Z');
+
+      // What a Regenerate, a Retry and a Restore pass: a person is waiting,
+      // and `claimPendingWork` drains `created_at DESC`.
+      await store.requeueWork('draft', 'email', 'old', refreshCreatedAt: true);
+
+      // Compared with `compareTo`: these stamps are ISO-8601 UTC, so their
+      // string order IS their time order, and `greaterThan` on a String has
+      // no `<` to call.
+      final revived = (await workRow('draft', 'old'))['created_at'] as String;
+      expect(revived.compareTo('2026-09-17T09:00:00Z'), greaterThan(0));
+      final first = await store.claimPendingWork('draft');
+      expect(first!['entity_id'], 'old');
+    });
+
+    test('it still revives only done and error rows', () async {
+      await store.enqueueWork('draft', 'email', 'm1');
+      await stampCreated('draft', 'm1', '2026-09-01T09:00:00Z');
+
+      // Pending: resetting it would lose its place in the drain order, and
+      // `refreshCreatedAt` must not be a way round the WHERE clause.
+      await store.requeueWork('draft', 'email', 'm1', refreshCreatedAt: true);
+
+      expect((await workRow('draft', 'm1'))['created_at'],
+          '2026-09-01T09:00:00Z');
+    });
+  });
+
   group('resetInterruptedWork', () {
     test('revives every claimed row, whatever its kind', () async {
       await store.enqueueWork('extract', 'email', 'a');

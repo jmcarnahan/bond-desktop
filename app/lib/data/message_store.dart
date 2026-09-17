@@ -4837,11 +4837,23 @@ FROM storylines s''';
   /// failure is fatal would treat the first try of new work as the last try
   /// of old work — a file re-queued after two bad digests would be closed as
   /// hopeless on the attempt that was going to succeed.
+  /// [refreshCreatedAt] moves a revived row to the FRONT of the drain, and it
+  /// is opt-in rather than the default because most requeues are not a person
+  /// asking. [claimPendingWork] drains `created_at DESC`, so a revived `done`
+  /// row keeps its original stamp and is claimed LAST — behind every newer
+  /// prefetch — which is the exact opposite of what a Regenerate, a Retry or a
+  /// Restore means. Those five call sites pass true.
+  ///
+  /// Not the default, because [requeueNeedsYouRejudge] revives up to two
+  /// hundred rows in one transaction ordered `received_at DESC`: stamping them
+  /// all with one wall-clock `now` would collapse their drain order to
+  /// `entity_id DESC` and jump the whole batch in front of new mail.
   Future<void> requeueWork(
     String kind,
     String source,
     String entityId, {
     String? payloadJson,
+    bool refreshCreatedAt = false,
   }) async {
     final now = _nowIso();
     await db.customUpdate(
@@ -4851,7 +4863,8 @@ FROM storylines s''';
       "VALUES (?, ?, ?, 'pending', 0, NULL, ?, ?, ?) "
       'ON CONFLICT(task_kind, source, entity_id) DO UPDATE SET '
       "status = 'pending', updated_at = excluded.updated_at, "
-      'payload_json = excluded.payload_json, attempts = 0, error = NULL '
+      'payload_json = excluded.payload_json, attempts = 0, error = NULL'
+      '${refreshCreatedAt ? ', created_at = excluded.created_at' : ''} '
       "WHERE work_items.status IN ('done', 'error')",
       variables: _args([kind, source, entityId, payloadJson, now, now]),
     );

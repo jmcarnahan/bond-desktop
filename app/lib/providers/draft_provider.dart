@@ -544,6 +544,10 @@ class DraftNotifier extends StateNotifier<DraftState> {
         'draft',
         _source,
         messageId,
+        // The one requeue a person is definitely waiting on: the claim order
+        // is `created_at DESC`, so without this the asked-for draft would be
+        // handed over after every prefetch queued since this message landed.
+        refreshCreatedAt: true,
         payloadJson:
             (pinnedAttachmentIds.isEmpty && contextFileIds.isEmpty)
                 ? null
@@ -988,7 +992,9 @@ final draftProvider =
     ref.watch(mailBackendProvider),
     target,
     teams: ref.watch(teamsBackendProvider),
-    worker: ref.watch(aiWorkerProvider),
+    // The DRAFT lane: this notifier pumps for one draft and listens for
+    // `kind == 'draft'`, and both are that worker's alone now.
+    worker: ref.watch(draftWorkerProvider),
     pipeline: ref.watch(pipelineProgressProvider),
     onSent: () => ref.read(conversationsProvider.notifier).load(),
   ),

@@ -211,10 +211,33 @@ class AppPrefs {
   /// place that resolves it.
   final String modelsFolder;
 
+  /// How many drafts may be at the prose server at once.
+  ///
+  /// The prose slot's WIDTH, not a speed dial: one per slot the server was
+  /// started with (`SLOTS` in `local.mk` for llama.cpp, `--max-num-seqs` on
+  /// vLLM). A batched decode reads the weights once for the whole batch, so a
+  /// second stream is close to free on a server that has a slot for it — and
+  /// worth nothing at all on one that does not, where the extra request simply
+  /// queues.
+  ///
+  /// Drafts only. A recap and a refresh both write the storyline they are
+  /// about and stay at one, on `WorkHandler.concurrency`'s rule: only
+  /// genuinely independent items go wider.
+  ///
+  /// Machine configuration like [routerPort] and [modelsFolder], so it
+  /// survives a `wipeAll` — how many slots this machine's server has is not a
+  /// fact about whoever is signed in.
+  final int proseParallel;
+
   /// What [routerPort] means when nothing is stored — llama-server's own
   /// default port, which is also what `make model` uses, so a user who never
   /// touches the field gets the port every doc in this repo names.
   static const int defaultRouterPort = 8080;
+
+  /// One draft at a time until somebody says otherwise: the shipping local
+  /// server is started with one slot, and a width the server cannot honour
+  /// buys queue-wait rather than throughput.
+  static const int defaultProseParallel = 1;
 
   const AppPrefs({
     this.attentionThreshold = AttentionTuning.defaultThreshold,
@@ -239,6 +262,7 @@ class AppPrefs {
     this.managedServer = false,
     this.routerPort = defaultRouterPort,
     this.modelsFolder = '',
+    this.proseParallel = defaultProseParallel,
   });
 
   /// The managed router's origin — one server, three models.
@@ -359,6 +383,7 @@ class AppPrefs {
     bool? managedServer,
     int? routerPort,
     String? modelsFolder,
+    int? proseParallel,
   }) =>
       AppPrefs(
         attentionThreshold: attentionThreshold ?? this.attentionThreshold,
@@ -384,6 +409,7 @@ class AppPrefs {
         managedServer: managedServer ?? this.managedServer,
         routerPort: routerPort ?? this.routerPort,
         modelsFolder: modelsFolder ?? this.modelsFolder,
+        proseParallel: proseParallel ?? this.proseParallel,
       );
 }
 
@@ -415,6 +441,10 @@ const String teamsLookbackDaysKey = 'teams_lookback_days';
 const String managedServerKey = 'managed_server';
 const String routerPortKey = 'router_port';
 const String modelsFolderKey = 'models_folder';
+
+/// How wide the prose server was started. Not in `wipeAll`'s list for the
+/// three keys above's reason — see [AppPrefs.proseParallel].
+const String proseParallelKey = 'prose_parallel';
 
 /// The switch [notifyStyleKey] replaced. Still read — and only read — so an
 /// install that had turned the ribbon off stays quiet across the upgrade
@@ -494,6 +524,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       managedServer: await store.getPref(managedServerKey) == 'true',
       routerPort: _routerPort(await store.getPref(routerPortKey)),
       modelsFolder: _slotValue(await store.getPref(modelsFolderKey)),
+      proseParallel: _proseParallel(await store.getPref(proseParallelKey)),
     );
   }
 
@@ -504,6 +535,13 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
 
   static int _routerPort(String? raw) =>
       clampRouterPort(int.tryParse(raw ?? '') ?? AppPrefs.defaultRouterPort);
+
+  /// A stored width, or one. [_routerPort]'s rule and its reason: a number
+  /// nothing wrote, or one somebody typed into the database by hand, must not
+  /// be able to put sixty requests in front of a one-slot server.
+  static int _proseParallel(String? raw) => clampProseParallel(
+        int.tryParse(raw ?? '') ?? AppPrefs.defaultProseParallel,
+      );
 
   /// A stored lookback, or the default. Unparseable is the default and
   /// out-of-range is the nearest end of the range: this number decides how far
@@ -744,6 +782,23 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _store.setPref(routerPortKey, clamped.toString());
   }
 
+  /// Moves how many drafts may be in flight at the prose server.
+  ///
+  /// Clamped on the way in as well as on the way out, exactly as
+  /// [setRouterPort] is: the segmented control offers 1 / 2 / 4 / 8, and this
+  /// guards a caller that hands over a number no control on screen could have
+  /// produced.
+  ///
+  /// State first, then the write, like every setter above — and the state is
+  /// the whole mechanism: `DraftHandler.concurrency` reads this through a
+  /// closure at every launch decision, so a change moves the next draft rather
+  /// than the next launch.
+  Future<void> setProseParallel(int value) async {
+    final clamped = clampProseParallel(value);
+    state = state.copyWith(proseParallel: clamped);
+    await _store.setPref(proseParallelKey, clamped.toString());
+  }
+
   /// Points the downloader and the router at a folder. Empty means the app's
   /// own — see [AppPrefs.effectiveModelsFolder]. Trimmed on the way in as well
   /// as on the way out, for [_slotValue]'s reason: a path with a trailing
@@ -767,6 +822,14 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
 /// precedent, so the read, the setter and the settings screen's validation all
 /// mean the same thing by "a usable port".
 int clampRouterPort(int value) => value.clamp(1024, 65535);
+
+/// How wide the prose lane may be: at least one request, and never more than
+/// eight. A free function beside [clampRouterPort], on its precedent, so the
+/// read, the setter and the settings control all mean the same thing by "a
+/// usable width". Eight is the top because past it a single draft's own
+/// latency — which is what the person waiting cares about — grows faster than
+/// the batch is worth.
+int clampProseParallel(int value) => value.clamp(1, 8);
 
 /// What `main()` read from the database before the first frame, or null where
 /// nothing preloaded them — see [AppPrefsNotifier]'s constructor.

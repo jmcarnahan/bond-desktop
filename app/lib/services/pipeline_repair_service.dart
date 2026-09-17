@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../data/message_store.dart';
 import 'activity_log.dart';
+import 'ai_workers.dart';
 import 'attention.dart';
 import 'pipeline_progress.dart';
 
@@ -162,16 +163,15 @@ class PipelineRepairService {
     }
 
     // Fire-and-forget, and CHAINED rather than merely ordered — the same
-    // shape and the same reason as `RestoreService`: `AiWorker.pump` takes the
-    // shared DrainGate synchronously while `TriageQueue.pump` awaits an
-    // `_emit()` before it reaches the gate, so launching both back to back
-    // would let the worker win the FIFO and hand the extract handler a row
-    // that is still untriaged.
+    // shape and the same reason as `RestoreService`, both written down at
+    // [pumpTriageThenWorkers].
     //
     // It runs even when nothing was requeued, because a row can be stalled on
     // a queue that is simply not draining, and turning that queue is the whole
     // repair.
-    unawaited(_pumpBoth());
+    unawaited(
+      pumpTriageThenWorkersQuietly(triage: _pumpTriage, workers: _pumpWork),
+    );
 
     return stages;
   }
@@ -244,14 +244,24 @@ class PipelineRepairService {
         return false;
       }
 
-      await _store.requeueWork('needs_you', source, sourceMessageId);
+      // `refreshCreatedAt`: a person is asking, so the row goes to the front
+      // of the drain rather than behind every prefetch queued since it first
+      // ran — the claim order is `created_at DESC`.
+      await _store.requeueWork(
+        'needs_you',
+        source,
+        sourceMessageId,
+        refreshCreatedAt: true,
+      );
       await _log.record(
         'needs_you_rejudge',
         source: source,
         entityId: sourceMessageId,
         count: 1,
       );
-      unawaited(_pumpBoth());
+      unawaited(
+      pumpTriageThenWorkersQuietly(triage: _pumpTriage, workers: _pumpWork),
+    );
       return true;
     } catch (e) {
       debugPrint('re-judge: $source/$sourceMessageId failed: $e');
@@ -273,7 +283,10 @@ class PipelineRepairService {
   ) async {
     final before = await _store.workStatusOf(kind, source, entityId);
     if (before == 'pending' || before == 'processing') return;
-    await _store.requeueWork(kind, source, entityId);
+    // `refreshCreatedAt`: Retry is a person asking for this stage NOW, and
+    // the claim order is `created_at DESC` — a revived row that kept its old
+    // stamp would be drained last.
+    await _store.requeueWork(kind, source, entityId, refreshCreatedAt: true);
     stages.add(kind);
   }
 
@@ -289,16 +302,5 @@ class PipelineRepairService {
       debugPrint('retry: reading the attention threshold failed: $e');
       return AttentionTuning.defaultThreshold;
     }
-  }
-
-  /// Each half swallows its own failure: a triage drain parked on a dead
-  /// session must not take the AI worker's pump down with it.
-  Future<void> _pumpBoth() async {
-    try {
-      await _pumpTriage?.call();
-    } catch (_) {}
-    try {
-      await _pumpWork?.call();
-    } catch (_) {}
   }
 }

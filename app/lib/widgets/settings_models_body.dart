@@ -38,6 +38,15 @@ class SettingsModelsBody extends StatefulWidget {
       onSave;
   final void Function(ModelSlot slot) onReset;
 
+  /// How many drafts may be at the prose server at once — `AppPrefs
+  /// .proseParallel`. Rendered under the prose editor as **Drafts in flight**.
+  final int proseParallel;
+
+  /// Null takes the width control off the section altogether, on the same
+  /// discipline every other optional control here follows: a host that cannot
+  /// store the change must not offer the control that makes one.
+  final void Function(int width)? onProseParallelChanged;
+
   /// Rendered ABOVE the stage table, before anything else in the section — the
   /// Local server card, when the host has one to give. Injected rather than
   /// built here so this file keeps knowing nothing about a supervisor: the
@@ -55,6 +64,8 @@ class SettingsModelsBody extends StatefulWidget {
     this.probe,
     required this.onSave,
     required this.onReset,
+    this.proseParallel = 1,
+    this.onProseParallelChanged,
   });
 
   /// The collapsed summary — where the three slots point, in one line.
@@ -103,6 +114,35 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
   /// no editor to hold that state for it.
   bool _embedProbing = false;
   ModelProbeResult? _embedProbe;
+
+  /// The selection on screen. Held locally so the segments move under the
+  /// finger rather than after a round trip through the store — the host is
+  /// told on the spot either way. Seeded from the prop and re-seeded when the
+  /// host hands over a different one.
+  late int _width = _knownWidth(widget.proseParallel);
+
+  @override
+  void didUpdateWidget(SettingsModelsBody oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.proseParallel != widget.proseParallel) {
+      _width = _knownWidth(widget.proseParallel);
+    }
+  }
+
+  /// The nearest segment this control actually offers. A stored 3 — hand-typed
+  /// into the database, or a default this app never wrote — has to select
+  /// SOMETHING, and `SegmentedButton` throws on a selection that is not one of
+  /// its values.
+  ///
+  /// DISPLAY ONLY: snapping 3 down to 2 draws the control, it does not write
+  /// anything. The pref stays 3 and the draft lane keeps running three wide
+  /// until somebody taps a segment, and then what is written is the number
+  /// they tapped.
+  static int _knownWidth(int value) {
+    const offered = [1, 2, 4, 8];
+    if (offered.contains(value)) return value;
+    return offered.lastWhere((w) => w <= value, orElse: () => 1);
+  }
 
   LlmTarget _target(ModelSlot slot) =>
       widget.targets[slot] ??
@@ -159,6 +199,10 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
               widget.onSave(ModelSlot.prose, url: url, model: model),
           onReset: () => widget.onReset(ModelSlot.prose),
         ),
+        if (widget.onProseParallelChanged case final onChanged?) ...[
+          const SizedBox(height: BondSpacing.s16),
+          ..._draftsInFlight(onChanged),
+        ],
         const SizedBox(height: BondSpacing.s8),
         Text(
           'Pointing both slots at one server makes them share its cache and '
@@ -169,6 +213,50 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
         ..._embeddingsCard(),
       ],
     );
+  }
+
+  /// How wide the draft lane runs, directly under the slot it is about.
+  ///
+  /// Here rather than in a section of its own because it is a fact about the
+  /// prose SERVER — how many slots it was started with — and reading it
+  /// anywhere but beside that server's address would be reading it without the
+  /// thing it describes. Reported to the host the instant it changes, like
+  /// every other control on this screen: the next draft is what it governs, and
+  /// one can be queued while this section is open.
+  List<Widget> _draftsInFlight(void Function(int) onChanged) {
+    return [
+      Text(
+        'Drafts in flight',
+        style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: BondSpacing.s8),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: SegmentedButton<int>(
+          // No tick on the selected segment, matching every other segmented
+          // control on this screen.
+          showSelectedIcon: false,
+          segments: const [
+            ButtonSegment(value: 1, label: Text('1')),
+            ButtonSegment(value: 2, label: Text('2')),
+            ButtonSegment(value: 4, label: Text('4')),
+            ButtonSegment(value: 8, label: Text('8')),
+          ],
+          selected: {_width},
+          onSelectionChanged: (selection) {
+            setState(() => _width = selection.first);
+            onChanged(selection.first);
+          },
+        ),
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(
+        'One per slot the prose server was started with (SLOTS in local.mk, '
+        '--max-num-seqs on vLLM). Extra requests queue at the server rather '
+        'than fail.',
+        style: BondType.caption,
+      ),
+    ];
   }
 
   /// One authored row: what the stage is, what it does, and which slot answers

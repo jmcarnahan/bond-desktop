@@ -15,12 +15,13 @@ import 'backend/teams_backend.dart';
 /// thread is already unbold and the user has moved on.
 ///
 /// **Deliberately not an `AiWorker` handler**, though the rows live in the same
-/// table. That worker drains under the shared `DrainGate` behind whatever
-/// triage and drafting are doing at the model server, and it parks a whole kind
-/// when a model server is down. An ack is a 200-millisecond PATCH that has
-/// nothing to do with any model, and putting it in that queue would leave the
-/// server's unread badge minutes behind the app's — or stalled entirely — for
-/// reasons that are none of its business.
+/// table. Every one of those lanes drains behind a `DrainGate` — the fast one
+/// behind whatever triage is doing, the other two behind a sweep or a draft —
+/// and each parks a whole kind when its model server is down. An ack is a
+/// 200-millisecond PATCH that has nothing to do with any model, and putting it
+/// in any of those queues would leave the server's unread badge minutes behind
+/// the app's — or stalled entirely — for reasons that are none of its
+/// business.
 ///
 /// A row this queue parks at `error` is not stuck for good. A later pump
 /// revives it while it is under the store's own lifetime ceiling, and reopening

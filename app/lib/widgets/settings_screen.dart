@@ -192,6 +192,13 @@ class SettingsScreen extends StatefulWidget {
   /// hiding the section — the section's premise is [onSlotTargetChanged].
   final void Function(ModelSlot slot)? onSlotReset;
 
+  /// How many drafts the prose server may be writing at once.
+  final int proseParallel;
+
+  /// Fired by the **Drafts in flight** segments. Null takes that one control
+  /// off the Models section and leaves the rest of it exactly as it was.
+  final void Function(int width)? onProseParallelChanged;
+
   /// Drawn at the top of the Models section — the host's Local server card.
   /// Null leaves the section exactly as it was before there was one.
   final Widget? modelsHeader;
@@ -373,6 +380,8 @@ class SettingsScreen extends StatefulWidget {
     this.probeServer,
     this.onSlotTargetChanged,
     this.onSlotReset,
+    this.proseParallel = 1,
+    this.onProseParallelChanged,
     this.modelsHeader,
     this.localServerSummary,
     this.lastMailSyncIso,
@@ -802,6 +811,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     probe: widget.probeServer,
     onSave: widget.onSlotTargetChanged!,
     onReset: widget.onSlotReset ?? (_) {},
+    proseParallel: widget.proseParallel,
+    onProseParallelChanged: widget.onProseParallelChanged,
   );
 
   // ── Sync & data ───────────────────────────────────────────────────────────

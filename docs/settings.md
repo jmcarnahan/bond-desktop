@@ -249,6 +249,22 @@ an unedited Save still leaves the slot following the router and a later port
 change still moves it. **A probe never blocks a Save**: somebody about to start
 a server has to be able to point the app at it first.
 
+**Drafts in flight** — a `SegmentedButton<int>` of 1 / 2 / 4 / 8 directly under
+the prose editor, captioned "One per slot the prose server was started with
+(SLOTS in local.mk, --max-num-seqs on vLLM). Extra requests queue at the server
+rather than fail." It writes `AppPrefs.proseParallel` (`prose_parallel`, 1–8,
+default 1), which `DraftHandler` reads through a closure at every launch
+decision — so the change moves the next draft rather than the next launch of
+the app. It is here rather than in a section of its own because it is a fact
+about the prose SERVER, and it does not touch the collapsed summary, which
+names where the three slots point and nothing else. Optional, like every other
+control here: a host that wires no `onProseParallelChanged` gets no segments.
+Drafts only — a recap and a refresh both write the storyline they are about and
+stay at one (`docs/pipeline/10-model-routing.md`). Measured 2026-09-17: a second
+local slot on this Mac's 27B did not pay (width 2 slower end to end than width
+1); the default stays 1 locally, and 4 is the measured value for a GPU-served
+target.
+
 **Three probe outcomes, rendered apart.** `ModelServerProbe.probe` never throws
 and answers one of:
 

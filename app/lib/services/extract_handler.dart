@@ -41,12 +41,24 @@ class ExtractHandler extends WorkHandler {
   /// recorder, so a test that builds this handler writes nothing extra.
   final PipelineProgress _pipeline;
 
+  /// Told the moment a `draft` row is written, so the draft lane can walk.
+  ///
+  /// `AttachmentDigestHandler.onRequeue`'s shape, and the same reason in a
+  /// different lane: since the drains were split, the draft this handler
+  /// queues is drained by a worker that has no idea it was queued. Without
+  /// this the prefetch would wait for the fast drain to end — which, on a
+  /// sixty-message backlog, is minutes after the extraction that asked for it.
+  ///
+  /// Null in tests and in the benches that measure the fast lane alone.
+  final void Function()? onDraftQueued;
+
   ExtractHandler(
     this._store,
     this._client,
     this._embeddings, {
     ActivityLog? activityLog,
     PipelineProgress progress = const PipelineProgress.disabled(),
+    this.onDraftQueued,
   })  : _log = activityLog ?? ActivityLog.disabled(),
         _pipeline = progress;
 
@@ -215,6 +227,10 @@ class ExtractHandler extends WorkHandler {
   ) async {
     if (asksForAReply(row)) {
       await _store.enqueueWork('draft', source, id);
+      // After the row exists, never before it: the callback pumps the draft
+      // lane, and a lane woken ahead of the write would drain an empty queue
+      // and go back to sleep.
+      onDraftQueued?.call();
       return;
     }
     await _pipeline.noteDraft(source, id, state: 'skipped');

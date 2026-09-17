@@ -325,7 +325,9 @@ void main() {
 
       final triage = container.read(triageQueueProvider);
       final worker = container.read(aiWorkerProvider);
-      final gate = container.read(drainGateProvider);
+      final storyline = container.read(storylineWorkerProvider);
+      final drafts = container.read(draftWorkerProvider);
+      final gate = container.read(fastDrainGateProvider);
       final activity = container.read(activityLogProvider);
       final progress = container.read(progressBusProvider);
 
@@ -340,9 +342,79 @@ void main() {
       // flight would be disposed to change where the NEXT request goes.
       expect(identical(container.read(triageQueueProvider), triage), isTrue);
       expect(identical(container.read(aiWorkerProvider), worker), isTrue);
-      expect(identical(container.read(drainGateProvider), gate), isTrue);
+      expect(identical(container.read(storylineWorkerProvider), storyline),
+          isTrue);
+      expect(identical(container.read(draftWorkerProvider), drafts), isTrue);
+      expect(identical(container.read(fastDrainGateProvider), gate), isTrue);
       expect(identical(container.read(activityLogProvider), activity), isTrue);
       expect(identical(container.read(progressBusProvider), progress), isTrue);
+    });
+
+    test('each lane has its own gate, and each is a singleton', () async {
+      final container = ProviderContainer(
+        overrides: [dbProvider.overrideWithValue(db)],
+      );
+      addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
+
+      final fast = container.read(fastDrainGateProvider);
+      final storyline = container.read(storylineDrainGateProvider);
+      final draft = container.read(draftDrainGateProvider);
+
+      // One instance each, or a gate would serialize nothing — see [DrainGate].
+      expect(identical(container.read(fastDrainGateProvider), fast), isTrue);
+      expect(
+          identical(container.read(storylineDrainGateProvider), storyline),
+          isTrue);
+      expect(identical(container.read(draftDrainGateProvider), draft), isTrue);
+
+      // And three DIFFERENT ones, which is the whole of the split: the fast
+      // lane shares its gate with the triage drain and nothing else, so a
+      // recap or a draft can never sit in front of a new message's triage.
+      expect(identical(fast, storyline), isFalse);
+      expect(identical(fast, draft), isFalse);
+      expect(identical(storyline, draft), isFalse);
+    });
+
+    test('each lane drains exactly the kinds it owns', () async {
+      final container = ProviderContainer(
+        overrides: [dbProvider.overrideWithValue(db)],
+      );
+      addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
+
+      // Literals and IN ORDER, not a derivation: moving a kind between lanes
+      // must force an edit here, and therefore an edit to
+      // docs/pipeline/10-model-routing.md. Nothing at runtime can otherwise be
+      // asked which lane a kind is on.
+      expect(container.read(aiWorkerProvider).kinds, [
+        'needs_you',
+        'extract',
+        'embed_message',
+        'attachment_text',
+        'attachment_digest',
+        'context_reconcile',
+        'context_digest',
+        'context_brief',
+      ]);
+      expect(container.read(storylineWorkerProvider).kinds, [
+        'storyline',
+        'storyline_sweep',
+        'storyline_refresh',
+        'storyline_audit',
+        'storyline_recruit',
+        'storyline_recap',
+      ]);
+      expect(container.read(draftWorkerProvider).kinds, ['draft']);
+
+      // Nothing on the fast lane dials the 27B, which is the property T1
+      // rests on — and nothing appears on two lanes.
+      final all = [
+        ...container.read(aiWorkerProvider).kinds,
+        ...container.read(storylineWorkerProvider).kinds,
+        ...container.read(draftWorkerProvider).kinds,
+      ];
+      expect(all.toSet(), hasLength(all.length));
     });
   });
 }
