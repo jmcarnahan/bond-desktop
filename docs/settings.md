@@ -76,6 +76,7 @@ body has the same shape in `settings_models_body.dart`.
 | Microsoft connection | any of `onBackendModeChanged`, `connectionStatus`, `hasScope`, `onSignIn` is wired | `MCP` or `This device`, then (MCP only) `Deployed` / `Local` / `Custom`, then `Checking…` / `Not signed in` / `Signed in as <label>` / `Signed in`, joined by ` · ` |
 | Models | `onSlotTargetChanged` wired | `[<local server summary> · ]Fast <model> @ <host:port> · Prose <model> @ <host:port> · Embeddings <host:port>` — the prefix is present only when the host wires the Local server card (`localServerSummary`), so a screen without one reads exactly as it always did |
 | Needs You | always | the threshold wording, plus ` · custom rules` or ` · default rules` when `onNeedsYouRulesSaved` is wired, plus ` · judging N message(s)` while `needsYouRejudging` (the whole needs-you queue, from `needsYouPendingProvider`) is above zero — "judging", not "re-judging", because the count cannot tell a Save's rows from a sync's |
+| Suggested replies | `onDraftPolicyChanged` wired (both scopes) | `For messages that need you` / `For every reply-worthy message` / `Only when asked` |
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
 | Activity log | `onShowActivityLogChanged` wired | `Shown in the sidebar` / `Hidden` |
 | Storylines | `onStorylineNewestFirstChanged` wired | `Newest first` / `Oldest first` |
@@ -86,8 +87,9 @@ body has the same shape in `settings_models_body.dart`.
 **A section whose wiring is absent is absent** — the same discipline every
 optional row in the old dialog followed, and what lets the permissions tests
 wire `hasScope` alone. Under `SettingsScope.ai` four of them are absent for a
-second reason: the AI pane keeps About me, Models, Needs You, Activity log,
-Storylines and Context directories, in this same order, and drops the rest.
+second reason: the AI pane keeps About me, Models, Needs You, Suggested
+replies, Activity log, Storylines and Context directories, in this same order,
+and drops the rest.
 
 **These strings are pinned by tests** (`settings_screen_test.dart`,
 `settings_connection_test.dart`, `settings_models_test.dart`,
@@ -384,6 +386,38 @@ summary, and the card renders above the stage table.
 **The probe's lifetime is the screen's.** `_InboxScreenState` holds one
 `ModelServerProbe` and closes it in `dispose`. A client per button press would
 leak a connection pool per press, and this is a button a user can hammer.
+
+## Suggested replies
+
+When a reply is written **without anyone asking**. Three segments and a
+sentence, between Needs You and Notifications, in **both scopes** — how much of
+the big model's time a backlog spends on replies nobody will read is a fact
+about the model, so the AI stop is where someone would look for it.
+
+| Segment | Stored `suggested_replies` | What extraction queues |
+|---|---|---|
+| **Needs you** | `needsYou` | the messages judged to need the owner, at most ten in flight — **the default** |
+| **All** | `all` | every message that looks like it wants a reply |
+| **When asked** | `onDemand` | nothing |
+
+The caption says it in the same words:
+
+> Needs you writes a reply ahead of time for messages judged to need you, at
+> most ten at a time. All drafts every message that looks like it wants a
+> reply. When asked writes nothing until you press Draft reply, which works in
+> every mode.
+
+That last clause is the one that has to be there: **Draft reply** is offered on
+every thread in every mode, so "When asked" is a choice about prefetching, not
+a way to turn drafting off. A draft a person asks for also skips the reply
+decision — pressing the button is that decision — so it arrives about five
+seconds sooner. The cap is soft: extraction drains three wide, so twelve is the
+real ceiling rather than ten.
+
+The mechanism, the two pre-gates and the activity notes are in
+[pipeline/07-replies.md](pipeline/07-replies.md), "When a draft is written".
+The control is `SettingsSegments<DraftPolicy>`, the same widget Notifications
+and Models › Drafts in flight use.
 
 ## Sync & data
 

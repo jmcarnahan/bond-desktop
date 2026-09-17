@@ -974,6 +974,13 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         // backlog this is the difference between a prefetch starting seconds
         // after its extraction and minutes after it.
         onDraftQueued: () => unawaited(ref.read(draftWorkerProvider).pump()),
+        // When a reply is written ahead of being asked for — the user's
+        // setting, read at the moment each message finishes rather than
+        // captured here. `ref.read` inside the closure, never `watch`, in
+        // [contextRetrieverProvider]'s `selectExpand` shape and for its
+        // reason: a watch would rebuild this provider, and the worker holding
+        // it mid-drain, the moment somebody moved the control.
+        draftPolicy: () => ref.read(appPrefsProvider).draftPolicy,
       ),
       // After extraction and before the storylines. After, because the summary
       // it embeds is triage's and the drain order keeps the fast server's slots

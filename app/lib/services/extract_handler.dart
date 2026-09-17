@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../data/message_store.dart';
+import '../models/draft_policy.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'ai_worker.dart';
@@ -52,6 +53,19 @@ class ExtractHandler extends WorkHandler {
   /// Null in tests and in the benches that measure the fast lane alone.
   final void Function()? onDraftQueued;
 
+  /// When suggested replies are written, read at the moment a message is
+  /// finished rather than when this handler was built.
+  ///
+  /// A CLOSURE and not a value, the `ContextRetriever.selectExpand` shape: the
+  /// policy is a SETTING (`AppPrefs.draftPolicy`, Settings › Suggested
+  /// replies), and a handler that had captured it would go on prefetching for
+  /// the rest of the drain after somebody turned it off.
+  ///
+  /// Null answers [DraftPolicy.all] — today's pre-gate, byte for byte — so
+  /// every test and both benches measure the pipeline they were written
+  /// against. The APP passes the pref.
+  final DraftPolicy Function()? _draftPolicy;
+
   ExtractHandler(
     this._store,
     this._client,
@@ -59,6 +73,9 @@ class ExtractHandler extends WorkHandler {
     ActivityLog? activityLog,
     PipelineProgress progress = const PipelineProgress.disabled(),
     this.onDraftQueued,
+    // `this._draftPolicy` and not a plain parameter: the caller still writes
+    // `draftPolicy:`, which is what a private field formal is named.
+    this._draftPolicy,
   })  : _log = activityLog ?? ActivityLog.disabled(),
         _pipeline = progress;
 
@@ -210,30 +227,81 @@ class ExtractHandler extends WorkHandler {
   /// Puts this message in front of the drafting model, or closes its draft
   /// stage without one.
   ///
-  /// [asksForAReply] is a PRE-GATE and nothing more. The verdict that decides
-  /// whether a suggestion is written comes from the 27B behind this queue,
-  /// which reads the whole conversation; this only decides which messages are
-  /// worth asking about — cost control, so a two-hundred-message backlog does
-  /// not spend hours of the big model's time on newsletters. If it proves too
-  /// tight, this is the line to widen: the false negatives are silent, and a
-  /// message it drops here is never drafted for at all.
+  /// Which of those happens is the user's setting — [DraftPolicy], read
+  /// through [_draftPolicy] at this moment rather than when the handler was
+  /// built:
   ///
-  /// A message it drops is `skipped`, not left waiting: no work row will ever
-  /// be written for it, and a bar that waited would wait forever.
+  /// * [DraftPolicy.onDemand] queues nothing (`on_demand`). **Draft reply**
+  ///   still works on every thread, so the reply is a keypress away rather
+  ///   than absent.
+  /// * [DraftPolicy.needsYou] — the default — queues only what
+  ///   [prefetchWorthy] admits (`not_prefetched` otherwise), and only while
+  ///   fewer than [DraftPolicy.prefetchCap] drafts are already in flight
+  ///   (`prefetch_cap` once there are).
+  /// * [DraftPolicy.all] is the pre-round behaviour: [asksForAReply] and
+  ///   nothing else.
+  ///
+  /// Whatever the mode, a message that is not queued is `skipped`, not left
+  /// waiting: no work row will ever be written for it, and a progress bar that
+  /// waited would wait forever. The reason goes on the activity row, which is
+  /// the only place there is to put it — the progress row has no reason column.
   Future<void> _queueDraft(
     String source,
     String id,
     Map<String, Object?> row,
   ) async {
-    if (asksForAReply(row)) {
-      await _store.enqueueWork('draft', source, id);
-      // After the row exists, never before it: the callback pumps the draft
-      // lane, and a lane woken ahead of the write would drain an empty queue
-      // and go back to sleep.
-      onDraftQueued?.call();
-      return;
+    final policy = _draftPolicy?.call() ?? DraftPolicy.all;
+
+    if (policy == DraftPolicy.onDemand) {
+      return _skipDraft(source, id, 'on_demand');
     }
+
+    if (policy == DraftPolicy.all) {
+      if (!asksForAReply(row)) return _skipDraft(source, id, 'no_cue');
+      return _enqueueDraft(source, id);
+    }
+
+    // [DraftPolicy.needsYou]: the narrow pre-gate first, because it is free,
+    // and the count only for the messages that passed it.
+    if (!prefetchWorthy(row)) return _skipDraft(source, id, 'not_prefetched');
+
+    // Every source the draft lane drains, not `workCounts`' `['email']`
+    // default: a chat is drafted for exactly as mail is, and counting only
+    // mail would let a Teams backlog queue an unbounded number of drafts under
+    // a cap that could not see them.
+    final counts = await _store.workCounts('draft', sources: AiWorker.sources);
+    final inFlight = (counts['pending'] ?? 0) + (counts['processing'] ?? 0);
+    // SOFT, and deliberately so, in two ways. This handler drains three wide,
+    // so three items can read the same count before any of them has written
+    // its row and the real ceiling is twelve. And `error` rows are not in
+    // flight by this count, though `reviveErroredWork` can put a batch of them
+    // back into `pending` in one pass and lift the true number past ten for as
+    // long as that pass takes. Both are acceptable on a number whose whole job
+    // is "ten, not sixty"; a hard cap would want a transaction around a queue
+    // insert to buy two drafts' worth of precision.
+    if (inFlight >= DraftPolicy.prefetchCap) {
+      return _skipDraft(source, id, 'prefetch_cap');
+    }
+    return _enqueueDraft(source, id);
+  }
+
+  /// One draft row, and the lane that drains it woken.
+  Future<void> _enqueueDraft(String source, String id) async {
+    await _store.enqueueWork('draft', source, id);
+    // After the row exists, never before it: the callback pumps the draft
+    // lane, and a lane woken ahead of the write would drain an empty queue
+    // and go back to sleep.
+    onDraftQueued?.call();
+  }
+
+  /// This message will never be drafted for, and its stage says so.
+  ///
+  /// The progress row closes the stage — `skipped` is terminal, so the message
+  /// settles exactly as a "no reply needed" one does — and the activity row
+  /// carries [reason], which is the only place a reason can go.
+  Future<void> _skipDraft(String source, String id, String reason) async {
     await _pipeline.noteDraft(source, id, state: 'skipped');
+    _log.note({'draft': reason});
   }
 
   /// Gives this ONE message its search vector, while the row is already in
@@ -465,6 +533,16 @@ class ExtractHandler extends WorkHandler {
 /// Whether a stored message looks, on its own row, like something the user
 /// might have to answer.
 ///
+/// This is [DraftPolicy.all]'s pre-gate — one of three policies, and the
+/// widest of them. It is a PRE-GATE and nothing more: the verdict that decides
+/// whether a suggestion is written comes from the big model behind the draft
+/// queue, which reads the whole conversation, and this only decides which
+/// messages are worth asking about. [prefetchWorthy] is the narrower gate
+/// [DraftPolicy.needsYou] uses, and under [DraftPolicy.onDemand] neither runs.
+/// If this proves too tight for someone who has chosen `all`, this is the line
+/// to widen: the false negatives are silent, and a message it drops is never
+/// drafted for at all.
+///
 /// Five signals, and any one of them is enough: the needs-you stage read the
 /// message and called it the user's to answer, the sender is waiting, the
 /// reader has to do something, the message is loud, or it names a date. Read
@@ -495,6 +573,30 @@ bool asksForAReply(Map<String, Object?> row) {
       row['urgency'] == 'urgent' ||
       row['urgency'] == 'high' ||
       (row['deadline'] as String?)?.isNotEmpty == true;
+}
+
+/// Whether a stored message is worth the drafting model's IDLE time — the
+/// narrower pre-gate [DraftPolicy.needsYou] uses.
+///
+/// Three signals where [asksForAReply] takes five, and the two it drops are
+/// the two that fire on ordinary mail: `reply_expected` is triage's guess from
+/// one message in isolation, and a `deadline` is a date the message mentions,
+/// which a calendar invitation and a newsletter both carry. What is left is
+/// the needs-you stage's whole-message verdict and triage's loudness — the
+/// messages a person would have opened first anyway, which is exactly the set
+/// worth having an answer ready for before they ask.
+///
+/// It is not a second opinion about whether a reply is warranted; the big
+/// model still decides that behind the queue. It decides which messages get
+/// asked about without anyone having pressed a button.
+///
+/// [asksForAReply]'s disciplines, for its reasons: outbound answers false, and
+/// the flags are INTEGERs compared against 1 rather than trusted to be truthy.
+bool prefetchWorthy(Map<String, Object?> row) {
+  if (row['direction'] != 'inbound') return false;
+  return row['needs_you_verdict'] == 1 ||
+      row['urgency'] == 'urgent' ||
+      row['urgency'] == 'high';
 }
 
 /// The text a conversation is embedded from.

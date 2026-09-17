@@ -4,7 +4,9 @@ import 'dart:typed_data';
 import 'package:bond_inbox/data/database.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/draft_policy.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
@@ -42,6 +44,17 @@ class FakeLlm extends LlmClient {
     if (step is Exception) throw step;
     return Map<String, dynamic>.from(step as Map);
   }
+}
+
+/// An [ActivityLog] that keeps what the handler noted, so the REASON a message
+/// was not queued can be read — the progress row has no column for it.
+class _Recorder extends ActivityLog {
+  _Recorder() : super.disabled();
+
+  final Map<String, Object?> notes = {};
+
+  @override
+  void note(Map<String, Object?> detail) => notes.addAll(detail);
 }
 
 /// An [EmbeddingsClient] over a scripted socket. [vector] null means the
@@ -969,60 +982,71 @@ void main() {
   /// already has in hand. That gate is COARSE on purpose: the 27B behind the
   /// queue makes the real call, and this only stops a backlog of newsletters
   /// from buying hours of its time.
-  group('the drafting pre-gate', () {
-    /// The stage as `message_progress` holds it — the bar's fifth segment.
-    Future<String?> draftStateOf(String id, {String source = 'email'}) async =>
-        (await db
-                .customSelect(
-                  'SELECT draft_state FROM message_progress '
-                  'WHERE source = ? AND source_message_id = ?',
-                  variables: [Variable(source), Variable(id)],
-                )
-                .getSingle())
-            .data['draft_state'] as String?;
-
-    Future<List<String>> queuedDrafts() async => [
-          for (final row in await db
+  /// The draft stage as `message_progress` holds it — the bar's fifth segment.
+  Future<String?> draftStateOf(String id, {String source = 'email'}) async =>
+      (await db
               .customSelect(
-                "SELECT entity_id FROM work_items WHERE task_kind = 'draft' "
-                'ORDER BY entity_id',
+                'SELECT draft_state FROM message_progress '
+                'WHERE source = ? AND source_message_id = ?',
+                variables: [Variable(source), Variable(id)],
               )
-              .get())
-            row.data['entity_id'] as String,
-        ];
+              .getSingle())
+          .data['draft_state'] as String?;
 
-    Future<void> triageSaid({
-      String id = 'm1',
-      bool replyExpected = false,
-      bool needsAction = false,
-      String urgency = 'normal',
-      String deadline = '',
-    }) =>
-        store.writeTriage(
-          'email',
-          id,
-          status: 'triaged',
-          result: TriageResult(
-            urgency: urgency,
-            category: 'work',
-            summary: 'what it says',
-            needsAction: needsAction,
-            actionItems: const [],
-            replyExpected: replyExpected,
-            deadline: deadline,
-          ),
-        );
+  Future<List<String>> queuedDrafts() async => [
+        for (final row in await db
+            .customSelect(
+              "SELECT entity_id FROM work_items WHERE task_kind = 'draft' "
+              'ORDER BY entity_id',
+            )
+            .get())
+          row.data['entity_id'] as String,
+      ];
 
-    Future<void> extract({String id = 'm1'}) => runOne(
-          ExtractHandler(
-            store,
-            FakeLlm([answer()]),
-            FakeEmbeddings().client,
-            progress: PipelineProgress(store),
-          ),
-          id: id,
-        );
+  Future<void> triageSaid({
+    String id = 'm1',
+    bool replyExpected = false,
+    bool needsAction = false,
+    String urgency = 'normal',
+    String deadline = '',
+  }) =>
+      store.writeTriage(
+        'email',
+        id,
+        status: 'triaged',
+        result: TriageResult(
+          urgency: urgency,
+          category: 'work',
+          summary: 'what it says',
+          needsAction: needsAction,
+          actionItems: const [],
+          replyExpected: replyExpected,
+          deadline: deadline,
+        ),
+      );
 
+  /// One extraction, under [policy]. No closure at all is the default every
+  /// existing caller gets, which the handler answers as [DraftPolicy.all].
+  Future<void> extract({
+    String id = 'm1',
+    DraftPolicy? policy,
+    ActivityLog? activityLog,
+    void Function()? onDraftQueued,
+  }) =>
+      runOne(
+        ExtractHandler(
+          store,
+          FakeLlm([answer()]),
+          FakeEmbeddings().client,
+          progress: PipelineProgress(store),
+          activityLog: activityLog,
+          onDraftQueued: onDraftQueued,
+          draftPolicy: policy == null ? null : () => policy,
+        ),
+        id: id,
+      );
+
+  group('the drafting pre-gate', () {
     test('a message somebody is waiting on is queued, by its own id',
         () async {
       await seedMessage();
@@ -1189,6 +1213,329 @@ void main() {
 
       expect(await queuedDrafts(), isEmpty);
       expect(await draftStateOf('o1'), 'skipped');
+    });
+  });
+
+  group('suggested replies: the three policies', () {
+    /// A message with every signal `asksForAReply` reads, so the only thing
+    /// separating the policies in a test is the policy.
+    Future<void> seedLoud({String id = 'm1'}) async {
+      await seedMessage(id: id);
+      await triageSaid(id: id, replyExpected: true, urgency: 'urgent');
+    }
+
+    /// A message that asks for a reply but is not worth the big model's idle
+    /// time: triage says the sender is waiting and names a date, and nothing
+    /// says it is loud or the owner's to answer.
+    Future<void> seedOrdinary({String id = 'm1'}) async {
+      await seedMessage(id: id);
+      await triageSaid(id: id, replyExpected: true, deadline: 'Friday');
+    }
+
+    group('all', () {
+      test('queues every message that passes the wide pre-gate', () async {
+        await seedOrdinary();
+
+        await extract(policy: DraftPolicy.all);
+
+        expect(await queuedDrafts(), ['m1']);
+        expect(await draftStateOf('m1'), 'pending');
+      });
+
+      test('and skips one with no cue at all, saying why', () async {
+        await seedMessage();
+        await triageSaid();
+        final log = _Recorder();
+
+        await extract(policy: DraftPolicy.all, activityLog: log);
+
+        expect(await queuedDrafts(), isEmpty);
+        expect(await draftStateOf('m1'), 'skipped');
+        expect(log.notes['draft'], 'no_cue');
+      });
+
+      test('is what a handler with no policy closure does', () async {
+        // Every existing test, and both live benches, build the handler this
+        // way: the pre-round pre-gate, byte for byte.
+        await seedOrdinary();
+
+        await extract();
+
+        expect(await queuedDrafts(), ['m1']);
+      });
+    });
+
+    group('onDemand', () {
+      test('queues nothing, however loud the message', () async {
+        await seedLoud();
+        await store.writeNeedsYouVerdict('email', 'm1',
+            verdict: true, reason: 'Priya is waiting on your number');
+        final log = _Recorder();
+
+        await extract(policy: DraftPolicy.onDemand, activityLog: log);
+
+        expect(await queuedDrafts(), isEmpty);
+        // Skipped, not pending: **Draft reply** is how this message gets an
+        // answer, and a bar waiting on a row nothing will write waits forever.
+        expect(await draftStateOf('m1'), 'skipped');
+        expect(log.notes['draft'], 'on_demand');
+      });
+
+      test('and never wakes the draft lane', () async {
+        await seedLoud();
+        var woken = 0;
+
+        await extract(
+          policy: DraftPolicy.onDemand,
+          onDraftQueued: () => woken++,
+        );
+
+        expect(woken, 0);
+      });
+    });
+
+    group('needsYou', () {
+      test('queues a message the needs-you stage called the owner\'s',
+          () async {
+        // Nothing triage wrote is loud. The whole-message verdict is the
+        // signal.
+        await seedMessage();
+        await triageSaid();
+        await store.writeNeedsYouVerdict('email', 'm1',
+            verdict: true, reason: 'Priya is waiting on your number');
+        var woken = 0;
+
+        await extract(
+          policy: DraftPolicy.needsYou,
+          onDraftQueued: () => woken++,
+        );
+
+        expect(await queuedDrafts(), ['m1']);
+        expect(await draftStateOf('m1'), 'pending');
+        expect(woken, 1);
+      });
+
+      test('and an urgent one, and a high one', () async {
+        await seedMessage(id: 'm1');
+        await triageSaid(id: 'm1', urgency: 'urgent');
+        await seedMessage(id: 'm2', conversationKey: 'conv-2');
+        await triageSaid(id: 'm2', urgency: 'high');
+
+        await extract(policy: DraftPolicy.needsYou, id: 'm1');
+        await extract(policy: DraftPolicy.needsYou, id: 'm2');
+
+        expect(await queuedDrafts(), ['m1', 'm2']);
+      });
+
+      test('but not a message whose only cue is that a reply is expected',
+          () async {
+        await seedOrdinary();
+        final log = _Recorder();
+        var woken = 0;
+
+        await extract(
+          policy: DraftPolicy.needsYou,
+          activityLog: log,
+          onDraftQueued: () => woken++,
+        );
+
+        // The wide gate would have taken it — this is the narrowing.
+        expect(asksForAReply(await store.getMessageRow('email', 'm1') ?? {}),
+            isTrue);
+        expect(await queuedDrafts(), isEmpty);
+        expect(await draftStateOf('m1'), 'skipped');
+        // Its OWN reason, not the mode's: a person reading the activity row
+        // has to be able to tell "this mode prefetches nothing" from "this
+        // message did not make the cut".
+        expect(log.notes['draft'], 'not_prefetched');
+        expect(woken, 0);
+      });
+
+      test('nor one whose only cue is an action item', () async {
+        await seedMessage();
+        await triageSaid(needsAction: true);
+
+        await extract(policy: DraftPolicy.needsYou);
+
+        expect(await queuedDrafts(), isEmpty);
+      });
+
+      test('nor one whose only cue is a date', () async {
+        await seedMessage();
+        await triageSaid(deadline: 'Friday');
+
+        await extract(policy: DraftPolicy.needsYou);
+
+        expect(await queuedDrafts(), isEmpty);
+      });
+
+      test('a judged no is a no, and so is a verdict nothing wrote', () async {
+        await seedMessage(id: 'm1');
+        await triageSaid(id: 'm1');
+        await store.writeNeedsYouVerdict('email', 'm1',
+            verdict: false, reason: 'a heads-up, nothing to answer');
+        await seedMessage(id: 'm2', conversationKey: 'conv-2');
+        await triageSaid(id: 'm2');
+        await store.writeNeedsYouVerdict('email', 'm2', verdict: null);
+
+        await extract(policy: DraftPolicy.needsYou, id: 'm1');
+        await extract(policy: DraftPolicy.needsYou, id: 'm2');
+
+        expect(await queuedDrafts(), isEmpty);
+      });
+
+      test('the owner\'s own mail never passes, whatever was written about it',
+          () async {
+        await store.upsertMessage({
+          'source': 'email',
+          'source_message_id': 'o1',
+          'conversation_key': 'conv-1',
+          'direction': 'outbound',
+          'received_at': '2026-08-29T10:00:00Z',
+          'body_text': 'Sent it over. — Jo',
+        });
+        await triageSaid(id: 'o1', urgency: 'urgent');
+        await store.writeNeedsYouVerdict('email', 'o1', verdict: true);
+
+        await extract(policy: DraftPolicy.needsYou, id: 'o1');
+
+        expect(await queuedDrafts(), isEmpty);
+        expect(await draftStateOf('o1'), 'skipped');
+      });
+    });
+
+    group('the prefetch cap', () {
+      /// [count] draft rows already in the queue, across BOTH connectors —
+      /// the count the cap reads is over `email`, `teams` and `local`, because
+      /// a chat is drafted for exactly as mail is.
+      Future<void> queueDrafts(int count) async {
+        for (var i = 0; i < count; i++) {
+          await store.enqueueWork(
+            'draft',
+            i.isEven ? 'email' : 'teams',
+            'seeded-$i',
+          );
+        }
+      }
+
+      test('the eleventh in flight is skipped, and says so', () async {
+        await queueDrafts(DraftPolicy.prefetchCap);
+        await seedLoud(id: 'n1');
+        final log = _Recorder();
+
+        await extract(
+          policy: DraftPolicy.needsYou,
+          id: 'n1',
+          activityLog: log,
+        );
+
+        expect(await draftStateOf('n1'), 'skipped');
+        expect(log.notes['draft'], 'prefetch_cap');
+        expect((await queuedDrafts()).contains('n1'), isFalse);
+      });
+
+      test('a chat backlog counts against it too', () async {
+        // The default `sources` on `workCounts` is `['email']` alone. If the
+        // cap read that, ten queued chats would leave the mail lane thinking
+        // it had the whole budget.
+        for (var i = 0; i < DraftPolicy.prefetchCap; i++) {
+          await store.enqueueWork('draft', 'teams', 'chat-$i');
+        }
+        await seedLoud(id: 'n1');
+
+        await extract(policy: DraftPolicy.needsYou, id: 'n1');
+
+        expect(await draftStateOf('n1'), 'skipped');
+      });
+
+      test('a draft that finished frees a slot', () async {
+        await queueDrafts(DraftPolicy.prefetchCap);
+        await db.customUpdate(
+          "UPDATE work_items SET status = 'done' "
+          "WHERE task_kind = 'draft' AND entity_id = 'seeded-0'",
+        );
+        await seedLoud(id: 'n1');
+
+        await extract(policy: DraftPolicy.needsYou, id: 'n1');
+
+        // The cap is "in flight", not "ever queued": `done` rows are history.
+        expect((await queuedDrafts()).contains('n1'), isTrue);
+        expect(await draftStateOf('n1'), 'pending');
+      });
+
+      test('a claimed draft still counts', () async {
+        await queueDrafts(DraftPolicy.prefetchCap - 1);
+        await store.enqueueWork('draft', 'email', 'claimed-1');
+        await db.customUpdate(
+          "UPDATE work_items SET status = 'processing' "
+          "WHERE task_kind = 'draft' AND entity_id = 'claimed-1'",
+        );
+        await seedLoud(id: 'n1');
+
+        await extract(policy: DraftPolicy.needsYou, id: 'n1');
+
+        expect(await draftStateOf('n1'), 'skipped');
+      });
+
+      test('and it binds only the prefetch, never the wide policy', () async {
+        // Someone who has asked for every message to be drafted has asked for
+        // exactly that; the cap is what makes the DEFAULT bounded.
+        await queueDrafts(DraftPolicy.prefetchCap);
+        await seedLoud(id: 'n1');
+
+        await extract(policy: DraftPolicy.all, id: 'n1');
+
+        expect((await queuedDrafts()).contains('n1'), isTrue);
+      });
+    });
+
+    test('the policy is re-read for every message, not captured', () async {
+      // One handler, two items, the setting moved in between: the closure is
+      // what makes turning the control off stop the NEXT prefetch rather than
+      // the next relaunch.
+      var policy = DraftPolicy.onDemand;
+      final log = _Recorder();
+      final handler = ExtractHandler(
+        store,
+        FakeLlm([answer()]),
+        FakeEmbeddings().client,
+        progress: PipelineProgress(store),
+        activityLog: log,
+        draftPolicy: () => policy,
+      );
+      await seedLoud(id: 'm1');
+      await seedMessage(id: 'm2', conversationKey: 'conv-2');
+      await triageSaid(id: 'm2', replyExpected: true);
+
+      await runOne(handler, id: 'm1');
+      expect(await queuedDrafts(), isEmpty);
+      expect(log.notes['draft'], 'on_demand');
+
+      policy = DraftPolicy.all;
+      await runOne(handler, id: 'm2');
+
+      expect(await queuedDrafts(), ['m2']);
+      expect(await draftStateOf('m2'), 'pending');
+    });
+
+    test('a skipped draft stage is TERMINAL, not a pause', () async {
+      // Which is what lets the message settle: `skipped` is stamped exactly
+      // as `no_reply_needed` is, so the outcome closes with the other stages
+      // rather than waiting on a row nothing is going to write.
+      await seedOrdinary();
+
+      await extract(policy: DraftPolicy.onDemand);
+
+      final row = (await db
+              .customSelect(
+                'SELECT draft_state, draft_at FROM message_progress '
+                "WHERE source = 'email' AND source_message_id = 'm1'",
+              )
+              .getSingle())
+          .data;
+
+      expect(row['draft_state'], 'skipped');
+      expect(row['draft_at'], isNotNull);
     });
   });
 

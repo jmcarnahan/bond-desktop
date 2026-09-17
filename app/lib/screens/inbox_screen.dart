@@ -2125,6 +2125,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onOpenActivityLog: _openActivityLog,
       notifyStyle: prefs.notifyStyle,
       onNotifyStyleChanged: (style) => unawaited(notifier.setNotifyStyle(style)),
+      draftPolicy: prefs.draftPolicy,
+      onDraftPolicyChanged: (value) =>
+          unawaited(notifier.setDraftPolicy(value)),
       storylineNewestFirst: prefs.storylineNewestFirst,
       onStorylineNewestFirstChanged: (on) =>
           unawaited(notifier.setStorylineNewestFirst(on)),

@@ -51,17 +51,26 @@ be re-run against a future prompt, not because anything calls them.
 2. **Conversation card + clustering embedding** (`_refreshCard`) — builds the
    thread card, hash-guards it against no-op rewrites, embeds it under the
    clustering prefix, and requeues `storyline` work for the conversation.
-3. **Draft pre-gate** (`_queueDraft`) — `asksForAReply(row)` decides whether a
-   `draft` work row is written or the draft stage closes as `skipped`. This is
-   the cheap filter before the 27B's reply decision (see
-   [07-replies.md](07-replies.md)). Five signals off the row, any one enough:
+3. **Draft pre-gate** (`_queueDraft`) — decides whether a `draft` work row is
+   written or the draft stage closes as `skipped`, under the user's
+   **Suggested replies** setting. `DraftPolicy` is one of three (see
+   [07-replies.md](07-replies.md), "When a draft is written"): `onDemand`
+   queues nothing, `needsYou` — the default — queues what `prefetchWorthy(row)`
+   admits while fewer than ten drafts are in flight, and `all` queues whatever
+   `asksForAReply(row)` admits. Either way this is the cheap filter in front of
+   the 27B's reply decision, and the reason for a skip goes on the activity row
+   as `draft: on_demand | not_prefetched | prefetch_cap | no_cue`.
+
+   `asksForAReply` takes five signals off the row, any one enough:
    `needs_you_verdict = 1`, `reply_expected`, `needs_action`, an urgent/high
-   urgency, or a named deadline. The first is the needs-you stage's
-   whole-message verdict (see [11-needs-you.md](11-needs-you.md)) rather than
-   one of triage's fields, and it is on the row because `NeedsYouHandler`
-   drains ahead of this handler in the worker. A judged yes puts a message in
-   front of the drafting model even when triage saw no reply cue at all; NULL
-   and 0 change nothing, and the gate degrades to its old four-signal shape.
+   urgency, or a named deadline. `prefetchWorthy` takes the three that do not
+   fire on ordinary mail: `needs_you_verdict = 1` or an urgent/high urgency.
+   The verdict is the needs-you stage's whole-message read (see
+   [11-needs-you.md](11-needs-you.md)) rather than one of triage's fields, and
+   it is on the row because `NeedsYouHandler` drains ahead of this handler in
+   the worker. A judged yes puts a message in front of the drafting model even
+   when triage saw no reply cue at all; NULL and 0 change nothing, and each
+   gate degrades to the triage-only shape it had.
 
 It also embeds the message's own document vector on the fast path
 (`_embedMessage`) — see [05-embeddings.md](05-embeddings.md).

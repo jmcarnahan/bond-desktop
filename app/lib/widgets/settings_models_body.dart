@@ -8,6 +8,7 @@ import '../services/llm/model_slots.dart'
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'model_slot_editor.dart';
+import 'settings_segments.dart';
 
 /// The Models section's body: which model each step of the pipeline uses, and
 /// the two slots the user is allowed to move.
@@ -230,31 +231,22 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
         style: BondType.small.copyWith(fontWeight: FontWeight.w600),
       ),
       const SizedBox(height: BondSpacing.s8),
-      Align(
-        alignment: Alignment.centerLeft,
-        child: SegmentedButton<int>(
-          // No tick on the selected segment, matching every other segmented
-          // control on this screen.
-          showSelectedIcon: false,
-          segments: const [
-            ButtonSegment(value: 1, label: Text('1')),
-            ButtonSegment(value: 2, label: Text('2')),
-            ButtonSegment(value: 4, label: Text('4')),
-            ButtonSegment(value: 8, label: Text('8')),
-          ],
-          selected: {_width},
-          onSelectionChanged: (selection) {
-            setState(() => _width = selection.first);
-            onChanged(selection.first);
-          },
-        ),
-      ),
-      const SizedBox(height: BondSpacing.s4),
-      Text(
-        'One per slot the prose server was started with (SLOTS in local.mk, '
-        '--max-num-seqs on vLLM). Extra requests queue at the server rather '
-        'than fail.',
-        style: BondType.caption,
+      SettingsSegments<int>(
+        segments: const [
+          (value: 1, label: '1'),
+          (value: 2, label: '2'),
+          (value: 4, label: '4'),
+          (value: 8, label: '8'),
+        ],
+        selected: _width,
+        onChanged: (value) {
+          setState(() => _width = value);
+          onChanged(value);
+        },
+        caption:
+            'One per slot the prose server was started with (SLOTS in '
+            'local.mk, --max-num-seqs on vLLM). Extra requests queue at the '
+            'server rather than fail.',
       ),
     ];
   }

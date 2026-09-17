@@ -1,5 +1,6 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/draft_request.dart';
 import 'package:bond_inbox/providers/draft_provider.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
@@ -815,7 +816,10 @@ void main() {
               .get())
           .single
           .data;
-      expect(work['payload_json'], '{"pinned_attachment_ids":["att-survey"]}');
+      expect(
+        work['payload_json'],
+        '{"pinned_attachment_ids":["att-survey"],"asked":true}',
+      );
     });
 
     test('Consult for the reply names the directory file on the work row',
@@ -834,9 +838,14 @@ void main() {
               .get())
           .single
           .data;
-      // Only the key that has something in it: a consulted file and a pinned
-      // document never have to be asked for together to be asked for at all.
-      expect(work['payload_json'], '{"context_file_ids":[7]}');
+      // Only the keys that have something in them: a consulted file and a
+      // pinned document never have to be asked for together to be asked for at
+      // all. `asked` rides on every one of these, because every one of them is
+      // a person pressing the button.
+      expect(
+        work['payload_json'],
+        '{"context_file_ids":[7],"asked":true}',
+      );
     });
 
     test('a document and a directory file ride together', () async {
@@ -859,7 +868,8 @@ void main() {
           .data;
       expect(
         work['payload_json'],
-        '{"pinned_attachment_ids":["att-survey"],"context_file_ids":[7]}',
+        '{"pinned_attachment_ids":["att-survey"],"context_file_ids":[7],'
+        '"asked":true}',
       );
     });
 
@@ -881,8 +891,32 @@ void main() {
           .single
           .data;
       // Asking again without naming a file means the last file is no longer
-      // named.
-      expect(work['payload_json'], isNull);
+      // named — but it is still a person asking, so `asked` stays.
+      expect(work['payload_json'], '{"asked":true}');
+    });
+
+    test('a plain Draft reply still says a person asked for it', () async {
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.generate();
+
+      final work = (await db
+              .customSelect(
+                "SELECT payload_json FROM work_items "
+                "WHERE task_kind = 'draft'",
+              )
+              .get())
+          .single
+          .data;
+      // Which is what skips the reply decision behind it: pressing the button
+      // IS the answer to "does this want a reply", and a model saying no would
+      // leave an empty box.
+      expect(
+        DraftRequest.fromPayload(work['payload_json']).asked,
+        isTrue,
+      );
     });
 
     test('generate on a thread with nothing to answer says so', () async {

@@ -31,6 +31,10 @@ class FakeLlm extends LlmClient {
   final List<double> temperatures = [];
   final List<int> tokenBudgets = [];
 
+  /// Which task each call was, in order — `reply_decision` then `draft_reply`
+  /// on the eager path, and `draft_reply` alone when a person asked.
+  final List<String> schemaNames = [];
+
   FakeLlm(this.script) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
 
   @override
@@ -44,6 +48,7 @@ class FakeLlm extends LlmClient {
     bool think = false,
   }) async {
     userMessages.add(user);
+    schemaNames.add(schemaName);
     temperatures.add(temperature);
     tokenBudgets.add(maxTokens);
     await Future<void>.delayed(const Duration(milliseconds: 1));
@@ -408,6 +413,30 @@ void main() {
       expect((await progressOf('m2'))['draft_state'], 'skipped');
     });
 
+    test('a no records both the verdict and the sentence behind it', () async {
+      // `_skip`'s payload, pinned once for the four ends that share it: the
+      // item is `skipped` rather than `ok`, `reason` says which end, and `why`
+      // carries the model's own sentence — which only this end has.
+      await seedInbound();
+      final log = _Recorder();
+
+      await runOne(DraftHandler(
+        store,
+        FakeLlm([
+          decision(
+            needsReply: false,
+            reason: 'A receipt, nobody is waiting.',
+          ),
+          answer(),
+        ]),
+        activityLog: log,
+        progress: progress,
+      ));
+
+      expect(log.notes['reason'], 'no_reply_needed');
+      expect(log.notes['why'], 'A receipt, nobody is waiting.');
+    });
+
     test('reads the message and the thread before it', () async {
       await seedOutbound(body: 'What is the current expiry? — Jo');
       await seedInbound(body: 'It expires Wednesday.');
@@ -442,6 +471,85 @@ void main() {
         expect(prompt, contains('Can we still ship on Thursday?'));
         expect(prompt, isNot(contains('Never mind, we shipped it.')));
       }
+    });
+
+    test('a draft a person asked for skips the decision entirely', () async {
+      await seedInbound();
+      final llm = FakeLlm([answer()]);
+      final log = _Recorder();
+
+      await DraftHandler(store, llm, activityLog: log, progress: progress).run({
+        'task_kind': 'draft',
+        'source': 'email',
+        'entity_id': 'm2',
+        'payload_json': '{"asked":true}',
+      });
+
+      // ONE call, and it is the drafting one. Pressing the button IS the
+      // decision; a model answering "no" would leave an empty box.
+      expect(llm.schemaNames, ['draft_reply']);
+      expect(await store.getDraftForMessage('email', 'm2'), isNotNull);
+      expect(log.notes['decision'], 'asked');
+      expect((await progressOf('m2'))['draft_state'], 'done');
+    });
+
+    test('an asked-for draft carries its pinned and consulted ids too',
+        () async {
+      await seedInbound();
+      final retriever = FakeRetriever(store);
+      final directories = FakeContextRetriever(store, ContextStore(db));
+      final llm = FakeLlm([answer()]);
+
+      await DraftHandler(
+        store,
+        llm,
+        attachments: retriever,
+        contextDirs: directories,
+      ).run({
+        'task_kind': 'draft',
+        'source': 'email',
+        'entity_id': 'm2',
+        'payload_json': '{"pinned_attachment_ids":["att-survey"],'
+            '"context_file_ids":[7],"asked":true}',
+      });
+
+      expect(llm.schemaNames, ['draft_reply']);
+      expect(retriever.pinnedSeen.single, ['att-survey']);
+      expect(directories.consultSeen.single, [7]);
+    });
+
+    test('a malformed payload still runs the decision', () async {
+      await seedInbound();
+      final llm = FakeLlm([decision(), answer()]);
+      final log = _Recorder();
+
+      await DraftHandler(store, llm, activityLog: log, progress: progress).run({
+        'task_kind': 'draft',
+        'source': 'email',
+        'entity_id': 'm2',
+        'payload_json': '{not json at all',
+      });
+
+      // Unreadable is "nobody asked", never "skip the judgement": the flag
+      // only ever skips work when it was definitely set.
+      expect(llm.schemaNames, ['reply_decision', 'draft_reply']);
+      expect(log.notes['decision'], isNull);
+    });
+
+    test('only the literal true skips it', () async {
+      await seedInbound();
+      final llm = FakeLlm([decision(), answer()]);
+
+      await DraftHandler(store, llm, progress: progress).run({
+        'task_kind': 'draft',
+        'source': 'email',
+        'entity_id': 'm2',
+        // A string somebody hand-edited into the table is not a person
+        // pressing a button.
+        'payload_json': '{"asked":"true"}',
+      });
+
+      expect(llm.schemaNames, ['reply_decision', 'draft_reply']);
     });
   });
 

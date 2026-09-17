@@ -3,15 +3,94 @@
 Drafts run at the grain of the *message*, not the thread (schema v9, PR #10):
 each draft is keyed to the message it answers. `DraftHandler`
 (`app/lib/services/draft_handler.dart`) runs both calls, on the **prose /
-27B slot**, and only for messages that passed the cheap `asksForAReply`
-pre-gate in extraction (see [04-extraction.md](04-extraction.md)).
+27B slot**, for the messages the user's **Suggested replies** setting lets
+extraction queue — and for any message at all the moment a person presses
+**Draft reply**.
 
-That pre-gate has a fifth signal: a `needs_you_verdict` of 1, the needs-you
-stage's read of the whole message (see [11-needs-you.md](11-needs-you.md)).
-`NeedsYouHandler` drains before extraction, so the verdict is on the row by the
-time the gate reads it. It only ever **widens** what reaches this file — the
-`ReplyDecisionTask` below still owns the actual reply decision, and a "no" from
-the 27B closes the draft stage `skipped` however the message got here.
+## When a draft is written
+
+Drafting is the most expensive thing this app does: two 27B calls per message,
+about 20–35 s of the prose server each. `DraftPolicy`
+(`app/lib/models/draft_policy.dart`) is what stops a sixty-message backlog
+spending a quarter of an hour writing replies nobody will read. It is a
+three-way setting, stored in `app_prefs` under `suggested_replies` as the
+enum's own name, read by `ExtractHandler` through a closure at the moment each
+message finishes extracting:
+
+| Mode | Stored | Settings label | What extraction queues |
+|---|---|---|---|
+| `DraftPolicy.needsYou` | `needsYou` | **Needs you** | `prefetchWorthy(row)`, capped at ten in flight — **the default** |
+| `DraftPolicy.all` | `all` | **All** | `asksForAReply(row)` — the behaviour this setting replaced |
+| `DraftPolicy.onDemand` | `onDemand` | **When asked** | nothing |
+
+The Settings section is **Suggested replies**, between Needs You and
+Notifications, present in both scopes (see
+[../settings.md](../settings.md)). Its summaries are *For messages that need
+you* / *For every reply-worthy message* / *Only when asked*.
+
+**The two pre-gates** both live in `app/lib/services/extract_handler.dart`,
+both read off the stored row rather than re-judging it, and both compare
+sqlite's INTEGER flags against 1:
+
+- `asksForAReply` — five signals, any one is enough: `needs_you_verdict == 1`,
+  `reply_expected == 1`, `needs_action == 1`, `urgency` of `urgent` or `high`,
+  or a non-empty `deadline`.
+- `prefetchWorthy` — three of those five: `needs_you_verdict == 1`, or
+  `urgency` of `urgent` or `high`. It drops `reply_expected` (triage's guess
+  from one message in isolation) and `deadline` (a date a newsletter carries
+  too), which are the two that fire on ordinary mail.
+
+Outbound answers false in both.
+
+**The cap.** Under `needsYou`, extraction also counts the `draft` rows that are
+`pending` or `processing` across `email`, `teams` and `local` — the three
+sources `AiWorker` drains, not `workCounts`' `['email']` default — and queues
+nothing while that count is at or above `DraftPolicy.prefetchCap` (10). It is a
+**soft** cap: `ExtractHandler` drains three wide, so three items can read the
+same count before any of them writes and the real ceiling is twelve. Twelve,
+not sixty, is the point.
+
+**What a skip looks like.** A message the policy does not queue gets no work
+row, ever. Its draft stage is written `skipped`, which is terminal — the
+message settles exactly as a `no_reply_needed` one does. `message_progress` has
+no reason column, so the reason goes on the activity row as `draft:`
+
+| Note | Meaning |
+|---|---|
+| `draft: on_demand` | `onDemand` — nothing is prefetched in this mode |
+| `draft: not_prefetched` | `needsYou`, and the message is not `prefetchWorthy` |
+| `draft: prefetch_cap` | `needsYou`, worthy, but ten drafts are already in flight |
+| `draft: no_cue` | `all`, and `asksForAReply` said no |
+
+**Draft reply is unconditional.** `Composer` offers it on every thread in every
+mode (`inbox_screen.dart` wires `onGenerate` for all of them), and
+`DraftNotifier.generate` requeues the message with `asked: true` on the
+payload — which makes the handler **skip the reply decision below** and note
+`decision: asked` on the activity row. A person pressing the button has already
+decided a reply is wanted; a 27B answering "no" would leave them an empty box
+and no sentence. It is also one 27B call, about five seconds, off a keypress
+somebody is waiting on. The payload is decoded by `DraftRequest`
+(`app/lib/models/draft_request.dart`), which is also what encodes it — and only
+the literal `true` counts, so a hand-edited value cannot skip the judgement.
+
+**Retry.** A person's Retry on a message whose extraction errored before the
+draft stage was decided (`pipeline_repair_service.dart` ~:137) enqueues a
+`draft` row only when `draft_state` is still `pending` and no work row exists —
+so a policy-skipped stage, which is `skipped`, is left alone, and a genuinely
+stuck one is queued under this handler's own guards. A Retry is a person
+asking.
+
+Which matters most under `needsYou`, where the needs-you verdict is
+load-bearing: if that stage errored for a message its verdict is NULL, the
+message reads `not_prefetched`, and its draft stage is `skipped` — terminal, so
+a Retry does not re-offer it. **Draft reply** is the way to get that draft.
+
+The reply DECISION below stays on the 27B whatever the policy: in `needsYou`
+mode it runs for the prefetched messages and on demand for the rest. The
+`needs_you_verdict` signal both pre-gates read is the needs-you stage's read of
+the whole message (see [11-needs-you.md](11-needs-you.md)); `NeedsYouHandler`
+drains before extraction, so the verdict is on the row by the time either gate
+reads it.
 
 ## Reply decision — should we spend drafting time at all
 

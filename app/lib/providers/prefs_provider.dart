@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/app_paths.dart' show AppPaths;
 import '../data/message_store.dart';
+import '../models/draft_policy.dart';
 import '../models/home_sort.dart';
 import '../models/needs_you_sort.dart';
 import '../models/people_sort.dart';
@@ -17,6 +18,11 @@ export '../data/message_store.dart' show aboutMeKey, needsYouRulesKey;
 /// The setter below takes a [NeedsYouSort], so whoever reads this file for the
 /// preference has the vocabulary to change it in the same import.
 export '../models/needs_you_sort.dart' show NeedsYouSort, NeedsYouSortLabel;
+
+/// When suggested replies are written, for the same reason: the setter below
+/// takes a [DraftPolicy] and the settings section that writes it needs the
+/// three modes and their labels out of the same import.
+export '../models/draft_policy.dart' show DraftPolicy, DraftPolicyLabel;
 
 /// The two People orders, for the same reason: the directory and a person's
 /// room read their order from here, and the menus that write it need the
@@ -134,6 +140,15 @@ class AppPrefs {
   /// clock instead asks for it once, and gets it in all three places.
   final NeedsYouSort needsYouSort;
 
+  /// When a suggested reply is written without anyone asking for it.
+  /// [DraftPolicy.needsYou] by default: the messages the pipeline judged to
+  /// need the owner are drafted ahead of time and nothing else is, which is
+  /// what keeps a backlog's worth of replies nobody will read out of the prose
+  /// server's queue. A user preference, so `wipeAll` leaves it alone exactly as
+  /// it leaves [needsYouSort] alone — it says how this person likes the app to
+  /// work, not anything about the mailbox that was wiped.
+  final DraftPolicy draftPolicy;
+
   /// How the People directory is ordered. [PeopleSort.recent] by default,
   /// which is the order [peopleRooms] already hands it in: the person who
   /// spoke last is the person most likely to be looked for.
@@ -249,6 +264,7 @@ class AppPrefs {
     this.contextSelectExpand = true,
     this.storylineNewestFirst = false,
     this.needsYouSort = NeedsYouSort.priority,
+    this.draftPolicy = DraftPolicy.needsYou,
     this.peopleSort = PeopleSort.recent,
     this.roomSort = RoomSort.newest,
     this.notifyStyle = NotifyStyle.native,
@@ -370,6 +386,7 @@ class AppPrefs {
     bool? contextSelectExpand,
     bool? storylineNewestFirst,
     NeedsYouSort? needsYouSort,
+    DraftPolicy? draftPolicy,
     PeopleSort? peopleSort,
     RoomSort? roomSort,
     NotifyStyle? notifyStyle,
@@ -396,6 +413,7 @@ class AppPrefs {
         storylineNewestFirst:
             storylineNewestFirst ?? this.storylineNewestFirst,
         needsYouSort: needsYouSort ?? this.needsYouSort,
+        draftPolicy: draftPolicy ?? this.draftPolicy,
         peopleSort: peopleSort ?? this.peopleSort,
         roomSort: roomSort ?? this.roomSort,
         notifyStyle: notifyStyle ?? this.notifyStyle,
@@ -425,6 +443,7 @@ const String showActivityLogKey = 'show_activity_log';
 const String contextSelectExpandKey = 'context_select_expand';
 const String storylineNewestFirstKey = 'storyline_newest_first';
 const String needsYouSortKey = 'needs_you_sort';
+const String draftPolicyKey = 'suggested_replies';
 const String peopleSortKey = 'people_sort';
 const String roomSortKey = 'person_room_sort';
 const String notifyStyleKey = 'notify_style';
@@ -501,16 +520,37 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
           await store.getPref(contextSelectExpandKey) != 'false',
       storylineNewestFirst:
           await store.getPref(storylineNewestFirstKey) == 'true',
-      needsYouSort: _needsYouSort(await store.getPref(needsYouSortKey)),
-      peopleSort: _peopleSort(await store.getPref(peopleSortKey)),
-      roomSort: _roomSort(await store.getPref(roomSortKey)),
+      needsYouSort: _enumOrDefault(
+        NeedsYouSort.values,
+        await store.getPref(needsYouSortKey),
+        NeedsYouSort.priority,
+      ),
+      draftPolicy: _enumOrDefault(
+        DraftPolicy.values,
+        await store.getPref(draftPolicyKey),
+        DraftPolicy.needsYou,
+      ),
+      peopleSort: _enumOrDefault(
+        PeopleSort.values,
+        await store.getPref(peopleSortKey),
+        PeopleSort.recent,
+      ),
+      roomSort: _enumOrDefault(
+        RoomSort.values,
+        await store.getPref(roomSortKey),
+        RoomSort.newest,
+      ),
       // The one setting here that DEFAULTS ON, so its read is the inverse of
       // the two above — see [_style].
       notifyStyle: _style(
         await store.getPref(notifyStyleKey),
         await store.getPref(notifyRibbonKey),
       ),
-      homeSort: _homeSort(await store.getPref(homeSortKey)),
+      homeSort: _enumOrDefault(
+        HomeSort.values,
+        await store.getPref(homeSortKey),
+        HomeSort.newest,
+      ),
       fastLlmUrl: _slotValue(await store.getPref(fastLlmUrlKey)),
       fastLlmModel: _slotValue(await store.getPref(fastLlmModelKey)),
       proseLlmUrl: _slotValue(await store.getPref(proseLlmUrlKey)),
@@ -555,36 +595,27 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// trailing newline is a `SocketException` nobody can read.
   static String _slotValue(String? raw) => raw?.trim() ?? '';
 
-  /// The stored order, or the ranking. Only the one spelling this notifier
-  /// writes reads as the clock — an absent key, a hand-edited value, or a name
-  /// a later build stopped using all leave the reader on the priority order
-  /// the app decides, which is the state every install starts in.
-  static NeedsYouSort _needsYouSort(String? raw) =>
-      raw == NeedsYouSort.newest.name
-          ? NeedsYouSort.newest
-          : NeedsYouSort.priority;
-
-  /// The stored People order, or recency. Anything this notifier did not write
-  /// — an absent key, a hand-edited value, a name a later build stopped using
-  /// — leaves the reader on the order every install starts in, rather than
-  /// throwing on the first frame of the People stop.
-  static PeopleSort _peopleSort(String? raw) {
-    for (final option in PeopleSort.values) {
+  /// A stored enum, or [fallback]. The rule every enum preference here obeys,
+  /// written once.
+  ///
+  /// ONLY a spelling this notifier wrote is honoured — the setters below all
+  /// store `value.name`, so that is the one spelling there is. An absent key,
+  /// a value somebody hand-edited into the table, or a name a later build
+  /// stopped using all read as [fallback], which is the state every fresh
+  /// install is in: the Needs You pile ranks by priority, People reads by
+  /// recency, a room and the Inbox open on what just happened, and replies are
+  /// drafted for the messages that need the owner. A preference must never be
+  /// able to throw on the first frame of the screen that reads it.
+  static T _enumOrDefault<T extends Enum>(
+    Iterable<T> values,
+    String? raw,
+    T fallback,
+  ) {
+    for (final option in values) {
       if (option.name == raw) return option;
     }
-    return PeopleSort.recent;
+    return fallback;
   }
-
-  /// The stored room order, or newest first. [_peopleSort]'s rule exactly.
-  static RoomSort _roomSort(String? raw) =>
-      raw == RoomSort.oldest.name ? RoomSort.oldest : RoomSort.newest;
-
-  /// The stored Inbox order, or newest first. [_roomSort]'s rule exactly: only
-  /// the one spelling this notifier writes reads as oldest, so an absent key
-  /// or a hand-edited value leaves the reader on the order every install
-  /// starts in rather than throwing on the Inbox's first frame.
-  static HomeSort _homeSort(String? raw) =>
-      raw == HomeSort.oldest.name ? HomeSort.oldest : HomeSort.newest;
 
   /// The stored style, or what the switch it replaced said, or on.
   ///
@@ -684,14 +715,21 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   }
 
   /// Orders the Needs You pile, in all three places it is drawn. Written as
-  /// the enum's own name, which is what [_needsYouSort] parses back.
+  /// the enum's own name, which is what [_enumOrDefault] parses back.
   Future<void> setNeedsYouSort(NeedsYouSort value) async {
     state = state.copyWith(needsYouSort: value);
     await _store.setPref(needsYouSortKey, value.name);
   }
 
+  /// When suggested replies are written without anyone asking. Written as the
+  /// enum's own name, which is what [_enumOrDefault] parses back.
+  Future<void> setDraftPolicy(DraftPolicy value) async {
+    state = state.copyWith(draftPolicy: value);
+    await _store.setPref(draftPolicyKey, value.name);
+  }
+
   /// Orders the People directory. Written as the enum's own name, which is
-  /// what [_peopleSort] parses back.
+  /// what [_enumOrDefault] parses back.
   Future<void> setPeopleSort(PeopleSort value) async {
     state = state.copyWith(peopleSort: value);
     await _store.setPref(peopleSortKey, value.name);
@@ -710,7 +748,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   }
 
   /// Orders the Inbox feed. Written as the enum's own name, which is what
-  /// [_homeSort] parses back.
+  /// [_enumOrDefault] parses back.
   Future<void> setHomeSort(HomeSort value) async {
     state = state.copyWith(homeSort: value);
     await _store.setPref(homeSortKey, value.name);

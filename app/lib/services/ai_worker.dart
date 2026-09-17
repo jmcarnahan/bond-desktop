@@ -138,12 +138,18 @@ enum _RunOutcome {
 /// The worker owns no timer. [pump] is called after each sync, is a no-op
 /// while a drain is running, and stops on its own when nothing is pending.
 class AiWorker {
-  /// Every source whose work this worker drains. Handlers are already
-  /// per-item source-aware (they read `item['source']`), so widening this
-  /// list is all a new connector needs.
+  /// Every source whose work this worker drains — the three connectors any
+  /// queue in this app has rows under. Handlers are already per-item
+  /// source-aware (they read `item['source']`), so widening this list is all a
+  /// new connector needs.
   /// `local` is not a connector: it is the source context directories queue
   /// under, because a folder on this machine came from no mailbox at all.
-  static const List<String> _sources = ['email', 'teams', 'local'];
+  ///
+  /// PUBLIC because it is no longer only this class's business: the draft
+  /// prefetch cap in `ExtractHandler` counts work rows over exactly the sources
+  /// that will drain them, and a second literal of this list would be a cap
+  /// that stopped seeing a connector the day one was added.
+  static const List<String> sources = ['email', 'teams', 'local'];
 
   /// One retry, then the item is left alone. Same trade triage makes: a local
   /// model that answered unparseably often gets it right on a second pass, and
@@ -350,7 +356,7 @@ class AiWorker {
               !parkedDrain) {
             final item = await _store.claimPendingWork(
               handler.kind,
-              sources: _sources,
+              sources: sources,
             );
             if (item == null) break;
             _claimed.add(_claimKey(handler.kind, item));
@@ -606,7 +612,7 @@ class AiWorker {
   /// has already moved on.
   Future<void> _emit(String kind) async {
     if (_progress.isClosed) return;
-    final counts = await _store.workCounts(kind, sources: _sources);
+    final counts = await _store.workCounts(kind, sources: sources);
     if (_progress.isClosed) return;
     _progress.add(WorkProgress(kind, counts));
   }

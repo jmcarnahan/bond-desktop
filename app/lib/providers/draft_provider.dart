@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/message_store.dart';
+import '../models/draft_request.dart';
 import '../models/message_models.dart' show ConversationState, Message;
 import '../services/ai_worker.dart';
 import '../services/backend/auth_session.dart';
@@ -518,7 +519,10 @@ class DraftNotifier extends StateNotifier<DraftState> {
   ///
   /// The payload carries only the keys that have something in them, so a
   /// consulted file and a pinned document never have to be asked for together
-  /// to be asked for at all.
+  /// to be asked for at all — and it always carries `asked`, which is what
+  /// tells the handler to skip the reply DECISION. A person pressing this
+  /// button has already decided a reply is wanted, and a model that came back
+  /// "no" would leave them an empty box.
   Future<void> generate({
     List<String> pinnedAttachmentIds = const [],
     List<int> contextFileIds = const [],
@@ -548,15 +552,13 @@ class DraftNotifier extends StateNotifier<DraftState> {
         // is `created_at DESC`, so without this the asked-for draft would be
         // handed over after every prefetch queued since this message landed.
         refreshCreatedAt: true,
-        payloadJson:
-            (pinnedAttachmentIds.isEmpty && contextFileIds.isEmpty)
-                ? null
-                : jsonEncode({
-                    if (pinnedAttachmentIds.isNotEmpty)
-                      'pinned_attachment_ids': pinnedAttachmentIds,
-                    if (contextFileIds.isNotEmpty)
-                      'context_file_ids': contextFileIds,
-                  }),
+        // Encoded by the value the handler decodes, so the two ends of this
+        // wire cannot drift apart.
+        payloadJson: DraftRequest(
+          pinnedAttachmentIds: pinnedAttachmentIds,
+          contextFileIds: contextFileIds,
+          asked: true,
+        ).encode(),
       );
     } catch (e) {
       state = state.copyWith(

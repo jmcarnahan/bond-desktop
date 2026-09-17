@@ -1542,10 +1542,13 @@ same day.
 | 2026-09-17 | lanes | 4 | 3 | 208.6 | 249.9 | 13.8 | 49.6 | `pipeline-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-185518.json` | box + MTP; pass 2 (kept) |
 | 2026-09-17 | single | 1 | 3 | 210.1 | 432.2 | 13.7 | 228.2 | `pipeline-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-190247.json` | box + MTP; pass 1 |
 | 2026-09-17 | single | 1 | 3 | 219.6 | 441.6 | 13.1 | 228.5 | `pipeline-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-191028.json` | box + MTP; pass 2 (kept) |
+| 2026-09-17 | lanes | 4 | 3 | 60.3 | 139.3 | 47.8 | 32.4 | `pipeline-vllm-g6e-qwen3-4b-instruct-2507-fp8-20260917-214712.json` | BOTH slots on the box — bulk = vLLM `Qwen/Qwen3-4B-Instruct-2507-FP8` on :8001, prose = vLLM `Qwen/Qwen3.8-27B-FP8` + MTP on :8000; 37 drafts; p50 triage 1,510 ms · needs-you 542 · extraction 1,764 · decision 1,960 · draft 7,801; pass 1 |
+| 2026-09-17 | lanes | 4 | 3 | 60.3 | 139.4 | 47.7 | 33.2 | `pipeline-vllm-g6e-qwen3-4b-instruct-2507-fp8-20260917-215052.json` | both slots on the box; 37 drafts; p50 triage 1,504 ms · needs-you 545 · extraction 1,754 · decision 2,138 · draft 7,397; pass 2 (kept) |
 
 **Phase 1 read (2026-09-17).** Every row is 3 copies of the fixture corpus —
-48 ungated messages — through the real queues, with the bulk slot the local 4B
-on :8082 at four slots throughout; only the prose slot and the shape move.
+48 ungated messages — through the real queues. Across the Phase 1 rows (every
+row but the last two) the bulk slot is the local 4B on :8082 at four slots
+throughout; only the prose slot and the shape move.
 
 The lanes do what they were cut for. A message arriving mid-backlog is
 extracted in **50–98 s** instead of **767–800 s** locally, **404–405 s** against
@@ -1571,6 +1574,23 @@ Two caveats on the reading. The local `lanes` row is ONE clean pass, and its
 98.2 s late arrival includes a 4B that was still mid-backlog when the message
 landed. And the bench asserts nothing about accuracy — it prints answers and
 times them; the golden set is where quality is read.
+
+**Both slots on the box (2026-09-17, Phase 2).** Every row above keeps the
+bulk work on the local 4B, and reads a fast wall of **200–240 s** (12–14
+msgs/min) — the floor Round C does not move. With the bulk slot on the box as
+well, the same 48 messages clear the fast phase in **60 s** (47.7 msgs/min) and
+every draft is written by **139 s**. A message arriving mid-backlog is triaged,
+judged and extracted in **≈33 s**, against 50 s with the box's prose slot alone
+and 98 s all-local.
+
+Two things this row is not. It is a SPEED row and not an adoption: the box's 4B
+is not an accuracy tie with the local Q8_0 4B on the golden set (those rows sit
+on the `feat/inference-endpoint` branch), so the bulk slot stays local per the
+roadmap's settled list until that gap is explained. And the 33 s late arrival
+is not model time — the newcomer's three calls total about 4 s. It is the fast
+lane's drain granularity: the triage drain, and then the worker pass, each
+finish the batch they are already holding before the new row is reached. That
+is a Round C observation for T1, not something this phase changes.
 
 **Memory, round 0 (2026-09-16).** With MTP on and both chat servers at 16K
 context, the three servers' resident sizes are 22.0GB (27B + MTP sidecar),

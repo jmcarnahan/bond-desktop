@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import '../data/message_store.dart';
 import '../models/draft_provenance.dart';
+import '../models/draft_request.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'ai_worker.dart';
@@ -153,25 +154,13 @@ class DraftHandler extends WorkHandler {
     final row = await _store.getMessageRow(source, id);
     // Queued, then deleted before the worker reached it. Nothing to answer
     // and nothing wrong — the item is done, not failed.
-    if (row == null) {
-      _log
-        ..noteStatus('skipped')
-        ..note({'reason': 'deleted'});
-      await _progress.noteDraft(source, id, state: 'skipped');
-      return;
-    }
+    if (row == null) return _skip(source, id, 'deleted');
 
     // The user's own mail. Extraction only ever enqueues inbound messages, so
     // this is the guard rather than a case — and it is here for the reason
     // every guard in this handler is: the queue can hand over a row that has
     // changed since it was written.
-    if (row['direction'] != 'inbound') {
-      _log
-        ..noteStatus('skipped')
-        ..note({'reason': 'outbound'});
-      await _progress.noteDraft(source, id, state: 'skipped');
-      return;
-    }
+    if (row['direction'] != 'inbound') return _skip(source, id, 'outbound');
 
     // Queued, then GATED before the worker reached it — the [ExtractHandler]
     // exit, at the one other point in the pipeline that can be reached after
@@ -181,11 +170,7 @@ class DraftHandler extends WorkHandler {
     // stands behind.
     if (row['triage_status'] == 'skipped' &&
         row['gate_reason'] != 'teams_source') {
-      _log
-        ..noteStatus('skipped')
-        ..note({'reason': 'gated'});
-      await _progress.noteDraft(source, id, state: 'skipped');
-      return;
+      return _skip(source, id, 'gated');
     }
 
     // Already answered. Two enqueues racing to the same message is benign —
@@ -198,6 +183,11 @@ class DraftHandler extends WorkHandler {
       await _progress.noteDraft(source, id, state: 'done');
       return;
     }
+
+    // What the person who queued this asked for, decoded ONCE — the two id
+    // lists the retrievers float first, and whether a person pressed the
+    // button at all.
+    final request = DraftRequest.fromPayload(item['payload_json']);
 
     var replyTo = Message.fromRow(row);
     final key = row['conversation_key'] as String? ?? '';
@@ -247,14 +237,14 @@ class DraftHandler extends WorkHandler {
       key,
       id,
       threadMessageIds: [for (final message in thread) message.id],
-      pinnedFirst: _pinnedIdsFrom(item['payload_json']),
+      pinnedFirst: request.pinnedAttachmentIds,
       queryVector: vector,
     );
 
     // ONE pack, for the same reason there is one retrieval: both calls below
     // ask about the same message on the same thread, and the directories have
     // not changed between the two.
-    final consultFirst = _contextFileIdsFrom(item['payload_json']);
+    final consultFirst = request.contextFileIds;
     final consulted = consultFirst.length;
     final pack = await _packFor(
       source,
@@ -264,33 +254,37 @@ class DraftHandler extends WorkHandler {
       consultFirst: consultFirst,
     );
 
-    final decision = await runTask(
-      _client,
-      const ReplyDecisionTask(),
-      ReplyDecisionInput(
-        context: context,
-        message: replyTo,
-        aboutMe: aboutMe,
-        attachmentExcerpts: excerpts,
-        directories: pack,
-        now: DateTime.now(),
-      ),
-      // Zero, like every judgement in this app: the same message must get the
-      // same verdict twice, or a re-drain would offer a suggestion the last
-      // one did not.
-      temperature: 0,
-      maxTokens: _decisionMaxTokens,
-    );
+    // The decision the person already made, when they made it. A prefetched
+    // draft asks the model whether a reply is wanted; an ASKED-FOR one does
+    // not, because pressing **Draft reply** is that answer — and a model that
+    // came back "no" would leave the person who pressed it an empty box and no
+    // sentence. It is also the expensive half of a keypress they are waiting
+    // on: one 27B call, about five seconds, off every asked-for draft.
+    final decision = request.asked
+        ? null
+        : await runTask(
+            _client,
+            const ReplyDecisionTask(),
+            ReplyDecisionInput(
+              context: context,
+              message: replyTo,
+              aboutMe: aboutMe,
+              attachmentExcerpts: excerpts,
+              directories: pack,
+              now: DateTime.now(),
+            ),
+            // Zero, like every judgement in this app: the same message must get
+            // the same verdict twice, or a re-drain would offer a suggestion
+            // the last one did not.
+            temperature: 0,
+            maxTokens: _decisionMaxTokens,
+          );
 
-    if (!decision.needsReply) {
+    if (decision != null && !decision.needsReply) {
       // A real END state, not a failure: the model read the conversation and
       // said nobody is waiting. The reason is recorded so a person looking at
       // the activity row can see what it read.
-      _log
-        ..noteStatus('skipped')
-        ..note({'reason': 'no_reply_needed', 'why': decision.reason});
-      await _progress.noteDraft(source, id, state: 'skipped');
-      return;
+      return _skip(source, id, 'no_reply_needed', why: decision.reason);
     }
 
     final result = await runTask(
@@ -398,6 +392,9 @@ class DraftHandler extends WorkHandler {
     await _progress.noteDraft(source, id, state: 'done');
     _log.note({
       'chars': result.replyBody.length,
+      // Why there is no decision call on this row's timeline: a person asked
+      // for it, so the judgement was theirs.
+      if (request.asked) 'decision': 'asked',
       // The activity row keeps its own copy, which is not a duplicate of the
       // stored provenance: a person reading the log is asking what the app
       // DID, and the row has to answer after the draft it belongs to has been
@@ -499,50 +496,28 @@ class DraftHandler extends WorkHandler {
     return () => cached ??= replyToQueryVector(_store, embeddings, source, id);
   }
 
-  /// The documents the user named with "Use in reply", off the work item.
+  /// This message gets no draft, and its stage says so.
   ///
-  /// Defensive to the point of paranoia because the payload is the one part of
-  /// a work row that is free-form: anything that is not a JSON object with a
-  /// list of strings under `pinned_attachment_ids` reads as "none named",
-  /// which is the ordinary case anyway. A malformed payload must cost the
-  /// pinning, never the draft.
-  static List<String> _pinnedIdsFrom(Object? payloadJson) {
-    if (payloadJson is! String || payloadJson.isEmpty) return const [];
-    try {
-      final decoded = jsonDecode(payloadJson);
-      if (decoded is! Map) return const [];
-      final ids = decoded['pinned_attachment_ids'];
-      if (ids is! List) return const [];
-      return [
-        for (final id in ids)
-          if (id is String && id.isNotEmpty) id,
-      ];
-    } on FormatException {
-      return const [];
-    }
-  }
-
-  /// The directory files the user named with "Consult for the reply", off the
-  /// work item.
+  /// The four ends that are not failures — the row is gone, it is the user's
+  /// own mail, triage gated it, or the model read the thread and said nobody
+  /// is waiting — record the same three things in the same order: the item is
+  /// `skipped` rather than `ok`, [reason] says which end it was, and the
+  /// progress row closes the stage so the message settles instead of waiting
+  /// for a draft nothing is going to write. [why] carries the model's own
+  /// sentence, which only the last of them has.
   ///
-  /// [_pinnedIdsFrom]'s paranoia over the other list, and one rule of its own:
-  /// a `context_files.id` is a positive integer, so anything else — a string,
-  /// a zero, a negative — is not an id and reads as "none named". A malformed
-  /// payload must cost the consultation, never the draft.
-  static List<int> _contextFileIdsFrom(Object? payloadJson) {
-    if (payloadJson is! String || payloadJson.isEmpty) return const [];
-    try {
-      final decoded = jsonDecode(payloadJson);
-      if (decoded is! Map) return const [];
-      final ids = decoded['context_file_ids'];
-      if (ids is! List) return const [];
-      return [
-        for (final id in ids)
-          if (id is int && id > 0) id,
-      ];
-    } on FormatException {
-      return const [];
-    }
+  /// Not used for "already drafted": that one is `done`, because the draft the
+  /// caller wanted exists.
+  Future<void> _skip(
+    String source,
+    String id,
+    String reason, {
+    String? why,
+  }) async {
+    _log
+      ..noteStatus('skipped')
+      ..note({'reason': reason, 'why': ?why});
+    await _progress.noteDraft(source, id, state: 'skipped');
   }
 
   /// The user's own recent replies to this sender, as writing samples.
