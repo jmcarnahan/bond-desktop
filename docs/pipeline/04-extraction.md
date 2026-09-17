@@ -19,6 +19,28 @@ handler's own `skipped` check stays as the belt, for an Ignore that lands
 between the claim and the run and for rows an older build enqueued. Every
 other work kind is untouched by the clause.
 
+**A thread for extraction, measured and not given (2026-09-17).** The task can
+take one. `ExtractionInput(message, now, {thread, threadDigest})` renders, in
+order, the date line, a `thread_digest` fence when a digest is passed, a
+`thread` fence built by the shared `buildThreadTailText` (newest three, 300
+characters each) when a thread is passed, the line "Extract from ONLY this
+message:" when either of those was written, and then the `inbound_message`
+fence. With neither the prompt is byte-identical to what this task has always
+built — the date line and one fence, no label between them — which is what
+keeps every prior 4B row comparable. `make golden GOLDEN_EXTRACT_CTX=none`,
+`=tail3` or `=digest` measures the three rungs on extraction's own axis. It
+was measured on the 4B at `GOLDEN_K=4`, two passes each, keep-only (76 items),
+and the five fields read intent / importance / project / topics / people: with
+nothing, 75% / 39% / 66% / 26% / 87%; with the tail, 78% / 39% / 53% / 25% /
+75%; with the digest and the tail, 76% / 37% / 53% / 30% / 66%. The tail buys
+3 points of intent and costs 12 of people and 13 of project; the digest costs
+21 of people and 13 of project. Neither is a trade worth making, so extraction
+stays message-alone: `ExtractHandler` builds `ExtractionInput(message,
+DateTime.now())` and passes neither field, pinned by `extraction sees the
+message alone even when the thread has history` in
+`app/test/extract_handler_test.dart`. The fields stay because the ladder will
+be re-run against a future prompt, not because anything calls them.
+
 1. **Bucket filing** (`_fileBucket`) — the extraction's read of the message
    files low-value mail into Later, unless a standing per-sender rule or an
    explicit "keep this in my inbox" overrides it. Nothing automatic overturns

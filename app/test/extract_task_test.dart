@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
+import 'package:bond_inbox/services/llm/message_block.dart';
+import 'package:bond_inbox/services/llm/prompt_guard.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 Message email({
@@ -226,6 +228,151 @@ void main() {
       expect(user, isNot(contains('teams:')));
       expect(user, isNot(contains('Subject:')));
       expect(user, contains('Can you send the CD?'));
+    });
+  });
+
+  group('thread context', () {
+    final now = DateTime(2026, 8, 29);
+
+    String fenced(String user, String tag) {
+      final open = '<untrusted_data source="$tag">\n';
+      final start = user.indexOf(open) + open.length;
+      return user.substring(start, user.indexOf('\n</untrusted_data>', start));
+    }
+
+    test('with neither a thread nor a digest the prompt has not moved', () {
+      // The byte-identical control. Extraction has always been given the
+      // message alone, and every number measured for it was measured on
+      // exactly this string — a label line added here would move all of them.
+      final message = email();
+
+      expect(
+        task.buildUserMessage(ExtractionInput(message, now)),
+        'Today is 2026-08-29 (Saturday).\n'
+        '${wrapUntrusted('inbound_message', buildMessageBlock(message))}',
+      );
+    });
+
+    test('a thread is quoted as a transcript, labelled as context', () {
+      final user = task.buildUserMessage(ExtractionInput(
+        email(bodyText: 'And the fourth question.'),
+        now,
+        thread: [
+          email(fromName: 'Ana Delgado', bodyText: 'The oldest question.'),
+          email(fromName: 'Ana Delgado', bodyText: 'A follow up.'),
+          Message(
+            id: 'o1',
+            outbound: true,
+            bodyText: 'Sure, on it.',
+            receivedAt: '2026-08-28T10:00:00Z',
+          ),
+          email(fromName: 'Ana Delgado', bodyText: 'Any word yet?'),
+        ],
+      ));
+
+      expect(
+        user,
+        contains('Earlier messages on this thread, oldest first, for context:'),
+      );
+      // The last three, oldest first, the reader named as themselves — and the
+      // oldest of the four dropped.
+      expect(
+        fenced(user, 'thread'),
+        'Ana Delgado: A follow up.\n---\n'
+        'You: Sure, on it.\n---\n'
+        'Ana Delgado: Any word yet?',
+      );
+      expect(user, isNot(contains('The oldest question.')));
+    });
+
+    test('context first, then the instruction, then the message', () {
+      final user = task.buildUserMessage(ExtractionInput(
+        email(bodyText: 'The new one.'),
+        now,
+        thread: [email(bodyText: 'The old one.')],
+        threadDigest: 'older still',
+      ));
+
+      expect(
+        user.indexOf('source="thread_digest"'),
+        lessThan(user.indexOf('source="thread"')),
+      );
+      expect(
+        user.indexOf('source="thread"'),
+        lessThan(user.indexOf('Extract from ONLY this message:')),
+      );
+      expect(
+        user.indexOf('Extract from ONLY this message:'),
+        lessThan(user.indexOf('source="inbound_message"')),
+      );
+      expect('</untrusted_data>'.allMatches(user).length, 3);
+    });
+
+    test('the instruction appears only when there is context to separate', () {
+      expect(
+        task.buildUserMessage(ExtractionInput(email(), now)),
+        isNot(contains('Extract from ONLY this message:')),
+      );
+      expect(
+        task.buildUserMessage(
+          ExtractionInput(email(), now, threadDigest: 'older still'),
+        ),
+        contains('Extract from ONLY this message:'),
+      );
+    });
+
+    test('an empty digest and an empty thread are no context at all', () {
+      final control = task.buildUserMessage(ExtractionInput(email(), now));
+
+      for (final empty in const ['', '   ']) {
+        expect(
+          task.buildUserMessage(
+            ExtractionInput(email(), now, threadDigest: empty),
+          ),
+          control,
+          reason: 'digest "$empty"',
+        );
+      }
+      expect(
+        task.buildUserMessage(
+          ExtractionInput(email(), now, thread: const []),
+        ),
+        control,
+      );
+    });
+
+    test('a long digest is fitted to 900 characters inside its fence', () {
+      final digest = [
+        '(thread has 90 earlier messages; 30 quoted below)',
+        for (var i = 0; i < 30; i++)
+          '2026-08-${(i % 28) + 1} · Ana Delgado: ${'turn $i, ' * 12}',
+      ].join('\n');
+      expect(digest.length, greaterThan(2000));
+
+      final inside = fenced(
+        task.buildUserMessage(
+          ExtractionInput(email(), now, threadDigest: digest),
+        ),
+        'thread_digest',
+      );
+
+      expect(inside.length, lessThanOrEqualTo(900));
+      expect(inside, startsWith('(thread has 90 earlier messages;'));
+      expect(inside, contains('turn 29,'));
+      expect(inside, isNot(contains('turn 0,')));
+    });
+
+    test('the system prompt does not move for any of it', () {
+      final before = task.systemPrompt;
+      task.buildUserMessage(ExtractionInput(email(), now));
+      task.buildUserMessage(ExtractionInput(
+        email(),
+        now,
+        thread: [email(bodyText: 'The old one.')],
+        threadDigest: 'older still',
+      ));
+
+      expect(identical(task.systemPrompt, before), isTrue);
     });
   });
 

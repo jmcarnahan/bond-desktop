@@ -124,3 +124,106 @@ String _subjectLine(Message message) => switch (message.source) {
       'teams' => '',
       _ => 'Subject: ${message.subject ?? ''}\n',
     };
+
+/// The digest's own budget inside a prompt, in characters.
+///
+/// Roughly three quoted thread messages' worth, and deliberately smaller than
+/// the digest the packer builds (its own cap is 2000): the digest is CONTEXT
+/// sitting above the message being judged, and a context block that outweighs
+/// the message is how a loud older turn gets classified in place of the new
+/// one. One number, shared by every task that fences a digest, so the three
+/// prompts cannot come to disagree about how much history a stage reads.
+const int threadDigestCap = 900;
+
+/// Trims [digest] to [cap] by WHOLE LINES, dropping from the OLD end.
+///
+/// A `substring(0, cap)` clamp would do the opposite of what is wanted here: a
+/// digest is oldest-first, so a head clip keeps the oldest lines and throws
+/// away the newest — which is exactly where an open ask lives. So the budget
+/// is spent from the newest end backwards, the way the packer itself spends
+/// it.
+///
+/// The `(thread has N earlier messages; M quoted below)` header is kept
+/// whatever else goes: without it a trimmed digest reads as the whole thread.
+/// It stays first, and the lines that survive keep their original order.
+///
+/// A digest already under the cap comes back byte for byte. When not even the
+/// newest single line fits beside the header, that line is clipped from its
+/// END so the result is exactly [cap] characters — half a line of the newest
+/// turn beats none of it.
+String fitThreadDigest(String digest, int cap) {
+  if (digest.length <= cap) return digest;
+
+  final lines = digest.split('\n');
+  final hasHeader = lines.first.startsWith('(thread has ');
+  final header = hasHeader ? lines.first : null;
+  final rest = hasHeader ? lines.sublist(1) : lines;
+
+  var used = header?.length ?? 0;
+  final kept = <String>[];
+  for (var i = rest.length - 1; i >= 0; i--) {
+    final line = rest[i];
+    // The newline that joins this line to whatever is already above it. The
+    // very first piece of the result carries none.
+    final extra =
+        (header == null && kept.isEmpty) ? line.length : line.length + 1;
+    // The first line that does not fit ends it: older lines are shorter only
+    // by accident, and skipping one to squeeze in an older one would print a
+    // history with a hole in it that nothing names.
+    if (used + extra > cap) break;
+    used += extra;
+    kept.insert(0, line);
+  }
+
+  if (kept.isNotEmpty) {
+    return [?header, ...kept].join('\n');
+  }
+
+  // Nothing but the header fits. A header longer than the whole budget is
+  // clipped to it; a header that fills the budget to within one character
+  // leaves no room for a newline and is returned whole; otherwise the newest
+  // line fills what is left.
+  if (header == null) return rest.last.substring(0, cap);
+  // `rest` cannot be empty here: a digest that is nothing but its header is
+  // shorter than the header and came back unchanged at the top.
+  if (header.length + 1 >= cap) {
+    return header.length > cap ? header.substring(0, cap) : header;
+  }
+  return '$header\n${rest.last.substring(0, cap - header.length - 1)}';
+}
+
+/// The thread tail as a transcript: who spoke, then what they said.
+///
+/// Deliberately not [buildMessageBlock] — headers on every quoted message
+/// would cost more prompt than the quotes themselves, and the only thing a
+/// tail has to establish is what was said and whether the reader answered it.
+/// "You" for the reader's own messages is the whole point of that second half:
+/// a thread whose last word is theirs is a thread nobody is waiting on.
+///
+/// Lives here rather than inside one task because two prompts render this
+/// tail — triage, and extraction at the rungs the replay prices — and a
+/// per-task copy is how the two would come to quote a thread differently.
+/// Needs-you is the deliberate exception: its `_contextText` quotes a
+/// `From:` / `Sent:` transcript of its own and is not meant to converge.
+/// [max] messages from the NEWEST end, each clipped at [cap].
+String buildThreadTailText(List<Message> thread, {int max = 3, int cap = 300}) {
+  if (thread.isEmpty) return '';
+  final tail =
+      thread.length > max ? thread.sublist(thread.length - max) : thread;
+  return [
+    for (final message in tail)
+      '${message.outbound ? 'You' : (message.fromName ?? '')}: '
+          '${_clampTail(_tailBody(message), cap)}',
+  ].join('\n---\n');
+}
+
+/// Markers out, for [buildMessageBlock]'s reason — a tail is quoted text too,
+/// and a `[[att:…]]` in it is a token nobody typed.
+String _tailBody(Message message) => stripAttachmentMarkers(
+      message.bodyText?.isNotEmpty == true
+          ? message.bodyText!
+          : message.bodyPreview,
+    );
+
+String _clampTail(String value, int cap) =>
+    value.length > cap ? value.substring(0, cap) : value;

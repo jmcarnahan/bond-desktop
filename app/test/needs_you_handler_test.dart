@@ -283,6 +283,36 @@ void main() {
       // second is worth putting in front of a judgement.
       expect(llm.user, isNot(contains('attachment_digests')));
     });
+
+    test('needs-you sends the thread and never a digest', () async {
+      // The context ladder measured on 2026-09-16/17 left needs-you on the
+      // thread tail: the digest read verdict 92 against the tail's 93 and lost
+      // judged evidence 34 -> 30, so it ships to no stage. `NeedsYouInput`
+      // still carries a `threadDigest` field; this pins that the handler never
+      // fills it in.
+      await seed(
+        source: 'email',
+        id: 'earlier',
+        body: 'Alex, the wayfinding sheet is ready for you.',
+        receivedAt: '2026-08-29T09:00:00Z',
+      );
+      await seed(
+        source: 'email',
+        id: 'latest',
+        body: 'Any word on that sign-off?',
+        receivedAt: '2026-08-29T10:00:00Z',
+      );
+      final llm = FakeLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'latest');
+
+      expect(llm.user, contains('<untrusted_data source="thread">'));
+      expect(
+        llm.user,
+        contains('Alex, the wayfinding sheet is ready for you.'),
+      );
+      expect(llm.user, isNot(contains('thread_digest')));
+    });
   });
 
   group('the deterministic floor', () {

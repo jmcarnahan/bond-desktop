@@ -50,6 +50,41 @@ the model more conservative about action items — 67% to 60% on the rubric, and
 51 to 45 kept items carrying any — recorded as a trade in the ledger. The rows
 are in the bakeoff ledger (`docs/model-bakeoff.md`, "Golden ledger").
 
+**The tail and the digest, measured (2026-09-16/17).** What triage reads is
+unchanged: the newest three messages before this one, each cut to 300
+characters, in the `thread` fence. What the prompt gained is an optional
+`TriageInput.threadDigest`. When a caller passes one it is rendered as its own
+`thread_digest` fence between the attachment line and the thread fence, under
+the line "A digest of the thread before those messages, oldest first, for
+context:", capped at 900 characters by `fitThreadDigest` — whole lines dropped
+from the OLD end, the header line kept. Nothing in the app builds a digest, so
+the shipped prompt never carries that fence; `TriageQueue` passes the tail and
+nothing else, pinned by `triage sends the thread tail and never a digest` in
+`app/test/triage_queue_test.dart`. The ladder that decided it ran three rungs
+on the 4B at `GOLDEN_K=4` under this document's prompt, two passes each,
+keep-only (76 items): `none` read needs_action 70% / reply_expected 70% then
+70% / 68%; `tail3` read 72% / 75% then 71% / 72%, against a record row of 71%
+/ 72%; `digest` read 67% / 70% then 70% / 74%. The rule was pre-registered:
+the message alone had to beat the tail by 4 points on a boolean before triage
+would drop the tail, and only then would the digest be tried against it. It
+did not, on either boolean on either pass, so triage keeps the tail and the
+digest branch was never reached. What the digest DID move is worth recording
+for the next round: the judged fields rose — label 82% to 89%, summary 64% to
+68%, action items 56% to 62% against the tail's 86% / 63% / 60% — and
+`reply_expected` on the 21 keep items whose gold label needs the thread went
+10 to 13 of 21, while needs-you evidence fell 34% to 30%, extraction lost
+people and project, and triage's p50 rose 27% at K=4 (throughput 13.4 to 11.9
+messages a minute). The judge's noise floor is 2 points on a judged field. A
+triage-only digest judged on summary and label is the natural next
+experiment, and the field is in place for it. Round 0's finding that the
+message alone beat the tail by 12 and 8 did not survive the summary rule:
+under this prompt `none` reads 70% / 70% where round 0 read 78% / 78% on the
+old one. A context result is valid only for the prompt it was measured with.
+The run files are
+`golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-233417.json`
+(none), `…-20260916-235139.json` (digest) and `…-20260917-000817.json`
+(tail3).
+
 **The Attachments line.** When the message carries non-inline attachments,
 the user message gains one line after the directness line and OUTSIDE every
 fence: `Attachments: ` followed by the names and sizes. Names and sizes only —

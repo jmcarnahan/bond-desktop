@@ -46,8 +46,8 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
 - `BENCH_VERIFY` — `0` skips the contract check that otherwise runs before
   every bench.
 - `BENCH_K` — the concurrencies `make drain` races, in order (e.g. `1,3,6`).
-- `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_K`, `GOLDEN_OWNER_NAME` /
-  `GOLDEN_OWNER_ADDRESS` — see "The golden set".
+- `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_EXTRACT_CTX`, `GOLDEN_K`,
+  `GOLDEN_OWNER_NAME` / `GOLDEN_OWNER_ADDRESS` — see "The golden set".
 
 Name the weights in a label, not just the runtime: two quantizations of one
 model otherwise produce two identical-looking tables. Once two runs have
@@ -179,27 +179,42 @@ phase, by a judge that grades the baseline and every candidate alike.
 **The context ladder.** The set exists partly because the pipeline is
 inconsistent about thread context: triage and needs-you see the last three
 messages at 300 characters each, extraction sees the judged message completely
-alone. So every item carries three rungs, and `GOLDEN_CTX` picks which one the
+alone. So every item carries four rungs, and `GOLDEN_CTX` picks which one the
 replay shows triage and needs-you:
 
 | rung | what the thread carries |
 |---|---|
 | `none` | the message alone |
 | `tail3` | the last three messages, 300 characters each — what ships today |
-| `compressed` | the tail, led by an extractive digest of everything earlier |
+| `compressed` | the tail, led by an extractive digest of everything earlier as a synthetic thread message (the superseded 2026-09-14 form) |
+| `digest` | the tail, plus the digest as its own `thread_digest` fence, 900 characters, trimmed by whole lines from the old end (2026-09-16; supersedes `compressed`) |
 
 The digest is extractive, never generated: a model inside the fixture would
-make it irreproducible, and a generated summary leaks the answer. It rides in
-as one synthetic leading thread message rather than as a new prompt field,
-because a measurement round does not edit the prompts it measures. Two
-consequences follow from riding in that fence. Triage and needs-you keep only
-the newest three thread messages, so at this rung the digest takes one of the
-three slots and the two newest tail messages take the others — a fourth would
-push the digest, the oldest, straight out. **And both clip a thread message at
-300 characters, so what they actually see of a digest is its head**: the
-median digest in the set is about 670 characters, so the clip bites on roughly
-two thirds of them. The `compressed` rung is therefore a lower bound on what
-real compression would buy, and any row run at it says so.
+make it irreproducible, and a generated summary leaks the answer. `compressed`
+rode it in as one synthetic leading thread message rather than as a new prompt
+field, on the principle that a measurement round does not edit the prompts it
+measures. Two consequences followed from riding in that fence. Triage and
+needs-you keep only the newest three thread messages, so at that rung the
+digest takes one of the three slots and the two newest tail messages take the
+others — a fourth would push the digest, the oldest, straight out. **And both
+clip a thread message at 300 characters, so what they actually saw of a digest
+was its head**: the median digest in the set is about 670 characters, so the
+clip bit on roughly two thirds of them. The `compressed` rung is therefore a
+lower bound on what real compression would buy, and any row run at it says so.
+`digest` is what replaced it: the three tasks gained a `threadDigest` field of
+their own, so the digest is no longer a thread message, no longer clipped to
+300, and no longer stealing a tail slot — it is its own fence above the tail,
+capped at 900 characters by `fitThreadDigest`, which drops whole lines from the
+OLD end and keeps the header line. Prefer `digest`; `compressed` stays only so
+older rows can be read.
+
+`GOLDEN_EXTRACT_CTX` is extraction's own axis — `none` (the default, what
+ships), `tail3` or `digest` — because extraction's question is not triage's
+and the two stages had never been measured apart. It is recorded as
+`extra.extract_ctx` in the timing JSON, and every run prints a
+`digests: N items carry one, M trimmed to 900` line so a reader knows how much
+of the set the rung actually touched.
+
 Gold records, per stage, which rung a label needs, so
 `BREAKDOWN=derivable_from` answers the question the ladder was built for: what
 does context buy, and where.
@@ -214,7 +229,8 @@ carry.
 ```sh
 make golden                               # bulk slot, tail3 — the shipping rung
 make golden GOLDEN_CTX=none               # the same, message alone
-make golden GOLDEN_CTX=compressed         # the digest rung, with its caveat
+make golden GOLDEN_CTX=digest GOLDEN_EXTRACT_CTX=digest   # the digest as its own fence, extraction on the same rung
+make golden GOLDEN_CTX=compressed         # the digest rung, with its caveat (superseded)
 make golden BENCH_URL=… BENCH_LABEL=…     # point it at a candidate
 make golden-prose                         # prose slot: decisions + drafts
 ```
@@ -512,6 +528,9 @@ not in date order.
 | 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-184707.json` | 88% / 88% / 72% / 75% / 89% / 75% / 39% / 66% / 26% / 87% | label 86% · action items 60% · summary 66% · needs-you evidence 36% · extract evidence 25% | 7321 / 4809 / 5399 (triage / needs_you / extraction) | 16.9 | 12.4 | $0.00 | round B phase 1, summary rule + needs-you evidence bullet v1 ("naming the specific words… and who is asking") — the bullet is NOT shipped: 27 of 64 evidence sentences reached the 300-character clamp (1 before) and the verdict fell 92 → 89; second of two passes (first: summary 63, evidence 34, traps 5); K=4 on 4 slots, so p50s include batching and msgs/min is not comparable with the K=1 rows; traps 4 items |
 | 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-192254.json` | 88% / 88% / 71% / 74% / 86% / 75% / 39% / 66% / 26% / 87% | label 88% · action items 60% · summary 63% · needs-you evidence 9% · extract evidence 25% | 7669 / 3006 / 5454 (triage / needs_you / extraction) | 16.1 | 13.1 | $0.00 | round B phase 1, summary rule + evidence bullet v2 ("ONE short sentence, under 30 words, quoting…") — NOT shipped: the verdict fell to 86 and the sentence to 9%; evidence avg 121 chars, none at the cap; second of two passes; K=4; traps 4 items |
 | 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-194031.json` | 88% / 88% / 71% / 72% / 92% / 75% / 39% / 66% / 26% / 87% | label 86% · action items 60% · summary 63% · needs-you evidence 28% · extract evidence 25% | 7563 / 3569 / 5891 (triage / needs_you / extraction) | 16.2 | 12.5 | $0.00 | ROW OF RECORD for round B phase 1: the summary rule alone, the evidence bullet as it was; second of two passes (first: 71 / 74 / 92, not judged); K=4 on 4 slots, so p50s include batching and msgs/min is not comparable with the K=1 rows; traps 4 items (3 on the before row); summaries avg 237 / median 212 chars, 1 of 76 at the 500 cap (before avg 128, none at the cap); kept items carrying any action item 45 (before 51) |
+| 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | none | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-233417.json` | 84% / 91% / 70% / 68% / 93% / 75% / 39% / 66% / 26% / 87% | label 82% · action items 56% · summary 64% · needs-you evidence 34% · extract evidence 25% | 6713 / 3317 / 5189 (triage / needs_you / extraction) | 17.0 | 13.4 | $0.00 | round B phase 3 ladder, run A: `none` under the Phase 1 prompt, extract ctx none; second of two passes (first `…232638`: 70 / 70 / 93, not judged); extraction identical to every prior 4B row; K=4; summaries avg 236 chars, 3 of 76 at the cap; against round 0's `none` (78 / 78, old prompt) the summary rule changed what the message alone buys |
+| 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | digest | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-235139.json` | 88% / 88% / 70% / 74% / 92% / 76% / 37% / 53% / 30% / 66% | label 89% · action items 62% · summary 68% · needs-you evidence 30% · extract evidence 26% | 8518 / 3825 / 5942 (triage / needs_you / extraction) | 15.9 | 11.9 | $0.00 | round B phase 3 ladder, run B: the digest as its own 900-char fence above the tail (39 items carry one, 17 trimmed), extract ctx digest; second of two passes (first `…234306`: 67 / 70 / 92, not judged); NOT SHIPPED — the booleans did not move by 4 against none or tail3 while label / summary / action items rose 82 → 89 / 64 → 68 / 56 → 62 and needs-you evidence fell 34 → 30; extraction with digest + tail loses people 87 → 66 and project 66 → 53; K=4; summaries avg 245 chars, 6 of 76 at the cap |
+| 2026-09-17 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json` | 88% / 88% / 71% / 72% / 92% / 78% / 39% / 53% / 25% / 75% | — | 7467 / 3791 / 5703 (triage / needs_you / extraction) | 16.4 | 12.6 | $0.00 | round B phase 3 ladder, run C: a third `tail3` sample of the Phase 1 prompt for triage / needs-you (matches the `…194031` record within the floor; first pass `…000012`: 72 / 75 / 92), extract ctx tail3 — extraction WITH the tail, NOT SHIPPED: intent 75 → 78, people 87 → 75, project 66 → 53; not judged (the record row is the judged tail3 point); K=4 |
 | 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | none | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-032602.json` | 88% / 91% / 78% / 78% / 93% / 75% / 39% / 66% / 26% / 87% | pass 1 judge: label 83% · action items 71% · summary 34% · needs-you evidence 34% · extract evidence 24% (pass 2 not judged) | 2232 / 1513 / 2113 (triage / needs_you / extraction) | 40.3 | 8.9 | $0.00 | context ladder: message alone; second of two passes — pass 1 (2026-09-14) read needs_action 75 / reply_expected 75; 4 slots at 4096 tokens each, no failures |
 | 2026-09-14 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | compressed | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-181030.json` | 89% / 89% / 68% / 74% / 91% / 75% / 39% / 66% / 26% / 87% | label 80% · action items 62% · summary 33% · needs-you evidence 25% · extract evidence 24% | 2452 / 1684 / 2028 (triage / needs_you / extraction) | 40.4 | 8.7 | $0.00 | context ladder: digest + two newest tail messages, 300-char clip — lower bound (one pass) |
 | 2026-09-14 | bulk | llamacpp/Qwen3.5-4B-UD-Q4_K_XL | tail3 | `golden-run-llamacpp-qwen3-5-4b-ud-q4-k-xl-20260914-190503.json` | 91% / 89% / 66% / 83% / 87% / 79% / 66% / 63% / 29% / 88% | label 82% · action items 53% · summary 16% · needs-you evidence 23% · extract evidence 33% | 2838 / 1716 / 2745 (triage / needs_you / extraction) | 36.9 | 7.5 | $0.00 | candidate bulk model, 1 slot on :8083; second of two passes |
@@ -734,6 +753,42 @@ and 1200 against the same cards and made the 4B worse both times —
 `storyline.id` 81 / 78 / 77%, forbidden-accept 20 / 25 / 26% — so the cap
 stays at 400 and only the knob that measured it is new. The confirm rows carry
 that ladder in full.
+
+**Prompt round (2026-09-16/17), phase 3 — the digest as its own fence,
+extraction's first thread, and the ladder decided.** What was built: a
+`threadDigest` field on all three bulk tasks, rendered as its own
+`thread_digest` fence above the tail and capped at 900 characters by
+`fitThreadDigest`, which trims whole lines from the OLD end and keeps the
+header; a shared `buildThreadTailText` so triage, needs-you and extraction
+render a tail the same way; a `digest` rung that supersedes `compressed`; a
+`GOLDEN_EXTRACT_CTX` knob giving extraction its own axis; and a Dart port of
+the packer's digest builder, kept in `app/test/fixtures/thread_digest.dart`
+because no stage ships one. The design was six passes on the 4B at
+`GOLDEN_K=4` under Phase 1's prompt, keep-only (76 items), second pass kept:
+run A `none` / `none`, run B `digest` / `digest`, run C `tail3` / `tail3`,
+with `none` as the control and the temperature-0 stages reproducing token for
+token inside each pair. The rule was pre-registered — the message alone had to
+beat the tail by 4 points on `needs_action` or `reply_expected` before triage
+would drop the tail, and only then would the digest be tried — and it failed:
+`none` read 70 / 70 then 70 / 68 against `tail3`'s 72 / 75 then 71 / 72 and a
+record of 71 / 72, so triage keeps the tail and the digest branch was never
+reached (against `none` the digest moved needs_action −3 / 0 and
+reply_expected 0 / +6, which would have failed it anyway). Needs-you keeps the
+tail as well, on verdict 92 against 93 and judged evidence 30 against 34; and
+extraction stays message-alone, because the tail buys intent 75 → 78 but costs
+people 87 → 75 and project 66 → 53, while the digest costs people 87 → 66 and
+project 66 → 53. So no stage ships the digest. What it DID move is the reason
+the fields stay: on triage the judged label went 82 → 89, the summary 64 → 68
+and action items 56 → 62 (against the tail3 record's 86 / 63 / 60), and
+`reply_expected` on the 21 keep items whose gold label needs the thread went
+10 → 13 of 21 — bought at needs-you evidence 34 → 30, the extraction losses
+above, triage p50 +27% at K=4 and throughput 13.4 → 11.9 messages a minute,
+with the judge's own noise floor at 2 points. Round 0's finding that `none`
+beat `tail3` by 12 and 8 does not survive Phase 1's summary rule: under the
+new prompt `none` reads 70 / 70 where round 0 read 78 / 78 on the old one, so
+a context result is valid only for the prompt it was measured with. The
+follow-up candidate is a triage-only digest judged on summary and label; the
+27B never saw the digest, because the bulk stages run on the 4B.
 
 #### Storyline confirm
 
@@ -1061,6 +1116,26 @@ tail is a live candidate for shipping, pending that round's before-and-after.
 The rubric side of the ladder still rests on pass 1: the summary and
 needs-you-evidence fields were not re-judged on this pass.
 
+**Measured 2026-09-17 (round B, phase 3):** both gaps are closed. The digest
+is now its own unclipped `thread_digest` field on all three bulk tasks, capped
+at 900 characters and trimmed by whole lines from the old end, and extraction
+has its own knob (`GOLDEN_EXTRACT_CTX`). Six passes on the 4B at `GOLDEN_K=4`
+under Phase 1's prompt settled it and nothing ships: triage keeps the tail
+(`none` 70 / 70 then 70 / 68 against `tail3` 72 / 75 then 71 / 72, never the 4
+points the rule asked for), needs-you keeps the tail (verdict 92 against 93,
+judged evidence 30 against 34), and extraction stays message-alone (the tail
+buys intent 75 → 78 and costs people 87 → 75 and project 66 → 53; the digest
+costs people 87 → 66 and project 66 → 53). Two things did move, and they are
+why the fields stay: triage's judged label / summary / action items rose 82 →
+89 / 64 → 68 / 56 → 62 against the tail3 record's 86 / 63 / 60, and
+`reply_expected` on the 21 keep items whose gold label needs the thread went
+10 → 13 of 21 — costing needs-you evidence 34 → 30, triage p50 +27% at K=4 and
+throughput 13.4 → 11.9 messages a minute. The pass-1/pass-2 finding above is
+also superseded: under the new prompt `none` reads 70 / 70 where it read 78 /
+78 on the old one, so a triage prompt without the tail is no longer a
+candidate. The open follow-up is a triage-only digest, judged on summary and
+label rather than on the booleans.
+
 **8. The local/cloud split by machine tier**, as the speed design's §2.3 table
 now reads with the set's numbers beside it. The 64 GB row is measured; the 32
 GB and 16 GB rows reuse its bulk numbers, because the bulk slot is the same
@@ -1150,8 +1225,15 @@ remain unmeasured by the set.
    with a `GOLDEN_CHARTER_CAP` knob now, and the replay at 400 / 800 / 1200
    gave `storyline.id` 81 / 78 / 77% with forbidden-accept 20 / 25 / 26%, so
    it stays at 400 and a longer charter is not the improvement this item
-   guessed it might be. The digest field is the only half of this item still
-   open, and it follows in phase 3.
+   guessed it might be. The digest field: done 2026-09-17 (round B, phase 3) —
+   measured on the 4B at all three rungs, two passes each, `none` re-run under
+   the new prompt; no rung ships (triage keeps the tail, needs-you keeps the
+   tail, extraction stays message-alone); the digest lifted triage's judged
+   label / summary / action items 82 → 89 / 64 → 68 / 56 → 62 and
+   `reply_expected` on thread-dependent items 10 → 13 of 21 while costing
+   needs-you evidence 34 → 30 and extraction people 87 → 66 — a triage-only
+   digest is the follow-up. With that, every half of this item has a done
+   note.
 2. **The reply decision on the 4B**, item 5 — done 2026-09-16: 64%, so the
    decision stays on the 27B and the speed design's §1.3 item 2 is settled the
    slow way.

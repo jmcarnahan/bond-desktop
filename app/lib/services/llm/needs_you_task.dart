@@ -149,6 +149,18 @@ class NeedsYouInput {
   /// date anchor, and so the anchor is the owner's local day.
   final DateTime now;
 
+  /// A digest of the thread BEFORE the quoted turns, oldest first, as the
+  /// golden harness's `buildThreadDigest` (`test/fixtures/thread_digest.dart`)
+  /// renders one — the history those turns are the end of. Null is the normal
+  /// case: the ladder was measured on 2026-09-17 and shipped the digest to no
+  /// stage, so nothing in the app builds one today, and a message with no
+  /// history behind it has none to build.
+  ///
+  /// Its own fence, and not a turn of the thread: it is a precis of several
+  /// people rather than something anybody said, and quoting it as a message
+  /// would attribute a sentence to somebody who never wrote it.
+  final String? threadDigest;
+
   const NeedsYouInput({
     required this.message,
     this.thread = const [],
@@ -156,6 +168,7 @@ class NeedsYouInput {
     this.ownerName,
     this.ownerAddress,
     required this.now,
+    this.threadDigest,
   });
 }
 
@@ -300,6 +313,19 @@ class NeedsYouTask implements JsonTask<NeedsYouResult> {
 
     final owner = _ownerLine(input.ownerName, input.ownerAddress);
     if (owner != null) buffer.writeln(owner);
+
+    // Before the quoted turns: oldest context first, so the thread reads in
+    // the order it happened and the judged message stays last.
+    final digest = input.threadDigest?.trim() ?? '';
+    if (digest.isNotEmpty) {
+      buffer
+        ..writeln('A digest of the thread before those messages, oldest '
+            'first, for context:')
+        ..writeln(wrapUntrusted(
+          'thread_digest',
+          fitThreadDigest(digest, threadDigestCap),
+        ));
+    }
 
     final context = _contextText(input.thread);
     if (context.isNotEmpty) {

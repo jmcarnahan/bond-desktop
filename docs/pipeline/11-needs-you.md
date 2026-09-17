@@ -140,11 +140,21 @@ is stated in the user message.
 The user message layers, in order: the date anchor, the directness line, the
 **owner-identity line** (`The owner of this inbox is NAME <ADDRESS>.` — the
 app's own statement, outside every fence, and what lets "the message names the
-owner" bind to a person), the thread's newest three turns, and last the judged
-message. Two fences, both `wrapUntrusted`: the thread and the judged message,
+owner" bind to a person), an optional `thread_digest` fence, the thread's
+newest three turns, and last the judged message. The app's prompt still
+carries two fences, both `wrapUntrusted`: the thread and the judged message,
 which is fenced as `inbound_message`, the same tag every other task uses. The
-owner's rules are **not** in the user message at all — moving them into the
-system prompt is what took the injection surface here from three fences to two.
+`thread_digest` fence sits between the owner line and the thread fence and is
+present only when a caller passes `NeedsYouInput.threadDigest`, which the
+handler does not — it is capped at 900 characters by `fitThreadDigest` and
+exists for the golden harness. Measured on 2026-09-17 on the 4B, the digest
+read the verdict at 92% against 93% for the message alone (the tail's own
+sample was 92%) and dropped judged evidence from 34% to 30%, so it ships to
+no stage and needs-you keeps the tail; the
+pin is `needs-you sends the thread and never a digest` in
+`app/test/needs_you_handler_test.dart`. The owner's rules are **not** in the
+user message at all — moving them into the system prompt is what took the
+injection surface here from three fences to two.
 
 The owner identity comes from an `OwnerLookup` callback, asked **once** per
 handler: it is a keychain read, and the answer only changes on sign-out, which

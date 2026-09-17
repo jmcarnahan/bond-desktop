@@ -21,10 +21,10 @@ import 'package:bond_inbox/services/llm/message_block.dart';
 
 /// Which rung of the context ladder a stage is shown.
 ///
-/// The set carries all three for every item because the pipeline is
-/// inconsistent about thread context today — triage and needs-you see the last
-/// three messages, extraction sees the message alone — and the only way to
-/// price context is to make the rung a variable.
+/// The set carries what all four rungs need for every item because the
+/// pipeline is inconsistent about thread context today — triage and needs-you
+/// see the last three messages, extraction sees the message alone — and the
+/// only way to price context is to make the rung a variable.
 enum GoldenCtx {
   /// The message alone.
   none,
@@ -35,6 +35,11 @@ enum GoldenCtx {
 
   /// The tail, led by the item's extractive digest of everything earlier.
   compressed,
+
+  /// The newest three as `tail3`, plus the item's digest as its own
+  /// `thread_digest` fence — `compressed` is the superseded 2026-09-14 form
+  /// that rode the digest as a 300-character synthetic message.
+  digest,
 }
 
 /// Reads the `GOLDEN_CTX` define. Case-insensitive; anything else is a typo
@@ -43,10 +48,11 @@ GoldenCtx parseGoldenCtx(String raw) => switch (raw.trim().toLowerCase()) {
       'none' => GoldenCtx.none,
       'tail3' => GoldenCtx.tail3,
       'compressed' => GoldenCtx.compressed,
+      'digest' => GoldenCtx.digest,
       _ => throw ArgumentError.value(
           raw,
           'GOLDEN_CTX',
-          'must be one of none, tail3, compressed',
+          'must be one of none, tail3, compressed, digest',
         ),
     };
 
@@ -291,7 +297,17 @@ class GoldenItem {
                       : 0,
                 ),
               ],
+        // The digest rung does not spend a thread slot on the digest: it rides
+        // in its own prompt fence, so the tail is the whole tail.
+        GoldenCtx.digest => tail,
       };
+
+  /// The digest a stage is shown at [ctx], or null when the rung carries none.
+  ///
+  /// Only the `digest` rung passes one as a digest. At `compressed` it rides
+  /// as a synthetic thread message instead — see [threadFor] — and reading it
+  /// twice would price a rung nobody ran.
+  String? digestFor(GoldenCtx ctx) => ctx == GoldenCtx.digest ? digest : null;
 
   Message _digestMessage(String body) => Message(
         id: '$id#digest',

@@ -1095,6 +1095,32 @@ void main() {
       );
     });
 
+    test('triage sends the thread tail and never a digest', () async {
+      // The context ladder measured on 2026-09-16/17 left triage exactly here:
+      // the newest three turns verbatim, and no `thread_digest` fence. The
+      // prompt field still exists and `TriageTask` still renders it, so this
+      // pins that the QUEUE never fills it in.
+      await seedMessage(
+        id: 'earlier',
+        receivedAt: '2026-08-29T09:00:00Z',
+        bodyText: 'The dock survey is booked for Tuesday.',
+      );
+      await seedMessage(
+        id: 'latest',
+        receivedAt: '2026-08-29T10:00:00Z',
+        bodyText: 'Did the surveyor confirm?',
+      );
+      final llm = FakeLlm([answer()]);
+
+      // Serial, so the first request out is the one judging `latest`.
+      await TriageQueue(store, llm, concurrency: 1).pump();
+
+      final judgingLatest = llm.userMessages.first;
+      expect(judgingLatest, contains('<untrusted_data source="thread">'));
+      expect(judgingLatest, contains('The dock survey is booked for Tuesday.'));
+      expect(judgingLatest, isNot(contains('thread_digest')));
+    });
+
     test('the oldest message on a thread has no thread to quote', () async {
       await seedMessage(
         id: 'first',
