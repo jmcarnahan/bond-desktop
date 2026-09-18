@@ -93,6 +93,26 @@ class StorylineTuning {
   /// model's, and the 27B or whatever replaces it can be asked the same
   /// question without a code change.
   static const int charterCap = 400;
+
+  /// Whether the text a conversation is EMBEDDED from carries the people on
+  /// it — [buildClusteringCard]'s `withParticipants`.
+  ///
+  /// True is what has always shipped, and it is the suspect this round is
+  /// here to measure (decision 3). In a mailbox where one team is on
+  /// everything, the participants segment is the same handful of names in
+  /// every card, so every pair of threads embeds alike and the sweep proposes
+  /// the team rather than the work. The cards the MODEL reads are unaffected
+  /// either way: this is the vector, not the prompt.
+  ///
+  /// Measured in Round D Phase 1 by `make golden-sweep SWEEP_CARD=
+  /// participants|topics`, twice each. The rule was written before the runs:
+  /// `topics` ships only if it beats `participants` by at least four points
+  /// on `storyline.id` on both passes, or ties within four with a smaller
+  /// largest-storyline share and no fewer correct positives. Otherwise this
+  /// stays true and the measured row is the record. Flipping it orphans every
+  /// stored conversation vector by construction, so it moves together with
+  /// [EmbeddingsClient.modelTag] and a one-shot re-embed.
+  static const bool participantsInClusteringCard = true;
 }
 
 /// What one pass of [StorylineService.assignConversation] concluded.
@@ -2528,7 +2548,7 @@ class StorylineService {
       );
     }
 
-    final card = enrichedCardForConversationRow(
+    final card = clusteringCardForConversationRow(
       row,
       await _store.newestInboundCardData(source, conversationKey),
     );
@@ -2912,6 +2932,38 @@ String enrichedCardForConversationRow(
     ],
     topics: _topicsOf(cardData?['extraction_json']),
     summary: cardData?['summary'] as String?,
+  );
+}
+
+/// The card a conversation is EMBEDDED from, built from the same row and the
+/// same stored facts [enrichedCardForConversationRow] reads.
+///
+/// Identical to that card while [StorylineTuning.participantsInClusteringCard]
+/// is true, and that is the point of routing both through
+/// [buildClusteringCard] rather than leaving the embed path on the prompt
+/// path's recipe: the flag decides ONE of them. The prompts keep their people
+/// whatever the vector does.
+/// [withParticipants] defaults to the flag the app ships, so the one caller
+/// inside this file passes nothing and cannot drift from it. It is a parameter
+/// at all for the sweep bench, which prices both variants against one mailbox
+/// and must be able to ask for the card the app is NOT currently writing —
+/// through this same recipe, so what it measures is the app's card and not a
+/// second copy of it.
+String clusteringCardForConversationRow(
+  Map<String, Object?> row,
+  Map<String, Object?>? cardData, {
+  bool withParticipants = StorylineTuning.participantsInClusteringCard,
+}) {
+  final conversation = Conversation.fromRow(row);
+  return buildClusteringCard(
+    subject: stripReFw(conversation.subject),
+    participants: [
+      for (final participant in conversation.participants)
+        if (participant.display.isNotEmpty) participant.display,
+    ],
+    topics: _topicsOf(cardData?['extraction_json']),
+    summary: cardData?['summary'] as String?,
+    withParticipants: withParticipants,
   );
 }
 

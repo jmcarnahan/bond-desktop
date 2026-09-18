@@ -13,6 +13,7 @@ import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
+import 'package:bond_inbox/services/storyline_service.dart' show StorylineTuning;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -957,6 +958,83 @@ void main() {
         ),
         ' |  |  | ',
       );
+    });
+  });
+
+  group('buildClusteringCard', () {
+    const subject = 'Launch date';
+    const participants = ['Sarah', 'Tom'];
+    const topics = ['launch', 'homepage copy'];
+    const summary = 'Shipping Thursday.';
+
+    test('with the people it is byte-identical to the card the app embeds',
+        () {
+      // The flag ships as `true`, so the card and therefore `cardHash` must be
+      // exactly what every stored vector was written from. A single byte here
+      // orphans the whole clustering corpus without anything saying so.
+      expect(
+        buildClusteringCard(
+          subject: subject,
+          participants: participants,
+          topics: topics,
+          summary: summary,
+          withParticipants: true,
+        ),
+        buildConversationCard(
+          subject: subject,
+          participants: participants,
+          topics: topics,
+          summary: summary,
+        ),
+      );
+      expect(StorylineTuning.participantsInClusteringCard, isTrue);
+    });
+
+    test('without them the people segment is empty, not absent', () {
+      final card = buildClusteringCard(
+        subject: subject,
+        participants: participants,
+        topics: topics,
+        summary: summary,
+        withParticipants: false,
+      );
+
+      expect(card, 'Launch date |  | launch, homepage copy | Shipping Thursday.');
+      // Four segments by contract either way: a three-segment card would make
+      // the hash disagree with itself about nothing.
+      expect(card.split(' | '), hasLength(4));
+      expect(
+        card,
+        isNot(buildClusteringCard(
+          subject: subject,
+          participants: participants,
+          topics: topics,
+          summary: summary,
+          withParticipants: true,
+        )),
+      );
+    });
+
+    test('nothing but the people changes between the two', () {
+      // The subject, the topics and the summary are the same text on both
+      // sides — this is a flag about the vector's people, not about the card.
+      final with_ = buildClusteringCard(
+        subject: subject,
+        participants: participants,
+        topics: topics,
+        summary: summary,
+        withParticipants: true,
+      ).split(' | ');
+      final without = buildClusteringCard(
+        subject: subject,
+        participants: participants,
+        topics: topics,
+        summary: summary,
+        withParticipants: false,
+      ).split(' | ');
+
+      expect([without[0], without[2], without[3]],
+          [with_[0], with_[2], with_[3]]);
     });
   });
 

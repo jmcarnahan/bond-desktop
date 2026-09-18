@@ -5,12 +5,38 @@ are never mixed:
 
 1. **Clustering corpus** — one vector per *conversation card*, used by the
    storyline sweep to find threads about the same thing. Written by
-   `ExtractHandler._refreshCard` into `conversation_ai.embedding`.
+   `ExtractHandler._refreshCard` into `conversation_ai.embedding`, and healed
+   by `StorylineService._reembed` for a thread whose vector is missing when
+   the sweep or the assign pass reaches it.
 2. **Document corpus** — one vector per *message*, used by semantic search
    (sqlite-vec, PR #10). Written on the fast path by
    `ExtractHandler._embedMessage` and healed by the `embed_message` work queue
    in `EmbedHandler` (`app/lib/services/embed_handler.dart`) for anything the
    fast path missed.
+
+**The clustering card has a name and a flag.** `buildClusteringCard` in
+`extract_handler.dart` is the one recipe for the text a CONVERSATION is
+embedded from, and both writers go through it, so the card the extraction
+writes and the card the storyline service heals with cannot drift apart. It is
+`buildConversationCard` with one decision folded in: whether the people on the
+thread are part of the vector.
+`StorylineTuning.participantsInClusteringCard` is what the app passes. It
+shipped true through Round D Phase 1; the sweep bench read `topics` eight
+points better on `storyline.id` on 2026-09-18, with a smaller largest
+storyline and purity moving from 37% to 71%, so Phase 2 flips it to false
+alongside the `EmbeddingsClient.modelTag` bump and the one-shot re-embed. The
+flag exists because the participants segment is the same
+handful of names in every card of a one-team mailbox, which pulls every pair of
+threads together and has the sweep proposing the team rather than the work.
+Dropping them leaves the segment empty rather than removing it: the card is
+four segments joined by ` | ` by contract, and a shorter card would make
+`cardHash` disagree with itself about nothing. The cards a MODEL reads keep
+their people either way. This is the vector, not the prompt.
+`make golden-sweep SWEEP_CARD=participants|topics` is what prices the two, and
+`docs/model-bakeoff.md` holds the rows. Flipping the flag orphans every stored
+conversation vector by construction, since every read filters on
+`EmbeddingsClient.modelTag`, so it moves together with a tag bump and a
+one-shot re-embed.
 
 **Attachment markers and the card hash.** `embedMessageRow` strips
 `[[att:…]]` / `[[img:…]]` markers out of the body before building the card, and

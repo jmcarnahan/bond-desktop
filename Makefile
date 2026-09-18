@@ -120,7 +120,7 @@ RESET  := \033[0m
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ab ab-membership drain bench-pipeline bench-compare \
         golden-check golden-baseline golden-score golden golden-prose \
-        golden-storyline golden-gate \
+        golden-storyline golden-sweep golden-gate \
         golden-judge-pack golden-judge-tally \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
         dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
@@ -160,6 +160,7 @@ help:
 	@printf "  make golden        → the golden set through triage/needs-you/extraction on the bulk slot (GOLDEN_CTX=none|tail3|compressed|digest, GOLDEN_EXTRACT_CTX=none|tail3|digest, GOLDEN_K=…)\n"
 	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
 	@printf "  make golden-storyline GOLDEN_RUN=<run.json> → storyline confirm for every golden item against the gold registry, on the bulk slot (GOLDEN_CHARTER_CAP=…)\n"
+	@printf "  make golden-sweep GOLDEN_RUN=<run.json> → the golden set through the app's own sweep, naming, confirms and assign shortlist, scored against the gold registry (SWEEP_CARD=participants|topics)\n"
 	@printf "  make golden-gate   → the golden set through the app's gates, offline (GOLDEN_RUN=<run.json> adds the model's notification proxy)\n"
 	@printf "  make golden-baseline → what the shipping app scores on the golden set (needs golden/)\n"
 	@printf "  make golden-score R=<run.json> → score a golden run file (BREAKDOWN= per-bucket tables, JSON= the tallies)\n"
@@ -683,6 +684,11 @@ GOLDEN_CHARTER_CAP ?= 400
 # Which context rung EXTRACTION sees, on its own axis: none | tail3 | digest.
 # The app gives extraction no thread today; the replay prices giving it one.
 GOLDEN_EXTRACT_CTX ?= none
+# Which clustering card `make golden-sweep` embeds: participants (what the app
+# ships) or topics (the same card with its people segment left empty). The
+# variable that bench exists to price — the people on a thread are the tokens
+# that make every pair in a one-team mailbox look alike.
+SWEEP_CARD ?= participants
 
 # Single-quoted values, every one: a label carries spaces and parentheses, and
 # an unquoted --dart-define would hand the shell a second word to run.
@@ -717,6 +723,8 @@ BENCH_DEFINES := \
   --dart-define=GOLDEN_EXTRACT_CTX='$(GOLDEN_EXTRACT_CTX)' \
   --dart-define=GOLDEN_RUN='$(if $(GOLDEN_RUN),$(abspath $(GOLDEN_RUN)),)' \
   --dart-define=GOLDEN_CHARTER_CAP='$(GOLDEN_CHARTER_CAP)' \
+  --dart-define=SWEEP_CARD='$(SWEEP_CARD)' \
+  --dart-define=EMBED_URL='$(if $(strip $(EMBED_URL)),$(EMBED_URL),http://localhost:$(EMBED_PORT)/v1/embeddings)' \
   --dart-define=BENCH_WIRE='$(BENCH_WIRE)' \
   --dart-define=PROSE_WIRE='$(PROSE_WIRE)' \
   --dart-define=BENCH_BEARER="$$(grep -m1 '^BEDROCK_API_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)"
@@ -1065,6 +1073,27 @@ golden-storyline: golden-check
 	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'storyline' $(BENCH_DEFINES)
+
+# The app's OWN filing path over the golden set: the sweep that forms
+# clusters, the naming pass, the per-member confirms and the assign shortlist.
+# Where golden-storyline hands the model a candidate list a person wrote, this
+# asks whether the app puts the right threads in front of it at all — it seeds
+# the conversations, messages, triage summaries and extraction topics behind
+# the hundred items, embeds each thread live, and then runs the real
+# StorylineService over them. GOLDEN_RUN supplies the cards, exactly as
+# golden-storyline does. Needs THREE servers: the embedding server for the
+# vectors, the bulk slot for the confirms and the prose slot for the names, so
+# both contract checks run first. SWEEP_CARD picks whether the people on a
+# thread are inside the vector. Writes the same two files as the other halves;
+# score the run file with `make golden-score R=…`, which reads its
+# storyline.id — derived from MEMBERSHIP here, where golden-baseline derives
+# it from the app's stored title.
+golden-sweep: golden-check
+	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-sweep GOLDEN_RUN=<golden-run-….json from make golden> [SWEEP_CARD=participants|topics BENCH_URL=… PROSE_URL=…]\n"; exit 1; }
+	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'sweep' $(BENCH_DEFINES)
 
 # The gate half, and the only golden target with no server in it: the app's
 # gates are pure, so this replays them over the set offline — the item's

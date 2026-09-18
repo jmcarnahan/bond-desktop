@@ -962,6 +962,34 @@ void main() {
     });
   });
 
+  group('ConfirmResult.accepted', () {
+    ConfirmResult result(bool belongs, String confidence) =>
+        ConfirmResult(evidence: '', belongs: belongs, confidence: confidence);
+
+    test('a confident yes is the only acceptance', () {
+      expect(result(true, 'high').accepted, isTrue);
+      expect(result(true, 'medium').accepted, isTrue);
+    });
+
+    test('a low-confidence yes is a no', () {
+      // The service's rule, stated once here and delegated to by the golden
+      // replay: a group the user has to correct costs more than one they were
+      // never offered.
+      expect(result(true, 'low').accepted, isFalse);
+    });
+
+    test('a no is a no at every confidence', () {
+      for (final confidence in const ['low', 'medium', 'high']) {
+        expect(result(false, confidence).accepted, isFalse);
+      }
+    });
+
+    test('an unparseable answer declines, because it validates to a low no',
+        () {
+      expect(confirm.validate(const {}).accepted, isFalse);
+    });
+  });
+
   group('NameStorylineTask validator', () {
     test('passes a good answer through', () {
       final result = name.validate(nameAnswer());

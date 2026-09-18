@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:bond_inbox/models/storyline_models.dart';
 
+import 'golden_json.dart';
 import 'golden_set.dart';
 
 /// The gold storyline registry, read back into the shapes the confirm task
@@ -21,18 +22,6 @@ import 'golden_set.dart';
 /// app would have handed `ConfirmMembershipTask`, so a replay puts the SAME
 /// prompt in front of a model that the pipeline puts there. Nothing here scores
 /// anything — `golden/tools/score_run.py` is the scorer of record.
-
-Map<String, dynamic> _asMap(Object? value) =>
-    value is Map ? value.cast<String, dynamic>() : const <String, dynamic>{};
-
-List<Object?> _asList(Object? value) =>
-    value is List ? value : const <Object?>[];
-
-List<String> _asStrings(Object? value) =>
-    [for (final entry in _asList(value)) if (entry != null) '$entry'];
-
-String _asString(Object? value, [String fallback = '']) =>
-    value is String ? value : fallback;
 
 /// One registry storyline, as the registry writes it.
 class RegistryStoryline {
@@ -87,16 +76,16 @@ class RegistryStoryline {
 
   static RegistryStoryline fromJson(Map<String, dynamic> json) =>
       RegistryStoryline(
-        slug: _asString(json['slug']),
-        title: _asString(json['title']),
-        charter: _asString(json['charter']),
-        includes: _asStrings(json['includes']),
-        excludes: _asStrings(json['excludes']),
+        slug: asString(json['slug']),
+        title: asString(json['title']),
+        charter: asString(json['charter']),
+        includes: asStrings(json['includes']),
+        excludes: asStrings(json['excludes']),
         memberKeys: [
-          for (final member in _asList(json['members']))
-            _asString(_asMap(member)['conversation_key']),
+          for (final member in asList(json['members']))
+            asString(asMap(member)['conversation_key']),
         ],
-        forbiddenNeighbors: _asStrings(json['forbidden_neighbors']),
+        forbiddenNeighbors: asStrings(json['forbidden_neighbors']),
       );
 }
 
@@ -124,12 +113,12 @@ class GoldenRegistry {
 
   static GoldenRegistry fromJson(Map<String, dynamic> json) => GoldenRegistry(
         storylines: [
-          for (final entry in _asList(json['storylines']))
-            RegistryStoryline.fromJson(_asMap(entry)),
+          for (final entry in asList(json['storylines']))
+            RegistryStoryline.fromJson(asMap(entry)),
         ],
         antiSlugs: [
-          for (final entry in _asList(json['anti_storylines']))
-            _asString(_asMap(entry)['slug']),
+          for (final entry in asList(json['anti_storylines']))
+            asString(asMap(entry)['slug']),
         ],
       );
 }

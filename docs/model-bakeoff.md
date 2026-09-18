@@ -29,6 +29,7 @@ depends on a server being up, and each `make` target below runs it with
 | `make golden-score R=…` | Scores a golden run file, keep-only first and all items second. See "The golden set". |
 | `make golden` | The golden set through triage, needs-you and extraction on the bulk slot — the run behind a golden-ledger row. Writes the run file and the timing/cost JSON. |
 | `make golden-prose` | Reply decisions for every gold-keep item and drafts for the reply-rubric items, on the prose slot. |
+| `make golden-sweep GOLDEN_RUN=…` | The app's own filing path over the golden set: the sweep, the naming pass, the per-member confirms and the assign shortlist, scored by membership against the gold registry. Needs the embed, bulk and prose servers. `SWEEP_CARD` picks whether the people on a thread are inside the clustering vector. See "The golden set". |
 | `make golden-gate` | Offline, no server: the golden set through the app's own gates — direction, sender address and body. Tier 2 (headers) and the Teams ingest gates are not in the set and go unmeasured. `GOLDEN_RUN=` adds the model's `notification` proxy column. See "The golden set". |
 
 The knobs, all `?=` in the `Makefile` and all overridable on the command line
@@ -63,6 +64,13 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
 - `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_EXTRACT_CTX`, `GOLDEN_K`,
   `GOLDEN_CHARTER_CAP`, `GOLDEN_OWNER_NAME` / `GOLDEN_OWNER_ADDRESS` — see
   "The golden set".
+- `SWEEP_CARD` — which clustering card `make golden-sweep` embeds:
+  `participants`, the card the app ships, or `topics`, the same card with its
+  people segment left empty. The variable that bench exists to price.
+- `EMBED_URL` — the embedding server every bench dials, defaulting to
+  `EMBED_PORT` on localhost. It reached only the app until `make golden-sweep`
+  needed it: a bench run without it would embed against the compiled default
+  whatever `local.mk` says.
 
 Name the weights in a label, not just the runtime: two quantizations of one
 model otherwise produce two identical-looking tables. Once two runs have
@@ -504,6 +512,56 @@ yeses were hedged into `low` and thrown away.
 make golden-storyline GOLDEN_RUN=tmp/bench/golden-run-<bulk>-….json         # the shipping 4B
 make golden-storyline GOLDEN_RUN=… BENCH_URL=… BENCH_MODEL=… BENCH_LABEL=…  # a candidate on the bulk slot
 make golden-score R=tmp/bench/golden-run-<bulk>-storyline-….json           # storyline.id, must/should/forbidden rules
+```
+
+**The sweep, replayed.** The block above measures the model handed a
+candidate list a person wrote. `make golden-sweep` measures the half that list
+skips: whether the app puts the right threads in front of it at all. It seeds
+an in-memory store with the conversations behind the hundred items, one
+conversation per thread, with the messages the set carries, the triage summary
+and extraction topics of a `GOLDEN_RUN` bulk run file, and one live embedding
+per thread through the app's own clustering recipe. Then it runs the real
+`StorylineService`: `sweep` forms the clusters, the naming pass names them, a
+confirm judges every member, and `assignConversation` offers every pool thread
+that is still unfiled to the storylines that now exist. Three servers, so the
+embed, bulk and prose slots all have to be up.
+
+The owner in this bench keeps everything. After each sweep pass every
+suggestion is kept and the pass runs again, until a pass proposes nothing or
+twenty have run. That is the only way past `maxPendingSuggestions`, which is a
+compiled constant of three, and it is the honest emulation of an owner who
+accepts what the sweep offers. One consequence rides on every row: a kept
+storyline is active before the assign pass runs, so any rule that treats an
+unanswered suggestion more strictly is exercised here by the sweep's own member
+confirms and never by the assign pass.
+
+Scoring is by MEMBERSHIP. Each app storyline is mapped to a registry slug by
+the plurality of its members' gold ids, needing at least half of the members
+that carry a slug and at least two of them; anything else is `unmapped`. An
+item's derived `storyline.id` is its storyline's slug, `unmapped` when its
+storyline answers to no effort, and `none` when its thread was filed nowhere.
+`unmapped` is a miss on every gold value including `none`, which is what filing
+into junk is. That goes into a run file `make golden-score` reads with the same
+must, should, may and forbidden rules as every other row. `make
+golden-baseline` resolves the app's stored TITLE to a slug instead, so the two
+42 of 99 numbers are one stage read two ways. Beside the scorer the run prints
+its own arithmetic: storylines formed and tombstoned, purity per storyline,
+coverage per gold effort, the largest storyline's share of every filed thread,
+correct positives, forbidden hits, model calls per kind and per pass, the
+cosine of every pair inside a formed group in five bins, and wall per pass.
+
+Three limits belong on every row. The pool is 95 conversations, 71 of them
+with a kept inbound message, against a
+live mailbox of hundreds, so the run UNDER-states chaining. The owner's kept
+and removed examples and the recruit laps never run, because a seeded mailbox
+has no owner history. And the gate verdict seeded is GOLD's rather than the
+app's, so this measures the sweep over a correctly gated pool; `make
+golden-gate` is what measures the gates.
+
+```sh
+make golden-sweep GOLDEN_RUN=tmp/bench/golden-run-<bulk>-….json                    # the shipping pair
+make golden-sweep GOLDEN_RUN=… SWEEP_CARD=topics                                   # the same, people out of the vector
+make golden-score R=tmp/bench/golden-run-<bulk>-<prose>-sweep-….json                # storyline.id, must/should/forbidden rules
 ```
 
 **The gates, replayed offline.** `make golden-gate` needs no server at all:
@@ -966,6 +1024,86 @@ forty-nine minutes would have bought no information. One thing the ladder
 settles for item 6: the missing half of a charter is not what the 4B's 19%
 forbidden-accept is made of, because giving it the missing half made that
 number worse.
+
+#### Storyline sweep
+
+The app's OWN filing path against the gold registry, per "The sweep,
+replayed." above. `storyline.id` is the scorer's number over the items it
+counts, derived by MEMBERSHIP plurality rather than by the stored title, so it
+is read against `make golden-baseline`'s 42 of 99 as the same stage seen a
+second way. Every row keeps everything it is offered, sweeps the 95
+conversations behind the set, 71 of them with a kept inbound message, and
+seeds the GOLD gate verdict.
+
+| date | confirm label | name label | card | run file | storyline.id | correct positives | purity | coverage | largest share | formed / tombstoned / lint | calls name / confirm | wall | note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-09-18 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | participants | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260918-161310.json` | 23/98 (23%), keep-only 21/85 (25%) | 0 | 44% over 6 of 7 storylines | 0% over 13 efforts | 56% | 7 / 0 / 3 would be refused | 7 / 142 | 240 s | the card the app ships; prose slot served with the MTP head; cards from `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json`; 95 conversations seeded, 71 with a kept inbound message, 24 fully gated, 71 embedded, 0 embed failures; 5 sweep passes, every suggestion kept; assign rejected 1; items unmapped 75, filed nowhere 25; lint counted and not applied; the third pass, on the review-fixed tree; the two earlier passes (`…153447` 259 s, `…153923` 231 s) were identical on every count, and the purity mean then averaged in the one storyline with no gold-carrying member as a zero, reading 37% |
+| 2026-09-18 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260918-162005.json` | 31/98 (32%), keep-only 26/85 (31%) | 0 | 71% over 7 of 7 storylines | 0% over 13 efforts | 47% | 7 / 1 / 4 would be refused | 8 / 291 | 411 s | the same mailbox with the people out of the vector; same servers, same cards, same seeding counts; 8 sweep passes, every suggestion kept; assign rejected 24, assigned 2; items unmapped 52, filed nowhere 48; the third pass, on the review-fixed tree; the two earlier passes (`…154658` 446 s, `…155344` 401 s) were identical on every count |
+
+**What the two sweep rows say (2026-09-18).** Both cards were run three
+times, twice before the phase's review and once after its fixes, and every
+pass of each was identical on every count, so the bench is deterministic at
+temperature 0 and the last pass of each is the row.
+
+| read | participants | topics |
+|---|---|---|
+| `storyline.id`, all items | 23/98 (23%) | 31/98 (32%) |
+| `storyline.id`, keep-only | 21/85 (25%) | 26/85 (31%) |
+| correct positives | 0 | 0 |
+| purity mean, over the storylines with a gold-carrying member | 44% over 6 of 7 | 71% over 7 of 7 |
+| purity per storyline, sorted | 0.12, 0.24, 0.25, 0.50, 0.50, 1.00 and one with no gold-carrying member | 0.25, 0.33, 0.38, 1.00, 1.00, 1.00, 1.00 |
+| coverage mean over 13 efforts | 0% | 0% |
+| largest storyline's share of filed threads | 56% | 47% |
+| storylines formed / tombstoned | 7 / 0 | 7 / 1 |
+| naming / confirm calls | 7 / 142 | 8 / 291 |
+| calls per sweep pass | 72, 59, 13, 4, 0 | 71, 46, 36, 34, 32, 29, 25, 0 |
+| sweep passes | 5 | 8 |
+| wall, kept pass | 240 s | 411 s |
+| items unmapped / filed nowhere | 75 / 25 | 52 / 48 |
+| charter lint, counted: clean / placeholder / person / category | 4 / 3 / 0 / 0 | 3 / 4 / 0 / 0 |
+
+**The card decision is met, so `topics` ships.** The rule written into
+`StorylineTuning.participantsInClusteringCard` before the runs asks for four
+points on `storyline.id` on both passes. `topics` beats `participants` by
+eight, with a smaller largest share and no fewer correct positives. Phase 2
+flips the const to false, bumps `EmbeddingsClient.modelTag` to
+`embeddinggemma-300M/clustering-v2`, and rides a one-shot re-embed on the
+sync. Phase 1 changes no code for it. The cost is proposals rather than
+accuracy: smaller clusters mean more of them, which is 291 confirms over eight
+passes against 142 over five.
+
+**The coherence floor for Phase 2 is 0.60**, read off the cosine of every pair
+INSIDE a formed storyline. Below 0.55 there are 17 pairs out of 861 even
+inside the chained blobs, so a 0.55 floor would never bite. The 0.55 to 0.60
+band is where a blob's mean pairwise similarity drifts and a tight cluster's
+does not.
+
+| pairs inside a formed storyline | <0.50 | 0.50-0.55 | 0.55-0.60 | 0.60-0.65 | >=0.65 | total | under the 0.65 link threshold |
+|---|---|---|---|---|---|---|---|
+| participants | 1 | 16 | 96 | 281 | 467 | 861 | 46% |
+| topics | 0 | 1 | 18 | 93 | 188 | 300 | 37% |
+
+**Neither card produces a correct positive, and that is the honest reading.**
+No formed storyline holds two threads of one gold effort at a plurality, so
+coverage is zero on all thirteen efforts that have at least two golden threads,
+and the largest storyline is still 47% to 56% of everything filed. That is the
+chaining Phase 2 removes. The card change alone moves purity from 44% to 71%
+and the scorer from 23 to 31 of 98, which is real and is not enough on its own.
+The lint counted beside the run says where the rest of it goes: the namer wrote
+a placeholder title or charter for three of the seven storylines it was handed
+under the participants card and four of seven under topics, which is what
+decision 5's `coherent` field and the lint wired into the naming pass in Phase
+3 exist to catch. The lint counts ride in `extra.sweep.lint` of the result
+JSON, counted in Phase 1 and applied to nothing.
+
+**This bench's 23 of 98 is the round's "before" of record**, not
+`make golden-baseline`'s 42 of 99. The two are the same stage read two ways and
+neither supersedes the other, but only this one runs the app's own sweep, and
+only this one can be re-run after a code change. The gap between them is the
+keep-all owner: seven blobs were accepted and they swallowed 75 items into
+storylines that answer to no gold effort, where the baseline reads a stored
+title per thread instead.
+
 
 ### Gate replay ledger
 
@@ -1507,7 +1645,8 @@ server started differently from the default.
 | 6 | bulk | llama.cpp, DeepSeek-R1-Distill-Qwen-14B Q4_K_M, `:8083` | `make fast FAST_PORT=8083 FAST_HF=unsloth/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q4_K_M FAST_SLOTS=6`, then `make bench BENCH_URL=http://localhost:8083/v1/chat/completions BENCH_LABEL='llamacpp/R1-Distill-Qwen-14B-Q4_K_M' BENCH_THINK=1` — always reasoning, so `BENCH_THINK=1` stops sending `enable_thinking:false` and relaxes the leak gate |
 | 7 | prose (and as bulk) | vLLM 0.29.0 on an AWS `g6e.xlarge` (one L40S), `Qwen/Qwen3.8-27B-FP8` (served as the alias `qwen3.8` by `--served-model-name qwen3.8` on the box's vLLM command), served on the box's loopback :8000 and reached through `ssh -N -L 18100:127.0.0.1:8000 ubuntu@<box>` (local 18100, never 8000) | `make bench-prose PROSE_URL=http://localhost:18100/v1/chat/completions PROSE_MODEL=qwen3.8 PROSE_LABEL=vllm-g6e/Qwen3.8-27B-FP8` and the same three defines on `make golden-prose`; as bulk, the `BENCH_*` triple with `BENCH_LABEL='vllm-g6e/Qwen3.8-27B-FP8 (as bulk)'` on `make golden` and `make golden-storyline`; the MTP head with `/opt/bond/serve.sh --speculative-config '{"method":"mtp","num_speculative_tokens":2}'` on the box (label `…-FP8+MTP`). The harness prices a localhost URL at $0.00, so these rows carry the box's hourly rate by hand (`1000 / (msgs_per_min × 60) × $1.86`) |
 | 8 | both | **the pipeline end to end**, not a candidate — the app's own queues over the fixture corpus | `make bench-pipeline PIPE_SHAPE=single` and `make bench-pipeline PIPE_SHAPE=lanes`, each twice, with BOTH servers up; `PIPE_COPIES` sets the corpus size (3 ≈ 48 ungated messages), `PIPE_WIDTH` the drafts in flight (the server must have been started with that many slots — `make model SLOTS=2 MODEL_CTX=32768` for two), `PIPE_LATE=0` drops the late-arrival leg. A prose slot elsewhere is the usual three `PROSE_*` defines |
-| 9 | — | further candidates | Added here as they come up, one command per row. What is worth trying is best judged after the rows above have numbers |
+| 9 | all three | **the app's own filing path**, not a candidate: the sweep, the naming, the confirms and the assign shortlist over the golden set | `make golden-sweep GOLDEN_RUN=<bulk run file>` twice, then `make golden-sweep GOLDEN_RUN=… SWEEP_CARD=topics` twice, with the embed, bulk and prose servers up. `make golden-score R=<sweep run file>` on each. The bulk run file is the newest local-4B `make golden` run; a storyline or sweep run file carries no cards and is refused |
+| 10 | — | further candidates | Added here as they come up, one command per row. What is worth trying is best judged after the rows above have numbers |
 
 ## Ledger
 

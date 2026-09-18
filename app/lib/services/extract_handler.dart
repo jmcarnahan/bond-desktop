@@ -13,6 +13,10 @@ import 'llm/extract_task.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'pipeline_progress.dart';
+// `show`: the one thing this file wants from the storyline service is the
+// clustering-card flag the sweep is tuned by, so the card written here and
+// the card `StorylineService._reembed` writes cannot drift apart.
+import 'storyline_service.dart' show StorylineTuning;
 
 /// Extracts structured facts from one message, then refreshes its thread's
 /// embedding if the thread now reads differently.
@@ -442,13 +446,14 @@ class ExtractHandler extends WorkHandler {
       return;
     }
 
-    final card = buildConversationCard(
+    final card = buildClusteringCard(
       subject: stripReFw(conversation['subject'] as String?),
       participants: _participants(conversation['participants_json']),
       topics: result.topics,
       // The triage summary, when there is one. It is the only sentence on the
       // row written to describe the thread rather than to label it.
       summary: row['summary'] as String?,
+      withParticipants: StorylineTuning.participantsInClusteringCard,
     );
     final hash = cardHash(card);
 
@@ -625,6 +630,38 @@ String buildConversationCard({
       topics.join(', '),
       summary?.trim() ?? '',
     ].join(' | ');
+
+/// The text a conversation is EMBEDDED from, which is [buildConversationCard]
+/// with one decision folded in: whether the people on the thread are part of
+/// the vector.
+///
+/// The one recipe for the clustering corpus, and the reason it exists apart
+/// from the card builder is that the card builder has other readers. The
+/// naming and membership PROMPTS read a card too, and they keep their people
+/// whatever this flag says — who is on a thread is the strongest thing a
+/// model can be told about it. The vector is the opposite case: in a mailbox
+/// where one team is on everything, the same names in every card pull every
+/// pair of threads together, and the sweep then proposes the team rather than
+/// the work. Round D Phase 1 measures both variants through `make
+/// golden-sweep` (`SWEEP_CARD=participants|topics`); `StorylineTuning
+/// .participantsInClusteringCard` is what the app passes.
+///
+/// Dropping the people leaves the segment EMPTY rather than removing it: the
+/// card is four ` | `-joined segments by contract, and a three-segment card
+/// would make [cardHash] disagree with itself about nothing.
+String buildClusteringCard({
+  required String? subject,
+  required List<String> participants,
+  required List<String> topics,
+  required String? summary,
+  required bool withParticipants,
+}) =>
+    buildConversationCard(
+      subject: subject,
+      participants: withParticipants ? participants : const [],
+      topics: topics,
+      summary: summary,
+    );
 
 /// How much of a message body reaches its embedding.
 ///

@@ -4,9 +4,14 @@
     "app's own gates, offline)")
 library;
 
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
+import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
@@ -16,6 +21,7 @@ import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
 import 'package:bond_inbox/services/llm/triage_task.dart';
+import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
@@ -29,6 +35,9 @@ import 'fixtures/golden_registry.dart';
 import 'fixtures/golden_run.dart';
 import 'fixtures/golden_set.dart';
 import 'fixtures/golden_storyline.dart';
+import 'fixtures/golden_sweep.dart';
+import 'fixtures/storyline_seed.dart';
+import 'fixtures/vec_test_db.dart';
 
 /// The golden set through the app's real tasks, on whatever server the defines
 /// point at.
@@ -1024,6 +1033,435 @@ void main() {
   /// set cannot ask (Tier 2 mail headers, and the two Teams ingest gates) and
   /// why this number is not the same measurement as `make golden-baseline`'s.
   ///
+  /// The golden set through the app's OWN filing path: the sweep that forms
+  /// clusters, the naming pass, the per-member confirms and the assign
+  /// shortlist.
+  ///
+  /// The confirm replay above hands the model a candidate list a PERSON wrote
+  /// and asks how well it judges one. This asks the question that list skips:
+  /// given a mailbox, does the app put the right threads in front of it at
+  /// all. So nothing here is a stand-in — the test seeds the conversations,
+  /// messages, triage summaries, extraction topics and live embeddings behind
+  /// the golden items (`fixtures/storyline_seed.dart`), then runs the real
+  /// `StorylineService` over them and reads the memberships back out.
+  ///
+  /// **The owner keeps everything.** After each sweep pass every `suggested`
+  /// storyline is kept, and the pass runs again until it proposes nothing.
+  /// That is the only way to get past `maxPendingSuggestions`, which is a
+  /// `static const` of three, and it is also the honest emulation of an owner
+  /// who accepts what the sweep offers. It has one consequence worth stating:
+  /// a kept storyline is `active` before the assign pass runs, so any rule
+  /// that treats a `suggested` storyline more strictly is exercised here by
+  /// the sweep's own member confirms and never by the assign pass.
+  ///
+  /// **Three further limits ride on every row.** The pool is the 95
+  /// conversations behind a hundred items, 71 of them with a kept inbound
+  /// message, against a live mailbox of hundreds, so it UNDER-states chaining. The owner's kept and removed examples and
+  /// the recruit laps never run, because a seeded mailbox has no owner
+  /// history. And the gate verdict seeded is GOLD's, not the app's, so this
+  /// measures the sweep over a correctly gated pool — `make golden-gate`
+  /// measures the gates.
+  ///
+  /// **Scoring is membership, not title.** Each app storyline is mapped to a
+  /// registry slug by the plurality of its members' gold ids, and an item's
+  /// derived `storyline.id` is that slug — `unmapped` when its storyline
+  /// answers to no effort, `none` when its thread was filed nowhere. That goes
+  /// into a run file `make golden-score` reads with the toolkit's own rules.
+  /// `make golden-baseline` resolves the app's stored TITLE to a slug instead;
+  /// the two are the same stage read two ways.
+  test(
+    'the golden set through the sweep and the assign shortlist',
+    () async {
+      if (GoldenDefines.setPath.isEmpty) {
+        fail('GOLDEN_SET is not defined — run via make golden-sweep (the '
+            'Makefile passes it); a bare flutter test cannot find the set');
+      }
+      final set = await _decoded(
+        GoldenDefines.setPath,
+        () => loadGoldenSet(GoldenDefines.setPath),
+      );
+      if (set.items.isEmpty) {
+        fail('the golden set at ${GoldenDefines.setPath} holds no items — '
+            'nothing to replay');
+      }
+      if (GoldenDefines.registryPath.isEmpty) {
+        fail('GOLDEN_REGISTRY is not defined — run via make golden-sweep '
+            '(the Makefile passes it); a bare flutter test cannot find the '
+            'registry');
+      }
+      final registry = await _decoded(
+        GoldenDefines.registryPath,
+        () => loadGoldenRegistry(GoldenDefines.registryPath),
+      );
+      // A gold slug the registry does not carry cannot be mapped to, so every
+      // item filed under it would read as a miss the app never made. The set
+      // and the registry are packed together, so this is zero or the two files
+      // do not belong to each other. Counted, never named.
+      final missingGold = set.items
+          .where((item) =>
+              item.gold.storylineId != noneId &&
+              !registry.bySlug.containsKey(item.gold.storylineId))
+          .length;
+      if (missingGold > 0) {
+        fail('$missingGold items are gold-filed under a storyline the '
+            'registry at ${GoldenDefines.registryPath} does not carry — the '
+            'set and the registry do not belong to each other');
+      }
+      if (GoldenDefines.runPath.isEmpty) {
+        fail('GOLDEN_RUN=<bulk run file from make golden> is not defined — '
+            "the seeded mailbox's triage summaries and extraction topics come "
+            'from that run, exactly as the app\'s own card carries the newest '
+            'inbound message\'s, so a replay without one would cluster '
+            'thinner cards than the app ever embeds');
+      }
+      final cards = await _decoded(
+        GoldenDefines.runPath,
+        () => loadGoldenCards(GoldenDefines.runPath),
+      );
+      if (cards.size == 0) {
+        // A STORYLINE or SWEEP run file is a JSON array of the same shape and
+        // carries no topics and no summary, so pointing GOLDEN_RUN at one
+        // loads cleanly and then embeds a hundred cards the app never builds.
+        fail('the run file at ${GoldenDefines.runPath} carries no cards — '
+            'GOLDEN_RUN wants a BULK run file from make golden (a storyline '
+            'or sweep run file has the same shape and no topics or summary)');
+      }
+      final withParticipants = parseSweepCard(GoldenDefines.sweepCardRaw);
+
+      final db = vecTestDb();
+      final store = MessageStore(db);
+      final confirmCollector = BenchTarget.bulk.collector();
+      final nameCollector = BenchTarget.prose.collector();
+      final startedAt = DateTime.now();
+
+      try {
+        final report = await seedGoldenMailbox(
+          store,
+          set,
+          cards,
+          withParticipants: withParticipants,
+          embeddings: EmbeddingsClient(),
+          // Literals, exactly as the app hands the owner's identity to
+          // needs-you: a bench has no keychain and must never grow a second
+          // path to one.
+          ownerName: GoldenDefines.ownerName ?? '',
+          ownerAddress: GoldenDefines.ownerAddress ?? '',
+        );
+        // ignore: avoid_print
+        print(
+          'card ${GoldenDefines.sweepCardRaw}, '
+          'cards from the run for '
+          '${set.items.where((i) => cards.byId.containsKey(i.id)).length} of '
+          '${set.items.length} items\n'
+          '${report.table()}',
+        );
+        if (report.embedded == 0) {
+          fail('nothing embedded — is the embedding server up? '
+              '(EMBED_URL ${EmbeddingsClient.defaultBaseUrl}, make embed)');
+        }
+        if (report.embedFailures > 0) {
+          // The row would MIX card variants. A thread the seeding failed to
+          // embed is embedded later by `_reembed`, which builds its card under
+          // the app's own flag rather than under SWEEP_CARD — so one thread of
+          // the pool would sit in the other variant's geometry and the A/B
+          // would be comparing two mailboxes.
+          fail('${report.embedFailures} threads did not embed — fix the '
+              'embedding server and rerun rather than scoring a pool that '
+              'mixes both SWEEP_CARD variants');
+        }
+
+        final service = StorylineService(
+          store,
+          BenchTarget.prose.client(onCall: nameCollector.record)
+            ..onReasoningLeak = nameCollector.noteLeak,
+          confirmClient: BenchTarget.bulk.client(onCall: confirmCollector.record)
+            ..onReasoningLeak = confirmCollector.noteLeak,
+          embeddings: EmbeddingsClient(),
+        );
+
+        // The room cap is a `static const` of three, so the loop KEEPS what it
+        // is offered rather than widening it. A pass that leaves the storyline
+        // count where it found it has nothing left to propose and ends the
+        // loop; the cap of twenty is a guard, not a budget.
+        const maxPasses = 20;
+        final callsPerPass = <int>[];
+        final wallPerPassMs = <int>[];
+        var passes = 0;
+        var keptSuggestions = 0;
+        for (var pass = 1; pass <= maxPasses; pass++) {
+          final before = await _storylineCount(store);
+          final callsBefore =
+              _callsMade(confirmCollector) + _callsMade(nameCollector);
+          final passStartedAt = DateTime.now();
+          // No retry wrapper: the SERVICE owns its calls, and a server that is
+          // down is not a row. An LlmUnavailableException out of here fails
+          // the run.
+          await service.sweep();
+          wallPerPassMs
+              .add(DateTime.now().difference(passStartedAt).inMilliseconds);
+          callsPerPass.add(
+            _callsMade(confirmCollector) + _callsMade(nameCollector) -
+                callsBefore,
+          );
+          passes = pass;
+
+          final after = await _storylineCount(store);
+          for (final storyline
+              in await store.loadStorylines(statuses: const ['suggested'])) {
+            await service.keepSuggestion(storyline.id);
+            keptSuggestions++;
+          }
+          if (after == before) break;
+        }
+
+        // Arrival order, which is the order the app files threads in: the
+        // assign pass runs per thread as its embedding lands.
+        final filed = (await readSweepMembership(store)).storylineByThread;
+        final shortlist = [
+          for (final thread in report.threads)
+            // `embedded` is the belt to the guard above's braces: a thread
+            // with no vector would be embedded by `_reembed` inside the assign
+            // pass, under the app's flag rather than under SWEEP_CARD.
+            if (thread.keptInbound &&
+                thread.embedded &&
+                !filed.containsKey(
+                  threadKeyOf(thread.source, thread.conversationKey),
+                ))
+              thread,
+        ]..sort(
+            (a, b) => (a.lastMessageAt ?? '').compareTo(b.lastMessageAt ?? ''),
+          );
+        final assignOutcomes = <String, int>{};
+        for (final thread in shortlist) {
+          final outcome = await service.assignConversation(
+            thread.source,
+            thread.conversationKey,
+          );
+          assignOutcomes[outcome.name] = (assignOutcomes[outcome.name] ?? 0) + 1;
+        }
+
+        // ── what the run filed ────────────────────────────────────────────
+        final membership = await readSweepMembership(store);
+        final goldByThread = goldSlugByThread(set);
+        final mapping = mapStorylinesToSlugs(
+          members: membership.threadsByStoryline,
+          goldByThread: goldByThread,
+        );
+        final derived = deriveSweepIds(
+          items: set.items,
+          storylineByThread: membership.storylineByThread,
+          slugByStoryline: mapping,
+        );
+
+        final entries = <GoldenRunEntry>[];
+        var correctPositives = 0;
+        var unmapped = 0;
+        var filedNowhere = 0;
+        final forbiddenHits = <String, int>{};
+        for (final item in set.items) {
+          final id = derived[item.id] ?? noneId;
+          entries.add(
+            GoldenRunEntry(
+              id: item.id,
+              stratum: item.stratum,
+              difficulty: item.difficulty,
+            )..storylineId = id,
+          );
+          if (id == unmappedId) {
+            unmapped++;
+          } else if (id == noneId) {
+            filedNowhere++;
+          } else if (id == item.gold.storylineId) {
+            correctPositives++;
+          }
+          if (item.gold.storylineForbidden.contains(id)) {
+            forbiddenHits[id] = (forbiddenHits[id] ?? 0) + 1;
+          }
+        }
+
+        final tombstoned = (await store.loadStorylines(
+          statuses: const ['dismissed'],
+        ))
+            .where((storyline) => storyline.createdBy == 'auto')
+            .length;
+
+        // Pairs INSIDE the groups the sweep formed, off the stored vectors —
+        // the population a coherence floor would judge. Read from the store
+        // rather than from the service, which keeps its clusters to itself.
+        final vectors = <String, List<double>>{};
+        final displays = <String, List<String>>{};
+        for (final row in await store.conversationsWithEmbeddings(
+          embedModel: EmbeddingsClient.modelTag,
+          sources: const ['email', 'teams'],
+        )) {
+          final key = threadKeyOf(
+            row['source'] as String? ?? 'email',
+            row['conversation_key'] as String? ?? '',
+          );
+          displays[key] = _displaysOfJson(row['participants_json']);
+          final blob = row['embedding'];
+          if (blob is Uint8List) vectors[key] = decodeEmbedding(blob);
+        }
+        final withinCluster = <double>[];
+        for (final threads in membership.threadsByStoryline.values) {
+          for (var i = 0; i < threads.length; i++) {
+            for (var j = i + 1; j < threads.length; j++) {
+              final a = vectors[threads[i]];
+              final b = vectors[threads[j]];
+              if (a == null || b == null) continue;
+              withinCluster.add(cosine(a, b));
+            }
+          }
+        }
+
+        // Counted, never applied: the lint is not wired into the naming pass
+        // until Phase 3, and this says what it would have thrown away.
+        final lintCounts = charterLintCounts([
+          for (final storyline in await store.loadStorylines(
+            statuses: const ['suggested', 'active'],
+          ))
+            LintCandidate(
+              title: storyline.title,
+              charter: storyline.charter ?? '',
+              participants: [
+                for (final thread
+                    in membership.threadsByStoryline[storyline.id] ?? const [])
+                  ...displays[thread] ?? const <String>[],
+              ],
+            ),
+        ]);
+
+        // Summed per task name across both collectors, never a map literal
+        // over the two lists: a label seen on BOTH slots would otherwise keep
+        // whichever collector came last and silently drop the other's calls.
+        // The confirm and the naming task carry different labels today, and
+        // the sum is what keeps that from being load-bearing.
+        final callsByKind = <String, int>{};
+        for (final metrics in [
+          ...confirmCollector.tasks,
+          ...nameCollector.tasks,
+        ]) {
+          callsByKind[metrics.task] =
+              (callsByKind[metrics.task] ?? 0) + metrics.n + metrics.failures;
+        }
+
+        final tally = SweepTally(
+          formed: membership.storylines,
+          tombstoned: tombstoned,
+          // Phase 1 counts the lint and applies nothing, and the namer cannot
+          // yet say a cluster is incoherent. Both land in Phase 3; the columns
+          // exist now so the before and after rows line up.
+          lintRejected: 0,
+          incoherent: 0,
+          purityByStoryline: {
+            for (final entry in membership.threadsByStoryline.entries)
+              entry.key: purityOf(entry.value, goldByThread),
+          },
+          coverageBySlug: coverageBySlugOf(
+            set: set,
+            membership: membership,
+            slugByStoryline: mapping,
+            goldByThread: goldByThread,
+          ),
+          largestShare: membership.largestShare,
+          correctPositives: correctPositives,
+          forbiddenByAnti: forbiddenHits,
+          unmapped: unmapped,
+          filedNowhere: filedNowhere,
+          callsByKind: callsByKind,
+          callsPerPass: callsPerPass,
+          wallPerPassMs: wallPerPassMs,
+          cosineBins: cosineBins(withinCluster),
+          lintCounts: lintCounts,
+        );
+
+        final wall = DateTime.now().difference(startedAt);
+        final runPath = BenchTarget.outDir.isEmpty
+            ? null
+            : await writeGoldenRun(
+                entries,
+                bench: 'golden-sweep',
+                // Both slots in the label: a sweep row is a pair of models,
+                // the confirms on one and the names on the other, and a row
+                // naming one of them could not be read a week later.
+                label: '${BenchTarget.bulk.label} + ${BenchTarget.prose.label} '
+                    'sweep',
+                outDir: BenchTarget.outDir,
+              );
+        final timingPath = await writeBenchResult(
+          bench: 'golden-sweep',
+          collectors: [confirmCollector, nameCollector],
+          accuracy: const [],
+          startedAt: startedAt,
+          extra: {
+            'run_file': runPath,
+            'cards_from': GoldenDefines.runPath,
+            'card': GoldenDefines.sweepCardRaw,
+            'sweep': tally.toJson(),
+            'seed': report.toJson(),
+            'assign_outcomes': assignOutcomes,
+            'passes': passes,
+            'kept_suggestions': keptSuggestions,
+            'wall_ms': wall.inMilliseconds,
+            // The calls MADE, divided by the wall they were made in — the
+            // failures included, because a failed call spent the time too.
+            'calls_per_min': msgsPerMinute(
+              _callsMade(confirmCollector) + _callsMade(nameCollector),
+              wall,
+            ),
+            'registry': {
+              'path': GoldenDefines.registryPath,
+              'storylines': registry.storylines.length,
+              'anti': registry.antiSlugs.length,
+            },
+            'golden': {
+              'path': GoldenDefines.setPath,
+              'generated': set.generated,
+              'items': set.items.length,
+            },
+          },
+        );
+
+        // ignore: avoid_print
+        print(
+          '\n${confirmCollector.banner}\n${confirmCollector.table()}\n'
+          '\n${nameCollector.banner}\n${nameCollector.table()}\n'
+          '\n${tally.table()}\n'
+          '\n  passes $passes, suggestions kept $keptSuggestions, '
+          'assign ${[
+            for (final entry in assignOutcomes.entries)
+              '${entry.key} ${entry.value}'
+          ].join('  ')}\n'
+          '  ${set.items.length} items in ${wall.inSeconds}s\n',
+        );
+        _printPaths(runPath, timingPath);
+
+        // Shape, never quality. Every judgement in this run belongs to the
+        // scorer: what is asserted here is that the replay had a mailbox to
+        // sweep and that something answered.
+        expect(entries, hasLength(set.items.length));
+        expect(
+          report.keptThreads,
+          greaterThan(0),
+          reason: 'no thread survived the gates — nothing to sweep',
+        );
+        expect(
+          confirmCollector.tasks.any((m) => m.n > 0) ||
+              nameCollector.tasks.any((m) => m.n > 0),
+          isTrue,
+          reason: 'no call succeeded — are both servers up?',
+        );
+        _assertNoLeaks(confirmCollector);
+        _assertNoLeaks(nameCollector);
+      } finally {
+        await db.close();
+      }
+    },
+    // A sweep pass is a naming call on the prose slot plus a confirm per
+    // member on the bulk slot, and the loop runs until nothing is proposed.
+    timeout: const Timeout(Duration(minutes: 90)),
+  );
+
   /// `GOLDEN_RUN=<bulk run file>` is optional and adds one column: triage's
   /// own `category` per item, so the standing question "would the model's
   /// `notification` verdict make a gate" can be re-read after a prompt change.
@@ -1247,6 +1685,56 @@ Future<(GoldenSet, GoldenCtx)> _loadOrFail() async {
     'ctx ${ctx.name}, k $k',
   );
   return (set, ctx);
+}
+
+/// [load], with a decode failure rethrown as a sentence naming the FILE.
+///
+/// `jsonDecode`'s own `FormatException` says "Unexpected character at 41231"
+/// and nothing about which of the three machine-local files it was reading,
+/// which is the difference between a two-minute fix and an afternoon. The
+/// exception's text is not repeated beyond its message: a decode error can
+/// carry the source it choked on, and these files are real correspondence.
+Future<T> _decoded<T>(String path, Future<T> Function() load) async {
+  try {
+    return await load();
+  } on FormatException catch (e) {
+    throw StateError('could not read $path as JSON: ${e.message}');
+  }
+}
+
+/// Every storyline row the sweep has written, live and tombstoned alike.
+///
+/// The loop's progress test, and it counts dismissals on purpose: a pass whose
+/// clusters were all thrown out still did work, and the next pass may propose
+/// what it could not reach for. What ends the loop is a pass that writes
+/// nothing at all.
+Future<int> _storylineCount(MessageStore store) async => (await store
+        .loadStorylines(statuses: const ['suggested', 'active', 'dismissed']))
+    .length;
+
+/// Calls this collector saw, failures included — what a per-pass count and a
+/// calls-per-minute figure are both divided by. A failed call spent the wall
+/// too, and a rate over successes alone would flatter a server that refused
+/// half of them.
+int _callsMade(CallCollector collector) => collector.tasks
+    .fold(0, (sum, metrics) => sum + metrics.n + metrics.failures);
+
+/// The display names on a stored `participants_json`, the way every card
+/// builder reads one: a blank display is not a person.
+List<String> _displaysOfJson(Object? raw) {
+  if (raw is! String || raw.isEmpty) return const [];
+  final Object? decoded;
+  try {
+    decoded = jsonDecode(raw);
+  } on FormatException {
+    return const [];
+  }
+  if (decoded is! List) return const [];
+  return [
+    for (final entry in decoded)
+      if (entry is Map && entry['name'] is String && (entry['name'] as String).isNotEmpty)
+        entry['name'] as String,
+  ];
 }
 
 /// How many items the app no longer renders into the block the set recorded.

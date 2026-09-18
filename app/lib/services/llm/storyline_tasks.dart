@@ -203,6 +203,17 @@ class ConfirmResult {
     required this.belongs,
     required this.confidence,
   });
+
+  /// The SERVICE's reading of this answer: a yes it was confident enough
+  /// about.
+  ///
+  /// Stated once, here, because it is quoted in seven places — the five
+  /// confirm call sites in `storyline_service.dart` (assign, recruit, the
+  /// sweep's members, its probe and the audit — Round D Phase 4 folds them
+  /// onto this getter), the golden replay's `ConfirmOutcome.accepted`, and
+  /// `docs/pipeline/06-storylines.md`. A `low` yes is a no: a group the user
+  /// has to correct costs more than one they were never offered.
+  bool get accepted => belongs && confidence != 'low';
 }
 
 /// Judges whether one thread belongs to an existing storyline.

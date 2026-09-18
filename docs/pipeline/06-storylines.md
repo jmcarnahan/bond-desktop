@@ -719,6 +719,20 @@ thread that is already filed. What that buys is native distance arithmetic over
 packed float32, not a better asymptotic: an index that made the sweep faster by
 proposing different storylines would be a bug wearing a benchmark.
 
+**Measuring it.** `make golden-sweep` is the ruler for everything in this
+section. It seeds an in-memory store with the conversations behind the golden
+set, embeds each thread through the app's own clustering card, then runs this
+sweep, its naming pass, its per-member confirms and the assign shortlist, and
+reads the memberships back out. Each app storyline is mapped to a gold effort
+by the plurality of its members, so the number it scores is what the FILING
+did, not what a title says. Beside the scorer it prints purity per storyline,
+coverage per effort, the largest storyline's share of every filed thread,
+which is the chaining number, and the cosine of every pair inside a formed
+group. The first row, on 2026-09-18, is what this section is being changed to
+fix: seven storylines formed, the largest holding 56% of every filed thread,
+zero correct positives and 23 of 98 on the scorer.
+`docs/model-bakeoff.md` carries the protocol, the knobs and the ledger.
+
 **Brute force is the fallback, and it is not exceptional.** The sweep does its
 own arithmetic when there is no usable index (the ordinary state of a build
 without the native extension), when the diff backfill cannot complete, when a
