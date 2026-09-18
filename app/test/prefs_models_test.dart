@@ -174,4 +174,52 @@ void main() {
     expect(prefs.targetFor(ModelSlot.fast), prefs.fastTarget);
     expect(prefs.targetFor(ModelSlot.prose), prefs.proseTarget);
   });
+
+  group('the prose lane\'s width', () {
+    test('one on a fresh install, and it round-trips', () async {
+      final ref = await container();
+      expect(ref.read(appPrefsProvider).proseParallel, 1);
+
+      await ref.read(appPrefsProvider.notifier).setProseParallel(4);
+
+      expect(ref.read(appPrefsProvider).proseParallel, 4);
+      expect(await MessageStore(db).getPref(proseParallelKey), '4');
+    });
+
+    test('a stored width is read back, and a silly one is clamped', () async {
+      final store = MessageStore(db);
+      await store.setPref(proseParallelKey, '64');
+
+      // Clamped on the READ as well as the write: a number nothing on screen
+      // could produce must not be able to put sixty requests in front of a
+      // one-slot server.
+      expect((await container()).read(appPrefsProvider).proseParallel, 8);
+
+      await store.setPref(proseParallelKey, 'wide');
+      expect((await container()).read(appPrefsProvider).proseParallel, 1);
+    });
+
+    test('the setter clamps too', () async {
+      final ref = await container();
+      final notifier = ref.read(appPrefsProvider.notifier);
+
+      await notifier.setProseParallel(0);
+      expect(ref.read(appPrefsProvider).proseParallel, 1);
+
+      await notifier.setProseParallel(99);
+      expect(ref.read(appPrefsProvider).proseParallel, 8);
+    });
+
+    test('it survives a wipe, like the other machine settings', () async {
+      final ref = await container();
+      await ref.read(appPrefsProvider.notifier).setProseParallel(2);
+
+      // `wipeAll` names the keys it clears, and this is not one of them: how
+      // many slots this machine's prose server has is a fact about the
+      // machine, not about whoever is signed in.
+      await MessageStore(db).wipeAll();
+
+      expect(await MessageStore(db).getPref(proseParallelKey), '2');
+    });
+  });
 }

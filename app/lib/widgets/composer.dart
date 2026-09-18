@@ -66,6 +66,15 @@ class Composer extends StatefulWidget {
   /// no side panel has nowhere to open one.
   final void Function(ProvenanceFile file)? onOpenProvenanceFile;
 
+  /// The draft being written this moment, as far as it has got, or null when
+  /// nothing is being written.
+  ///
+  /// Drawn ABOVE the box and never INTO it. The box holds what the host staged
+  /// and what the reader typed, and streamed text that arrived in the
+  /// controller would overwrite a sentence somebody was in the middle of
+  /// writing — the stored row stages exactly as it always has, once it exists.
+  final String? streamingBody;
+
   /// True while a draft is being written. The generate button becomes a
   /// spinner; the composer stays usable.
   final bool generating;
@@ -123,6 +132,7 @@ class Composer extends StatefulWidget {
     this.provenance,
     this.provenanceFiles = const [],
     this.onOpenProvenanceFile,
+    this.streamingBody,
     this.generating = false,
     this.capability = SendCapability.copyOnly,
     required this.onSend,
@@ -141,6 +151,9 @@ class Composer extends StatefulWidget {
 
   /// How present the text looks before anyone has touched it.
   static const double suggestedOpacity = 0.7;
+
+  /// The live preview above the box, while a draft is being written.
+  static const Key streamingPreviewKey = Key('composer-streaming-preview');
 
   /// The key of the chip that opens one file, by its `context_files.id`.
   static ValueKey<String> provenanceChipKeyFor(int fileId) =>
@@ -250,11 +263,66 @@ class _ComposerState extends State<Composer> {
             _provenanceChips(),
             const SizedBox(height: BondSpacing.s8),
           ],
+          if ((widget.streamingBody ?? '').isNotEmpty) ...[
+            _streamingPreview(widget.streamingBody!),
+            const SizedBox(height: BondSpacing.s8),
+          ],
           _field(),
           const SizedBox(height: BondSpacing.s8),
           _buttons(),
         ],
       ),
+    );
+  }
+
+  /// The reply as the model is writing it: read-only, in the suggestion's own
+  /// dress, behind the same accent rule the box draws around an untouched
+  /// draft.
+  ///
+  /// Above the field rather than in it, on purpose. The controller belongs to
+  /// the reader — a sentence they started while waiting must survive the draft
+  /// landing — so nothing here touches it, and the finished suggestion arrives
+  /// through the host's ordinary staging exactly as it did before any of this
+  /// streamed.
+  Widget _streamingPreview(String body) {
+    return _suggestionRule(
+      key: Composer.streamingPreviewKey,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('Drafting…', style: BondType.caption),
+          const SizedBox(height: 2),
+          Text(
+            // The block cursor is the whole of the "still being written"
+            // signal: no animation, because nothing on this screen loops.
+            '$body▍',
+            style: BondType.body.copyWith(
+              color: BondColors.ink.withValues(alpha: Composer.suggestedOpacity),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// A rule down the left, the way a quoted passage is marked: what sits
+  /// inside it is here to be read and changed, not to be signed off on.
+  ///
+  /// One helper because this widget draws it twice, around the two
+  /// machine-written things it shows — the untouched suggestion IN the box,
+  /// and the draft still arriving above it — and two copies of the mark that
+  /// says "not yours yet" could drift into meaning two different things.
+  Widget _suggestionRule({required Widget child, Key? key}) {
+    return Container(
+      key: key,
+      padding: const EdgeInsets.only(left: BondSpacing.s8),
+      decoration: const BoxDecoration(
+        border: Border(
+          left: BorderSide(color: BondColors.seaGlassOnDark, width: 2),
+        ),
+      ),
+      child: child,
     );
   }
 
@@ -337,18 +405,7 @@ class _ComposerState extends State<Composer> {
     );
 
     if (!_showingSuggestion) return field;
-
-    // A rule down the left, the way a quoted passage is marked: this text is
-    // here to be read and changed, not to be signed off on.
-    return Container(
-      padding: const EdgeInsets.only(left: BondSpacing.s8),
-      decoration: const BoxDecoration(
-        border: Border(
-          left: BorderSide(color: BondColors.seaGlassOnDark, width: 2),
-        ),
-      ),
-      child: field,
-    );
+    return _suggestionRule(child: field);
   }
 
   /// Both buttons read the field, so both live under one listener: emptying

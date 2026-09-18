@@ -4,7 +4,13 @@ import 'package:flutter/material.dart';
 
 import '../providers/context_provider.dart' show ContextDirRow;
 import '../providers/prefs_provider.dart'
-    show NotifyStyle, backendModeMcp, defaultMcpServerUrl, mcpDeployedUrl;
+    show
+        DraftPolicy,
+        DraftPolicyLabel,
+        NotifyStyle,
+        backendModeMcp,
+        defaultMcpServerUrl,
+        mcpDeployedUrl;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart';
 import '../theme/tokens.dart';
@@ -17,6 +23,7 @@ import 'settings_context_section.dart';
 import 'settings_lookback_field.dart';
 import 'settings_models_body.dart';
 import 'settings_section.dart';
+import 'settings_segments.dart';
 import 'time_format.dart' show relativeTime;
 
 /// How much of Settings a host is asking for.
@@ -78,6 +85,15 @@ class SettingsScreen extends StatefulWidget {
   /// Fired the instant the selection moves, for the same reason
   /// [onShowActivityLogChanged] is. Null hides the whole section.
   final void Function(NotifyStyle value)? onNotifyStyleChanged;
+
+  /// When a suggested reply is written without anyone asking for it.
+  final DraftPolicy draftPolicy;
+
+  /// Fired the instant the selection moves, for [onNotifyStyleChanged]'s
+  /// reason and one of its own: the next message to finish extracting is what
+  /// the choice governs, and one can land while this section is open. Null
+  /// hides the whole section.
+  final void Function(DraftPolicy value)? onDraftPolicyChanged;
 
   /// See [MicrosoftConnectionSection.hasScope].
   final Future<bool> Function(String bareScope)? hasScope;
@@ -191,6 +207,13 @@ class SettingsScreen extends StatefulWidget {
   /// Fired by 'Use build defaults'. Null leaves the button inert rather than
   /// hiding the section — the section's premise is [onSlotTargetChanged].
   final void Function(ModelSlot slot)? onSlotReset;
+
+  /// How many drafts the prose server may be writing at once.
+  final int proseParallel;
+
+  /// Fired by the **Drafts in flight** segments. Null takes that one control
+  /// off the Models section and leaves the rest of it exactly as it was.
+  final void Function(int width)? onProseParallelChanged;
 
   /// Drawn at the top of the Models section — the host's Local server card.
   /// Null leaves the section exactly as it was before there was one.
@@ -341,6 +364,8 @@ class SettingsScreen extends StatefulWidget {
     this.onOpenActivityLog,
     this.notifyStyle = NotifyStyle.native,
     this.onNotifyStyleChanged,
+    this.draftPolicy = DraftPolicy.needsYou,
+    this.onDraftPolicyChanged,
     this.hasScope,
     this.onSignInAgain,
     this.backendMode = backendModeMcp,
@@ -373,6 +398,8 @@ class SettingsScreen extends StatefulWidget {
     this.probeServer,
     this.onSlotTargetChanged,
     this.onSlotReset,
+    this.proseParallel = 1,
+    this.onProseParallelChanged,
     this.modelsHeader,
     this.localServerSummary,
     this.lastMailSyncIso,
@@ -437,6 +464,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late double _threshold = widget.threshold.clamp(0.0, 1.0);
   late bool _showActivityLog = widget.showActivityLog;
   late NotifyStyle _notifyStyle = widget.notifyStyle;
+  late DraftPolicy _draftPolicy = widget.draftPolicy;
   late bool _storylineNewestFirst = widget.storylineNewestFirst;
 
   /// Ten stops. Enough that the slider feels like it has an opinion, few enough
@@ -647,6 +675,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _modelsBody(),
         ),
       _section('Needs You', _needsYouSummary(), _needsYouBody()),
+      // After Needs You because it is the next question that pile raises —
+      // these are the messages a reply gets written for — and in BOTH scopes
+      // with no `!ai` guard: how much of the big model's time goes on replies
+      // nobody asked for is a fact about the model, so the AI stop is exactly
+      // where someone would look for it.
+      if (widget.onDraftPolicyChanged != null)
+        _section(
+          'Suggested replies',
+          _suggestedRepliesSummary(),
+          _suggestedRepliesBody(),
+        ),
       if (!ai && widget.onNotifyStyleChanged != null)
         _section('Notifications', _notifySummary(), _notifyBody()),
       if (widget.onShowActivityLogChanged != null)
@@ -802,6 +841,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     probe: widget.probeServer,
     onSave: widget.onSlotTargetChanged!,
     onReset: widget.onSlotReset ?? (_) {},
+    proseParallel: widget.proseParallel,
+    onProseParallelChanged: widget.onProseParallelChanged,
   );
 
   // ── Sync & data ───────────────────────────────────────────────────────────
@@ -1327,37 +1368,57 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// one could arrive while this section is still open.
   Widget _notifyBody() {
     final onChanged = widget.onNotifyStyleChanged!;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Align(
-          alignment: Alignment.centerLeft,
-          child: SegmentedButton<NotifyStyle>(
-            // No tick on the selected segment, matching the backend picker.
-            showSelectedIcon: false,
-            segments: const [
-              ButtonSegment(value: NotifyStyle.off, label: Text('Off')),
-              ButtonSegment(value: NotifyStyle.inApp, label: Text('In-app')),
-              ButtonSegment(value: NotifyStyle.native, label: Text('Native')),
-            ],
-            selected: {_notifyStyle},
-            onSelectionChanged: (selection) {
-              setState(() => _notifyStyle = selection.first);
-              onChanged(selection.first);
-            },
-          ),
-        ),
-        const SizedBox(height: BondSpacing.s4),
-        // The one thing about Native that is not obvious from its name, and
-        // that a user would otherwise report as a bug: it is silent while they
-        // are looking at the app, on purpose.
-        Text(
+    return SettingsSegments<NotifyStyle>(
+      segments: const [
+        (value: NotifyStyle.off, label: 'Off'),
+        (value: NotifyStyle.inApp, label: 'In-app'),
+        (value: NotifyStyle.native, label: 'Native'),
+      ],
+      selected: _notifyStyle,
+      onChanged: (value) {
+        setState(() => _notifyStyle = value);
+        onChanged(value);
+      },
+      // The one thing about Native that is not obvious from its name, and
+      // that a user would otherwise report as a bug: it is silent while they
+      // are looking at the app, on purpose.
+      caption:
           'Native uses system notifications when the app is in the background '
           'and falls back to the in-app ribbon when it is frontmost.',
-          style: BondType.caption,
-        ),
+    );
+  }
+
+  // ── Suggested replies ─────────────────────────────────────────────────────
+
+  String _suggestedRepliesSummary() => _draftPolicy.label;
+
+  /// Which messages get a reply written for them before anyone asks.
+  ///
+  /// Reported to the host the instant the selection changes, like every other
+  /// control on this screen: the next message to finish extracting is what the
+  /// choice governs, and one can land while this section is open.
+  Widget _suggestedRepliesBody() {
+    final onChanged = widget.onDraftPolicyChanged!;
+    return SettingsSegments<DraftPolicy>(
+      // Off the enum, in its own declaration order: the labels belong to
+      // `DraftPolicyLabel` beside the modes they name, and a second list here
+      // would be a mode this screen could silently stop offering.
+      segments: [
+        for (final policy in DraftPolicy.values)
+          (value: policy, label: policy.short),
       ],
+      selected: _draftPolicy,
+      onChanged: (value) {
+        setState(() => _draftPolicy = value);
+        onChanged(value);
+      },
+      // What each one does, and the sentence that keeps the third from
+      // reading as "turn drafts off": the button is always there.
+      caption:
+          'Needs you writes a reply ahead of time for messages judged to need '
+          'you, at most ten at a time. All drafts every message that looks '
+          'like it wants a reply. When asked writes nothing until you press '
+          'Draft reply, which works in every mode.',
     );
   }
 

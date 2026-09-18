@@ -22,11 +22,16 @@ for.
 direct boost, while NULL and 0 move nothing. It changes the score, never the
 threshold; the slider still gates.
 
-**The draft pre-gate** reads it as well — see
-[04-extraction.md](04-extraction.md). `asksForAReply` counts
-`needs_you_verdict = 1` as a fifth reason to spend the 27B's time, which is why
-this handler is registered ahead of `ExtractHandler`. It only widens what gets
-asked about; `ReplyDecisionTask` still decides whether a draft is written.
+**The draft pre-gates** read it as well — see
+[04-extraction.md](04-extraction.md) and
+[07-replies.md](07-replies.md). Which gate runs is the user's **Suggested
+replies** setting, one of three `DraftPolicy` modes: `asksForAReply` counts
+`needs_you_verdict = 1` as a fifth reason to spend the 27B's time, and the
+default mode's narrower `prefetchWorthy` counts it as one of three. Either way
+this handler is registered ahead of `ExtractHandler` so the verdict is on the
+row when the gate reads it. A gate only decides what gets asked about;
+`ReplyDecisionTask` still decides whether a draft is written — except when a
+person pressed **Draft reply**, which is that decision.
 
 **What happens.** `NeedsYouHandler`
 (`app/lib/services/needs_you_handler.dart`, run by `AiWorker`) answers one

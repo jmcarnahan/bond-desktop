@@ -53,6 +53,22 @@ class TaskMetrics {
   int get p50Ms => percentile(_sortedMs, 0.5);
   int get p95Ms => percentile(_sortedMs, 0.95);
 
+  /// How long the answer took to START, over the calls that streamed.
+  ///
+  /// Null rather than 0 when nothing streamed, which is every task in this app
+  /// but the draft: a bench of triage has no time-to-first-token, and a zero
+  /// in that column would read as one that answered instantly. Measured over
+  /// the streamed calls alone for the same reason — a run with one streamed
+  /// leg among four plain ones must report that leg's number, not a median
+  /// diluted by calls that never reported one.
+  int? get firstTokenP50Ms {
+    final streamed = [
+      for (final r in ok)
+        if (r.firstTokenMs != null) r.firstTokenMs!,
+    ]..sort();
+    return streamed.isEmpty ? null : percentile(streamed, 0.5);
+  }
+
   int get totalMs => ok.fold(0, (sum, r) => sum + r.durationMs);
   int get meanMs => ok.isEmpty ? 0 : totalMs ~/ ok.length;
 
@@ -175,14 +191,15 @@ class CallCollector {
 
   String table() {
     final rows = tasks.map((m) => '| ${m.task} | ${m.n} | ${m.failures} '
-        '| ${m.p50Ms} | ${m.p95Ms} | ${m.meanMs} '
+        '| ${m.p50Ms} | ${m.firstTokenP50Ms ?? '—'} | ${m.p95Ms} | ${m.meanMs} '
         '| ${(m.totalMs / 1000).toStringAsFixed(1)} '
         '| ${m.promptTokens} | ${m.completionTokens} '
         '| ${_rate(m.genTps)} | ${_rate(m.serverGenTps)} '
         '| ${_rate(m.promptTps)} |');
-    return '| task | n | fail | p50 ms | p95 ms | mean ms | total s '
+    return '| task | n | fail | p50 ms | ttft p50 | p95 ms | mean ms | total s '
         '| prompt tok | gen tok | gen t/s | gen t/s (srv) | prompt t/s |\n'
-        '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n'
+        '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- '
+        '| --- | --- |\n'
         '${rows.join('\n')}';
   }
 

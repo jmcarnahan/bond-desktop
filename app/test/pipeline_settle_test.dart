@@ -245,11 +245,12 @@ void main() {
     expect(log.where((e) => e == 'read'), hasLength(2));
   });
 
-  test('the queue is pumped once — drafting rides the same drain', () async {
-    // Nothing here enqueues a draft, and the settle pass does not pump again
-    // to look for one: a settle that re-drained would be a loop with a model
-    // call in it, and the work drafting needs is written mid-drain by
-    // extraction anyway.
+  test('the settle pass pumps no lane a second time', () async {
+    // The settle does not pump again to look for a draft: a settle that
+    // re-drained would be a loop with a model call in it. Since the drains
+    // were split, the draft LANE is woken where its row is written —
+    // `ExtractHandler.onDraftQueued` — and by the fast lane's `onDrained`, so
+    // there is nothing left for a second pump here to find.
     await seedThread();
     final triage = FakeTriage(store, log);
     final worker = FakeWorker(store, log);

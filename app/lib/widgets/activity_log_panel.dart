@@ -372,6 +372,10 @@ class ActivityLogPanel extends StatefulWidget {
         // row of their own: nothing was queued for them, so a reader looking
         // for what this pass did would find a storyline write with no work
         // item behind it.
+        //
+        // HISTORICAL since Round C: the offer now runs on the storyline lane,
+        // after this row is written, so a new brief row never carries this
+        // key. Rows already in a database do, and they still read correctly.
         final charters = detail['charters_offered'];
         final offered = charters is num
             ? ' · ${charters.toInt()} '

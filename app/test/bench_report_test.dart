@@ -33,6 +33,7 @@ LlmCallRecord ok({
   int? promptTokens,
   int? completionTokens,
   int? serverPredictedMs,
+  int? firstTokenMs,
 }) =>
     LlmCallRecord(
       label: label,
@@ -41,6 +42,7 @@ LlmCallRecord ok({
       promptTokens: promptTokens,
       completionTokens: completionTokens,
       serverPredictedMs: serverPredictedMs,
+      firstTokenMs: firstTokenMs,
     );
 
 void main() {
@@ -137,6 +139,41 @@ void main() {
       expect(task['gen_tps_server'], isNull);
       expect(task['prompt_tps'], isNull);
       expect(task['gen_tps'], 20.0);
+    });
+
+    test('carries the time to first token, and null where nothing streamed',
+        () {
+      // Only the draft leg streams. A zero in this field would read as a call
+      // that answered instantly, which is the opposite of what it means.
+      final streamed = collectorWith([
+        ok(label: 'draft_reply', durationMs: 20000, firstTokenMs: 300),
+        ok(label: 'draft_reply', durationMs: 30000, firstTokenMs: 500),
+        ok(label: 'triage', durationMs: 2000),
+      ]);
+
+      final json = benchResultJson(
+        bench: 'prose',
+        collectors: [streamed],
+        accuracy: const [],
+        startedAt: DateTime.utc(2026, 9, 17, 12),
+        finishedAt: DateTime.utc(2026, 9, 17, 12, 1),
+      );
+
+      final tasks = ((json['targets'] as List).single
+          as Map<String, Object?>)['tasks'] as List;
+      final draft = tasks.first as Map<String, Object?>;
+      final triage = tasks.last as Map<String, Object?>;
+      // Nearest rank over the two streamed calls, the same rule every other
+      // percentile in this file follows.
+      expect(draft['first_token_p50_ms'], 300);
+      expect(triage['first_token_p50_ms'], isNull);
+
+      // And the table says so with the em dash it uses for every other number
+      // nobody measured.
+      final rows = streamed.table().split('\n');
+      expect(rows.first, contains('ttft p50'));
+      expect(rows[2], contains('| 300 |'));
+      expect(rows[3], contains('| — |'));
     });
 
     test('carries the scorecards and every disagreement under them', () {

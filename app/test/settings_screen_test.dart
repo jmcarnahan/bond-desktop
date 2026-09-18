@@ -28,6 +28,9 @@ void main() {
     void Function(bool)? onShowActivityLogChanged,
     NotifyStyle notifyStyle = NotifyStyle.native,
     void Function(NotifyStyle)? onNotifyStyleChanged,
+    DraftPolicy draftPolicy = DraftPolicy.needsYou,
+    void Function(DraftPolicy)? onDraftPolicyChanged,
+    SettingsScope scope = SettingsScope.all,
     VoidCallback? onBack,
     VoidCallback? onHome,
     int needsYouRejudging = 0,
@@ -37,6 +40,7 @@ void main() {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
         body: SettingsScreen(
+          scope: scope,
           threshold: threshold,
           aboutMe: aboutMe,
           onThresholdChanged: onThresholdChanged,
@@ -47,6 +51,8 @@ void main() {
           onShowActivityLogChanged: onShowActivityLogChanged,
           notifyStyle: notifyStyle,
           onNotifyStyleChanged: onNotifyStyleChanged,
+          draftPolicy: draftPolicy,
+          onDraftPolicyChanged: onDraftPolicyChanged,
           hasScope: hasScope,
           onSignInAgain: onSignInAgain,
           needsYouRejudging: needsYouRejudging,
@@ -59,7 +65,7 @@ void main() {
   /// Opens one named section. Everything starts collapsed, so most tests begin
   /// with one of these.
   ///
-  /// Scrolled to first: eight sections do not fit a 900pt window once a couple
+  /// Scrolled to first: nine sections do not fit a 900pt window once a couple
   /// of them are open, and they certainly do not at a doubled text scale.
   Future<void> expand(WidgetTester tester, String title) async {
     final toggle = find.byKey(SettingsSection.toggleKey(title));
@@ -612,6 +618,133 @@ void main() {
       expect(find.byType(SwitchListTile), findsOneWidget);
       expect(find.text('Show activity log'), findsOneWidget);
       expect(find.byType(SegmentedButton<NotifyStyle>), findsOneWidget);
+    });
+  });
+
+  group('Suggested replies', () {
+    testWidgets('is absent when the host wires no callback', (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+      );
+
+      expect(find.text('Suggested replies'), findsNothing);
+    });
+
+    // One test per mode rather than a loop inside one: the screen's local
+    // selection is seeded from the prop ONCE, the way `_notifyStyle` is, so a
+    // second pumpWidget into the same tree would reuse the first State.
+    for (final (policy, summary) in const [
+      (DraftPolicy.needsYou, 'For messages that need you'),
+      (DraftPolicy.all, 'For every reply-worthy message'),
+      (DraftPolicy.onDemand, 'Only when asked'),
+    ]) {
+      testWidgets('its summary for $policy says what the mode does, '
+          'not its name', (tester) async {
+        await open(
+          tester,
+          onThresholdChanged: (_) {},
+          onAboutMeChanged: (_) {},
+          draftPolicy: policy,
+          onDraftPolicyChanged: (_) {},
+        );
+
+        expect(find.text('Suggested replies'), findsOneWidget);
+        expect(find.text(summary), findsOneWidget);
+      });
+    }
+
+    testWidgets('renders the three segments on what is already stored',
+        (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        draftPolicy: DraftPolicy.onDemand,
+        onDraftPolicyChanged: (_) {},
+      );
+      await expand(tester, 'Suggested replies');
+
+      expect(find.text('Needs you'), findsOneWidget);
+      expect(find.text('All'), findsOneWidget);
+      expect(find.text('When asked'), findsWidgets);
+      expect(
+        tester
+            .widget<SegmentedButton<DraftPolicy>>(
+              find.byType(SegmentedButton<DraftPolicy>),
+            )
+            .selected,
+        {DraftPolicy.onDemand},
+      );
+      // The sentence that keeps "When asked" from reading as "off".
+      expect(
+        find.textContaining('which works in every mode'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('reports the choice immediately', (tester) async {
+      final written = <DraftPolicy>[];
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        onDraftPolicyChanged: written.add,
+      );
+      await expand(tester, 'Suggested replies');
+
+      await tester.tap(find.text('All'));
+      await tester.pumpAndSettle();
+
+      expect(written, [DraftPolicy.all]);
+      expect(
+        tester
+            .widget<SegmentedButton<DraftPolicy>>(
+              find.byType(SegmentedButton<DraftPolicy>),
+            )
+            .selected,
+        {DraftPolicy.all},
+      );
+
+      await tester.tap(find.text('When asked'));
+      await tester.pumpAndSettle();
+
+      expect(written, [DraftPolicy.all, DraftPolicy.onDemand]);
+    });
+
+    // No `!ai` guard, deliberately: how much of the big model's time goes on
+    // replies nobody asked for is a fact about the model, so the AI stop is
+    // where someone would look for it.
+    for (final scope in SettingsScope.values) {
+      testWidgets('is present under $scope', (tester) async {
+        await open(
+          tester,
+          scope: scope,
+          onThresholdChanged: (_) {},
+          onAboutMeChanged: (_) {},
+          onDraftPolicyChanged: (_) {},
+          onNotifyStyleChanged: (_) {},
+        );
+
+        expect(find.text('Suggested replies'), findsOneWidget);
+      });
+    }
+
+    testWidgets('sits between Needs You and Notifications', (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        onDraftPolicyChanged: (_) {},
+        onNotifyStyleChanged: (_) {},
+      );
+
+      double topOf(String title) =>
+          tester.getTopLeft(find.text(title).first).dy;
+
+      expect(topOf('Needs You'), lessThan(topOf('Suggested replies')));
+      expect(topOf('Suggested replies'), lessThan(topOf('Notifications')));
     });
   });
 

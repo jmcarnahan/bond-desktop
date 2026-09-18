@@ -90,6 +90,21 @@ opt-in cloud drafts. On Converse a JSON answer is a forced tool call rather
 than a `response_format`, `temperature` is not sent, and the response carries
 no server timings.
 
+**One streamed call.** `LlmClient.completeJsonStreamed` is the same request with
+`"stream": true` and `"stream_options": {"include_usage": true}`, read back as
+server-sent events and handed to the caller delta by delta. It exists for one
+caller — the draft, see [07-replies.md](07-replies.md) — and it is a separate
+METHOD rather than a flag on `completeJson` because twenty-two test doubles
+override that method with its exact signature. Everything but the delivery is
+shared with the plain path: the same status mapping (5xx and 429 park, anything
+else non-200 is fatal), the same timeout over the WHOLE read rather than just
+the headers, the same `usage` and `timings` readers, the same reasoning
+tripwire, the same decode at the end — so a stream that stopped mid-object is
+the format failure a truncated plain answer is, and the observer sees exactly
+one record. That record carries one field the plain path leaves null:
+`firstTokenMs`. Streaming is OpenAI-wire only; on Converse the call degrades to
+one plain POST.
+
 ## Managed mode: one router
 
 Everything above describes the app talking to servers somebody else started.
@@ -328,10 +343,83 @@ what Bond is would be the app asking for credentials as its opening line.
   429 (a throttled cloud server) → unavailable/park as well; timeout →
   counted against the item; HTTP 400 → fatal, never retried — which
   is what a model name the server does not have looks like.
-- `TriageQueue` and `AiWorker` share one `DrainGate`
-  (`app/lib/services/drain_gate.dart`) so the two drains never compete for the
-  fast server's slots. The worker's header comment explains handler ordering
-  as a data dependency and per-kind vs whole-drain parking.
+- `TriageQueue` and the FAST `AiWorker` share one `DrainGate`
+  (`app/lib/services/drain_gate.dart`) so those two drains never compete for
+  the fast server's slots. The storyline and draft lanes hold their own gates
+  — see **Three drains** below. The worker's header comment explains handler
+  ordering as a data dependency and per-kind vs whole-drain parking.
+
+## Three drains
+
+Since Round C (2026-09) there are three `AiWorker` instances, not one, and
+three gates. One list behind one gate meant the 27B's work sat both in front
+of the 4B's and behind it: a message that arrived while a recap was being
+written waited for the recap, and a draft a person asked for waited for the
+whole pass to come round.
+
+| Lane | Kinds, in drain order | Server(s) | Gate | Provider |
+|---|---|---|---|---|
+| Fast | `needs_you`, `extract`, `embed_message`, `attachment_text`, `attachment_digest`, `context_reconcile`, `context_digest`, `context_brief` | fast + embed | `fastDrainGateProvider`, shared with `TriageQueue` | `aiWorkerProvider` |
+| Storyline | `storyline`, `storyline_sweep`, `storyline_refresh`, `storyline_audit`, `storyline_recruit`, `storyline_recap` | fast (membership) + prose (naming, refresh, recap) | `storylineDrainGateProvider` | `storylineWorkerProvider` |
+| Draft | `draft` | prose | `draftDrainGateProvider` | `draftWorkerProvider` |
+
+The cut is where the constraints are, not where the servers are. The fast lane
+is the critical path for a new message and holds nothing that dials the 27B.
+Its own load on the fast server is one kind at a time at K=3 — needs-you, then
+extraction — and the gate it shares with the triage drain is what stops that
+K=3 landing on top of triage's. The fourth slot is the STORYLINE lane's: it is
+on a gate of its own, and its membership confirms are fast-server calls, so the
+worst case at that server is three plus one, which is `FAST_SLOTS`.
+The storyline six stay together because their ORDER is an argument
+(`06-storylines.md`) and they mutate shared membership — splitting them by
+server would break it. The draft is alone because it is the one kind a person
+sits and waits for. Where the two prose lanes genuinely contend the SERVER
+queues them, so the worst case for an asked-for draft is one recap rather than
+a drain pass.
+
+**Order across lanes is enqueue-and-pump, not list position.** A fast handler
+writes the `storyline*` or `draft` row and something wakes the lane that owns
+it: `AiWorker.onDrained` fires after every completed drain, empty ones
+included (the fast lane wakes the other two; the storyline lane wakes the
+draft lane), and `ExtractHandler.onDraftQueued` wakes the draft lane as each
+row is written, so a prefetch starts seconds after its extraction rather than
+at the end of the fast drain. `AiWorkers.pumpAll()` — fast, THEN the other two
+together — is what a caller outside the pipeline pumps, and its chained shape
+is what keeps "the sync's pump completed" meaning "and the drafts are done".
+
+**How wide the draft lane runs is a setting.** `AppPrefs.proseParallel`
+(`prose_parallel`, 1–8, default 1) is read by `DraftHandler.concurrency`
+through a closure, and `AiWorker` re-reads that on every launch decision — so
+Settings → Models → **Drafts in flight** moves the next draft rather than the
+next launch. One per slot the prose server was started with (`SLOTS` in
+`local.mk`, `--max-num-seqs` on vLLM); extra requests queue at the server
+rather than fail. Drafts only: a recap and a refresh both write the storyline
+they are about and stay at one. Measured 2026-09-17: a second local slot on
+this Mac's 27B did not pay (width 2 slower end to end than width 1); the
+default stays 1 locally, and 4 is the measured value for a GPU-served target.
+
+**Two writers ride the storyline gate** because the single gate used to
+serialise them by accident:
+
+- `GateRepairService.afterGate` is called from inside the triage drain. Its
+  message-side writes stay awaited; its three storyline writes
+  (`evictGatedThread`, `clearConversationEmbedding`,
+  `deletePendingWork('storyline', …)`) go through the storyline lane's gate,
+  unawaited, and write their own activity row when they land. The sharp one is
+  the delete: landing while the lane holds that row's claim it would miss it,
+  and the assign pass would file the thread straight back after the eviction.
+- `ContextBriefHandler.onBriefChanged` → `StorylineService
+  .offerDirectoryCharters` writes `charterSuggestion`, and the refresh pass
+  writes the same column. The offer is dispatched onto the storyline gate,
+  unawaited — so the brief handler (fast lane) never waits on a sweep, and the
+  activity row for a brief no longer carries `charters_offered`.
+
+The one-shot `GateRepairService.repairAll` stays inline: it runs once per
+install, from the sync, before the storylines it would race have anything to
+do.
+
+`make bench-pipeline` measures both shapes — `PIPE_SHAPE=single` is the
+pre-Round-C single worker, `lanes` is what ships. See `docs/model-bakeoff.md`.
 
 ## Every prompt is fenced
 
@@ -347,7 +435,10 @@ Every chat task implements `JsonTask` (`app/lib/services/llm/json_task.dart`):
 a schema-constrained call whose defaults are temperature 0.2 / maxTokens 512,
 overridden per call site (see each stage's page). Decoding is
 grammar-constrained; `make bench-verify` asserts the server honours the
-schema before any bench run trusts it.
+schema before any bench run trusts it. `runTask(onText:)` is what picks the
+streamed method instead of the plain one, and `DraftHandler` is the only caller
+in `lib/` that passes it — every other stage, every test double and every bench
+goes through `completeJson` unchanged.
 
 **The two timeouts are one number each, sized to the longest legitimate call
 on that slot.** The prose client gets 90 s, and there are two worst cases to

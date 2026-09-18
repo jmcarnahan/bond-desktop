@@ -1,6 +1,6 @@
-import 'dart:async';
+import 'package:flutter/foundation.dart' show immutable;
 
-import 'package:flutter/foundation.dart' show debugPrint, immutable;
+import 'event_bus.dart';
 
 /// One stage write, as it happened.
 ///
@@ -45,40 +45,19 @@ class ProgressTick {
 /// Ticks once per stage write, so an open home screen follows the pipeline
 /// without polling it.
 ///
-/// The rule it exists under is the one [ActivityLog] documents at length:
-/// **the observer must never be able to break the thing it observes.**
-/// [publish] does not throw, does not await, and does not care whether
-/// anybody is listening — a stage write that failed to be announced is a bar
-/// that fills a moment late, which is not worth a message.
-///
-/// [ProgressBus.disabled] is the default every instrumented constructor takes,
-/// so a test that builds a queue without caring about the screen keeps
-/// compiling and keeps costing nothing.
-class ProgressBus {
-  final StreamController<ProgressTick>? _ticks;
-
-  ProgressBus() : _ticks = StreamController<ProgressTick>.broadcast();
+/// An [EventBus] of [ProgressTick] and nothing else: the rule the publish
+/// happens under, the disabled twin and the broadcast stream are all that
+/// class's, and they are documented there. What is specific to progress is the
+/// name of the stream — [ticks] — which eleven call sites and every test read,
+/// and which is why this is a subclass rather than a bare alias.
+class ProgressBus extends EventBus<ProgressTick> {
+  ProgressBus();
 
   /// A bus that drops everything.
-  const ProgressBus.disabled() : _ticks = null;
+  const ProgressBus.disabled() : super.disabled();
 
   /// Broadcast, so the home screen and anything else that ever wants these
   /// are independent subscribers — and so a listener attaching late misses
   /// nothing it cannot re-read from `message_progress`.
-  Stream<ProgressTick> get ticks =>
-      _ticks?.stream ?? const Stream<ProgressTick>.empty();
-
-  void publish(ProgressTick tick) {
-    final ticks = _ticks;
-    if (ticks == null || ticks.isClosed) return;
-    try {
-      ticks.add(tick);
-    } catch (e) {
-      debugPrint('ProgressBus: dropped $tick: $e');
-    }
-  }
-
-  void dispose() {
-    _ticks?.close();
-  }
+  Stream<ProgressTick> get ticks => stream;
 }

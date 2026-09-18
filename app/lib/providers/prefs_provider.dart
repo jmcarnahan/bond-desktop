@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/app_paths.dart' show AppPaths;
 import '../data/message_store.dart';
+import '../models/draft_policy.dart';
 import '../models/home_sort.dart';
 import '../models/needs_you_sort.dart';
 import '../models/people_sort.dart';
@@ -17,6 +18,11 @@ export '../data/message_store.dart' show aboutMeKey, needsYouRulesKey;
 /// The setter below takes a [NeedsYouSort], so whoever reads this file for the
 /// preference has the vocabulary to change it in the same import.
 export '../models/needs_you_sort.dart' show NeedsYouSort, NeedsYouSortLabel;
+
+/// When suggested replies are written, for the same reason: the setter below
+/// takes a [DraftPolicy] and the settings section that writes it needs the
+/// three modes and their labels out of the same import.
+export '../models/draft_policy.dart' show DraftPolicy, DraftPolicyLabel;
 
 /// The two People orders, for the same reason: the directory and a person's
 /// room read their order from here, and the menus that write it need the
@@ -134,6 +140,15 @@ class AppPrefs {
   /// clock instead asks for it once, and gets it in all three places.
   final NeedsYouSort needsYouSort;
 
+  /// When a suggested reply is written without anyone asking for it.
+  /// [DraftPolicy.needsYou] by default: the messages the pipeline judged to
+  /// need the owner are drafted ahead of time and nothing else is, which is
+  /// what keeps a backlog's worth of replies nobody will read out of the prose
+  /// server's queue. A user preference, so `wipeAll` leaves it alone exactly as
+  /// it leaves [needsYouSort] alone — it says how this person likes the app to
+  /// work, not anything about the mailbox that was wiped.
+  final DraftPolicy draftPolicy;
+
   /// How the People directory is ordered. [PeopleSort.recent] by default,
   /// which is the order [peopleRooms] already hands it in: the person who
   /// spoke last is the person most likely to be looked for.
@@ -211,10 +226,33 @@ class AppPrefs {
   /// place that resolves it.
   final String modelsFolder;
 
+  /// How many drafts may be at the prose server at once.
+  ///
+  /// The prose slot's WIDTH, not a speed dial: one per slot the server was
+  /// started with (`SLOTS` in `local.mk` for llama.cpp, `--max-num-seqs` on
+  /// vLLM). A batched decode reads the weights once for the whole batch, so a
+  /// second stream is close to free on a server that has a slot for it — and
+  /// worth nothing at all on one that does not, where the extra request simply
+  /// queues.
+  ///
+  /// Drafts only. A recap and a refresh both write the storyline they are
+  /// about and stay at one, on `WorkHandler.concurrency`'s rule: only
+  /// genuinely independent items go wider.
+  ///
+  /// Machine configuration like [routerPort] and [modelsFolder], so it
+  /// survives a `wipeAll` — how many slots this machine's server has is not a
+  /// fact about whoever is signed in.
+  final int proseParallel;
+
   /// What [routerPort] means when nothing is stored — llama-server's own
   /// default port, which is also what `make model` uses, so a user who never
   /// touches the field gets the port every doc in this repo names.
   static const int defaultRouterPort = 8080;
+
+  /// One draft at a time until somebody says otherwise: the shipping local
+  /// server is started with one slot, and a width the server cannot honour
+  /// buys queue-wait rather than throughput.
+  static const int defaultProseParallel = 1;
 
   const AppPrefs({
     this.attentionThreshold = AttentionTuning.defaultThreshold,
@@ -226,6 +264,7 @@ class AppPrefs {
     this.contextSelectExpand = true,
     this.storylineNewestFirst = false,
     this.needsYouSort = NeedsYouSort.priority,
+    this.draftPolicy = DraftPolicy.needsYou,
     this.peopleSort = PeopleSort.recent,
     this.roomSort = RoomSort.newest,
     this.notifyStyle = NotifyStyle.native,
@@ -239,6 +278,7 @@ class AppPrefs {
     this.managedServer = false,
     this.routerPort = defaultRouterPort,
     this.modelsFolder = '',
+    this.proseParallel = defaultProseParallel,
   });
 
   /// The managed router's origin — one server, three models.
@@ -346,6 +386,7 @@ class AppPrefs {
     bool? contextSelectExpand,
     bool? storylineNewestFirst,
     NeedsYouSort? needsYouSort,
+    DraftPolicy? draftPolicy,
     PeopleSort? peopleSort,
     RoomSort? roomSort,
     NotifyStyle? notifyStyle,
@@ -359,6 +400,7 @@ class AppPrefs {
     bool? managedServer,
     int? routerPort,
     String? modelsFolder,
+    int? proseParallel,
   }) =>
       AppPrefs(
         attentionThreshold: attentionThreshold ?? this.attentionThreshold,
@@ -371,6 +413,7 @@ class AppPrefs {
         storylineNewestFirst:
             storylineNewestFirst ?? this.storylineNewestFirst,
         needsYouSort: needsYouSort ?? this.needsYouSort,
+        draftPolicy: draftPolicy ?? this.draftPolicy,
         peopleSort: peopleSort ?? this.peopleSort,
         roomSort: roomSort ?? this.roomSort,
         notifyStyle: notifyStyle ?? this.notifyStyle,
@@ -384,6 +427,7 @@ class AppPrefs {
         managedServer: managedServer ?? this.managedServer,
         routerPort: routerPort ?? this.routerPort,
         modelsFolder: modelsFolder ?? this.modelsFolder,
+        proseParallel: proseParallel ?? this.proseParallel,
       );
 }
 
@@ -399,6 +443,7 @@ const String showActivityLogKey = 'show_activity_log';
 const String contextSelectExpandKey = 'context_select_expand';
 const String storylineNewestFirstKey = 'storyline_newest_first';
 const String needsYouSortKey = 'needs_you_sort';
+const String draftPolicyKey = 'suggested_replies';
 const String peopleSortKey = 'people_sort';
 const String roomSortKey = 'person_room_sort';
 const String notifyStyleKey = 'notify_style';
@@ -415,6 +460,10 @@ const String teamsLookbackDaysKey = 'teams_lookback_days';
 const String managedServerKey = 'managed_server';
 const String routerPortKey = 'router_port';
 const String modelsFolderKey = 'models_folder';
+
+/// How wide the prose server was started. Not in `wipeAll`'s list for the
+/// three keys above's reason — see [AppPrefs.proseParallel].
+const String proseParallelKey = 'prose_parallel';
 
 /// The switch [notifyStyleKey] replaced. Still read — and only read — so an
 /// install that had turned the ribbon off stays quiet across the upgrade
@@ -471,16 +520,37 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
           await store.getPref(contextSelectExpandKey) != 'false',
       storylineNewestFirst:
           await store.getPref(storylineNewestFirstKey) == 'true',
-      needsYouSort: _needsYouSort(await store.getPref(needsYouSortKey)),
-      peopleSort: _peopleSort(await store.getPref(peopleSortKey)),
-      roomSort: _roomSort(await store.getPref(roomSortKey)),
+      needsYouSort: _enumOrDefault(
+        NeedsYouSort.values,
+        await store.getPref(needsYouSortKey),
+        NeedsYouSort.priority,
+      ),
+      draftPolicy: _enumOrDefault(
+        DraftPolicy.values,
+        await store.getPref(draftPolicyKey),
+        DraftPolicy.needsYou,
+      ),
+      peopleSort: _enumOrDefault(
+        PeopleSort.values,
+        await store.getPref(peopleSortKey),
+        PeopleSort.recent,
+      ),
+      roomSort: _enumOrDefault(
+        RoomSort.values,
+        await store.getPref(roomSortKey),
+        RoomSort.newest,
+      ),
       // The one setting here that DEFAULTS ON, so its read is the inverse of
       // the two above — see [_style].
       notifyStyle: _style(
         await store.getPref(notifyStyleKey),
         await store.getPref(notifyRibbonKey),
       ),
-      homeSort: _homeSort(await store.getPref(homeSortKey)),
+      homeSort: _enumOrDefault(
+        HomeSort.values,
+        await store.getPref(homeSortKey),
+        HomeSort.newest,
+      ),
       fastLlmUrl: _slotValue(await store.getPref(fastLlmUrlKey)),
       fastLlmModel: _slotValue(await store.getPref(fastLlmModelKey)),
       proseLlmUrl: _slotValue(await store.getPref(proseLlmUrlKey)),
@@ -494,6 +564,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       managedServer: await store.getPref(managedServerKey) == 'true',
       routerPort: _routerPort(await store.getPref(routerPortKey)),
       modelsFolder: _slotValue(await store.getPref(modelsFolderKey)),
+      proseParallel: _proseParallel(await store.getPref(proseParallelKey)),
     );
   }
 
@@ -504,6 +575,13 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
 
   static int _routerPort(String? raw) =>
       clampRouterPort(int.tryParse(raw ?? '') ?? AppPrefs.defaultRouterPort);
+
+  /// A stored width, or one. [_routerPort]'s rule and its reason: a number
+  /// nothing wrote, or one somebody typed into the database by hand, must not
+  /// be able to put sixty requests in front of a one-slot server.
+  static int _proseParallel(String? raw) => clampProseParallel(
+        int.tryParse(raw ?? '') ?? AppPrefs.defaultProseParallel,
+      );
 
   /// A stored lookback, or the default. Unparseable is the default and
   /// out-of-range is the nearest end of the range: this number decides how far
@@ -517,36 +595,27 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// trailing newline is a `SocketException` nobody can read.
   static String _slotValue(String? raw) => raw?.trim() ?? '';
 
-  /// The stored order, or the ranking. Only the one spelling this notifier
-  /// writes reads as the clock — an absent key, a hand-edited value, or a name
-  /// a later build stopped using all leave the reader on the priority order
-  /// the app decides, which is the state every install starts in.
-  static NeedsYouSort _needsYouSort(String? raw) =>
-      raw == NeedsYouSort.newest.name
-          ? NeedsYouSort.newest
-          : NeedsYouSort.priority;
-
-  /// The stored People order, or recency. Anything this notifier did not write
-  /// — an absent key, a hand-edited value, a name a later build stopped using
-  /// — leaves the reader on the order every install starts in, rather than
-  /// throwing on the first frame of the People stop.
-  static PeopleSort _peopleSort(String? raw) {
-    for (final option in PeopleSort.values) {
+  /// A stored enum, or [fallback]. The rule every enum preference here obeys,
+  /// written once.
+  ///
+  /// ONLY a spelling this notifier wrote is honoured — the setters below all
+  /// store `value.name`, so that is the one spelling there is. An absent key,
+  /// a value somebody hand-edited into the table, or a name a later build
+  /// stopped using all read as [fallback], which is the state every fresh
+  /// install is in: the Needs You pile ranks by priority, People reads by
+  /// recency, a room and the Inbox open on what just happened, and replies are
+  /// drafted for the messages that need the owner. A preference must never be
+  /// able to throw on the first frame of the screen that reads it.
+  static T _enumOrDefault<T extends Enum>(
+    Iterable<T> values,
+    String? raw,
+    T fallback,
+  ) {
+    for (final option in values) {
       if (option.name == raw) return option;
     }
-    return PeopleSort.recent;
+    return fallback;
   }
-
-  /// The stored room order, or newest first. [_peopleSort]'s rule exactly.
-  static RoomSort _roomSort(String? raw) =>
-      raw == RoomSort.oldest.name ? RoomSort.oldest : RoomSort.newest;
-
-  /// The stored Inbox order, or newest first. [_roomSort]'s rule exactly: only
-  /// the one spelling this notifier writes reads as oldest, so an absent key
-  /// or a hand-edited value leaves the reader on the order every install
-  /// starts in rather than throwing on the Inbox's first frame.
-  static HomeSort _homeSort(String? raw) =>
-      raw == HomeSort.oldest.name ? HomeSort.oldest : HomeSort.newest;
 
   /// The stored style, or what the switch it replaced said, or on.
   ///
@@ -646,14 +715,21 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   }
 
   /// Orders the Needs You pile, in all three places it is drawn. Written as
-  /// the enum's own name, which is what [_needsYouSort] parses back.
+  /// the enum's own name, which is what [_enumOrDefault] parses back.
   Future<void> setNeedsYouSort(NeedsYouSort value) async {
     state = state.copyWith(needsYouSort: value);
     await _store.setPref(needsYouSortKey, value.name);
   }
 
+  /// When suggested replies are written without anyone asking. Written as the
+  /// enum's own name, which is what [_enumOrDefault] parses back.
+  Future<void> setDraftPolicy(DraftPolicy value) async {
+    state = state.copyWith(draftPolicy: value);
+    await _store.setPref(draftPolicyKey, value.name);
+  }
+
   /// Orders the People directory. Written as the enum's own name, which is
-  /// what [_peopleSort] parses back.
+  /// what [_enumOrDefault] parses back.
   Future<void> setPeopleSort(PeopleSort value) async {
     state = state.copyWith(peopleSort: value);
     await _store.setPref(peopleSortKey, value.name);
@@ -672,7 +748,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   }
 
   /// Orders the Inbox feed. Written as the enum's own name, which is what
-  /// [_homeSort] parses back.
+  /// [_enumOrDefault] parses back.
   Future<void> setHomeSort(HomeSort value) async {
     state = state.copyWith(homeSort: value);
     await _store.setPref(homeSortKey, value.name);
@@ -744,6 +820,23 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _store.setPref(routerPortKey, clamped.toString());
   }
 
+  /// Moves how many drafts may be in flight at the prose server.
+  ///
+  /// Clamped on the way in as well as on the way out, exactly as
+  /// [setRouterPort] is: the segmented control offers 1 / 2 / 4 / 8, and this
+  /// guards a caller that hands over a number no control on screen could have
+  /// produced.
+  ///
+  /// State first, then the write, like every setter above — and the state is
+  /// the whole mechanism: `DraftHandler.concurrency` reads this through a
+  /// closure at every launch decision, so a change moves the next draft rather
+  /// than the next launch.
+  Future<void> setProseParallel(int value) async {
+    final clamped = clampProseParallel(value);
+    state = state.copyWith(proseParallel: clamped);
+    await _store.setPref(proseParallelKey, clamped.toString());
+  }
+
   /// Points the downloader and the router at a folder. Empty means the app's
   /// own — see [AppPrefs.effectiveModelsFolder]. Trimmed on the way in as well
   /// as on the way out, for [_slotValue]'s reason: a path with a trailing
@@ -767,6 +860,14 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
 /// precedent, so the read, the setter and the settings screen's validation all
 /// mean the same thing by "a usable port".
 int clampRouterPort(int value) => value.clamp(1024, 65535);
+
+/// How wide the prose lane may be: at least one request, and never more than
+/// eight. A free function beside [clampRouterPort], on its precedent, so the
+/// read, the setter and the settings control all mean the same thing by "a
+/// usable width". Eight is the top because past it a single draft's own
+/// latency — which is what the person waiting cares about — grows faster than
+/// the batch is worth.
+int clampProseParallel(int value) => value.clamp(1, 8);
 
 /// What `main()` read from the database before the first frame, or null where
 /// nothing preloaded them — see [AppPrefsNotifier]'s constructor.

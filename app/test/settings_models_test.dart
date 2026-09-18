@@ -34,6 +34,9 @@ void main() {
     bool wireModels = true,
     Widget? modelsHeader,
     String? localServerSummary,
+    int proseParallel = 1,
+    void Function(int)? onProseParallelChanged,
+    bool wireWidth = true,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -57,6 +60,10 @@ void main() {
               ? (onSave ?? (_, {required url, required model}) {})
               : null,
           onSlotReset: onReset,
+          proseParallel: proseParallel,
+          onProseParallelChanged: wireWidth
+              ? (onProseParallelChanged ?? (_) {})
+              : null,
           modelsHeader: modelsHeader,
           localServerSummary: localServerSummary,
         ),
@@ -282,6 +289,75 @@ void main() {
       tester.getTopLeft(find.text('HEADER')).dy,
       lessThan(tester.getTopLeft(find.text('Which model each step uses')).dy),
     );
+  });
+
+  group('Drafts in flight', () {
+    testWidgets('it renders under the prose editor and reports the width',
+        (tester) async {
+      final reported = <int>[];
+      await open(
+        tester,
+        onProseParallelChanged: reported.add,
+      );
+      await expand(tester, 'Models');
+
+      expect(find.text('Drafts in flight'), findsOneWidget);
+      expect(
+        find.text(
+          'One per slot the prose server was started with (SLOTS in '
+          'local.mk, --max-num-seqs on vLLM). Extra requests queue at the '
+          'server rather than fail.',
+        ),
+        findsOneWidget,
+      );
+      // Under the prose slot it is about, not under the fast one.
+      expect(
+        tester.getTopLeft(find.text('Drafts in flight')).dy,
+        greaterThan(
+          tester.getTopLeft(find.text('Prose · reads and writes')).dy,
+        ),
+      );
+
+      final four = find.descendant(
+        of: find.byType(SegmentedButton<int>),
+        matching: find.text('4'),
+      );
+      await tester.ensureVisible(four);
+      await tester.pumpAndSettle();
+      await tester.tap(four);
+      await tester.pumpAndSettle();
+
+      // Reported the instant it moves, like every other control here: the next
+      // draft is what it governs, and one can be queued while this is open.
+      expect(reported, [4]);
+    });
+
+    testWidgets('a host that cannot store it is offered no control',
+        (tester) async {
+      await open(tester, wireWidth: false);
+      await expand(tester, 'Models');
+
+      expect(find.text('Drafts in flight'), findsNothing);
+      // And the rest of the section is exactly what it was.
+      expect(
+        find.byKey(ModelSlotEditor.saveKey(ModelSlot.prose)),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('it does not touch the collapsed summary', (tester) async {
+      // The summary names where the three slots point and nothing else. It is
+      // pinned by the test at the top of this file and by docs/settings.md,
+      // and a width is not a destination.
+      await open(tester, proseParallel: 8);
+
+      expect(
+        find.text('Fast qwen3.8 @ localhost:8082 · '
+            'Prose qwen3.8 @ localhost:8080 · '
+            'Embeddings localhost:8081'),
+        findsOneWidget,
+      );
+    });
   });
 
   testWidgets('the whole section survives a doubled text scale',

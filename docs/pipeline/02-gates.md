@@ -164,8 +164,25 @@ sequence: reset the message row and the `message_progress` cascade, fetch
 the mail body (gated mail was skipped before tier 2 ever fetched; Teams
 bodies arrived whole at ingest), requeue `extract` / `needs_you` /
 `embed_message` (the draft is chained from the extract handler, as always),
-then pump triage and the AI worker — chained in that order under the shared
-`DrainGate`, so the handlers never read an untriaged row.
+then pump triage and the worker lanes — chained in that order. All THREE of
+those requeues pass `refreshCreatedAt: true`, because a Restore is the owner
+asking for this message NOW and `claimPendingWork` drains `created_at DESC`; a
+revived row that kept its old stamp would be claimed behind every message that
+has arrived since. (The attachment work beside them is `enqueueWork`, which
+inserts fresh rows and needs no such flag.)
+
+Two things keep the handlers off an untriaged row, and only one of them is a
+gate. `claimPendingWork` holds `needs_you` and `extract` back while that
+message's triage is `pending` or `processing` — the claim clause, which is
+true no matter who pumps what. The chained launch is what makes triage get
+there FIRST in the ordinary case: `AiWorker.pump` takes its `DrainGate`
+synchronously while `TriageQueue.pump` awaits an `_emit()` before it reaches
+the gate, so launching both back to back would let the worker win the FIFO.
+Since Round C the gate those two share is the FAST lane's alone
+([10-model-routing.md](10-model-routing.md)) — which is the only lane the
+argument was ever about, because the storyline and draft lanes read rows
+triage has already spoken about. `pumpTriageThenWorkers`
+(`app/lib/services/ai_workers.dart`) is the one copy of that launch.
 
 A restored message never toasts, deliberately: `admitNotifyCandidates` is
 recency-floored and inserts with `INSERT OR IGNORE`, and restore is the user

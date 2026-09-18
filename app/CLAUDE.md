@@ -33,9 +33,15 @@ enforce the ones that are commands.
   and no-looping-animation rule): three bare `tester.pump()` calls is the
   idiom; `pump(Duration(milliseconds: 400))` for scoring passes.
 - Read pills and rows BY LABEL, never by count.
-- Seven `@Skip`'d live harnesses (`test/llm_*_live_test.dart`,
+- Eight `@Skip`'d live harnesses (`test/llm_*_live_test.dart`,
   `llm_target_verify_test.dart`) sit in every run as skipped; they never get
   accuracy thresholds (`docs/model-bakeoff.md`).
+- Never run `flutter test` or `flutter analyze` while a live `make` bench is
+  running: any load moves the timings the bench exists to measure, and the
+  run is spent.
+- The Makefile resolves `BENCH_BEARER` into the `flutter test` command line,
+  so never list a running bench's process WITH its arguments — `pgrep -f …
+  >/dev/null` answers "is it running" without printing the key.
 - Narrow scope while iterating (`flutter test test/<file>`); the full gate
   (`.claude/hooks/gate.sh <label>`) before review and commit.
 - Never await a real filesystem or socket future inside a `testWidgets`
@@ -58,5 +64,26 @@ enforce the ones that are commands.
   back button.
 - One shared prompt per LLM task across sources, pinned by parity tests;
   examples ride in the user message, never the system prompt.
-- Prefer narrow SQL statements over widening a `copyWith`; `payload_json` is
-  NULL on requeue — never plumb provenance through it.
+- Prefer narrow SQL statements over widening a `copyWith`. Request parameters
+  may ride a work row's `payload_json` — `DraftRequest` is the one encoder and
+  decoder for the draft row's pinned ids, context files and `asked` — and
+  provenance never does.
+- Three AI drains, not one: the FAST lane (needs-you, extract, embed,
+  attachments, context — on `fastDrainGateProvider`, shared with
+  `TriageQueue`), the STORYLINE lane (the six passes in ONE worker, which is
+  what keeps `docs/pipeline/06-storylines.md`'s ordering true), the DRAFT lane
+  (`draft` alone, at `AppPrefs.proseParallel` wide). A new handler goes on the
+  lane whose server it calls, and order ACROSS lanes is enqueue-and-pump, not
+  list position.
+- `requeueWork(refreshCreatedAt: true)` only where a person asked for the work
+  NOW (Regenerate, Draft reply, the two Retries, Restore, a storyline action):
+  the drain claims `created_at DESC`, so a bulk revive keeps its stamps rather
+  than jumping the whole batch in front of new mail.
+- `completeJsonStreamed` is a SEPARATE method from `completeJson`: twenty-two
+  test doubles extend `LlmClient` and override the latter's exact signature,
+  so never add a named parameter to it. `runTask(onText:)` picks the path,
+  only the draft call streams, and a streamed and a plain call of the same
+  prompt must decode to the same object.
+- Settings section titles and summary strings are pinned by
+  `settings_screen_test.dart` and by the table in `docs/settings.md` — move
+  all three together; a new segmented control is `SettingsSegments<T>`.

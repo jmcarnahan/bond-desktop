@@ -1030,10 +1030,18 @@ Use this is one tap, and it is the tap that makes it theirs.
 The offer is made AFTER the brief is stored and inside its own `try`: what the
 handler owes the app is the brief, which a model call was already spent on, so
 an offer that throws costs the offer, notes `charter_error`, and leaves the
-brief standing. A pass that offered at least one charter notes
-`charters_offered` with the count, and `ActivityLogPanel` appends
-`· N charters offered` to the brief's line — a second sentence on the same
-row rather than a row of its own, since nothing was queued for it.
+brief standing.
+
+Since Round C the offer does not happen on this handler's row at all. The brief
+handler runs on the FAST lane, and `offerDirectoryCharters` writes the same
+`charterSuggestion` column the storyline refresh pass writes — two writers on
+two lanes — so `app_providers.dart` dispatches the offer onto the STORYLINE
+lane's gate and does not wait for it (`docs/pipeline/10-model-routing.md`). The
+brief's own activity row is therefore recorded before any charter is offered
+and carries no count: what files the charter is the storyline lane's work, and
+what a reader sees on the brief's line is the files it mapped. The
+`charters_offered` key is still read by `ActivityLogPanel`, because rows
+written before this round still carry it.
 
 ### The recap line
 
@@ -1156,9 +1164,10 @@ stays `pending` and nothing reports a queue that is never claimed.
 before `StorylineAssignHandler`): `ContextReconcileHandler`, then
 `ContextDigestHandler`, then `ContextBriefHandler`. The digests come before
 the brief because the brief is compiled FROM the digest map — a drain that ran
-them the other way round would compile yesterday's map. All three come before
-the storylines and the drafts, so a reply written later in the same drain
-reads an index and a brief that already know what changed this morning.
+them the other way round would compile yesterday's map. All three are on the
+FAST lane (`docs/pipeline/10-model-routing.md`), ahead of the storyline and
+draft lanes those handlers wake — so a reply written after this pass reads an
+index and a brief that already know what changed this morning.
 
 ## Activity
 

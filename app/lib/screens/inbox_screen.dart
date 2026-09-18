@@ -2125,6 +2125,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onOpenActivityLog: _openActivityLog,
       notifyStyle: prefs.notifyStyle,
       onNotifyStyleChanged: (style) => unawaited(notifier.setNotifyStyle(style)),
+      draftPolicy: prefs.draftPolicy,
+      onDraftPolicyChanged: (value) =>
+          unawaited(notifier.setDraftPolicy(value)),
       storylineNewestFirst: prefs.storylineNewestFirst,
       onStorylineNewestFirstChanged: (on) =>
           unawaited(notifier.setStorylineNewestFirst(on)),
@@ -2237,6 +2240,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ModelSlot.embed => Future<void>.value(),
           }),
       onSlotReset: (slot) => unawaited(notifier.clearSlotTarget(slot)),
+      proseParallel: prefs.proseParallel,
+      onProseParallelChanged: (width) =>
+          unawaited(notifier.setProseParallel(width)),
       localServerSummary: SettingsLocalServerBody.summary(
         serverState,
         managed: prefs.managedServer,
@@ -4497,6 +4503,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // own typing or a sent reply — see [DraftState.suggestable].
       onSuggest: draft.suggestable ? () => unawaited(notifier.generate()) : null,
       suggesting: draft.generating,
+      // The pair being written this moment, where the thread has none stored.
+      // The per-message bars above show stored options only — a preview
+      // belongs where the reader is waiting, which is the end of the
+      // transcript.
+      streamingOptions: draft.streaming?.options ?? const [],
     );
   }
 
@@ -4587,6 +4598,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         '-${_stageSeq[_stageKey(target)] ?? 0}',
       ),
       suggestedBody: stagedBody,
+      // Above the box and never in it: the words the model is writing this
+      // moment, until the stored row stages the finished one.
+      streamingBody: draft.streaming?.replyBody,
       focusOnMount:
           focusNode == _sideComposerFocus && _focusSideOnMount == target,
       // What the model actually read, when the handler wrote it down. The

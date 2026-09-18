@@ -4837,11 +4837,32 @@ FROM storylines s''';
   /// failure is fatal would treat the first try of new work as the last try
   /// of old work — a file re-queued after two bad digests would be closed as
   /// hopeless on the attempt that was going to succeed.
+  /// [refreshCreatedAt] moves the row to the FRONT of the drain, and it is
+  /// opt-in rather than the default because most requeues are not a person
+  /// asking. [claimPendingWork] drains `created_at DESC`, so a revived `done`
+  /// row keeps its original stamp and is claimed LAST — behind every newer
+  /// prefetch — which is the exact opposite of what a Regenerate, a Retry or a
+  /// Restore means. With the flag a row that is still `pending` is moved too:
+  /// a prefetch queued behind nine others is the row a person pressing
+  /// **Draft reply** is waiting on, and leaving it in place would make the
+  /// press a no-op for as long as the queue ahead of it takes. A pending row
+  /// takes a new payload only when one is passed — a Retry or a Restore that
+  /// passes none leaves the asked-for flag and the pinned ids where they are.
+  /// A `processing` row is never touched either way — it is at the server.
+  /// The call sites where a person asked pass true: Regenerate / Draft reply,
+  /// the two Retries, Restore, a storyline action, and a context directory's
+  /// re-read, re-index and digest toggle.
+  ///
+  /// Not the default, because [requeueNeedsYouRejudge] revives up to two
+  /// hundred rows in one transaction ordered `received_at DESC`: stamping them
+  /// all with one wall-clock `now` would collapse their drain order to
+  /// `entity_id DESC` and jump the whole batch in front of new mail.
   Future<void> requeueWork(
     String kind,
     String source,
     String entityId, {
     String? payloadJson,
+    bool refreshCreatedAt = false,
   }) async {
     final now = _nowIso();
     await db.customUpdate(
@@ -4851,8 +4872,20 @@ FROM storylines s''';
       "VALUES (?, ?, ?, 'pending', 0, NULL, ?, ?, ?) "
       'ON CONFLICT(task_kind, source, entity_id) DO UPDATE SET '
       "status = 'pending', updated_at = excluded.updated_at, "
-      'payload_json = excluded.payload_json, attempts = 0, error = NULL '
-      "WHERE work_items.status IN ('done', 'error')",
+      // A pending row a person is moving to the front keeps the payload it
+      // has when the mover passes none: a Retry or a Restore must not strip
+      // the `asked` flag and the pinned ids off a draft somebody just pressed
+      // for. Every other case overwrites, null included — the doc above.
+      "payload_json = CASE WHEN work_items.status = 'pending' "
+      'AND excluded.payload_json IS NULL THEN work_items.payload_json '
+      'ELSE excluded.payload_json END, attempts = 0, error = NULL'
+      '${refreshCreatedAt ? ', created_at = excluded.created_at' : ''} '
+      "WHERE work_items.status IN ('done', 'error')"
+      // A person's request also reaches a row that is queued but not yet
+      // claimed: it is re-stamped to the front and carries the new payload.
+      // Never a `processing` row — that one is at the server, and flipping it
+      // back to pending would run the same item twice.
+      "${refreshCreatedAt ? " OR work_items.status = 'pending'" : ''}",
       variables: _args([kind, source, entityId, payloadJson, now, now]),
     );
   }

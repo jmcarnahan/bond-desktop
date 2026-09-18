@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import '../data/message_store.dart';
 import '../models/message_models.dart' show localEchoPrefix;
 import 'activity_log.dart';
+import 'ai_workers.dart';
 import 'attachments/attachment_policy.dart';
 import 'pipeline_progress.dart';
 
@@ -105,8 +106,18 @@ class RestoreService {
     // rows before the gate closed on it, and `INSERT OR IGNORE` against a
     // `done` row would mean the work is never offered again. `draft` is
     // absent on purpose — the extract handler chains it.
+    //
+    // `refreshCreatedAt`: a Restore is the owner asking for this message now,
+    // and [MessageStore.claimPendingWork] drains `created_at DESC` — a revived
+    // row that kept the old stamp would be claimed behind every message that
+    // has arrived since.
     for (final kind in const ['extract', 'needs_you', 'embed_message']) {
-      await _store.requeueWork(kind, source, sourceMessageId);
+      await _store.requeueWork(
+        kind,
+        source,
+        sourceMessageId,
+        refreshCreatedAt: true,
+      );
     }
 
     // Attachment work is ENQUEUED rather than requeued, and that is the whole
@@ -154,30 +165,16 @@ class RestoreService {
 
     await _log.record('restore', source: source, entityId: sourceMessageId);
 
-    // Fire-and-forget, and CHAINED rather than merely ordered. Launching both
-    // back to back is not enough to get triage in first: `AiWorker.pump` takes
-    // the shared DrainGate synchronously while `TriageQueue.pump` awaits an
-    // `_emit()` before it reaches the gate, so the worker would win the FIFO
-    // and the extract handler would read the row while it was still untriaged
-    // — no urgency, no reply cue, and so no draft chained for a message the
-    // owner asked to see. The sync path chains the two for the same reason
-    // (see `DrainGate`'s own comment).
+    // Fire-and-forget, and CHAINED rather than merely ordered — see
+    // [pumpTriageThenWorkers], which carries the reason.
     //
     // The app's queue drains `TriageQueue.sources` — email AND teams — so a
     // restored chat message drains here too. (`claimPendingTriage` on its own
     // defaults to email, which is why this is worth saying.)
     //
-    // Each half swallows its own failure: a triage drain that parked on a dead
-    // session must not take the AI worker's pump down with it.
-    unawaited(_pumpBoth());
-  }
-
-  Future<void> _pumpBoth() async {
-    try {
-      await _pumpTriage?.call();
-    } catch (_) {}
-    try {
-      await _pumpWork?.call();
-    } catch (_) {}
+    // Each half swallows its own failure — see [pumpTriageThenWorkersQuietly].
+    unawaited(
+      pumpTriageThenWorkersQuietly(triage: _pumpTriage, workers: _pumpWork),
+    );
   }
 }

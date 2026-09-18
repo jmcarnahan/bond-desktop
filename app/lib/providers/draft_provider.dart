@@ -7,12 +7,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/message_store.dart';
+import '../models/draft_request.dart';
 import '../models/message_models.dart' show ConversationState, Message;
 import '../services/ai_worker.dart';
 import '../services/backend/auth_session.dart';
 import '../services/backend/backend_types.dart';
 import '../services/backend/mail_backend.dart';
 import '../services/backend/teams_backend.dart';
+import '../services/draft_stream.dart';
 import '../services/graph_mail.dart';
 import '../services/graph_teams.dart' show GraphTeamsException;
 import '../services/llm/draft_task.dart' show DraftOption;
@@ -122,6 +124,60 @@ enum SendOutcome {
   failed,
 }
 
+/// The draft being written RIGHT NOW, as much of it as has arrived.
+///
+/// Not a draft row and never stored: it is the model's answer mid-sentence,
+/// assembled from [DraftStreamEvent] deltas so a person waiting on a 27B has
+/// something to read before the row lands. The stored row replaces it the
+/// moment it exists — see [DraftNotifier.load] — so nothing downstream ever
+/// has to decide which of the two is the real suggestion.
+@immutable
+class StreamingDraft {
+  final String replyBody;
+
+  /// The short options, in the order the model wrote them, each growing in
+  /// place. A stance can arrive before its body or after it; both append.
+  final List<({String stance, String body})> options;
+
+  const StreamingDraft.empty()
+      : replyBody = '',
+        options = const [];
+
+  const StreamingDraft._(this.replyBody, this.options);
+
+  /// This preview with one delta folded in. Returns a NEW value — the state is
+  /// immutable, and the composer rebuilds on the change.
+  ///
+  /// A path this does not recognise is ignored rather than raised: the reader
+  /// upstream is schema-agnostic on purpose, and a draft is not worth losing
+  /// to a key nobody thought about.
+  StreamingDraft apply(String path, String delta) {
+    if (path == 'reply_body') {
+      return StreamingDraft._(replyBody + delta, options);
+    }
+    final match = DraftStreamEvent.optionPath.firstMatch(path);
+    if (match == null) return this;
+    final index = int.parse(match.group(1)!);
+    // The schema allows two. The ceiling is here because the index comes off
+    // generated text, and a list grown to a number the model invented would be
+    // a memory question rather than a display one.
+    if (index >= _maxOptions) return this;
+    final grown = <({String stance, String body})>[
+      ...options,
+      for (var i = options.length; i <= index; i++) (stance: '', body: ''),
+    ];
+    final current = grown[index];
+    grown[index] = match.group(2) == 'stance'
+        ? (stance: current.stance + delta, body: current.body)
+        : (stance: current.stance, body: current.body + delta);
+    return StreamingDraft._(replyBody, grown);
+  }
+
+  bool get isEmpty => replyBody.isEmpty && options.isEmpty;
+
+  static const int _maxOptions = 8;
+}
+
 @immutable
 class DraftState {
   /// The stored `drafts` row the composer surface is holding: the answer to the
@@ -165,6 +221,11 @@ class DraftState {
   /// for that has not left yet.
   final PendingSend? pending;
 
+  /// The draft the model is writing this moment, or null when none is being
+  /// written for this conversation. A preview only: the composer renders it
+  /// ABOVE the box and never into it.
+  final StreamingDraft? streaming;
+
   /// The text of a send that has left the undo window but has not finished
   /// landing — set when the timer fires, cleared once the send returns.
   ///
@@ -184,6 +245,7 @@ class DraftState {
     this.sendEpoch = 0,
     this.pending,
     this.inFlightBody,
+    this.streaming,
   });
 
   /// The optimistic bubble to draw under [messages], or null for none.
@@ -277,6 +339,7 @@ class DraftState {
     int? sendEpoch,
     Object? pending = _unset,
     Object? inFlightBody = _unset,
+    Object? streaming = _unset,
   }) =>
       DraftState(
         draft: identical(draft, _unset)
@@ -294,6 +357,9 @@ class DraftState {
         inFlightBody: identical(inFlightBody, _unset)
             ? this.inFlightBody
             : inFlightBody as String?,
+        streaming: identical(streaming, _unset)
+            ? this.streaming
+            : streaming as StreamingDraft?,
       );
 
   /// Separates "not passed" from "passed as null" on [copyWith], where the two
@@ -354,6 +420,26 @@ class DraftNotifier extends StateNotifier<DraftState> {
   final Duration _undoWindow;
 
   StreamSubscription<WorkProgress>? _progress;
+
+  /// This conversation's share of the draft stream, or null when no bus was
+  /// given — which is every test that does not ask for one.
+  StreamSubscription<DraftStreamEvent>? _draftStream;
+
+  /// The last thing the stream said was `done`. Read by [load]: a reload that
+  /// runs for some OTHER reason mid-stream must not wipe the preview, and the
+  /// reload a `done` schedules must.
+  bool _streamDone = false;
+
+  /// Which MESSAGE the preview is of, or null when none is being written.
+  ///
+  /// A conversation is not fine-grained enough to accumulate on. Two drafts
+  /// for one thread can be in flight at once — the prose lane runs at
+  /// `AppPrefs.proseParallel` and a thread can hold two unanswered messages —
+  /// and their deltas would interleave into one preview that reads as a reply
+  /// to neither. First in flight wins; the second is simply not previewed, and
+  /// its stored row stages as it always has.
+  String? _streamingId;
+
   Timer? _reload;
   Timer? _pendingSend;
 
@@ -368,6 +454,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
     this._onSent,
     Future<bool> Function(Uri url)? launch,
     Duration? undoWindow,
+    DraftStreamBus? stream,
   })  : _source = target.source,
         conversationKey = target.conversationKey,
         _worker = worker,
@@ -379,10 +466,53 @@ class DraftNotifier extends StateNotifier<DraftState> {
       if (progress.kind != 'draft') return;
       _scheduleReload();
     });
+    // This conversation's drafts and nobody else's. The bus carries every
+    // draft the app is writing, and a composer that accumulated another
+    // thread's sentences would be showing the wrong reply to the wrong person.
+    _draftStream = stream?.stream
+        .where((event) =>
+            event.source == _source && event.conversationKey == conversationKey)
+        .listen(_onStream);
     // Reading is the only thing construction does. A composer that appears
     // holding the draft the queue already wrote is the point of caching it;
     // asking for a NEW one is always somebody's click.
     unawaited(load());
+  }
+
+  /// One fragment of a draft being written for this conversation, or the word
+  /// that it has stopped being written.
+  void _onStream(DraftStreamEvent event) {
+    if (!mounted) return;
+    if (event.done) {
+      // Only for the draft being previewed. A `done` for the OTHER message in
+      // flight says nothing about the words on screen, and acting on it would
+      // clear a preview that is still growing.
+      if (event.sourceMessageId != _streamingId) return;
+      // The row is already stored by the time this arrives — the handler
+      // publishes it after the write — so the reload below is what swaps the
+      // preview for the real suggestion, in one state write.
+      _streamDone = true;
+      _scheduleReload();
+      return;
+    }
+
+    // Three cases, and only the first appends. Nothing in flight, or the last
+    // one finished: this delta STARTS a preview, which is also what keeps a
+    // retry's first words off the end of the failed attempt's text inside the
+    // reload debounce. A different message while one is still being written:
+    // ignored, per [_streamingId].
+    final StreamingDraft base;
+    if (_streamDone || _streamingId == null) {
+      base = const StreamingDraft.empty();
+      _streamingId = event.sourceMessageId;
+      _streamDone = false;
+    } else if (_streamingId != event.sourceMessageId) {
+      return;
+    } else {
+      base = state.streaming ?? const StreamingDraft.empty();
+    }
+
+    state = state.copyWith(streaming: base.apply(event.path, event.delta));
   }
 
   void _scheduleReload() {
@@ -396,6 +526,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
   void dispose() {
     _reload?.cancel();
     _progress?.cancel();
+    _draftStream?.cancel();
     // Cancelled, NOT flushed. A thread closing while an undo window is open
     // takes the queued reply with it: the last thing the user did was navigate
     // away, and firing a send on the way out is the one behaviour nobody could
@@ -417,6 +548,11 @@ class DraftNotifier extends StateNotifier<DraftState> {
       draft: read.newest,
       threadDrafts: read.byMessage,
       generating: settled ? false : state.generating,
+      // The same shape as [generating] above, and for the same reason: a
+      // reload that ran for an unrelated reason while the model is still
+      // writing must leave the preview alone, and the one a `done` scheduled
+      // must clear it in the same write that stages the row.
+      streaming: _streamDone ? null : state.streaming,
     );
 
     final capability = await _capability();
@@ -518,7 +654,10 @@ class DraftNotifier extends StateNotifier<DraftState> {
   ///
   /// The payload carries only the keys that have something in them, so a
   /// consulted file and a pinned document never have to be asked for together
-  /// to be asked for at all.
+  /// to be asked for at all — and it always carries `asked`, which is what
+  /// tells the handler to skip the reply DECISION. A person pressing this
+  /// button has already decided a reply is wanted, and a model that came back
+  /// "no" would leave them an empty box.
   Future<void> generate({
     List<String> pinnedAttachmentIds = const [],
     List<int> contextFileIds = const [],
@@ -544,15 +683,17 @@ class DraftNotifier extends StateNotifier<DraftState> {
         'draft',
         _source,
         messageId,
-        payloadJson:
-            (pinnedAttachmentIds.isEmpty && contextFileIds.isEmpty)
-                ? null
-                : jsonEncode({
-                    if (pinnedAttachmentIds.isNotEmpty)
-                      'pinned_attachment_ids': pinnedAttachmentIds,
-                    if (contextFileIds.isNotEmpty)
-                      'context_file_ids': contextFileIds,
-                  }),
+        // The one requeue a person is definitely waiting on: the claim order
+        // is `created_at DESC`, so without this the asked-for draft would be
+        // handed over after every prefetch queued since this message landed.
+        refreshCreatedAt: true,
+        // Encoded by the value the handler decodes, so the two ends of this
+        // wire cannot drift apart.
+        payloadJson: DraftRequest(
+          pinnedAttachmentIds: pinnedAttachmentIds,
+          contextFileIds: contextFileIds,
+          asked: true,
+        ).encode(),
       );
     } catch (e) {
       state = state.copyWith(
@@ -561,7 +702,12 @@ class DraftNotifier extends StateNotifier<DraftState> {
       );
       return;
     }
-    state = state.copyWith(draft: null);
+    // Both, together: the row this pane was holding is gone, and so is any
+    // preview of the one before it. What comes next is the draft being asked
+    // for now.
+    _streamDone = false;
+    _streamingId = null;
+    state = state.copyWith(draft: null, streaming: null);
 
     final pump = _worker?.pump();
     if (pump == null) {
@@ -988,8 +1134,13 @@ final draftProvider =
     ref.watch(mailBackendProvider),
     target,
     teams: ref.watch(teamsBackendProvider),
-    worker: ref.watch(aiWorkerProvider),
+    // The DRAFT lane: this notifier pumps for one draft and listens for
+    // `kind == 'draft'`, and both are that worker's alone now.
+    worker: ref.watch(draftWorkerProvider),
     pipeline: ref.watch(pipelineProgressProvider),
+    // The words of a draft as it is written, for this conversation's share of
+    // the bus the draft handler publishes on.
+    stream: ref.watch(draftStreamBusProvider),
     onSent: () => ref.read(conversationsProvider.notifier).load(),
   ),
 );

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 // `show`: drift generates an `ActivityEvent` row class from the
@@ -5,6 +6,7 @@ import 'dart:typed_data';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/activity_log.dart';
+import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/gate_repair_service.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
@@ -59,13 +61,24 @@ void main() {
 
   tearDown(() async => db.close());
 
-  GateRepairService serviceOn(MessageStore on) => GateRepairService(
+  GateRepairService serviceOn(MessageStore on, {DrainGate? storylineGate}) =>
+      GateRepairService(
         on,
         StorylineService(on, NeverCalledLlm()),
         activityLog: ActivityLog(on),
+        storylineGate: storylineGate,
       );
 
   GateRepairService service() => serviceOn(store);
+
+  /// Waits for whatever this gate is already holding, and nothing else.
+  ///
+  /// [DrainGate] is a FIFO chain, and `afterGate` queues the storyline half
+  /// synchronously before its own future completes — so a body handed over
+  /// afterwards is strictly behind that repair, and awaiting it is awaiting
+  /// the repair. A `Future.delayed` here would be a guess about how long the
+  /// store takes.
+  Future<void> fence(DrainGate gate) => gate.run(() async {});
 
   Uint8List bytes(List<int> values) => Uint8List.fromList(values);
 
@@ -137,6 +150,82 @@ void main() {
     final found = rows.where((e) => e.kind == 'gate_repair');
     return found.isEmpty ? null : found.first;
   }
+
+  group('the storyline lane', () {
+    test('a repair issued mid-drain runs after that drain', () async {
+      await seedMessage(id: 'm1');
+      await seedEmbedded('conv-1');
+      await seedStoryline('sl-1');
+      await store.enqueueWork('storyline', 'email', 'conv-1');
+
+      // The lane, busy. Until the drains were split this could not happen:
+      // `afterGate` runs inside the triage drain, which held the one gate the
+      // storyline passes also took.
+      final gate = DrainGate();
+      final sweeping = Completer<void>();
+      final swept = gate.run(() => sweeping.future);
+
+      final repaired =
+          serviceOn(store, storylineGate: gate).afterGate(
+        'email',
+        'm1',
+        reason: 'extracted_then_gated',
+      );
+
+      // The message side is answered immediately — the triage drain awaits
+      // this, and must not wait minutes behind a sweep.
+      final outcome = await repaired;
+      expect(outcome.allGated, isTrue);
+      // Nothing storyline-side has moved yet: the lane still holds the gate.
+      expect(await store.membersOf('sl-1'), hasLength(1));
+      expect(await store.workStatusOf('storyline', 'email', 'conv-1'),
+          'pending');
+
+      sweeping.complete();
+      await swept;
+      await fence(gate);
+
+      expect(await store.membersOf('sl-1'), isEmpty);
+      expect((await store.getConversationAi('email', 'conv-1'))!['embedding'],
+          isNull);
+      // The sharp one: a delete that landed while the lane held this row's
+      // claim would have missed it, and the assign pass would have filed the
+      // thread straight back after the eviction.
+      expect(await store.workStatusOf('storyline', 'email', 'conv-1'), isNull);
+    });
+
+    test('the deferred half writes its own row', () async {
+      await seedMessage(id: 'm1');
+      await seedEmbedded('conv-1');
+      await seedStoryline('sl-1');
+
+      final gate = DrainGate();
+      await serviceOn(store, storylineGate: gate)
+          .afterGate('email', 'm1', reason: 'ignored');
+      await fence(gate);
+
+      final event = (await repairRow())!;
+      expect(event.detail['reason'], 'ignored');
+      expect(event.detail['storylines'], 1);
+      expect(event.detail['embedding_cleared'], isTrue);
+    });
+
+    test('with no gate it is inline, exactly as it always was', () async {
+      await seedMessage(id: 'm1');
+      await seedEmbedded('conv-1');
+      await seedStoryline('sl-1');
+
+      // Every test in this file that predates the lane takes this path, and
+      // so does any build without a storyline worker: the counts come back on
+      // the outcome, awaited.
+      final outcome =
+          await service().afterGate('email', 'm1', reason: 'ignored');
+
+      expect(outcome.storylines, 1);
+      expect(outcome.embeddingCleared, isTrue);
+      expect(await store.membersOf('sl-1'), isEmpty);
+    });
+  });
 
   group('afterGate', () {
     test('an all-gated thread loses its memberships, its vector and its '

@@ -266,6 +266,8 @@ class ContextDirectoriesActions {
           'local',
           id,
           payloadJson: '{"force":true}',
+          // A person is waiting: front of the lane (see `requeueWork`).
+          refreshCreatedAt: true,
         );
     unawaited(_ref.read(aiWorkerProvider).pump());
     _ref.invalidate(contextDirectoriesProvider);
@@ -317,6 +319,8 @@ class ContextDirectoriesActions {
           'local',
           id,
           payloadJson: '{"force":true}',
+          // A person is waiting: front of the lane (see `requeueWork`).
+          refreshCreatedAt: true,
         );
     unawaited(_ref.read(aiWorkerProvider).pump());
     _ref.invalidate(contextDirectoriesProvider);
@@ -347,6 +351,8 @@ class ContextDirectoriesActions {
             'local',
             id,
             payloadJson: '{"force":true}',
+            // A person is waiting: front of the lane (see `requeueWork`).
+            refreshCreatedAt: true,
           );
       unawaited(_ref.read(aiWorkerProvider).pump());
     }

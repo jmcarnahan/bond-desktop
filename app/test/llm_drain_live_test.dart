@@ -14,6 +14,7 @@ import 'fixtures/bench_target.dart';
 import 'fixtures/test_db.dart';
 
 import 'fixtures/corpus.dart';
+import 'fixtures/corpus_seed.dart';
 
 /// What the drain's concurrency is actually worth, measured rather than
 /// reasoned about.
@@ -93,26 +94,10 @@ void main() {
     final db = testDb();
     final store = MessageStore(db);
     try {
-      // Body, headers and all, the way a delta page plus a detail fetch would
-      // have left it — the queue is given no `ensureBody`, so what is stored
-      // here is all it will ever have to read.
-      for (final entry in emailCorpus) {
-        final message = entry.message;
-        await store.upsertMessage({
-          'source': message.source,
-          'source_message_id': entry.id,
-          'conversation_key': entry.conversationKey,
-          'direction': message.outbound ? 'outbound' : 'inbound',
-          'subject': message.subject,
-          'from_name': message.fromName,
-          'from_address': message.fromAddress,
-          'received_at': message.receivedAt,
-          'body_preview': message.bodyPreview,
-          'body_text': message.bodyText,
-          'source_meta_json': message.sourceMetaJson,
-          'triage_status': 'pending',
-        });
-      }
+      // One copy, under the corpus's own ids — see [seedCorpus], which the
+      // pipeline bench shares. The assertion below is against those ids, so
+      // this bench measures exactly the mail it always did.
+      await seedCorpus(store);
 
       // Observed, which the old version could not be: a wall clock around
       // `pump()` says how long the backlog took and nothing about where the

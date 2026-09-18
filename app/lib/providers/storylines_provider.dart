@@ -329,7 +329,15 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
       _auditing.remove(id);
       _republish();
     });
-    await _store.requeueWork('storyline_audit', _source, id);
+    // `refreshCreatedAt`: the owner pressed Check, so the audit goes to the
+    // front of the storyline lane rather than behind whatever the sweep has
+    // queued since this storyline was last audited.
+    await _store.requeueWork(
+      'storyline_audit',
+      _source,
+      id,
+      refreshCreatedAt: true,
+    );
     unawaited(_worker?.pump());
   }
 
@@ -362,7 +370,9 @@ final storylinesProvider =
   (ref) => StorylinesNotifier(
     ref.watch(messageStoreProvider),
     ref.watch(storylineServiceProvider),
-    aiWorker: ref.watch(aiWorkerProvider),
+    // The STORYLINE lane: every kind this notifier filters for is drained
+    // there, and its actions (a charter save, an audit) queue work for it.
+    aiWorker: ref.watch(storylineWorkerProvider),
     onMembersChanged: () {
       ref.invalidate(storylineMembersProvider);
       ref.invalidate(storylineThreadIdsProvider);
@@ -652,6 +662,8 @@ final storylineTimelineProvider = StateNotifierProvider.family<
   (ref, storylineId) => StorylineTimelineNotifier(
     ref.watch(messageStoreProvider),
     storylineId,
-    aiWorker: ref.watch(aiWorkerProvider),
+    // The STORYLINE lane, for [storylinesProvider]'s reason: it listens to the
+    // same kinds the list does.
+    aiWorker: ref.watch(storylineWorkerProvider),
   ),
 );

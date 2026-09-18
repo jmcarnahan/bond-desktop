@@ -59,6 +59,9 @@ Map<String, Object?> benchResultJson({
                   'n': m.n,
                   'failures': m.failures,
                   'p50_ms': m.p50Ms,
+                  // Null on every task that does not stream, which is all of
+                  // them but the draft. Additive, so `schema` stays 1.
+                  'first_token_p50_ms': m.firstTokenP50Ms,
                   'p95_ms': m.p95Ms,
                   'mean_ms': m.meanMs,
                   'total_ms': m.totalMs,

@@ -26,6 +26,7 @@ void main() {
     FocusNode? focusNode,
     List<ProvenanceFile> provenanceFiles = const [],
     void Function(ProvenanceFile file)? onOpenProvenanceFile,
+    String? streamingBody,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -36,6 +37,7 @@ void main() {
           provenance: provenance,
           provenanceFiles: provenanceFiles,
           onOpenProvenanceFile: onOpenProvenanceFile,
+          streamingBody: streamingBody,
           generating: generating,
           sending: sending,
           capability: capability,
@@ -442,6 +444,62 @@ void main() {
       );
 
       expect(find.byKey(Composer.provenanceChipKeyFor(7)), findsNothing);
+    });
+  });
+
+  group('the live preview', () {
+    testWidgets('shows the words as they are written, above the box',
+        (tester) async {
+      await pumpComposer(
+        tester,
+        streamingBody: 'Hi Tom, Friday still',
+        onSend: (_) {},
+      );
+
+      expect(find.byKey(Composer.streamingPreviewKey), findsOneWidget);
+      expect(find.text('Drafting…'), findsOneWidget);
+      expect(find.text('Hi Tom, Friday still▍'), findsOneWidget);
+    });
+
+    testWidgets('and never puts them in the box', (tester) async {
+      // The controller belongs to the reader. A sentence they started while
+      // waiting has to survive the draft arriving, and the stored row stages
+      // through the ordinary path when it lands.
+      await pumpComposer(
+        tester,
+        streamingBody: 'Hi Tom, Friday still',
+        onSend: (_) {},
+      );
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        isEmpty,
+      );
+    });
+
+    testWidgets('is absent when nothing is being written', (tester) async {
+      await pumpComposer(tester, onSend: (_) {});
+      expect(find.byKey(Composer.streamingPreviewKey), findsNothing);
+
+      await pumpComposer(tester, streamingBody: '', onSend: (_) {});
+      expect(find.byKey(Composer.streamingPreviewKey), findsNothing);
+      expect(find.text('Drafting…'), findsNothing);
+    });
+
+    testWidgets('leaves the buttons exactly as they were', (tester) async {
+      // An empty box still offers to write one, and Send stays disabled: the
+      // preview is not text the reader can send.
+      await pumpComposer(
+        tester,
+        streamingBody: 'half a reply',
+        onSend: (_) {},
+        onGenerate: () {},
+      );
+
+      expect(find.text('Draft reply'), findsOneWidget);
+      expect(find.text('Regenerate'), findsNothing);
+      final send = tester.widget<ElevatedButton>(find.byType(ElevatedButton));
+      expect(send.onPressed, isNull);
     });
   });
 }

@@ -28,12 +28,24 @@ is always the authority when they disagree.
 | 10 | Attachments — text extraction and chunk embeddings, then one digest per document | **yes**‡ | [12-attachments.md](12-attachments.md) |
 | 10b | Context directories — a registered folder re-read on every sync, chunked and embedded, then one digest per file, one brief per directory, and one section pick per directory-fed draft | **yes**‡‡ | [13-context-directories.md](13-context-directories.md) |
 | 11 | **Storylines** — assign, sweep, refresh, audit, recruit, recap | **yes** | [06-storylines.md](06-storylines.md) |
-| 12 | **Reply decision** — does this message need an answer | **yes** | [07-replies.md](07-replies.md) |
-| 13 | **Draft generation** — the suggested reply itself | **yes** | [07-replies.md](07-replies.md) |
+| 12 | **Reply decision** — does this message need an answer; lazy by policy, and skipped outright when a person asked — see 07 | **yes** | [07-replies.md](07-replies.md) |
+| 13 | **Draft generation** — the suggested reply itself; lazy by policy — see 07 | **yes** | [07-replies.md](07-replies.md) |
 | 14 | Attention rescore — Needs You ranking | no | [08-attention.md](08-attention.md) |
 | 15 | Notification settle — one verdict per message | no | [09-notifications.md](09-notifications.md) |
 
 \* embeddings call the embedding server, but no chat model.
+
+**Stage numbers are the order inside a lane, not a single queue.** Since Round
+C (2026-09) the work queue drains through THREE `AiWorker` instances on three
+gates: a fast lane (stages 6–10b, plus triage's own queue in front of it on
+the same gate), a storyline lane (stage 11) and a draft lane (stages 12–13).
+Within a lane the order above is exactly the order the work happens in; ACROSS
+lanes, a stage reaches the next one by enqueuing a row and waking the lane that
+owns it. What that buys is stage 5's seconds: a new message's triage,
+needs-you verdict and extraction no longer wait behind a storyline recap or a
+draft. The lanes, their gates and the two writers that ride the storyline gate
+are in [10-model-routing.md](10-model-routing.md); `make bench-pipeline`
+measures the whole thing end to end.
 
 The attachment row sits here because this is where the two handlers register:
 `AttachmentTextHandler` and `AttachmentDigestHandler` go on the drain between

@@ -17,6 +17,7 @@ import '../data/message_store.dart';
 import '../data/setup_store.dart';
 import '../services/activity_log.dart';
 import '../services/ai_worker.dart';
+import '../services/ai_workers.dart';
 import '../services/attachments/attachment_bytes.dart';
 import '../services/attachments/attachment_cache.dart';
 import '../services/attachments/attachment_digest_handler.dart';
@@ -35,6 +36,7 @@ import '../services/context/context_reconcile_handler.dart';
 import '../services/context/context_retriever.dart';
 import '../services/context/directory_access.dart';
 import '../services/draft_handler.dart';
+import '../services/draft_stream.dart';
 import '../services/drain_gate.dart';
 import '../services/embed_handler.dart';
 import '../services/extract_handler.dart';
@@ -252,8 +254,16 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
     // nothing rather than throw on a timer.
     onReady: () {
       try {
-        ref.read(triageQueueProvider).pump();
-        ref.read(aiWorkerProvider).pump();
+        // Chained, not launched side by side, for the reason every other
+        // caller chains — see [pumpTriageThenWorkers]. Every lane, because a
+        // server coming back is news to all three and the fast lane's own
+        // `onDrained` would only reach the others if it had work of its own.
+        unawaited(
+          pumpTriageThenWorkers(
+            triage: () => ref.read(triageQueueProvider).pump(),
+            workers: () => ref.read(aiWorkersProvider).pumpAll(),
+          ),
+        );
       } catch (_) {}
     },
   );
@@ -359,6 +369,17 @@ final activityLogProvider = Provider<ActivityLog>((ref) {
 /// subscription it already has or its table would freeze mid-sync.
 final progressBusProvider = Provider<ProgressBus>((ref) {
   final bus = ProgressBus();
+  ref.onDispose(bus.dispose);
+  return bus;
+});
+
+/// Where a draft's words are announced while the model is writing them.
+///
+/// Beside [progressBusProvider] and watching nothing, for exactly its reason:
+/// a composer open across a backend switch has to keep the subscription it
+/// already has, or the preview it is showing would stop growing mid-sentence.
+final draftStreamBusProvider = Provider<DraftStreamBus>((ref) {
+  final bus = DraftStreamBus();
   ref.onDispose(bus.dispose);
   return bus;
 });
@@ -660,19 +681,39 @@ final fastLlmClientProvider = Provider<LlmClient>(
   ),
 );
 
-/// The one gate the two DRAINS hold while at the model servers — servers
-/// plural since the split above, which is why the gate is about drains rather
-/// than about a server.
+/// The FAST lane's gate: the triage drain and the fast worker, and nothing
+/// else.
 ///
-/// It keeps a triage drain and a worker drain from running at once: both send
-/// their bulk work to the fast server, so overlapping them would double-book
-/// its slots and have each drain's byte-identical system prompt evict the
-/// other's from the KV prefix cache. It deliberately does NOT serialize the
-/// handful of requests one drain has in flight — those are batched by the
-/// server on purpose, and are what the slot count is sized for.
+/// It keeps those two drains from running at once, because both send their
+/// bulk work to the fast server: overlapping them would double-book its slots
+/// and have each drain's byte-identical system prompt evict the other's from
+/// the KV prefix cache. It deliberately does NOT serialize the handful of
+/// requests one drain has in flight — those are batched by the server on
+/// purpose, and are what the slot count is sized for.
 ///
 /// One instance for the app, or it would serialize nothing — see [DrainGate].
-final drainGateProvider = Provider<DrainGate>((ref) => DrainGate());
+final fastDrainGateProvider = Provider<DrainGate>((ref) => DrainGate());
+
+/// The STORYLINE lane's gate — the six storyline passes, and the two writers
+/// that have to be serialised against them.
+///
+/// Its own gate rather than the fast one, because the storyline passes are
+/// where the 27B's minutes are: a recap behind the fast lane's gate would sit
+/// in front of the next message's triage, which is the whole thing the split
+/// is for. The two writers it also holds are [gateRepairServiceProvider]'s
+/// storyline half and the charter offer wired into [ContextBriefHandler]
+/// below; both used to be serialised against the passes by accident, because
+/// there was only ever one gate.
+final storylineDrainGateProvider = Provider<DrainGate>((ref) => DrainGate());
+
+/// The DRAFT lane's gate. One drain, on the prose server, at
+/// `AppPrefs.proseParallel` items in flight.
+///
+/// A gate of its own so a draft a person is waiting for never sits behind a
+/// sweep or twenty recaps. Where this lane and the storyline lane genuinely
+/// contend — both send prose to the 27B — the SERVER queues them, which costs
+/// the draft one recap rather than a whole drain pass.
+final draftDrainGateProvider = Provider<DrainGate>((ref) => DrainGate());
 
 /// What a gate that speaks late has to undo — see [GateRepairService].
 ///
@@ -686,6 +727,10 @@ final gateRepairServiceProvider = Provider<GateRepairService>(
     ref.watch(messageStoreProvider),
     ref.watch(storylineServiceProvider),
     activityLog: ref.watch(activityLogProvider),
+    // The lane whose passes this repair has to be serialised against — see
+    // [GateRepairService]. Until the drains were split, the one shared gate
+    // did this by accident.
+    storylineGate: ref.watch(storylineDrainGateProvider),
   ),
 );
 
@@ -700,7 +745,9 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     // the thread. Taken off [MailSync], so this stays typed to the interface
     // a test can override.
     ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
-    gate: ref.watch(drainGateProvider),
+    // The FAST lane's gate: this drain and the fast worker share the fast
+    // server, and nothing else is on it.
+    gate: ref.watch(fastDrainGateProvider),
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
     // The knock on the worker's door. Extraction and needs-you are no longer
@@ -836,7 +883,9 @@ final restoreServiceProvider = Provider<RestoreService>(
     progress: ref.watch(pipelineProgressProvider),
     ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
     pumpTriage: () => ref.read(triageQueueProvider).pump(),
-    pumpWork: () => ref.read(aiWorkerProvider).pump(),
+    // Every lane, not the fast one: a restored message owes an extraction AND
+    // whatever that extraction queues.
+    pumpWork: () => ref.read(aiWorkersProvider).pumpAll(),
     activityLog: ref.watch(activityLogProvider),
   ),
 );
@@ -851,7 +900,9 @@ final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
     ref.watch(messageStoreProvider),
     progress: ref.watch(pipelineProgressProvider),
     pumpTriage: () => ref.read(triageQueueProvider).pump(),
-    pumpWork: () => ref.read(aiWorkerProvider).pump(),
+    // Every lane, for [restoreServiceProvider]'s reason: a Retry can owe a
+    // stage on any of the three.
+    pumpWork: () => ref.read(aiWorkersProvider).pumpAll(),
     // For the settle backstop a Retry runs when a row owes no stage at all.
     threshold: attentionThresholdReader(ref.watch(messageStoreProvider)),
     // An Ignore is a gate arriving after the pipeline has already run.
@@ -862,15 +913,29 @@ final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
   ),
 );
 
-/// The AI work queue. One for the whole app, for the same reason there is one
-/// [triageQueueProvider]: it is one queue over shared rows.
+/// The FAST lane's worker — the kinds a new message's first seconds run
+/// through, and nothing that dials the 27B.
 ///
-/// Its handlers drain in list order, so the order here is the order the work
-/// happens in.
+/// One for the whole app, for the same reason there is one
+/// [triageQueueProvider]: it is one queue over shared rows. Its handlers drain
+/// in list order, so the order here is the order the work happens in — and
+/// that order is unchanged from when this list held all fourteen kinds; what
+/// left it are the six storyline passes ([storylineWorkerProvider]) and the
+/// draft ([draftWorkerProvider]).
+///
+/// It KEEPS its name and its type. Twenty tests construct an `AiWorker`
+/// directly and six read this provider; the fast lane is what every one of
+/// them means by "the worker".
+///
+/// Its own load on the fast server is one kind at a time at K=3 — needs-you,
+/// then extraction — and the gate it shares with the triage drain is what
+/// keeps that K=3 off the back of triage's. The fourth slot is the STORYLINE
+/// lane's: that lane is on a gate of its own and its membership confirms are
+/// fast-server calls, so the worst case at that server is three plus one,
+/// which is `FAST_SLOTS`.
 final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
-  final storylines = ref.watch(storylineServiceProvider);
-  final worker = AiWorker(
-    ref.watch(messageStoreProvider),
+  return _lane(
+    ref,
     handlers: [
       // First, and it drains completely before extraction starts. The verdict
       // has to be ON the row before anything asks about it: extraction's draft
@@ -913,6 +978,21 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
         progress: ref.watch(pipelineProgressProvider),
+        // The draft lane, woken as the row is written rather than at the end
+        // of this drain — `AttachmentDigestHandler.onRequeue`'s shape, and the
+        // same `read`-inside-a-closure reasoning: a `watch` here would be a
+        // cycle through the provider being built, and a `read` from inside a
+        // drain is a read of a worker that already exists. On a sixty-message
+        // backlog this is the difference between a prefetch starting seconds
+        // after its extraction and minutes after it.
+        onDraftQueued: () => unawaited(ref.read(draftWorkerProvider).pump()),
+        // When a reply is written ahead of being asked for — the user's
+        // setting, read at the moment each message finishes rather than
+        // captured here. `ref.read` inside the closure, never `watch`, in
+        // [contextRetrieverProvider]'s `selectExpand` shape and for its
+        // reason: a watch would rebuild this provider, and the worker holding
+        // it mid-drain, the moment somebody moved the control.
+        draftPolicy: () => ref.read(appPrefsProvider).draftPolicy,
       ),
       // After extraction and before the storylines. After, because the summary
       // it embeds is triage's and the drain order keeps the fast server's slots
@@ -992,8 +1072,64 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         // is read rather than where it is declared, so reaching forward to
         // [storylineServiceProvider] — declared further down this file — is
         // ordinary rather than a cycle.
-        onBriefChanged: ref.watch(storylineServiceProvider).offerDirectoryCharters,
+        //
+        // Dispatched onto the STORYLINE lane, because the offer writes a
+        // storyline's `charterSuggestion` and the refresh pass writes the same
+        // column: with the drains split they are two writers on two lanes, and
+        // last-writer-wins between them is a suggestion that flickers. The
+        // gate makes the offer wait for the pass instead.
+        //
+        // Not awaited, and the return value is therefore 0: this handler is on
+        // the FAST lane, and waiting here would put a sweep in front of the
+        // next message's context brief. The cost is one activity row that no
+        // longer counts charters offered — `charters_offered` is simply absent
+        // now, which is what the key's `if (charters > 0)` guard already does
+        // when nothing was offered.
+        onBriefChanged: (dirId) async {
+          final gate = ref.read(storylineDrainGateProvider);
+          final storylines = ref.read(storylineServiceProvider);
+          unawaited(
+            gate.run(() => storylines.offerDirectoryCharters(dirId)).catchError(
+                  (Object e) {
+                    debugPrint('charter offer failed: $e');
+                    return 0;
+                  },
+                ),
+          );
+          return 0;
+        },
       ),
+    ],
+    gate: fastDrainGateProvider,
+    // What used to be list position. The storyline and draft rows this lane's
+    // handlers just wrote are drained by workers that have no idea they were
+    // written, so the end of a fast drain is where they are told. It fires
+    // after an EMPTY fast drain too, which is the case that matters most: a
+    // Restore or a Regenerate enqueues a row directly, and the lane that owns
+    // it has to be woken by something.
+    wakes: [storylineWorkerProvider, draftWorkerProvider],
+  );
+});
+
+/// The STORYLINE lane's worker: the six passes, in the order their arguments
+/// require, behind a gate of their own.
+///
+/// All six in ONE worker, and that is the decision rather than an accident of
+/// where they were. They are mixed-slot — assignment, the audit, the recruit
+/// and the sweep's confirms are fast-server calls; the sweep's naming, the
+/// refresh and the recap are the 27B's — so neither server is the thing that
+/// groups them. What groups them is that they mutate shared membership, and
+/// the ordering arguments below only hold while they run one after another in
+/// this list: refresh before recruit, audit between them, recap after the
+/// sweep.
+///
+/// Off the fast lane entirely, which is the point: a twelve-to-twenty-three
+/// second recap used to sit in front of the next message's triage.
+final Provider<AiWorker> storylineWorkerProvider = Provider<AiWorker>((ref) {
+  final storylines = ref.watch(storylineServiceProvider);
+  return _lane(
+    ref,
+    handlers: [
       // Assignment before the sweep: a thread that joins an existing storyline
       // is one fewer unassigned thread for the sweep to propose a new group
       // around.
@@ -1018,26 +1154,48 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       // removal the recruit could not see would be filed straight back in this
       // same drain.
       StorylineAuditHandler(storylines),
-      // After the sweep and before drafts: a recruit is rare — it only exists
-      // when a charter was just saved, or a refresh moved one — and the
-      // threads it files are exactly what the draft below should know about.
+      // After the sweep: a recruit is rare — it only exists when a charter
+      // was just saved, or a refresh moved one — and the threads it files are
+      // exactly what a draft written after this lane should know about.
       StorylineRecruitHandler(storylines),
       // After the recruit, so a thread the recruit just filed is in the recap
       // written on this same drain rather than a pump later — the recap is the
       // storyline screen's centrepiece, and a member the user can see in the
       // timeline while the recap still talks about the group without it is the
-      // one inconsistency they would notice. Still ahead of the draft, which
-      // is last on its own terms.
+      // one inconsistency they would notice. Last in this lane, and this
+      // lane's completion is what wakes the draft lane.
       StorylineRecapHandler(storylines),
-      // Last, and after both storyline passes: a draft reads the storyline
-      // summary as background, so drafting before the sweep has run would
-      // write this message's reply without it. Last also means the work
-      // extraction queued at the top of this drain is picked up on the same
-      // pass rather than waiting for the next sync.
+    ],
+    gate: storylineDrainGateProvider,
+    // A storyline born in a sweep is background a draft written after it
+    // should be able to read, so this lane wakes the draft lane when it is
+    // done. No cycle: the draft lane wakes nothing.
+    wakes: [draftWorkerProvider],
+  );
+});
+
+/// The DRAFT lane's worker: one handler, on the 27B, at the width the prose
+/// server was started with.
+///
+/// Alone on its gate because of what a draft IS — the one piece of work in
+/// this app a person sits and waits for. Behind the old single drain it waited
+/// for everything: a sweep of confirms, twenty recaps, the whole pass coming
+/// round. Here the worst case is one prose call already at the server.
+final Provider<AiWorker> draftWorkerProvider = Provider<AiWorker>((ref) {
+  return _lane(
+    ref,
+    handlers: [
+      // The only handler on this lane, and the only one of the fourteen a
+      // person sits and waits for. A draft is prose they send under their own
+      // name — the one place the bigger model earns its seconds.
       //
-      // The only handler still on the 27B. A draft is prose the user sends
-      // under their own name — the one place the bigger model earns its
-      // seconds.
+      // It still reads the storyline summary as background, which used to be
+      // guaranteed by drafting LAST in one list. It no longer is: a draft
+      // prefetched seconds after its extraction may be written before the
+      // sweep that would have named its storyline. That is the trade the
+      // split makes on purpose — a background sentence against minutes of
+      // waiting — and the storyline lane's `onDrained` pumps this one, so the
+      // next draft after a sweep has it.
       DraftHandler(
         ref.watch(messageStoreProvider),
         ref.watch(llmClientProvider),
@@ -1048,14 +1206,64 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         // so the message being answered is embedded once for the two of them.
         embeddings: ref.watch(embeddingsClientProvider),
         progress: ref.watch(pipelineProgressProvider),
+        // The prose server's width, read at every launch decision — see
+        // `DraftHandler.concurrency`. `read` inside the closure, never
+        // `watch`: a width change must move the next draft, not rebuild the
+        // worker holding the drain that is writing this one.
+        concurrency: () => ref.read(appPrefsProvider).proseParallel,
+        // The live bus, so the draft streams. Every other build of this
+        // handler takes the disabled default and makes the plain call.
+        stream: ref.watch(draftStreamBusProvider),
       ),
     ],
-    gate: ref.watch(drainGateProvider),
+    gate: draftDrainGateProvider,
+  );
+});
+
+/// One lane's worker, built the way all three are: the store, the lane's
+/// handlers and gate, the shared activity log and progress, and — for a lane
+/// that feeds others — the lanes to wake when its drain ends.
+///
+/// The wake is unawaited and guarded on the triage queue's own `onDrained`
+/// reasoning: the drains it starts are minutes of model time and this one
+/// must not wait for them, and the `read` itself throws against a torn-down
+/// container. Why each lane wakes what it wakes is said at the lane.
+AiWorker _lane(
+  Ref ref, {
+  required List<WorkHandler> handlers,
+  required Provider<DrainGate> gate,
+  List<Provider<AiWorker>> wakes = const [],
+}) {
+  final worker = AiWorker(
+    ref.watch(messageStoreProvider),
+    handlers: handlers,
+    gate: ref.watch(gate),
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
+    onDrained: wakes.isEmpty
+        ? null
+        : () {
+            try {
+              for (final lane in wakes) {
+                unawaited(ref.read(lane).pump());
+              }
+            } catch (_) {}
+          },
   );
   ref.onDispose(worker.dispose);
   return worker;
+}
+
+/// The three lanes as one value — what a caller outside the pipeline pumps and
+/// listens to. See [AiWorkers] for the chain and the merge.
+final Provider<AiWorkers> aiWorkersProvider = Provider<AiWorkers>((ref) {
+  final workers = AiWorkers(
+    fast: ref.watch(aiWorkerProvider),
+    storyline: ref.watch(storylineWorkerProvider),
+    draft: ref.watch(draftWorkerProvider),
+  );
+  ref.onDispose(workers.dispose);
+  return workers;
 });
 
 /// The storyline logic, shared by the two work handlers and by the UI's user

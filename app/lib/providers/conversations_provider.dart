@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/message_store.dart';
 import '../models/message_models.dart';
 import '../services/ai_worker.dart';
+import '../services/ai_workers.dart';
 import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/backend_types.dart';
@@ -106,8 +107,21 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// kicks it and every result it lands reloads the list.
   final TriageQueue? _triage;
 
-  /// The AI queue, kicked after triage rather than beside it — see [load].
+  /// ONE ai worker, kicked after triage rather than beside it — see [load].
+  ///
+  /// Kept for the tests, which hand over a `FakeWorker extends AiWorker` and
+  /// count its pumps. The APP passes [_pumpWorkers] instead, because there are
+  /// three lanes now and "the drain finished" has to mean all of them.
   final AiWorker? _aiWorker;
+
+  /// Every worker lane, pumped as one — `AiWorkers.pumpAll`. Used in
+  /// preference to [_aiWorker] wherever it is supplied.
+  ///
+  /// Why the app must pass this rather than the fast worker alone: the chain
+  /// below is what tells [_afterPump] the drains are done, and the rail's
+  /// pending-draft badge reads that. A "done" that meant only the fast lane
+  /// would put the badge on the sixty-second tick.
+  final Future<void> Function()? _pumpWorkers;
 
   /// Scores and re-files the mailbox immediately before every read. Null in
   /// tests that only exercise the read model; the list then renders whatever
@@ -153,6 +167,8 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     this._teamsSync,
     TriageQueue? triage,
     AiWorker? aiWorker,
+    this._pumpWorkers,
+    Stream<WorkProgress>? workProgress,
     this._attention,
     this._readAcks,
     this._notify,
@@ -164,7 +180,14 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         super(const ConversationsInitial()) {
     // Subscribed before the triage early-return below, because a notifier can
     // be wired with an AI queue and no triage queue at all.
-    _aiProgress = aiWorker?.progress.listen((_) => _scheduleReload());
+    //
+    // [workProgress] is the app's merged stream — every lane's kinds on one
+    // subscription — and the single worker's own stream is what a test that
+    // built this notifier by hand gets. This listener wants every kind either
+    // way: a CTA from extraction, a thread joining a storyline and a draft
+    // landing are three lanes' news about the same list.
+    _aiProgress =
+        (workProgress ?? aiWorker?.progress)?.listen((_) => _scheduleReload());
 
     final queue = triage;
     if (queue == null) return;
@@ -221,35 +244,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         // Started, never awaited: triage takes about seventeen seconds a
         // message, and the mail that just synced must render now. Results
         // arrive later through the progress stream.
-        //
-        // The AI queue is CHAINED behind triage rather than started beside it.
-        // Both are serial queues in front of the same single-threaded model
-        // server, so running them together would not finish either sooner — it
-        // would halve the speed of both and throw away the prompt cache
-        // between every pair of requests. Triage goes first because its output
-        // is what the user is looking at.
-        final pump = _triage?.pump();
-        if (pump != null) {
-          unawaited(
-            pump.then<void>((_) async {
-              await _aiWorker?.pump();
-              await _afterPump();
-            }).catchError(
-              // Both pumps handle their own failures; anything reaching here
-              // is a bug worth a trace, not worth crashing the zone over.
-              (Object e) => debugPrint('queue pump chain failed: $e'),
-            ),
-          );
-        } else {
-          final ai = _aiWorker?.pump();
-          if (ai != null) {
-            unawaited(
-              ai.then<void>((_) => _afterPump()).catchError(
-                (Object e) => debugPrint('queue pump chain failed: $e'),
-              ),
-            );
-          }
-        }
+        _startPumpChain();
       } on AuthException catch (e) {
         if (seq != _fetchSeq) return;
         // Only these two mean "sign in again". A generic AuthException is a
@@ -340,29 +335,8 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       _notify?.noteSyncCompleted();
       // The same chain [load] starts after a mail sync, for the same reason:
       // the chats this pull just re-pended should be triaged and drafted now,
-      // not whenever the poll timer next happens to come round. Chained rather
-      // than run beside each other — one model server, one queue at a time,
-      // triage first because its output is what the user is looking at.
-      final pump = _triage?.pump();
-      if (pump != null) {
-        unawaited(
-          pump.then<void>((_) async {
-            await _aiWorker?.pump();
-            await _afterPump();
-          }).catchError(
-            (Object e) => debugPrint('queue pump chain failed: $e'),
-          ),
-        );
-      } else {
-        final ai = _aiWorker?.pump();
-        if (ai != null) {
-          unawaited(
-            ai.then<void>((_) => _afterPump()).catchError(
-              (Object e) => debugPrint('queue pump chain failed: $e'),
-            ),
-          );
-        }
-      }
+      // not whenever the poll timer next happens to come round.
+      _startPumpChain();
     } on AuthException {
       // Deliberately the same banner as any other failure: the inbox load is
       // what routes a dead session to sign-in, and a second opinion from the
@@ -382,7 +356,35 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     }
   }
 
-  /// The settle pass: what the inbox does once both queues have drained.
+  /// Triage, then the worker lanes, then the settle — started and never
+  /// awaited.
+  ///
+  /// Both entry points that sync (a mail load and a Teams refresh) end here,
+  /// because the chain is the same one in both and the reason is the same:
+  /// triage's output is what the user is looking at, and the order is
+  /// load-bearing rather than merely tidy — see [pumpTriageThenWorkers].
+  ///
+  /// Nothing at all when this notifier was built with neither a queue nor a
+  /// pump: there is no drain to settle after, and a settle pass on its own
+  /// would be scoring a mailbox nothing has read.
+  void _startPumpChain() {
+    final triage = _triage;
+    final workers = _pumpWorkers ?? _aiWorker?.pump;
+    if (triage == null && workers == null) return;
+    // Both pumps handle their own failures; anything reaching the catch below
+    // is a bug worth a trace, not worth crashing the zone over.
+    unawaited(
+      pumpTriageThenWorkers(
+        triage: () => triage?.pump() ?? Future<void>.value(),
+        workers: () async {
+          await workers?.call();
+          await _afterPump();
+        },
+      ).catchError((Object e) => debugPrint('queue pump chain failed: $e')),
+    );
+  }
+
+  /// The settle pass: what the inbox does once every queue has drained.
   ///
   /// [load] scores BEFORE the pumps it starts have finished, which is right
   /// for the frame the user is looking at and wrong for the mail the model was
@@ -392,8 +394,9 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// correction show up in the frame the user made it in.
   ///
   /// Nothing is enqueued here any more. Drafting is queued from the end of
-  /// extraction, per message, so the work lands mid-drain and the drafting
-  /// handler — last in the worker's order — picks it up on the same pass.
+  /// extraction, per message, and the draft LANE is woken as that row is
+  /// written (`ExtractHandler.onDraftQueued`) — so a prefetch starts within
+  /// seconds of its extraction rather than waiting for the pass to come round.
   Future<void> _afterPump() async {
     await _attention?.recomputeAll(sources: inboxSources);
     // Above the `mounted` check on purpose: the drain's verdicts are written
@@ -856,7 +859,11 @@ final conversationsProvider =
     ref.watch(syncServiceProvider),
     teamsSync: ref.watch(teamsSyncProvider),
     triage: ref.watch(triageQueueProvider),
-    aiWorker: ref.watch(aiWorkerProvider),
+    // Every lane, and the merged stream: the sync's "done" has to mean the
+    // drafts are done, and this listener wants every kind — see the notifier's
+    // constructor. `aiWorker` is left to the tests.
+    pumpWorkers: () => ref.read(aiWorkersProvider).pumpAll(),
+    workProgress: ref.watch(aiWorkersProvider).progress,
     attention: ref.watch(attentionServiceProvider),
     readAcks: ref.watch(readAckQueueProvider),
     notify: ref.watch(notificationCoordinatorProvider),

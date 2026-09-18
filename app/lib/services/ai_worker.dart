@@ -48,6 +48,12 @@ abstract class WorkHandler {
   /// against a mailbox the other is mid-way through changing. A handler raises
   /// this only when its items are genuinely independent of each other, and
   /// then no higher than the server it calls has slots for.
+  ///
+  /// A handler may back this with a CLOSURE over a setting rather than a
+  /// constant — `DraftHandler` reads the prose server's width from the prefs
+  /// — because [AiWorker._drainAll] re-reads it on every launch decision. A
+  /// width changed in Settings therefore moves the next item rather than the
+  /// next launch of the app.
   int get concurrency => 1;
 
   /// One row from `work_items`. `entity_id` names what to work on.
@@ -93,9 +99,34 @@ enum _RunOutcome {
 ///
 /// The kinds still drain in handler ORDER rather than interleaved, and that
 /// has never been about the server: extraction writes the embeddings both
-/// storyline passes compare, and a draft reads the storyline summary. The
-/// caller chains this worker's [pump] after triage's, and the shared
-/// [DrainGate] is what actually holds the two drains apart.
+/// storyline passes compare, and a draft reads the storyline summary.
+///
+/// THREE instances of this class, not one — see `AiWorkers`. One list in one
+/// worker meant the 27B's work sat in front of the 4B's and behind it: a
+/// message that arrived while a recap was being written waited for the recap,
+/// and a draft the user asked for waited for the whole pass to come round.
+/// The lanes are cut where the constraints are:
+///
+/// - the FAST lane — needs-you, extraction, embed, the two attachment kinds
+///   and the three context kinds — shares one [DrainGate] with the triage
+///   drain, because both send bulk work to the 4-slot fast server and the
+///   gate is what keeps them from double-booking it. This is the lane a new
+///   message's first seconds run on, and nothing on the 27B is allowed into
+///   it;
+/// - the STORYLINE lane holds the six storyline passes, behind their own
+///   gate. They are mixed-slot (membership on the fast server, naming and
+///   recaps on the 27B) and they mutate shared membership, so the ordering
+///   arguments in `docs/pipeline/06-storylines.md` — refresh before recruit,
+///   audit between them, recap after the sweep — only hold while all six stay
+///   in ONE worker in list order;
+/// - the DRAFT lane is `DraftHandler` alone, behind its own gate, at the
+///   width the prose server was started with. A draft a person is waiting for
+///   must not sit behind a sweep.
+///
+/// So ORDER ACROSS LANES is no longer list position: it is enqueue-and-pump.
+/// A fast handler writes the `storyline*` or `draft` row and [onDrained] (or
+/// `ExtractHandler.onDraftQueued`) wakes the lane that owns it. Inside a lane,
+/// list order still means exactly what it always did.
 ///
 /// A park is per KIND when it is the model server that went away, because
 /// since phase 3 the kinds do not share one: extraction runs against the fast
@@ -107,12 +138,18 @@ enum _RunOutcome {
 /// The worker owns no timer. [pump] is called after each sync, is a no-op
 /// while a drain is running, and stops on its own when nothing is pending.
 class AiWorker {
-  /// Every source whose work this worker drains. Handlers are already
-  /// per-item source-aware (they read `item['source']`), so widening this
-  /// list is all a new connector needs.
+  /// Every source whose work this worker drains — the three connectors any
+  /// queue in this app has rows under. Handlers are already per-item
+  /// source-aware (they read `item['source']`), so widening this list is all a
+  /// new connector needs.
   /// `local` is not a connector: it is the source context directories queue
   /// under, because a folder on this machine came from no mailbox at all.
-  static const List<String> _sources = ['email', 'teams', 'local'];
+  ///
+  /// PUBLIC because it is no longer only this class's business: the draft
+  /// prefetch cap in `ExtractHandler` counts work rows over exactly the sources
+  /// that will drain them, and a second literal of this list would be a cap
+  /// that stopped seeing a connector the day one was added.
+  static const List<String> sources = ['email', 'teams', 'local'];
 
   /// One retry, then the item is left alone. Same trade triage makes: a local
   /// model that answered unparseably often gets it right on a second pass, and
@@ -180,18 +217,35 @@ class AiWorker {
 
   bool _stopped = false;
 
+  /// Told after every completed drain, so the lanes this one feeds can walk.
+  ///
+  /// `TriageQueue._onDrained`'s shape with one difference: it fires even when
+  /// the drain wrote nothing. An empty fast drain still has to wake the
+  /// storyline and draft lanes, because a caller that enqueued a row directly
+  /// — a user's Regenerate, a restore — is exactly the case where this lane
+  /// had nothing of its own to do.
+  final void Function()? _onDrained;
+
   AiWorker(
     this._store, {
     required List<WorkHandler> handlers,
     DrainGate? gate,
     ActivityLog? activityLog,
     PipelineProgress progress = const PipelineProgress.disabled(),
+    this._onDrained,
   })  : _handlers = List.unmodifiable(handlers),
         _gate = gate ?? DrainGate(),
         _log = activityLog ?? ActivityLog.disabled(),
         _pipeline = progress;
 
   Stream<WorkProgress> get progress => _progress.stream;
+
+  /// The kinds this worker drains, in drain order.
+  ///
+  /// Public so the lane wiring can be pinned by a test: which kinds live on
+  /// which worker is the whole of the three-lane split, and nothing at
+  /// runtime could otherwise be asked.
+  List<String> get kinds => [for (final handler in _handlers) handler.kind];
 
   /// Ends the current drain after the items already in flight finish. Not
   /// permanent: the next [pump] starts a fresh drain.
@@ -230,18 +284,68 @@ class AiWorker {
   /// Serialized two ways. Against ITSELF: a call while a drain is running does
   /// not start a racing one — it schedules one more full pass on the active
   /// drain and returns that drain's future, so the caller still awaits the
-  /// pass that will do its work. Against the OTHER queue: the whole drain runs
-  /// under the shared [DrainGate], so it can never interleave model calls with
-  /// a triage drain already at the server.
+  /// pass that will do its work. Against the OTHER queue on its gate: the
+  /// whole drain runs under this lane's [DrainGate], so the fast lane can
+  /// never interleave model calls with a triage drain already at the server.
+  ///
+  /// The future this returns completes once [_onDrained] has been CALLED, not
+  /// once what it started has finished — which is the point of it being a
+  /// `void` callback. "This lane is drained" is the fact a caller waits for,
+  /// and waking the next lane must not extend this one's wall clock.
   Future<void> pump() {
     final inFlight = _draining;
     if (inFlight != null) {
       _repump = true;
       return inFlight;
     }
-    final drain = _gate.run(_drainAll);
-    _draining = drain.whenComplete(() => _draining = null);
-    return _draining!;
+    final drain = _drainUntilQuiet();
+    _draining = drain;
+    return drain;
+  }
+
+  /// One gated drain, and one more for a pump that landed in its last
+  /// microtasks.
+  ///
+  /// [_drainAll] re-reads [_repump] between its own passes, but between its
+  /// final read and this worker noticing the drain is over there is a gap —
+  /// the gate's future resolving, this frame resuming — in which a [pump]
+  /// would find [_draining] still set, raise the flag and hand back a future
+  /// about to complete without the row it was called for. The loop here reads
+  /// the flag again after the gate returns, and the `finally` clears
+  /// [_draining] in the same synchronous step as that last read, so no such
+  /// gap is left: a pump either joins a drain that will run again, or starts
+  /// a fresh one.
+  Future<void> _drainUntilQuiet() async {
+    try {
+      do {
+        await _gate.run(_drainAll);
+      } while (_repump && !_stopped);
+    } finally {
+      // Cleared FIRST, so a pump issued from inside the callback starts a
+      // fresh drain rather than joining the one that has just finished.
+      _draining = null;
+      _fireDrained();
+    }
+  }
+
+  /// Wakes whatever this lane feeds, outside the gate and without waiting.
+  ///
+  /// Outside, because the callback's job is to pump ANOTHER worker, and one
+  /// that ran while this drain still held the gate would be describing a lane
+  /// that is not free yet. Guarded, because this drain's work is already
+  /// written: a callback that throws must not turn a completed drain into a
+  /// failed future its caller sees.
+  ///
+  /// Silent after a [stop] or a [dispose], on `TriageQueue.pump`'s rule: a
+  /// drain cut short must not restart the lanes it feeds — the next pump has
+  /// them either way, and a worker being torn down would otherwise wake the
+  /// one being torn down beside it.
+  void _fireDrained() {
+    final onDrained = _onDrained;
+    if (onDrained == null || _stopped) return;
+    try {
+      onDrained();
+    } catch (_) {}
   }
 
   Future<void> _drainAll() async {
@@ -272,7 +376,7 @@ class AiWorker {
               !parkedDrain) {
             final item = await _store.claimPendingWork(
               handler.kind,
-              sources: _sources,
+              sources: sources,
             );
             if (item == null) break;
             _claimed.add(_claimKey(handler.kind, item));
@@ -528,7 +632,7 @@ class AiWorker {
   /// has already moved on.
   Future<void> _emit(String kind) async {
     if (_progress.isClosed) return;
-    final counts = await _store.workCounts(kind, sources: _sources);
+    final counts = await _store.workCounts(kind, sources: sources);
     if (_progress.isClosed) return;
     _progress.add(WorkProgress(kind, counts));
   }

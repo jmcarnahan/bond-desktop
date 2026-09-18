@@ -643,9 +643,11 @@ void main() {
           .single
           .data;
       expect(work['entity_id'], 'c1-m1');
+      // `asked` rides along on every payload this button writes: pressing it
+      // is the reply decision, so the handler skips the model's.
       expect(
         work['payload_json'],
-        '{"context_file_ids":[${seeded.fileId}]}',
+        '{"context_file_ids":[${seeded.fileId}],"asked":true}',
       );
       await settleQueues(tester);
     });

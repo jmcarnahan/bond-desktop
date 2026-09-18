@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../data/message_store.dart';
 import 'activity_log.dart';
+import 'drain_gate.dart';
 import 'storyline_service.dart';
 
 /// What one repair actually moved — the outcome a caller and a test can read
@@ -12,6 +15,12 @@ class GateRepairOutcome {
   final bool extracted;
 
   /// Storyline memberships evicted, which is never more than the thread had.
+  ///
+  /// This and the two below are ZERO on the app's path, where the storyline
+  /// half of the repair is dispatched onto the storyline lane's gate and
+  /// lands later: the counts it produces go on its own activity row, not
+  /// here. They are populated only when the service runs without a gate —
+  /// tests, and nothing else today.
   final int storylines;
 
   final bool embeddingCleared;
@@ -63,6 +72,15 @@ class GateRepairOutcome {
 /// rather than a branch inside `TriageQueue`, because that queue judges
 /// messages and this cleans up after a judgement.
 ///
+/// Since the drains were split it speaks to TWO lanes. The message-side
+/// writes — the `extracted_then_gated` counter, anything on `messages` — stay
+/// where they are, awaited by whoever asked. The three storyline writes go
+/// through the storyline lane's own gate, because that lane may be halfway
+/// through a sweep that is filing the very thread this is unfiling. The
+/// one-shot [repairAll] is the exception and stays inline: it runs once per
+/// install, from the sync, before the storylines it would race have anything
+/// to do.
+///
 /// What it deliberately does NOT do is queue a storyline audit. An audit means
 /// "the owner says the model was wrong about this group", and a gate says
 /// nothing of the kind — see [StorylineService.evictGatedThread]. For the same
@@ -83,10 +101,22 @@ class GateRepairService {
   final StorylineService _storylines;
   final ActivityLog _log;
 
+  /// The STORYLINE lane's gate, or null to repair inline.
+  ///
+  /// Until the drains were split, the one shared gate was what silently kept
+  /// this repair off a running sweep, refresh or audit: [afterGate] is called
+  /// from inside the triage drain, which held that gate. With a lane of its
+  /// own the storyline passes run while a gate lands, so the three storyline
+  /// writes have to be dispatched onto the lane instead — see
+  /// [_repairStorylines]. Null is every test and any build without the lane,
+  /// and means what it always did: run them here and now.
+  final DrainGate? _storylineGate;
+
   GateRepairService(
     this._store,
     this._storylines, {
     ActivityLog? activityLog,
+    this._storylineGate,
   }) : _log = activityLog ?? ActivityLog.disabled();
 
   /// Called after a gate lands on ONE message.
@@ -115,31 +145,57 @@ class GateRepairService {
       final extracted = await _store.hasExtraction(source, sourceMessageId);
       final key = row['conversation_key'] as String? ?? '';
 
+      // One activity row and one return whichever way it goes; the three
+      // branches differ only in what the outcome can honestly say.
+      final GateRepairOutcome outcome;
+      final gate = _storylineGate;
       if (key.isEmpty || await _store.keptInboundCount(source, key) > 0) {
-        return await _recordOne(
-          source,
-          sourceMessageId,
-          reason: reason,
-          key: key,
+        outcome = GateRepairOutcome(extracted: extracted);
+      } else if (gate == null) {
+        final repair = await _repairConversation(source, key);
+        outcome = GateRepairOutcome(
           extracted: extracted,
-          outcome: GateRepairOutcome(extracted: extracted),
+          storylines: repair.storylines,
+          embeddingCleared: repair.embeddingCleared,
+          pendingWorkDeleted: repair.pendingWorkDeleted,
+          allGated: true,
         );
+      } else {
+        // Dispatched onto the storyline lane and NOT awaited. Both halves of
+        // that matter:
+        //
+        // Onto the lane, because the sharpest of the three writes is the
+        // `deletePendingWork('storyline', …)`: a delete that lands while the
+        // lane holds that row's claim misses it, and the assign pass then
+        // files the thread back after the eviction. Run after the lane's
+        // drain, the pass has already filed (or not) and the eviction is
+        // final.
+        //
+        // Not awaited, because this is called from INSIDE the triage drain,
+        // which awaits `_onGated` — and a sweep is minutes. A repair is
+        // background by nature; the triage drain is the thing a person is
+        // watching. It carries its own try/catch and writes its own activity
+        // row when it lands, which is why this path records the message side
+        // now and the storyline side later.
+        unawaited(
+          gate.run(
+            () =>
+                _repairStorylines(source, sourceMessageId, key, reason: reason),
+          ),
+        );
+        // The storyline counts are deliberately absent: they are not known
+        // yet, and a return value that guessed them would be the one number
+        // a caller could not check.
+        outcome = GateRepairOutcome(extracted: extracted, allGated: true);
       }
 
-      final repair = await _repairConversation(source, key);
       return await _recordOne(
         source,
         sourceMessageId,
         reason: reason,
         key: key,
         extracted: extracted,
-        outcome: GateRepairOutcome(
-          extracted: extracted,
-          storylines: repair.storylines,
-          embeddingCleared: repair.embeddingCleared,
-          pendingWorkDeleted: repair.pendingWorkDeleted,
-          allGated: true,
-        ),
+        outcome: outcome,
       );
     } catch (e) {
       // This is called from inside the triage drain and from a button. A
@@ -222,6 +278,42 @@ class GateRepairService {
     } catch (e) {
       debugPrint('gate repair: the one-shot failed: $e');
       rethrow;
+    }
+  }
+
+  /// [_repairConversation] on the storyline lane, with its own row and its own
+  /// failure policy.
+  ///
+  /// It swallows for [afterGate]'s reason, one remove further out: nobody is
+  /// waiting on this future at all, so an exception escaping it would be an
+  /// unhandled error in whatever zone the lane's drain happens to run in. What
+  /// a failure costs is this thread staying as it is — where it already was,
+  /// and where the one-shot will find it.
+  Future<void> _repairStorylines(
+    String source,
+    String sourceMessageId,
+    String key, {
+    required String reason,
+  }) async {
+    try {
+      final repair = await _repairConversation(source, key);
+      await _recordOne(
+        source,
+        sourceMessageId,
+        reason: reason,
+        key: key,
+        // The counter was recorded by the message half already; this row is
+        // about what the storyline lane moved.
+        extracted: false,
+        outcome: GateRepairOutcome(
+          storylines: repair.storylines,
+          embeddingCleared: repair.embeddingCleared,
+          pendingWorkDeleted: repair.pendingWorkDeleted,
+          allGated: true,
+        ),
+      );
+    } catch (e) {
+      debugPrint('gate repair: $source/$key storylines failed: $e');
     }
   }
 
