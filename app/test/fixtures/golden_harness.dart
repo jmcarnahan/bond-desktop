@@ -85,11 +85,15 @@ class GoldenDefines {
     defaultValue: StorylineTuning.charterCap,
   );
 
-  /// Which clustering card the sweep replay embeds: `participants` (the card
-  /// the app ships) or `topics` (the same card with its people segment left
-  /// empty). Parsed by [parseSweepCard], which refuses anything else.
+  /// Which clustering card the sweep replay embeds: `topics` (the card the app
+  /// ships since Round D Phase 2, its people segment left empty) or
+  /// `participants` (the card it shipped before). Parsed by [parseSweepCard],
+  /// which refuses anything else.
+  ///
+  /// The default follows the app, like every other define here: a replay
+  /// nobody passed a card to measures the card the app writes.
   static const String sweepCardRaw =
-      String.fromEnvironment('SWEEP_CARD', defaultValue: 'participants');
+      String.fromEnvironment('SWEEP_CARD', defaultValue: 'topics');
 
   /// The owner's name, or null when the define is empty or only whitespace.
   /// Null and not the empty string: `NeedsYouInput` takes a `String?` and
@@ -124,9 +128,9 @@ GoldenCtx parseExtractCtx(String raw) => switch (raw.trim().toLowerCase()) {
 /// Whether `SWEEP_CARD` says the people ride inside the clustering vector.
 ///
 /// Loud rather than defaulted, for [parseGoldenCtx]'s reason: this define IS
-/// the variable the sweep bench exists to price, and a typo that quietly
-/// measured `participants` twice would put two rows in the ledger that look
-/// like an A/B and are not.
+/// the variable the sweep bench was built to price, and a typo that quietly
+/// measured one card twice would put two rows in the ledger that look like an
+/// A/B and are not.
 bool parseSweepCard(String raw) => switch (raw.trim().toLowerCase()) {
       'participants' => true,
       'topics' => false,

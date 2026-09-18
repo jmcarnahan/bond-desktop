@@ -13,10 +13,10 @@ import 'llm/extract_task.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'pipeline_progress.dart';
-// `show`: the one thing this file wants from the storyline service is the
-// clustering-card flag the sweep is tuned by, so the card written here and
-// the card `StorylineService._reembed` writes cannot drift apart.
-import 'storyline_service.dart' show StorylineTuning;
+// `show`: the clustering card, which this file and `StorylineService._reembed`
+// both write. One recipe over one data source, so the two cannot drift apart
+// and the hash column means one thing.
+import 'storyline_service.dart' show clusteringCardForConversationRow;
 
 /// Extracts structured facts from one message, then refreshes its thread's
 /// embedding if the thread now reads differently.
@@ -190,7 +190,7 @@ class ExtractHandler extends WorkHandler {
     });
 
     await _fileBucket(source, row, result);
-    await _refreshCard(source, row, result);
+    await _refreshCard(source, row);
     await _queueRecap(source, row);
     await _embedMessage(source, row);
     await _queueDraft(source, id, row);
@@ -430,11 +430,11 @@ class ExtractHandler extends WorkHandler {
   /// re-extract it. Now an unreachable server still queues the work and lets
   /// the storyline pass park on it — which is the one thing that gets the
   /// thread looked at again once `make embed` is running.
-  Future<void> _refreshCard(
-    String source,
-    Map<String, Object?> row,
-    ExtractionResult result,
-  ) async {
+  /// Runs AFTER `writeExtraction`, and that ordering is load-bearing now that
+  /// the card is built from the stored facts rather than from the result in
+  /// hand: `newestInboundCardData` has to be able to read the topics this
+  /// extraction just wrote.
+  Future<void> _refreshCard(String source, Map<String, Object?> row) async {
     final key = row['conversation_key'] as String?;
     if (key == null || key.isEmpty) return;
     final conversation = await _store.getConversationRow(source, key);
@@ -446,21 +446,35 @@ class ExtractHandler extends WorkHandler {
       return;
     }
 
-    final card = buildClusteringCard(
-      subject: stripReFw(conversation['subject'] as String?),
-      participants: _participants(conversation['participants_json']),
-      topics: result.topics,
-      // The triage summary, when there is one. It is the only sentence on the
-      // row written to describe the thread rather than to label it.
-      summary: row['summary'] as String?,
-      withParticipants: StorylineTuning.participantsInClusteringCard,
+    // One recipe over one data source. The extraction was written a few lines
+    // above, so `newestInboundCardData` already returns this message's topics
+    // when this message IS the thread's newest kept inbound, and the older
+    // message's when it is not — which is the point. `StorylineService._reembed`
+    // heals a missing vector from exactly this call, and while these two built
+    // their cards out of different things they could write the same
+    // `embedded_hash` column for two different texts: extracting the fifth
+    // message of a thread would store a hash over a card nothing else would
+    // ever produce, and the next heal would re-embed a thread that had not
+    // changed. One thread has one card.
+    final card = clusteringCardForConversationRow(
+      conversation,
+      await _store.newestInboundCardData(source, key),
     );
     final hash = cardHash(card);
 
     // The whole reason a hash is stored: re-extracting the same thread's tenth
     // message must not spend an embedding call to arrive at the same vector.
+    //
+    // The tag is half of that question, exactly as it is in `EmbedHandler`'s
+    // message corpus. The hash says the CARD has not changed; the tag says the
+    // stored vector was taken over the card this build builds. Without it a
+    // tag bump — a card change, which is what bumps it — would leave every
+    // re-extracted thread whose card happened not to change carrying an
+    // orphaned vector forever, invisible to a sweep that filters on the tag.
     final stored = await _store.getConversationAi(source, key);
-    if (stored != null && stored['embedded_hash'] == hash) {
+    if (stored != null &&
+        stored['embedded_hash'] == hash &&
+        stored['embed_model'] == EmbeddingsClient.modelTag) {
       // The same vector is the same answer, so the pass is not queued — and
       // the stage is closed HERE, with the storyline the thread already sits
       // in, because nothing else would ever write it for this message. The
@@ -516,28 +530,6 @@ class ExtractHandler extends WorkHandler {
     await _store.requeueWork('storyline', source, key);
   }
 
-  /// Display names, falling back to the address — what a human would call the
-  /// other people on the thread.
-  static List<String> _participants(Object? raw) {
-    if (raw is! String || raw.isEmpty) return const [];
-    final Object? decoded;
-    try {
-      decoded = jsonDecode(raw);
-    } on FormatException {
-      return const [];
-    }
-    if (decoded is! List) return const [];
-    final names = <String>[];
-    for (final entry in decoded) {
-      if (entry is! Map) continue;
-      final name = entry['name'] as String?;
-      final display = (name != null && name.isNotEmpty)
-          ? name
-          : (entry['email'] as String? ?? '');
-      if (display.isNotEmpty) names.add(display);
-    }
-    return names;
-  }
 }
 
 /// Whether a stored message looks, on its own row, like something the user

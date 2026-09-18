@@ -1194,11 +1194,141 @@ void main() {
       expect(llm.callsFor('storyline_membership'), 2);
     });
 
+    test('a chain of four becomes two pairs, not one blob', () async {
+      // The failure the join rule exists for, at the sweep's own level. Each
+      // thread is 0.765 from its neighbour and 0.17 from the thread beyond it,
+      // so single-link welded all four into one cluster and spent one naming
+      // call describing whatever they had in common — which, in a one-team
+      // mailbox, is the team. Two links and half the members leaves the chain
+      // as the two pairs it actually is.
+      //
+      // Two dimensions is as far as this file's vectors go, which is why the
+      // cap, the coherence floor and the split ladder are pinned in
+      // `storyline_clustering_test.dart` instead: a group of four whose
+      // members are pairwise close and whose mean is still low does not fit
+      // on a circle.
+      for (final (index, thread) in [
+        ('c1', '2026-08-29T04:00:00Z'),
+        ('c2', '2026-08-29T03:00:00Z'),
+        ('c3', '2026-08-29T02:00:00Z'),
+        ('c4', '2026-08-29T01:00:00Z'),
+      ].indexed) {
+        await seed(store, thread.$1,
+            vector: vectorAt(math.cos(0.7 * index)),
+            lastMessageAt: thread.$2);
+      }
+      final llm = FakeLlm({
+        'storyline_name': [
+          nameAnswer(title: 'The near pair'),
+          nameAnswer(title: 'The far pair'),
+        ],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final storylines = await store.loadStorylines();
+      final members = <String, Set<String>>{};
+      for (final storyline in storylines) {
+        members[storyline.title] = {
+          for (final m in await store.membersOf(storyline.id)) m.conversationKey,
+        };
+      }
+      expect(members, {
+        'The near pair': {'c1', 'c2'},
+        'The far pair': {'c3', 'c4'},
+      });
+      // Two names for two groups, where the chain used to buy one name for
+      // four threads.
+      expect(llm.callsFor('storyline_name'), 2);
+      expect(llm.callsFor('storyline_membership'), 4);
+    });
+
+    test('a tight triple and a far pair are two proposals', () async {
+      // The other half of the same rule: a group whose members all recognise
+      // each other stays whole, and a pair nowhere near it is its own group
+      // rather than a thread the trio absorbed.
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T05:00:00Z');
+      await seed(store, 'c2',
+          vector: vectorAt(0.95), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'c3',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(store, 'c4',
+          vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T02:00:00Z');
+      await seed(store, 'c5',
+          vector: vectorAt(-0.95), lastMessageAt: '2026-08-29T01:00:00Z');
+      final llm = FakeLlm({
+        'storyline_name': [
+          nameAnswer(title: 'The triple'),
+          nameAnswer(title: 'The pair'),
+        ],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final members = <String, Set<String>>{};
+      for (final storyline in await store.loadStorylines()) {
+        members[storyline.title] = {
+          for (final m in await store.membersOf(storyline.id)) m.conversationKey,
+        };
+      }
+      expect(members, {
+        'The triple': {'c1', 'c2', 'c3'},
+        'The pair': {'c4', 'c5'},
+      });
+      expect(llm.callsFor('storyline_name'), 2);
+      expect(llm.callsFor('storyline_membership'), 5);
+    });
+
+    test('a cluster stops at twelve, and the thirteenth is not a member',
+        () async {
+      // The cap, through the app's own wiring rather than through the module:
+      // thirteen threads at the same point, so nothing but the cap decides the
+      // shape. The twelve are coherent at every rung of the split ladder, so
+      // they survive being re-clustered for being large; the thirteenth is a
+      // cluster of one and never reaches the model.
+      for (var i = 1; i <= 13; i++) {
+        await seed(store, 'c$i',
+            vector: vectorAt(1),
+            lastMessageAt: '2026-08-${29 - i}T10:00:00Z');
+      }
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final storyline = (await store.loadStorylines()).single;
+      final members = {
+        for (final m in await store.membersOf(storyline.id)) m.conversationKey,
+      };
+      expect(members, hasLength(StorylineTuning.maxClusterSize));
+      expect(members, isNot(contains('c13')));
+      // One name over twelve cards, and one confirm per card.
+      expect(llm.callsFor('storyline_name'), 1);
+      expect(llm.callsFor('storyline_membership'),
+          StorylineTuning.maxClusterSize);
+      final naming = llm.userMessages.first;
+      expect(
+        [
+          for (var i = 1; i <= 13; i++)
+            if (naming.contains('Subject for c$i')) 'c$i',
+        ],
+        hasLength(StorylineTuning.maxClusterSize),
+      );
+      // Nothing filed it and nothing blocked it, so it is back in the pool for
+      // the next sweep.
+      expect(await store.storylineIdsFor('email', 'c13'), isEmpty);
+    });
+
     test('an all-gated thread is never proposed, embedding and all', () async {
       // The backstop, and what it pins is the STORE's pool: the thread is
       // excluded by `conversationsWithEmbeddings` before the sweep sees it.
       // The index probe's own guard — a neighbour whose key is not among the
-      // candidate rows is dropped (`_indexedLinks`) — is not exercised here,
+      // candidate rows is dropped (`_indexedSimilarities`) — is not exercised here,
       // because `flutter test` has no sqlite-vec extension and the sweep runs
       // its brute-force path; that line is read, not run, in this file.
       await seed(store, 'c1',

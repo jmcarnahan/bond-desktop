@@ -20,6 +20,7 @@ import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'llm/storyline_tasks.dart';
 import 'pipeline_progress.dart';
+import 'storyline_clustering.dart';
 
 /// Every number the storyline logic turns on, in one place.
 ///
@@ -40,10 +41,16 @@ class StorylineTuning {
   /// the same deal, so it buys a look the vector alone would not have earned.
   static const double assignCosineGateWithOverlap = 0.50;
 
-  /// Cosine two conversations must reach to land in the same proposed cluster.
+  /// Cosine two conversations must reach for the pair to count as a LINK.
   /// Higher than the assignment gates because there is no existing group to
   /// score a candidate against — the only thing holding a cluster together is
   /// how close its members sit to each other.
+  ///
+  /// A link is no longer a join. Reaching this against ONE member of a group
+  /// used to be enough to be in it, which is what chained the golden mailbox
+  /// into a single storyline holding 56% of every filed thread on 2026-09-18.
+  /// A candidate now needs two links and half the members — see
+  /// [clusterBySimilarity], which owns the rule and every compare in it.
   ///
   /// Still a filter and not a verdict: what the cluster produces is a
   /// shortlist and a name, and every member of it is then confirmed against
@@ -56,6 +63,46 @@ class StorylineTuning {
 
   /// A storyline of one is just a thread.
   static const int minClusterSize = 2;
+
+  /// How many threads one cluster may hold before it stops accepting members.
+  ///
+  /// Not a limit on how large a storyline may grow — the assign pass, the
+  /// recruit lap and a person's own filing all add members without asking
+  /// this — but on how large a group may get before anybody has looked at it.
+  /// A proposal of twelve threads is already more than a person reads before
+  /// answering, and every thread past that is a naming call describing
+  /// something more general than the one it would have described without it.
+  /// Twelve is also well under where the measured blobs sat: the largest
+  /// storyline of the 2026-09-18 golden sweep held 56% of every filed thread.
+  ///
+  /// A cluster that reaches it is re-clustered at a higher threshold rather
+  /// than truncated. Truncating would make the result depend on the store's
+  /// order in a way nothing could explain to a user.
+  static const int maxClusterSize = 12;
+
+  /// The mean pairwise cosine a cluster has to reach to be worth naming.
+  ///
+  /// Read off the golden sweep of 2026-09-18, which printed the cosine of
+  /// every pair inside every storyline it formed. Below 0.55 there were 17
+  /// pairs out of 861 even inside the chained blobs, so a floor there would
+  /// never bite; the 0.55 to 0.60 band is where a blob's mean sits and a
+  /// tight cluster's does not.
+  ///
+  /// A cluster under it is split at a higher threshold, and what is still
+  /// under it at [clusterSplitCeiling] is dropped for the pass — no naming
+  /// call, and no tombstone either, because nothing was asked.
+  static const double clusterCoherenceFloor = 0.60;
+
+  /// How much higher each re-clustering rung asks for. Small enough that a
+  /// group that is nearly two groups comes apart at the seam rather than
+  /// shattering into singletons.
+  static const double clusterSplitStep = 0.05;
+
+  /// The top of that ladder. Past this the question stops being useful: two
+  /// threads at 0.85 are near-duplicates of each other, and a group that is
+  /// still incoherent when only near-duplicates count as linked was never one
+  /// group.
+  static const double clusterSplitCeiling = 0.85;
 
   /// How many unanswered suggestions may sit in the rail at once. A wall of
   /// proposals is not a feature; it is a chore, and it gets dismissed as one.
@@ -97,22 +144,31 @@ class StorylineTuning {
   /// Whether the text a conversation is EMBEDDED from carries the people on
   /// it — [buildClusteringCard]'s `withParticipants`.
   ///
-  /// True is what has always shipped, and it is the suspect this round is
-  /// here to measure (decision 3). In a mailbox where one team is on
-  /// everything, the participants segment is the same handful of names in
-  /// every card, so every pair of threads embeds alike and the sweep proposes
-  /// the team rather than the work. The cards the MODEL reads are unaffected
-  /// either way: this is the vector, not the prompt.
+  /// True is what shipped until 2026-09-18, and it was the suspect: in a
+  /// mailbox where one team is on everything, the participants segment is the
+  /// same handful of names in every card, so every pair of threads embeds
+  /// alike and the sweep proposes the team rather than the work. The cards the
+  /// MODEL reads are unaffected either way. This is the vector, not the
+  /// prompt.
   ///
   /// Measured in Round D Phase 1 by `make golden-sweep SWEEP_CARD=
-  /// participants|topics`, twice each. The rule was written before the runs:
-  /// `topics` ships only if it beats `participants` by at least four points
-  /// on `storyline.id` on both passes, or ties within four with a smaller
-  /// largest-storyline share and no fewer correct positives. Otherwise this
-  /// stays true and the measured row is the record. Flipping it orphans every
-  /// stored conversation vector by construction, so it moves together with
-  /// [EmbeddingsClient.modelTag] and a one-shot re-embed.
-  static const bool participantsInClusteringCard = true;
+  /// participants|topics`, twice each, over the same 95 seeded conversations.
+  /// The rule was written before the runs: `topics` ships only if it beats
+  /// `participants` by at least four points on `storyline.id` on both passes,
+  /// or ties within four with a smaller largest-storyline share and no fewer
+  /// correct positives. It beat it by eight — 31 of 98 against 23 of 98 —
+  /// with purity over the storylines that carried gold members moving from
+  /// 44% to 71% and the largest storyline's share of every filed thread
+  /// falling from 56% to 47%. Neither card produced a correct positive, which
+  /// is the chaining the join rule above is what removes.
+  ///
+  /// So it ships false. Flipping it orphans every stored conversation vector
+  /// by construction, since every read filters on the tag, so it moved
+  /// together with [EmbeddingsClient.modelTag] (now `…/clustering-v2`) and the
+  /// `clustering_card_v2` one-shot in `sync_service.dart`, which requeues the
+  /// assign pass for the old-tag threads a slice at a time until they carry a
+  /// vector in the new geometry.
+  static const bool participantsInClusteringCard = false;
 }
 
 /// What one pass of [StorylineService.assignConversation] concluded.
@@ -1182,16 +1238,14 @@ class StorylineService {
       // gate, same order.
       final blocked = await _store.blockedThreadsOf(storylineId);
 
-      // Scored, then top-N. Ties break on the store's own order (newest first,
-      // key ascending), and the sort is made deterministic by index because
-      // List.sort makes no stability promise of its own.
-      final scored = <({int index, Map<String, Object?> row, double score})>[];
-      var index = 0;
+      // Everything this lap could still consider, in the store's own order:
+      // not a member, not blocked, and carrying a readable vector.
+      final candidates =
+          <({Map<String, Object?> row, List<double> vector})>[];
       for (final row in await _store.conversationsWithEmbeddings(
         embedModel: EmbeddingsClient.modelTag,
         sources: _sources,
       )) {
-        final order = index++;
         final key = row['conversation_key'] as String? ?? '';
         if (key.isEmpty) continue;
         final rowSource = row['source'] as String? ?? _workSource;
@@ -1202,16 +1256,16 @@ class StorylineService {
         if (blob is! Uint8List) continue;
         final vector = decodeEmbedding(blob);
         if (vector.isEmpty) continue;
-        final score = cosine(vector, centroid);
-        if (score < StorylineTuning.assignCosineGateWithOverlap) continue;
-        scored.add((index: order, row: row, score: score));
+        candidates.add((row: row, vector: vector));
       }
-      scored.sort((a, b) {
-        final byScore = b.score.compareTo(a.score);
-        return byScore != 0 ? byScore : a.index.compareTo(b.index);
-      });
-      final considered =
-          scored.take(StorylineTuning.recruitMaxCandidates).toList();
+      // Scored, then top-N — [_shortlist], the same recipe the sweep's probe
+      // runs over the finished threads.
+      final considered = _shortlist(
+        candidates,
+        centroid,
+        gate: StorylineTuning.assignCosineGateWithOverlap,
+        take: StorylineTuning.recruitMaxCandidates,
+      );
 
       // One snapshot for every candidate: the storyline as the user saved it is
       // what all eight are judged against, not a group that grows under the
@@ -1556,7 +1610,7 @@ class StorylineService {
 
     // Pair-discovery, on the index when there is one and in Dart when there is
     // not. The two answers are the same clusters either way — see
-    // [_indexedLinks] — so nothing below this line knows which ran.
+    // [_indexedSimilarities] — so nothing below this line knows which ran.
     final clusters = await _clusterCandidates(rows, vectors);
 
     // Room is spent on PROPOSALS, not on clusters considered: the pass is
@@ -1619,35 +1673,84 @@ class StorylineService {
   /// The clusters this sweep will consider, from whichever pair-discovery is
   /// available.
   ///
-  /// The split is deliberate and narrow: finding the linked PAIRS is the part
-  /// an index can do faster, and forming the clusters out of them is the part
-  /// whose determinism the tombstones depend on. So both paths hand the same
-  /// question to the same [_clusterBy], and the only thing that varies is who
-  /// answered "does row i link to row j".
+  /// The split is deliberate and narrow: measuring the pairs is the part an
+  /// index can do faster, and forming the clusters out of them is the part
+  /// whose determinism the tombstones depend on. So both paths build the same
+  /// table of similarities and hand it to the same [_clusterBy], and the only
+  /// thing that varies is who measured "how close are rows i and j".
   Future<List<List<int>>> _clusterCandidates(
     List<Map<String, Object?>> rows,
     List<List<double>> vectors,
   ) async {
-    final links = await _indexedLinks(rows, vectors);
-    if (links == null) return _cluster(vectors);
-    return _clusterBy(vectors.length, (i, j) => links[i].contains(j));
+    final table = await _indexedSimilarities(rows, vectors) ??
+        _arithmeticSimilarities(vectors);
+    return _clusterBy(vectors.length, table.get);
   }
 
-  /// The link adjacency read off the vec0 index, or null when the index cannot
-  /// answer for this candidate set and the caller must do the arithmetic.
+  /// The clustering rule, with this app's numbers in it. The rule itself lives
+  /// in [clusterBySimilarity], which knows nothing about storylines — see its
+  /// doc for the join rule, the cap, the coherence floor and the split ladder,
+  /// and for why the whole thing has to be a pure function of the row order
+  /// the store handed over.
+  static List<List<int>> _clusterBy(
+    int count,
+    double Function(int i, int j) sim,
+  ) =>
+      clusterBySimilarity(
+        count,
+        sim,
+        threshold: StorylineTuning.clusterLinkThreshold,
+        minSize: StorylineTuning.minClusterSize,
+        maxSize: StorylineTuning.maxClusterSize,
+        floor: StorylineTuning.clusterCoherenceFloor,
+        step: StorylineTuning.clusterSplitStep,
+        ceiling: StorylineTuning.clusterSplitCeiling,
+      );
+
+  /// Every candidate pair's similarity, computed in Dart — the fallback, and
+  /// the definition the index path is measured against.
+  ///
+  /// Full agglomerative clustering — repeatedly merging the closest pair —
+  /// would find slightly better groups and is O(n³) on a list that is
+  /// re-clustered after every sync. This is O(n²) against a mailbox of a few
+  /// hundred live threads, and the model call behind each proposal is the part
+  /// that decides quality anyway.
+  static PairSimilarities _arithmeticSimilarities(
+    List<List<double>> vectors,
+  ) {
+    final table = PairSimilarities(vectors.length);
+    for (var i = 0; i < vectors.length; i++) {
+      for (var j = i + 1; j < vectors.length; j++) {
+        table.set(i, j, cosine(vectors[i], vectors[j]));
+      }
+    }
+    return table;
+  }
+
+  /// The candidate pair similarities read off the vec0 index, or null when the
+  /// index cannot answer for this candidate set and the caller must do the
+  /// arithmetic.
   ///
   /// **This is an equivalence, not an approximation.** Every probe asks for as
   /// many neighbours as the index HOLDS, so each one comes back with the whole
-  /// corpus and the same `>=` against the same threshold decides each pair. The
-  /// win being bought is that the distances are computed natively over packed
-  /// float32 instead of a Dart triple-accumulation per pair; it is emphatically
-  /// not an asymptotic one, and asking for fewer neighbours to get one would
-  /// mean the sweep proposing different storylines depending on whether an
-  /// optional native extension had loaded. Note that the index holds the whole
+  /// corpus and every candidate pair is seen — twice, once from each end, at
+  /// the same number. A pair no probe reported reads 0 out of the table, which
+  /// is below every threshold the clustering compares against. The win being
+  /// bought is that the distances are computed natively over packed float32
+  /// instead of a Dart triple-accumulation per pair; it is emphatically not an
+  /// asymptotic one, and asking for fewer neighbours to get one would mean the
+  /// sweep proposing different storylines depending on whether an optional
+  /// native extension had loaded. Note that the index holds the whole
   /// clustering corpus and the candidates are a subset of it — filed and
   /// finished threads are indexed too — which is exactly why `k` is the index's
   /// row count and not the candidate count: a `k` of the latter would let
   /// already-filed threads crowd a genuine candidate out of a probe's answer.
+  ///
+  /// What this does NOT do any more is decide anything. It used to return a
+  /// boolean adjacency, applying the link threshold as it read each hit; the
+  /// compare now lives in [clusterBySimilarity], because the coherence floor
+  /// is a mean over every pair inside a cluster and the new join rule puts
+  /// sub-threshold pairs inside one by construction.
   ///
   /// Four ways to decline, and each of them says why — once per distinct
   /// reason, per process:
@@ -1667,7 +1770,7 @@ class StorylineService {
   /// But a build that quietly clusters the slow way forever and a corpus with
   /// one bad row are very different things to be told about, and the report is
   /// the only place that distinction survives.
-  Future<List<Set<int>>?> _indexedLinks(
+  Future<PairSimilarities?> _indexedSimilarities(
     List<Map<String, Object?>> rows,
     List<List<double>> vectors,
   ) async {
@@ -1693,7 +1796,7 @@ class StorylineService {
       position[_threadKey(source, key)] = i;
     }
 
-    final links = [for (var i = 0; i < rows.length; i++) <int>{}];
+    final table = PairSimilarities(rows.length);
     for (var i = 0; i < rows.length; i++) {
       final blob = rows[i]['embedding'];
       if (blob is! Uint8List) {
@@ -1709,21 +1812,19 @@ class StorylineService {
           foundSelf = true;
           continue;
         }
-        if (hit.similarity < StorylineTuning.clusterLinkThreshold) continue;
-        // Written both ways from either sighting. Cosine is symmetric and each
-        // probe sees the whole corpus, so this is a formality — but it is the
-        // formality that makes the adjacency a genuine undirected graph rather
-        // than something whose clusters could turn on which row was probed
-        // first.
-        links[i].add(j);
-        links[j].add(i);
+        // Stored once for the unordered pair, whichever end reported it.
+        // Cosine is symmetric and each probe sees the whole corpus, so the
+        // second sighting writes the number the first one did — which is what
+        // makes the table a genuine symmetric measure rather than something
+        // whose clusters could turn on which row was probed first.
+        table.set(i, j, hit.similarity);
       }
       if (!foundSelf) {
         _reportBruteForce('the index does not hold every candidate');
         return null;
       }
     }
-    return links;
+    return table;
   }
 
   /// Reasons already reported. Static because the interesting thing is the
@@ -1742,65 +1843,6 @@ class StorylineService {
   static void _reportBruteForce(String reason) {
     if (!_fallbackReported.add(reason)) return;
     debugPrint('storylines: sweeping by arithmetic — $reason');
-  }
-
-  /// Single-link greedy agglomeration over [vectors], every pair compared in
-  /// Dart — the fallback, and the definition both paths are measured against.
-  ///
-  /// Full agglomerative clustering — repeatedly merging the closest pair —
-  /// would find slightly better groups and is O(n³) on a list that is
-  /// re-clustered after every sync. This pass is O(n²) against a mailbox of a
-  /// few hundred live threads, and the model call behind each proposal is the
-  /// part that decides quality anyway.
-  static List<List<int>> _cluster(List<List<double>> vectors) => _clusterBy(
-        vectors.length,
-        (i, j) =>
-            cosine(vectors[i], vectors[j]) >=
-            StorylineTuning.clusterLinkThreshold,
-      );
-
-  /// Single-link greedy agglomeration, in one pass, over [count] rows and the
-  /// one question [linked] answers about them.
-  ///
-  /// Each conversation, in the order the store handed them over (newest first,
-  /// key ascending — a total order with no ties), joins the FIRST existing
-  /// cluster holding a member it links to, and otherwise opens one of its own.
-  /// That makes the result a pure function of the input: same rows and same
-  /// links in, same clusters out, which is what
-  /// [MessageStore.dismissedHashExistsAny] depends on to recognise a suggestion
-  /// the user already threw away. [linked] is therefore required to be pure and
-  /// symmetric — both callers above satisfy that, one by arithmetic and one by
-  /// construction — because a link that depended on the order it was asked in
-  /// would put that property back at risk.
-  ///
-  /// Returned largest-first, so the [take] above keeps the strongest
-  /// proposals; ties break on the earlier cluster, which preserves the recency
-  /// order the rows arrived in.
-  static List<List<int>> _clusterBy(
-    int count,
-    bool Function(int i, int j) linked,
-  ) {
-    final clusters = <List<int>>[];
-    for (var i = 0; i < count; i++) {
-      var joined = false;
-      for (final cluster in clusters) {
-        final links = cluster.any((member) => linked(i, member));
-        if (!links) continue;
-        cluster.add(i);
-        joined = true;
-        break;
-      }
-      if (!joined) clusters.add([i]);
-    }
-
-    final kept = [
-      for (final cluster in clusters)
-        if (cluster.length >= StorylineTuning.minClusterSize) cluster,
-    ];
-    // A stable sort, so equal-sized clusters keep the order they were built
-    // in rather than an arbitrary one.
-    kept.sort((a, b) => b.length.compareTo(a.length));
-    return kept;
   }
 
   /// Names one cluster, asks whether each of its threads actually belongs
@@ -2058,13 +2100,10 @@ class StorylineService {
             ),
         };
 
-        // Scored, then top-N, ties broken by arrival index — [recruit]'s
-        // recipe exactly, and for its reason: `List.sort` makes no stability
-        // promise, and this pass has to answer the same way twice.
-        final scored = <({int index, Map<String, Object?> row, double score})>[];
-        var order = 0;
+        // The finished threads still on offer, in the order the sweep
+        // diverted them.
+        final offered = <({Map<String, Object?> row, List<double> vector})>[];
         for (final candidate in doneCandidates) {
-          final candidateIndex = order++;
           final row = candidate.row;
           final key = row['conversation_key'] as String? ?? '';
           if (key.isEmpty) continue;
@@ -2075,19 +2114,17 @@ class StorylineService {
           // taken-set could not know about it, because that storyline did not
           // exist when the set was read.
           if (claimed.contains(thread)) continue;
-          final score = cosine(candidate.vector, centroid);
-          // The lower assignment gate, as the recruit uses for every
-          // candidate: the embedding decides what the model looks at, and the
-          // model decides membership.
-          if (score < StorylineTuning.assignCosineGateWithOverlap) continue;
-          scored.add((index: candidateIndex, row: row, score: score));
+          offered.add(candidate);
         }
-        scored.sort((a, b) {
-          final byScore = b.score.compareTo(a.score);
-          return byScore != 0 ? byScore : a.index.compareTo(b.index);
-        });
-        final considered =
-            scored.take(StorylineTuning.recruitMaxCandidates).toList();
+        // Scored, then top-N — [_shortlist], [recruit]'s recipe exactly, at
+        // the lower assignment gate for the recruit's reason: the embedding
+        // decides what the model looks at, and the model decides membership.
+        final considered = _shortlist(
+          offered,
+          centroid,
+          gate: StorylineTuning.assignCosineGateWithOverlap,
+          take: StorylineTuning.recruitMaxCandidates,
+        );
 
         if (considered.isNotEmpty) {
           // Read back from the stored members, not the `storylineParticipants`
@@ -2579,6 +2616,45 @@ class StorylineService {
       embedModel: EmbeddingsClient.modelTag,
     );
     return vector;
+  }
+
+  /// The best [take] of [candidates] against one [centroid]: scored by cosine,
+  /// everything under [gate] dropped, highest first.
+  ///
+  /// The one recipe for "many threads against one storyline" — the recruit lap
+  /// and the sweep's finished-thread probe both ask exactly this, of different
+  /// lists. The assignment pass is the transpose, one thread against many
+  /// centroids with a per-candidate gate, and does not come through here.
+  ///
+  /// Ties break on arrival order, which is the store's own (newest first, key
+  /// ascending), and that tiebreak is spelled out rather than left implicit
+  /// because `List.sort` makes no stability promise and both callers have to
+  /// answer the same way twice.
+  static List<({Map<String, Object?> row, double score})> _shortlist(
+    Iterable<({Map<String, Object?> row, List<double> vector})> candidates,
+    List<double> centroid, {
+    required double gate,
+    required int take,
+  }) {
+    final scored =
+        <({int index, Map<String, Object?> row, double score})>[];
+    var order = 0;
+    for (final candidate in candidates) {
+      final index = order++;
+      final score = cosine(candidate.vector, centroid);
+      if (score < gate) continue;
+      scored.add((index: index, row: candidate.row, score: score));
+    }
+    scored.sort((a, b) {
+      final byScore = b.score.compareTo(a.score);
+      return byScore != 0 ? byScore : a.index.compareTo(b.index);
+    });
+    // The arrival index stays inside: it exists to break the sort's ties and
+    // neither caller has any use for it afterwards.
+    return [
+      for (final candidate in scored.take(take))
+        (row: candidate.row, score: candidate.score),
+    ];
   }
 
   /// The mean vector, or null when there is nothing to average. Not

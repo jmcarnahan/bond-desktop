@@ -64,9 +64,10 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
 - `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_EXTRACT_CTX`, `GOLDEN_K`,
   `GOLDEN_CHARTER_CAP`, `GOLDEN_OWNER_NAME` / `GOLDEN_OWNER_ADDRESS` — see
   "The golden set".
-- `SWEEP_CARD` — which clustering card `make golden-sweep` embeds:
-  `participants`, the card the app ships, or `topics`, the same card with its
-  people segment left empty. The variable that bench exists to price.
+- `SWEEP_CARD` — which clustering card `make golden-sweep` embeds: `topics`,
+  the card the app ships since 2026-09-18, with its people segment left empty,
+  or `participants`, the card it shipped before. Defaults to `topics`, which
+  is to say to the app. The variable that bench was built to price.
 - `EMBED_URL` — the embedding server every bench dials, defaulting to
   `EMBED_PORT` on localhost. It reached only the app until `make golden-sweep`
   needed it: a bench run without it would embed against the compiled default
@@ -559,8 +560,8 @@ app's, so this measures the sweep over a correctly gated pool; `make
 golden-gate` is what measures the gates.
 
 ```sh
-make golden-sweep GOLDEN_RUN=tmp/bench/golden-run-<bulk>-….json                    # the shipping pair
-make golden-sweep GOLDEN_RUN=… SWEEP_CARD=topics                                   # the same, people out of the vector
+make golden-sweep GOLDEN_RUN=tmp/bench/golden-run-<bulk>-….json                    # the card the app ships
+make golden-sweep GOLDEN_RUN=… SWEEP_CARD=participants                             # the same, people back in the vector
 make golden-score R=tmp/bench/golden-run-<bulk>-<prose>-sweep-….json                # storyline.id, must/should/forbidden rules
 ```
 
@@ -1039,6 +1040,7 @@ seeds the GOLD gate verdict.
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-09-18 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | participants | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260918-161310.json` | 23/98 (23%), keep-only 21/85 (25%) | 0 | 44% over 6 of 7 storylines | 0% over 13 efforts | 56% | 7 / 0 / 3 would be refused | 7 / 142 | 240 s | the card the app ships; prose slot served with the MTP head; cards from `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json`; 95 conversations seeded, 71 with a kept inbound message, 24 fully gated, 71 embedded, 0 embed failures; 5 sweep passes, every suggestion kept; assign rejected 1; items unmapped 75, filed nowhere 25; lint counted and not applied; the third pass, on the review-fixed tree; the two earlier passes (`…153447` 259 s, `…153923` 231 s) were identical on every count, and the purity mean then averaged in the one storyline with no gold-carrying member as a zero, reading 37% |
 | 2026-09-18 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260918-162005.json` | 31/98 (32%), keep-only 26/85 (31%) | 0 | 71% over 7 of 7 storylines | 0% over 13 efforts | 47% | 7 / 1 / 4 would be refused | 8 / 291 | 411 s | the same mailbox with the people out of the vector; same servers, same cards, same seeding counts; 8 sweep passes, every suggestion kept; assign rejected 24, assigned 2; items unmapped 52, filed nowhere 48; the third pass, on the review-fixed tree; the two earlier passes (`…154658` 446 s, `…155344` 401 s) were identical on every count |
+| 2026-09-18 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260918-171650.json` | 37/98 (38%), keep-only 30/85 (35%) | 11 | 51% over 13 of 14 storylines | 8% over 13 efforts | 14% | 14 / 1 / 6 would be refused | 15 / 106 | 312 s | the Phase 2 rule, two links and half the members, the cap of twelve and the coherence floor of 0.60, with the topics card shipped; second of two identical passes, the first `…-sweep-20260918-171100.json` at 330 s; same servers, same cards from `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json`, same seeding counts: 95 conversations, 71 with a kept inbound message, 24 fully gated, 71 embedded, 0 embed failures; 6 sweep passes, every suggestion kept; calls per pass 24, 22, 28, 19, 16, 0; assign assigned 6, rejected 6; items unmapped 52, filed nowhere 30; forbidden hits 4 in 1 anti-storyline bucket; incoherent 0; lint counted and not applied, all 6 hits placeholder |
 
 **What the two sweep rows say (2026-09-18).** Both cards were run three
 times, twice before the phase's review and once after its fixes, and every
@@ -1065,10 +1067,11 @@ temperature 0 and the last pass of each is the row.
 **The card decision is met, so `topics` ships.** The rule written into
 `StorylineTuning.participantsInClusteringCard` before the runs asks for four
 points on `storyline.id` on both passes. `topics` beats `participants` by
-eight, with a smaller largest share and no fewer correct positives. Phase 2
-flips the const to false, bumps `EmbeddingsClient.modelTag` to
-`embeddinggemma-300M/clustering-v2`, and rides a one-shot re-embed on the
-sync. Phase 1 changes no code for it. The cost is proposals rather than
+eight, with a smaller largest share and no fewer correct positives. Phase 1
+changed no code for it; Phase 2 flipped the const to false, bumped
+`EmbeddingsClient.modelTag` to `embeddinggemma-300M/clustering-v2`, added the
+`clustering_card_v2` one-shot re-embed on the sync, and moved `SWEEP_CARD`'s
+default to `topics` so the bench keeps following the app. The cost is proposals rather than
 accuracy: smaller clusters mean more of them, which is 291 confirms over eight
 passes against 142 over five.
 
@@ -1103,6 +1106,50 @@ only this one can be re-run after a code change. The gap between them is the
 keep-all owner: seven blobs were accepted and they swallowed 75 items into
 storylines that answer to no gold effort, where the baseline reads a stored
 title per thread instead.
+
+**What the Phase 2 row says (2026-09-18).** The same mailbox, the same
+servers and the same cards, swept by the clustering rule Phase 2 shipped: two
+links and half the members to join, a cap of twelve, and a split at 0.05
+higher for any cluster at the cap or under the 0.60 coherence floor. Run
+twice, identical on every count, second pass kept.
+
+| read | participants | topics | Phase 2 rule |
+|---|---|---|---|
+| `storyline.id`, all items | 23/98 (23%) | 31/98 (32%) | 37/98 (38%) |
+| correct positives | 0 | 0 | 11 |
+| purity mean, over the storylines with a gold-carrying member | 44% over 6 of 7 | 71% over 7 of 7 | 51% over 13 of 14 |
+| largest storyline's share of filed threads | 56% | 47% | 14% |
+| naming / confirm calls | 7 / 142 | 8 / 291 | 15 / 106 |
+| wall, kept pass | 240 s | 411 s | 312 s |
+
+**The chaining is gone and the bench has its first correct positives.**
+Eleven items are now filed under the gold effort they belong to, where both
+Phase 1 cards produced none at all. The largest storyline holds 14% of every
+filed thread against 47% under the same card a rule ago, which is the number
+this phase existed to move. The model spends less to get there: 106 confirms
+against 291, because fourteen small groups cost fewer member questions than
+seven blobs, and the wall falls from 411 s to 312 s.
+
+**Purity fell, from 71% to 51%, and that is not a regression hiding in the
+average.** It is fourteen storylines instead of seven, and the plurality
+mapping is harsher on a group of three than on a blob: one wrong member in a
+trio costs 33 points where one wrong member in a group of twenty costs 5. Six
+of the fourteen carry a title or charter the lint already reads as a
+placeholder, counted and not applied until Phase 3, so the namer is still
+being handed groups it cannot describe and is still describing them anyway.
+
+**Coverage is 8% and is the next thing to fix, not this phase's.** An effort
+whose threads now sit in three small storylines scores against none of them,
+so cutting the blobs up moved coverage from 0% to 8% and no further. The two
+answers to that are already planned: the series pre-pass in Phase 3, which
+groups a recurring subject before the cosine sees it, and the fragment
+handling in Phase 5. The cosine inside a formed storyline is tighter
+throughout, which is the floor doing its work.
+
+| pairs inside a formed storyline | <0.50 | 0.50-0.55 | 0.55-0.60 | 0.60-0.65 | >=0.65 | total | under the 0.65 link threshold |
+|---|---|---|---|---|---|---|---|
+| Phase 2 rule, topics | 0 | 0 | 1 | 26 | 132 | 159 | 17% |
+
 
 
 ### Gate replay ledger

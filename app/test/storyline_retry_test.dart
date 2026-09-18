@@ -284,10 +284,12 @@ void main() {
         containsAll(['member', 'conv-1']),
       );
 
-      // And the vector it filed on is stored, hashed over the same enriched
-      // card the extraction would have embedded — so the next extraction of
-      // this thread sees its own answer rather than embedding it again.
-      final card = enrichedCardForConversationRow(
+      // And the vector it filed on is stored, hashed over the same CLUSTERING
+      // card the extraction would have embedded — the one recipe both writers
+      // go through, so the next extraction of this thread sees its own answer
+      // rather than embedding it again. Not the enriched card: that one is a
+      // prompt recipe and keeps its people whatever the vector does.
+      final card = clusteringCardForConversationRow(
         (await store.getConversationRow('email', 'conv-1'))!,
         await store.newestInboundCardData('email', 'conv-1'),
       );

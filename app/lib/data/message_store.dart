@@ -4630,6 +4630,57 @@ FROM storylines s''';
     return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
 
+  /// The threads still carrying a vector under [embedModel], newest first, at
+  /// most [cap] of them.
+  ///
+  /// Written for the `clustering_card_v2` one-shot in `SyncService`, which
+  /// asks it for the RETIRED tag: a conversation still under the old tag is
+  /// one whose vector was taken over a card this build no longer writes, and
+  /// every clustering read filters the tag, so the thread is invisible to the
+  /// sweep until something re-embeds it. The one-shot requeues the assign pass
+  /// for each key it returns, and that pass writes the new vector.
+  ///
+  /// No source filter, deliberately: mail and chat share this table and the
+  /// same card recipe, so one caller on the mail sync covers both connectors
+  /// and `teams_sync.dart` needs no one-shot of its own. `embedding IS NOT
+  /// NULL` because a row with no vector has nothing to retire.
+  ///
+  /// The kept-inbound clause is [conversationsWithEmbeddings]'s, and it is
+  /// load-bearing rather than tidy. A thread with nothing kept is not the
+  /// pool's: `assignConversation` returns `AssignOutcome.gated` before it
+  /// looks for a vector, so the pass the one-shot queues would turn it away
+  /// without re-embedding it, and the row would come back in every slice
+  /// forever. Two hundred such threads would hold the one-shot open for the
+  /// life of the database, re-queueing the same work on every sync. Left out,
+  /// its old-tag row simply stays where it is, invisible to every clustering
+  /// read by construction, and `GateRepairService.evictGatedThread` clears it
+  /// on the path that actually cares.
+  Future<List<({String source, String key})>> conversationKeysWithEmbedModel(
+    String embedModel, {
+    required int cap,
+  }) async {
+    final result = await db
+        .customSelect(
+          'SELECT a.source AS source, a.conversation_key AS conversation_key '
+          'FROM conversation_ai a '
+          'WHERE a.embed_model = ? AND a.embedding IS NOT NULL '
+          'AND EXISTS (SELECT 1 FROM messages m '
+          '  WHERE m.source = a.source '
+          '  AND m.conversation_key = a.conversation_key '
+          "  AND m.direction = 'inbound' AND ${keptMessageSql('m')}) "
+          'ORDER BY a.updated_at DESC, a.conversation_key ASC LIMIT ?',
+          variables: _args([embedModel, cap]),
+        )
+        .get();
+    return [
+      for (final row in result)
+        (
+          source: row.data['source'] as String? ?? '',
+          key: row.data['conversation_key'] as String? ?? '',
+        ),
+    ];
+  }
+
   /// Brings the clustering index level with `conversation_ai` and returns how
   /// many rows it then holds — `null` when there is no usable index, which is
   /// the caller's signal to do the arithmetic itself.

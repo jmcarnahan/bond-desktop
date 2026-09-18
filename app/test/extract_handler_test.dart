@@ -13,7 +13,8 @@ import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
-import 'package:bond_inbox/services/storyline_service.dart' show StorylineTuning;
+import 'package:bond_inbox/services/storyline_service.dart'
+    show StorylineTuning, clusteringCardForConversationRow;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -360,10 +361,13 @@ void main() {
 
       await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
 
+      // The people segment is empty since Round D Phase 2 — the card is four
+      // segments by contract whatever the flag says, so the vector is taken
+      // over a subject, a topic list and a summary and nothing else.
       expect(
         embeddings.clusteringInputs.single,
         '${EmbeddingsClient.clusteringPrefix}'
-        'Launch date | Sarah Chen, billing@vendor.example.com | launch date | '
+        'Launch date |  | launch date | '
         'Sarah needs the lock extended.',
       );
       final row = (await store.getConversationAi('email', 'conv-1'))!;
@@ -394,6 +398,122 @@ void main() {
       expect(embeddings.clusteringInputs.length, 1);
       // The per-message card has its own hash, and the same guard.
       expect(embeddings.documentInputs.length, 1);
+    });
+
+    test('the hash is over the card the heal path would rebuild', () async {
+      // One thread, one card. Extraction used to build from the result in hand
+      // and the row's own triage summary while `StorylineService._reembed`
+      // built from the thread's newest kept inbound, and both wrote the same
+      // `embedded_hash` column — so extracting an older message of a thread
+      // stored a hash over a card nothing else would ever produce, and the
+      // next heal re-embedded a thread that had not changed. The older message
+      // is extracted here deliberately: that is the case that used to differ.
+      await seedConversation();
+      await seedMessage(summary: 'Sarah needs the lock extended.');
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'm2',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'subject': 'Re: Launch date',
+        'from_name': 'Sarah',
+        'from_address': 'sarah@x.com',
+        'received_at': '2026-08-30T10:00:00Z',
+        'body_text': 'And the photography?',
+        'triage_status': 'triaged',
+      });
+      await store.writeTriage(
+        'email',
+        'm2',
+        status: 'triaged',
+        result: const TriageResult(
+          urgency: 'normal',
+          category: 'work',
+          summary: 'Sarah is asking about the photography.',
+          needsAction: true,
+          actionItems: ['Send the photo selects'],
+        ),
+      );
+      await store.writeExtraction(
+        'email',
+        'm2',
+        jsonEncode({
+          'topics': ['photography'],
+        }),
+      );
+      final embeddings = FakeEmbeddings();
+
+      await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
+
+      final expected = clusteringCardForConversationRow(
+        (await store.getConversationRow('email', 'conv-1'))!,
+        await store.newestInboundCardData('email', 'conv-1'),
+      );
+      expect(
+        (await store.getConversationAi('email', 'conv-1'))!['embedded_hash'],
+        cardHash(expected),
+      );
+      // And the text that was actually embedded is that card, not the one the
+      // extracted message alone would have described.
+      expect(
+        embeddings.clusteringInputs.single,
+        '${EmbeddingsClient.clusteringPrefix}$expected',
+      );
+      expect(expected, contains('photography'));
+    });
+
+    test('a card stored under the retired tag is embedded again', () async {
+      // The defect a tag bump would otherwise leave behind. The card has not
+      // changed, so the hash matches and the old guard would have skipped —
+      // and the thread would carry a vector nothing reads for as long as its
+      // card stayed the same, invisible to every sweep.
+      await seedConversation();
+      await seedMessage();
+      final embeddings = FakeEmbeddings();
+      final handler = ExtractHandler(
+        store,
+        FakeLlm([answer()]),
+        embeddings.client,
+      );
+
+      await runOne(handler);
+      final hash =
+          (await store.getConversationAi('email', 'conv-1'))!['embedded_hash'];
+      await store.upsertConversationAi(
+        'email',
+        'conv-1',
+        embedModel: EmbeddingsClient.retiredModelTag,
+      );
+
+      await runOne(handler);
+
+      expect(embeddings.clusteringInputs.length, 2);
+      final row = (await store.getConversationAi('email', 'conv-1'))!;
+      expect(row['embed_model'], EmbeddingsClient.modelTag);
+      // The same card, so the same hash: what moved is the space the vector
+      // lives in.
+      expect(row['embedded_hash'], hash);
+    });
+
+    test('the same card under the current tag is not embedded twice', () async {
+      await seedConversation();
+      await seedMessage();
+      final embeddings = FakeEmbeddings();
+      final handler = ExtractHandler(
+        store,
+        FakeLlm([answer()]),
+        embeddings.client,
+      );
+
+      await runOne(handler);
+      expect(
+        (await store.getConversationAi('email', 'conv-1'))!['embed_model'],
+        EmbeddingsClient.modelTag,
+      );
+
+      await runOne(handler);
+
+      expect(embeddings.clusteringInputs.length, 1);
     });
 
     test('a changed card is re-embedded', () async {
@@ -967,11 +1087,10 @@ void main() {
     const topics = ['launch', 'homepage copy'];
     const summary = 'Shipping Thursday.';
 
-    test('with the people it is byte-identical to the card the app embeds',
-        () {
-      // The flag ships as `true`, so the card and therefore `cardHash` must be
-      // exactly what every stored vector was written from. A single byte here
-      // orphans the whole clustering corpus without anything saying so.
+    test('with the people it is byte-identical to the prompt card', () {
+      // The two recipes agree while the flag says they should. What the flag
+      // decides is which of them the vector is taken over; the cards a model
+      // reads keep their people either way.
       expect(
         buildClusteringCard(
           subject: subject,
@@ -987,7 +1106,28 @@ void main() {
           summary: summary,
         ),
       );
-      expect(StorylineTuning.participantsInClusteringCard, isTrue);
+    });
+
+    test('the app ships the card without them', () {
+      // False since Round D Phase 2, and pinned here because the flag and
+      // `EmbeddingsClient.modelTag` have to move together: a flip on its own
+      // would leave every stored vector describing a card this build no
+      // longer writes, with nothing saying so.
+      expect(StorylineTuning.participantsInClusteringCard, isFalse);
+
+      final card = buildClusteringCard(
+        subject: subject,
+        participants: participants,
+        topics: topics,
+        summary: summary,
+        withParticipants: StorylineTuning.participantsInClusteringCard,
+      );
+
+      final segments = card.split(' | ');
+      expect(segments, hasLength(4));
+      expect(segments[1], isEmpty);
+      expect(segments.first, subject);
+      expect(EmbeddingsClient.modelTag, 'embeddinggemma-300M/clustering-v2');
     });
 
     test('without them the people segment is empty, not absent', () {

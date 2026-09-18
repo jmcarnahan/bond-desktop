@@ -688,36 +688,71 @@ has one only because something embedded it before the gates spoke, and one
 sender's gated mail looks alike enough to cluster into a proposal about mail
 nobody was ever going to read. The vec0 index can lag the durable table for a
 sweep — it is diff-backfilled from `conversation_ai` — but that changes
-nothing: `_indexedLinks` maps every probe hit back through the candidate rows
-and ignores a neighbour that is not among them. The card's message-side data
-(`newestInboundCardData`) prefers a kept inbound too, falling back to a gated
-one only when there is nothing else, so a no-reply autoresponder landing on a
-live thread cannot become the sentence that thread is clustered by. The same
-query feeds each episode card's one-line summary on the storyline screen
-(`storylines_provider.dart`), so that line moves with it: an episode whose
-newest inbound is a bounce is summarised by the last message a person sent,
-while the spine still lists every row. Ordering
-is what makes any of this hold: a message is never extracted, and so never
-embedded, before triage has spoken about it — see
-[04-extraction.md](04-extraction.md) for the claim rule that enforces it.
+nothing: `_indexedSimilarities` maps every probe hit back through the
+candidate rows and ignores a neighbour that is not among them. The card's
+message-side data (`newestInboundCardData`) prefers a kept inbound too,
+falling back to a gated one only when there is nothing else, so a no-reply
+autoresponder landing on a live thread cannot become the sentence that thread
+is clustered by. The same query feeds each episode card's one-line summary on
+the storyline screen (`storylines_provider.dart`), so that line moves with it:
+an episode whose newest inbound is a bounce is summarised by the last message
+a person sent, while the spine still lists every row. Ordering is what makes
+any of this hold: a message is never extracted, and so never embedded, before
+triage has spoken about it — see [04-extraction.md](04-extraction.md) for the
+claim rule that enforces it.
 
-Clustering is two halves, and only one of them moved. **Forming** the clusters
-is single-link greedy agglomeration in `StorylineService._clusterBy` — each
-thread, in the order the store handed them over, joins the first existing
-cluster holding a member it links to. That is a pure function of its input, and
-has to stay one: `cluster_hash` is what tombstones a dismissed suggestion, so
-the same threads must group the same way on every run for a dismissal to hold.
-**Finding** the linked pairs is the half an index can do faster, and it now
-does — `ConversationVectorIndex` (see `05-embeddings.md`), diff-backfilled at
-sweep start, one KNN probe per candidate, `1 - distance` converted back to the
-cosine similarity the same `>= clusterLinkThreshold` decides on.
+Clustering is two halves. **Measuring** the pairs is the half an index can do
+faster, and it does — `ConversationVectorIndex` (see `05-embeddings.md`),
+diff-backfilled at sweep start, one KNN probe per candidate, `1 - distance`
+converted back to a cosine. **Forming** the clusters out of those numbers is
+`clusterBySimilarity` in `storyline_clustering.dart`, which has no store, no
+model and no clock in it, and both halves meet at one table of similarities.
 
-**The results are identical, unconditionally, by design.** Each probe asks for
-as many neighbours as the *index* holds — not as many as there are candidates —
-so it comes back with the whole corpus and no link can be crowded out by a
-thread that is already filed. What that buys is native distance arithmetic over
-packed float32, not a better asymptotic: an index that made the sweep faster by
-proposing different storylines would be a bug wearing a benchmark.
+**Two links and half the members.** A link is a pair at or above
+`clusterLinkThreshold`. Threads arrive in the order the store handed them over,
+newest first and key ascending, and each one either joins a cluster or opens
+its own. It may join a cluster when it links to at least two of that cluster's
+members and to at least half of them, so a pair still forms from a single link
+and a third thread has to look like both of the first two. Where several
+clusters qualify, the one it has the most links into wins, and a tie goes to
+the earlier cluster. What this replaces is single-link: join the first cluster
+holding any member you link to. One thread that looks a little like two
+different groups is all single-link needs to weld them together, and in a
+one-team mailbox there is always one. On 2026-09-18 that chained the golden
+mailbox into a single storyline holding 56% of every filed thread, with no
+correct positive anywhere in the run.
+
+**A cap, a floor, and a split rather than a verdict.** A cluster stops
+accepting members at `maxClusterSize`, twelve, because a proposal longer than
+that is more than a person reads before answering and the name it gets
+describes something more general with every thread added. After the pass, a
+cluster at the cap and a cluster whose mean pairwise cosine is under
+`clusterCoherenceFloor`, 0.60, are both re-clustered on their own members at
+0.05 higher, repeating up to 0.85. A group that is nearly two groups comes
+apart at the seam. What is still under the floor at the top of that ladder is
+dropped for this pass: no naming call is spent on a blob, and no tombstone is
+written either, because nothing was ever asked about it. A group that is merely
+large survives at the ceiling, since being at the cap is not a defect when
+everything in it is coherent.
+
+The whole thing is a pure function of the store's order and the similarities,
+and has to stay one: `cluster_hash` is what tombstones a dismissed suggestion,
+so the same threads must group the same way on every run for a dismissal to
+hold. A cluster that forms differently under a changed rule is a new question
+and costs one naming call and its confirms, once, after which its own tombstone
+holds. An old tombstone still answers for any identical member set.
+
+**The two paths agree on the clusters, unconditionally, by design.** Each probe
+asks for as many neighbours as the *index* holds — not as many as there are
+candidates — so it comes back with the whole corpus and every candidate pair is
+seen, from both ends, at the same number. A pair no probe reported reads zero
+out of the table, which is below every threshold the rule compares against. The
+index supplies similarities now rather than a yes or a no, because the
+coherence floor is a mean over every pair inside a cluster and the join rule
+puts sub-threshold pairs inside one by construction. What the index buys is
+native distance arithmetic over packed float32, not a better asymptotic: an
+index that made the sweep faster by proposing different storylines would be a
+bug wearing a benchmark.
 
 **Measuring it.** `make golden-sweep` is the ruler for everything in this
 section. It seeds an in-memory store with the conversations behind the golden
@@ -730,7 +765,12 @@ coverage per effort, the largest storyline's share of every filed thread,
 which is the chaining number, and the cosine of every pair inside a formed
 group. The first row, on 2026-09-18, is what this section is being changed to
 fix: seven storylines formed, the largest holding 56% of every filed thread,
-zero correct positives and 23 of 98 on the scorer.
+zero correct positives and 23 of 98 on the scorer. The rule above is the second
+row on the same mailbox: fourteen storylines, the largest holding 14% of every
+filed thread, eleven correct positives where there had never been one, and 37
+of 98 on the scorer, reached with 106 member confirms against 291. Purity fell
+from 71% to 51% over fourteen groups rather than seven, and coverage is still
+8%, which is what the series pre-pass and the fragment handling are for.
 `docs/model-bakeoff.md` carries the protocol, the knobs and the ledger.
 
 **Brute force is the fallback, and it is not exceptional.** The sweep does its

@@ -1,8 +1,13 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/activity_log.dart';
+// `show`: the one thing this file wants from the embedding client is the pair
+// of tags the clustering one-shot moves between.
+import 'package:bond_inbox/services/llm/embeddings_client.dart'
+    show EmbeddingsClient;
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
 import 'package:bond_inbox/services/sync_service.dart';
@@ -439,6 +444,132 @@ void main() {
       // A test build must leave the pref for the app that is owed the sweep.
       expect(await store.getPref('gated_conversation_repair'), isNull);
       expect(await reportedGateRepairs(), 0);
+    });
+
+    /// One conversation carrying a vector under [tag], and the kept inbound
+    /// message that makes it the clustering pool's. [kept] false writes a
+    /// gated message instead, which is a thread the assign pass turns away
+    /// before it re-embeds anything.
+    Future<void> seedVector(
+      String source,
+      String key,
+      String tag, {
+      bool kept = true,
+    }) async {
+      await store.upsertMessage({
+        'source': source,
+        'source_message_id': 'in-$source-$key',
+        'conversation_key': key,
+        'direction': 'inbound',
+        'subject': 'Subject',
+        'from_name': 'Sarah',
+        'from_address': 'sarah@example.test',
+        'received_at': isoAgo(const Duration(days: 2)),
+        'body_text': 'Body',
+        'triage_status': kept ? 'triaged' : 'skipped',
+        'gate_reason': kept ? null : 'no_reply',
+      });
+      await store.upsertConversationAi(
+        source,
+        key,
+        embedding: Uint8List.fromList([1, 2, 3, 4]),
+        embeddedHash: 'h-$key',
+        embedModel: tag,
+      );
+    }
+
+    /// How many `sync_mail` rows name the clustering one-shot at all — the
+    /// twin of [reportedRefolds], and the honest question here because a sync
+    /// that queued nothing is quiet enough to write no row of its own.
+    Future<int> reportedReembeds() async {
+      final rows = await db
+          .customSelect(
+            "SELECT COUNT(*) AS n FROM activity_events WHERE kind = 'sync_mail' "
+            "AND detail_json LIKE '%requeued_clustering_reembeds%'",
+          )
+          .getSingle();
+      return (rows.data['n'] as num).toInt();
+    }
+
+    /// Every thread with a pending `storyline` row, in no particular order.
+    Future<Set<String>> queuedStorylineKeys() async {
+      final rows = await db
+          .customSelect(
+            "SELECT source, entity_id FROM work_items WHERE task_kind = 'storyline' "
+            "AND status = 'pending'",
+          )
+          .get();
+      return {
+        for (final row in rows)
+          '${row.data['source']}/${row.data['entity_id']}',
+      };
+    }
+
+    test('the old clustering vectors are queued for a re-embed, once',
+        () async {
+      // The card lost its people and the tag moved with it, so a vector under
+      // the retired tag describes a card this build no longer writes. The
+      // assign pass is the vehicle: it re-embeds before it judges anything.
+      await seedVector('email', 'stale-1', EmbeddingsClient.retiredModelTag);
+      await seedVector('email', 'stale-2', EmbeddingsClient.retiredModelTag);
+      await seedVector('teams', 'stale-3', EmbeddingsClient.retiredModelTag);
+      await seedVector('email', 'current', EmbeddingsClient.modelTag);
+      // A thread the gates emptied. It keeps its old-tag row and is not in the
+      // slice: the assign pass would return `gated` before re-embedding it, so
+      // counting it would hold the one-shot open on work that can never close.
+      await seedVector('email', 'all-gated', EmbeddingsClient.retiredModelTag,
+          kept: false);
+
+      await syncReaching(14).syncNow();
+
+      expect(await queuedStorylineKeys(),
+          {'email/stale-1', 'email/stale-2', 'teams/stale-3'});
+      // Three is short of the cap, so the pass closed the one-shot.
+      expect(await store.getPref('clustering_card_v2'), '1');
+      expect((await syncMailDetail())['requeued_clustering_reembeds'], 3);
+
+      graph.requests.clear();
+      await store.writeWork('storyline', 'email', 'stale-1', status: 'done');
+      await syncReaching(14).syncNow();
+
+      // Nothing queued it again. Named on exactly one row, ever: a later pass
+      // omits the key rather than reporting a zero, which would read as a
+      // re-embed that ran and found nothing.
+      expect(await queuedStorylineKeys(),
+          {'email/stale-2', 'teams/stale-3'});
+      expect(await reportedReembeds(), 1);
+    });
+
+    test('a full slice leaves the one-shot owed and the next sync walks on',
+        () async {
+      // The cap is a pace: a mailbox with more old vectors than one slice
+      // holds is re-embedded over several syncs, and only the pass that comes
+      // back short closes the pref.
+      for (var i = 0; i < clusteringCardReembedCap; i++) {
+        await seedVector('email', 'old-$i', EmbeddingsClient.retiredModelTag);
+      }
+
+      await syncReaching(14).syncNow();
+
+      expect(await queuedStorylineKeys(), hasLength(clusteringCardReembedCap));
+      expect(await store.getPref('clustering_card_v2'), isNull);
+      expect((await syncMailDetail())['requeued_clustering_reembeds'],
+          clusteringCardReembedCap);
+
+      // The assign pass writes the new tag as it goes. All but five are done
+      // by the time the next sync runs.
+      for (var i = 0; i < clusteringCardReembedCap - 5; i++) {
+        await store.upsertConversationAi(
+          'email',
+          'old-$i',
+          embedModel: EmbeddingsClient.modelTag,
+        );
+      }
+      graph.requests.clear();
+      await syncReaching(14).syncNow();
+
+      expect((await syncMailDetail())['requeued_clustering_reembeds'], 5);
+      expect(await store.getPref('clustering_card_v2'), '1');
     });
   });
 

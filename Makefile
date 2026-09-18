@@ -684,11 +684,13 @@ GOLDEN_CHARTER_CAP ?= 400
 # Which context rung EXTRACTION sees, on its own axis: none | tail3 | digest.
 # The app gives extraction no thread today; the replay prices giving it one.
 GOLDEN_EXTRACT_CTX ?= none
-# Which clustering card `make golden-sweep` embeds: participants (what the app
-# ships) or topics (the same card with its people segment left empty). The
-# variable that bench exists to price — the people on a thread are the tokens
-# that make every pair in a one-team mailbox look alike.
-SWEEP_CARD ?= participants
+# Which clustering card `make golden-sweep` embeds: topics (what the app ships
+# since 2026-09-18, the card with its people segment left empty) or
+# participants (what it shipped before). The variable that bench was built to
+# price — the people on a thread are the tokens that make every pair in a
+# one-team mailbox look alike, and dropping them scored eight points better.
+# The default follows the app.
+SWEEP_CARD ?= topics
 
 # Single-quoted values, every one: a label carries spaces and parentheses, and
 # an unquoted --dart-define would hand the shell a second word to run.
@@ -1084,7 +1086,8 @@ golden-storyline: golden-check
 # golden-storyline does. Needs THREE servers: the embedding server for the
 # vectors, the bulk slot for the confirms and the prose slot for the names, so
 # both contract checks run first. SWEEP_CARD picks whether the people on a
-# thread are inside the vector. Writes the same two files as the other halves;
+# thread are inside the vector, and defaults to the card the app ships.
+# Writes the same two files as the other halves;
 # score the run file with `make golden-score R=…`, which reads its
 # storyline.id — derived from MEMBERSHIP here, where golden-baseline derives
 # it from the app's stored title.

@@ -88,6 +88,9 @@ class EmbedResult {
 /// vector is how that is prevented rather than merely hoped for: every read
 /// filters on the tag it expects, so a vector from the other corpus, or from
 /// an older prefix, is invisible instead of silently outranking real hits.
+/// That is also how a change to the TEXT a corpus is embedded from ships: the
+/// tag is bumped, every stored vector goes quiet by construction, and a
+/// one-shot re-embed refills the corpus under the new tag.
 class EmbeddingsClient {
   /// Overridable at build time (`--dart-define=EMBED_URL=…`).
   static const String defaultBaseUrl = String.fromEnvironment(
@@ -109,7 +112,22 @@ class EmbeddingsClient {
   /// Stored beside every conversation vector. Two vectors are only comparable
   /// when this matches, so a model swap is detectable rather than silently
   /// poisonous.
-  static const String modelTag = 'embeddinggemma-300M/clustering';
+  ///
+  /// `-v2` since 2026-09-18: the people left the clustering card that day
+  /// (`StorylineTuning.participantsInClusteringCard`, Round D Phase 2), and a
+  /// card change is a geometry change. Every vector written under the old tag
+  /// describes a different text, so mixing the two would compare threads by a
+  /// card half of them do not have. Bumping the tag is how that is prevented
+  /// rather than hoped for: the old rows are simply invisible to every read.
+  static const String modelTag = 'embeddinggemma-300M/clustering-v2';
+
+  /// The tag the `clustering_card_v2` one-shot in `sync_service.dart` retires.
+  ///
+  /// A vector under it is not wrong, it is in the wrong space: it was taken
+  /// over a card carrying the thread's participants, and nothing reads that
+  /// card any more. The one-shot requeues the assign pass for these threads a
+  /// slice at a time, and the pass re-embeds each one under [modelTag].
+  static const String retiredModelTag = 'embeddinggemma-300M/clustering';
 
   /// The message corpus, written side: one message as a retrievable document.
   ///
