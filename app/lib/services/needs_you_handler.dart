@@ -10,12 +10,8 @@ import 'llm/llm_client.dart';
 import 'attention.dart';
 import 'llm/needs_you_task.dart';
 import 'needs_you.dart';
+import 'owner_lookup.dart';
 import 'pipeline_progress.dart';
-
-/// Who the owner is, asked lazily. A record rather than two arguments so
-/// "the app does not know yet" is one null rather than two — a keychain that
-/// has not answered has no name AND no address.
-typedef OwnerLookup = Future<({String? name, String? address})?> Function();
 
 /// Decides whether ONE message needs the owner, and writes the verdict onto
 /// its row.
@@ -81,13 +77,13 @@ class NeedsYouHandler extends WorkHandler {
   /// the disabled log, so a test that builds this handler writes nothing extra.
   final ActivityLog _log;
 
+  /// The owner lookup, asked ONCE for the life of this handler by
+  /// [memoizedOwner]. It is a keychain read, and the answer only changes on
+  /// sign-out — which disposes the provider that built this handler and so
+  /// builds a new one. Only a lookup that ANSWERED is kept, so a keychain
+  /// hiccup is forgotten and this prompt simply names no owner, which the
+  /// line's own contract already allows.
   final OwnerLookup _owner;
-
-  /// The owner lookup, asked ONCE for the life of this handler. It is a
-  /// keychain read, and the answer only changes on sign-out — which disposes
-  /// the provider that built this handler and so builds a new one. Only a
-  /// lookup that ANSWERED is kept — see [_ownerIdentity].
-  Future<({String? name, String? address})?>? _ownerFuture;
 
   /// The task, memoized on the rules text it was built from. The pref is read
   /// per item so a mid-drain edit takes effect on the next message, but an
@@ -115,7 +111,7 @@ class NeedsYouHandler extends WorkHandler {
     PipelineProgress progress = const PipelineProgress.disabled(),
     Future<double> Function()? attentionThreshold,
   })  : _log = activityLog ?? ActivityLog.disabled(),
-        _owner = owner ?? (() async => null),
+        _owner = memoizedOwner(owner ?? (() async => null)),
         _pipeline = progress,
         _threshold = attentionThreshold;
 
@@ -219,7 +215,7 @@ class NeedsYouHandler extends WorkHandler {
     // Read per item rather than held, like [DraftHandler]'s about-me: someone
     // who edits their rules mid-drain wants the rest of the drain to use them.
     final rules = await _store.getPref(needsYouRulesKey);
-    final owner = await _ownerIdentity();
+    final owner = await _owner();
 
     final result = await runTask(
       _client,
@@ -324,20 +320,5 @@ class NeedsYouHandler extends WorkHandler {
       _task = NeedsYouTask.withRules(body);
     }
     return _task;
-  }
-
-  /// The memoized lookup, degraded rather than trusted. A keychain read that
-  /// THREW is forgotten — caching the failed future would leave every later
-  /// item rethrowing a hiccup until the app restarts — and this prompt simply
-  /// names no owner, which the line's own contract already allows. Failing the
-  /// item instead would spend its retries on something no retry of the model
-  /// can fix.
-  Future<({String? name, String? address})?> _ownerIdentity() async {
-    try {
-      return await (_ownerFuture ??= _owner());
-    } catch (_) {
-      _ownerFuture = null;
-      return null;
-    }
   }
 }

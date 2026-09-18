@@ -65,8 +65,12 @@ class StorylineAssignHandler extends WorkHandler {
       // embedding changed and matched nothing, which is most of them.
       case AssignOutcome.noCandidate:
         await _pipeline.noteStoryline(source, key, state: 'done');
+      // `catchAll` rides with these two because it is the same shape of
+      // ending: the pass looked, and deliberately filed nothing. The audit it
+      // queued is the service's business and is noted nowhere here.
       case AssignOutcome.rejected:
       case AssignOutcome.blocked:
+      case AssignOutcome.catchAll:
         await _pipeline.noteStoryline(source, key, state: 'done');
         _log
           ..noteStatus('skipped')

@@ -67,6 +67,7 @@ import '../services/system/system_info.dart';
 import '../services/system/updater.dart';
 import '../services/needs_you_handler.dart';
 import '../services/notification_coordinator.dart';
+import '../services/owner_lookup.dart';
 import '../services/notify/desktop_notifier.dart';
 import '../services/pipeline_progress.dart';
 import '../services/pipeline_repair_service.dart';
@@ -954,18 +955,7 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         progress: ref.watch(pipelineProgressProvider),
         attentionThreshold:
             attentionThresholdReader(ref.watch(messageStoreProvider)),
-        // A callback, not a value: the account is a keychain read, and this
-        // provider is built by plenty that never drains. The handler asks
-        // once, on the first message that reaches the model; until the answer
-        // arrives the prompt simply names no owner.
-        owner: () => ref.read(authSessionProvider).storedAccount.then(
-              (account) => account == null
-                  ? null
-                  : (
-                      name: account.displayName,
-                      address: account.mail ?? account.userPrincipalName,
-                    ),
-            ),
+        owner: _ownerLookup(ref),
       ),
       // Extraction next, and it drains completely before either storyline
       // handler starts. That order is the point: extraction is what writes the
@@ -1220,6 +1210,23 @@ final Provider<AiWorker> draftWorkerProvider = Provider<AiWorker>((ref) {
   );
 });
 
+/// Who the owner is, from the account the sync signed in with.
+///
+/// A callback, not a value: the account is a keychain read, and both callers
+/// are built by plenty that never drains. Each caller asks once, on the first
+/// item that reaches a model. Until the answer arrives the needs-you prompt
+/// names no owner and the storyline overlap rule counts everyone as not the
+/// owner, which is the stricter reading of both.
+OwnerLookup _ownerLookup(Ref ref) => () =>
+    ref.read(authSessionProvider).storedAccount.then(
+          (account) => account == null
+              ? null
+              : (
+                  name: account.displayName,
+                  address: account.mail ?? account.userPrincipalName,
+                ),
+        );
+
 /// One lane's worker, built the way all three are: the store, the lane's
 /// handlers and gate, the shared activity log and progress, and — for a lane
 /// that feeds others — the lanes to wake when its drain ends.
@@ -1292,6 +1299,9 @@ final storylineServiceProvider = Provider<StorylineService>(
     progress: ref.watch(pipelineProgressProvider),
     // The library, for the recap's directory footer and the charter offer.
     contextStore: ref.watch(contextStoreProvider),
+    // The overlap rule in `assignConversation` counts shared people who are
+    // not the owner; the same closure the needs-you handler takes.
+    owner: _ownerLookup(ref),
   ),
 );
 

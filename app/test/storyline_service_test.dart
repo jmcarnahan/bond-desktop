@@ -311,6 +311,10 @@ void main() {
     String key, {
     List<double>? vector,
     List<String> participants = const [],
+    /// Participants with an ADDRESS as well as a name, for the one rule that
+    /// reads both: the owner is recognised by either. Merged after
+    /// [participants], which stays the short spelling every other test uses.
+    List<({String? name, String? email})> participantRecords = const [],
     String state = 'waiting',
     String lastMessageAt = '2026-08-28T10:00:00Z',
     String? subject,
@@ -332,8 +336,10 @@ void main() {
       'subject': subject ?? 'Subject for ${spellDigits(key)}',
       'state': state,
       'last_message_at': lastMessageAt,
-      'participants_json':
-          '[${participants.map((p) => '{"name":"$p"}').join(',')}]',
+      'participants_json': jsonEncode([
+        for (final p in participants) {'name': p},
+        for (final p in participantRecords) {'name': p.name, 'email': p.email},
+      ]),
       // The series pre-pass's counters, written only when a test means to
       // build a shape that depends on them.
       'message_count': ?messageCount,
@@ -545,18 +551,264 @@ void main() {
       expect(await store.membersOf('sl-1'), hasLength(1));
     });
 
-    test('a shared participant lowers the gate', () async {
-      await seedStoryline(store, memberParticipants: const ['Sarah Chen']);
-      // The same vector as the test above, and the same 0.55 cosine. The only
-      // difference is that Sarah is on both threads.
+    test('two shared people lower the gate, one does not', () async {
+      // The same vector as the test above, and the same 0.55 cosine. What
+      // buys the discount is a GROUP in common: one shared person is what
+      // every pair of threads in a one-team mailbox has, so the old rule made
+      // 0.50 the real gate. Two is a group.
+      await seedStoryline(store,
+          memberParticipants: const ['Sarah Chen', 'Ann Lu']);
       await seed(store, 'c1',
           vector: vectorAt(0.55), participants: const ['sarah chen']);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
+          AssignOutcome.noCandidate);
+      expect(llm.schemas, isEmpty);
+      expect(await store.membersOf('sl-1'), hasLength(1));
+
+      await seed(store, 'c2',
+          vector: vectorAt(0.55), participants: const ['sarah chen', 'ann lu']);
+
+      expect(await StorylineService(store, llm).assignConversation('email', 'c2'),
+          AssignOutcome.assigned);
+      expect(llm.callsFor('storyline_membership'), 1);
+      expect((await store.membersOf('sl-1')).map((m) => m.conversationKey),
+          ['member', 'c2']);
+    });
+
+    test('the owner never counts toward the overlap', () async {
+      // The owner is on every thread in their own mailbox, so counting them
+      // as a shared person would hand the discount to any two threads at all.
+      await seedStoryline(store,
+          memberParticipants: const ['Pat Owner', 'Ann Lu']);
+      await seed(store, 'c1',
+          vector: vectorAt(0.55), participants: const ['Pat Owner', 'Ann Lu']);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final service = StorylineService(
+        store,
+        llm,
+        owner: () async => (name: 'Pat Owner', address: 'pat@example.com'),
+      );
+
+      // Two shared displays, but one of them is the owner: one shared person
+      // is left, which is not a group.
+      expect(await service.assignConversation('email', 'c1'),
+          AssignOutcome.noCandidate);
+      expect(llm.schemas, isEmpty);
+    });
+
+    test('and is recognised by address when the display says otherwise',
+        () async {
+      await seedStoryline(store,
+          memberParticipants: const ['Pat Owner', 'Ann Lu']);
+      await seed(
+        store,
+        'c1',
+        vector: vectorAt(0.55),
+        participants: const ['Ann Lu'],
+        // The same person the storyline knows as "Pat Owner", writing from a
+        // client that spells the display differently. The address is what
+        // settles it.
+        participantRecords: const [(name: 'P. Owner', email: 'pat@example.com')],
+      );
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final service = StorylineService(
+        store,
+        llm,
+        owner: () async => (name: 'Pat Owner', address: 'pat@example.com'),
+      );
+
+      expect(await service.assignConversation('email', 'c1'),
+          AssignOutcome.noCandidate);
+      expect(llm.schemas, isEmpty);
+    });
+
+    test('a lookup that throws counts everyone as not the owner, and is asked '
+        'again', () async {
+      // Until an answer arrives every participant counts, which keeps the
+      // overlap rule STRICTER than it would otherwise be — never looser — and
+      // the next thread asks again rather than inheriting one keychain
+      // hiccup forever.
+      await seedStoryline(store,
+          memberParticipants: const ['Pat Owner', 'Ann Lu']);
+      await seed(store, 'c1',
+          vector: vectorAt(0.55), participants: const ['Pat Owner', 'Ann Lu']);
+      await seed(store, 'c2',
+          vector: vectorAt(0.55), participants: const ['Pat Owner', 'Ann Lu']);
+      // A no, so the storyline's centroid does not move between the two
+      // threads and the only thing that changed is who the owner is.
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer(belongs: false)],
+      });
+      var lookups = 0;
+      final service = StorylineService(
+        store,
+        llm,
+        owner: () async {
+          lookups++;
+          if (lookups == 1) throw StateError('keychain unavailable');
+          return (name: 'Pat Owner', address: 'pat@example.com');
+        },
+      );
+
+      // Pat is a person like any other while the lookup is silent: two shared
+      // people, so the discount applies, 0.55 clears 0.50 and the model is
+      // asked.
+      expect(await service.assignConversation('email', 'c1'),
+          AssignOutcome.rejected);
+      // The second thread is judged with the answer, so Pat drops out, one
+      // shared person is left and nothing reaches the model at all.
+      expect(await service.assignConversation('email', 'c2'),
+          AssignOutcome.noCandidate);
+      expect(llm.callsFor('storyline_membership'), 1);
+      expect(lookups, 2);
+    });
+
+    /// Two live storylines a thread at `[1, 0]` sees at exactly [firstCosine]
+    /// and [secondCosine]: a storyline's centroid is its single member's
+    /// vector, so placing the member places the storyline.
+    Future<void> seedTwoCandidates({
+      required double firstCosine,
+      required double secondCosine,
+      String firstStatus = 'active',
+      String secondStatus = 'active',
+    }) async {
+      await seedStoryline(store,
+          id: 'sl-near',
+          status: firstStatus,
+          memberKey: 'near',
+          memberVector: vectorAt(firstCosine));
+      await seedStoryline(store,
+          id: 'sl-far',
+          status: secondStatus,
+          memberKey: 'far',
+          memberVector: vectorAt(secondCosine));
+      await seed(store, 'c1', vector: vectorAt(1));
+    }
+
+    test('a near-tie confirms both and takes high over medium', () async {
+      // 0.62 against 0.60 is a coin toss dressed as a ranking, so the cosine
+      // stops deciding and the answers decide instead.
+      await seedTwoCandidates(firstCosine: 0.62, secondCosine: 0.60);
+      final llm = FakeLlm({
+        'storyline_membership': [
+          confirmAnswer(confidence: 'medium'),
+          confirmAnswer(confidence: 'high'),
+        ],
+      });
+
+      expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
+          AssignOutcome.assigned);
+
+      expect(llm.callsFor('storyline_membership'), 2);
+      expect(await store.membersOf('sl-near'), hasLength(1));
+      expect((await store.membersOf('sl-far')).map((m) => m.conversationKey),
+          ['far', 'c1']);
+    });
+
+    test('and says in the log that it asked twice', () async {
+      await seedTwoCandidates(firstCosine: 0.62, secondCosine: 0.60);
+      final llm = FakeLlm({
+        'storyline_membership': [
+          confirmAnswer(confidence: 'medium'),
+          confirmAnswer(confidence: 'high'),
+        ],
+      });
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+
+      await StorylineService(store, llm, activityLog: log)
+          .assignConversation('email', 'c1');
+      await log.record('storyline', source: 'email', entityId: 'c1');
+
+      final row = ActivityEvent.fromRow((await store.recentActivity()).single);
+      expect(row.detail['confirmed'], 2);
+    });
+
+    test('a near-tie on equal confidence takes the higher cosine', () async {
+      await seedTwoCandidates(firstCosine: 0.62, secondCosine: 0.60);
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer(), confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      expect(llm.callsFor('storyline_membership'), 2);
+      expect((await store.membersOf('sl-near')).map((m) => m.conversationKey),
+          ['near', 'c1']);
+      expect(await store.membersOf('sl-far'), hasLength(1));
+    });
+
+    test('a near-tie where neither is accepted is rejected, once', () async {
+      await seedTwoCandidates(firstCosine: 0.62, secondCosine: 0.60);
+      final llm = FakeLlm({
+        'storyline_membership': [
+          confirmAnswer(belongs: false),
+          confirmAnswer(belongs: false),
+        ],
+      });
+
+      expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
+          AssignOutcome.rejected);
+
+      expect(llm.callsFor('storyline_membership'), 2);
+      expect(await store.membersOf('sl-near'), hasLength(1));
+      expect(await store.membersOf('sl-far'), hasLength(1));
+    });
+
+    test('a gap beyond the margin is still a ranking, and one question',
+        () async {
+      await seedTwoCandidates(firstCosine: 0.70, secondCosine: 0.60);
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
       expect(llm.callsFor('storyline_membership'), 1);
+      expect((await store.membersOf('sl-near')).map((m) => m.conversationKey),
+          ['near', 'c1']);
+    });
+
+    test('an active storyline takes a medium yes, as it always did', () async {
+      // A group the owner kept is a group they have looked at.
+      await seedStoryline(store, memberKey: 'kept');
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer(confidence: 'medium')],
+      });
+
+      expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
+          AssignOutcome.assigned);
       expect(await store.membersOf('sl-1'), hasLength(2));
+    });
+
+    test('a suggested one needs high', () async {
+      // Auto-filing into a group nobody has kept yet is what grew the blobs,
+      // so it needs the strongest answer the model gives.
+      await seedStoryline(store, status: 'suggested', memberKey: 'new');
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer(confidence: 'medium')],
+      });
+
+      expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
+          AssignOutcome.rejected);
+      // Asked, and turned down on the answer rather than kept from the model.
+      expect(llm.callsFor('storyline_membership'), 1);
+      expect(await store.membersOf('sl-1'), hasLength(1));
+    });
+
+    test('and a high yes files into it', () async {
+      await seedStoryline(store, status: 'suggested', memberKey: 'new');
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer(confidence: 'high')],
+      });
+
+      expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
+          AssignOutcome.assigned);
+      expect((await store.membersOf('sl-1')).map((m) => m.conversationKey),
+          ['new', 'c1']);
     });
 
     test('a blocked thread is skipped entirely', () async {
@@ -924,6 +1176,210 @@ void main() {
         await StorylineService(store, llm).assignConversation('email', 'c1'),
         AssignOutcome.gated,
       );
+    });
+  });
+
+  /// The rule that stops one group swallowing the mailbox.
+  ///
+  /// The Phase 3 sweep bench ended with two storylines holding 71% of every
+  /// filed thread, all of it put there by the assign pass — so a storyline
+  /// taking a disproportionate share of the recent automatic adds is treated
+  /// as a charter that admits everything, skipped as a candidate, and sent to
+  /// the audit instead of grown further.
+  group('the catch-all', () {
+    /// A storyline with [adds] membership rows, the FIRST of which carries
+    /// [vector] and the rest nothing. The centroid is the first member's, so
+    /// a test places a storyline in space and loads its recent-add count
+    /// independently of each other.
+    Future<void> seedGroup(
+      String id, {
+      required int adds,
+      List<double>? vector,
+      String addedBy = 'auto',
+      String status = 'active',
+    }) async {
+      await store.insertStoryline(
+        id: id,
+        title: 'Website redesign',
+        summary: 'The studio is reviewing the homepage copy.',
+        charter: 'The redesign of the Northline Studio website.',
+        status: status,
+        createdBy: 'auto',
+      );
+      for (var i = 0; i < adds; i++) {
+        final key = '$id-member-${spellDigits('$i')}';
+        await seed(store, key, vector: i == 0 ? vector : null);
+        await store.addStorylineMember(id, 'email', key, addedBy: addedBy);
+      }
+    }
+
+    /// Seven adds to `sl-a`, two to `sl-b` and one to `sl-c`: ten in the
+    /// window over three storylines, so the threshold is twice a third and
+    /// `sl-a`'s seven clears it.
+    Future<void> seedShares({
+      List<double>? aVector,
+      List<double>? bVector,
+      String addedBy = 'auto',
+    }) async {
+      await seedGroup('sl-a', adds: 7, vector: aVector, addedBy: addedBy);
+      await seedGroup('sl-b', adds: 2, vector: bVector, addedBy: addedBy);
+      await seedGroup('sl-c', adds: 1, vector: vectorAt(0), addedBy: addedBy);
+    }
+
+    test('the arithmetic is twice a fair share, never under three in ten', () {
+      Set<String> of(Map<String, int> byStoryline) =>
+          StorylineService.catchAllsOf(
+            byStoryline: byStoryline,
+            total: byStoryline.values.fold(0, (a, b) => a + b),
+          );
+
+      // Three storylines: a fair share is a third, so the bar is two thirds.
+      expect(of({'a': 7, 'b': 2, 'c': 1}), {'a'});
+      // Two storylines: the bar is the whole window, and the rule never
+      // fires. There is nothing for a catch-all to be a catch-all OF.
+      expect(of({'a': 6, 'b': 4}), isEmpty);
+      // Five: the fair-share half is 40%, and half of ten beats it.
+      expect(of({'a': 5, 'b': 2, 'c': 1, 'd': 1, 'e': 1}), {'a'});
+      // Exactly 40% is not more than 40%.
+      expect(of({'a': 4, 'b': 2, 'c': 2, 'd': 1, 'e': 1}), isEmpty);
+      // Nine adds is not a pattern, whatever its shape.
+      expect(of({'a': 8, 'b': 1}), isEmpty);
+      // Ten storylines: twice a fair share is 20%, so the 30% floor is what
+      // holds — 25% is not a catch-all and 31% is.
+      expect(
+          of({
+            'a': 3,
+            for (final id in ['b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'])
+              id: 1,
+          }),
+          isEmpty);
+      expect(
+          of({
+            'a': 4,
+            for (final id in ['b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'])
+              id: 1,
+          }),
+          {'a'});
+    });
+
+    test('a catch-all is skipped, the outcome says so, and one audit is queued',
+        () async {
+      await seedShares(aVector: vectorAt(1), bVector: vectorAt(0));
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final service = StorylineService(store, llm);
+
+      expect(await service.assignConversation('email', 'c1'),
+          AssignOutcome.catchAll);
+
+      // Not filed, and never asked: a group that admits everything would
+      // answer yes.
+      expect(llm.schemas, isEmpty);
+      expect(await store.membersOf('sl-a'), hasLength(7));
+      expect((await store.nextPendingWork('storyline_audit'))?['entity_id'],
+          'sl-a');
+
+      await seed(store, 'c2', vector: vectorAt(0.9));
+      expect(await service.assignConversation('email', 'c2'),
+          AssignOutcome.catchAll);
+
+      // A hundred threads arriving while the audit is pending queue one
+      // audit: `requeueWork` revives only `done` and `error` rows.
+      expect(await store.workCounts('storyline_audit'), {'pending': 1});
+    });
+
+    test('and the audit is not re-queued once it has run in this window',
+        () async {
+      // The audit runs at temperature 0 against an unchanged charter, so
+      // asking it again this afternoon spends one confirm per automatic
+      // member to be told what it was told this morning.
+      await seedShares(aVector: vectorAt(1), bVector: vectorAt(0));
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final service = StorylineService(store, llm);
+
+      await service.assignConversation('email', 'c1');
+
+      /// The audit drained, and last wrote its row at [updatedAt].
+      Future<void> auditRan(String updatedAt) => db.customUpdate(
+            "UPDATE work_items SET status = 'done', updated_at = ? "
+            "WHERE task_kind = 'storyline_audit' AND entity_id = 'sl-a'",
+            variables: [Variable(updatedAt)],
+          );
+
+      await auditRan(MessageStore.isoStamp(DateTime.now()));
+      await seed(store, 'c2', vector: vectorAt(0.9));
+
+      expect(await service.assignConversation('email', 'c2'),
+          AssignOutcome.catchAll);
+      expect(await store.workCounts('storyline_audit'), {'done': 1});
+
+      // A touch older than the window is a pass whose answer may have gone
+      // stale, and that one is worth asking again.
+      await auditRan(MessageStore.isoStamp(DateTime.now().subtract(
+          const Duration(days: StorylineTuning.catchAllWindowDays + 1))));
+      await seed(store, 'c3', vector: vectorAt(0.9));
+
+      expect(await service.assignConversation('email', 'c3'),
+          AssignOutcome.catchAll);
+      expect(await store.workCounts('storyline_audit'), {'pending': 1});
+    });
+
+    test('a catch-all that is not the only candidate is passed over',
+        () async {
+      // `sl-a` is the closer of the two and would have won the shortlist.
+      await seedShares(aVector: vectorAt(0.9), bVector: vectorAt(0.7));
+      await seed(store, 'c1', vector: vectorAt(1));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
+          AssignOutcome.assigned);
+
+      expect(llm.callsFor('storyline_membership'), 1);
+      expect(await store.membersOf('sl-a'), hasLength(7));
+      expect((await store.membersOf('sl-b')).last.conversationKey, 'c1');
+    });
+
+    test('a catch-all under the gate is not the catch-all ending', () async {
+      // The skip is checked AFTER the gate on purpose: a group this thread
+      // would never have joined is not "the only qualifying candidate", and
+      // saying so would queue an audit for every thread in the mailbox.
+      await seedShares(aVector: vectorAt(0.1), bVector: vectorAt(0));
+      await seed(store, 'c1', vector: vectorAt(1));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
+          AssignOutcome.noCandidate);
+      expect(await store.nextPendingWork('storyline_audit'), isNull);
+    });
+
+    test("the owner's own filings do not make a catch-all", () async {
+      // Hand-filing is not the assign pass's habit, and this rule measures
+      // the pass's habit. With `sl-a`'s seven uncounted the window holds
+      // nothing at all, so nothing is skipped.
+      await seedShares(
+          aVector: vectorAt(1), bVector: vectorAt(0), addedBy: 'user');
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
+          AssignOutcome.assigned);
+      expect((await store.membersOf('sl-a')).last.conversationKey, 'c1');
+      expect(await store.nextPendingWork('storyline_audit'), isNull);
+    });
+
+    test('blocked and skipped together read as the catch-all', () async {
+      // Both endings are true of this thread; the catch-all is the one worth
+      // saying, because it is the one that queued a pass.
+      await seedShares(aVector: vectorAt(1), bVector: vectorAt(0.95));
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      await store.removeStorylineMember('sl-b', 'email', 'c1', block: true);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
+          AssignOutcome.catchAll);
+      expect((await store.nextPendingWork('storyline_audit'))?['entity_id'],
+          'sl-a');
     });
   });
 
@@ -1589,6 +2045,53 @@ void main() {
       // One survivor is not a storyline, so the pass files nothing — the same
       // rule the assignment and recruit paths apply to a low answer.
       expect(await store.loadStorylines(), isEmpty);
+    });
+
+    test("the sweep's own members are held to high", () async {
+      // The proposal the members are judged against is `suggested` by
+      // construction, so the newborn storyline is built of `high` answers or
+      // it is not built at all. Three medium yeses leave no survivors, which
+      // is the same ending an outright rejection reaches.
+      await seedMailbox(store);
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [
+          confirmAnswer(confidence: 'medium'),
+          confirmAnswer(confidence: 'medium'),
+          confirmAnswer(confidence: 'medium'),
+        ],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      expect(llm.callsFor('storyline_membership'), 3);
+      final tombstone =
+          (await store.loadStorylines(statuses: const ['dismissed'])).single;
+      expect(await store.membersOf(tombstone.id), isEmpty);
+      final hashes = (await db
+              .customSelect(
+                'SELECT cluster_hash FROM storylines WHERE id = ?',
+                variables: [Variable(tombstone.id)],
+              )
+              .getSingle())
+          .data;
+      expect(hashes['cluster_hash'], isNotNull);
+      expect(await store.loadStorylines(statuses: const ['suggested']),
+          isEmpty);
+    });
+
+    test('and three high ones build the storyline of three', () async {
+      await seedMailbox(store);
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final storyline =
+          (await store.loadStorylines(statuses: const ['suggested'])).single;
+      expect(await store.membersOf(storyline.id), hasLength(3));
     });
 
     test('a cluster the model rejects outright is never proposed twice',
@@ -2793,6 +3296,32 @@ void main() {
       expect(llm.callsFor('storyline_membership'), 4);
     });
 
+    test('a medium yes keeps the finished thread out too', () async {
+      // The probe judges against the same unsaved `suggested` proposal the
+      // cluster members were judged against, so it is held to the same bar.
+      await seedMailbox(store);
+      await seedDone(store, 'd1', vector: vectorAt(0.95));
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [
+          confirmAnswer(),
+          confirmAnswer(),
+          confirmAnswer(),
+          confirmAnswer(confidence: 'medium'),
+        ],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final storyline =
+          (await store.loadStorylines(statuses: const ['suggested'])).single;
+      expect((await store.membersOf(storyline.id))
+          .map((m) => m.conversationKey)
+          .toSet(), {'c1', 'c2', 'c3'});
+      // Asked, and turned down on the answer.
+      expect(llm.callsFor('storyline_membership'), 4);
+    });
+
     test('a probe join burns no refresh and rewrites no cluster hash',
         () async {
       await seedMailbox(store);
@@ -3590,6 +4119,48 @@ void main() {
           'sl-1');
       expect((await store.nextPendingWork('storyline_recap'))?['entity_id'],
           'sl-1');
+    });
+
+    test('the audit keeps a medium member of a storyline the owner kept',
+        () async {
+      // `active` means the owner looked at this group and kept it, and a
+      // medium yes has always been enough to stay in one.
+      await seedMixed();
+      final llm = FakeLlm({
+        'storyline_membership': [
+          confirmAnswer(confidence: 'medium'),
+          confirmAnswer(confidence: 'medium'),
+        ],
+      });
+
+      await StorylineService(store, llm).audit('sl-1');
+
+      expect(llm.callsFor('storyline_membership'), 2);
+      expect((await store.membersOf('sl-1')).map((m) => m.conversationKey),
+          ['a1', 'a2', 'u1']);
+      expect(await store.blocksOf('sl-1'), isEmpty);
+    });
+
+    test('and removes one from a group nobody has kept yet', () async {
+      // The same two answers against a `suggested` row: the bar is `high`
+      // there, so both automatic members go and both go blocked, as the
+      // audit's removals always do.
+      await seedMixed();
+      await store.updateStoryline('sl-1', status: 'suggested');
+      final llm = FakeLlm({
+        'storyline_membership': [
+          confirmAnswer(confidence: 'medium'),
+          confirmAnswer(confidence: 'medium'),
+        ],
+      });
+
+      await StorylineService(store, llm).audit('sl-1');
+
+      expect((await store.membersOf('sl-1')).map((m) => m.conversationKey),
+          ['u1']);
+      final blocks = await store.blocksOf('sl-1');
+      expect(blocks.map((b) => b.conversationKey).toSet(), {'a1', 'a2'});
+      expect(blocks.every((b) => b.blockedBy == 'audit'), isTrue);
     });
 
     test('an audit removal clears the recap too', () async {

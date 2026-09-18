@@ -33,6 +33,9 @@ You are an assistant grouping a person's message threads into storylines. A stor
 Rules:
 - evidence: ONE sentence naming what the candidate thread and the storyline do or do not have in common. Write it first and write it plainly — the answer below should follow from it.
 - belongs: true only when the candidate concerns the SAME specific event, project, or topic the storyline's charter describes. Two threads that are merely the same KIND of thing — two different invoices, two unrelated trips — do NOT belong together.
+- When the storyline's charter describes a team, a person, a sender, or a category of message rather than one specific project, event, or topic, the candidate does NOT belong — such a charter admits nothing.
+- The evidence must name the shared specific occasion. "Both involve meetings", "same team", "same sender", "same kind of request", and "aligns with operational focus" are not evidence of the same storyline.
+- Two threads with the same people and different subjects are two threads.
 - When the storyline is about a specific dated occasion — a meeting on a named day, a trip, a deadline — a candidate about a different date or a different occasion does NOT belong, however similar its shape. Another meeting is not this meeting.
 - The people listed on the storyline are context, not a requirement: a thread from a person the storyline has not seen before still belongs when it concerns the same specific event, project, or topic — new participants joining is normal.
 - confidence: one of low|medium|high. How sure you are of the answer above. Use low when the shared subject could just as easily be a coincidence of vocabulary.
@@ -209,12 +212,14 @@ class ConfirmResult {
   /// The SERVICE's reading of this answer: a yes it was confident enough
   /// about.
   ///
-  /// Stated once, here, because it is quoted in seven places — the five
-  /// confirm call sites in `storyline_service.dart` (assign, recruit, the
-  /// sweep's members, its probe and the audit — Round D Phase 4 folds them
-  /// onto this getter), the golden replay's `ConfirmOutcome.accepted`, and
-  /// `docs/pipeline/06-storylines.md`. A `low` yes is a no: a group the user
-  /// has to correct costs more than one they were never offered.
+  /// Stated once, here, because it is quoted in three places: the golden
+  /// replay's `ConfirmOutcome.accepted`, `docs/pipeline/06-storylines.md`,
+  /// and `StorylineService._accepts`, which the five confirm call sites
+  /// (assign, recruit, the sweep's members, its probe and the audit) all go
+  /// through. `_accepts` reads this getter and adds the one rule that depends
+  /// on the STORYLINE rather than on the answer: a storyline nobody has kept
+  /// yet needs `high`. A `low` yes is a no: a group the user has to correct
+  /// costs more than one they were never offered.
   bool get accepted => belongs && confidence != 'low';
 }
 

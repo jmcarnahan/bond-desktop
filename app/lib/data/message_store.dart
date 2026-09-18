@@ -4426,6 +4426,37 @@ FROM storylines s''';
     return [for (final row in result) StorylineMember.fromRow(row.data)];
   }
 
+  /// How the automatic membership adds since [sinceIso] are spread over the
+  /// storylines that received them: a count per storyline and the total.
+  ///
+  /// `added_by = 'auto'` only. The owner's own filings are not the assign
+  /// pass's habit, and this measures the pass's habit.
+  ///
+  /// No join on `storylines`: a dismissed storyline's adds still count toward
+  /// the total, because they were adds the pass made. The reader only ever
+  /// asks about `suggested` and `active` ids anyway.
+  ///
+  /// Read by the catch-all rule in `StorylineService.assignConversation`.
+  Future<({Map<String, int> byStoryline, int total})> autoMembershipShares(
+    String sinceIso,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT storyline_id, COUNT(*) AS n FROM storyline_members '
+          "WHERE added_by = 'auto' AND added_at >= ? GROUP BY storyline_id",
+          variables: _args([sinceIso]),
+        )
+        .get();
+    final byStoryline = <String, int>{};
+    var total = 0;
+    for (final row in result) {
+      final n = (row.data['n'] as int?) ?? 0;
+      byStoryline[row.data['storyline_id'] as String] = n;
+      total += n;
+    }
+    return (byStoryline: byStoryline, total: total);
+  }
+
   /// The threads the OWNER filed into [storylineId] by hand, newest first.
   ///
   /// Newest first, unlike [membersOf], because these are read as examples: the
@@ -4955,6 +4986,39 @@ FROM storylines s''';
       // back to pending would run the same item twice.
       "${refreshCreatedAt ? " OR work_items.status = 'pending'" : ''}",
       variables: _args([kind, source, entityId, payloadJson, now, now]),
+    );
+  }
+
+  /// [requeueWork] that is also a RATE LIMIT, for a caller that would
+  /// otherwise ask again on every arrival.
+  ///
+  /// The row is inserted when there is none, because a pass that has never
+  /// run is stale by definition. An existing row is revived only when its
+  /// last touch is older than [touchedBefore]; anything touched since is left
+  /// exactly as it is, a `pending` or `processing` row included. So a caller
+  /// whose reason for asking does not change between arrivals spends one run
+  /// of the work per window rather than one per arrival.
+  ///
+  /// No payload and no `created_at` refresh: this is a caller asking for a
+  /// pass it already asked for, not a person moving something to the front.
+  Future<void> requeueWorkIfStale(
+    String kind,
+    String source,
+    String entityId, {
+    required String touchedBefore,
+  }) async {
+    final now = _nowIso();
+    await db.customUpdate(
+      'INSERT INTO work_items '
+      '(task_kind, source, entity_id, status, attempts, error, payload_json, '
+      'created_at, updated_at) '
+      "VALUES (?, ?, ?, 'pending', 0, NULL, NULL, ?, ?) "
+      'ON CONFLICT(task_kind, source, entity_id) DO UPDATE SET '
+      "status = 'pending', updated_at = excluded.updated_at, "
+      'attempts = 0, error = NULL '
+      "WHERE work_items.status IN ('done', 'error') "
+      'AND work_items.updated_at < ?',
+      variables: _args([kind, source, entityId, now, now, touchedBefore]),
     );
   }
 

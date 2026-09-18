@@ -18,7 +18,27 @@ recap after the sweep. See [10-model-routing.md](10-model-routing.md).
 
 1. **Assign** (`StorylineAssignHandler` → `assignConversation`) — when a
    conversation's card changes, cosine-shortlist it against live storyline
-   centroids, then ask the model to confirm the best candidate. Every
+   centroids, then ask the model to confirm the best candidate. Three rules
+   govern that shortlist. The lower gate `assignCosineGateWithOverlap` needs
+   **two shared people who are not the owner**, the count
+   `assignOverlapMinShared`: in a one-team mailbox every pair of threads
+   shares someone, so one shared person made the discount the rule rather
+   than the exception, and the owner is on every thread in their own mailbox.
+   When the top two candidates are `assignTieMargin` of 0.03 apart or less,
+   **both are confirmed** and the more confident answer wins, the higher
+   cosine on a draw. A cosine ranking inside that margin is a coin toss
+   dressed as a ranking. And a storyline that has lately taken more than
+   twice its fair share of the automatic adds, and more than 30% of
+   them, over at least 10 adds in 7 days, is a **catch-all**: it is skipped
+   as a candidate, and the pass ends `AssignOutcome.catchAll` when it was the
+   only one that cleared the gate. Skipping one always queues an audit of its
+   automatic members, including on a pass that went on to file the thread
+   somewhere else, and `requeueWorkIfStale` bounds that to **at most one
+   audit per storyline per window**. The audit runs at temperature 0 against
+   an unchanged charter, so a second one the same afternoon spends a confirm
+   per member to hear the same answer, and a storyline excluded from
+   auto-assign can only change through a refresh or a person, either of which
+   queues its own pass. Every
    candidate's members and blocks are read in one query each for the whole
    pass (`memberContextRows`, `blockedStorylineIdsFor`), so filing one thread
    costs the same against a mailbox of fifty storylines as against two. On
@@ -51,8 +71,10 @@ recap after the sweep. See [10-model-routing.md](10-model-routing.md).
    storyline whose membership has moved. Its own section below.
 4. **Audit** (`StorylineAuditHandler` → `audit`) — re-judges the threads the
    MODEL filed into one storyline, against the charter as it now reads and the
-   owner's own examples. Queued by `removeThread` and by *Re-check members* at
-   the head of the Messages tab. It is registered after the refresh and before
+   owner's own examples. Queued by `removeThread`, by *Re-check members* at
+   the head of the Messages tab, and by the assign pass's catch-all rule,
+   which sends a storyline that has been swallowing the mailbox here rather
+   than growing it further. It is registered after the refresh and before
    the recruit,
    and both halves of that matter: the removal that woke it also queues a
    refresh, which is the pass that narrows the charter, so the audit judges
@@ -889,7 +911,9 @@ is never offered; the rest are scored against the centroid of the *surviving*
 members, gated at `assignCosineGateWithOverlap`, and the top
 `recruitMaxCandidates` by cosine each get the same `ConfirmMembershipTask` call
 recruit and assign make, against the charter the naming call wrote seconds ago,
-at temperature zero, with `low` still treated as a no. They are judged against
+at temperature zero, held to the same `_accepts` rule as the cluster members
+beside them. The proposal is `suggested`, so the bar there is `high`. They are
+judged against
 the participants of the storyline as it actually stands, read back from the
 stored members rather than from the pre-confirmation cluster.
 
@@ -958,16 +982,35 @@ recipe; a dismissal made under the old one holds forever.
 
 **ConfirmMembershipTask** — `app/lib/services/llm/storyline_tasks.dart`,
 schema `storyline_membership`, **fast / bulk slot** (`confirmClient` in
-`app_providers.dart`), **temperature 0** at all four call sites (assign,
-recruit, sweep-member, audit). Given a storyline described by its *charter* and
+`app_providers.dart`), **temperature 0** at all five call sites (assign,
+recruit, the sweep's members, its probe, the audit), which all go through one
+`StorylineService._confirm`. Given a storyline described by its *charter* and
 one candidate thread: an evidence sentence first, a boolean `belongs`, and a
-low/medium/high confidence — **low is treated as a no**. The prompt's real
+low/medium/high confidence.
+
+**The rule that reads the answer is `StorylineService._accepts`**: `belongs`,
+not `low`, and `high` when the storyline is still `suggested`. Auto-filing
+into a group nobody has kept yet needs the strongest answer the model gives,
+because a `medium` yes into a group no owner has looked at is how the blobs
+grew. The sweep judges its own members against an unsaved proposal whose
+status is `suggested`, so a newborn storyline is built of `high` answers too,
+on purpose. An `active` storyline is one the owner kept, and takes `medium` as
+it always did.
+
+The prompt's real
 work is what *not* to weigh: two threads of the same kind (two invoices, two
 trips) do not belong together, and the participant list is context, not a
 requirement. Dates are the same rule one step finer: a storyline about a
 specific dated occasion — a meeting on a named day, a trip, a deadline — admits
 only threads about *that* occasion, because another meeting is not this
-meeting.
+meeting. Three sentences added in Round D mirror the namer's own rule, so the
+two calls cannot disagree about what a storyline is. A charter that describes
+a team, a person, a sender or a category of message rather than one specific
+project, event or topic admits nothing, so the candidate does not belong. The
+evidence has to name the shared specific occasion, and "both involve
+meetings", "same team", "same sender" and "aligns with operational focus" are
+not evidence. Two threads with the same people and different subjects are two
+threads.
 
 Four fences, in the order `storyline`, `kept_by_owner`, `removed_by_owner`,
 `candidate_thread`. The two example fences are what the owner has taught this

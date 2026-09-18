@@ -1187,6 +1187,16 @@ void main() {
             ..onReasoningLeak = confirmCollector.noteLeak,
           embeddings: EmbeddingsClient(),
           activityLog: log,
+          // The overlap rule counts shared people who are not the owner, so
+          // the bench has to name the owner the way the app does or every
+          // mailbox-wide participant would buy the lower gate.
+          owner: () async => GoldenDefines.ownerName == null &&
+                  GoldenDefines.ownerAddress == null
+              ? null
+              : (
+                  name: GoldenDefines.ownerName,
+                  address: GoldenDefines.ownerAddress
+                ),
         );
 
         // The room cap is a `static const` of three, so the loop KEEPS what it
