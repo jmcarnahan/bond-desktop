@@ -584,6 +584,7 @@ not in date order.
 | 2026-09-16 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260916-214911.json` | — / — / — / 82% / — / — / — / — / — / — | draft 24% | 6077 / 13269 (reply_decision / draft_reply) | 8.2 | 5.0 | $0.00 | invention rules v3 SHIPPED, draft budget 768, K=1 with MTP; invented 14 of 19 failing; identical drafts to pass 1, which a second judge run scored 32% / invented 12 — judge noise ±2 |
 | 2026-09-16 | prose | bedrock/claude-opus-5 | tail (fixed) | `golden-run-bedrock-claude-opus-5-20260916-215244.json` | — / — / — / 75% / — / — / — / — / — / — | draft 68% | 2252 / 5606 (reply_decision / draft_reply) | 50.9 | 55.6 | $17.98 | invention rules v3 SHIPPED, draft budget 768; invented 6 of 8 failing; Converse, no temperature; K=4 |
 | 2026-09-17 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260917-020022.json` | — / — / — / 82% / — / — / — / — / — / — | draft 20% | 6110 / 12453 (reply_decision / draft_reply) | 8.4 | 4.9 | $0.00 | invention rules v4 SHIPPED (the two-options example no longer contradicts the owner-only bullet); 5 of 25 against v3's 6, inside the judge's ±2; invented 14 of 20 — the SAME 14 items as v3, none new, none cleared, with 21 of 25 texts changed; drafts asking a question 3 → 8; max completion 322; MTP; K=1; pass 2 `…021535` byte-identical on all 25 drafts and every decision (this row cites the judged pass 1) |
+| 2026-09-18 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260918-000138.json` | — / — / — / 82% / — / — / — / — / — / — | draft — (not re-judged) | 6087 / 12515 (reply_decision / draft_reply) | 8.5 | 5.0 | $0.00 | Round C phase 4 reproduction on the branch tip (three lanes, DraftPolicy, streamed client in the tree; the harness itself calls the plain path): all 76 decisions and all 25 drafts BYTE-IDENTICAL to the v4 row `…-020022` two lines up, so the round moved no accuracy by construction and the drafts were not re-judged; prompts, budgets, MTP and K=1 unchanged; 76 items in 910 s |
 | 2026-09-17 | prose | vllm-g6e/Qwen3.8-27B-FP8 | tail (fixed) | `golden-run-vllm-g6e-qwen3-8-27b-fp8-20260917-044752.json` | — / — / — / 82% / — / — / — / — / — / — | draft 24% | 1947 / 6606 (reply_decision / draft_reply) | 22.9 | 13.6 | $2.28 | GPU spike: the same 27B as `Qwen/Qwen3.8-27B-FP8` on vLLM 0.29.0, one L40S (AWS g6e.xlarge), no MTP, 32K ctx, one stream, reached through an SSH tunnel (~50 ms a call, nothing against these p50s); invention rules v4, draft budget 768, K=1; 6 of 25 against the local row's 5 with invented 10 of 19 failing against 14 of 20 — the favourable side of judge noise plus FP8 text drift, recorded as a tie; second of two passes, the first (`…044212`) identical on all 76 decisions and all 25 drafts; wall-clock tok/s (vLLM sends no timings block); priced at the box's $1.86/h on-demand rate at the measured msgs/min, not per token — the harness itself prices a localhost URL at $0.00 |
 | 2026-09-17 | prose | vllm-g6e/Qwen3.8-27B-FP8 | tail (fixed) | `golden-run-vllm-g6e-qwen3-8-27b-fp8-20260917-045439.json` | — / — / — / 82% / — / — / — / — / — / — | — | 2377 / 7382 (reply_decision / draft_reply) | 18.6 | 43.1 | $0.72 | GPU spike, throughput read only — one pass, not judged; its own decision read 82 as well, but the judged accuracy is the K=1 row's; four streams lift throughput 3.2× while the p50s rise 22% / 12%, which is what batching on one GPU looks like; priced at $1.86/h at 43.1 msgs/min; K=4 |
 | 2026-09-17 | prose | vllm-g6e/Qwen3.8-27B-FP8+MTP | tail (fixed) | `golden-run-vllm-g6e-qwen3-8-27b-fp8-mtp-20260917-064431.json` | — / — / — / 83% / — / — / — / — / — / — | draft 28% | 1313 / 3711 (reply_decision / draft_reply) | 37.6 | 21.6 | $1.43 | GPU spike, the FP8 repo's MTP head loaded (`--speculative-config '{"method":"mtp","num_speculative_tokens":2}'`, ~6.5 min of recompile): one pass; 7 of 25 against the no-MTP row's 6, invented 10 of 18 failing; 75 of 76 decisions and 9 of 25 drafts byte-identical to the no-MTP row — vLLM's speculation is not bit-exact under FP8, so the drafts were judged on their own; draft p50 3.7 s against 12.5 s locally (3.4×), decode 37.6 tok/s against 8.4; priced at $1.86/h at 21.6 msgs/min |
@@ -1095,7 +1096,11 @@ design's 5K-in / 300-out shape, $17 per thousand messages in the ledger's
 accounting), with **Sonnet 5** as the cheaper option at 40% of the price and
 40% of drafts passing. DeepSeek V3.2 matching Sonnet at an eighth of the price
 is a fact worth keeping; whether a second provider belongs on the consent
-screen is a product call, not a bakeoff call. Two caveats sit on the whole
+screen is a product call, not a bakeoff call. Since 2026-09-17 (Round C) the
+prose slot's work runs on two lanes of its own — the six storyline passes in
+one, `DraftHandler` alone in the other at the **Drafts in flight** width — and
+a draft a person asked for skips this decision entirely, because they have
+already made it. Two caveats sit on the whole
 column. Every model's draft failures have the same shape — of the failing
 drafts, 10 to 15 per model invent a fact only the owner knows — so the "ask,
 don't invent" rule in the draft prompt precedes any swap and any escalation,
@@ -1368,6 +1373,16 @@ remain unmeasured by the set.
    decode error escapes the loaders without the file's path; a pseudonymised
    public fixture; and whether `golden/tools/` should be versioned separately
    from the data it sits beside.
+7. **The prose critical path**, the roadmap's Round C — done 2026-09-17:
+   three drain lanes (fast, storyline, draft) so the 4B's work never queues
+   behind the 27B's; **Suggested replies** as a setting, "For messages that
+   need you" by default and at most ten prefetched; drafts streamed over the
+   OpenAI wire, with the reply decision skipped for a draft somebody asked
+   for. A message arriving mid-backlog is extracted in 50–98 s against
+   767–800 s before, and 33 s with both slots on the box, while the fast wall
+   (200–240 s for 48 messages) is the 4B's own throughput and no lane moves
+   it. Not adopted: a second local prose slot (slower end to end) and the
+   box's 4B as the bulk slot (a speed row, not an accuracy tie).
 
 
 ## oMLX
@@ -1491,7 +1506,8 @@ server started differently from the default.
 | 5 | prose | oMLX, Qwen3.8-27B 4bit (same `:8090` server) | `make bench-prose PROSE_URL=http://localhost:8090/v1/chat/completions PROSE_MODEL='mlx-community--Qwen3.8-27B-4bit' PROSE_LABEL='omlx/Qwen3.8-27B-4bit'` |
 | 6 | bulk | llama.cpp, DeepSeek-R1-Distill-Qwen-14B Q4_K_M, `:8083` | `make fast FAST_PORT=8083 FAST_HF=unsloth/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q4_K_M FAST_SLOTS=6`, then `make bench BENCH_URL=http://localhost:8083/v1/chat/completions BENCH_LABEL='llamacpp/R1-Distill-Qwen-14B-Q4_K_M' BENCH_THINK=1` — always reasoning, so `BENCH_THINK=1` stops sending `enable_thinking:false` and relaxes the leak gate |
 | 7 | prose (and as bulk) | vLLM 0.29.0 on an AWS `g6e.xlarge` (one L40S), `Qwen/Qwen3.8-27B-FP8` (served as the alias `qwen3.8` by `--served-model-name qwen3.8` on the box's vLLM command), served on the box's loopback :8000 and reached through `ssh -N -L 18100:127.0.0.1:8000 ubuntu@<box>` (local 18100, never 8000) | `make bench-prose PROSE_URL=http://localhost:18100/v1/chat/completions PROSE_MODEL=qwen3.8 PROSE_LABEL=vllm-g6e/Qwen3.8-27B-FP8` and the same three defines on `make golden-prose`; as bulk, the `BENCH_*` triple with `BENCH_LABEL='vllm-g6e/Qwen3.8-27B-FP8 (as bulk)'` on `make golden` and `make golden-storyline`; the MTP head with `/opt/bond/serve.sh --speculative-config '{"method":"mtp","num_speculative_tokens":2}'` on the box (label `…-FP8+MTP`). The harness prices a localhost URL at $0.00, so these rows carry the box's hourly rate by hand (`1000 / (msgs_per_min × 60) × $1.86`) |
-| 8 | — | further candidates | Added here as they come up, one command per row. What is worth trying is best judged after the rows above have numbers |
+| 8 | both | **the pipeline end to end**, not a candidate — the app's own queues over the fixture corpus | `make bench-pipeline PIPE_SHAPE=single` and `make bench-pipeline PIPE_SHAPE=lanes`, each twice, with BOTH servers up; `PIPE_COPIES` sets the corpus size (3 ≈ 48 ungated messages), `PIPE_WIDTH` the drafts in flight (the server must have been started with that many slots — `make model SLOTS=2 MODEL_CTX=32768` for two), `PIPE_LATE=0` drops the late-arrival leg. A prose slot elsewhere is the usual three `PROSE_*` defines |
+| 9 | — | further candidates | Added here as they come up, one command per row. What is worth trying is best judged after the rows above have numbers |
 
 ## Ledger
 
@@ -1517,6 +1533,8 @@ lives in the golden ledger above.
 | 2026-09-16 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260916-223602.json` | 14.0 (17.0 srv) draft | 15722 (draft) · 8609 (name) · 11679 (recap) | prose read by hand | — | round B phase 2 — draft budget 768, invention rules v3; the recap leg ran at the generic 512 (the harness did not pass the 384 — found on the whole-branch review, fixed, re-run below); third of three passes, second identical; drafts ≈ 221 tokens and recaps ≈ 179 |
 | 2026-09-17 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260917-012727.json` | 13.9 (16.9 srv) draft | 16062 (draft) · 8605 (name) · 11833 (recap) | prose read by hand | — | ROW OF RECORD for round B's budgets — draft 768 AND recap 384 both in force, invention rules v3; second of two passes (first 16344 / 8383 / 11528); drafts 1,104 tokens over 5 (≈ 221) and recaps 537 over 3 (≈ 179), identical totals to the 512 run, so neither budget was reached and the p50s are round 0's within noise; the budgets bound the worst case, which is what the 90 s prose timeout rests on |
 | 2026-09-17 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260917-232905.json` | 14.2 (17.0 srv) draft | 17624 (draft, ttft 2955) · 8340 (name) · 11568 (recap) | prose read by hand | — | Round C phase 3 — the draft leg STREAMS; second of two passes (first 17614 / 8307 / 11548, ttft 2959). Names and recaps sit on the row of record (8605 / 11833) with identical token counts (523 / 537); the draft p50 is +1.6 s because the five drafts came out LONGER — 1,332 generated tokens against 1,104 at 14.2 tok/s against 13.9 — the date anchor in the user message moved by a day between the two runs, which is enough to change a temperature-0 draft's wording. Streaming itself costs nothing: the verify check's same-prompt pair ran plain at 17.2 tok/s (server clock) and streamed at 17.4, and on the box 5,037 ms plain against 5,000 ms streamed. TTFT per case 534 / 4,484 / 2,726 / 2,955 / 4,482 ms — the system prompt is prefix-cached, so the first token waits only on the per-message part of the prompt (1.1K tokens here); a full app draft carries 2–5K tokens of thread, passages and style, so its first words land later than these |
+| 2026-09-18 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260918-045642.json` | 14.2 (16.9 srv) draft | 17625 (draft, ttft 2956) · 8314 (name) · 11622 (recap) | prose read by hand | — | Round C phase 4 after-row, final tree, first of two passes; the draft leg streams; 1,332 generated draft tokens, the same length as the phase 3 row; TTFT per case 594 / 4,531 / 2,811 / 2,956 / 4,481 ms; the verify's same-prompt pair 13,497 ms streamed with first token at 213 ms of 229 deltas, streamed == plain |
+| 2026-09-18 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260918-050050.json` | 14.2 (17.0 srv) draft | 17612 (draft, ttft 2957) · 8342 (name) · 11531 (recap) | prose read by hand | — | Round C phase 4 after-row, final tree, second of two passes (KEPT): the draft leg streams; against the phase 3 row 17624 / 8340 / 11568 every p50 is inside 40 ms and the draft token count is the same 1,332 — the streamed client and the three lanes cost the prose slot nothing measurable; TTFT per case 444 / 4,541 / 2,726 / 2,957 / 4,480 ms (prefix-cache-bound); the verify's same-prompt pair 13,598 ms streamed with first token at 273 ms, streamed == plain |
 | 2026-09-17 | vllm-g6e/Qwen3.8-27B-FP8 (AWS g6e.xlarge, one L40S, vLLM 0.29.0, no MTP, 32K ctx) | `prose-vllm-g6e-qwen3-8-27b-fp8-20260917-045218.json` | 24.6 draft · 23.6 name · 24.1 recap (wall; no server clock) | 10795 (draft) · 4415 (name) · 7362 (recap) | prose read by hand | — | GPU spike, one stream through an SSH tunnel; against the local MTP row above (16062 / 8605 / 11833) drafts 1.5×, names 1.9×, recaps 1.6× faster on wall p50 and 1.8× per token (24.6 against 13.9) — the FP8 model writes longer drafts here, 1,364 tokens over five (≈ 273 against ≈ 221) and 568 over three recaps (≈ 189 against ≈ 179); second of two passes, first 10764 / 4419 / 7364 |
 | 2026-09-17 | vllm-g6e/Qwen3.8-27B-FP8+MTP (same box, `--speculative-config '{"method":"mtp","num_speculative_tokens":2}'`) | `prose-vllm-g6e-qwen3-8-27b-fp8-mtp-20260917-064055.json` | 46.5 draft · 43.8 name · 46.4 recap (wall) | 5730 (draft) · 2363 (name) · 3627 (recap) | prose read by hand | — | GPU spike, the MTP head the FP8 repo ships, ~6.5 min of recompile to load; against the same box without MTP drafts 1.9×, names 1.9×, recaps 2.0× faster, and against the local MTP row 2.8× / 3.6× / 3.3×; 1,390 draft tokens over five, 538 over three recaps; second of two passes, first 5736 / 2363 / 3622 at 46.4 / 43.4 / 46.5 tok/s; vLLM warns that speculative decoding caps `max_num_scheduled_tokens` at 2048, left as is |
 | 2026-09-16 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K (4096 per slot, 4 slots) | `triage-extract-…-20260916-023642.json` | 54.3 (62.9 srv) | 2234 | cat 81% · label 88% · needs_action 100% (16 items, 0 format failures, same three category misses as the 2026-09-04 baseline) | — (see the drain row below) | unchanged against the 2026-09-04 baseline (p50 2176, 54.8 tok/s) — halving the context to 4096 tokens a slot costs nothing on the fictional corpus; extraction p50 1808ms, 50.8 tok/s (61.1 srv) |
@@ -1524,6 +1542,7 @@ lives in the golden ledger above.
 | 2026-09-17 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K, ONE slot | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260917-191414.json` | 13.8 (16.9 srv) | 18095 (draft) · 8364 (name) · 11596 (recap) | prose read by hand | — | round C phase 1 — today's control for the two-slot read below, taken on the same tree the same hour |
 | 2026-09-17 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 32K, TWO slots | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260917-192135.json` | 14.4 (16.9 srv) | 17193 (draft) · 8341 (name) · 11560 (recap) | prose read by hand | — | `SLOTS=2 MODEL_CTX=32768`: single-stream prose is unchanged against the row above and MTP is still active, so the second slot costs nothing per call — but the PIPELINE at width 2 was slower end to end (drafts 1,102.6 s against 896.6 at width 1, `#### Pipeline bench`), so it is not adopted and `local.mk` stays at one slot |
 | 2026-09-17 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K, 4 slots (drain) | `drain-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-k-1-20260917-145236.json` | 54.0 at K=1 · 21.7 per stream at K=3 | — | — | 19.2 / 22.2 / — | round C control, 16 messages per round, taken BEFORE phase 1's code — K=1 49.9 s, queue-wait 23 ms; K=3 43.3 s, queue-wait 334 ms, 1.15× over K=1. The round changes no bulk path, so this is the row a later drain is compared against |
+| 2026-09-18 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K, 4 slots (drain) | `drain-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-k-1-20260918-045214.json` | 53.9 at K=1 · 32.9 per stream at K=3 | — | — | 19.2 / 33.8 / — | round C after-row on the final tree, 16 messages per round — K=1 49.9 s, queue-wait 22 ms, IDENTICAL to the control; K=3 28.4 s, queue-wait 654 ms, 1.76× over K=1 against the control's 1.15× (43.3 s). The round changes no bulk path, so the K=1 identity is the reading; the K=3 gain is the idle machine (the control ran beside an editing agent), not the code |
 
 #### Pipeline bench
 
@@ -1560,6 +1579,10 @@ same day.
 | 2026-09-17 | single | 1 | 3 | 219.6 | 441.6 | 13.1 | 228.5 | `pipeline-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-191028.json` | box + MTP; pass 2 (kept) |
 | 2026-09-17 | lanes | 4 | 3 | 60.3 | 139.3 | 47.8 | 32.4 | `pipeline-vllm-g6e-qwen3-4b-instruct-2507-fp8-20260917-214712.json` | BOTH slots on the box — bulk = vLLM `Qwen/Qwen3-4B-Instruct-2507-FP8` on :8001, prose = vLLM `Qwen/Qwen3.8-27B-FP8` + MTP on :8000; 37 drafts; p50 triage 1,510 ms · needs-you 542 · extraction 1,764 · decision 1,960 · draft 7,801; pass 1 |
 | 2026-09-17 | lanes | 4 | 3 | 60.3 | 139.4 | 47.7 | 33.2 | `pipeline-vllm-g6e-qwen3-4b-instruct-2507-fp8-20260917-215052.json` | both slots on the box; 37 drafts; p50 triage 1,504 ms · needs-you 545 · extraction 1,754 · decision 2,138 · draft 7,397; pass 2 (kept) |
+| 2026-09-18 | single | 1 | 3 | 157.9 | 826.4 | 18.2 | 677.1 | `pipeline-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260918-001746.json` | Round C phase 4, final tree, local 27B + MTP one slot, policy `all`; 36 drafts; p50 triage 4,519 ms · needs-you 2,031 · extraction 2,705 · decision 2,878 · draft 15,228; pass 1 |
+| 2026-09-18 | single | 1 | 3 | 174.0 | 847.4 | 16.5 | 681.8 | `pipeline-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260918-041751.json` | same tree and servers; 36 drafts; p50 triage 4,532 ms · needs-you 2,714 · extraction 2,718 · decision 2,840 · draft 15,235; pass 2 (kept) |
+| 2026-09-18 | lanes | 1 | 3 | 218.1 | 871.5 | 13.2 | 98.0 | `pipeline-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260918-043401.json` | same tree and servers; 37 drafts; late arrival upserted at 133 s, needs-you done 94.2 s later, extract 98.0 s later; p50 triage 4,595 ms · needs-you 2,955 · extraction 4,560 · decision 3,061 · draft 14,977; no re-pumps; pass 1 |
+| 2026-09-18 | lanes | 1 | 3 | 210.5 | 865.4 | 13.7 | 95.7 | `pipeline-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260918-045009.json` | same tree and servers; 37 drafts; late arrival upserted at 128 s, needs-you done 92.7 s later, extract 95.7 s later; p50 triage 4,641 ms · needs-you 2,727 · extraction 4,731 · decision 3,070 · draft 15,326; no re-pumps; pass 2 (kept) |
 
 **Phase 1 read (2026-09-17).** Every row is 3 copies of the fixture corpus —
 48 ungated messages — through the real queues. Across the Phase 1 rows (every
@@ -1608,6 +1631,57 @@ lane's drain granularity: the triage drain, and then the worker pass, each
 finish the batch they are already holding before the new row is reached. That
 is a Round C observation for T1, not something this phase changes.
 
+**Round C after-rows (2026-09-18, Phase 4).** The same 48 messages on the
+final tree, both shapes twice, the local 4B on the bulk slot and the local 27B
+with MTP on the prose slot. These four rows are read against EACH OTHER and
+not against the Phase 1 rows above: they were taken on an idle machine, where
+the Phase 1 rows were taken while an agent was editing beside them, so their
+absolute walls are faster for a reason that has nothing to do with the code —
+Phase 1's rows keep their own within-day comparison, and this group has its
+own. `single` pass 1 reads a fast wall of 157.9 s (18.2 msgs/min), 826.4 s to
+the drafts and a 677.1 s late arrival, and pass 2 — the kept one — 174.0 s
+(16.5 msgs/min), 847.4 s and 681.8 s; `lanes` pass 1 reads 218.1 s (13.2
+msgs/min), 871.5 s and 98.0 s, and pass 2 — the kept one — 210.5 s (13.7
+msgs/min), 865.4 s and 95.7 s. Every row in this table runs draft policy
+`all` — the bench has no `PIPE_POLICY` knob — so the drafts column is
+the WORST case and not what the app does: the shipped default is "For messages
+that need you", which prefetches at most ten and writes the rest when somebody
+asks.
+
+What the two shapes cost each other on THIS machine, kept pass against kept
+pass: `single` 174.0 s fast wall / 847.4 s drafts / 681.8 s late arrival
+against `lanes` 210.5 / 865.4 / 95.7 — a **7.1× shorter wait** for a message
+arriving mid-backlog, bought with 36 s on the fast wall and 18 s on the
+drafts wall. The two lanes share one GPU here, so the 27B's drafts now decode
+beside the 4B's triage and extraction instead of after them, and extraction's
+p50 goes 2,718 → 4,731 ms. The Phase 1 rows show the same shape (`single`
+209–234 s fast wall, `lanes` 240.6 s). That trade is the point of the split
+for the person using the app — the inbox is usable half a minute later, and a
+message that arrives mid-backlog is answered nearly ten minutes sooner — and
+it disappears on a target with a GPU of its own for the prose slot, which is
+what the box rows above read.
+
+**Round C (2026-09) — the prose critical path.** What shipped on branch
+`feat/pipeline-round-c`: three drain lanes instead of one handler list (fast,
+storyline, draft), each behind its own gate, so the 4B's work never queues
+behind the 27B's; the draft lane's width as a setting (**Drafts in flight**,
+`AppPrefs.proseParallel`, 1 by default); **Suggested replies**, which
+prefetches at most ten drafts for the messages the pipeline judged to need
+their owner and leaves the rest until somebody asks; and drafts streamed over
+the OpenAI wire, with the reply decision skipped for a draft that was asked
+for. `make bench-pipeline` was built to measure it, and its rows read: a
+message arriving mid-backlog extracted in 50–98 s against 767–800 s in the old
+shape, while the fast wall — 200–240 s for 48 messages, 12–14 msgs/min — is
+the bulk slot's own throughput and does not move. Golden-prose was re-run once
+to show the prompts had not shifted: the decision reads 82% and 25 of 25
+drafts are byte-identical to `…-020022.json`, all 76 decisions with them, so
+nothing was re-judged. Not adopted: a second local prose slot (`SLOTS=2
+MODEL_CTX=32768` leaves single-stream prose unchanged but the pipeline is
+slower end to end) and the box's 4B as the bulk slot (a speed row, not an
+accuracy tie). The three simplifications this round wrote down rather than
+built — one shared `LlmClient` test double, `firstTokenMs` in the activity
+log, a `PIPE_POLICY` knob — are in the roadmap's §10.
+
 **Memory, round 0 (2026-09-16).** With MTP on and both chat servers at 16K
 context, the three servers' resident sizes are 22.0GB (27B + MTP sidecar),
 4.1GB (4B, 4 slots) and 0.3GB (embed) — 26.4GB, inside the speed design's
@@ -1639,6 +1713,10 @@ Since round 0 (2026-09-16) the ggml-org Q4_K_M runs with its MTP head and a
 `CTX_SIZE = 16384` in the gitignored `local.mk`; a fresh clone still gets the
 Makefile defaults) — names 29% and recaps 44% faster, ledger rows above. The Unsloth UD-Q4_K_XL quant costs nothing to keep cached if a quality
 read later favors it. GPU spike (2026-09-17): the same 27B as `Qwen/Qwen3.8-27B-FP8` on vLLM on one L40S matched the local 27B on the reply decision (82% against 82%) and the drafts (6 of 25 against 5), with invention four fewer (10 against 14) and every prompt-stable as-bulk enum within 4 points, at 1.5–1.9× the per-stream draft speed without its MTP head and 2.8× with it, and 43.1 / 54.6 messages a minute at K=4 without / with MTP — rows above, decision in the roadmap's E3; not adopted, `local.mk` and Settings unchanged.
+Since Round C (2026-09-17) the prose slot serves two lanes rather than a
+tail of one list — the storyline passes and the drafts — with **Drafts in
+flight** as the draft lane's width (1 locally, 4 the value measured on the
+L40S box), and drafts stream.
 
 **R1-Distill-Qwen-14B: do not adopt for bulk work.** Not a speed judgement —
 a fit one: with thinking enabled (its only mode) it cannot reliably finish a

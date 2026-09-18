@@ -4842,7 +4842,9 @@ FROM storylines s''';
   /// asking. [claimPendingWork] drains `created_at DESC`, so a revived `done`
   /// row keeps its original stamp and is claimed LAST — behind every newer
   /// prefetch — which is the exact opposite of what a Regenerate, a Retry or a
-  /// Restore means. Those five call sites pass true.
+  /// Restore means. The call sites where a person asked pass true: Regenerate
+  /// / Draft reply, the two Retries, Restore, a storyline action, and a
+  /// context directory's re-read, re-index and digest toggle.
   ///
   /// Not the default, because [requeueNeedsYouRejudge] revives up to two
   /// hundred rows in one transaction ordered `received_at DESC`: stamping them

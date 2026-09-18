@@ -15,6 +15,12 @@ class GateRepairOutcome {
   final bool extracted;
 
   /// Storyline memberships evicted, which is never more than the thread had.
+  ///
+  /// This and the two below are ZERO on the app's path, where the storyline
+  /// half of the repair is dispatched onto the storyline lane's gate and
+  /// lands later: the counts it produces go on its own activity row, not
+  /// here. They are populated only when the service runs without a gate —
+  /// tests, and nothing else today.
   final int storylines;
 
   final bool embeddingCleared;
@@ -139,56 +145,49 @@ class GateRepairService {
       final extracted = await _store.hasExtraction(source, sourceMessageId);
       final key = row['conversation_key'] as String? ?? '';
 
-      if (key.isEmpty || await _store.keptInboundCount(source, key) > 0) {
-        return await _recordOne(
-          source,
-          sourceMessageId,
-          reason: reason,
-          key: key,
-          extracted: extracted,
-          outcome: GateRepairOutcome(extracted: extracted),
-        );
-      }
-
+      // One activity row and one return whichever way it goes; the three
+      // branches differ only in what the outcome can honestly say.
+      final GateRepairOutcome outcome;
       final gate = _storylineGate;
-      if (gate == null) {
+      if (key.isEmpty || await _store.keptInboundCount(source, key) > 0) {
+        outcome = GateRepairOutcome(extracted: extracted);
+      } else if (gate == null) {
         final repair = await _repairConversation(source, key);
-        return await _recordOne(
-          source,
-          sourceMessageId,
-          reason: reason,
-          key: key,
+        outcome = GateRepairOutcome(
           extracted: extracted,
-          outcome: GateRepairOutcome(
-            extracted: extracted,
-            storylines: repair.storylines,
-            embeddingCleared: repair.embeddingCleared,
-            pendingWorkDeleted: repair.pendingWorkDeleted,
-            allGated: true,
+          storylines: repair.storylines,
+          embeddingCleared: repair.embeddingCleared,
+          pendingWorkDeleted: repair.pendingWorkDeleted,
+          allGated: true,
+        );
+      } else {
+        // Dispatched onto the storyline lane and NOT awaited. Both halves of
+        // that matter:
+        //
+        // Onto the lane, because the sharpest of the three writes is the
+        // `deletePendingWork('storyline', …)`: a delete that lands while the
+        // lane holds that row's claim misses it, and the assign pass then
+        // files the thread back after the eviction. Run after the lane's
+        // drain, the pass has already filed (or not) and the eviction is
+        // final.
+        //
+        // Not awaited, because this is called from INSIDE the triage drain,
+        // which awaits `_onGated` — and a sweep is minutes. A repair is
+        // background by nature; the triage drain is the thing a person is
+        // watching. It carries its own try/catch and writes its own activity
+        // row when it lands, which is why this path records the message side
+        // now and the storyline side later.
+        unawaited(
+          gate.run(
+            () =>
+                _repairStorylines(source, sourceMessageId, key, reason: reason),
           ),
         );
+        // The storyline counts are deliberately absent: they are not known
+        // yet, and a return value that guessed them would be the one number
+        // a caller could not check.
+        outcome = GateRepairOutcome(extracted: extracted, allGated: true);
       }
-
-      // Dispatched onto the storyline lane and NOT awaited. Both halves of
-      // that matter:
-      //
-      // Onto the lane, because the sharpest of the three writes is the
-      // `deletePendingWork('storyline', …)`: a delete that lands while the
-      // lane holds that row's claim misses it, and the assign pass then files
-      // the thread back after the eviction. Run after the lane's drain, the
-      // pass has already filed (or not) and the eviction is final.
-      //
-      // Not awaited, because this is called from INSIDE the triage drain,
-      // which awaits `_onGated` — and a sweep is minutes. A repair is
-      // background by nature; the triage drain is the thing a person is
-      // watching. It carries its own try/catch and writes its own activity
-      // row when it lands, which is why this path records the message side
-      // now and the storyline side later.
-      unawaited(
-        gate.run(
-          () => _repairStorylines(source, sourceMessageId, key, reason: reason),
-        ),
-      );
 
       return await _recordOne(
         source,
@@ -196,10 +195,7 @@ class GateRepairService {
         reason: reason,
         key: key,
         extracted: extracted,
-        // The storyline counts are deliberately absent: they are not known
-        // yet, and a return value that guessed them would be the one number
-        // a caller could not check.
-        outcome: GateRepairOutcome(extracted: extracted, allGated: true),
+        outcome: outcome,
       );
     } catch (e) {
       // This is called from inside the triage drain and from a button. A

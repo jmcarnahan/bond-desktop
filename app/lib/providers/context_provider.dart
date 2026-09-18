@@ -266,10 +266,7 @@ class ContextDirectoriesActions {
           'local',
           id,
           payloadJson: '{"force":true}',
-          // The person is waiting on this one, so it goes to the front of
-          // the lane: `claimPendingWork` drains `created_at DESC`, and a
-          // revived row that kept its old stamp would be claimed behind every
-          // directory queued since.
+          // A person is waiting: front of the lane (see `requeueWork`).
           refreshCreatedAt: true,
         );
     unawaited(_ref.read(aiWorkerProvider).pump());
@@ -322,10 +319,7 @@ class ContextDirectoriesActions {
           'local',
           id,
           payloadJson: '{"force":true}',
-          // The person is waiting on this one, so it goes to the front of
-          // the lane: `claimPendingWork` drains `created_at DESC`, and a
-          // revived row that kept its old stamp would be claimed behind every
-          // directory queued since.
+          // A person is waiting: front of the lane (see `requeueWork`).
           refreshCreatedAt: true,
         );
     unawaited(_ref.read(aiWorkerProvider).pump());
@@ -357,10 +351,7 @@ class ContextDirectoriesActions {
             'local',
             id,
             payloadJson: '{"force":true}',
-            // The person is waiting on this one, so it goes to the front
-            // of the lane: `claimPendingWork` drains `created_at DESC`, and a
-            // revived row that kept its old stamp would be claimed behind
-            // every directory queued since.
+            // A person is waiting: front of the lane (see `requeueWork`).
             refreshCreatedAt: true,
           );
       unawaited(_ref.read(aiWorkerProvider).pump());

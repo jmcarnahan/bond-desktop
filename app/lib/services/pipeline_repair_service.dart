@@ -260,8 +260,8 @@ class PipelineRepairService {
         count: 1,
       );
       unawaited(
-      pumpTriageThenWorkersQuietly(triage: _pumpTriage, workers: _pumpWork),
-    );
+        pumpTriageThenWorkersQuietly(triage: _pumpTriage, workers: _pumpWork),
+      );
       return true;
     } catch (e) {
       debugPrint('re-judge: $source/$sourceMessageId failed: $e');

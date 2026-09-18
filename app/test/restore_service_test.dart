@@ -441,7 +441,7 @@ void main() {
     final llm = FakeLlm();
     final progress = PipelineProgress(store);
     // One gate across both drains, as the app wires it. The gate alone is not
-    // what orders them — see the chaining in `RestoreService._pumpBoth` — but
+    // what orders them — see the chaining in `pumpTriageThenWorkers` — but
     // without it the two drains would overlap here in a way they never do in
     // the app.
     final gate = DrainGate();

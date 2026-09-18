@@ -365,44 +365,12 @@ class DraftHandler extends WorkHandler {
         );
       }
 
-      // What this reply was written from, distinct and in ranked order. Three
-      // passages of one contract are one document to a reader, and three
-      // passages of one analysis are three places in one file — so the
-      // documents collapse by name and the directory files collapse by the
-      // triple that names a place.
-      final documents = <String>[];
-      for (final excerpt in excerpts) {
-        final name = excerpt.name.isEmpty ? 'a file' : excerpt.name;
-        if (!documents.contains(name)) documents.add(name);
-      }
-      final files =
-          <({String dir, String path, String locator, int? fileId})>[];
-      final directoryFiles = <String>[];
-      for (final excerpt in pack.excerpts) {
-        final entry = (
-          dir: excerpt.dirName,
-          path: excerpt.relPath,
-          locator: excerpt.locator,
-          // The row id, so the composer's chip can open the file rather than
-          // only name it.
-          fileId: excerpt.fileId,
-        );
-        if (!files.contains(entry)) files.add(entry);
-        if (!directoryFiles.contains(excerpt.relPath)) {
-          directoryFiles.add(excerpt.relPath);
-        }
-      }
-      final provenance = DraftProvenance(
-        documents: documents,
-        // A pack that rendered nothing named nothing, whatever its own list
-        // says. The retriever is the layer that decides which directories
-        // contributed and it already answers that way; this is the belt to its
-        // braces, because the one thing the caption must never do is tell a
-        // person their reply was drafted from a project the model never read.
-        directories: pack.isEmpty ? const [] : pack.directories,
-        files: files,
-        skills: pack.skills,
-      );
+      final provenance = _provenanceFor(excerpts, pack);
+      // The distinct paths the caption's directory files came from, for the
+      // activity row below.
+      final directoryFiles = {
+        for (final file in provenance.files) file.path,
+      }.toList();
 
       await _store.upsertDraft(
         source: source,
@@ -457,6 +425,43 @@ class DraftHandler extends WorkHandler {
       // there.
       _publishStreamDone(source, key, id);
     }
+  }
+
+  /// What this reply was written from, distinct and in ranked order. Three
+  /// passages of one contract are one document to a reader, and three
+  /// passages of one analysis are three places in one file — so the documents
+  /// collapse by name and the directory files collapse by the tuple that names
+  /// a place. Set literals keep insertion order, which is the ranking.
+  static DraftProvenance _provenanceFor(
+    List<AttachmentExcerpt> excerpts,
+    ContextPack pack,
+  ) {
+    final documents = {
+      for (final excerpt in excerpts)
+        excerpt.name.isEmpty ? 'a file' : excerpt.name,
+    }.toList();
+    final files = {
+      for (final excerpt in pack.excerpts)
+        (
+          dir: excerpt.dirName,
+          path: excerpt.relPath,
+          locator: excerpt.locator,
+          // The row id, so the composer's chip can open the file rather than
+          // only name it.
+          fileId: excerpt.fileId,
+        ),
+    }.toList();
+    return DraftProvenance(
+      documents: documents,
+      // A pack that rendered nothing named nothing, whatever its own list
+      // says. The retriever is the layer that decides which directories
+      // contributed and it already answers that way; this is the belt to its
+      // braces, because the one thing the caption must never do is tell a
+      // person their reply was drafted from a project the model never read.
+      directories: pack.isEmpty ? const [] : pack.directories,
+      files: files,
+      skills: pack.skills,
+    );
   }
 
   /// Feeds one chunk of the streamed answer to the reader and publishes the

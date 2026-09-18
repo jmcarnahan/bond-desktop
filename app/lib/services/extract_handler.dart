@@ -290,8 +290,13 @@ class ExtractHandler extends WorkHandler {
     await _store.enqueueWork('draft', source, id);
     // After the row exists, never before it: the callback pumps the draft
     // lane, and a lane woken ahead of the write would drain an empty queue
-    // and go back to sleep.
-    onDraftQueued?.call();
+    // and go back to sleep. Guarded like every other lane-waking callback
+    // (`AiWorker._fireDrained`): the row is stored and the extraction is
+    // done, so a container torn down under the closure must not turn a
+    // finished item into a retry of a model call that already succeeded.
+    try {
+      onDraftQueued?.call();
+    } catch (_) {}
   }
 
   /// This message will never be drafted for, and its stage says so.
