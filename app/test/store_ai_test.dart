@@ -1013,6 +1013,116 @@ void main() {
     });
   });
 
+  group('conversationsWithEmbeddings carries the series columns', () {
+    Uint8List bytes(List<int> values) => Uint8List.fromList(values);
+
+    /// One inbound message on [key], kept unless [kept] says otherwise.
+    Future<void> seedInbound(
+      String key, {
+      required String id,
+      required String from,
+      required String receivedAt,
+      bool kept = true,
+    }) async {
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': id,
+        'conversation_key': key,
+        'direction': 'inbound',
+        'subject': 'Subject',
+        'from_name': 'Sender',
+        'from_address': from,
+        'received_at': receivedAt,
+        'body_text': 'Body',
+        'triage_status': kept ? 'triaged' : 'skipped',
+        'gate_reason': kept ? null : 'no_reply',
+      });
+    }
+
+    /// The conversation row plus its vector, so the thread is in the pool.
+    Future<void> seedConversation(
+      String key, {
+      required int messageCount,
+      required int inboundCount,
+    }) async {
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': key,
+        'subject': 'Weekly ops digest',
+        'participants_json': '[]',
+        'state': 'waiting',
+        'message_count': messageCount,
+        'inbound_count': inboundCount,
+        'last_message_at': '2026-09-01T10:00:00Z',
+      });
+      await store.upsertConversationAi(
+        'email',
+        key,
+        embedding: bytes([1, 2, 3, 4]),
+        embeddedHash: 'h-$key',
+        embedModel: 'model-a',
+      );
+    }
+
+    Future<Map<String, Object?>> rowFor(String key) async {
+      final rows = await store.conversationsWithEmbeddings(
+        embedModel: 'model-a',
+      );
+      return rows.firstWhere((r) => r['conversation_key'] == key);
+    }
+
+    test('the newest kept inbound sender wins', () async {
+      await seedConversation('c-one', messageCount: 2, inboundCount: 2);
+      await seedInbound(
+        'c-one',
+        id: 'm-old',
+        from: 'older@example.com',
+        receivedAt: '2026-08-20T10:00:00Z',
+      );
+      await seedInbound(
+        'c-one',
+        id: 'm-new',
+        from: 'newer@example.com',
+        receivedAt: '2026-08-28T10:00:00Z',
+      );
+
+      expect((await rowFor('c-one'))['newest_kept_from'], 'newer@example.com');
+    });
+
+    test('a skipped newest inbound falls back to the kept older one', () async {
+      await seedConversation('c-two', messageCount: 2, inboundCount: 2);
+      await seedInbound(
+        'c-two',
+        id: 'm-kept',
+        from: 'kept@example.com',
+        receivedAt: '2026-08-20T10:00:00Z',
+      );
+      await seedInbound(
+        'c-two',
+        id: 'm-gated',
+        from: 'gated@example.com',
+        receivedAt: '2026-08-28T10:00:00Z',
+        kept: false,
+      );
+
+      expect((await rowFor('c-two'))['newest_kept_from'], 'kept@example.com');
+    });
+
+    test('the counters come back as the conversation row holds them', () async {
+      await seedConversation('c-three', messageCount: 5, inboundCount: 3);
+      await seedInbound(
+        'c-three',
+        id: 'm-three',
+        from: 'sender@example.com',
+        receivedAt: '2026-08-20T10:00:00Z',
+      );
+
+      final row = await rowFor('c-three');
+      expect(row['message_count'], 5);
+      expect(row['inbound_count'], 3);
+    });
+  });
+
   group('the late-gate repair reads', () {
     Uint8List bytes(List<int> values) => Uint8List.fromList(values);
 

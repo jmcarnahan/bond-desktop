@@ -312,13 +312,24 @@ class SweepTally {
   /// with `created_by = 'auto'`.
   final int tombstoned;
 
-  /// Proposals a charter lint would have refused. Zero while the lint is
-  /// counted rather than applied (Phase 1).
+  /// Clusters the charter lint tombstoned, summed off the sweep's own
+  /// activity rows.
   final int lintRejected;
 
-  /// Clusters the namer called incoherent. Zero until the namer can say so
-  /// (Phase 3); the field exists now so the two rows line up.
+  /// Clusters the namer refused, summed the same way: a `coherent: false` that
+  /// named no outliers, or an outlier list that left fewer than two threads.
+  /// Both are the model naming no group to keep, so neither contributes to
+  /// [outliersDropped].
   final int incoherent;
+
+  /// Series the pre-pass seeded as clusters of their own.
+  final int seriesSeeded;
+
+  /// Threads the pre-pass took out of the pool as notification-shaped.
+  final int seriesExcluded;
+
+  /// Threads the namer named as not belonging, dropped before the confirms.
+  final int outliersDropped;
 
   /// Storyline id → the share of its gold-carrying members that agree, or
   /// null for a storyline no member of which carries a gold slug. Every live
@@ -363,7 +374,14 @@ class SweepTally {
   /// Pairs inside the clusters the sweep formed, by cosine bin.
   final List<int> cosineBins;
 
-  /// What the lint would have refused, by verdict.
+  /// What the lint would still refuse among the LIVE storylines, by verdict.
+  ///
+  /// Before Phase 3 this was the lint's whole reading, counted and not
+  /// applied. Now the lint tombstones a cluster before its confirms, so what
+  /// is left here is what SURVIVED that a lint pass would still refuse — and
+  /// that should read zero. A non-zero entry is a bug report, not a
+  /// measurement: either a charter reached a storyline by a path that does not
+  /// lint, or the two readings disagree.
   final Map<String, int> lintCounts;
 
   const SweepTally({
@@ -371,6 +389,9 @@ class SweepTally {
     required this.tombstoned,
     required this.lintRejected,
     required this.incoherent,
+    required this.seriesSeeded,
+    required this.seriesExcluded,
+    required this.outliersDropped,
     required this.purityByStoryline,
     required this.coverageBySlug,
     required this.largestShare,
@@ -413,6 +434,9 @@ class SweepTally {
         'tombstoned': tombstoned,
         'lint_rejected': lintRejected,
         'incoherent': incoherent,
+        'series': seriesSeeded,
+        'series_excluded': seriesExcluded,
+        'outliers': outliersDropped,
         'purity': {
           'mean': purityMean,
           'with_carrier': purityWithCarrier,
@@ -456,6 +480,8 @@ class SweepTally {
     return 'sweep:\n'
         '  storylines  formed $formed  tombstoned $tombstoned'
         '  lint-rejected $lintRejected  incoherent $incoherent\n'
+        '  series  seeded $seriesSeeded  excluded $seriesExcluded'
+        '  outliers dropped $outliersDropped\n'
         '  purity mean ${_pct(purityMean)} over $purityWithCarrier of '
         '${purityByStoryline.length} storylines   '
         'coverage mean ${_pct(coverageMean)} over '
@@ -467,7 +493,7 @@ class SweepTally {
         '  calls  $calls   per pass ${callsPerPass.join(', ')}\n'
         '  wall per pass ms ${wallPerPassMs.join(', ')}\n'
         '  in-cluster cosines  $bins\n'
-        '  charter lint (counted, not applied)  $lint';
+        '  charter lint over live storylines (should be 0)  $lint';
   }
 
   static String _pct(double share) => '${(share * 100).round()}%';

@@ -1041,6 +1041,7 @@ seeds the GOLD gate verdict.
 | 2026-09-18 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | participants | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260918-161310.json` | 23/98 (23%), keep-only 21/85 (25%) | 0 | 44% over 6 of 7 storylines | 0% over 13 efforts | 56% | 7 / 0 / 3 would be refused | 7 / 142 | 240 s | the card the app ships; prose slot served with the MTP head; cards from `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json`; 95 conversations seeded, 71 with a kept inbound message, 24 fully gated, 71 embedded, 0 embed failures; 5 sweep passes, every suggestion kept; assign rejected 1; items unmapped 75, filed nowhere 25; lint counted and not applied; the third pass, on the review-fixed tree; the two earlier passes (`…153447` 259 s, `…153923` 231 s) were identical on every count, and the purity mean then averaged in the one storyline with no gold-carrying member as a zero, reading 37% |
 | 2026-09-18 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260918-162005.json` | 31/98 (32%), keep-only 26/85 (31%) | 0 | 71% over 7 of 7 storylines | 0% over 13 efforts | 47% | 7 / 1 / 4 would be refused | 8 / 291 | 411 s | the same mailbox with the people out of the vector; same servers, same cards, same seeding counts; 8 sweep passes, every suggestion kept; assign rejected 24, assigned 2; items unmapped 52, filed nowhere 48; the third pass, on the review-fixed tree; the two earlier passes (`…154658` 446 s, `…155344` 401 s) were identical on every count |
 | 2026-09-18 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260918-171650.json` | 37/98 (38%), keep-only 30/85 (35%) | 11 | 51% over 13 of 14 storylines | 8% over 13 efforts | 14% | 14 / 1 / 6 would be refused | 15 / 106 | 312 s | the Phase 2 rule, two links and half the members, the cap of twelve and the coherence floor of 0.60, with the topics card shipped; second of two identical passes, the first `…-sweep-20260918-171100.json` at 330 s; same servers, same cards from `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json`, same seeding counts: 95 conversations, 71 with a kept inbound message, 24 fully gated, 71 embedded, 0 embed failures; 6 sweep passes, every suggestion kept; calls per pass 24, 22, 28, 19, 16, 0; assign assigned 6, rejected 6; items unmapped 52, filed nowhere 30; forbidden hits 4 in 1 anti-storyline bucket; incoherent 0; lint counted and not applied, all 6 hits placeholder |
+| 2026-09-18 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260918-192251.json` | 47/98 (48%), keep-only 38/85 (45%) | 7 | 43% over 2 of 2 storylines | 4% over 13 efforts | 71% | 2 / 12 / 3 refused | 14 / 71 | 182 s | the Phase 3 rules on top of Phase 2: the lexical series pre-pass, the namer that can decline a cluster and name outliers, twelve whole numbered central cards, and the charter lint wired into the naming branch. Second of two identical passes, the first `...-sweep-20260918-191812.json` at 203 s. Same servers, same cards from `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json`, same seeding counts: 95 conversations, 71 with a kept inbound message, 24 fully gated, 71 embedded, 0 embed failures. 4 sweep passes, every suggestion kept; calls per pass 11, 8, 1, 0. Series seeded 0, excluded 0. Outliers dropped 3. Incoherent 9, lint 3, both now applied rather than counted. Assign assigned 28, rejected 37; items unmapped 27, filed nowhere 63; forbidden hits 1 in 1 anti-storyline bucket. In-cluster cosine bins 0 / 4 / 37 / 86 / 194 over 321 pairs. The namer declined 9 of 14 clusters; the lint refused 3; the 2 that shipped then took 28 assign adds, which is the 71% |
 
 **What the two sweep rows say (2026-09-18).** Both cards were run three
 times, twice before the phase's review and once after its fixes, and every
@@ -1149,6 +1150,81 @@ throughout, which is the floor doing its work.
 | pairs inside a formed storyline | <0.50 | 0.50-0.55 | 0.55-0.60 | 0.60-0.65 | >=0.65 | total | under the 0.65 link threshold |
 |---|---|---|---|---|---|---|---|
 | Phase 2 rule, topics | 0 | 0 | 1 | 26 | 132 | 159 | 17% |
+
+**What the Phase 3 row says (2026-09-18).** The same mailbox, the same servers
+and the same cards, swept with the series pre-pass in front of the clustering,
+a namer that may decline a cluster or name the threads in it that do not
+belong, twelve whole numbered central cards, and the charter lint applied
+rather than counted. Run twice, identical on every count, second pass kept.
+
+| read | Phase 2 rule | Phase 3 rules |
+|---|---|---|
+| `storyline.id`, all items | 37/98 (38%) | 47/98 (48%) |
+| correct positives | 11 | 7 |
+| largest storyline's share of filed threads | 14% | 71% |
+| storylines formed | 14 | 2 |
+| placeholder charters that shipped | 6 | 0 |
+| naming calls | 15 | 14 |
+| confirm calls | 106 | 71 |
+| sweep wall, kept pass | 312 s | 182 s |
+| items unmapped | 52 | 27 |
+| assign pass, threads assigned | 6 | 28 |
+
+**A reference number nobody working on this scorer should forget: a sweep that
+files NOTHING scores 50 of 98.** Every correct abstention is credited, so an
+app that formed no storyline at all would beat both rules on this column. The
+bench measured exactly that by accident, which is the next paragraph. Phase 3's
+47 sits three items UNDER that floor while carrying 7 correct positives, where
+an empty run carries none. The round's target, at least 70 with positives,
+needs both halves and neither number is evidence on its own.
+
+**How this row was reached, in the order it happened.** The rule as first
+shipped tombstoned every cluster the 27B called `coherent: false`, and the
+first pass on the golden pool formed 0 storylines: 8 clusters named, 8
+declined, 50 of 98 on the scorer and 0 correct positives. A counts-only probe
+of the live 27B over fictional trios showed the prompt behaving exactly as
+written. On a coherent trio it answered true with no outliers. Whenever any
+thread did not belong it answered false, listed the outlier numbers, and wrote
+a title and charter for the largest group, which is what the prompt's own
+sentence asks of it. On the golden pool 14 of 14 clusters came back false at
+some point across the passes, and in the diagnostic pass 4 of 8 listed every
+thread as an outlier. So the code now reads false as "not all of them": a false
+carrying no outliers, or a kept set of fewer than two threads, is a tombstone,
+and otherwise the kept threads go to the confirms. That change and the reruns
+are the row above. The prompt text did not move.
+
+**The series pre-pass is unmeasured by this bench.** It seeded 0 series and
+excluded 0, because no three golden conversations share a folded subject: the
+set was sampled for diversity, which is the one shape a recurring-series rule
+cannot be read against. It will be read on the live rail instead, where a
+weekly digest and a vendor feed are ordinary. The zero is not evidence the rule
+does nothing.
+
+**The namer is strict and the lint bites.** It declined 9 of the 14 clusters it
+was handed, and the sets it kept are small at 3, 3 and 2 threads. The lint then
+refused 3 placeholder charters that Phase 2 would have shipped, so the 6
+placeholder charters of the Phase 2 row become 0 here. Three threads were
+dropped as outliers across the run. Between them those three gates are why only
+2 storylines formed against 14.
+
+**The 71% largest share is the assign pass, not the sweep.** The two storylines
+that did form then received 28 automatic assign adds against 37 rejections,
+which is more assign filing than every earlier row combined, and it is where
+both the 71% and the 27 unmapped items come from. A sweep that proposes two
+tight groups and an assign pass that pours the mailbox into them is the same
+blob arriving by a different door. Phase 4 is aimed at exactly that: the
+catch-all detector, the near-tie confirm and the confirm-prompt rule that
+mirrors the charter rule.
+
+**The whole-card change cost nothing measurable in prompt size.** The cards the
+namer saw ran from 837 to 2,493 characters for 3 to 7 cards, far under the
+7,300-character set cap, so no card was dropped from the far end and no clamp
+bit.
+
+**This is the cheapest row the sweep has produced.** 71 confirms and 182 s
+against 106 and 312 s a phase ago, and against 291 and 411 s two phases ago.
+The balance has flipped with it: the 14 naming calls on the 27B are now the
+larger share of the wall, where the 4B confirms used to be.
 
 
 

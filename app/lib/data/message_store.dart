@@ -4603,6 +4603,16 @@ FROM storylines s''';
   /// into a proposal about mail nobody was ever going to read. "Kept" is
   /// [keptMessageSql] here, as in every reader that means it — a `teams_source`
   /// chat is kept, a settle-time `not_worthy` drop is kept.
+  ///
+  /// `message_count`, `inbound_count` and `newest_kept_from` are the series
+  /// pre-pass's three columns. The sweep groups the pool by subject first, and
+  /// a group where no thread has ever been answered and every thread's newest
+  /// kept inbound message came from one address is a notification feed rather
+  /// than a recurring effort, so it leaves the pool for the pass. The two
+  /// counters are the conversation row's own, maintained by both syncs through
+  /// `recomputeConversationCounts`; the subquery is the newest kept inbound
+  /// sender, newest by `received_at` with the source message id breaking a tie
+  /// so one mailbox reads one way twice.
   Future<List<Map<String, Object?>>> conversationsWithEmbeddings({
     required String embedModel,
     List<String> sources = const ['email'],
@@ -4613,7 +4623,14 @@ FROM storylines s''';
           'SELECT a.source AS source, a.conversation_key AS conversation_key, '
           'a.embedding AS embedding, c.subject AS subject, '
           'c.participants_json AS participants_json, c.state AS state, '
-          'c.last_message_at AS last_message_at '
+          'c.last_message_at AS last_message_at, '
+          'c.message_count AS message_count, c.inbound_count AS inbound_count, '
+          '(SELECT m2.from_address FROM messages m2 '
+          '  WHERE m2.source = a.source '
+          '  AND m2.conversation_key = a.conversation_key '
+          "  AND m2.direction = 'inbound' AND ${keptMessageSql('m2')} "
+          '  ORDER BY m2.received_at DESC, m2.source_message_id ASC '
+          '  LIMIT 1) AS newest_kept_from '
           'FROM conversation_ai a '
           'JOIN conversations c '
           '  ON c.source = a.source AND c.conversation_key = a.conversation_key '

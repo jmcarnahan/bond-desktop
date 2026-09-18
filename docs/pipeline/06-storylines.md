@@ -31,12 +31,20 @@ recap after the sweep. See [10-model-routing.md](10-model-routing.md).
    as a belt, since it is the only place outside extraction that writes a
    conversation embedding.
 2. **Sweep** (`StorylineSweepHandler` → `sweep`) — clusters *unassigned*
-   threads by embedding similarity (gate: 2 similar threads form a proposal),
-   names the proposal, then confirms each member individually. Pair-discovery
+   threads by embedding similarity (gate: three similar threads, or a
+   recurring series of three, form a proposal, and two confirmed members are
+   still a storyline), names the proposal, then confirms each member
+   individually.
+   Series are found by subject before any geometry runs and the
+   notification-shaped ones leave the pool, and the namer may decline a
+   cluster outright or name the threads in it that do not belong; both have
+   their own sections below. Pair-discovery
    runs on the sqlite-vec index when there is one and on Dart arithmetic when
    there is not, to the same clusters either way — its own section below.
    Rejected clusters are tombstoned by immutable `cluster_hash` (schema v7) so
-   a dismissed suggestion stays dismissed even after membership drift. Finished
+   a dismissed suggestion stays dismissed even after membership drift. Three
+   reasons write one, listed once under *How the sweep finds its pairs*.
+   Finished
    threads are held out of the clustering and offered to the newborn storyline
    afterwards instead — "join, not seed", its own section below.
 3. **Refresh** (`StorylineRefreshHandler` → `refresh`) — re-describes a
@@ -109,8 +117,9 @@ true rather than claiming a pass ran. Without the stamp the next sweep's
 catch-up would read the row as never described and spend a Refine call
 re-writing a description seconds old over a member set that has not moved. It is
 the same claim the v10 backfill makes about the storylines it found already
-described. The below-minimum tombstone branch stamps nothing — it has no member
-rows to describe.
+described. A tombstoned cluster stamps nothing. It has no member rows to
+describe, for any of the three reasons listed under *How the sweep finds its
+pairs*.
 
 **Triggers** — every path that can change what a storyline is about, all via
 `requeueWork` (never `enqueueWork`; `payload_json` is NULL, so nothing carries
@@ -701,6 +710,78 @@ any of this hold: a message is never extracted, and so never embedded, before
 triage has spoken about it — see [04-extraction.md](04-extraction.md) for the
 claim rule that enforces it.
 
+### Series first
+
+Before any geometry runs, the pool is grouped by subject.
+`seriesKeyFor(subject)` in `conversation_state.dart` folds away everything that
+varies between two issues of one recurring series: the leading `Re:`/`Fw:`
+markers, letter case, ISO dates, `Month D` and `Month D, YYYY` forms with
+month names full or abbreviated, ticket ids such as `OPS-118` and bare issue
+numbers such as `#4412`, then every digit run that is left, and finally runs of
+whitespace. `Weekly digest 2026-09-14` and `Re: weekly digest 2026-09-21` fold
+to one key. The dates and the ticket ids are recognised as wholes first, so
+`OPS-118` becomes one placeholder rather than a word and a number. An empty
+subject never groups.
+
+A group of at least `seriesMinSize`, three, is a series, and one question
+decides which kind. A series is **notification-shaped** when no thread in it
+has an outbound message, which is `message_count - inbound_count == 0` on every
+row, over the conversation's own counters maintained by both syncs through
+`recomputeConversationCounts`, AND one address sent the newest kept inbound
+message in all of them. That is a feed: a system writing to a mailbox, every
+issue looking like the last. Naming it would write a charter that admits every
+future issue forever, so its threads are taken out of the pool for the pass and
+the row notes `series_excluded`. Nothing is tombstoned, because no model was
+asked anything. Both halves are required: a series nobody answered but several
+people wrote is a group of correspondents, and a series one address wrote and
+somebody answered is a conversation whatever its subject looks like. A row
+whose `inbound_count` is zero is stale rather than unanswered and fails the
+test: both counters default to zero on a conversation nothing has recomputed,
+while the pool query has already proved the thread holds a kept inbound
+message.
+
+Every other series is **seeded** as a cluster of its own, ahead of the cosine
+clustering and taken out of the pool the clustering sees. This is a thing
+people take part in on a recurring subject, which the cosine pass would never
+have found: two issues of one series share a shape and not a subject matter. A
+seeded group takes at most `maxClusterSize` of its members, the newest twelve,
+and the rest stay in the pool for a later pass. A seed is a question and not a
+verdict. It goes through the same naming call, the same charter lint and the
+same per-member confirms as any cluster. The counts land on the activity row as
+`series` and `series_excluded`. The three columns this reads,
+`message_count`, `inbound_count` and `newest_kept_from`, are the ones
+`conversationsWithEmbeddings` gained for it; the last is a correlated subquery
+over the kept inbound messages and costs no schema change.
+
+### Three threads to propose, two to keep
+
+`proposeMinClusterSize` is three and `minClusterSize` is two, and they answer
+different questions. Three is what a COSINE cluster needs before the sweep will
+spend a naming call on it. Two threads that merely embed alike are a
+coincidence, and the confirms cannot rescue a pair: they are judged against a
+charter written from those same two threads, so the coincidence describes
+itself and then agrees with its own description. Three is a pattern, which is
+something a charter can be wrong about. Two is the SURVIVOR floor, applied
+after the confirms have spoken, so a three-thread proposal that loses one
+member still ships as a storyline of two. A seeded series is already at least
+`seriesMinSize`, so the propose floor never turns one away.
+
+### The three reasons a tombstone exists
+
+A `dismissed` row with `created_by = 'auto'`, a `cluster_hash` and no members
+is a tombstone: the record that this exact group of threads was asked about and
+the answer was no. There are exactly three reasons one is written, all in
+`_propose` and all through the same `_tombstone` helper. The namer named no
+group to keep, which is a `coherent: false` carrying no outliers or an outlier
+list that leaves fewer than two threads, noted `incoherent`. The charter lint
+refused what the namer wrote, noted `lint`. Or the per-member confirms left
+fewer than `minClusterSize` survivors. `member_hash` stays null in all three:
+no member rows are ever written for a tombstoned cluster, so there is no stored
+set for it to describe, and the cluster is the only identity the row has. A
+cluster the sweep merely dropped for sitting under the coherence floor or under
+`proposeMinClusterSize` leaves no tombstone at all, because nothing was asked
+about it.
+
 Clustering is two halves. **Measuring** the pairs is the half an index can do
 faster, and it does — `ConversationVectorIndex` (see `05-embeddings.md`),
 diff-backfilled at sweep start, one KNN probe per candidate, `1 - distance`
@@ -771,7 +852,16 @@ filed thread, eleven correct positives where there had never been one, and 37
 of 98 on the scorer, reached with 106 member confirms against 291. Purity fell
 from 71% to 51% over fourteen groups rather than seven, and coverage is still
 8%, which is what the series pre-pass and the fragment handling are for.
-`docs/model-bakeoff.md` carries the protocol, the knobs and the ledger.
+The tally reads its own numbers off the sweep's activity rows: `incoherent`,
+`lint`, `series`, `series_excluded` and `outliers` are summed over every
+`storyline_sweep` row the run recorded, so the printed row and the log tell one
+story rather than two. Its `charter lint` line changed meaning with them.
+Before the lint was wired it was the whole reading, counted over every live
+storyline and applied to none. Now that a lint hit tombstones a cluster before
+its confirms, what that line counts is what SURVIVED and would still be
+refused, and it should read zero; a non-zero entry there is a bug report rather
+than a measurement. `docs/model-bakeoff.md` carries the protocol, the knobs and
+the ledger.
 
 **Brute force is the fallback, and it is not exceptional.** The sweep does its
 own arithmetic when there is no usable index (the ordinary state of a build
@@ -818,22 +908,32 @@ a finished thread sitting between two newborn clusters could join both, which is
 a state no other automatic path can produce — `assignConversation` files a
 thread into its single best storyline and nothing else.
 
-Two further limits are worth naming. The tombstone branch probes nothing: a cluster the
-model threw out below `minClusterSize` must not go recruiting history to make
-itself big enough to ship. And when the probe files anything, **both** member
-hash columns are recomputed over the final set, so `member_hash ==
-refreshed_member_hash` still holds — the storyline is born described, and a
-probe join must not send it to `staleRefreshStorylineIds` and spend a 27B Refine
-call re-describing what was written moments ago. `recap_through` is cleared as
-every other member-add path clears it, so the recap already queued by the birth
-covers the joined threads too; the recap handler drains after the sweep's in the
-same pass, which is why the probe runs inline rather than as a pass of its own.
-`cluster_hash` is never rewritten: it names the group the user is being asked
-about, and the probe did not change that question.
+Two further limits are worth naming. A tombstoned cluster probes nothing,
+whichever of the three reasons wrote it: a group the model just threw out must
+not go recruiting history to make itself big enough to ship. And when the probe
+files anything, **both** member hash columns are recomputed over the final set,
+so `member_hash == refreshed_member_hash` still holds — the storyline is born
+described, and a probe join must not send it to `staleRefreshStorylineIds` and
+spend a 27B Refine call re-describing what was written moments ago.
+`recap_through` is cleared as every other member-add path clears it, so the
+recap already queued by the birth covers the joined threads too; the recap
+handler drains after the sweep's in the same pass, which is why the probe runs
+inline rather than as a pass of its own. `cluster_hash` is never rewritten: it
+names the group the user is being asked about, and the probe did not change
+that question.
 
 In the activity row the probe reports itself as `joined`, kept separate from
 `confirmed` and `rejected` — those two count the cluster's own members being
 judged, and a finished thread that was offered and turned away was never one.
+
+The sweep's row carries nine numeric keys: `proposed`, `confirmed`, `rejected`
+and `joined`, and beside them `series` and `series_excluded` from the subject
+pre-pass, `incoherent` and `lint` for the clusters the namer and the charter
+lint refused, and `outliers` for the threads the namer named as not belonging.
+Every one is a number and never a null or a string, because the log's
+quiet-kind check reads them as numerics and a non-numeric would make every
+all-zero sweep loud again. The row is written when the pass reached a cluster
+OR excluded a series: leaving the pool is something the pass did.
 
 ## Cross-source identity
 
@@ -848,9 +948,9 @@ The dedupe hashes fold the source in for the same reason: `cluster_hash` and
 `member_hash` are taken over the sorted composites, so two groups that differ
 only by connector are two groups. Recognising a dismissal asks **both**
 recipes, though. Hashes written before the source was folded in can never be
-rewritten — a cluster tombstoned below `minClusterSize` has no member rows to
-rebuild it from — so `MessageStore.dismissedHashExistsAny` is handed the
-composite hash and the old bare-key hash for the same candidate set, and
+rewritten, and a tombstoned cluster has no member rows to rebuild it from, so
+`MessageStore.dismissedHashExistsAny` is handed the composite hash and the old
+bare-key hash for the same candidate set, and
 matches either against either column in one query. Every write uses the new
 recipe; a dismissal made under the old one holds forever.
 
@@ -907,13 +1007,77 @@ knob stay, so a future model can be asked the same question without a code
 change.
 
 **NameStorylineTask** — same file, schema `storyline_name`, **prose / 27B
-slot**, **temperature 0**. Names a group of threads: evidence sentence, a
-≤6-word title in the owner's own vocabulary (generic labels explicitly
-banned), a present-tense one-sentence status summary, and a charter phrased as
-membership criteria so future threads can be judged against it. Called from
-the sweep's `_propose` and from the refresh pass's bootstrap branch. The doc
+slot**, **temperature 0**. Six fields in schema order, which is the order a
+grammar emits them in: `evidence`, `coherent`, `outliers`, `title`, `summary`,
+`charter`. The evidence sentence comes first and the two judgements come
+straight after it, so the title follows from them rather than being written
+first and defended afterwards. `title` is ≤6 words in the owner's own
+vocabulary, with generic labels banned and now a person, a team, a department
+or a category of message banned with them; `summary` is a present-tense
+one-sentence status; `charter` is membership criteria so future threads can be
+judged against it, and must name the specific thing, because a charter that
+would admit every thread from one person or one team is not a charter. The doc
 comment above the prompts explains the charter-vs-summary distinction — the
 charter is the membership contract, the summary is display text.
+
+`coherent` is the model's out: true only when the threads are ONE specific
+event, project or topic, with the same team, the same sender and the same kind
+of message named as things that are not one storyline. `outliers` are the
+numbers of the threads that do not belong to what the rest share. Both default
+in the validator. A missing `coherent` reads true and a missing `outliers`
+reads empty, so an answer from a server that never saw the fields still names
+its group.
+
+The cards it reads are the cluster's `namingCards`, twelve, nearest the
+centroid, most central first, each clamped whole to `cardCap`, 600 characters,
+with its `[k] ` number prefixed before the clamp; whole cards are then dropped
+from the far end until the joined set fits `cardsCap`, 7,300. Twelve cards of
+600 joined by eleven separators is 7,266, which is why the set cap is not
+7,200: a 7,200 clamp would cut the twelfth card mid-sentence after the service
+went to the trouble of keeping every card whole. The service builds the set to
+fit, so the task's own clamp is a belt. The order is by centrality precisely so
+a dropped card is an edge of the cluster rather than its middle. What this
+replaced was forty cards squeezed into four thousand characters at
+eighty-three characters each, which is a subject line and nothing a name could
+follow from.
+
+What the sweep does with the answer, in `_propose` and before any confirm is
+spent, follows how the live model actually uses the two fields. Asked this
+prompt, the 27B answers `coherent: false` whenever ANY thread does not belong
+and lists those threads in `outliers`, writing its title and charter for the
+group that remains, which is what the prompt's own sentence asks of it. On the
+golden pool eight clusters of eight came back false, four of them listing every
+thread and the rest listing 4 of 7, 3 of 6, 2 of 3 and 1 of 3. So a false is
+read as "not all of them" rather than as a refusal.
+
+First, a cluster is tombstoned and noted `incoherent` on the two answers that
+name no group to keep: `coherent: false` carrying no outliers, which is the
+model declining outright, and a kept set of fewer than `minClusterSize`
+threads, which is the same refusal spelled as a list.
+
+Then `charterLint` in `storyline_lint.dart` reads the title and charter against
+the WHOLE cluster's participants, and a hit on any of its three verdicts, which
+are `placeholder`, `person` and `category`, tombstones the cluster and notes
+`lint`. The confirm stage cannot refuse what the charter allows, so a charter
+that allows everything has to be caught before it is asked about, and the lint
+runs on the participant list as the sweep built it rather than on what survives
+the drop below.
+
+Only then are the outliers dropped, and the pass proceeds on the kept threads,
+`coherent` false or true alike. They go straight back into the pool, with
+nothing written for them and nothing blocking them, and the count lands on the
+row as `outliers`. The per-member confirms are the guard on what is left: each
+kept thread is judged against the charter the model wrote for the group it
+kept, and `minClusterSize` is applied again to the survivors. `_charterCap` on
+this task stays 300, which puts every charter the app writes under the
+confirm's 400 clamp; that clamp bites only on charters a person typed.
+
+Called from the sweep's `_propose` and from the refresh pass's bootstrap
+branch. The bootstrap branch numbers its cards the same way, so the prompt's
+sentence about threads listed in brackets is true there too, and then IGNORES
+`coherent` and `outliers` by design: a storyline a person made by hand is not
+the sweep's to split, and a model asked to find the odd thread out will always
+find one.
 
 **RefineStorylineTask** — same file, schema `storyline_refresh`, **prose / 27B
 slot**, **temperature 0**. The same four fields as naming, asked of a

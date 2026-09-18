@@ -200,6 +200,65 @@ String stripReFw(String? subject) {
   return text;
 }
 
+/// An ISO date, the first thing that varies between two issues of a series.
+final RegExp _seriesIsoDate = RegExp(r'\d{4}-\d{2}-\d{2}');
+
+/// `Month D`, `Month D, YYYY`, `Sept 3rd` — month names full or abbreviated,
+/// an optional ordinal suffix, an optional year.
+///
+/// The month alternatives are spelled out rather than a three-letter prefix
+/// followed by `[a-z]*`, which matched any word starting with one: `decide 5
+/// options` and `marketing 5 ideas` folded their whole phrase away and two
+/// unrelated subjects became one series key.
+final RegExp _seriesWordyDate = RegExp(
+  r'\b(jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|jun(e)?|jul(y)?'
+  r'|aug(ust)?|sep(t(ember)?)?|oct(ober)?|nov(ember)?|dec(ember)?)\.?\s+'
+  r'\d{1,2}(st|nd|rd|th)?(,?\s+\d{4})?\b',
+  caseSensitive: false,
+);
+
+/// A ticket id (`OPS-1234`, `ops-1234`) or a bare issue number (`#4412`).
+final RegExp _seriesTicketId = RegExp(
+  r'\b[A-Za-z][A-Za-z0-9]+-\d+\b|#\d+',
+);
+
+/// Whatever digits are left after the dates and the ticket ids: an issue
+/// number, a week number, a count.
+final RegExp _seriesDigits = RegExp(r'\d+');
+
+/// A run of whitespace, folded to one space so spacing never splits a series.
+final RegExp _seriesSpaces = RegExp(r'\s+');
+
+/// The subject with everything that varies between issues of one recurring
+/// series folded away, so "Weekly digest 2026-09-14" and "Weekly digest
+/// 2026-09-21" read as one key. Empty when the subject is empty.
+///
+/// What is folded, in order, each replaced by `#`:
+///
+/// | step | what it matches | example |
+/// | --- | --- | --- |
+/// | `stripReFw` | leading `Re:`/`Fw:`/`Fwd:` | `Re: Weekly digest` |
+/// | lower-case | letter case | `Weekly` and `weekly` |
+/// | `_seriesIsoDate` | `\d{4}-\d{2}-\d{2}` | `2026-09-14` |
+/// | `_seriesWordyDate` | a month NAME, full or abbreviated, then `D(, YYYY)` | `Sept 3`, `September 10, 2026` |
+/// | `_seriesTicketId` | `[A-Za-z][A-Za-z0-9]+-\d+`, `#\d+` | `OPS-118`, `#4412` |
+/// | `_seriesDigits` | any remaining digit run | `2` in `Budget review 2` |
+/// | `_seriesSpaces` | whitespace runs | two spaces become one |
+///
+/// The bare-digit rule is last on purpose: the dates and the ticket ids are
+/// recognised as wholes first, so `OPS-118` folds to one `#` rather than to a
+/// word and a number.
+String seriesKeyFor(String? subject) {
+  var text = stripReFw(subject).toLowerCase();
+  if (text.isEmpty) return '';
+  text = text.replaceAll(_seriesIsoDate, '#');
+  text = text.replaceAll(_seriesWordyDate, '#');
+  text = text.replaceAll(_seriesTicketId, '#');
+  text = text.replaceAll(_seriesDigits, '#');
+  text = text.replaceAll(_seriesSpaces, ' ').trim();
+  return text;
+}
+
 /// The later of two ISO-8601 UTC timestamps. Both are Graph's own strings,
 /// stored verbatim, so a string comparison IS the chronological one.
 String _newer(String? a, String b) =>

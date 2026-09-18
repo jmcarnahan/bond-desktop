@@ -333,8 +333,11 @@ void main() {
         SweepTally(
           formed: 2,
           tombstoned: 3,
-          lintRejected: 0,
-          incoherent: 0,
+          lintRejected: 5,
+          incoherent: 6,
+          seriesSeeded: 1,
+          seriesExcluded: 8,
+          outliersDropped: 3,
           purityByStoryline: purity,
           coverageBySlug: coverage,
           largestShare: 0.4,
@@ -403,6 +406,18 @@ void main() {
       expect(json['calls_per_pass'], [7, 4]);
     });
 
+    test('the sweep-side counts ride the JSON under the note keys', () {
+      // The same five keys the sweep writes to its activity row, so the run
+      // file and the log read as one story.
+      final json = tally().toJson();
+
+      expect(json['lint_rejected'], 5);
+      expect(json['incoherent'], 6);
+      expect(json['series'], 1);
+      expect(json['series_excluded'], 8);
+      expect(json['outliers'], 3);
+    });
+
     test('the printed table names no slug and no storyline', () {
       final printed = tally().table();
 
@@ -417,6 +432,10 @@ void main() {
       expect(printed, contains('correct positives 7'));
       expect(printed, contains('forbidden hits 2 over 1 buckets'));
       expect(printed, contains('0.55-0.60 2'));
+      // Counts, which is all the sweep-side line ever carries.
+      expect(printed, contains('lint-rejected 5  incoherent 6'));
+      expect(printed, contains('series  seeded 1  excluded 8'));
+      expect(printed, contains('outliers dropped 3'));
     });
   });
 }

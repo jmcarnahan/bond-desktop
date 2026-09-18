@@ -9,6 +9,7 @@ import 'dart:typed_data';
 
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
+import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -1170,6 +1171,14 @@ void main() {
               'mixes both SWEEP_CARD variants');
         }
 
+        // The app's own log, because the sweep's per-pass counts — the series
+        // it seeded and excluded, the clusters it refused, the outliers it
+        // dropped — are written there and nowhere else. The run records a row
+        // after each pass and sums them afterwards, rather than the bench
+        // keeping a second set of counters that could disagree with the
+        // app's.
+        final log = ActivityLog(store);
+        addTearDown(log.dispose);
         final service = StorylineService(
           store,
           BenchTarget.prose.client(onCall: nameCollector.record)
@@ -1177,6 +1186,7 @@ void main() {
           confirmClient: BenchTarget.bulk.client(onCall: confirmCollector.record)
             ..onReasoningLeak = confirmCollector.noteLeak,
           embeddings: EmbeddingsClient(),
+          activityLog: log,
         );
 
         // The room cap is a `static const` of three, so the loop KEEPS what it
@@ -1197,6 +1207,10 @@ void main() {
           // down is not a row. An LlmUnavailableException out of here fails
           // the run.
           await service.sweep();
+          // The row the app writes on every other trigger. A pass whose every
+          // count was zero is suppressed by the log's quiet-kind check, which
+          // is exactly right: there is nothing to sum.
+          await log.record('storyline_sweep', source: 'email', entityId: 'sweep');
           wallPerPassMs
               .add(DateTime.now().difference(passStartedAt).inMilliseconds);
           callsPerPass.add(
@@ -1314,8 +1328,10 @@ void main() {
           }
         }
 
-        // Counted, never applied: the lint is not wired into the naming pass
-        // until Phase 3, and this says what it would have thrown away.
+        // What SURVIVED that the lint would still refuse. Since Phase 3 the
+        // naming pass tombstones a lint hit before its confirms, so this reads
+        // over the live storylines and should be zero; a non-zero entry is a
+        // bug report, not a measurement.
         final lintCounts = charterLintCounts([
           for (final storyline in await store.loadStorylines(
             statuses: const ['suggested', 'active'],
@@ -1345,14 +1361,33 @@ void main() {
               (callsByKind[metrics.task] ?? 0) + metrics.n + metrics.failures;
         }
 
+        // The five per-pass counts, summed off the sweep's own activity rows.
+        // Read after the loop rather than per pass, so a pass the log
+        // suppressed as quiet simply contributes nothing.
+        var sweptIncoherent = 0;
+        var sweptLint = 0;
+        var sweptOutliers = 0;
+        var sweptSeries = 0;
+        var sweptSeriesExcluded = 0;
+        for (final row in await store.recentActivity(limit: 1000)) {
+          if (row['kind'] != 'storyline_sweep') continue;
+          final detail = ActivityEvent.fromRow(row).detail;
+          int at(String key) => (detail[key] as num?)?.toInt() ?? 0;
+          sweptIncoherent += at('incoherent');
+          sweptLint += at('lint');
+          sweptOutliers += at('outliers');
+          sweptSeries += at('series');
+          sweptSeriesExcluded += at('series_excluded');
+        }
+
         final tally = SweepTally(
           formed: membership.storylines,
           tombstoned: tombstoned,
-          // Phase 1 counts the lint and applies nothing, and the namer cannot
-          // yet say a cluster is incoherent. Both land in Phase 3; the columns
-          // exist now so the before and after rows line up.
-          lintRejected: 0,
-          incoherent: 0,
+          lintRejected: sweptLint,
+          incoherent: sweptIncoherent,
+          seriesSeeded: sweptSeries,
+          seriesExcluded: sweptSeriesExcluded,
+          outliersDropped: sweptOutliers,
           purityByStoryline: {
             for (final entry in membership.threadsByStoryline.entries)
               entry.key: purityOf(entry.value, goldByThread),

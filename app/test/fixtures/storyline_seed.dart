@@ -426,6 +426,41 @@ String? _newest(List<String?> stamps) {
   return newest;
 }
 
+/// [key] with every digit spelled out, so the default subject gives each
+/// thread its own SERIES key.
+///
+/// The sweep's series pre-pass folds every digit run in a subject to one
+/// placeholder, which would make `Subject for c1`, `Subject for c2` and
+/// `Subject for c3` one recurring series — three threads with no outbound
+/// message and one sender, so the pre-pass would drop them from the pool and
+/// every test that seeds three default threads would see nothing. Spelling
+/// the digits keeps the fixture's keys apart under the fold. A test that
+/// passes its own subject is unaffected.
+String _spellDigits(String key) {
+  const words = {
+    '0': 'zero',
+    '1': 'one',
+    '2': 'two',
+    '3': 'three',
+    '4': 'four',
+    '5': 'five',
+    '6': 'six',
+    '7': 'seven',
+    '8': 'eight',
+    '9': 'nine',
+  };
+  final out = StringBuffer();
+  for (final rune in key.split('')) {
+    final word = words[rune];
+    if (word == null) {
+      out.write(rune);
+    } else {
+      out.write(out.isEmpty ? word : ' $word');
+    }
+  }
+  return out.toString();
+}
+
 /// One thread with a vector, for a unit test that needs a pool rather than a
 /// mailbox.
 ///
@@ -438,6 +473,11 @@ String? _newest(List<String?> stamps) {
 /// ask for a kept inbound message before they look at a vector, so such a
 /// thread would be silently invisible. Pass `keptInbound: false` to build that
 /// state on purpose.
+///
+/// [messageCount], [inboundCount] and [fromAddress] are the series pre-pass's
+/// three facts: a group where every thread is unanswered and one address sent
+/// the newest kept message in all of them is a notification feed, not a
+/// recurring effort. Only a test that means to build that shape passes them.
 Future<void> seedThread(
   MessageStore store,
   String key, {
@@ -449,15 +489,23 @@ Future<void> seedThread(
   String embedModel = EmbeddingsClient.modelTag,
   String source = 'email',
   bool keptInbound = true,
+  int? messageCount,
+  int? inboundCount,
+  String fromAddress = 'sarah@example.com',
 }) async {
   await store.upsertConversation({
     'source': source,
     'conversation_key': key,
-    'subject': subject ?? 'Subject for $key',
+    'subject': subject ?? 'Subject for ${_spellDigits(key)}',
     'state': state,
     'last_message_at': lastMessageAt,
     'participants_json':
         jsonEncode([for (final person in participants) {'name': person}]),
+    // Left off the map entirely when the test does not care: the series
+    // pre-pass reads them, and a column the fixture never writes keeps the
+    // schema's own default.
+    'message_count': ?messageCount,
+    'inbound_count': ?inboundCount,
   });
   if (vector == null) return;
   if (keptInbound) {
@@ -466,9 +514,9 @@ Future<void> seedThread(
       'source_message_id': 'kept-$key',
       'conversation_key': key,
       'direction': 'inbound',
-      'subject': subject ?? 'Subject for $key',
+      'subject': subject ?? 'Subject for ${_spellDigits(key)}',
       'from_name': 'Sarah',
-      'from_address': 'sarah@example.com',
+      'from_address': fromAddress,
       'received_at': lastMessageAt,
       'body_text': 'body of kept-$key',
       'triage_status': 'triaged',

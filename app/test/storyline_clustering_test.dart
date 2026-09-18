@@ -45,6 +45,11 @@ void main() {
     int count,
     double Function(int, int) sim, {
     double threshold = 0.65,
+    // Two, where the sweep passes three. The minimum size is the CALLER's
+    // policy about what is worth a naming call, not part of the join rule
+    // these tests are about, and holding it at two is what lets a test say
+    // "a pair still forms from a single link" at all. The sweep's own number
+    // is pinned below.
     int minSize = 2,
     int maxSize = 12,
     double floor = 0.60,
@@ -69,6 +74,11 @@ void main() {
     // `StorylineService._clusterBy` started passing something else, so the
     // literals and the constants are pinned to each other here, once.
     expect(StorylineTuning.clusterLinkThreshold, 0.65);
+    // What `_clusterBy` passes as `minSize`: the PROPOSE floor. A pair is a
+    // shape this rule can form and not a question worth a naming call, so
+    // `minClusterSize` (2) is the survivor floor after the confirms and never
+    // reaches this module.
+    expect(StorylineTuning.proposeMinClusterSize, 3);
     expect(StorylineTuning.minClusterSize, 2);
     expect(StorylineTuning.maxClusterSize, 12);
     expect(StorylineTuning.clusterCoherenceFloor, 0.60);

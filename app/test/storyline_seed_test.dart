@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/services/conversation_state.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
@@ -404,6 +405,45 @@ void main() {
       expect(await store.getConversationAi('email', 'c1'), isNull);
       final conversation = await store.getConversationRow('email', 'c1');
       expect(conversation!['participants_json'], '[{"name":"Dana Whitfield"}]');
+    });
+
+    test('the counters and the sender reach the pool row', () async {
+      // The three facts the series pre-pass reads. A test that means to build
+      // a notification feed needs all three, and they have to arrive through
+      // the query the sweep actually runs rather than through the columns.
+      await seedThread(
+        store,
+        'c1',
+        vector: [1, 0],
+        messageCount: 4,
+        inboundCount: 3,
+        fromAddress: 'ops@example.com',
+      );
+
+      final row = (await store.conversationsWithEmbeddings(
+        embedModel: EmbeddingsClient.modelTag,
+      ))
+          .single;
+      expect(row['message_count'], 4);
+      expect(row['inbound_count'], 3);
+      expect(row['newest_kept_from'], 'ops@example.com');
+    });
+
+    test('the default subject gives every key its own series key', () async {
+      // The fixture spells its digits out, because `seriesKeyFor` folds every
+      // digit run: left as written, three default threads would be one
+      // unanswered single-sender series and the pre-pass would drop them.
+      await seedThread(store, 'c1', vector: [1, 0]);
+      await seedThread(store, 'c2', vector: [1, 0]);
+
+      final subjects = [
+        for (final row in await store.conversationsWithEmbeddings(
+          embedModel: EmbeddingsClient.modelTag,
+        ))
+          row['subject'] as String,
+      ];
+      expect(subjects, hasLength(2));
+      expect(seriesKeyFor(subjects.first), isNot(seriesKeyFor(subjects.last)));
     });
   });
 }
