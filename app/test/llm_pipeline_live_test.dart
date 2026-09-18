@@ -49,7 +49,7 @@ import 'fixtures/test_db.dart';
 /// another gate, so it should be one triage plus one needs-you plus one
 /// extraction. The gap between the two is what T1 is about.
 ///
-/// Two honest limits, stated here because they bound every number below:
+/// Three honest limits, stated here because they bound every number below:
 ///
 /// 1. The seed writes messages and NO conversation rows (`seedCorpus`, the
 ///    drain bench's shape). `ExtractHandler._refreshCard` and `_fileBucket`
@@ -58,6 +58,15 @@ import 'fixtures/test_db.dart';
 /// 2. `_embedMessage` still dials the embeddings client once per message. It
 ///    is pointed at a never-dialled port, so each is a refused connection —
 ///    milliseconds, but they are in the wall clock.
+/// 3. It is a SUBSET of the app's pipeline, chosen for what T1 and T2 read:
+///    two of the three lanes (no storyline lane — the sweep needs the embed
+///    server and the vector index), two of the fast lane's eight handlers,
+///    a `DraftHandler` with no attachment or context retrievers, and the
+///    plain draft call rather than the streamed one. So it can say what the
+///    lanes and the width do to the late arrival and the two walls, and it
+///    cannot say anything about names, recaps or first-token time — those
+///    are `bench-prose`'s, and "off the critical path" for the storyline
+///    passes is a fact of the wiring, not a number from here.
 ///
 /// `make model` returns when the port binds, while the weights are still
 /// loading — poll `/health` for `{"status":"ok"}` before a pass, or the first

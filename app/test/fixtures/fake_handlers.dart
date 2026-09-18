@@ -110,26 +110,3 @@ class HeldHandler extends WorkHandler {
     await _release.future;
   }
 }
-
-/// Writes one line per item into a shared log, so several handlers' ORDER can
-/// be read off one list.
-///
-/// It logs on COMPLETION rather than on entry: the order a log records is then
-/// the order things finished in, which is the only order a lane test has an
-/// opinion about.
-class LoggingHandler extends WorkHandler {
-  @override
-  final String kind;
-
-  final List<String> log;
-
-  final Duration duration;
-
-  LoggingHandler(this.kind, this.log, {this.duration = Duration.zero});
-
-  @override
-  Future<void> run(Map<String, Object?> item) async {
-    if (duration > Duration.zero) await Future<void>.delayed(duration);
-    log.add('$kind:${item['entity_id'] as String? ?? ''}');
-  }
-}

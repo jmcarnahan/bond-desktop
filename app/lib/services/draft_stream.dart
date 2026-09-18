@@ -55,10 +55,11 @@ class DraftStreamEvent {
   static final RegExp optionPath =
       RegExp(r'^options\[(\d+)\]\.(stance|reply_body)$');
 
-  /// Whether a path from [PartialJsonStrings] is one a person reads. Said once
-  /// here because two layers ask it — the handler deciding what to publish and
-  /// [StreamingDraft] deciding what to fold in — and a rule that drifted
-  /// between them would be a path published and then silently dropped.
+  /// Whether a path from [PartialJsonStrings] is one a person reads: the
+  /// handler publishes by it. `StreamingDraft.apply` folds the same two paths
+  /// — `reply_body` and whatever [optionPath] matches — and shares the regexp,
+  /// which is the half of the rule that could drift; a path published here and
+  /// not folded there would be a delta silently dropped.
   static bool isVisible(String path) =>
       path == 'reply_body' || optionPath.hasMatch(path);
 

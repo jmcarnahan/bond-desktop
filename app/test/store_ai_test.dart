@@ -390,16 +390,95 @@ void main() {
       expect(first!['entity_id'], 'old');
     });
 
-    test('it still revives only done and error rows', () async {
+    test('without the flag a pending row keeps its place', () async {
       await store.enqueueWork('draft', 'email', 'm1');
       await stampCreated('draft', 'm1', '2026-09-01T09:00:00Z');
 
-      // Pending: resetting it would lose its place in the drain order, and
-      // `refreshCreatedAt` must not be a way round the WHERE clause.
-      await store.requeueWork('draft', 'email', 'm1', refreshCreatedAt: true);
+      // The default requeue is a system revive, not a person asking: a
+      // pending row is left exactly where the drain order has it.
+      await store.requeueWork('draft', 'email', 'm1', payloadJson: '{"x":1}');
 
-      expect((await workRow('draft', 'm1'))['created_at'],
-          '2026-09-01T09:00:00Z');
+      final row = await workRow('draft', 'm1');
+      expect(row['created_at'], '2026-09-01T09:00:00Z');
+      expect(row['payload_json'], isNull);
+    });
+
+    test('with the flag a pending row is moved to the front and re-payloaded',
+        () async {
+      // A prefetch queued behind a newer one, and then a person asking for it:
+      // Draft reply on a message whose draft is still in the queue must not be
+      // a no-op for as long as the queue ahead of it takes.
+      await store.enqueueWork('draft', 'email', 'asked');
+      await stampCreated('draft', 'asked', '2026-09-01T09:00:00Z');
+      await store.enqueueWork('draft', 'email', 'prefetch');
+      await stampCreated('draft', 'prefetch', '2026-09-17T09:00:00Z');
+
+      await store.requeueWork(
+        'draft',
+        'email',
+        'asked',
+        payloadJson: '{"asked":true}',
+        refreshCreatedAt: true,
+      );
+
+      final row = await workRow('draft', 'asked');
+      expect(row['status'], 'pending');
+      expect(row['payload_json'], '{"asked":true}');
+      expect((row['created_at'] as String).compareTo('2026-09-17T09:00:00Z'),
+          greaterThan(0));
+      final first = await store.claimPendingWork('draft');
+      expect(first!['entity_id'], 'asked');
+    });
+
+    test('a flagged requeue without a payload keeps a pending row\'s payload',
+        () async {
+      // Draft reply wrote `asked` and a pinned id; a Retry on the same message
+      // moments later passes no payload. It may move the row — a person is
+      // asking — but it must not strip what the earlier press asked for.
+      await store.enqueueWork('draft', 'email', 'asked');
+      await stampCreated('draft', 'asked', '2026-09-01T09:00:00Z');
+      await store.requeueWork(
+        'draft',
+        'email',
+        'asked',
+        payloadJson: '{"asked":true}',
+        refreshCreatedAt: true,
+      );
+      await store.requeueWork('draft', 'email', 'asked',
+          refreshCreatedAt: true);
+
+      final row = await workRow('draft', 'asked');
+      expect(row['status'], 'pending');
+      expect(row['payload_json'], '{"asked":true}');
+
+      // A done row is the documented opposite: a plain requeue drops the last
+      // request's payload, so a pinned file is not pinned for ever.
+      await store.writeWork('draft', 'email', 'asked', status: 'done');
+      await store.requeueWork('draft', 'email', 'asked',
+          refreshCreatedAt: true);
+      expect((await workRow('draft', 'asked'))['payload_json'], isNull);
+    });
+
+    test('a processing row is never touched, flag or no flag', () async {
+      // At the server. Flipping it back to pending would run the same item
+      // twice, which is the one thing the atomic claim exists to prevent.
+      await store.enqueueWork('draft', 'email', 'busy');
+      await stampCreated('draft', 'busy', '2026-09-01T09:00:00Z');
+      final claimed = await store.claimPendingWork('draft');
+      expect(claimed!['entity_id'], 'busy');
+
+      await store.requeueWork(
+        'draft',
+        'email',
+        'busy',
+        payloadJson: '{"asked":true}',
+        refreshCreatedAt: true,
+      );
+
+      final row = await workRow('draft', 'busy');
+      expect(row['status'], 'processing');
+      expect(row['payload_json'], isNull);
+      expect(row['created_at'], '2026-09-01T09:00:00Z');
     });
   });
 

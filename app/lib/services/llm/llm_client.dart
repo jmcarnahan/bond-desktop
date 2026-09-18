@@ -381,27 +381,16 @@ class LlmClient {
     int maxTokens = 512,
     double temperature = 0.2,
     bool think = false,
-  }) async {
-    final reply = await _post((
-      system: system,
-      user: user,
-      maxTokens: maxTokens,
-      temperature: temperature,
-      think: think,
-      schema: schema,
-      schemaName: schemaName,
-      label: schemaName,
-    ));
-
-    // Decoded inside [_post], on either wire, so a constrained call's reply
-    // always arrives here as an object — see [_decoded] for why the decode
-    // does not live in this method.
-    final json = reply.json;
-    if (json == null) {
-      throw LlmFormatException('$_modelNoun answered with no message content.');
-    }
-    return json;
-  }
+  }) =>
+      _completeJson(
+        system: system,
+        user: user,
+        schema: schema,
+        schemaName: schemaName,
+        maxTokens: maxTokens,
+        temperature: temperature,
+        think: think,
+      );
 
   /// [completeJson], with the answer's text handed to [onText] as it arrives.
   ///
@@ -431,6 +420,30 @@ class LlmClient {
     double temperature = 0.2,
     bool think = false,
     required void Function(String delta) onText,
+  }) =>
+      _completeJson(
+        system: system,
+        user: user,
+        schema: schema,
+        schemaName: schemaName,
+        maxTokens: maxTokens,
+        temperature: temperature,
+        think: think,
+        onText: onText,
+      );
+
+  /// The one body behind [completeJson] and [completeJsonStreamed]: the same
+  /// request record, the same post, the same decode. [onText] null is the
+  /// plain call.
+  Future<Map<String, dynamic>> _completeJson({
+    required String system,
+    required String user,
+    required Map<String, dynamic> schema,
+    required String schemaName,
+    required int maxTokens,
+    required double temperature,
+    required bool think,
+    void Function(String delta)? onText,
   }) async {
     final reply = await _post(
       (
@@ -446,6 +459,9 @@ class LlmClient {
       onText: onText,
     );
 
+    // Decoded inside [_post], on either wire, so a constrained call's reply
+    // always arrives here as an object — see [_decoded] for why the decode
+    // does not live in this method.
     final json = reply.json;
     if (json == null) {
       throw LlmFormatException('$_modelNoun answered with no message content.');
@@ -679,6 +695,21 @@ class LlmClient {
   /// this is one request going wrong rather than a server that is down.
   /// Counting it against the message is what stops a single pathological
   /// email from blocking the queue behind it forever.
+  /// The three ways a request fails before the server has answered, mapped
+  /// ONCE for both paths: no socket and a client-side abort are the server
+  /// being unreachable, and the ceiling is the timeout the observer counts.
+  Future<T> _guardTransport<T>(Uri url, Future<T> Function() send) async {
+    try {
+      return await send();
+    } on SocketException {
+      throw LlmUnavailableException(_unreachable(url.toString()));
+    } on http.ClientException {
+      throw LlmUnavailableException(_unreachable(url.toString()));
+    } on TimeoutException {
+      throw _timeoutException();
+    }
+  }
+
   LlmException _timeoutException() => LlmException(
         '$_modelNoun did not answer within ${timeout.inSeconds} seconds.',
       );
@@ -721,18 +752,12 @@ class LlmClient {
     required LlmTarget target,
   }) async {
     final url = _endpoint(target);
-    final http.Response response;
-    try {
-      response = await _http
+    final response = await _guardTransport(
+      url,
+      () => _http
           .post(url, headers: _headers, body: jsonEncode(body))
-          .timeout(timeout);
-    } on SocketException {
-      throw LlmUnavailableException(_unreachable(url.toString()));
-    } on http.ClientException {
-      throw LlmUnavailableException(_unreachable(url.toString()));
-    } on TimeoutException {
-      throw _timeoutException();
-    }
+          .timeout(timeout),
+    );
 
     if (response.statusCode != 200) {
       _throwForStatus(response.statusCode, _text(response));
@@ -781,26 +806,20 @@ class LlmClient {
     final url = _endpoint(target);
     final sw = Stopwatch()..start();
 
-    final http.StreamedResponse response;
-    try {
-      final streamRequest = http.Request('POST', url)
-        ..headers.addAll(_headers)
-        ..body = jsonEncode({
-          ...body,
-          'stream': true,
-          // Without this the final chunk carries no `usage` and the call
-          // cannot be given a tokens-per-second number at all — which is half
-          // of what every bench table is.
-          'stream_options': {'include_usage': true},
-        });
-      response = await _http.send(streamRequest).timeout(timeout);
-    } on SocketException {
-      throw LlmUnavailableException(_unreachable(url.toString()));
-    } on http.ClientException {
-      throw LlmUnavailableException(_unreachable(url.toString()));
-    } on TimeoutException {
-      throw _timeoutException();
-    }
+    final streamRequest = http.Request('POST', url)
+      ..headers.addAll(_headers)
+      ..body = jsonEncode({
+        ...body,
+        'stream': true,
+        // Without this the final chunk carries no `usage` and the call
+        // cannot be given a tokens-per-second number at all — which is half
+        // of what every bench table is.
+        'stream_options': {'include_usage': true},
+      });
+    final response = await _guardTransport(
+      url,
+      () => _http.send(streamRequest).timeout(timeout),
+    );
 
     // What is left of the client's ceiling now the headers are in. Computed
     // ONCE here and spent by whichever read follows — the error body or the

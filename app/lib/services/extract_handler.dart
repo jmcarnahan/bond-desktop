@@ -583,10 +583,12 @@ bool asksForAReply(Map<String, Object?> row) {
 /// Whether a stored message is worth the drafting model's IDLE time — the
 /// narrower pre-gate [DraftPolicy.needsYou] uses.
 ///
-/// Three signals where [asksForAReply] takes five, and the two it drops are
-/// the two that fire on ordinary mail: `reply_expected` is triage's guess from
-/// one message in isolation, and a `deadline` is a date the message mentions,
-/// which a calendar invitation and a newsletter both carry. What is left is
+/// Two signals where [asksForAReply] takes five, and the three it drops are
+/// the ones that fire on ordinary mail: `reply_expected` is triage's guess from
+/// one message in isolation, `needs_action` is its guess that something is to
+/// be done, which a receipt and a reminder both trip, and a `deadline` is a
+/// date the message mentions, which a calendar invitation and a newsletter
+/// both carry. What is left is
 /// the needs-you stage's whole-message verdict and triage's loudness — the
 /// messages a person would have opened first anyway, which is exactly the set
 /// worth having an answer ready for before they ask.

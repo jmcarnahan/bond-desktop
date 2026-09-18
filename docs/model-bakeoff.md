@@ -1557,7 +1557,11 @@ Two honest limits of the bench, which bound every row: the seed writes no
 conversation rows, so the extraction leg measures the model call rather than
 the card, the bucket filing or the thread embedding; and `_embedMessage` dials
 a refused port once per message. Both shapes are measured on the same tree the
-same day.
+same day. And it is a subset of the pipeline on purpose: no storyline lane (the
+sweep needs the embed server and the index), two of the fast lane's eight
+handlers, a draft handler without its retrievers, and the plain draft call —
+so it reads what the lanes and the width do to the walls and the late arrival,
+and nothing about names, recaps or first-token time, which are `bench-prose`'s.
 
 | date | shape | width | copies | fast wall s | drafts wall s | fast msgs/min | late arrival s | result json | notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -1585,13 +1589,15 @@ same day.
 | 2026-09-18 | lanes | 1 | 3 | 210.5 | 865.4 | 13.7 | 95.7 | `pipeline-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260918-045009.json` | same tree and servers; 37 drafts; late arrival upserted at 128 s, needs-you done 92.7 s later, extract 95.7 s later; p50 triage 4,641 ms · needs-you 2,727 · extraction 4,731 · decision 3,070 · draft 15,326; no re-pumps; pass 2 (kept) |
 
 **Phase 1 read (2026-09-17).** Every row is 3 copies of the fixture corpus —
-48 ungated messages — through the real queues. Across the Phase 1 rows (every
-row but the last two) the bulk slot is the local 4B on :8082 at four slots
-throughout; only the prose slot and the shape move.
+48 ungated messages — through the real queues. Across the Phase 1 rows (the
+2026-09-17 rows whose bulk label is the local 4B) the bulk slot is the local 4B
+on :8082 at four slots throughout; only the prose slot and the shape move. The
+two `vllm-g6e-qwen3-4b` rows and the 2026-09-18 group are read below.
 
 The lanes do what they were cut for. A message arriving mid-backlog is
-extracted in **50–98 s** instead of **767–800 s** locally, **404–405 s** against
-the box, and **228 s** against the box with MTP: in `single` that message waits
+extracted in **50–98 s** instead of **767–800 s** locally on 2026-09-17
+(677–682 s in the 2026-09-18 pair), **404–405 s** against the box, and
+**228 s** against the box with MTP: in `single` that message waits
 for the pass in flight, every draft in it, and in `lanes` it costs one triage
 plus one needs-you plus one extraction. Width pays where the server has slots
 for it: 4 on the box finishes the drafts **40–60 s** after the fast phase
@@ -1599,15 +1605,19 @@ for it: 4 on the box finishes the drafts **40–60 s** after the fast phase
 width 1 on the same box takes 565–577 s.
 
 The fast wall is the floor this round does not move: **≈200–240 s** for those
-48 messages, 12–14 msgs/min on the 4B, in every row and every shape. Nothing
-here touches it — it is the bulk slot's own throughput, which `make drain`
-measures directly.
+48 messages, 12–14 msgs/min on the 4B, in every 2026-09-17 row and every shape
+— and 158–218 s (13–18 msgs/min) in the 2026-09-18 group, taken on an idle
+machine: the same floor, set by the same server. Nothing here touches it — it
+is the bulk slot's own throughput, which `make drain` measures directly.
 
 The second local slot was measured and not adopted. `SLOTS=2
 MODEL_CTX=32768` leaves single-stream prose unchanged (the two `bench-prose`
 rows in the ledger below), but at pipeline width 2 the drafts took **1,102.6 s**
 against **896.6 s** at width 1, so `local.mk` stays at one slot. 4 remains the
-measured value for a GPU-served target, not for this Mac.
+measured value for a GPU-served target, not for this Mac. Both of those are
+single passes, against the house rule of two: the 23% margin is read as
+decisive only because it runs the wrong way on the fast wall too (272.7 s
+against 240.6), and a second pair is owed before two local slots are reopened.
 
 Two caveats on the reading. The local `lanes` row is ONE clean pass, and its
 98.2 s late arrival includes a 4B that was still mid-backlog when the message
@@ -1616,7 +1626,7 @@ times them; the golden set is where quality is read.
 
 **Both slots on the box (2026-09-17, Phase 2).** Every row above keeps the
 bulk work on the local 4B, and reads a fast wall of **200–240 s** (12–14
-msgs/min) — the floor Round C does not move. With the bulk slot on the box as
+msgs/min) on that day — the floor Round C does not move. With the bulk slot on the box as
 well, the same 48 messages clear the fast phase in **60 s** (47.7 msgs/min) and
 every draft is written by **139 s**. A message arriving mid-backlog is triaged,
 judged and extracted in **≈33 s**, against 50 s with the box's prose slot alone
@@ -1657,7 +1667,8 @@ beside the 4B's triage and extraction instead of after them, and extraction's
 p50 goes 2,718 → 4,731 ms. The Phase 1 rows show the same shape (`single`
 209–234 s fast wall, `lanes` 240.6 s). That trade is the point of the split
 for the person using the app — the inbox is usable half a minute later, and a
-message that arrives mid-backlog is answered nearly ten minutes sooner — and
+message that arrives mid-backlog is triaged and extracted nearly ten minutes
+sooner (the clock stops at its extraction; its own draft is not timed) — and
 it disappears on a target with a GPU of its own for the prose slot, which is
 what the box rows above read.
 
@@ -1670,9 +1681,10 @@ prefetches at most ten drafts for the messages the pipeline judged to need
 their owner and leaves the rest until somebody asks; and drafts streamed over
 the OpenAI wire, with the reply decision skipped for a draft that was asked
 for. `make bench-pipeline` was built to measure it, and its rows read: a
-message arriving mid-backlog extracted in 50–98 s against 767–800 s in the old
-shape, while the fast wall — 200–240 s for 48 messages, 12–14 msgs/min — is
-the bulk slot's own throughput and does not move. Golden-prose was re-run once
+message arriving mid-backlog extracted in 50–98 s against 677–800 s in the old
+shape, while the fast wall — 158–240 s for 48 messages across the two days,
+13–18 msgs/min — is the bulk slot's own throughput and does not move with the
+shape. Golden-prose was re-run once
 to show the prompts had not shifted: the decision reads 82% and 25 of 25
 drafts are byte-identical to `…-020022.json`, all 76 decisions with them, so
 nothing was re-judged. Not adopted: a second local prose slot (`SLOTS=2

@@ -298,14 +298,34 @@ class AiWorker {
       _repump = true;
       return inFlight;
     }
-    final drain = _gate.run(_drainAll);
-    _draining = drain.whenComplete(() {
+    final drain = _drainUntilQuiet();
+    _draining = drain;
+    return drain;
+  }
+
+  /// One gated drain, and one more for a pump that landed in its last
+  /// microtasks.
+  ///
+  /// [_drainAll] re-reads [_repump] between its own passes, but between its
+  /// final read and this worker noticing the drain is over there is a gap —
+  /// the gate's future resolving, this frame resuming — in which a [pump]
+  /// would find [_draining] still set, raise the flag and hand back a future
+  /// about to complete without the row it was called for. The loop here reads
+  /// the flag again after the gate returns, and the `finally` clears
+  /// [_draining] in the same synchronous step as that last read, so no such
+  /// gap is left: a pump either joins a drain that will run again, or starts
+  /// a fresh one.
+  Future<void> _drainUntilQuiet() async {
+    try {
+      do {
+        await _gate.run(_drainAll);
+      } while (_repump && !_stopped);
+    } finally {
       // Cleared FIRST, so a pump issued from inside the callback starts a
       // fresh drain rather than joining the one that has just finished.
       _draining = null;
       _fireDrained();
-    });
-    return _draining!;
+    }
   }
 
   /// Wakes whatever this lane feeds, outside the gate and without waiting.

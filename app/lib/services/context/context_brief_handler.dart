@@ -132,6 +132,12 @@ class ContextBriefHandler extends WorkHandler {
     // What this handler owes the app is the brief; the charter offer is a
     // courtesy built on top of it, so an offer that throws costs the offer and
     // never the brief that was already paid for with a model call.
+    //
+    // In the app (`app_providers.dart`) the callback dispatches the offer onto
+    // the storyline lane and answers 0 at once — this handler is on the fast
+    // lane and must not wait behind a sweep — so on a production row the
+    // `charters_offered` key below is absent. It still counts for a caller
+    // that awaits the offer, which is what the tests do.
     var charters = 0;
     final offer = onBriefChanged;
     if (offer != null) {

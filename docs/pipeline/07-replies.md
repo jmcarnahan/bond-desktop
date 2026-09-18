@@ -72,6 +72,12 @@ and no sentence. It is also one 27B call, about five seconds, off a keypress
 somebody is waiting on. The payload is decoded by `DraftRequest`
 (`app/lib/models/draft_request.dart`), which is also what encodes it — and only
 the literal `true` counts, so a hand-edited value cannot skip the judgement.
+The requeue also moves the row to the FRONT of the draft lane
+(`requeueWork(refreshCreatedAt: true)`), and that reaches a prefetch row that
+is still `pending` too: it is re-stamped and given the asked payload rather
+than left in queue order, so the press is never a no-op for as long as the
+prefetches ahead of it take. Only a row already at the server (`processing`)
+is left alone; that draft lands as the prefetch it was, decision and all.
 
 **Retry.** A person's Retry on a message whose extraction errored before the
 draft stage was decided (`pipeline_repair_service.dart` ~:137) enqueues a

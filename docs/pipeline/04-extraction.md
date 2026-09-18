@@ -63,8 +63,10 @@ be re-run against a future prompt, not because anything calls them.
 
    `asksForAReply` takes five signals off the row, any one enough:
    `needs_you_verdict = 1`, `reply_expected`, `needs_action`, an urgent/high
-   urgency, or a named deadline. `prefetchWorthy` takes the three that do not
-   fire on ordinary mail: `needs_you_verdict = 1` or an urgent/high urgency.
+   urgency, or a named deadline. `prefetchWorthy` keeps the two that do not
+   fire on ordinary mail — `needs_you_verdict = 1` or an urgent/high urgency —
+   and drops `reply_expected`, `needs_action` and the deadline, which a
+   receipt, a reminder and a calendar invitation trip between them.
    The verdict is the needs-you stage's whole-message read (see
    [11-needs-you.md](11-needs-you.md)) rather than one of triage's fields, and
    it is on the row because `NeedsYouHandler` drains ahead of this handler in

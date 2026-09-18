@@ -40,8 +40,9 @@ import 'pipeline_progress.dart';
 /// sentence. What does NOT change is everything else. The prompt, the schema,
 /// the token budget, the retry policy and the stored row are what they were,
 /// the row is written once when the call finishes, and a `done` event says the
-/// call has ended — written, skipped or failed — so a listener drops its
-/// preview and reads the row instead.
+/// call has ended — written or failed — so a listener drops its preview and
+/// reads the row instead. The guards that skip an item exit BEFORE the stream
+/// opens and publish nothing, which is right: nobody was shown a preview.
 ///
 /// It only ever writes to the `drafts` table. Nothing in this class — and
 /// nothing this class calls — touches Microsoft Graph: a suggestion is text in
