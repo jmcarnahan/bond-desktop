@@ -386,6 +386,10 @@ typedef _ProposeTally = ({
   int fragments,
 });
 
+/// A cluster member the confirms kept, with the evidence sentence the model
+/// gave for it; a fragment sibling rides its representative's.
+typedef _Survivor = ({Map<String, Object?> row, String evidence});
+
 /// What the sweep decided about one cluster it formed, told to the golden
 /// sweep bench and to nobody else. See [StorylineService.new]'s
 /// `clusterObserver`.
@@ -2592,6 +2596,11 @@ class StorylineService {
   /// representative's verdict and carries its evidence sentence, and a sibling
   /// whose representative was rejected joins nothing. They are counted as
   /// `fragments` and they never count toward either cluster-size floor.
+  ///
+  /// The work runs in three helpers, in this order: [_confirmMembers] judges
+  /// the cluster member by member, [_writeProposal] stores what survived
+  /// together with its fragment siblings, and [_probeFinished] offers the
+  /// diverted finished threads the same membership question.
   Future<_ProposeTally> _propose(
     List<Map<String, Object?>> rows,
     List<List<double>> vectors, {
@@ -2732,12 +2741,82 @@ class StorylineService {
       createdBy: 'auto',
     );
 
+    final judged = await _confirmMembers(
+      proposal,
+      storylineParticipants,
+      rows,
+    );
+
+    // Representatives only, here and at [StorylineTuning.proposeMinClusterSize]
+    // upstream. A fragment is not a second thread that agreed: it is the same
+    // thread arriving twice, and counting it would let one conversation that
+    // forked three ways clear a floor that exists to ask for three
+    // conversations.
+    if (judged.survivors.length < StorylineTuning.minClusterSize) {
+      await _tombstone(id, result, clusterHash);
+      // No probe on this branch, and that is the point of saying so: a group
+      // the model just threw out must not go recruiting history to make
+      // itself big enough to ship.
+      return (
+        proposed: false,
+        confirmed: judged.survivors.length,
+        rejected: judged.rejected,
+        joined: 0,
+        incoherent: 0,
+        lint: 0,
+        outliers: outliersDropped,
+        fragments: 0,
+      );
+    }
+
+    final written = await _writeProposal(
+      id: id,
+      result: result,
+      clusterHash: clusterHash,
+      survivors: judged.survivors,
+      siblings: siblings,
+    );
+
+    final claimed = claimedByProbe ?? <String>{};
+    final joined = await _probeFinished(
+      id: id,
+      proposal: proposal,
+      survivors: judged.survivors,
+      doneCandidates: doneCandidates,
+      claimed: claimed,
+      memberCount: written.memberCount,
+    );
+
+    return (
+      proposed: true,
+      confirmed: judged.survivors.length,
+      rejected: judged.rejected,
+      joined: joined,
+      incoherent: 0,
+      lint: 0,
+      outliers: outliersDropped,
+      fragments: written.fragments,
+    );
+  }
+
+  /// Judges each of [rows] against the charter [proposal] was just named
+  /// with, one thread at a time, and returns the survivors with the evidence
+  /// sentence the model gave for each, alongside how many it turned away.
+  ///
+  /// [storylineParticipants] is the cluster as the namer kept it, computed
+  /// once by the caller: every member is judged against that same participant
+  /// list, which no rejection shrinks out from under the later questions.
+  Future<({List<_Survivor> survivors, int rejected})> _confirmMembers(
+    Storyline proposal,
+    List<String> storylineParticipants,
+    List<Map<String, Object?>> rows,
+  ) async {
     // No cap on how many of these a cluster may spend, unlike [recruit]'s
     // eight. The cost is bounded by identity rather than by count: a cluster
     // is confirmed once ever, because the hash checks above and the tombstone
     // below mean the same set of threads never reaches this line twice — and
     // the confirmations run on the small local model.
-    final survivors = <({Map<String, Object?> row, String evidence})>[];
+    final survivors = <_Survivor>[];
     var rejected = 0;
     for (final row in rows) {
       final source = row['source'] as String? ?? _workSource;
@@ -2761,32 +2840,26 @@ class StorylineService {
       survivors.add((row: row, evidence: confirm.evidence));
     }
 
-    // Representatives only, here and at [StorylineTuning.proposeMinClusterSize]
-    // upstream. A fragment is not a second thread that agreed: it is the same
-    // thread arriving twice, and counting it would let one conversation that
-    // forked three ways clear a floor that exists to ask for three
-    // conversations.
-    if (survivors.length < StorylineTuning.minClusterSize) {
-      await _tombstone(id, result, clusterHash);
-      // No probe on this branch, and that is the point of saying so: a group
-      // the model just threw out must not go recruiting history to make
-      // itself big enough to ship.
-      return (
-        proposed: false,
-        confirmed: survivors.length,
-        rejected: rejected,
-        joined: 0,
-        incoherent: 0,
-        lint: 0,
-        outliers: outliersDropped,
-        fragments: 0,
-      );
-    }
+    return (survivors: survivors, rejected: rejected);
+  }
 
+  /// Writes the storyline the confirms left standing: the row itself, the
+  /// recap work item, one member per survivor and one more per fragment
+  /// sibling riding its representative's verdict and evidence sentence.
+  ///
+  /// Returns how many members were stored and how many of those were
+  /// fragments.
+  Future<({int memberCount, int fragments})> _writeProposal({
+    required String id,
+    required NameResult result,
+    required String clusterHash,
+    required List<_Survivor> survivors,
+    required Map<String, List<Map<String, Object?>>> siblings,
+  }) async {
     // Every survivor, and with each of them the pool rows that are fragments
     // of the same thread. Read here, before the hashes, because both the hash
     // and the member writes below walk the same list.
-    final survivorSiblings = <({Map<String, Object?> row, String evidence})>[];
+    final survivorSiblings = <_Survivor>[];
     for (final survivor in survivors) {
       final group = siblings[_threadKey(
         survivor.row['source'] as String? ?? _workSource,
@@ -2886,12 +2959,27 @@ class StorylineService {
       }
     }
 
-    // The probe: join, not seed. The storyline exists now, so the finished
-    // threads the sweep would not cluster can be asked the one question that
-    // was never available to them — not "are you the start of a story", which
-    // they are not, but "do you belong to this one".
+    return (memberCount: memberCount, fragments: survivorSiblings.length);
+  }
+
+  /// The probe: join, not seed. The storyline exists now, so the finished
+  /// threads the sweep would not cluster can be asked the one question that
+  /// was never available to them — not "are you the start of a story", which
+  /// they are not, but "do you belong to this one".
+  ///
+  /// Returns how many of them joined. [claimed] is the sweep's running set of
+  /// threads an earlier proposal in the SAME pass already took, read and
+  /// written here so one finished thread joins at most one newborn storyline.
+  Future<int> _probeFinished({
+    required String id,
+    required Storyline proposal,
+    required List<_Survivor> survivors,
+    required List<({Map<String, Object?> row, List<double> vector})>
+        doneCandidates,
+    required Set<String> claimed,
+    required int memberCount,
+  }) async {
     var joined = 0;
-    final claimed = claimedByProbe ?? <String>{};
     if (doneCandidates.isNotEmpty) {
       // The centroid over the SURVIVOR vectors, computed in memory rather
       // than through [_memberContext]: the member rows were written a few
@@ -3006,16 +3094,7 @@ class StorylineService {
       }
     }
 
-    return (
-      proposed: true,
-      confirmed: survivors.length,
-      rejected: rejected,
-      joined: joined,
-      incoherent: 0,
-      lint: 0,
-      outliers: outliersDropped,
-      fragments: survivorSiblings.length,
-    );
+    return joined;
   }
 
   /// One naming call over the cluster's most central cards, and what it said.
