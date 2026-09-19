@@ -111,8 +111,17 @@ void main() {
     test('the schema asks for one, last — the grammar emits in this order', () {
       final properties = name.schema['properties'] as Map<String, dynamic>;
 
-      expect(
-          properties.keys.toList(), ['evidence', 'title', 'summary', 'charter']);
+      // The two judgements sit between the evidence and the title since Round
+      // D; the charter is still the last thing the grammar emits.
+      expect(properties.keys.toList(), [
+        'evidence',
+        'coherent',
+        'outliers',
+        'title',
+        'summary',
+        'charter',
+      ]);
+      expect(properties.keys.last, 'charter');
       expect(name.schema['required'], properties.keys.toList());
       expect((properties['charter'] as Map)['type'], 'string');
     });

@@ -6,6 +6,7 @@ import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
 
+import 'golden_json.dart';
 import 'golden_run.dart';
 import 'golden_set.dart';
 
@@ -52,29 +53,23 @@ class GoldenCards {
   static GoldenCards fromRunJson(List<dynamic> entries) {
     final byId = <String, GoldenCard>{};
     for (final raw in entries) {
-      if (raw is! Map) continue;
-      final id = raw['id'];
-      if (id is! String || id.isEmpty) continue;
+      final entry = asMap(raw);
+      final id = asString(entry['id']);
+      if (id.isEmpty) continue;
 
-      final extract = raw['extract'];
       final topics = <String>[];
-      if (extract is Map && extract['topics'] is List) {
-        for (final topic in extract['topics'] as List) {
-          if (topic is String && topic.isNotEmpty) topics.add(topic);
-        }
+      for (final topic in asList(asMap(entry['extract'])['topics'])) {
+        if (topic is String && topic.isNotEmpty) topics.add(topic);
       }
 
       // An empty or whitespace-only summary is NO summary, not a short one:
       // it puts nothing in the card's fourth segment, so an entry whose only
       // content is `""` must not be counted among the items the run file
       // carded.
-      final triage = raw['triage'];
-      final rawSummary =
-          triage is Map && triage['summary'] is String
-              ? triage['summary'] as String
-              : null;
-      final summary =
-          rawSummary == null || rawSummary.trim().isEmpty ? null : rawSummary;
+      final rawSummary = asMap(entry['triage'])['summary'];
+      final summary = rawSummary is! String || rawSummary.trim().isEmpty
+          ? null
+          : rawSummary;
 
       if (topics.isEmpty && summary == null) continue;
       byId[id] = GoldenCard(topics: topics, summary: summary);
@@ -170,13 +165,11 @@ class ConfirmOutcome {
     required this.result,
   });
 
-  /// The SERVICE's rule, not the model's: `storyline_service.dart` rejects
-  /// `!belongs || confidence == 'low'`, because a group the user has to
-  /// correct costs more than one they were never offered. A replay that
-  /// counted a low-confidence yes as a filing would be scoring a pipeline
-  /// nobody ships.
-  bool get accepted =>
-      result != null && result!.belongs && result!.confidence != 'low';
+  /// The SERVICE's rule, not the model's — and delegated to
+  /// [ConfirmResult.accepted] rather than restated, so the replay cannot score
+  /// a pipeline the app does not ship. A failed call is not an acceptance: a
+  /// null result answered nothing.
+  bool get accepted => result?.accepted ?? false;
 
   /// A yes the service throws away. Counted separately because it is the one
   /// number that says whether a model is being declined by its own hedging

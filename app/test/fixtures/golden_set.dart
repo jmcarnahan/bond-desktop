@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/llm/message_block.dart';
 
+import 'golden_json.dart';
+
 /// The golden set, read back into the shapes the app's own tasks take.
 ///
 /// The set is a hundred real messages with gold labels for every stage, and it
@@ -56,19 +58,7 @@ GoldenCtx parseGoldenCtx(String raw) => switch (raw.trim().toLowerCase()) {
         ),
     };
 
-Map<String, dynamic> _asMap(Object? value) =>
-    value is Map ? value.cast<String, dynamic>() : const <String, dynamic>{};
-
-List<Object?> _asList(Object? value) =>
-    value is List ? value : const <Object?>[];
-
-List<String> _asStrings(Object? value) =>
-    [for (final entry in _asList(value)) if (entry != null) '$entry'];
-
-String _asString(Object? value, [String fallback = '']) =>
-    value is String ? value : fallback;
-
-/// The nullable half of [_asString]. Used wherever the app's own model takes a
+/// The nullable half of [asString]. Used wherever the app's own model takes a
 /// `String?`: a field the set left as a number or an object is "not recorded",
 /// which is a thing these models already express, and never a cast error
 /// halfway through loading a hundred items.
@@ -129,29 +119,29 @@ class GoldenGold {
   });
 
   factory GoldenGold.fromJson(Map<String, dynamic> gold) {
-    final storyline = _asMap(gold['storyline']);
-    final triage = _asMap(gold['triage']);
-    final extract = _asMap(gold['extract']);
-    final needsYou = _asMap(gold['needs_you']);
-    final storylineId = _asString(storyline['id']);
+    final storyline = asMap(gold['storyline']);
+    final triage = asMap(gold['triage']);
+    final extract = asMap(gold['extract']);
+    final needsYou = asMap(gold['needs_you']);
+    final storylineId = asString(storyline['id']);
     return GoldenGold(
-      gateVerdict: _asString(_asMap(gold['gate'])['verdict']),
+      gateVerdict: asString(asMap(gold['gate'])['verdict']),
       // An absent or empty id is the assertion "no storyline", which is a
       // label in its own right — 35 items in the real set carry it — not a
       // missing value.
       storylineId: storylineId.isEmpty ? 'none' : storylineId,
-      storylineStrength: _asString(storyline['strength']),
-      storylineForbidden: _asStrings(storyline['forbidden']),
+      storylineStrength: asString(storyline['strength']),
+      storylineForbidden: asStrings(storyline['forbidden']),
       hasReply: gold['reply'] != null,
       replyExpected: triage['reply_expected'] == true,
       needsYou: needsYou['verdict'] == true,
       derivableFrom: {
-        'triage': _asString(triage['derivable_from']),
-        'extract': _asString(extract['derivable_from']),
-        'needs_you': _asString(needsYou['derivable_from']),
-        'storyline': _asString(storyline['derivable_from']),
+        'triage': asString(triage['derivable_from']),
+        'extract': asString(extract['derivable_from']),
+        'needs_you': asString(needsYou['derivable_from']),
+        'storyline': asString(storyline['derivable_from']),
       },
-      annotatorAgreement: _asString(gold['annotator_agreement']),
+      annotatorAgreement: asString(gold['annotator_agreement']),
       raw: gold,
     );
   }
@@ -205,6 +195,16 @@ class GoldenItem {
 
   final String? conversationSubject;
 
+  /// The thread's own state as the set recorded it — `waiting`, `needs_reply`
+  /// or `done`, the column `conversations.state` holds.
+  ///
+  /// Read by the sweep replay, which seeds the mailbox behind the items: the
+  /// sweep DIVERTS a `done` thread out of clustering, so a seeding that
+  /// defaulted every thread to one state would measure a pool the app never
+  /// has. `waiting` when the set records none, which is the state a thread
+  /// with nothing outstanding sits in.
+  final String conversationState;
+
   /// The app's own 2026-09-12 output for this item, untouched. The Python
   /// scorer reads it for `--baseline`; nothing here interprets it.
   final Map<String, dynamic> stored;
@@ -241,6 +241,7 @@ class GoldenItem {
     required this.addressedMe,
     required this.conversationParticipants,
     required this.conversationSubject,
+    required this.conversationState,
     required this.stored,
     required this.gold,
     required this.messageBlock,
@@ -322,44 +323,45 @@ class GoldenItem {
       );
 
   factory GoldenItem.fromJson(Map<String, dynamic> json) {
-    final id = _asString(json['id']);
-    final provenance = _asMap(json['provenance']);
-    final stageInput = _asMap(json['stage_input']);
-    final conversation = _asMap(json['conversation']);
-    final source = _asString(provenance['source'], 'email');
-    final direction = _asString(provenance['direction'], 'inbound');
-    final block = _asString(stageInput['message_block']);
+    final id = asString(json['id']);
+    final provenance = asMap(json['provenance']);
+    final stageInput = asMap(json['stage_input']);
+    final conversation = asMap(json['conversation']);
+    final source = asString(provenance['source'], 'email');
+    final direction = asString(provenance['direction'], 'inbound');
+    final block = asString(stageInput['message_block']);
 
-    final compressed = _asMap(stageInput['ctx_compressed']);
-    final threadDigest = _asMap(compressed['thread_digest']);
-    final digest = _asString(threadDigest['digest']);
-    final span = _asStrings(threadDigest['span']);
+    final compressed = asMap(stageInput['ctx_compressed']);
+    final threadDigest = asMap(compressed['thread_digest']);
+    final digest = asString(threadDigest['digest']);
+    final span = asStrings(threadDigest['span']);
 
     return GoldenItem(
       id: id,
-      stratum: _asString(json['stratum']),
-      difficulty: _asString(json['difficulty']),
-      note: _asString(json['note']),
+      stratum: asString(json['stratum']),
+      difficulty: asString(json['difficulty']),
+      note: asString(json['note']),
       source: source,
       direction: direction,
-      conversationKey: _asString(provenance['conversation_key']),
+      conversationKey: asString(provenance['conversation_key']),
       message: _messageOf(id, provenance, block, source, direction),
       tail: _tailOf(id, source, stageInput),
       digest: digest.isEmpty ? null : digest,
-      now: _nowOf(id, _asString(stageInput['now'])),
+      now: _nowOf(id, asString(stageInput['now'])),
       attachmentRows: [
-        for (final name in _asStrings(provenance['attachment_names']))
+        for (final name in asStrings(provenance['attachment_names']))
           // `_attachmentLine` reads exactly these three keys, and a size of 0
           // prints no suffix — the set records names and nothing else.
           {'name': name, 'size': 0, 'is_inline': 0},
       ],
       addressedMe: provenance['addressed_me'] == 1,
-      conversationParticipants: _asStrings(conversation['participants']),
+      conversationParticipants: asStrings(conversation['participants']),
       conversationSubject: _asStringOrNull(conversation['subject']),
-      stored: _asMap(json['stored']),
-      gold: GoldenGold.fromJson(_asMap(json['gold'])),
+      conversationState: _stateOf(conversation['state']),
+      stored: asMap(json['stored']),
+      gold: GoldenGold.fromJson(asMap(json['gold'])),
       messageBlock: block,
-      directnessLine: _asString(stageInput['directness_line']),
+      directnessLine: asString(stageInput['directness_line']),
       digestStartedAt: span.isEmpty ? null : span.first,
     );
   }
@@ -410,12 +412,12 @@ class GoldenItem {
     String source,
     Map<String, dynamic> stageInput,
   ) {
-    final tail = _asList(_asMap(stageInput['ctx_tail3'])['thread_tail']);
+    final tail = asList(asMap(stageInput['ctx_tail3'])['thread_tail']);
     return [
       for (var i = 0; i < tail.length; i++)
         () {
-          final entry = _asMap(tail[i]);
-          final who = _asString(entry['who']);
+          final entry = asMap(tail[i]);
+          final who = asString(entry['who']);
           return Message(
             // Synthetic ids: the set records a tail as text, and the thread a
             // prompt renders never needs a real one.
@@ -424,10 +426,18 @@ class GoldenItem {
             source: source,
             fromName: who,
             receivedAt: _asStringOrNull(entry['received_at']),
-            bodyText: _asString(entry['text']),
+            bodyText: asString(entry['text']),
           );
         }(),
     ];
+  }
+
+  /// The recorded thread state, or `waiting`. An empty string takes the
+  /// default too: a state column the set left blank is one nobody recorded,
+  /// and `conversations.state` has no empty value.
+  static String _stateOf(Object? raw) {
+    final state = asString(raw).trim();
+    return state.isEmpty ? 'waiting' : state;
   }
 
   /// `2026-09-09 (Wednesday)` → local midnight on that day. Local, not UTC:
@@ -476,10 +486,10 @@ class GoldenSet {
   };
 
   static GoldenSet fromJson(Map<String, dynamic> json) => GoldenSet(
-        generated: _asString(json['generated']),
+        generated: asString(json['generated']),
         items: [
-          for (final entry in _asList(json['items']))
-            GoldenItem.fromJson(_asMap(entry)),
+          for (final entry in asList(json['items']))
+            GoldenItem.fromJson(asMap(entry)),
         ],
       );
 }

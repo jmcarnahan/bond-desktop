@@ -60,8 +60,11 @@ restart and without interrupting work in flight.
   llama-server answers with the single model it loaded; MLX-style runtimes list
   several, which is what makes the model NAME worth setting.
 - **Embeddings are not switchable.** Stored vectors are tagged
-  `embeddinggemma-300M/clustering` and `…/document` and are only comparable
-  within a tag, so the embed slot is displayed and probed but never moved.
+  `embeddinggemma-300M/clustering-v2` and `…/document` and are only comparable
+  within a tag, so the embed slot is displayed and probed but never moved. The
+  `-v2` is 2026-09-18, when the people left the clustering card: a change to
+  the text a corpus is embedded from is a tag bump and a one-shot re-embed, and
+  `05-embeddings.md` has both.
 - **What a wrong model name costs.** A runtime that routes on the name answers
   HTTP 400 for one it does not have, and a 400 is fatal — never retried (see
   below). Pick from the probe's list rather than typing.
@@ -383,7 +386,11 @@ it: `AiWorker.onDrained` fires after every completed drain, empty ones
 included (the fast lane wakes the other two; the storyline lane wakes the
 draft lane), and `ExtractHandler.onDraftQueued` wakes the draft lane as each
 row is written, so a prefetch starts seconds after its extraction rather than
-at the end of the fast drain. `AiWorkers.pumpAll()` — fast, THEN the other two
+at the end of the fast drain. The fast lane also re-arms the storyline sweep
+through `MessageStore.requeueSweep()` before it wakes that lane, and only after
+a drain whose `AiWorker.lastDrainCount` is above zero, so a settled fast lane is
+what schedules the sweep and an idle pump schedules nothing.
+`AiWorkers.pumpAll()` — fast, THEN the other two
 together — is what a caller outside the pipeline pumps, and its chained shape
 is what keeps "the sync's pump completed" meaning "and the drafts are done".
 

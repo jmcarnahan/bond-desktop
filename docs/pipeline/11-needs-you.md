@@ -163,7 +163,12 @@ injection surface here from three fences to two.
 
 The owner identity comes from an `OwnerLookup` callback, asked **once** per
 handler: it is a keychain read, and the answer only changes on sign-out, which
-disposes the provider that built the handler.
+disposes the provider that built the handler. The typedef and the
+ask-once-and-forget-a-throw helper `memoizedOwner` live in
+`app/lib/services/owner_lookup.dart`, because the storyline service takes the
+same closure for its overlap rule: the owner is on every thread in their own
+mailbox and must not count as a shared person. One keychain read path, two
+callers.
 
 **The `needs_you_rules` pref.** One global text (`app_prefs`, key
 `needs_you_rules`, re-exported by `prefs_provider.dart`) holding the **whole**

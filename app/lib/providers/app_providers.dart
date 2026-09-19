@@ -67,6 +67,7 @@ import '../services/system/system_info.dart';
 import '../services/system/updater.dart';
 import '../services/needs_you_handler.dart';
 import '../services/notification_coordinator.dart';
+import '../services/owner_lookup.dart';
 import '../services/notify/desktop_notifier.dart';
 import '../services/pipeline_progress.dart';
 import '../services/pipeline_repair_service.dart';
@@ -954,18 +955,7 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         progress: ref.watch(pipelineProgressProvider),
         attentionThreshold:
             attentionThresholdReader(ref.watch(messageStoreProvider)),
-        // A callback, not a value: the account is a keychain read, and this
-        // provider is built by plenty that never drains. The handler asks
-        // once, on the first message that reaches the model; until the answer
-        // arrives the prompt simply names no owner.
-        owner: () => ref.read(authSessionProvider).storedAccount.then(
-              (account) => account == null
-                  ? null
-                  : (
-                      name: account.displayName,
-                      address: account.mail ?? account.userPrincipalName,
-                    ),
-            ),
+        owner: _ownerLookup(ref),
       ),
       // Extraction next, and it drains completely before either storyline
       // handler starts. That order is the point: extraction is what writes the
@@ -1108,6 +1098,24 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
     // Restore or a Regenerate enqueues a row directly, and the lane that owns
     // it has to be woken by something.
     wakes: [storylineWorkerProvider, draftWorkerProvider],
+    // The sweep stands down over an unsettled mailbox, so something has to
+    // tell it the mailbox settled, and a fast lane that has just gone quiet
+    // IS that signal: extraction, embedding and the needs-you judgement all
+    // drain here. Gated on the count because `onDrained` fires after an empty
+    // drain too — a Restore or a Regenerate enqueues a row directly, and an
+    // ungated requeue would run a whole sweep after every idle pump.
+    // `requeueWork` never touches a `processing` sweep, and the requeue both
+    // syncs make stays the durable trigger under this one.
+    //
+    // The count is read before the first `await` on purpose: `onDrained` fires
+    // synchronously at the end of the drain, so a pump landing while this hook
+    // is suspended would zero it out from under the test below.
+    beforeWaking: (worker) async {
+      final didWork = worker.lastDrainCount > 0;
+      if (didWork) {
+        await ref.read(messageStoreProvider).requeueSweep();
+      }
+    },
   );
 });
 
@@ -1220,6 +1228,23 @@ final Provider<AiWorker> draftWorkerProvider = Provider<AiWorker>((ref) {
   );
 });
 
+/// Who the owner is, from the account the sync signed in with.
+///
+/// A callback, not a value: the account is a keychain read, and both callers
+/// are built by plenty that never drains. Each caller asks once, on the first
+/// item that reaches a model. Until the answer arrives the needs-you prompt
+/// names no owner and the storyline overlap rule counts everyone as not the
+/// owner, which is the stricter reading of both.
+OwnerLookup _ownerLookup(Ref ref) => () =>
+    ref.read(authSessionProvider).storedAccount.then(
+          (account) => account == null
+              ? null
+              : (
+                  name: account.displayName,
+                  address: account.mail ?? account.userPrincipalName,
+                ),
+        );
+
 /// One lane's worker, built the way all three are: the store, the lane's
 /// handlers and gate, the shared activity log and progress, and — for a lane
 /// that feeds others — the lanes to wake when its drain ends.
@@ -1228,26 +1253,46 @@ final Provider<AiWorker> draftWorkerProvider = Provider<AiWorker>((ref) {
 /// reasoning: the drains it starts are minutes of model time and this one
 /// must not wait for them, and the `read` itself throws against a torn-down
 /// container. Why each lane wakes what it wakes is said at the lane.
+///
+/// [beforeWaking] is a lane's chance to write a row the lane it is about to
+/// wake should find waiting. It is AWAITED, and the wakes are not: what it
+/// writes has to be pending before the woken drain claims, while the drains
+/// that wake starts are minutes of model time nothing here may wait for.
+///
+/// The worker is a `late final` local because the callback is about the
+/// worker that is being built. `onDrained` is a final constructor argument so
+/// it cannot be attached afterwards, and `ref.read(aiWorkerProvider)` inside
+/// that provider's own build is a circular dependency. The closure captures
+/// the late local instead, which is assigned long before any drain can end.
 AiWorker _lane(
   Ref ref, {
   required List<WorkHandler> handlers,
   required Provider<DrainGate> gate,
   List<Provider<AiWorker>> wakes = const [],
+  Future<void> Function(AiWorker worker)? beforeWaking,
 }) {
-  final worker = AiWorker(
+  late final AiWorker worker;
+  worker = AiWorker(
     ref.watch(messageStoreProvider),
     handlers: handlers,
     gate: ref.watch(gate),
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
-    onDrained: wakes.isEmpty
+    onDrained: wakes.isEmpty && beforeWaking == null
         ? null
         : () {
-            try {
-              for (final lane in wakes) {
-                unawaited(ref.read(lane).pump());
+            unawaited(() async {
+              if (beforeWaking != null) {
+                try {
+                  await beforeWaking(worker);
+                } catch (_) {}
               }
-            } catch (_) {}
+              try {
+                for (final lane in wakes) {
+                  unawaited(ref.read(lane).pump());
+                }
+              } catch (_) {}
+            }());
           },
   );
   ref.onDispose(worker.dispose);
@@ -1292,6 +1337,9 @@ final storylineServiceProvider = Provider<StorylineService>(
     progress: ref.watch(pipelineProgressProvider),
     // The library, for the recap's directory footer and the charter offer.
     contextStore: ref.watch(contextStoreProvider),
+    // The overlap rule in `assignConversation` counts shared people who are
+    // not the owner; the same closure the needs-you handler takes.
+    owner: _ownerLookup(ref),
   ),
 );
 

@@ -4,6 +4,8 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
+import 'package:bond_inbox/services/ai_worker.dart';
+import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
@@ -91,11 +93,41 @@ void main() {
 
   tearDown(() => db.close());
 
+  /// [key] with every digit spelled out. The sweep's series pre-pass folds
+  /// every digit run in a subject to one placeholder, so `Subject for c1` and
+  /// `Subject for c2` would read as two issues of one recurring series — and
+  /// a series nobody answered, sent from one address, leaves the pool before
+  /// the clustering ever sees it.
+  String spellDigits(String key) {
+    const words = {
+      '0': 'zero',
+      '1': 'one',
+      '2': 'two',
+      '3': 'three',
+      '4': 'four',
+      '5': 'five',
+      '6': 'six',
+      '7': 'seven',
+      '8': 'eight',
+      '9': 'nine',
+    };
+    final out = StringBuffer();
+    for (final rune in key.split('')) {
+      final word = words[rune];
+      if (word == null) {
+        out.write(rune);
+      } else {
+        out.write(out.isEmpty ? word : ' $word');
+      }
+    }
+    return out.toString();
+  }
+
   Future<void> seed(String key,
       {List<double>? vector, String? lastMessageAt}) async {
     await store.upsertConversation({
       'conversation_key': key,
-      'subject': 'Subject for $key',
+      'subject': 'Subject for ${spellDigits(key)}',
       'state': 'waiting',
       'last_message_at': lastMessageAt ?? '2026-08-28T10:00:00Z',
       'participants_json': '[{"name":"Sarah Chen"}]',
@@ -111,7 +143,7 @@ void main() {
       'source_message_id': 'kept-$key',
       'conversation_key': key,
       'direction': 'inbound',
-      'subject': 'Subject for $key',
+      'subject': 'Subject for ${spellDigits(key)}',
       'from_name': 'Sarah',
       'from_address': 'sarah@example.com',
       'received_at': lastMessageAt ?? '2026-08-28T10:00:00Z',
@@ -171,15 +203,19 @@ void main() {
 
     test('the sweep names on the primary and confirms on the fast client',
         () async {
-      // Four unassigned threads, two of which link — the sweep proposes one
-      // storyline and names it. The cluster is a shortlist, not a verdict, so
-      // each of its two threads is then confirmed against that name, and
-      // membership is a membership question wherever it is asked from: it goes
-      // to the small server exactly as an assignment's does.
+      // Five unassigned threads, three of which link — the sweep proposes one
+      // storyline and names it. Three and not two because a cosine cluster
+      // under `proposeMinClusterSize` never reaches the namer at all. The
+      // cluster is a shortlist, not a verdict, so each of its threads is then
+      // confirmed against that name, and membership is a membership question
+      // wherever it is asked from: it goes to the small server exactly as an
+      // assignment's does.
       await seed('c1', vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
-      await seed('c2', vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
-      await seed('c3', vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
-      await seed('c4', vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T01:00:00Z');
+      await seed('c2',
+          vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
+      await seed('c3', vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed('c4', vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
+      await seed('c5', vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T01:00:00Z');
       final primary = FakeLlm('primary', {
         'storyline_name': [nameAnswer()],
       });
@@ -190,7 +226,11 @@ void main() {
       await StorylineService(store, primary, confirmClient: fast).sweep();
 
       expect(primary.schemas, ['storyline_name']);
-      expect(fast.schemas, ['storyline_membership', 'storyline_membership']);
+      expect(fast.schemas, [
+        'storyline_membership',
+        'storyline_membership',
+        'storyline_membership',
+      ]);
       expect(await store.loadStorylines(), hasLength(1));
     });
 
@@ -374,6 +414,68 @@ void main() {
       expect(identical(fast, storyline), isFalse);
       expect(identical(fast, draft), isFalse);
       expect(identical(storyline, draft), isFalse);
+    });
+
+    test('the fast lane requeues the sweep after a drain that did work',
+        () async {
+      // The real wiring, not a hand-built worker: `_lane`'s `beforeWaking`
+      // hook is what re-arms the sweep, and nothing else in the suite reads
+      // the provider that carries it. The two lanes it wakes are replaced by
+      // idle workers so this test starts no drain that would dial a server.
+      final idleStoryline =
+          AiWorker(store, handlers: const [], gate: DrainGate());
+      final idleDraft = AiWorker(store, handlers: const [], gate: DrainGate());
+      addTearDown(idleStoryline.dispose);
+      addTearDown(idleDraft.dispose);
+      final container = ProviderContainer(
+        overrides: [
+          dbProvider.overrideWithValue(db),
+          storylineWorkerProvider.overrideWithValue(idleStoryline),
+          draftWorkerProvider.overrideWithValue(idleDraft),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
+
+      // An extraction for a message that is not there: the handler closes it
+      // `skipped` before it reads a card, so the drain processes an item
+      // without dialling anything.
+      await store.enqueueWork('extract', 'email', 'gone');
+      await container.read(aiWorkerProvider).pump();
+      // `onDrained` schedules its own body rather than blocking the drain, so
+      // the requeue lands a turn later.
+      await pumpEventQueue();
+
+      expect(await store.workCounts('storyline_sweep'), {'pending': 1});
+    });
+
+    test('the fast lane leaves the sweep alone after a drain that did nothing',
+        () async {
+      // The other half of the `lastDrainCount > 0` guard, and the common case:
+      // `onDrained` fires after an EMPTY drain too, so an ungated requeue
+      // would run a whole sweep after every idle pump. Same wiring as the test
+      // above, same two idle lanes, and nothing enqueued.
+      final idleStoryline =
+          AiWorker(store, handlers: const [], gate: DrainGate());
+      final idleDraft = AiWorker(store, handlers: const [], gate: DrainGate());
+      addTearDown(idleStoryline.dispose);
+      addTearDown(idleDraft.dispose);
+      final container = ProviderContainer(
+        overrides: [
+          dbProvider.overrideWithValue(db),
+          storylineWorkerProvider.overrideWithValue(idleStoryline),
+          draftWorkerProvider.overrideWithValue(idleDraft),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
+
+      await container.read(aiWorkerProvider).pump();
+      await pumpEventQueue();
+
+      // No row of that kind at all — `workCounts` groups by status over the
+      // rows that exist, so a sweep that was never queued is an empty map.
+      expect(await store.workCounts('storyline_sweep'), isEmpty);
     });
 
     test('each lane drains exactly the kinds it owns', () async {

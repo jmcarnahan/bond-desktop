@@ -42,7 +42,23 @@ void main() {
     test('the clustering pair is exactly what every stored conversation '
         'vector was written under', () {
       expect(EmbeddingsClient.clusteringPrefix, 'task: clustering | query: ');
-      expect(EmbeddingsClient.modelTag, 'embeddinggemma-300M/clustering');
+      expect(EmbeddingsClient.modelTag, 'embeddinggemma-300M/clustering-v2');
+    });
+
+    test('the retired tag is the one the clustering card change orphaned', () {
+      // `-v2` is 2026-09-18, when the people left the clustering card. The
+      // prefix did NOT move with it — a vector under the old tag is in the
+      // same space, taken over a different text — and the one-shot re-embed
+      // in `sync_service.dart` is what refills the corpus. Both strings are
+      // pinned because the one-shot reads one and writes the other.
+      expect(
+        EmbeddingsClient.retiredModelTag,
+        'embeddinggemma-300M/clustering',
+      );
+      expect(
+        EmbeddingsClient.retiredModelTag,
+        isNot(EmbeddingsClient.modelTag),
+      );
     });
 
     test('the document pair is exactly what every stored message vector was '

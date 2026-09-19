@@ -14,6 +14,9 @@ import 'backend/mail_backend.dart';
 import 'conversation_state.dart';
 import 'gates.dart';
 import 'graph_mail.dart';
+// `show`: the one thing the sync wants from the embedding client is the tag
+// the clustering one-shot below retires.
+import 'llm/embeddings_client.dart' show EmbeddingsClient;
 import 'mail_text.dart';
 import 'pipeline_progress.dart';
 
@@ -40,6 +43,16 @@ int clampLookbackDays(int days) => days.clamp(minLookbackDays, maxLookbackDays);
 /// deep window drains over several passes instead of being cut down to its
 /// newest this-many forever.
 const int backlogEnqueueCap = 150;
+
+/// How many threads the `clustering_card_v2` one-shot re-embeds per sync.
+///
+/// [backlogEnqueueCap]'s shape and the gate repair's number: a pace, not a
+/// truncation. Each queued thread costs one embedding call on the storyline
+/// lane, and a mailbox that has been running for months holds thousands of
+/// them — queued all at once they would sit in front of every new message's
+/// filing for the rest of the drain. The pref closes only on a pass that comes
+/// back short, so the slices continue until the old tag is gone.
+const int clusteringCardReembedCap = 200;
 
 /// How far back the reconcile re-enumerates, and how often it does it.
 ///
@@ -443,11 +456,54 @@ class SyncService implements MailSync {
         source: _source,
       );
 
-      // The clustering pass over everything not in a storyline yet. One row, not
-      // one per thread — there is one mailbox to sweep — and a requeue rather
-      // than an enqueue, so the sweep that ran after the last sync runs again
-      // after this one instead of staying `done` forever.
-      await _store.requeueWork('storyline_sweep', _source, 'sweep');
+      // The conversation vectors written before the people left the clustering
+      // card (Round D Phase 2, 2026-09-18). A card change is a geometry
+      // change, so `EmbeddingsClient.modelTag` was bumped with it and every
+      // vector under the old tag is invisible to the sweep — which is correct,
+      // and also means those threads are out of the pool until something
+      // re-embeds them. Same one-shot idiom as the four above, capped the same
+      // way, and BEFORE the sweep requeue so the sweep reads what this queued.
+      //
+      // The `storyline` kind is the vehicle rather than a re-extraction: the
+      // assign pass reaches `_reembed` before any membership check, so a
+      // thread already inside a storyline gets its new vector too, which is
+      // what the member centroids need. The one thing that pass returns on
+      // first is a thread with no kept inbound message, and such threads are
+      // not in the slice at all — the query asks for the pool's own
+      // kept-inbound clause. That is what lets the short pass be a real
+      // ending: every row this queues is a row the pass can actually
+      // re-embed, so the slices shrink and the one-shot closes.
+      //
+      // `teams_sync.dart` needs no one-shot of its own: the query has no
+      // source filter, so this covers chat threads as well as mail.
+      int? requeuedReembeds;
+      if (await _store.getPref('clustering_card_v2') == null) {
+        final stale = await _store.conversationKeysWithEmbedModel(
+          EmbeddingsClient.retiredModelTag,
+          cap: clusteringCardReembedCap,
+        );
+        for (final thread in stale) {
+          await _store.requeueWork('storyline', thread.source, thread.key);
+        }
+        // The size of the slice this pass found, which is the same thing the
+        // gate repair's count reports.
+        requeuedReembeds = stale.length;
+        // A full slice leaves the pref unset, so the next sync walks the next
+        // one; only a pass that came back short closes the one-shot. That
+        // terminates because the slice holds nothing but threads the assign
+        // pass will actually re-embed: each sync moves its whole slice to the
+        // new tag, the query has that many fewer rows to answer with, and a
+        // short pass arrives.
+        if (stale.length < clusteringCardReembedCap) {
+          await _store.setPref('clustering_card_v2', '1');
+        }
+      }
+
+      // The clustering pass over everything not in a storyline yet. The sync's
+      // durable trigger for it: see [MessageStore.requeueSweep] for the row,
+      // its label and the other two callers. Whether the pass then runs or
+      // stands down is the sweep's own question, not this one's.
+      await _store.requeueSweep();
 
       // One reconcile per REGISTERED directory, linked or not, on every sync.
       // That is what makes a directory a living context rather than a
@@ -526,6 +582,7 @@ class SyncService implements MailSync {
           'named_participants': ?namedParticipants,
           'refolded_threads': ?refoldedThreads,
           'repaired_gated_conversations': ?repairedGated,
+          'requeued_clustering_reembeds': ?requeuedReembeds,
           if (contextDirs > 0) 'context_dirs': contextDirs,
           if (inboxResync || sentResync) 'resync': true,
         },

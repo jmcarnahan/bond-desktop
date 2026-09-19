@@ -50,7 +50,11 @@ be re-run against a future prompt, not because anything calls them.
    [08-attention.md](08-attention.md)).
 2. **Conversation card + clustering embedding** (`_refreshCard`) — builds the
    thread card, hash-guards it against no-op rewrites, embeds it under the
-   clustering prefix, and requeues `storyline` work for the conversation.
+   clustering prefix, and requeues `storyline` work for the conversation. It
+   runs after the extraction is written and builds the card from the STORED
+   facts (`clusteringCardForConversationRow` over `newestInboundCardData`),
+   not from the result in hand, so the hash it writes is the hash the heal
+   path in `StorylineService._reembed` computes for the same thread.
 3. **Draft pre-gate** (`_queueDraft`) — decides whether a `draft` work row is
    written or the draft stage closes as `skipped`, under the user's
    **Suggested replies** setting. `DraftPolicy` is one of three (see

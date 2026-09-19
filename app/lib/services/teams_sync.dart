@@ -377,13 +377,9 @@ class TeamsSync {
 
       // Chat ingest freshens discovery exactly as mail ingest does: the sweep
       // reads both connectors, so a chat can now SEED a storyline and not only
-      // join one. A requeue rather than an enqueue, so the sweep that ran after
-      // the last sync runs again instead of staying `done` forever.
-      //
-      // The `'email'` is the work row's historical label, not a scope — see
-      // [StorylineService._workSource]. Both syncs write the same row, which is
-      // right: there is one pool to sweep, and one row for sweeping it.
-      await _store.requeueWork('storyline_sweep', 'email', 'sweep');
+      // join one. Both syncs write the SAME row, and why that row is named the
+      // way it is lives on [MessageStore.requeueSweep].
+      await _store.requeueSweep();
 
       await _log.record(
         'sync_teams',

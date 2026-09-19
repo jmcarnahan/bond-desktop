@@ -881,6 +881,248 @@ void main() {
     });
   });
 
+  group('conversationKeysWithEmbedModel', () {
+    Uint8List bytes(List<int> values) => Uint8List.fromList(values);
+
+    /// One `conversation_ai` row under [tag], stamped so the ordering is the
+    /// test's rather than the clock's, and the kept inbound message the pool
+    /// requires. [kept] false writes a gated one instead: a thread the gates
+    /// emptied, which the assign pass would turn away before re-embedding.
+    Future<void> seedVector(
+      String source,
+      String key, {
+      required String tag,
+      bool embedded = true,
+      bool kept = true,
+      String updatedAt = '2026-09-01T00:00:00.000000Z',
+    }) async {
+      await store.upsertMessage({
+        'source': source,
+        'source_message_id': 'in-$source-$key',
+        'conversation_key': key,
+        'direction': 'inbound',
+        'subject': 'Subject',
+        'from_name': 'Sarah',
+        'from_address': 'sarah@example.com',
+        'received_at': '2026-08-28T10:00:00Z',
+        'body_text': 'Body',
+        'triage_status': kept ? 'triaged' : 'skipped',
+        'gate_reason': kept ? null : 'no_reply',
+      });
+      await store.upsertConversationAi(
+        source,
+        key,
+        embedding: embedded ? bytes([1, 2, 3, 4]) : null,
+        embeddedHash: 'h-$key',
+        embedModel: tag,
+      );
+      await db.customUpdate(
+        'UPDATE conversation_ai SET updated_at = ? '
+        'WHERE source = ? AND conversation_key = ?',
+        variables: [Variable(updatedAt), Variable(source), Variable(key)],
+      );
+    }
+
+    test('only the asked tag, and only rows that carry a vector', () async {
+      await seedVector('email', 'old-1', tag: 'model-a');
+      await seedVector('email', 'current', tag: 'model-b');
+      await seedVector('email', 'cleared', tag: 'model-a', embedded: false);
+
+      final stale = await store.conversationKeysWithEmbedModel(
+        'model-a',
+        cap: 50,
+      );
+
+      expect(stale.map((t) => t.key), ['old-1']);
+    });
+
+    test('a thread the gates emptied is not in the slice', () async {
+      // The assign pass returns `gated` before it looks for a vector, so a
+      // thread with nothing kept can never be re-embedded by the one-shot that
+      // reads this. Counting it would hand the same rows back on every sync
+      // and hold the one-shot open forever.
+      await seedVector('email', 'gated', tag: 'model-a', kept: false);
+      await seedVector('email', 'live', tag: 'model-a');
+
+      final stale = await store.conversationKeysWithEmbedModel(
+        'model-a',
+        cap: 50,
+      );
+
+      expect(stale.map((t) => t.key), ['live']);
+    });
+
+    test('both connectors, because the card is the same recipe', () async {
+      await seedVector('email', 'mail', tag: 'model-a');
+      await seedVector('teams', 'chat', tag: 'model-a');
+
+      final stale = await store.conversationKeysWithEmbedModel(
+        'model-a',
+        cap: 50,
+      );
+
+      expect(
+        {for (final thread in stale) '${thread.source}/${thread.key}'},
+        {'email/mail', 'teams/chat'},
+      );
+    });
+
+    test('newest first, so a slice walks the mailbox from the top', () async {
+      await seedVector('email', 'oldest',
+          tag: 'model-a', updatedAt: '2026-09-01T00:00:00.000000Z');
+      await seedVector('email', 'newest',
+          tag: 'model-a', updatedAt: '2026-09-03T00:00:00.000000Z');
+      await seedVector('email', 'middle',
+          tag: 'model-a', updatedAt: '2026-09-02T00:00:00.000000Z');
+
+      final stale = await store.conversationKeysWithEmbedModel(
+        'model-a',
+        cap: 50,
+      );
+
+      expect(stale.map((t) => t.key), ['newest', 'middle', 'oldest']);
+    });
+
+    test('the cap is a pace, and the next call walks the rest', () async {
+      for (var i = 0; i < 5; i++) {
+        await seedVector('email', 'c$i',
+            tag: 'model-a', updatedAt: '2026-09-0${5 - i}T00:00:00.000000Z');
+      }
+
+      final first = await store.conversationKeysWithEmbedModel(
+        'model-a',
+        cap: 2,
+      );
+      expect(first.map((t) => t.key), ['c0', 'c1']);
+
+      // The caller re-embeds what it was handed; the rest are what is left
+      // under the old tag.
+      for (final thread in first) {
+        await store.upsertConversationAi(
+          thread.source,
+          thread.key,
+          embedModel: 'model-b',
+        );
+      }
+      final second = await store.conversationKeysWithEmbedModel(
+        'model-a',
+        cap: 2,
+      );
+
+      expect(second.map((t) => t.key), ['c2', 'c3']);
+    });
+  });
+
+  group('conversationsWithEmbeddings carries the series columns', () {
+    Uint8List bytes(List<int> values) => Uint8List.fromList(values);
+
+    /// One inbound message on [key], kept unless [kept] says otherwise.
+    Future<void> seedInbound(
+      String key, {
+      required String id,
+      required String from,
+      required String receivedAt,
+      bool kept = true,
+    }) async {
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': id,
+        'conversation_key': key,
+        'direction': 'inbound',
+        'subject': 'Subject',
+        'from_name': 'Sender',
+        'from_address': from,
+        'received_at': receivedAt,
+        'body_text': 'Body',
+        'triage_status': kept ? 'triaged' : 'skipped',
+        'gate_reason': kept ? null : 'no_reply',
+      });
+    }
+
+    /// The conversation row plus its vector, so the thread is in the pool.
+    Future<void> seedConversation(
+      String key, {
+      required int messageCount,
+      required int inboundCount,
+    }) async {
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': key,
+        'subject': 'Weekly ops digest',
+        'participants_json': '[]',
+        'state': 'waiting',
+        'message_count': messageCount,
+        'inbound_count': inboundCount,
+        'last_message_at': '2026-09-01T10:00:00Z',
+      });
+      await store.upsertConversationAi(
+        'email',
+        key,
+        embedding: bytes([1, 2, 3, 4]),
+        embeddedHash: 'h-$key',
+        embedModel: 'model-a',
+      );
+    }
+
+    Future<Map<String, Object?>> rowFor(String key) async {
+      final rows = await store.conversationsWithEmbeddings(
+        embedModel: 'model-a',
+      );
+      return rows.firstWhere((r) => r['conversation_key'] == key);
+    }
+
+    test('the newest kept inbound sender wins', () async {
+      await seedConversation('c-one', messageCount: 2, inboundCount: 2);
+      await seedInbound(
+        'c-one',
+        id: 'm-old',
+        from: 'older@example.com',
+        receivedAt: '2026-08-20T10:00:00Z',
+      );
+      await seedInbound(
+        'c-one',
+        id: 'm-new',
+        from: 'newer@example.com',
+        receivedAt: '2026-08-28T10:00:00Z',
+      );
+
+      expect((await rowFor('c-one'))['newest_kept_from'], 'newer@example.com');
+    });
+
+    test('a skipped newest inbound falls back to the kept older one', () async {
+      await seedConversation('c-two', messageCount: 2, inboundCount: 2);
+      await seedInbound(
+        'c-two',
+        id: 'm-kept',
+        from: 'kept@example.com',
+        receivedAt: '2026-08-20T10:00:00Z',
+      );
+      await seedInbound(
+        'c-two',
+        id: 'm-gated',
+        from: 'gated@example.com',
+        receivedAt: '2026-08-28T10:00:00Z',
+        kept: false,
+      );
+
+      expect((await rowFor('c-two'))['newest_kept_from'], 'kept@example.com');
+    });
+
+    test('the counters come back as the conversation row holds them', () async {
+      await seedConversation('c-three', messageCount: 5, inboundCount: 3);
+      await seedInbound(
+        'c-three',
+        id: 'm-three',
+        from: 'sender@example.com',
+        receivedAt: '2026-08-20T10:00:00Z',
+      );
+
+      final row = await rowFor('c-three');
+      expect(row['message_count'], 5);
+      expect(row['inbound_count'], 3);
+    });
+  });
+
   group('the late-gate repair reads', () {
     Uint8List bytes(List<int> values) => Uint8List.fromList(values);
 

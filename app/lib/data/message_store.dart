@@ -4222,6 +4222,38 @@ FROM storylines s''';
     return [for (final row in result) Storyline.fromRow(row.data)];
   }
 
+  /// Dismisses every automatic suggestion nobody ever answered: `suggested`,
+  /// `created_by = 'auto'`, and proposed before [olderThanIso]. Returns how
+  /// many there were.
+  ///
+  /// The rail holds at most three unanswered suggestions at once, and a
+  /// suggestion nobody answers holds its slot for ever: three of them and the
+  /// sweep's room count is zero on every future pass, so the app quietly stops
+  /// proposing anything at all. This is what keeps the room moving.
+  ///
+  /// Nothing is rebuilt and nothing is deleted. The row becomes the TOMBSTONE
+  /// it has carried since it was written — its `cluster_hash` was stamped at
+  /// insert, and [dismissedHashExistsAny] recognises the same cluster on the
+  /// very next sweep, so an expiry costs no model call later. Its members stay
+  /// exactly as `dismissSuggestion` leaves them, which is what returns the
+  /// threads to the pool: `assignedOrBlockedKeys` counts memberships of
+  /// `suggested` and `active` storylines only. And `restoreDismissed` lifts an
+  /// expiry like any other dismissal, because there is nothing to tell them
+  /// apart.
+  ///
+  /// Never an `active` storyline, which somebody kept, and never a storyline a
+  /// person made: `created_by != 'auto'` is the owner's own filing and no
+  /// deadline applies to it. The bound is STRICT, so a row stamped exactly at
+  /// it has one more pass.
+  Future<int> expireStaleSuggestions(String olderThanIso) {
+    return db.customUpdate(
+      "UPDATE storylines SET status = 'dismissed', updated_at = ? "
+      "WHERE status = 'suggested' AND created_by = 'auto' "
+      'AND created_at < ?',
+      variables: _args([_nowIso(), olderThanIso]),
+    );
+  }
+
   Future<Storyline?> getStoryline(String id) async {
     final result = await db
         .customSelect('$_storylineSelect WHERE s.id = ?', variables: _args([id]))
@@ -4426,6 +4458,37 @@ FROM storylines s''';
     return [for (final row in result) StorylineMember.fromRow(row.data)];
   }
 
+  /// How the automatic membership adds since [sinceIso] are spread over the
+  /// storylines that received them: a count per storyline and the total.
+  ///
+  /// `added_by = 'auto'` only. The owner's own filings are not the assign
+  /// pass's habit, and this measures the pass's habit.
+  ///
+  /// No join on `storylines`: a dismissed storyline's adds still count toward
+  /// the total, because they were adds the pass made. The reader only ever
+  /// asks about `suggested` and `active` ids anyway.
+  ///
+  /// Read by the catch-all rule in `StorylineService.assignConversation`.
+  Future<({Map<String, int> byStoryline, int total})> autoMembershipShares(
+    String sinceIso,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT storyline_id, COUNT(*) AS n FROM storyline_members '
+          "WHERE added_by = 'auto' AND added_at >= ? GROUP BY storyline_id",
+          variables: _args([sinceIso]),
+        )
+        .get();
+    final byStoryline = <String, int>{};
+    var total = 0;
+    for (final row in result) {
+      final n = (row.data['n'] as int?) ?? 0;
+      byStoryline[row.data['storyline_id'] as String] = n;
+      total += n;
+    }
+    return (byStoryline: byStoryline, total: total);
+  }
+
   /// The threads the OWNER filed into [storylineId] by hand, newest first.
   ///
   /// Newest first, unlike [membersOf], because these are read as examples: the
@@ -4603,6 +4666,16 @@ FROM storylines s''';
   /// into a proposal about mail nobody was ever going to read. "Kept" is
   /// [keptMessageSql] here, as in every reader that means it — a `teams_source`
   /// chat is kept, a settle-time `not_worthy` drop is kept.
+  ///
+  /// `message_count`, `inbound_count` and `newest_kept_from` are the series
+  /// pre-pass's three columns. The sweep groups the pool by subject first, and
+  /// a group where no thread has ever been answered and every thread's newest
+  /// kept inbound message came from one address is a notification feed rather
+  /// than a recurring effort, so it leaves the pool for the pass. The two
+  /// counters are the conversation row's own, maintained by both syncs through
+  /// `recomputeConversationCounts`; the subquery is the newest kept inbound
+  /// sender, newest by `received_at` with the source message id breaking a tie
+  /// so one mailbox reads one way twice.
   Future<List<Map<String, Object?>>> conversationsWithEmbeddings({
     required String embedModel,
     List<String> sources = const ['email'],
@@ -4613,7 +4686,14 @@ FROM storylines s''';
           'SELECT a.source AS source, a.conversation_key AS conversation_key, '
           'a.embedding AS embedding, c.subject AS subject, '
           'c.participants_json AS participants_json, c.state AS state, '
-          'c.last_message_at AS last_message_at '
+          'c.last_message_at AS last_message_at, '
+          'c.message_count AS message_count, c.inbound_count AS inbound_count, '
+          '(SELECT m2.from_address FROM messages m2 '
+          '  WHERE m2.source = a.source '
+          '  AND m2.conversation_key = a.conversation_key '
+          "  AND m2.direction = 'inbound' AND ${keptMessageSql('m2')} "
+          '  ORDER BY m2.received_at DESC, m2.source_message_id ASC '
+          '  LIMIT 1) AS newest_kept_from '
           'FROM conversation_ai a '
           'JOIN conversations c '
           '  ON c.source = a.source AND c.conversation_key = a.conversation_key '
@@ -4628,6 +4708,57 @@ FROM storylines s''';
         )
         .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// The threads still carrying a vector under [embedModel], newest first, at
+  /// most [cap] of them.
+  ///
+  /// Written for the `clustering_card_v2` one-shot in `SyncService`, which
+  /// asks it for the RETIRED tag: a conversation still under the old tag is
+  /// one whose vector was taken over a card this build no longer writes, and
+  /// every clustering read filters the tag, so the thread is invisible to the
+  /// sweep until something re-embeds it. The one-shot requeues the assign pass
+  /// for each key it returns, and that pass writes the new vector.
+  ///
+  /// No source filter, deliberately: mail and chat share this table and the
+  /// same card recipe, so one caller on the mail sync covers both connectors
+  /// and `teams_sync.dart` needs no one-shot of its own. `embedding IS NOT
+  /// NULL` because a row with no vector has nothing to retire.
+  ///
+  /// The kept-inbound clause is [conversationsWithEmbeddings]'s, and it is
+  /// load-bearing rather than tidy. A thread with nothing kept is not the
+  /// pool's: `assignConversation` returns `AssignOutcome.gated` before it
+  /// looks for a vector, so the pass the one-shot queues would turn it away
+  /// without re-embedding it, and the row would come back in every slice
+  /// forever. Two hundred such threads would hold the one-shot open for the
+  /// life of the database, re-queueing the same work on every sync. Left out,
+  /// its old-tag row simply stays where it is, invisible to every clustering
+  /// read by construction, and `GateRepairService.evictGatedThread` clears it
+  /// on the path that actually cares.
+  Future<List<({String source, String key})>> conversationKeysWithEmbedModel(
+    String embedModel, {
+    required int cap,
+  }) async {
+    final result = await db
+        .customSelect(
+          'SELECT a.source AS source, a.conversation_key AS conversation_key '
+          'FROM conversation_ai a '
+          'WHERE a.embed_model = ? AND a.embedding IS NOT NULL '
+          'AND EXISTS (SELECT 1 FROM messages m '
+          '  WHERE m.source = a.source '
+          '  AND m.conversation_key = a.conversation_key '
+          "  AND m.direction = 'inbound' AND ${keptMessageSql('m')}) "
+          'ORDER BY a.updated_at DESC, a.conversation_key ASC LIMIT ?',
+          variables: _args([embedModel, cap]),
+        )
+        .get();
+    return [
+      for (final row in result)
+        (
+          source: row.data['source'] as String? ?? '',
+          key: row.data['conversation_key'] as String? ?? '',
+        ),
+    ];
   }
 
   /// Brings the clustering index level with `conversation_ai` and returns how
@@ -4887,6 +5018,61 @@ FROM storylines s''';
       // back to pending would run the same item twice.
       "${refreshCreatedAt ? " OR work_items.status = 'pending'" : ''}",
       variables: _args([kind, source, entityId, payloadJson, now, now]),
+    );
+  }
+
+  /// The one row that sweeps the mailbox, re-armed.
+  ///
+  /// There is one pool to sweep and one row for sweeping it, keyed to the
+  /// single entity id `sweep` under the historical label `email` — a row NAME
+  /// and not a scope, which is why the chat sync writes the same row as the
+  /// mail sync does. See [StorylineService] for what the pass reads.
+  ///
+  /// A requeue rather than an enqueue, so a sweep that already ran and closed
+  /// `done` runs again instead of staying done for ever; and [requeueWork]'s
+  /// own rule is what makes it safe to call from anywhere, because a sweep
+  /// that is `processing` is at the server and is left exactly where it is. No
+  /// `refreshCreatedAt`: nobody asked for this, it is the pipeline noticing
+  /// that the mailbox moved.
+  ///
+  /// Three callers: the mail sync at the end of its ingest, the chat sync at
+  /// the end of its, and the FAST lane after a drain that actually processed
+  /// something. The last is the interesting one — the sweep stands down over
+  /// an unsettled mailbox, and a fast lane that has gone quiet is the signal
+  /// it was waiting for.
+  Future<void> requeueSweep() =>
+      requeueWork('storyline_sweep', 'email', 'sweep');
+
+  /// [requeueWork] that is also a RATE LIMIT, for a caller that would
+  /// otherwise ask again on every arrival.
+  ///
+  /// The row is inserted when there is none, because a pass that has never
+  /// run is stale by definition. An existing row is revived only when its
+  /// last touch is older than [touchedBefore]; anything touched since is left
+  /// exactly as it is, a `pending` or `processing` row included. So a caller
+  /// whose reason for asking does not change between arrivals spends one run
+  /// of the work per window rather than one per arrival.
+  ///
+  /// No payload and no `created_at` refresh: this is a caller asking for a
+  /// pass it already asked for, not a person moving something to the front.
+  Future<void> requeueWorkIfStale(
+    String kind,
+    String source,
+    String entityId, {
+    required String touchedBefore,
+  }) async {
+    final now = _nowIso();
+    await db.customUpdate(
+      'INSERT INTO work_items '
+      '(task_kind, source, entity_id, status, attempts, error, payload_json, '
+      'created_at, updated_at) '
+      "VALUES (?, ?, ?, 'pending', 0, NULL, NULL, ?, ?) "
+      'ON CONFLICT(task_kind, source, entity_id) DO UPDATE SET '
+      "status = 'pending', updated_at = excluded.updated_at, "
+      'attempts = 0, error = NULL '
+      "WHERE work_items.status IN ('done', 'error') "
+      'AND work_items.updated_at < ?',
+      variables: _args([kind, source, entityId, now, now, touchedBefore]),
     );
   }
 

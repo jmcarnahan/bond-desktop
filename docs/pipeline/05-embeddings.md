@@ -5,12 +5,61 @@ are never mixed:
 
 1. **Clustering corpus** — one vector per *conversation card*, used by the
    storyline sweep to find threads about the same thing. Written by
-   `ExtractHandler._refreshCard` into `conversation_ai.embedding`.
+   `ExtractHandler._refreshCard` into `conversation_ai.embedding`, and healed
+   by `StorylineService._reembed` for a thread whose vector is missing when
+   the sweep or the assign pass reaches it.
 2. **Document corpus** — one vector per *message*, used by semantic search
    (sqlite-vec, PR #10). Written on the fast path by
    `ExtractHandler._embedMessage` and healed by the `embed_message` work queue
    in `EmbedHandler` (`app/lib/services/embed_handler.dart`) for anything the
    fast path missed.
+
+**The clustering card has a name and a flag.** `buildClusteringCard` in
+`extract_handler.dart` is the one recipe for the text a CONVERSATION is
+embedded from, and both writers go through it over the same stored facts:
+`clusteringCardForConversationRow(conversationRow, newestInboundCardData(...))`
+at the extraction and at the heal alike. One recipe over one data source is
+what makes `embedded_hash` mean something. While the extraction built its card
+from the result in hand and the heal built its own from the newest kept
+inbound, extracting the fifth message of a thread wrote a hash over a card
+nothing else would ever produce, and the next heal re-embedded a thread that
+had not changed.
+
+**The flag.** The clustering card is `buildConversationCard` with one decision
+folded in: whether the people on the thread are part of the vector.
+`StorylineTuning.participantsInClusteringCard` is what the app passes, and
+since Round D Phase 2, on 2026-09-18, it is FALSE: the people are out of the
+vector. The sweep bench read `topics` eight points better on `storyline.id`
+that day, with a smaller largest storyline and purity over the storylines
+carrying gold members moving from 44% to 71%. The flag exists because the
+participants segment is the same handful of names in every card of a one-team
+mailbox, which pulls every pair of threads together and has the sweep proposing
+the team rather than the work. Dropping them leaves the segment empty rather
+than removing it: the card is four segments joined by ` | ` by contract, and a
+shorter card would make `cardHash` disagree with itself about nothing. The
+cards a MODEL reads keep their people either way. This is the vector, not the
+prompt. `make golden-sweep SWEEP_CARD=participants|topics` is what priced the
+two, defaulting to the card the app ships, and `docs/model-bakeoff.md` holds
+the rows.
+
+**A card change ships as a tag bump and a one-shot.** Flipping that flag
+orphans every stored conversation vector by construction, since every read
+filters on `EmbeddingsClient.modelTag`, so the three moved together. The tag is
+now `embeddinggemma-300M/clustering-v2`, and
+`EmbeddingsClient.retiredModelTag` names the one it replaced. The
+`clustering_card_v2` one-shot in `sync_service.dart` requeues the assign pass
+for up to 200 old-tag conversations a sync, and that pass re-embeds each thread
+under the new tag on its way past. The slice asks for the pool's own
+kept-inbound clause, so it holds only threads that pass can actually re-embed:
+a thread the gates emptied would be turned away as `gated` and would come back
+in every slice forever. It runs before the sweep is requeued, so the
+sweep reads the pool it refilled; it has no source filter, so one one-shot on
+the mail sync covers chat threads too; and its pref is written only by a pass
+that came back short, so the slices continue until the old tag is gone.
+`ExtractHandler._refreshCard`'s skip is now hash AND tag, matching the message
+corpus in `EmbedHandler`: without the tag half, a re-extracted thread whose
+card had not changed would keep an orphaned vector forever. The document corpus
+and its `documentModelTag` are untouched by any of this.
 
 **Attachment markers and the card hash.** `embedMessageRow` strips
 `[[att:…]]` / `[[img:…]]` markers out of the body before building the card, and

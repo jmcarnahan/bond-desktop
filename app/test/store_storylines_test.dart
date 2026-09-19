@@ -939,6 +939,134 @@ void main() {
     });
   });
 
+  /// The sweep's own lifecycle: the row that re-arms it, and the rule that
+  /// keeps the rail of three suggestions from deadlocking it for ever.
+  group('expireStaleSuggestions', () {
+    // Six fractional digits and a `Z`, the shape [MessageStore.isoStamp]
+    // writes: `created_at` is compared as a string, so a fixture of another
+    // width would sort against the stored rows by accident rather than by
+    // time.
+    const bound = '2026-09-04T00:00:00.000000Z';
+
+    Future<void> proposedAt(String id, String createdAt) => db.customUpdate(
+          'UPDATE storylines SET created_at = ? WHERE id = ?',
+          variables: [Variable(createdAt), Variable(id)],
+        );
+
+    Future<String?> statusOf(String id) async =>
+        (await store.getStoryline(id))?.status;
+
+    test('an old automatic suggestion nobody answered is dismissed', () async {
+      await seedStoryline('sl-old');
+      await proposedAt('sl-old', '2026-08-20T00:00:00.000000Z');
+
+      expect(await store.expireStaleSuggestions(bound), 1);
+      expect(await statusOf('sl-old'), 'dismissed');
+    });
+
+    test('a young one, a kept one and a person\'s own all stay', () async {
+      await seedStoryline('sl-young');
+      await proposedAt('sl-young', '2026-09-16T00:00:00.000000Z');
+      await seedStoryline('sl-kept', status: 'active');
+      await proposedAt('sl-kept', '2026-08-20T00:00:00.000000Z');
+      await seedStoryline('sl-mine', createdBy: 'user');
+      await proposedAt('sl-mine', '2026-08-20T00:00:00.000000Z');
+
+      expect(await store.expireStaleSuggestions(bound), 0);
+      expect(await statusOf('sl-young'), 'suggested');
+      // An owner kept this one, and a storyline somebody kept has no deadline.
+      expect(await statusOf('sl-kept'), 'active');
+      // Nor has one they made themselves.
+      expect(await statusOf('sl-mine'), 'suggested');
+    });
+
+    test('the bound is strict, so a row stamped on it has one more pass',
+        () async {
+      await seedStoryline('sl-edge');
+      await proposedAt('sl-edge', bound);
+
+      expect(await store.expireStaleSuggestions(bound), 0);
+      expect(await statusOf('sl-edge'), 'suggested');
+    });
+
+    test('the expired row is stamped and its tombstone still answers',
+        () async {
+      await seedStoryline('sl-old', clusterHash: 'hash-of-the-cluster');
+      await proposedAt('sl-old', '2026-08-20T00:00:00.000000Z');
+      // The model carries no `updated_at`, so the column is read directly.
+      Future<String?> stampOf(String id) async => (await db
+              .customSelect(
+                'SELECT updated_at FROM storylines WHERE id = ?',
+                variables: [Variable(id)],
+              )
+              .getSingle())
+          .data['updated_at'] as String?;
+      await db.customUpdate(
+        'UPDATE storylines SET updated_at = ? WHERE id = ?',
+        variables: [
+          const Variable('2026-08-20T00:00:00.000000Z'),
+          const Variable('sl-old'),
+        ],
+      );
+      final before = await stampOf('sl-old');
+
+      expect(await store.expireStaleSuggestions(bound), 1);
+
+      expect(await stampOf('sl-old'), isNot(before));
+      expect(await statusOf('sl-old'), 'dismissed');
+      // The row was born carrying its tombstone, so the next sweep recognises
+      // the same cluster without spending a model call re-deriving it.
+      expect(
+        await store.dismissedHashExistsAny(const ['hash-of-the-cluster']),
+        isTrue,
+      );
+    });
+
+    test('nothing to expire is zero and no write', () async {
+      expect(await store.expireStaleSuggestions(bound), 0);
+    });
+  });
+
+  group('requeueSweep', () {
+    Future<String?> sweepStatus() async {
+      final rows = await db.customSelect(
+        'SELECT status FROM work_items '
+        "WHERE task_kind = 'storyline_sweep' AND source = 'email' "
+        "AND entity_id = 'sweep'",
+      ).get();
+      return rows.isEmpty ? null : rows.single.data['status'] as String?;
+    }
+
+    test('writes the one sweep row pending', () async {
+      await store.requeueSweep();
+
+      expect(await sweepStatus(), 'pending');
+      expect(await store.workCounts('storyline_sweep'), {'pending': 1});
+    });
+
+    test('revives a sweep that already ran', () async {
+      await store.requeueSweep();
+      await store.writeWork('storyline_sweep', 'email', 'sweep',
+          status: 'done');
+
+      await store.requeueSweep();
+
+      expect(await sweepStatus(), 'pending');
+    });
+
+    test('leaves a sweep that is at the server alone', () async {
+      await store.requeueSweep();
+      await store.writeWork('storyline_sweep', 'email', 'sweep',
+          status: 'processing');
+
+      await store.requeueSweep();
+
+      // A sweep is one item that legitimately takes minutes, and flipping it
+      // back to pending would run the whole pass twice.
+      expect(await sweepStatus(), 'processing');
+    });
+  });
+
   group('requeueWork', () {
     Future<String?> statusOf(String kind, String id) async {
       final counts = await db.customSelect(
@@ -1005,6 +1133,86 @@ void main() {
       await store.requeueWork('storyline', 'email', 'c1');
 
       expect(await store.workCounts('storyline'), {'pending': 1});
+    });
+
+    /// The same rate-limited requeue the catch-all rule makes, for a caller
+    /// that would otherwise ask for the same pass on every arrival.
+    group('requeueWorkIfStale', () {
+      Future<void> touchedAt(String kind, String id, String updatedAt) =>
+          db.customUpdate(
+            'UPDATE work_items SET updated_at = ? '
+            'WHERE task_kind = ? AND entity_id = ?',
+            variables: [Variable(updatedAt), Variable(kind), Variable(id)],
+          );
+
+      // Six fractional digits and a `Z`, the shape [MessageStore.isoStamp]
+      // writes: these are compared as strings, so a fixture of another width
+      // would sort against the stored rows by accident rather than by time.
+      const bound = '2026-09-11T00:00:00.000000Z';
+      const older = '2026-09-01T00:00:00.000000Z';
+      const newer = '2026-09-16T00:00:00.000000Z';
+
+      test('a pass that never ran is stale by definition', () async {
+        await store.requeueWorkIfStale('storyline_audit', 'email', 'sl-1',
+            touchedBefore: bound);
+
+        expect(await statusOf('storyline_audit', 'sl-1'), 'pending');
+      });
+
+      test('a row touched inside the bound is left alone', () async {
+        await store.enqueueWork('storyline_audit', 'email', 'sl-1');
+        await store.writeWork('storyline_audit', 'email', 'sl-1',
+            status: 'done');
+        await touchedAt('storyline_audit', 'sl-1', newer);
+
+        await store.requeueWorkIfStale('storyline_audit', 'email', 'sl-1',
+            touchedBefore: bound);
+
+        // The reason for asking has not changed since the pass ran, so the
+        // pass would answer the same way and is not spent again.
+        expect(await statusOf('storyline_audit', 'sl-1'), 'done');
+      });
+
+      test('a row touched before the bound is revived, attempts afresh',
+          () async {
+        await store.enqueueWork('storyline_audit', 'email', 'sl-1');
+        await store.writeWork('storyline_audit', 'email', 'sl-1',
+            status: 'error', error: 'boom', attempts: 2);
+        await touchedAt('storyline_audit', 'sl-1', older);
+
+        await store.requeueWorkIfStale('storyline_audit', 'email', 'sl-1',
+            touchedBefore: bound);
+
+        final row = await db.customSelect(
+          'SELECT status, attempts, error FROM work_items '
+          "WHERE task_kind = 'storyline_audit' AND entity_id = 'sl-1'",
+        ).getSingle();
+        expect(row.data['status'], 'pending');
+        expect(row.data['attempts'], 0);
+        expect(row.data['error'], isNull);
+      });
+
+      test('a pending or processing row is never touched, however stale',
+          () async {
+        await store.enqueueWork('storyline_audit', 'email', 'sl-1');
+        await touchedAt('storyline_audit', 'sl-1', older);
+        await store.enqueueWork('storyline_audit', 'email', 'sl-2');
+        await store.writeWork('storyline_audit', 'email', 'sl-2',
+            status: 'processing');
+        await touchedAt('storyline_audit', 'sl-2', older);
+
+        await store.requeueWorkIfStale('storyline_audit', 'email', 'sl-1',
+            touchedBefore: bound);
+        await store.requeueWorkIfStale('storyline_audit', 'email', 'sl-2',
+            touchedBefore: bound);
+
+        expect(await statusOf('storyline_audit', 'sl-1'), 'pending');
+        // The claim a running worker holds, exactly as [requeueWork] treats
+        // it.
+        expect(await statusOf('storyline_audit', 'sl-2'), 'processing');
+        expect(await store.workCounts('storyline_audit'),
+            {'pending': 1, 'processing': 1});
+      });
     });
   });
 
@@ -1358,6 +1566,89 @@ void main() {
 
       expect((await store.newestInboundCardData('email', 'c1'))?['summary'],
           'The second question.');
+    });
+  });
+  group('autoMembershipShares', () {
+    // The window is written by hand rather than slept through:
+    // [MessageStore.addStorylineMember] stamps `added_at` with now, so a row
+    // that has to sit outside the window is moved there with one statement.
+    Future<void> addAt(
+      String storylineId,
+      String key,
+      String addedAt, {
+      String addedBy = 'auto',
+    }) async {
+      await store.addStorylineMember(storylineId, 'email', key,
+          addedBy: addedBy);
+      await db.customUpdate(
+        'UPDATE storyline_members SET added_at = ? '
+        'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
+        variables: [
+          Variable(addedAt),
+          Variable(storylineId),
+          const Variable('email'),
+          Variable(key),
+        ],
+      );
+    }
+
+    // Six fractional digits and a `Z`, the shape [MessageStore.isoStamp]
+    // writes `added_at` in: the window is a string compare.
+    const inside = '2026-09-16T10:00:00.000000Z';
+    const outside = '2026-09-01T10:00:00.000000Z';
+    const since = '2026-09-11T00:00:00.000000Z';
+
+    test('counts the automatic adds inside the window, per storyline',
+        () async {
+      await seedStoryline('sl-a');
+      await seedStoryline('sl-b');
+      await seedStoryline('sl-c');
+      await addAt('sl-a', 'c1', inside);
+      await addAt('sl-a', 'c2', inside);
+      await addAt('sl-b', 'c3', inside);
+      await addAt('sl-c', 'c4', inside);
+
+      final shares = await store.autoMembershipShares(since);
+
+      expect(shares.byStoryline, {'sl-a': 2, 'sl-b': 1, 'sl-c': 1});
+      expect(shares.total, 4);
+    });
+
+    test('an add older than the window is not the pass\'s recent habit',
+        () async {
+      await seedStoryline('sl-a');
+      await seedStoryline('sl-b');
+      await addAt('sl-a', 'c1', inside);
+      await addAt('sl-a', 'c2', outside);
+      await addAt('sl-b', 'c3', outside);
+
+      final shares = await store.autoMembershipShares(since);
+
+      // sl-b carried nothing inside the window, so it is not in the map at
+      // all: the denominator is the adds the pass made lately, not every
+      // storyline that ever received one.
+      expect(shares.byStoryline, {'sl-a': 1});
+      expect(shares.total, 1);
+    });
+
+    test("the owner's own filings never count", () async {
+      await seedStoryline('sl-a');
+      await seedStoryline('sl-b');
+      await addAt('sl-a', 'c1', inside, addedBy: 'user');
+      await addAt('sl-a', 'c2', inside, addedBy: 'user');
+      await addAt('sl-b', 'c3', inside);
+
+      final shares = await store.autoMembershipShares(since);
+
+      expect(shares.byStoryline, {'sl-b': 1});
+      expect(shares.total, 1);
+    });
+
+    test('an empty table is a total of zero, not a throw', () async {
+      final shares = await store.autoMembershipShares(since);
+
+      expect(shares.byStoryline, isEmpty);
+      expect(shares.total, 0);
     });
   });
 }

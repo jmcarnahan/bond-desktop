@@ -307,6 +307,28 @@ void main() {
     expect(item.conversationKey, 'email:fx-conv-lease');
   });
 
+  test('the thread state is read, and defaults to waiting', () {
+    // The sweep DIVERTS a `done` thread out of clustering, so the replay that
+    // seeds a mailbox behind these items has to seed the state the set
+    // recorded rather than one state for everything.
+    expect(byId['email:fx-keep-tail']!.conversationState, 'needs_reply');
+    expect(byId['email:fx-drop-notification']!.conversationState, 'waiting');
+
+    final blank = GoldenSet.fromJson({
+      'items': [
+        {
+          'id': 'fx-stateless',
+          'provenance': {'source': 'email', 'conversation_key': 'k'},
+          'conversation': {'subject': 'No state recorded'},
+          'stage_input': {'now': '2026-09-09 (Wednesday)'},
+        },
+      ],
+    });
+    // A thread with nothing outstanding sits in `waiting`, and a set that
+    // recorded no state must not invent a `done` the sweep would skip.
+    expect(blank.items.single.conversationState, 'waiting');
+  });
+
   test('the digest rung keeps the whole tail and carries the digest apart', () {
     // Unlike `compressed`, the digest does not take a thread slot: it rides in
     // its own prompt fence, so all three tail messages survive.

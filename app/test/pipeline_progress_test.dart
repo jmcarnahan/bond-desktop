@@ -1,6 +1,7 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -387,6 +388,48 @@ void main() {
       await assign(AssignOutcome.rejected);
 
       expect((await progressOf('m1'))['storyline_state'], 'done');
+    });
+
+    test('a thread a catch-all was skipped for is finished the way a rejection '
+        'is', () async {
+      // The bar cannot tell a catch-all skip from a rejection — both looked
+      // and filed nothing — so the only place the difference from a FILING
+      // shows is the log, and the log is what this test reads. Through the
+      // worker rather than the handler alone, because the note the handler
+      // leaves is folded into a row by the item's own `record`.
+      await seedMessage('m1');
+      await store.enqueueWork('storyline', 'email', 'c1');
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      final worker = AiWorker(
+        store,
+        handlers: [
+          StorylineAssignHandler(
+            FakeStorylines(store, AssignOutcome.catchAll),
+            activityLog: log,
+            progress: progress,
+          ),
+        ],
+        activityLog: log,
+        progress: progress,
+      );
+      addTearDown(worker.dispose);
+
+      await worker.pump();
+      await pumpEventQueue();
+
+      final row = await progressOf('m1');
+      expect(row['storyline_state'], 'done');
+      expect(row['storyline_id'], null);
+      // Not `ok`, and the outcome by name: moving this case in with
+      // `assigned` would leave the bar reading exactly as it does here and
+      // say nothing at all in the panel.
+      final rows = await store.recentActivity();
+      final event = ActivityEvent.fromRow(
+        rows.firstWhere((r) => r['kind'] == 'storyline'),
+      );
+      expect(event.status, 'skipped');
+      expect(event.detail['outcome'], 'catchAll');
     });
 
     test('a thread the gates emptied is skipped, not done', () async {
