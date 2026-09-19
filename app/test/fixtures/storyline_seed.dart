@@ -21,8 +21,8 @@ import 'golden_storyline.dart';
 /// have, the triage summary and extraction topics a bulk run file recorded,
 /// and one live embedding per thread under the app's own clustering recipe.
 ///
-/// Three rules decide whether the pool this produces is the pool the app
-/// sweeps, and all three are load-bearing:
+/// Four rules decide whether the pool this produces is the pool the app
+/// sweeps, and all four are load-bearing:
 ///
 /// 1. **The gate verdict is GOLD's, not the app's.** An item gold calls a drop
 ///    is seeded `skipped` — its own message AND every inbound message of its

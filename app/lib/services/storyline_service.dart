@@ -370,6 +370,39 @@ typedef _MemberContext = ({
   Set<String> memberThreads,
 });
 
+/// What one proposal did, as [StorylineService._propose] reports it to the
+/// sweep: whether a suggested storyline was written, how many members the
+/// confirms kept and turned away, how many finished threads the probe pulled
+/// in, whether the namer or the charter lint refused the cluster, how many
+/// outliers were dropped, and how many fragment siblings rode a survivor.
+typedef _ProposeTally = ({
+  bool proposed,
+  int confirmed,
+  int rejected,
+  int joined,
+  int incoherent,
+  int lint,
+  int outliers,
+  int fragments,
+});
+
+/// What the sweep decided about one cluster it formed, told to the golden
+/// sweep bench and to nobody else. See [StorylineService.new]'s
+/// `clusterObserver`.
+///
+/// [threads] is the cluster AS FORMED: its representatives in pool order,
+/// before the namer's outliers narrowed it and without the fragment siblings
+/// that ride those representatives. [outcome] is one of five words:
+/// `formed` (a suggested storyline was written), `incoherent` (the namer
+/// declined it, or kept fewer than [StorylineTuning.minClusterSize]),
+/// `lint` (the charter lint refused the name), `thin` (the confirms left
+/// fewer than [StorylineTuning.minClusterSize] survivors) and `answered`
+/// (a tombstone already held for this set and no model was asked).
+typedef SweepClusterObserver = void Function(
+  List<({String source, String key})> threads,
+  String outcome,
+);
+
 /// Groups conversations into storylines, and applies the user's corrections.
 ///
 /// Two entry points do the automatic work — [assignConversation] runs when one
@@ -455,6 +488,14 @@ class StorylineService {
   /// passes the same closure the needs-you handler takes.
   final OwnerLookup _owner;
 
+  /// A bench seam, null in the app: called once per cluster the sweep asked
+  /// [_propose] about, with the cluster as formed and what became of it. The
+  /// golden sweep bench reads each cluster's gold purity BEFORE naming through
+  /// it, which is the only way to tell a namer that declines pure groups from
+  /// a clustering that builds mixed ones; the store keeps no record of a
+  /// declined cluster beyond its tombstone hash.
+  final SweepClusterObserver? _observeCluster;
+
   StorylineService(
     this._store,
     LlmClient client, {
@@ -464,10 +505,12 @@ class StorylineService {
     this._progress = const PipelineProgress.disabled(),
     ContextStore? contextStore,
     OwnerLookup? owner,
+    SweepClusterObserver? clusterObserver,
   })  : _client = client,
         _confirmClient = confirmClient ?? client,
         _context = contextStore,
         _owner = memoizedOwner(owner ?? (() async => null)),
+        _observeCluster = clusterObserver,
         _log = activityLog ?? ActivityLog.disabled();
 
   // ── automatic: one thread ──────────────────────────────────────────────
@@ -1998,6 +2041,16 @@ class StorylineService {
         },
       );
       attempted++;
+      _observeCluster?.call(
+        [
+          for (final index in cluster)
+            (
+              source: rows[index]['source'] as String? ?? _workSource,
+              key: rows[index]['conversation_key'] as String? ?? '',
+            ),
+        ],
+        _outcomeOf(tally),
+      );
       if (tally.proposed) proposed++;
       // Summed across every cluster the pass named, the tombstoned ones
       // included: the model's rejections are work it did and an answer it
@@ -2028,7 +2081,7 @@ class StorylineService {
         'rejected': rejected,
         // A number, always, and never a null or a string: the quiet-kind
         // check reads these as numerics, and a non-numeric here would make
-        // every all-zero sweep loud again. That holds for the seven below too,
+        // every all-zero sweep loud again. That holds for the eight below too,
         // `lint` included: the reason the lint gave is on the tombstone, and
         // what this row carries is how many there were. The one deliberate
         // exception on this row is `deferred`, written by [_deferSweep]
@@ -2135,6 +2188,20 @@ class StorylineService {
       groups.add(representativesOf);
     }
     return groups;
+  }
+
+  /// The one word [SweepClusterObserver] gets for what [_propose] returned.
+  ///
+  /// Read in the order the exits happen: a proposal beats everything, the
+  /// namer's refusal and the lint's come before any confirm was spent, a
+  /// cluster whose confirms ran but left too few is `thin`, and a cluster
+  /// that spent nothing was answered by a tombstone.
+  static String _outcomeOf(_ProposeTally tally) {
+    if (tally.proposed) return 'formed';
+    if (tally.incoherent > 0) return 'incoherent';
+    if (tally.lint > 0) return 'lint';
+    if (tally.confirmed + tally.rejected > 0) return 'thin';
+    return 'answered';
   }
 
   /// Which pool rows stand for a whole thread, and which rows each one stands
@@ -2525,17 +2592,7 @@ class StorylineService {
   /// representative's verdict and carries its evidence sentence, and a sibling
   /// whose representative was rejected joins nothing. They are counted as
   /// `fragments` and they never count toward either cluster-size floor.
-  Future<
-      ({
-        bool proposed,
-        int confirmed,
-        int rejected,
-        int joined,
-        int incoherent,
-        int lint,
-        int outliers,
-        int fragments,
-      })> _propose(
+  Future<_ProposeTally> _propose(
     List<Map<String, Object?>> rows,
     List<List<double>> vectors, {
     List<({Map<String, Object?> row, List<double> vector})> doneCandidates =
@@ -2569,19 +2626,6 @@ class StorylineService {
       [clusterHash, _legacyHashOfThreads(threads)],
     )) {
       return nothing;
-    }
-
-    // Everyone in the WHOLE cluster, computed once and before the naming
-    // call: all the candidates are judged against the same group, not against
-    // one that shrinks as its members are rejected out from under the later
-    // questions — and the charter lint needs it to tell a charter from a
-    // roster of the people who happen to be on these threads.
-    final seen = <String>{};
-    final storylineParticipants = <String>[];
-    for (final row in rows) {
-      for (final display in _displaysOf(Conversation.fromRow(row))) {
-        if (seen.add(display.toLowerCase())) storylineParticipants.add(display);
-      }
     }
 
     final id = newStorylineId();
@@ -2623,6 +2667,21 @@ class StorylineService {
         outliers: 0,
         fragments: 0,
       );
+    }
+
+    // Everyone in the cluster AS THE NAMER KEPT IT, computed once: the charter
+    // was written for the kept group, so the lint reads it against those
+    // people and not against a roster that still holds the outliers' threads,
+    // and every confirm below is judged against this same list, which no
+    // rejection shrinks out from under the later questions. The probe
+    // re-reads the stored members afterwards, which is a different snapshot
+    // again and deliberately so.
+    final seen = <String>{};
+    final storylineParticipants = <String>[];
+    for (final index in named.kept) {
+      for (final display in _displaysOf(Conversation.fromRow(rows[index]))) {
+        if (seen.add(display.toLowerCase())) storylineParticipants.add(display);
+      }
     }
 
     // The charter the confirms are about to be judged against, read before a
@@ -3976,30 +4035,6 @@ String newStorylineId() {
   return buffer.toString();
 }
 
-/// The card text for a stored conversation row.
-///
-/// Deliberately NOT the card that produced the row's embedding: that one is
-/// built during extraction and carries the extracted topics and the triage
-/// summary, neither of which is stored on the conversation. What is here is
-/// the durable half — the subject and who is on the thread — and it is what
-/// the naming and membership prompts read.
-///
-/// The vector already carries the rest. This text is what a model reads, and
-/// re-deriving the full card would mean re-running an extraction to name a
-/// storyline.
-String cardForConversationRow(Map<String, Object?> row) {
-  final conversation = Conversation.fromRow(row);
-  return buildConversationCard(
-    subject: stripReFw(conversation.subject),
-    participants: [
-      for (final participant in conversation.participants)
-        if (participant.display.isNotEmpty) participant.display,
-    ],
-    topics: const [],
-    summary: null,
-  );
-}
-
 /// The card the NAMING prompt reads: the thin card plus the newest inbound
 /// triage summary, and deliberately no topics.
 ///
@@ -4025,7 +4060,7 @@ String _namingCardForConversationRow(
 
 /// The card for a conversation row enriched with what the AI already knows
 /// about the thread: extracted topics and the newest inbound triage summary.
-/// Degrades to [cardForConversationRow]'s thin card when [cardData] is null
+/// Degrades to the thin card, subject and people only, when [cardData] is null
 /// or its pieces are missing/corrupt — enrichment is a bonus, never a
 /// requirement.
 String enrichedCardForConversationRow(
@@ -4047,8 +4082,9 @@ String enrichedCardForConversationRow(
 /// The card a conversation is EMBEDDED from, built from the same row and the
 /// same stored facts [enrichedCardForConversationRow] reads.
 ///
-/// Identical to that card while [StorylineTuning.participantsInClusteringCard]
-/// is true, and that is the point of routing both through
+/// Identical to that card only while
+/// [StorylineTuning.participantsInClusteringCard] is true, which it has not
+/// been since Round D shipped the `topics` card, and that is still the point of routing both through
 /// [buildClusteringCard] rather than leaving the embed path on the prompt
 /// path's recipe: the flag decides ONE of them. The prompts keep their people
 /// whatever the vector does.

@@ -49,7 +49,13 @@ recap after the sweep. See [10-model-routing.md](10-model-routing.md).
    closes the storyline stage `skipped` rather than `done` — nothing was
    judged, so there is no verdict to claim. `_reembed` carries the same guard
    as a belt, since it is the only place outside extraction that writes a
-   conversation embedding.
+   conversation embedding. Six endings in all, and
+   the handler treats them in three ways: `assigned` closes the stage `done`
+   with the storyline it landed in; `rejected`, `blocked` and `catchAll` close
+   it `done` with status `skipped` and the outcome on the row, because each is
+   a verdict that deliberately filed nothing; `noCandidate` closes it `done`
+   and notes nothing, so a quiet pass writes no row; and only `gated` closes
+   the stage `skipped` without a verdict.
 2. **Sweep** (`StorylineSweepHandler` → `sweep`) — clusters *unassigned*
    threads by embedding similarity (gate: three similar threads, or a
    recurring series of three, form a proposal, and two confirmed members are
@@ -774,6 +780,16 @@ because `assignedOrBlockedKeys` counts suggested and active memberships only,
 and **Restore** lifts an expiry like any other dismissal. It never touches an
 `active` storyline, which somebody kept, and never one a person made.
 
+**What the pool is.** After the room count the pass reads every conversation
+that has a vector under the current model tag and leaves out the taken ones:
+a thread that is already a member of a storyline, or that a person took out
+of one, is never re-clustered (`assignedOrBlockedKeys`). A thread whose
+conversation state is `done` is not clustered either; it is set aside as a
+finished thread and offered only to the probe of a storyline the pass just
+formed. Fewer than `sweepMinUnassigned`, two, unassigned threads with vectors
+and the pass returns before it clusters anything, because nothing smaller can
+form a pair.
+
 ## How the sweep finds its pairs
 
 **The pool is kept-inbound conversations, not the embedding table.**
@@ -999,7 +1015,13 @@ by the plurality of its members, so the number it scores is what the FILING
 did, not what a title says. Beside the scorer it prints purity per storyline,
 coverage per effort, the largest storyline's share of every filed thread,
 which is the chaining number, and the cosine of every pair inside a formed
-group. The first row, on 2026-09-18, is what this section is being changed to
+group. Since Round D Phase 6 it also watches every cluster before the namer
+sees it, through a constructor seam the app never passes, and prints each
+cluster's gold purity by what the sweep then did with it, formed against
+declined. It prints alongside that the cosine of every pool pair split by
+whether the two threads share a gold effort, which is the ceiling any
+threshold could reach. Both lines are counts, and no thread key reaches
+stdout. The first row, on 2026-09-18, is what this section is being changed to
 fix: seven storylines formed, the largest holding 56% of every filed thread,
 zero correct positives and 23 of 98 on the scorer. The rule above is the second
 row on the same mailbox: fourteen storylines, the largest holding 14% of every
@@ -1023,6 +1045,13 @@ its confirms, what that line counts is what SURVIVED and would still be
 refused, and it should read zero; a non-zero entry there is a bug report rather
 than a measurement. `docs/model-bakeoff.md` carries the protocol, the knobs and
 the ledger.
+The round's last row, taken on 2026-09-19, files 46 of 98 with no
+correct positive and one storyline formed. The two Phase 6 lines say where
+that comes from. The ten clusters the namer declined are 39% gold-pure and not
+one of them is a single effort, and the pool's same-effort pairs sit in the
+same cosine band as its cross-effort pairs, 74% of them at or above 0.65
+against 49%. The vector, not the rule above it, is the ceiling on this
+mailbox.
 
 **Brute force is the fallback, and it is not exceptional.** The sweep does its
 own arithmetic when there is no usable index (the ordinary state of a build
@@ -1089,14 +1118,17 @@ In the activity row the probe reports itself as `joined`, kept separate from
 `confirmed` and `rejected` — those two count the cluster's own members being
 judged, and a finished thread that was offered and turned away was never one.
 
-The sweep's row carries nine numeric keys: `proposed`, `confirmed`, `rejected`
-and `joined`, and beside them `series` and `series_excluded` from the subject
-pre-pass, `incoherent` and `lint` for the clusters the namer and the charter
-lint refused, and `outliers` for the threads the namer named as not belonging.
-Every one is a number and never a null or a string, because the log's
-quiet-kind check reads them as numerics and a non-numeric would make every
-all-zero sweep loud again. The row is written when the pass reached a cluster
-OR excluded a series: leaving the pool is something the pass did.
+The sweep's row carries eleven numeric keys: `proposed`, `confirmed`,
+`rejected` and `joined`, and beside them `series` and `series_excluded` from
+the subject pre-pass, `incoherent` and `lint` for the clusters the namer and
+the charter lint refused, `outliers` for the threads the namer named as not
+belonging, and `fragments` and `folded` for the rows the fragment fold joined
+and the rows it folded at all. Every one is a number and never a null or a
+string, because the log's quiet-kind check reads them as numerics and a
+non-numeric would make every all-zero sweep loud again; the one string this
+row ever carries is `deferred`, and it is a string so that a deferred pass is
+never hidden as quiet. The row is written when the pass reached a cluster,
+excluded a series, or folded a row: each of those is something the pass did.
 
 ## Cross-source identity
 

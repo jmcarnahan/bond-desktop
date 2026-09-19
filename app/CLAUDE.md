@@ -52,6 +52,13 @@ enforce the ones that are commands.
   never written as absolute dates: the 14-day `syncFloorDays` window walks
   past a literal at midnight UTC and the test rots with no code change
   (it happened twice on 2026-09-12).
+- `--plain-name` on a live `make` target is a SUBSTRING filter, so a new live
+  test's name must not contain another target's word (`storyline`, `triage`,
+  `reply`, `gates`, `sweep`) or it runs under that target too.
+- A live bench prints counts, ms, ratios and enum words only, never a subject,
+  title, charter, slug, participant or thread key. That is
+  `SweepTally.table()`'s rule, and it holds because the golden storylines are
+  named out of real mail.
 
 ## Working rules
 
@@ -87,3 +94,18 @@ enforce the ones that are commands.
 - Settings section titles and summary strings are pinned by
   `settings_screen_test.dart` and by the table in `docs/settings.md` — move
   all three together; a new segmented control is `SettingsSegments<T>`.
+- The clustering card is ONE recipe (`clusteringCardForConversationRow` in
+  `storyline_service.dart`) behind `StorylineTuning.participantsInClusteringCard`
+  and `EmbeddingsClient.modelTag`; a tag bump orphans every stored
+  conversation vector by construction, so it ships with a one-shot re-embed
+  in `sync_service.dart` (Round A's pref idiom).
+- `_accepts` in `storyline_service.dart` is the one membership rule at all
+  five confirm sites (assign, recruit, sweep member, probe, audit), and a
+  `suggested` storyline needs `high`.
+- The sweep is re-armed by the fast lane only after a drain that processed
+  something (`AiWorker.lastDrainCount`), and it defers above three floors read
+  from ONE `pipelinePulse`; the sync-time `requeueSweep()` is the durable
+  trigger.
+- A `StorylineTuning` number moves only with a `make golden-sweep` row on each
+  side, and a diagnostic flip of one is a single shell command that puts the
+  constant back before it exits.

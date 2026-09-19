@@ -324,11 +324,141 @@ void main() {
     });
   });
 
+  group('clusters before naming', () {
+    /// The three efforts these tests file under, and the thread that files
+    /// nowhere. Invented slugs: the registry's own never reach a test.
+    const gold = {
+      'email\nk1': 'alpha-effort',
+      'email\nk2': 'alpha-effort',
+      'email\nk3': 'beta-effort',
+      'email\nk4': noneId,
+    };
+
+    test('reports of one set are one cluster, and answered yields to the '
+        'verdict', () {
+      final verdictFirst = distinctClusters([
+        (threads: [t('k1'), t('k2'), t('k3')], outcome: 'incoherent'),
+        (threads: [t('k3'), t('k1'), t('k2')], outcome: 'answered'),
+      ]);
+      // The same three threads, reported in a different order by the second
+      // pass, are the same cluster judged once.
+      expect(verdictFirst, hasLength(1));
+      expect(verdictFirst.single.outcome, 'incoherent');
+
+      final answeredFirst = distinctClusters([
+        (threads: [t('k3'), t('k1'), t('k2')], outcome: 'answered'),
+        (threads: [t('k1'), t('k2'), t('k3')], outcome: 'incoherent'),
+      ]);
+      expect(answeredFirst, hasLength(1));
+      expect(answeredFirst.single.outcome, 'incoherent');
+
+      // Only ever answered: the tombstone predates the run and there is no
+      // verdict to recover.
+      final onlyAnswered = distinctClusters([
+        (threads: [t('k1'), t('k2')], outcome: 'answered'),
+        (threads: [t('k2'), t('k1')], outcome: 'answered'),
+      ]);
+      expect(onlyAnswered, hasLength(1));
+      expect(onlyAnswered.single.outcome, 'answered');
+    });
+
+    test('two different sets are two clusters', () {
+      final distinct = distinctClusters([
+        (threads: [t('k1'), t('k2')], outcome: 'formed'),
+        (threads: [t('k3'), t('k4')], outcome: 'incoherent'),
+      ]);
+
+      expect(distinct, hasLength(2));
+      expect(distinct.map((c) => c.outcome), ['formed', 'incoherent']);
+    });
+
+    test('purity by outcome averages the clusters that carry gold', () {
+      // `k5` is in no gold map at all, which reads the same as `none`: a
+      // thread there is nothing to be pure about.
+      final byOutcome = clusterPurityByOutcome(
+        [
+          (threads: [t('k1'), t('k2')], outcome: 'formed'),
+          (threads: [t('k1'), t('k2'), t('k3')], outcome: 'incoherent'),
+          (threads: [t('k4'), t('k5')], outcome: 'lint'),
+        ],
+        gold,
+      );
+
+      expect(byOutcome['formed']!.mean, closeTo(1.0, 1e-9));
+      expect(byOutcome['formed']!.pureAt70, 1);
+      expect(byOutcome['formed']!.pureAt100, 1);
+
+      expect(byOutcome['incoherent']!.mean, closeTo(2 / 3, 1e-9));
+      expect(byOutcome['incoherent']!.pureAt70, 0);
+      expect(byOutcome['incoherent']!.pureAt100, 0);
+
+      // Nothing to be pure about: counted as a cluster, averaged nowhere.
+      expect(byOutcome['lint']!.clusters, 1);
+      expect(byOutcome['lint']!.withCarrier, 0);
+      expect(byOutcome['lint']!.mean, 0);
+      expect(byOutcome['lint']!.shares, [null]);
+
+      // The union bucket, in input order, and `thin` absent rather than zero.
+      expect(byOutcome['declined']!.clusters, 2);
+      expect(byOutcome['declined']!.withCarrier, 1);
+      expect(byOutcome['declined']!.sizes, [3, 2]);
+      expect(byOutcome.containsKey('thin'), isFalse);
+      expect(byOutcome.containsKey('answered'), isFalse);
+    });
+
+    test('pureAt70 is inclusive', () {
+      // Seven threads of one effort and three of another: exactly the line.
+      final purity = ClusterPurity.of(
+        [
+          (
+            threads: [for (var i = 0; i < 10; i++) t('n$i')],
+            outcome: 'formed',
+          ),
+        ],
+        {
+          for (var i = 0; i < 7; i++) t('n$i'): 'alpha-effort',
+          for (var i = 7; i < 10; i++) t('n$i'): 'beta-effort',
+        },
+      );
+
+      expect(purity.shares.single, closeTo(0.7, 1e-9));
+      expect(purity.pureAt70, 1);
+      expect(purity.pureAt100, 0);
+    });
+
+    test('pair cosines split by whether the threads share an effort', () {
+      const vectors = {
+        'email\nk1': [1.0, 0.0],
+        'email\nk2': [0.0, 1.0],
+        'email\nk3': [1.0, 1.0],
+        'email\nk4': [1.0, -1.0],
+      };
+
+      final pairs = pairCosinesOf(vectors: vectors, goldByThread: gold);
+
+      // Six unordered pairs: one inside alpha, two across the two efforts,
+      // three touching the thread that files nowhere.
+      expect(pairs.sameEffort, hasLength(1));
+      expect(pairs.crossEffort, hasLength(2));
+      expect(pairs.withNone, hasLength(3));
+
+      // Sorted keys, so the answer does not depend on insertion order.
+      final reversed = <String, List<double>>{
+        for (final key in vectors.keys.toList().reversed) key: vectors[key]!,
+      };
+      final again = pairCosinesOf(vectors: reversed, goldByThread: gold);
+      expect(again.sameEffort, pairs.sameEffort);
+      expect(again.crossEffort, pairs.crossEffort);
+      expect(again.withNone, pairs.withNone);
+    });
+  });
+
   group('the tally', () {
     SweepTally tally({
       Map<String, double?> purity = const {'sl-1': 1.0, 'sl-2': 0.5},
       Map<String, double> coverage = const {'river-office-lease': 0.5},
       Map<String, int> forbidden = const {'studio-website-redesign': 2},
+      Map<String, ClusterPurity> clusters = const {},
     }) =>
         SweepTally(
           formed: 2,
@@ -357,7 +487,27 @@ void main() {
             'person': 0,
             'category': 0,
           },
+          clusterPurity: clusters,
+          sameEffortBins: const [0, 0, 0, 0, 0],
+          crossEffortBins: const [0, 0, 0, 0, 0],
+          withNoneBins: const [0, 0, 0, 0, 0],
         );
+
+    /// Two judged clusters: a formed one wholly inside one effort and a
+    /// declined one that was half another. Built through the real arithmetic
+    /// so the printed line is the line the bench prints.
+    final judgedClusters = clusterPurityByOutcome(
+      [
+        (threads: [t('k1'), t('k2')], outcome: 'formed'),
+        (threads: [t('k3'), t('k4')], outcome: 'incoherent'),
+      ],
+      {
+        t('k1'): 'alpha-effort',
+        t('k2'): 'alpha-effort',
+        t('k3'): 'beta-effort',
+        t('k4'): 'alpha-effort',
+      },
+    );
 
     test('the means are over the entries that have one', () {
       expect(tally().purityMean, closeTo(0.75, 1e-9));
@@ -422,6 +572,74 @@ void main() {
       expect(json['folded'], 6);
     });
 
+    test('the JSON carries clusters by outcome and the pair bins by name', () {
+      final json = SweepTally(
+        formed: 1,
+        tombstoned: 1,
+        lintRejected: 0,
+        incoherent: 1,
+        seriesSeeded: 0,
+        seriesExcluded: 0,
+        outliersDropped: 0,
+        fragmentsJoined: 0,
+        fragmentsFolded: 0,
+        purityByStoryline: const {},
+        coverageBySlug: const {},
+        largestShare: 0,
+        correctPositives: 0,
+        forbiddenByAnti: const {},
+        unmapped: 0,
+        filedNowhere: 0,
+        callsByKind: const {},
+        callsPerPass: const [],
+        wallPerPassMs: const [],
+        cosineBins: const [0, 0, 0, 0, 0],
+        lintCounts: const {},
+        clusterPurity: judgedClusters,
+        sameEffortBins: const [0, 0, 1, 0, 0],
+        crossEffortBins: const [2, 0, 0, 0, 0],
+        withNoneBins: const [0, 0, 0, 3, 0],
+      ).toJson();
+
+      final clusters = json['clusters']! as Map;
+      expect(clusters.keys, ['formed', 'incoherent', 'declined']);
+      expect((clusters['formed']! as Map)['mean'], closeTo(1.0, 1e-9));
+      expect((clusters['formed']! as Map)['pure_at_100'], 1);
+      expect((clusters['incoherent']! as Map)['mean'], closeTo(0.5, 1e-9));
+      expect((clusters['declined']! as Map)['sizes'], [2]);
+
+      expect(json['pair_bins'], {
+        'same_effort': {
+          '<0.50': 0,
+          '0.50-0.55': 0,
+          '0.55-0.60': 1,
+          '0.60-0.65': 0,
+          '>=0.65': 0,
+        },
+        'cross_effort': {
+          '<0.50': 2,
+          '0.50-0.55': 0,
+          '0.55-0.60': 0,
+          '0.60-0.65': 0,
+          '>=0.65': 0,
+        },
+        'with_none': {
+          '<0.50': 0,
+          '0.50-0.55': 0,
+          '0.55-0.60': 0,
+          '0.60-0.65': 3,
+          '>=0.65': 0,
+        },
+      });
+    });
+
+    test('the declined bucket is not counted twice in clusters judged', () {
+      // Two clusters judged, three entries in the map: `declined` unions one
+      // of them and summing every entry would report three.
+      expect(tally(clusters: judgedClusters).clustersJudged, 2);
+      expect(tally().clustersJudged, 0);
+    });
+
     test('the printed table names no slug and no storyline', () {
       final printed = tally().table();
 
@@ -442,6 +660,43 @@ void main() {
       expect(printed, contains('outliers dropped 3'));
       expect(printed, contains('fragments 4'));
       expect(printed, contains('folded 6'));
+      // A run that judged nothing still prints all five columns and says so.
+      expect(
+        printed,
+        contains(
+            'clusters judged 0  formed 0  incoherent 0  lint 0  thin 0  '
+            'answered 0'),
+      );
+      expect(printed, contains('purity before naming  formed: none'));
+      expect(printed, contains('declined: none'));
+      expect(
+        printed,
+        contains('pool pairs by cosine  same effort  <0.50 0'),
+      );
+
+      // The same three lines with clusters in them, which is where a thread
+      // key would leak if one ever reached the printed side.
+      final withClusters = tally(clusters: judgedClusters).table();
+      expect(
+        withClusters,
+        contains(
+            'clusters judged 2  formed 1  incoherent 1  lint 0  thin 0  '
+            'answered 0'),
+      );
+      expect(
+        withClusters,
+        contains('purity before naming  formed: 1 clusters, mean 100% over 1, '
+            '>=70% 1, 100% 1'),
+      );
+      expect(
+        withClusters,
+        contains('declined: 1 clusters, mean 50% over 1, >=70% 0, 100% 0'),
+      );
+      for (final key in ['k1', 'k2', 'k3', 'k4']) {
+        expect(withClusters, isNot(contains(t(key))));
+      }
+      expect(withClusters, isNot(contains('alpha-effort')));
+      expect(withClusters, isNot(contains('beta-effort')));
     });
   });
 }

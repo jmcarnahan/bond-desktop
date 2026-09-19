@@ -1,4 +1,5 @@
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/storyline_lint.dart';
 
 import 'golden_set.dart';
@@ -298,6 +299,223 @@ Map<String, int> charterLintCounts(List<LintCandidate> storylines) {
   return counts;
 }
 
+/// One report from the service's `clusterObserver` seam: a cluster the sweep
+/// asked about, and the one word for what became of it.
+///
+/// [threads] are [threadKeyOf] keys, the cluster as the clustering formed it —
+/// before the namer's outliers narrowed it and without the fragment siblings
+/// that ride its members. The words are the seam's five: `formed`,
+/// `incoherent`, `lint`, `thin`, `answered`.
+typedef JudgedCluster = ({List<String> threads, String outcome});
+
+/// The clusters behind [judged], one entry per distinct thread set.
+///
+/// The keep-all loop re-runs the sweep until a pass proposes nothing, so a
+/// cluster the first pass tombstoned is rebuilt identically on the second and
+/// reported again as `answered` — the same group, judged once and recognised
+/// afterwards. Counting both would say the sweep formed twice as many clusters
+/// as it did, so the reports are de-duplicated by their SORTED thread keys.
+///
+/// The first report of a set wins, with one exception: an `answered` yields to
+/// the first report that says what the models actually decided, whichever pass
+/// carried it. A set that was only ever `answered` stays `answered` — the
+/// tombstone was written before this run and there is no verdict to recover.
+/// Output is in first-seen order.
+List<JudgedCluster> distinctClusters(Iterable<JudgedCluster> judged) {
+  final order = <String>[];
+  final bySet = <String, JudgedCluster>{};
+  for (final cluster in judged) {
+    // NUL, because no thread key can carry one: a plain separator would let
+    // two different sets collide into one id.
+    final id = (cluster.threads.toList()..sort()).join('\u0000');
+    final held = bySet[id];
+    if (held == null) {
+      order.add(id);
+      bySet[id] = cluster;
+      continue;
+    }
+    if (held.outcome == 'answered' && cluster.outcome != 'answered') {
+      bySet[id] = cluster;
+    }
+  }
+  return [for (final id in order) bySet[id]!];
+}
+
+/// How pure a set of clusters was BEFORE the namer saw them.
+///
+/// The one number Phase 5 could not read: the store keeps no record of a
+/// cluster the namer declined beyond its tombstone hash, so a namer that
+/// refuses gold-pure groups and a clustering that builds mixed ones look
+/// identical from the outside. Read per outcome, the two come apart — pure
+/// declined clusters accuse the naming rule, mixed ones accuse the clustering.
+class ClusterPurity {
+  /// Clusters in this bucket, the ones with nothing to say about purity
+  /// included.
+  final int clusters;
+
+  /// How many of them carry at least one gold slug, which is how many
+  /// [mean] is over.
+  final int withCarrier;
+
+  /// The mean plurality share over [withCarrier] clusters. 0 when none carry a
+  /// slug, which is a statement about the denominator and not about purity.
+  final double mean;
+
+  /// Clusters whose share is at least 0.7 — the "mostly one effort" line.
+  final int pureAt70;
+
+  /// Clusters whose members all carry the same slug.
+  final int pureAt100;
+
+  /// Each cluster's share in input order, null where no member carries a slug.
+  /// [toJson] alone; no key and no slug rides it.
+  final List<double?> shares;
+
+  /// Each cluster's size in input order, counted as the sweep formed it.
+  final List<int> sizes;
+
+  const ClusterPurity({
+    required this.clusters,
+    required this.withCarrier,
+    required this.mean,
+    required this.pureAt70,
+    required this.pureAt100,
+    required this.shares,
+    required this.sizes,
+  });
+
+  /// [purityOf] over every cluster, summarised.
+  ///
+  /// A cluster no member of which carries a gold slug counts in [clusters] and
+  /// [sizes] and in nothing else: it is not a dirty cluster, it is one there is
+  /// nothing to be pure about, and averaging a zero in would report the
+  /// clustering as worse than it was.
+  factory ClusterPurity.of(
+    Iterable<JudgedCluster> clusters,
+    Map<String, String> goldByThread,
+  ) {
+    final shares = <double?>[];
+    final sizes = <int>[];
+    for (final cluster in clusters) {
+      shares.add(purityOf(cluster.threads, goldByThread));
+      sizes.add(cluster.threads.length);
+    }
+    final carried = shares.whereType<double>().toList();
+    return ClusterPurity(
+      clusters: shares.length,
+      withCarrier: carried.length,
+      mean: carried.isEmpty
+          ? 0
+          : carried.fold(0.0, (sum, v) => sum + v) / carried.length,
+      pureAt70: carried.where((share) => share >= 0.7).length,
+      pureAt100: carried.where((share) => share >= 1.0).length,
+      shares: shares,
+      sizes: sizes,
+    );
+  }
+
+  Map<String, Object?> toJson() => {
+        'clusters': clusters,
+        'with_carrier': withCarrier,
+        'mean': mean,
+        'pure_at_70': pureAt70,
+        'pure_at_100': pureAt100,
+        'shares': shares,
+        'sizes': sizes,
+      };
+
+  /// Counts and ratios, for the printed table.
+  String line() => '$clusters clusters, mean ${pct(mean)} over $withCarrier, '
+      '>=70% $pureAt70, 100% $pureAt100';
+}
+
+/// The outcome words present in [distinct], each with its clusters' purity.
+///
+/// In the seam's own order, absent words skipped, and with one derived bucket:
+/// `declined` is every cluster the sweep judged and did not ship — the namer's
+/// refusals, the lint's, and the groups the confirms thinned out — which is the
+/// bucket `formed` is read against. It overlaps the three it unions, so
+/// [SweepTally.clustersJudged] leaves it out.
+Map<String, ClusterPurity> clusterPurityByOutcome(
+  List<JudgedCluster> distinct,
+  Map<String, String> goldByThread,
+) {
+  const order = ['formed', 'incoherent', 'lint', 'thin', 'answered'];
+  const declinedWords = {'incoherent', 'lint', 'thin'};
+  final byOutcome = <String, ClusterPurity>{};
+  for (final outcome in order) {
+    final bucket = [
+      for (final cluster in distinct)
+        if (cluster.outcome == outcome) cluster,
+    ];
+    if (bucket.isEmpty) continue;
+    byOutcome[outcome] = ClusterPurity.of(bucket, goldByThread);
+  }
+  final declined = [
+    for (final cluster in distinct)
+      if (declinedWords.contains(cluster.outcome)) cluster,
+  ];
+  if (declined.isNotEmpty) {
+    byOutcome['declined'] = ClusterPurity.of(declined, goldByThread);
+  }
+  return byOutcome;
+}
+
+/// Every pool pair's cosine, split by whether the two threads are the same
+/// gold effort.
+///
+/// The separability read, and the ceiling on every threshold the clustering
+/// could be given: a floor that keeps the in-effort pairs and drops the rest
+/// exists only where [sameEffort] sits above [crossEffort]. If the three
+/// populations lie on top of each other, no threshold separates them and the
+/// vector is what has to change.
+///
+/// [withNone] is every pair at least one side of which gold files nowhere or
+/// carries no slug at all. Kept apart from [crossEffort] because the two ask
+/// different questions: two efforts that should not be joined, against a
+/// thread that belongs to no effort in the first place.
+({List<double> sameEffort, List<double> crossEffort, List<double> withNone})
+    pairCosinesOf({
+  required Map<String, List<double>> vectors,
+  required Map<String, String> goldByThread,
+}) {
+  final sameEffort = <double>[];
+  final crossEffort = <double>[];
+  final withNone = <double>[];
+  // Sorted, so the three populations do not depend on the order the caller
+  // happened to build the map in.
+  final keys = vectors.keys.toList()..sort();
+  String? slugOf(String key) {
+    final slug = goldByThread[key];
+    if (slug == null || slug.isEmpty || slug == noneId) return null;
+    return slug;
+  }
+
+  for (var i = 0; i < keys.length; i++) {
+    for (var j = i + 1; j < keys.length; j++) {
+      final value = cosine(vectors[keys[i]]!, vectors[keys[j]]!);
+      final a = slugOf(keys[i]);
+      final b = slugOf(keys[j]);
+      if (a == null || b == null) {
+        withNone.add(value);
+      } else if (a == b) {
+        sameEffort.add(value);
+      } else {
+        crossEffort.add(value);
+      }
+    }
+  }
+  return (
+    sameEffort: sameEffort,
+    crossEffort: crossEffort,
+    withNone: withNone,
+  );
+}
+
+/// A share as a whole percent. Top-level because the cluster purity lines and
+/// the tally's own both print one.
+String pct(double share) => '${(share * 100).round()}%';
+
 /// What one sweep replay did, counted.
 ///
 /// Built once at the end of the run rather than accumulated, because every
@@ -393,6 +611,21 @@ class SweepTally {
   /// lint, or the two readings disagree.
   final Map<String, int> lintCounts;
 
+  /// Outcome word to the purity of the clusters the sweep judged under it,
+  /// read BEFORE the namer narrowed or refused any of them. Carries the
+  /// derived `declined` bucket as well as the seam's five words; see
+  /// [clusterPurityByOutcome].
+  final Map<String, ClusterPurity> clusterPurity;
+
+  /// Pool pairs whose two threads are the same gold effort, by cosine bin.
+  final List<int> sameEffortBins;
+
+  /// Pool pairs whose two threads are two different gold efforts, by bin.
+  final List<int> crossEffortBins;
+
+  /// Pool pairs at least one side of which gold files nowhere, by bin.
+  final List<int> withNoneBins;
+
   const SweepTally({
     required this.formed,
     required this.tombstoned,
@@ -415,6 +648,10 @@ class SweepTally {
     required this.wallPerPassMs,
     required this.cosineBins,
     required this.lintCounts,
+    required this.clusterPurity,
+    required this.sameEffortBins,
+    required this.crossEffortBins,
+    required this.withNoneBins,
   });
 
   /// The mean of [purityByStoryline] over the storylines that HAVE one.
@@ -434,6 +671,14 @@ class SweepTally {
 
   int get forbiddenHits =>
       forbiddenByAnti.values.fold(0, (sum, count) => sum + count);
+
+  /// How many distinct clusters the sweep asked a verdict about.
+  ///
+  /// `declined` is skipped: it is a union of three buckets that are already
+  /// counted, so summing every entry would count each refused cluster twice.
+  int get clustersJudged => clusterPurity.entries
+      .where((entry) => entry.key != 'declined')
+      .fold(0, (sum, entry) => sum + entry.value.clusters);
 
   static double _mean(Iterable<double> values) {
     if (values.isEmpty) return 0;
@@ -475,6 +720,20 @@ class SweepTally {
             cosineBinLabels[i]: cosineBins[i],
         },
         'lint': lintCounts,
+        'clusters': {
+          for (final entry in clusterPurity.entries)
+            entry.key: entry.value.toJson(),
+        },
+        'pair_bins': {
+          'same_effort': _binsJson(sameEffortBins),
+          'cross_effort': _binsJson(crossEffortBins),
+          'with_none': _binsJson(withNoneBins),
+        },
+      };
+
+  static Map<String, int> _binsJson(List<int> bins) => {
+        for (var i = 0; i < cosineBinLabels.length; i++)
+          cosineBinLabels[i]: bins[i],
       };
 
   /// Counts, ratios and enums. No slug and no storyline title: the per-slug
@@ -490,27 +749,46 @@ class SweepTally {
     final lint = [
       for (final entry in lintCounts.entries) '${entry.key} ${entry.value}',
     ].join('  ');
+    String binsOf(List<int> counts) => [
+          for (var i = 0; i < cosineBinLabels.length; i++)
+            '${cosineBinLabels[i]} ${counts[i]}',
+        ].join('  ');
+    // A word the run never saw prints a zero rather than vanishing: a reader
+    // comparing two ledger rows has to see the same five columns on both.
+    int clustersAt(String outcome) => clusterPurity[outcome]?.clusters ?? 0;
+    String purityAt(String outcome) =>
+        clusterPurity[outcome]?.line() ?? 'none';
     return 'sweep:\n'
         '  storylines  formed $formed  tombstoned $tombstoned'
         '  lint-rejected $lintRejected  incoherent $incoherent\n'
         '  series  seeded $seriesSeeded  excluded $seriesExcluded'
         '  outliers dropped $outliersDropped  fragments $fragmentsJoined'
         '  folded $fragmentsFolded\n'
-        '  purity mean ${_pct(purityMean)} over $purityWithCarrier of '
+        '  purity mean ${pct(purityMean)} over $purityWithCarrier of '
         '${purityByStoryline.length} storylines   '
-        'coverage mean ${_pct(coverageMean)} over '
+        'coverage mean ${pct(coverageMean)} over '
         '${coverageBySlug.length} gold efforts\n'
-        '  largest storyline ${_pct(largestShare)} of all filed threads\n'
+        '  largest storyline ${pct(largestShare)} of all filed threads\n'
         '  items  correct positives $correctPositives  unmapped $unmapped'
         '  filed nowhere $filedNowhere  forbidden hits $forbiddenHits '
         'over ${forbiddenByAnti.length} buckets\n'
         '  calls  $calls   per pass ${callsPerPass.join(', ')}\n'
         '  wall per pass ms ${wallPerPassMs.join(', ')}\n'
         '  in-cluster cosines  $bins\n'
+        '  clusters judged $clustersJudged'
+        '  formed ${clustersAt('formed')}'
+        '  incoherent ${clustersAt('incoherent')}'
+        '  lint ${clustersAt('lint')}'
+        '  thin ${clustersAt('thin')}'
+        '  answered ${clustersAt('answered')}\n'
+        '  purity before naming  formed: ${purityAt('formed')}\n'
+        '                        declined: ${purityAt('declined')}\n'
+        '  pool pairs by cosine  same effort  ${binsOf(sameEffortBins)}'
+        '   cross effort  ${binsOf(crossEffortBins)}'
+        '   with none  ${binsOf(withNoneBins)}\n'
         '  charter lint over live storylines (should be 0)  $lint';
   }
 
-  static String _pct(double share) => '${(share * 100).round()}%';
 }
 
 /// The coverage map: for every gold effort with at least two golden threads,

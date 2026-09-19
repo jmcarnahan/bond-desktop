@@ -449,6 +449,35 @@ void main() {
       expect(await store.workCounts('storyline_sweep'), {'pending': 1});
     });
 
+    test('the fast lane leaves the sweep alone after a drain that did nothing',
+        () async {
+      // The other half of the `lastDrainCount > 0` guard, and the common case:
+      // `onDrained` fires after an EMPTY drain too, so an ungated requeue
+      // would run a whole sweep after every idle pump. Same wiring as the test
+      // above, same two idle lanes, and nothing enqueued.
+      final idleStoryline =
+          AiWorker(store, handlers: const [], gate: DrainGate());
+      final idleDraft = AiWorker(store, handlers: const [], gate: DrainGate());
+      addTearDown(idleStoryline.dispose);
+      addTearDown(idleDraft.dispose);
+      final container = ProviderContainer(
+        overrides: [
+          dbProvider.overrideWithValue(db),
+          storylineWorkerProvider.overrideWithValue(idleStoryline),
+          draftWorkerProvider.overrideWithValue(idleDraft),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
+
+      await container.read(aiWorkerProvider).pump();
+      await pumpEventQueue();
+
+      // No row of that kind at all — `workCounts` groups by status over the
+      // rows that exist, so a sweep that was never queued is an empty map.
+      expect(await store.workCounts('storyline_sweep'), isEmpty);
+    });
+
     test('each lane drains exactly the kinds it owns', () async {
       final container = ProviderContainer(
         overrides: [dbProvider.overrideWithValue(db)],

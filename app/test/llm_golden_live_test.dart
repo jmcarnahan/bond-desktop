@@ -1070,6 +1070,15 @@ void main() {
   /// into a run file `make golden-score` reads with the toolkit's own rules.
   /// `make golden-baseline` resolves the app's stored TITLE to a slug instead;
   /// the two are the same stage read two ways.
+  ///
+  /// **Two readings ride alongside since Round D Phase 6.** The bench watches
+  /// every cluster BEFORE the namer sees it, through the service's
+  /// `clusterObserver` seam, and prints each one's gold purity by what the
+  /// sweep then did with it — which is what tells a namer that declines pure
+  /// groups from a clustering that builds mixed ones. It also prints the
+  /// cosine of every pool pair, split by whether the two threads share a gold
+  /// effort, which is the ceiling any threshold could reach. Both are counts
+  /// only; the per-cluster shares stay in the result JSON.
   test(
     'the golden set through the sweep and the assign shortlist',
     () async {
@@ -1179,6 +1188,11 @@ void main() {
         // app's.
         final log = ActivityLog(store);
         addTearDown(log.dispose);
+        // Every cluster the sweep judged, as it was formed and before the
+        // namer narrowed or refused it. The store keeps no record of a
+        // declined cluster, so this seam is the only place its gold purity can
+        // be read from.
+        final judged = <JudgedCluster>[];
         final service = StorylineService(
           store,
           BenchTarget.prose.client(onCall: nameCollector.record)
@@ -1197,6 +1211,13 @@ void main() {
                   name: GoldenDefines.ownerName,
                   address: GoldenDefines.ownerAddress
                 ),
+          clusterObserver: (threads, outcome) => judged.add((
+            threads: [
+              for (final thread in threads)
+                threadKeyOf(thread.source, thread.key),
+            ],
+            outcome: outcome,
+          )),
         );
 
         // The room cap is a `static const` of three, so the loop KEEPS what it
@@ -1338,6 +1359,21 @@ void main() {
           }
         }
 
+        // The two Phase 6 readings, both pure arithmetic over what is already
+        // in hand. The keep-all loop re-runs the sweep until nothing is
+        // proposed, so one cluster is reported once per pass and
+        // `distinctClusters` folds the repeats back to one.
+        final distinct = distinctClusters(judged);
+        final clusterPurity = clusterPurityByOutcome(distinct, goldByThread);
+        // Over the WHOLE pool and not just the clusters: the question is
+        // whether any threshold could have separated the in-effort pairs from
+        // the rest, and the pairs the clustering never joined are most of the
+        // evidence for that.
+        final pairs = pairCosinesOf(
+          vectors: vectors,
+          goldByThread: goldByThread,
+        );
+
         // What SURVIVED that the lint would still refuse. Since Phase 3 the
         // naming pass tombstones a lint hit before its confirms, so this reads
         // over the live storylines and should be zero; a non-zero entry is a
@@ -1433,6 +1469,10 @@ void main() {
           wallPerPassMs: wallPerPassMs,
           cosineBins: cosineBins(withinCluster),
           lintCounts: lintCounts,
+          clusterPurity: clusterPurity,
+          sameEffortBins: cosineBins(pairs.sameEffort),
+          crossEffortBins: cosineBins(pairs.crossEffort),
+          withNoneBins: cosineBins(pairs.withNone),
         );
 
         final wall = DateTime.now().difference(startedAt);

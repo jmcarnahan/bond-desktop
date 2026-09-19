@@ -529,7 +529,6 @@ class ExtractHandler extends WorkHandler {
     // would mean each thread is only ever considered on its first message.
     await _store.requeueWork('storyline', source, key);
   }
-
 }
 
 /// Whether a stored message looks, on its own row, like something the user
