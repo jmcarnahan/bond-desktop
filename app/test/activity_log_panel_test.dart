@@ -1121,6 +1121,151 @@ void main() {
       );
     });
 
+    test('a deferred sweep says what it is waiting for', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {
+            'deferred': 'unsettled',
+            'extract': 42,
+            'embed': 7,
+            'triage': 0,
+          },
+        )),
+        'Storyline sweep — deferred, mailbox unsettled: extract 42, embed 7, '
+        'triage 0',
+      );
+      // A key that is not a number is left out rather than printed as null.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {'deferred': 'unsettled', 'embed': 30},
+        )),
+        'Storyline sweep — deferred, mailbox unsettled: embed 30',
+      );
+      // The expiry runs before the deferral, so the two arrive together.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {
+            'deferred': 'unsettled',
+            'extract': 11,
+            'embed': 0,
+            'triage': 0,
+            'expired': 2,
+          },
+        )),
+        'Storyline sweep — deferred, mailbox unsettled: extract 11, embed 0, '
+        'triage 0, 2 expired',
+      );
+    });
+
+    test('a sweep says what it expired and what rode in as a fragment', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {
+            'proposed': 1,
+            'confirmed': 3,
+            'rejected': 0,
+            'joined': 0,
+            'fragments': 2,
+            'expired': 1,
+          },
+        )),
+        'Storyline sweep — 1 proposed, 3 threads confirmed, 0 rejected, '
+        '0 joined, 2 fragments, 1 expired',
+      );
+      // One fragment is a fragment, and `expired` has no plural to get wrong.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {
+            'proposed': 1,
+            'confirmed': 2,
+            'rejected': 0,
+            'joined': 0,
+            'fragments': 1,
+          },
+        )),
+        'Storyline sweep — 1 proposed, 2 threads confirmed, 0 rejected, '
+        '0 joined, 1 fragment',
+      );
+      // Zero fragments is the ordinary pass and says nothing.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {
+            'proposed': 1,
+            'confirmed': 2,
+            'rejected': 0,
+            'joined': 0,
+            'fragments': 0,
+          },
+        )),
+        'Storyline sweep — 1 proposed, 2 threads confirmed, 0 rejected, '
+        '0 joined',
+      );
+    });
+
+    test('a sweep that folded rows but shipped none of them says so', () {
+      // `fragments` counts the siblings that JOINED and `folded` counts every
+      // row the rule folded, so a pass whose cluster was turned down still
+      // reports the folding it did.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {
+            'proposed': 0,
+            'confirmed': 0,
+            'rejected': 0,
+            'joined': 0,
+            'fragments': 0,
+            'folded': 2,
+          },
+        )),
+        'Storyline sweep — 0 proposed, 0 threads confirmed, 0 rejected, '
+        '0 joined, 2 folded',
+      );
+      // All three of the sometimes-counts on one row, in the order the pass
+      // produced them.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {
+            'proposed': 1,
+            'confirmed': 3,
+            'rejected': 0,
+            'joined': 0,
+            'fragments': 2,
+            'folded': 3,
+            'expired': 1,
+          },
+        )),
+        'Storyline sweep — 1 proposed, 3 threads confirmed, 0 rejected, '
+        '0 joined, 2 fragments, 3 folded, 1 expired',
+      );
+    });
+
+    test('a pass that only expired still has a sentence', () {
+      // Every early return in the sweep is behind the expiry, so a row whose
+      // detail is nothing but this key is a shape that actually happens.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {'expired': 3},
+        )),
+        'Storyline sweep — 3 expired',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {'expired': 0},
+        )),
+        'Storyline sweep',
+      );
+    });
+
     test('a recruit says how many of its candidates it took', () {
       expect(
         ActivityLogPanel.describe(_event(

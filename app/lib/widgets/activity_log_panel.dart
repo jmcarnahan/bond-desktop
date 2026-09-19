@@ -315,24 +315,7 @@ class ActivityLogPanel extends StatefulWidget {
             ? '$label — one-shot: ${parts.join('; ')}'
             : '$label — ${parts.join('; ')}';
       case 'storyline_sweep':
-        final proposed = detail['proposed'];
-        final confirmed = detail['confirmed'];
-        final rejected = detail['rejected'];
-        if (proposed is! num) return label;
-        // The tallies the confirm stage added, when the row carries them. Rows
-        // written before it existed have only `proposed`, and they still read
-        // as the sentence they were written as.
-        if (confirmed is! num || rejected is! num) {
-          return '$label — ${proposed.toInt()} proposed';
-        }
-        final sentence = '$label — ${proposed.toInt()} proposed, '
-            '${confirmed.toInt()} ${confirmed == 1 ? 'thread' : 'threads'} '
-            'confirmed, ${rejected.toInt()} rejected';
-        // The same degradation once more, for the finished threads the
-        // post-birth probe pulled in. Rows written before the probe existed
-        // end at "rejected", exactly as they were written.
-        final joined = detail['joined'];
-        return joined is num ? '$sentence, ${joined.toInt()} joined' : sentence;
+        return _sweepSentence(label, detail);
       // Neither attachment row can name its file: the entity is
       // `<message id>|<attachment id>`, and the name lives on a table this
       // panel does not read. So each says what it produced instead — the
@@ -409,6 +392,70 @@ class ActivityLogPanel extends StatefulWidget {
       default:
         return label;
     }
+  }
+
+  /// The sweep's one sentence, out of [describe]'s switch because it is the
+  /// longest case by far and every one of its branches is a row shape some
+  /// build of the app actually wrote.
+  static String _sweepSentence(String label, Map<String, Object?> detail) {
+    final proposed = detail['proposed'];
+    final confirmed = detail['confirmed'];
+    final rejected = detail['rejected'];
+    // How many suggestions the pass expired, on whatever sentence follows.
+    // It runs before every early return the pass has, so it is the one
+    // count that can arrive with nothing else beside it.
+    final expired = detail['expired'];
+    final expiredText =
+        expired is num && expired > 0 ? '${expired.toInt()} expired' : '';
+    // The pass stood down over an unsettled mailbox. A string rather than
+    // a count, which is also what keeps the row out of the log's quiet
+    // suppression, so it is read before anything numeric.
+    final deferred = detail['deferred'];
+    if (deferred is String) {
+      final backlog = [
+        for (final stage in ['extract', 'embed', 'triage'])
+          if (detail[stage] case final num n) '$stage ${n.toInt()}',
+      ].join(', ');
+      final sentence = backlog.isEmpty
+          ? '$label — deferred, mailbox unsettled'
+          : '$label — deferred, mailbox unsettled: $backlog';
+      return expiredText.isEmpty ? sentence : '$sentence, $expiredText';
+    }
+    // A pass that expired something and then returned before any cluster
+    // reached the model writes this key and no other.
+    if (proposed is! num) {
+      return expiredText.isEmpty ? label : '$label — $expiredText';
+    }
+    // The tallies the confirm stage added, when the row carries them. Rows
+    // written before it existed have only `proposed`, and they still read
+    // as the sentence they were written as.
+    if (confirmed is! num || rejected is! num) {
+      final short = '$label — ${proposed.toInt()} proposed';
+      return expiredText.isEmpty ? short : '$short, $expiredText';
+    }
+    var sentence = '$label — ${proposed.toInt()} proposed, '
+        '${confirmed.toInt()} ${confirmed == 1 ? 'thread' : 'threads'} '
+        'confirmed, ${rejected.toInt()} rejected';
+    // The same degradation once more, for the finished threads the
+    // post-birth probe pulled in. Rows written before the probe existed
+    // end at "rejected", exactly as they were written.
+    final joined = detail['joined'];
+    if (joined is num) sentence = '$sentence, ${joined.toInt()} joined';
+    // The three counts a pass only sometimes has, appended rather than
+    // folded in: a zero of any of them is the ordinary case and says
+    // nothing worth a clause. `fragments` is what JOINED a storyline and
+    // `folded` is every row the rule folded, so a pass can read `0
+    // proposed … 2 folded` when nothing it folded went on to ship.
+    final fragments = detail['fragments'];
+    if (fragments is num && fragments > 0) {
+      sentence = '$sentence, ${fragments.toInt()} '
+          '${fragments == 1 ? 'fragment' : 'fragments'}';
+    }
+    final folded = detail['folded'];
+    if (folded is num && folded > 0) {
+      sentence = '$sentence, ${folded.toInt()} folded';
+    }
+    return expiredText.isEmpty ? sentence : '$sentence, $expiredText';
   }
 
   /// The pieces of a sentence that are actually present, joined the one way

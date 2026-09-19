@@ -66,7 +66,9 @@ recap after the sweep. See [10-model-routing.md](10-model-routing.md).
    reasons write one, listed once under *How the sweep finds its pairs*.
    Finished
    threads are held out of the clustering and offered to the newborn storyline
-   afterwards instead — "join, not seed", its own section below.
+   afterwards instead — "join, not seed", its own section below. It runs only
+   over a settled mailbox and it expires stale suggestions before it decides
+   that, both under *When the sweep runs* below.
 3. **Refresh** (`StorylineRefreshHandler` → `refresh`) — re-describes a
    storyline whose membership has moved. Its own section below.
 4. **Audit** (`StorylineAuditHandler` → `audit`) — re-judges the threads the
@@ -707,6 +709,71 @@ line saying why the thread is here
 hand-filed member, the model's own sentence for an automatic one, and nothing
 at all where an automatic row has none. "Grouped automatically." was filler.
 
+## When the sweep runs
+
+**Three things arm it, and none of them runs it.** Both syncs end with
+`MessageStore.requeueSweep()`, which is the one row that sweeps the mailbox:
+task kind `storyline_sweep`, entity id `sweep`, under the historical label
+`email`, which is a row name and not a scope. The fast lane calls the same
+method after any drain whose `AiWorker.lastDrainCount` is above zero, before it
+wakes the storyline lane. A person's own actions queue their own passes and
+never this one. `requeueWork` revives a `done` or an `error` row only, so a
+sweep that is `processing` is at the server and is never doubled, and nothing
+here passes `refreshCreatedAt`: the pipeline noticing that the mailbox moved is
+not a person asking for something now.
+
+**The order inside the pass is an argument.** First the two catch-ups, the
+refresh and the recap, because they heal wakeups that were LOST and the pass
+returns early on most sweeps. Then the expiry. Then the settle gate. Then the
+room count and everything the sweep is actually for. The expiry sits ahead of
+the gate deliberately: a mailbox that never settles is exactly the one whose
+rail fills with proposals nobody answered, and an expiry behind the gate would
+never run on it, so the deadlock the expiry exists to break would survive the
+thing meant to break it.
+
+**The settle gate.** The sweep that formed every storyline on screen in
+September 2026 ran over a quarter-synced mailbox. A first sync queues thousands
+of extractions and the pool grows for as long as they drain, so clustering
+early proposes the storylines the first tenth of a mailbox happens to hold,
+then tombstones them when the model says no, and can never ask again once the
+rest arrives, because the tombstone recognises the cluster by its hash. So the
+pass reads the backlog once and stands down while any of three floors is
+exceeded.
+
+| stage | floor | what is counted |
+|---|---|---|
+| extract | 10 | `work_items` rows of kind `extract`, pending plus processing |
+| embed | 25 | `work_items` rows of kind `embed_message`, pending plus processing |
+| triage | 20 | `messages` whose `triage_status` is pending or processing |
+
+All three come from ONE `MessageStore.pipelinePulse` call, which already
+returns per-kind queue counts and the triage count across three tables, so the
+gate costs no query the pass could not already make. It is read over
+`AiWorker.sources` rather than the service's own connector list, because what
+is being measured is the backlog the worker drains, and the worker's list is
+the one that grows the day a connector is added. The comparison is strictly
+greater than the floor, so a backlog sitting exactly at one of these numbers is
+settled enough. A pass that stands down notes `deferred: unsettled` with the
+three counts and returns, and its work row closes `done` like any other sweep.
+The triage count filters on no direction and needs none:
+`triageStatusOnInsert(outbound: true)` writes every outbound row `skipped` at
+the moment it is inserted, so a row still at `pending` is an inbound one
+waiting to be judged.
+
+**Suggestions expire.** At most `maxPendingSuggestions`, three, unanswered
+proposals may sit in the rail at once, and the sweep's room count is what
+enforces it. A suggestion nobody ever answers holds its slot for the life of
+the mailbox, so three of them and the room is zero on every future pass: the
+app quietly stops proposing anything at all, with no error anywhere. The expiry
+is what keeps the room moving. An automatic suggestion proposed more than
+`suggestionTtlDays`, fourteen days, ago goes to `dismissed`, and the count
+lands on the activity row as `expired`. Nothing is rebuilt and nothing is
+deleted: the row becomes the tombstone it has carried since it was written, its
+members stay exactly as a dismissal leaves them, the threads return to the pool
+because `assignedOrBlockedKeys` counts suggested and active memberships only,
+and **Restore** lifts an expiry like any other dismissal. It never touches an
+`active` storyline, which somebody kept, and never one a person made.
+
 ## How the sweep finds its pairs
 
 **The pool is kept-inbound conversations, not the embedding table.**
@@ -774,6 +841,72 @@ same per-member confirms as any cluster. The counts land on the activity row as
 `message_count`, `inbound_count` and `newest_kept_from`, are the ones
 `conversationsWithEmbeddings` gained for it; the last is a correlated subquery
 over the kept inbound messages and costs no schema change.
+
+### Fragments ride together
+
+A reply-all that forked, a subject somebody re-sent to a second list, a meeting
+cancelled and re-booked: the connectors mint a conversation key each, and the
+sweep sees three pool rows where a person sees one thread. Each would otherwise
+take a numbered card in the naming call and a confirm of its own, and the group
+they land in is described as though they were three separate efforts.
+
+Two pool rows are fragments of one thread when they share a `fragmentKeyFor`
+subject AND a participant set, the lower-cased displays sorted, AND a
+`last_message_at` within `fragmentWindowDays`, fourteen days, of the row that
+already stands for them. `fragmentKeyFor` is NOT `seriesKeyFor`, and the
+difference is the whole reason there are two keys. It folds only what a mail
+client adds on the way
+past: the leading `Re:` and `Fw:` markers, letter case, and whitespace runs.
+Dates, ticket ids and bare digit runs are KEPT. A re-send and a reply-all fork
+carry the same subject down to the date in it, while the issues of a dated
+series carry different ones, and that is exactly what makes them a series;
+folding the digits here would read three issues of a weekly digest among fixed
+people as one thread that had arrived three times. An empty subject key never
+groups, on the series rule. An empty participant set does: two threads with one
+subject and nobody named on either are the same thread as far as anything here
+can tell. The newest row of a group is its REPRESENTATIVE, because the pool
+arrives `last_message_at DESC`, and the window is measured from the
+representative rather than from the previous sibling, so one long-running
+subject cannot chain its way across months a fortnight at a time. A row whose
+stamp will not parse starts a new representative rather than joining one.
+
+The representative is what clusters, what is numbered in the naming call and
+what gets the confirm. Its siblings join on its verdict, carrying its evidence
+sentence and `added_by = 'auto'`, and the count lands on the activity row as
+`fragments`. The row also carries `folded`, every pool row that was folded
+onto a representative this pass whether or not that representative shipped,
+which is the number to read on a mailbox where many subjects differ only by a
+digit run. A sibling of a representative the confirm turned down is written
+nowhere and blocked nowhere: it goes back to the pool with the row it rode in
+with. The two size floors, `proposeMinClusterSize` and `minClusterSize`, count
+representatives only, because a fragment is not a second thread that agreed, it
+is the same thread arriving twice. `maxClusterSize` counts representatives for
+the same reason and the siblings ride in on top of it, so a storyline can be
+born holding more members than the twelve cards its description was written
+from. That is intended: a sibling is the same thread as a card the namer
+already read. A leftover beyond a seeded series' cap is the other half of it,
+and it rides in too when it is a fragment of a representative that made the
+group. The assign pass is per thread and is unchanged.
+
+The two hashes now say different things about one storyline and both are
+deliberate. `member_hash` covers the survivors and their siblings, because it
+describes who is STORED. `cluster_hash` covers the representatives alone,
+because it names the set the model was asked about, and a fourth fragment
+arriving next week must not turn a tombstoned question into a new one.
+
+The order against the series pre-pass is load-bearing. The pre-pass runs FIRST,
+on the raw rows, before anything is folded. A DATED series among fixed people is
+never a fragment group in the first place, because the fragment key keeps the
+date, so the two rules no longer compete for it. An UNDATED feed still is
+fragment-shaped: the same subject exactly, the same single sender, issues days
+apart. Folded first, three issues of one vendor's alerts would collapse to a
+single representative, never reach `seriesMinSize`, and land in the cosine pool,
+where a charter written about something else could admit every issue of the feed
+one confirm at a time. Folding afterwards has the opposite and
+intended effect on a seeded SERIES: a group that folds to fewer than
+`seriesMinSize` representatives is not seeded at all, because three issues of
+one cancelled meeting are one thread and not something recurring, and its
+representative goes back to the cosine pool.
 
 ### Three threads to propose, two to keep
 
@@ -875,9 +1008,15 @@ of 98 on the scorer, reached with 106 member confirms against 291. Purity fell
 from 71% to 51% over fourteen groups rather than seven, and coverage is still
 8%, which is what the series pre-pass and the fragment handling are for.
 The tally reads its own numbers off the sweep's activity rows: `incoherent`,
-`lint`, `series`, `series_excluded` and `outliers` are summed over every
-`storyline_sweep` row the run recorded, so the printed row and the log tell one
-story rather than two. Its `charter lint` line changed meaning with them.
+`lint`, `series`, `series_excluded`, `outliers`, `fragments` and `folded` are
+summed over every `storyline_sweep` row the run recorded, so the printed row and
+the log tell one story rather than two. The run fails outright if any of those
+rows carries a `deferred` key: the bench store has no queue behind it, so the
+settle gate can never bite there, and a scored row that was really a deferral
+would read as a measurement of a pass that never ran. The golden pool holds no
+series and no fragments of one thread, so `series`, `series_excluded`,
+`fragments` and `folded` are read from the unit tests and from the live rail
+rather than from this bench. Its `charter lint` line changed meaning with them.
 Before the lint was wired it was the whole reading, counted over every live
 storyline and applied to none. Now that a lint hit tombstones a cluster before
 its confirms, what that line counts is what SURVIVED and would still be

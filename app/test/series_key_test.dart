@@ -127,4 +127,59 @@ void main() {
       expect(seriesKeyFor('Sept 3rd notes'), '# notes');
     });
   });
+
+  /// The OTHER subject key, and the whole reason there are two. The fragment
+  /// rule asks whether two rows are the same thread arriving twice, so it
+  /// folds only what a mail client adds on the way past: a re-send and a
+  /// reply-all fork carry the same subject down to the date in it, while the
+  /// issues of a dated series carry different ones, which is exactly what
+  /// makes them a series.
+  group('fragmentKeyFor', () {
+    test('reply and forward markers are stripped, stacked ones included', () {
+      expect(fragmentKeyFor('Re: Alpha launch review'),
+          'alpha launch review');
+      expect(fragmentKeyFor('Fwd: Re: Alpha launch review'),
+          'alpha launch review');
+      expect(fragmentKeyFor('RE[2]: Alpha launch review'),
+          'alpha launch review');
+    });
+
+    test('case and whitespace runs are folded', () {
+      expect(fragmentKeyFor('ALPHA   Launch\tReview'),
+          'alpha launch review');
+      expect(fragmentKeyFor('  Alpha launch review  '),
+          'alpha launch review');
+    });
+
+    test('dates, ticket ids and bare digits are KEPT', () {
+      // Where the two keys part company. Each of these pairs is one series to
+      // the pre-pass and two threads to the fragment rule.
+      expect(fragmentKeyFor('Weekly digest 2026-09-14'),
+          isNot(fragmentKeyFor('Weekly digest 2026-09-21')));
+      expect(fragmentKeyFor('Invoice #4412'),
+          isNot(fragmentKeyFor('Invoice #4413')));
+      expect(fragmentKeyFor('OPS-118: build failed'),
+          isNot(fragmentKeyFor('OPS-204: build failed')));
+      expect(fragmentKeyFor('Budget review 2'),
+          isNot(fragmentKeyFor('Budget review 3')));
+      expect(fragmentKeyFor('Sept 3 standup notes'),
+          'sept 3 standup notes');
+    });
+
+    test('an unnamed thread has no key, so it can never group', () {
+      expect(fragmentKeyFor(null), '');
+      expect(fragmentKeyFor(''), '');
+      expect(fragmentKeyFor('   '), '');
+      // A subject that is nothing but markers keeps nothing either.
+      expect(fragmentKeyFor('Re:'), '');
+    });
+
+    test('a re-send and its reply are one key where the series key agrees',
+        () {
+      expect(fragmentKeyFor('Re: Roof replacement quote'),
+          fragmentKeyFor('Roof replacement quote'));
+      expect(seriesKeyFor('Roof replacement quote'),
+          fragmentKeyFor('Roof replacement quote'));
+    });
+  });
 }

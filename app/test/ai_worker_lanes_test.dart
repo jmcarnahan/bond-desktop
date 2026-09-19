@@ -2,6 +2,7 @@ import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/drain_gate.dart';
+import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/fake_handlers.dart';
@@ -173,6 +174,97 @@ void main() {
       // must not turn a completed drain into a failed future.
       await expectLater(worker.pump(), completes);
       expect(handler.seen, ['m1']);
+    });
+
+    test('lastDrainCount is this drain\'s, read inside the callback',
+        () async {
+      // The number the fast lane's sweep re-arm turns on. `onDrained` fires
+      // after an empty drain too, so a caller that re-arms work has to be able
+      // to tell a drain that moved the mailbox from a pump that found nothing.
+      final counts = <int>[];
+      final handler = ScriptedHandler('extract');
+      late final AiWorker worker;
+      worker = AiWorker(
+        store,
+        handlers: [handler],
+        onDrained: () => counts.add(worker.lastDrainCount),
+      );
+      addTearDown(worker.dispose);
+
+      expect(worker.lastDrainCount, 0);
+
+      await queue('extract', ['m1', 'm2', 'm3']);
+      await worker.pump();
+      expect(counts, [3]);
+      expect(worker.lastDrainCount, 3);
+
+      // And back to zero on the next drain rather than accumulating: the
+      // getter is about the LAST drain, not about the worker's whole life.
+      await worker.pump();
+      expect(counts, [3, 0]);
+      expect(worker.lastDrainCount, 0);
+    });
+
+    test('an item that failed on its own terms was still processed', () async {
+      final handler = ScriptedHandler(
+        'extract',
+        script: [Exception('the model answered nonsense'), null],
+      );
+      final worker = AiWorker(store, handlers: [handler]);
+      addTearDown(worker.dispose);
+
+      await queue('extract', ['m1']);
+      await worker.pump();
+
+      // One item, one attempt that failed, one retry that did not: the queue
+      // moved either way, which is what the count is about.
+      expect(worker.lastDrainCount, greaterThan(0));
+    });
+
+    test('a parked drain processed nothing and says so', () async {
+      final handler = ScriptedHandler(
+        'extract',
+        script: [const LlmUnavailableException('not reachable')],
+      );
+      final worker = AiWorker(store, handlers: [handler]);
+      addTearDown(worker.dispose);
+
+      await queue('extract', ['m1', 'm2']);
+      await worker.pump();
+
+      // A park puts the item back exactly as it found it. Nothing was
+      // processed, and a lane that re-armed work on this drain would be
+      // re-arming it on a downed server.
+      expect(worker.lastDrainCount, 0);
+      expect(await store.workCounts('extract'), {'pending': 2});
+    });
+
+    test('a repumped drain counts both of its passes', () async {
+      // The reason the count is zeroed per PUMP and not per inner pass: a
+      // drain that repumped runs the handler loop twice and fires this
+      // callback once, at the end of the whole thing.
+      late AiWorker worker;
+      Future<void>? repump;
+      final first = ScriptedHandler('first');
+      final second = ScriptedHandler('second', onRun: (_) async {
+        if (repump != null) return;
+        await store.enqueueWork('first', 'email', 'late');
+        repump = worker.pump();
+      });
+      var seenWhenDrained = -1;
+      worker = AiWorker(
+        store,
+        handlers: [first, second],
+        onDrained: () => seenWhenDrained = worker.lastDrainCount,
+      );
+      addTearDown(worker.dispose);
+
+      await queue('second', ['s1']);
+      await worker.pump();
+      await repump;
+
+      expect(first.seen, ['late']);
+      expect(seenWhenDrained, 2);
     });
 
     test('a stopped drain wakes nothing', () async {

@@ -259,6 +259,24 @@ String seriesKeyFor(String? subject) {
   return text;
 }
 
+/// The subject as a FRAGMENT identity: the same text, reply markers and case
+/// and spacing aside. Empty when the subject is empty.
+///
+/// Deliberately not [seriesKeyFor], and the difference is the whole point of
+/// there being two. A re-send and a reply-all fork carry the SAME subject, down
+/// to the date in it; the issues of a dated series carry different ones, which
+/// is exactly what makes them a series. Folding the digits here would read
+/// three issues of a weekly digest among the same people as one thread that had
+/// arrived three times, and the pre-pass that exists to recognise a recurring
+/// series would never see it. So this folds only what a mail client adds on the
+/// way past: the leading `Re:`/`Fw:`/`Fwd:` markers through [stripReFw], letter
+/// case, and runs of whitespace.
+String fragmentKeyFor(String? subject) {
+  final text = stripReFw(subject).toLowerCase();
+  if (text.isEmpty) return '';
+  return text.replaceAll(_seriesSpaces, ' ').trim();
+}
+
 /// The later of two ISO-8601 UTC timestamps. Both are Graph's own strings,
 /// stored verbatim, so a string comparison IS the chronological one.
 String _newer(String? a, String b) =>

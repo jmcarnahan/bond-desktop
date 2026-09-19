@@ -136,6 +136,101 @@ void main() {
     expect(recaps.seen, ['s1']);
   });
 
+  group('the fast lane re-arms the storyline sweep', () {
+    /// A fast worker wired the way `_lane` wires the real one: the sweep row
+    /// is re-armed before the storyline lane is woken, and only when the drain
+    /// actually processed something.
+    AiWorker fastLane(
+      ScriptedHandler handler,
+      AiWorker storylineWorker,
+      List<Future<void>> woken,
+    ) {
+      late final AiWorker fast;
+      fast = AiWorker(
+        store,
+        handlers: [handler],
+        gate: DrainGate(),
+        onDrained: () {
+          woken.add(() async {
+            if (fast.lastDrainCount > 0) await store.requeueSweep();
+            await storylineWorker.pump();
+          }());
+        },
+      );
+      return fast;
+    }
+
+    test('a drain that did work queues a sweep, and the lane runs it',
+        () async {
+      final sweeps = ScriptedHandler('storyline_sweep');
+      final storylineWorker =
+          AiWorker(store, handlers: [sweeps], gate: DrainGate());
+      addTearDown(storylineWorker.dispose);
+      final woken = <Future<void>>[];
+      final fast = fastLane(ScriptedHandler('extract'), storylineWorker, woken);
+      addTearDown(fast.dispose);
+
+      // The sweep row as it is on a machine that has synced before: already
+      // run, already closed. A requeue is what brings it back; an enqueue
+      // would find it and do nothing.
+      await store.requeueSweep();
+      await store.writeWork('storyline_sweep', 'email', 'sweep',
+          status: 'done');
+      await store.enqueueWork('extract', 'email', 'm1');
+
+      await fast.pump();
+      await Future.wait(woken);
+
+      expect(sweeps.seen, ['sweep']);
+    });
+
+    test('an empty drain leaves the sweep where it is', () async {
+      final sweeps = ScriptedHandler('storyline_sweep');
+      final storylineWorker =
+          AiWorker(store, handlers: [sweeps], gate: DrainGate());
+      addTearDown(storylineWorker.dispose);
+      final woken = <Future<void>>[];
+      final fast = fastLane(ScriptedHandler('extract'), storylineWorker, woken);
+      addTearDown(fast.dispose);
+
+      await store.requeueSweep();
+      await store.writeWork('storyline_sweep', 'email', 'sweep',
+          status: 'done');
+
+      // Nothing queued for the fast lane at all. `onDrained` still fires, and
+      // an ungated requeue here would spend a whole sweep after every idle
+      // pump the app makes.
+      await fast.pump();
+      await Future.wait(woken);
+
+      expect(sweeps.seen, isEmpty);
+      expect(await store.workCounts('storyline_sweep'), {'done': 1});
+    });
+
+    test('a sweep already at the server is not doubled', () async {
+      final sweeps = ScriptedHandler('storyline_sweep');
+      final storylineWorker =
+          AiWorker(store, handlers: [sweeps], gate: DrainGate());
+      addTearDown(storylineWorker.dispose);
+      final woken = <Future<void>>[];
+      final fast = fastLane(ScriptedHandler('extract'), storylineWorker, woken);
+      addTearDown(fast.dispose);
+
+      await store.requeueSweep();
+      await store.writeWork('storyline_sweep', 'email', 'sweep',
+          status: 'processing');
+      await store.enqueueWork('extract', 'email', 'm1');
+
+      await fast.pump();
+      await Future.wait(woken);
+
+      // A sweep is one item that takes minutes; flipping its claim back to
+      // pending would hand the same pass to a second drain.
+      expect(await store.workCounts('storyline_sweep'), {'processing': 1});
+      expect(sweeps.seen, isEmpty);
+    });
+  });
+
   test('dispose drops the merge and leaves the workers alone', () async {
     final fast =
         AiWorker(store, handlers: [ScriptedHandler('extract')], gate: DrainGate());

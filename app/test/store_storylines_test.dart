@@ -939,6 +939,134 @@ void main() {
     });
   });
 
+  /// The sweep's own lifecycle: the row that re-arms it, and the rule that
+  /// keeps the rail of three suggestions from deadlocking it for ever.
+  group('expireStaleSuggestions', () {
+    // Six fractional digits and a `Z`, the shape [MessageStore.isoStamp]
+    // writes: `created_at` is compared as a string, so a fixture of another
+    // width would sort against the stored rows by accident rather than by
+    // time.
+    const bound = '2026-09-04T00:00:00.000000Z';
+
+    Future<void> proposedAt(String id, String createdAt) => db.customUpdate(
+          'UPDATE storylines SET created_at = ? WHERE id = ?',
+          variables: [Variable(createdAt), Variable(id)],
+        );
+
+    Future<String?> statusOf(String id) async =>
+        (await store.getStoryline(id))?.status;
+
+    test('an old automatic suggestion nobody answered is dismissed', () async {
+      await seedStoryline('sl-old');
+      await proposedAt('sl-old', '2026-08-20T00:00:00.000000Z');
+
+      expect(await store.expireStaleSuggestions(bound), 1);
+      expect(await statusOf('sl-old'), 'dismissed');
+    });
+
+    test('a young one, a kept one and a person\'s own all stay', () async {
+      await seedStoryline('sl-young');
+      await proposedAt('sl-young', '2026-09-16T00:00:00.000000Z');
+      await seedStoryline('sl-kept', status: 'active');
+      await proposedAt('sl-kept', '2026-08-20T00:00:00.000000Z');
+      await seedStoryline('sl-mine', createdBy: 'user');
+      await proposedAt('sl-mine', '2026-08-20T00:00:00.000000Z');
+
+      expect(await store.expireStaleSuggestions(bound), 0);
+      expect(await statusOf('sl-young'), 'suggested');
+      // An owner kept this one, and a storyline somebody kept has no deadline.
+      expect(await statusOf('sl-kept'), 'active');
+      // Nor has one they made themselves.
+      expect(await statusOf('sl-mine'), 'suggested');
+    });
+
+    test('the bound is strict, so a row stamped on it has one more pass',
+        () async {
+      await seedStoryline('sl-edge');
+      await proposedAt('sl-edge', bound);
+
+      expect(await store.expireStaleSuggestions(bound), 0);
+      expect(await statusOf('sl-edge'), 'suggested');
+    });
+
+    test('the expired row is stamped and its tombstone still answers',
+        () async {
+      await seedStoryline('sl-old', clusterHash: 'hash-of-the-cluster');
+      await proposedAt('sl-old', '2026-08-20T00:00:00.000000Z');
+      // The model carries no `updated_at`, so the column is read directly.
+      Future<String?> stampOf(String id) async => (await db
+              .customSelect(
+                'SELECT updated_at FROM storylines WHERE id = ?',
+                variables: [Variable(id)],
+              )
+              .getSingle())
+          .data['updated_at'] as String?;
+      await db.customUpdate(
+        'UPDATE storylines SET updated_at = ? WHERE id = ?',
+        variables: [
+          const Variable('2026-08-20T00:00:00.000000Z'),
+          const Variable('sl-old'),
+        ],
+      );
+      final before = await stampOf('sl-old');
+
+      expect(await store.expireStaleSuggestions(bound), 1);
+
+      expect(await stampOf('sl-old'), isNot(before));
+      expect(await statusOf('sl-old'), 'dismissed');
+      // The row was born carrying its tombstone, so the next sweep recognises
+      // the same cluster without spending a model call re-deriving it.
+      expect(
+        await store.dismissedHashExistsAny(const ['hash-of-the-cluster']),
+        isTrue,
+      );
+    });
+
+    test('nothing to expire is zero and no write', () async {
+      expect(await store.expireStaleSuggestions(bound), 0);
+    });
+  });
+
+  group('requeueSweep', () {
+    Future<String?> sweepStatus() async {
+      final rows = await db.customSelect(
+        'SELECT status FROM work_items '
+        "WHERE task_kind = 'storyline_sweep' AND source = 'email' "
+        "AND entity_id = 'sweep'",
+      ).get();
+      return rows.isEmpty ? null : rows.single.data['status'] as String?;
+    }
+
+    test('writes the one sweep row pending', () async {
+      await store.requeueSweep();
+
+      expect(await sweepStatus(), 'pending');
+      expect(await store.workCounts('storyline_sweep'), {'pending': 1});
+    });
+
+    test('revives a sweep that already ran', () async {
+      await store.requeueSweep();
+      await store.writeWork('storyline_sweep', 'email', 'sweep',
+          status: 'done');
+
+      await store.requeueSweep();
+
+      expect(await sweepStatus(), 'pending');
+    });
+
+    test('leaves a sweep that is at the server alone', () async {
+      await store.requeueSweep();
+      await store.writeWork('storyline_sweep', 'email', 'sweep',
+          status: 'processing');
+
+      await store.requeueSweep();
+
+      // A sweep is one item that legitimately takes minutes, and flipping it
+      // back to pending would run the whole pass twice.
+      expect(await sweepStatus(), 'processing');
+    });
+  });
+
   group('requeueWork', () {
     Future<String?> statusOf(String kind, String id) async {
       final counts = await db.customSelect(

@@ -1379,15 +1379,28 @@ void main() {
         var sweptOutliers = 0;
         var sweptSeries = 0;
         var sweptSeriesExcluded = 0;
+        var sweptFragments = 0;
+        var sweptFolded = 0;
         for (final row in await store.recentActivity(limit: 1000)) {
           if (row['kind'] != 'storyline_sweep') continue;
           final detail = ActivityEvent.fromRow(row).detail;
           int at(String key) => (detail[key] as num?)?.toInt() ?? 0;
+          // The bench store has no queue behind it, so the settle gate can
+          // never bite here. If it ever did, every count below would be a
+          // measurement of a pass that never ran, and the row would read as a
+          // score rather than as the empty thing it was.
+          if (detail['deferred'] is String) {
+            fail('the sweep deferred on the bench store: '
+                'extract ${at('extract')}, embed ${at('embed')}, '
+                'triage ${at('triage')}');
+          }
           sweptIncoherent += at('incoherent');
           sweptLint += at('lint');
           sweptOutliers += at('outliers');
           sweptSeries += at('series');
           sweptSeriesExcluded += at('series_excluded');
+          sweptFragments += at('fragments');
+          sweptFolded += at('folded');
         }
 
         final tally = SweepTally(
@@ -1398,6 +1411,8 @@ void main() {
           seriesSeeded: sweptSeries,
           seriesExcluded: sweptSeriesExcluded,
           outliersDropped: sweptOutliers,
+          fragmentsJoined: sweptFragments,
+          fragmentsFolded: sweptFolded,
           purityByStoryline: {
             for (final entry in membership.threadsByStoryline.entries)
               entry.key: purityOf(entry.value, goldByThread),

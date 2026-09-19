@@ -338,6 +338,8 @@ void main() {
           seriesSeeded: 1,
           seriesExcluded: 8,
           outliersDropped: 3,
+          fragmentsJoined: 4,
+          fragmentsFolded: 6,
           purityByStoryline: purity,
           coverageBySlug: coverage,
           largestShare: 0.4,
@@ -407,7 +409,7 @@ void main() {
     });
 
     test('the sweep-side counts ride the JSON under the note keys', () {
-      // The same five keys the sweep writes to its activity row, so the run
+      // The same seven keys the sweep writes to its activity row, so the run
       // file and the log read as one story.
       final json = tally().toJson();
 
@@ -416,6 +418,8 @@ void main() {
       expect(json['series'], 1);
       expect(json['series_excluded'], 8);
       expect(json['outliers'], 3);
+      expect(json['fragments'], 4);
+      expect(json['folded'], 6);
     });
 
     test('the printed table names no slug and no storyline', () {
@@ -436,6 +440,8 @@ void main() {
       expect(printed, contains('lint-rejected 5  incoherent 6'));
       expect(printed, contains('series  seeded 1  excluded 8'));
       expect(printed, contains('outliers dropped 3'));
+      expect(printed, contains('fragments 4'));
+      expect(printed, contains('folded 6'));
     });
   });
 }

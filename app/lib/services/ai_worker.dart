@@ -217,6 +217,33 @@ class AiWorker {
 
   bool _stopped = false;
 
+  int _lastDrainCount = 0;
+
+  /// How many items the most recent drain processed.
+  ///
+  /// Read by the lane wiring inside `onDrained`, where it is what tells a
+  /// drain that moved the mailbox from one that was pumped and found nothing:
+  /// [_onDrained] fires after empty drains too, by design, so a caller that
+  /// re-arms something on the strength of a drain has to gate on this or it
+  /// re-arms it on every idle pump.
+  ///
+  /// An item counts when it finished or failed on its own terms, which is
+  /// [_RunOutcome.ok] — either way the queue moved and a handler ran. A PARK
+  /// does not: both kinds put the item back exactly as they found it, having
+  /// processed nothing, so counting one would report work on a drain that hit
+  /// a downed server and stopped.
+  ///
+  /// Zeroed once per [pump], at the top of [_drainUntilQuiet] rather than of
+  /// [_drainAll]: a repumped drain runs [_drainAll] more than once and fires
+  /// [_onDrained] only at the end, so a count zeroed per inner pass would
+  /// report the last of them instead of the whole drain.
+  ///
+  /// A hook must therefore read this BEFORE its first `await`. [_fireDrained]
+  /// runs synchronously inside [_drainUntilQuiet]'s `finally`, with [_draining]
+  /// already cleared, so a pump landing while a suspended hook waits starts a
+  /// fresh drain and zeroes the count out from under it.
+  int get lastDrainCount => _lastDrainCount;
+
   /// Told after every completed drain, so the lanes this one feeds can walk.
   ///
   /// `TriageQueue._onDrained`'s shape with one difference: it fires even when
@@ -316,6 +343,10 @@ class AiWorker {
   /// gap is left: a pump either joins a drain that will run again, or starts
   /// a fresh one.
   Future<void> _drainUntilQuiet() async {
+    // Once per pump, and not once per [_drainAll] pass — see
+    // [lastDrainCount]. What a reader of that getter is asking about is this
+    // whole drain, repumps included.
+    _lastDrainCount = 0;
     try {
       do {
         await _gate.run(_drainAll);
@@ -387,6 +418,10 @@ class AiWorker {
             future = _log.inSpan(() => _runOne(handler, item)).then((outcome) {
               parkedKind |= outcome == _RunOutcome.parkKind;
               parkedDrain |= outcome == _RunOutcome.parkDrain;
+              // Counted here rather than at the end of the drain, because
+              // [_drainAll] returns early on a parked drain and a count
+              // written at the end would be the previous drain's.
+              if (outcome == _RunOutcome.ok) _lastDrainCount++;
             }).whenComplete(() => _inFlight.remove(future));
             _inFlight.add(future);
           }

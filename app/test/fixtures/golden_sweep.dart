@@ -331,6 +331,15 @@ class SweepTally {
   /// Threads the namer named as not belonging, dropped before the confirms.
   final int outliersDropped;
 
+  /// Pool rows that were fragments of a member's own thread and joined on its
+  /// verdict, never clustered, named or confirmed in their own right.
+  final int fragmentsJoined;
+
+  /// Pool rows folded onto a representative by the fragment rule, whether or
+  /// not that representative shipped. [fragmentsJoined] is the subset that
+  /// became members; this is how much the fold changed the pool.
+  final int fragmentsFolded;
+
   /// Storyline id → the share of its gold-carrying members that agree, or
   /// null for a storyline no member of which carries a gold slug. Every live
   /// storyline is listed either way: a reader counting groups must see them
@@ -392,6 +401,8 @@ class SweepTally {
     required this.seriesSeeded,
     required this.seriesExcluded,
     required this.outliersDropped,
+    required this.fragmentsJoined,
+    required this.fragmentsFolded,
     required this.purityByStoryline,
     required this.coverageBySlug,
     required this.largestShare,
@@ -437,6 +448,8 @@ class SweepTally {
         'series': seriesSeeded,
         'series_excluded': seriesExcluded,
         'outliers': outliersDropped,
+        'fragments': fragmentsJoined,
+        'folded': fragmentsFolded,
         'purity': {
           'mean': purityMean,
           'with_carrier': purityWithCarrier,
@@ -481,7 +494,8 @@ class SweepTally {
         '  storylines  formed $formed  tombstoned $tombstoned'
         '  lint-rejected $lintRejected  incoherent $incoherent\n'
         '  series  seeded $seriesSeeded  excluded $seriesExcluded'
-        '  outliers dropped $outliersDropped\n'
+        '  outliers dropped $outliersDropped  fragments $fragmentsJoined'
+        '  folded $fragmentsFolded\n'
         '  purity mean ${_pct(purityMean)} over $purityWithCarrier of '
         '${purityByStoryline.length} storylines   '
         'coverage mean ${_pct(coverageMean)} over '

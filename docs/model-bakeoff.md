@@ -1045,6 +1045,7 @@ seeds the GOLD gate verdict.
 | 2026-09-18 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260918-171650.json` | 37/98 (38%), keep-only 30/85 (35%) | 11 | 51% over 13 of 14 storylines | 8% over 13 efforts | 14% | 14 / 1 / 6 would be refused | 15 / 106 | 312 s | the Phase 2 rule, two links and half the members, the cap of twelve and the coherence floor of 0.60, with the topics card shipped; second of two identical passes, the first `…-sweep-20260918-171100.json` at 330 s; same servers, same cards from `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json`, same seeding counts: 95 conversations, 71 with a kept inbound message, 24 fully gated, 71 embedded, 0 embed failures; 6 sweep passes, every suggestion kept; calls per pass 24, 22, 28, 19, 16, 0; assign assigned 6, rejected 6; items unmapped 52, filed nowhere 30; forbidden hits 4 in 1 anti-storyline bucket; incoherent 0; lint counted and not applied, all 6 hits placeholder |
 | 2026-09-18 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260918-192251.json` | 47/98 (48%), keep-only 38/85 (45%) | 7 | 43% over 2 of 2 storylines | 4% over 13 efforts | 71% | 2 / 12 / 3 refused | 14 / 71 | 182 s | the Phase 3 rules on top of Phase 2: the lexical series pre-pass, the namer that can decline a cluster and name outliers, twelve whole numbered central cards, and the charter lint wired into the naming branch. Second of two identical passes, the first `...-sweep-20260918-191812.json` at 203 s. Same servers, same cards from `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json`, same seeding counts: 95 conversations, 71 with a kept inbound message, 24 fully gated, 71 embedded, 0 embed failures. 4 sweep passes, every suggestion kept; calls per pass 11, 8, 1, 0. Series seeded 0, excluded 0. Outliers dropped 3. Incoherent 9, lint 3, both now applied rather than counted. Assign assigned 28, rejected 37; items unmapped 27, filed nowhere 63; forbidden hits 1 in 1 anti-storyline bucket. In-cluster cosine bins 0 / 4 / 37 / 86 / 194 over 321 pairs. The namer declined 9 of 14 clusters; the lint refused 3; the 2 that shipped then took 28 assign adds, which is the 71% |
 | 2026-09-18 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260918-225817.json` | 48/98 (49%) | 6 | 60% over 2 of 2 storylines | 4% over 13 efforts | 80% | 2 / 12 / 3 refused | 14 / 76 | 203 s | Phase 4: the confirm prompt's three rules, `_accepts` with `high` for a suggested storyline, overlap needs two shared non-owner people, near-tie confirms both, catch-all detector; second of two passes, the first identical on every count; same servers, same cards from `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json`; seed 95 conversations / 71 kept / 24 gated / 71 embedded; 4 sweep passes, every suggestion kept, wall per pass 124665, 63993, 14826, 47 ms; incoherent 9, outliers dropped 3, series 0 seeded / 0 excluded; assign assigned 24 / rejected 41; unmapped 27, filed nowhere 67, forbidden hits 0 over 0; cosine bins 0 / 1 / 34 / 87 / 169 |
+| 2026-09-19 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260919-005938.json` | 46/98 (47%) | 0 | 47% over 1 of 1 storylines | 0% over 13 efforts | 100% | 1 / 10 / 1 refused | 11 / 71 | 213 s | Phase 5: the settle gate, the 14-day expiry and the fragment fold keyed on the raw subject; the gate and the expiry cannot fire on the bench store; the fold folds one row per pass and one storyline forms that maps to no gold effort and takes 16 assign adds; second of two passes, the first identical on every count except the lint / incoherent split of the ten tombstones, 2 / 8 against 1 / 9, the namer at temperature; same servers, same cards from `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json`; seed 95 / 71 / 24 / 71 / 0; 3 sweep passes, wall per pass 79004, 61751, 48 ms; incoherent 9, outliers dropped 3, series 0 seeded / 0 excluded, fragments joined 0, rows folded 1 per pass; assign assigned 16 / rejected 52; cosine bins 0 / 2 / 18 / 48 / 103 |
 
 **What the two sweep rows say (2026-09-18).** Both cards were run three
 times, twice before the phase's review and once after its fixes, and every
@@ -1273,6 +1274,69 @@ pass has only two groups to file into. The next number to take, in Phase 6, is
 each cluster's gold-slug plurality share BEFORE naming, computed offline from
 the bench's membership map, counts only, so a declined pure cluster is visible.
 That number decides whether the naming rule or the clustering moves next.
+
+**What the Phase 5 rows say (2026-09-19).** The phase shipped three lifecycle
+rules and this bench can see one of them. The settle gate and the 14-day
+expiry cannot fire on the bench store, which has no queue behind it and whose
+suggestions are minutes old; the run now fails outright if a sweep row ever
+carries `deferred`. The fragment fold does run. As shipped it keys fragment
+identity on the raw subject, with `Re` and `Fw` stripped and case and
+whitespace folded while digits are kept. On this pool it folds one row per
+pass onto its representative, and an offline count over the golden set finds
+that the pair carries the same gold storyline id, so the fold is right where
+it fires.
+
+**The fold is the whole difference between this row and Phase 4's**, and the
+diagnostics below say so from two directions.
+
+| variant | storyline.id | correct positives | formed | names | confirms | wall |
+|---|---|---|---|---|---|---|
+| Phase 4 (fold absent) | 48/98 | 6 | 2 | 14 | 76 | 203 s |
+| Phase 5 as shipped | 46/98 | 0 | 1 | 11 | 71 | 213 s |
+| Phase 5, first cut, series-key identity (not shipped) | 50/98 | 0 | 0 | 6 | 0 | 71 s |
+| Phase 5, fragment window 0 (diagnostic, not shipped) | 48/98 | 6 | 2 | 14 | 76 | 294 s |
+
+The fold-off diagnostic was taken against the first cut, and with the fold
+switched off it matched Phase 4 on every count. Under the shipped identity one
+row folds per pass and one storyline forms. It is impure and it holds every one
+of the 16 threads the assign pass then filed, which is the 100% largest share.
+So the six positives Phase 4 carried are gone under either identity. 50 of 98
+is the score a sweep that files nothing earns from the abstentions alone, and
+the round's exit needs positives on top of it.
+
+**Three diagnostics tried to bring the clusters back and none of them
+shipped.** All three were taken on the first cut, before the fragment identity
+moved to the raw subject.
+
+| variant | storyline.id | correct positives | formed | names | confirms | forbidden hits | wall |
+|---|---|---|---|---|---|---|---|
+| propose floor 2 | 51/98 | 9 | 6 | 35 | 106 | 3 | 597 s |
+| propose floor counting folded rows | 50/98 | 0 | 0 | 6 | 0 | 0 | 99 s |
+| link threshold 0.60 | 41/98 | 2 | 3 | 14 | 108 | 0 | 345 s |
+
+The floor is not the mechanism, because counting a representative's folded
+rows toward it changes nothing. A lower link threshold forms three storylines
+and loses seven scorer points. A floor of two buys nine positives at three
+times Phase 4's wall, thirty-five naming calls and three forbidden hits, which
+is the trade the round set out not to make. All three constants stand where
+Phase 2 and Phase 3 left them.
+
+**The clustering is what is brittle, not the fold.** A folded row is a
+near-duplicate vector of its representative, and the Phase 2 join rule asks a
+candidate for two links into a cluster. On this pool the duplicate was the
+second link, so the clusters Phase 3 and Phase 4 formed, and the six positives
+they carried, rested on rows the sweep was counting twice. The number to take
+next is still the one the Phase 4 block named: each cluster's gold purity
+before naming, so that the six clusters the namer still declines can be told
+from the eight that no longer form.
+
+**What the phase did prove is read off the unit tests, not off this bench.**
+The sweep defers above 10 extractions, 25 embeddings or 20 unjudged messages,
+and the fast lane re-arms it only after a drain that processed something. An
+automatic suggestion left unanswered for 14 days is dismissed, and the room it
+held is reused in the same pass. Fragments join on their representative's
+verdict with one confirm instead of three. The live rail after the round is
+where those three are read.
 
 
 

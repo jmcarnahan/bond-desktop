@@ -386,7 +386,11 @@ it: `AiWorker.onDrained` fires after every completed drain, empty ones
 included (the fast lane wakes the other two; the storyline lane wakes the
 draft lane), and `ExtractHandler.onDraftQueued` wakes the draft lane as each
 row is written, so a prefetch starts seconds after its extraction rather than
-at the end of the fast drain. `AiWorkers.pumpAll()` — fast, THEN the other two
+at the end of the fast drain. The fast lane also re-arms the storyline sweep
+through `MessageStore.requeueSweep()` before it wakes that lane, and only after
+a drain whose `AiWorker.lastDrainCount` is above zero, so a settled fast lane is
+what schedules the sweep and an idle pump schedules nothing.
+`AiWorkers.pumpAll()` — fast, THEN the other two
 together — is what a caller outside the pipeline pumps, and its chained shape
 is what keeps "the sync's pump completed" meaning "and the drafts are done".
 

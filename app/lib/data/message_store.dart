@@ -4222,6 +4222,38 @@ FROM storylines s''';
     return [for (final row in result) Storyline.fromRow(row.data)];
   }
 
+  /// Dismisses every automatic suggestion nobody ever answered: `suggested`,
+  /// `created_by = 'auto'`, and proposed before [olderThanIso]. Returns how
+  /// many there were.
+  ///
+  /// The rail holds at most three unanswered suggestions at once, and a
+  /// suggestion nobody answers holds its slot for ever: three of them and the
+  /// sweep's room count is zero on every future pass, so the app quietly stops
+  /// proposing anything at all. This is what keeps the room moving.
+  ///
+  /// Nothing is rebuilt and nothing is deleted. The row becomes the TOMBSTONE
+  /// it has carried since it was written — its `cluster_hash` was stamped at
+  /// insert, and [dismissedHashExistsAny] recognises the same cluster on the
+  /// very next sweep, so an expiry costs no model call later. Its members stay
+  /// exactly as `dismissSuggestion` leaves them, which is what returns the
+  /// threads to the pool: `assignedOrBlockedKeys` counts memberships of
+  /// `suggested` and `active` storylines only. And `restoreDismissed` lifts an
+  /// expiry like any other dismissal, because there is nothing to tell them
+  /// apart.
+  ///
+  /// Never an `active` storyline, which somebody kept, and never a storyline a
+  /// person made: `created_by != 'auto'` is the owner's own filing and no
+  /// deadline applies to it. The bound is STRICT, so a row stamped exactly at
+  /// it has one more pass.
+  Future<int> expireStaleSuggestions(String olderThanIso) {
+    return db.customUpdate(
+      "UPDATE storylines SET status = 'dismissed', updated_at = ? "
+      "WHERE status = 'suggested' AND created_by = 'auto' "
+      'AND created_at < ?',
+      variables: _args([_nowIso(), olderThanIso]),
+    );
+  }
+
   Future<Storyline?> getStoryline(String id) async {
     final result = await db
         .customSelect('$_storylineSelect WHERE s.id = ?', variables: _args([id]))
@@ -4988,6 +5020,28 @@ FROM storylines s''';
       variables: _args([kind, source, entityId, payloadJson, now, now]),
     );
   }
+
+  /// The one row that sweeps the mailbox, re-armed.
+  ///
+  /// There is one pool to sweep and one row for sweeping it, keyed to the
+  /// single entity id `sweep` under the historical label `email` — a row NAME
+  /// and not a scope, which is why the chat sync writes the same row as the
+  /// mail sync does. See [StorylineService] for what the pass reads.
+  ///
+  /// A requeue rather than an enqueue, so a sweep that already ran and closed
+  /// `done` runs again instead of staying done for ever; and [requeueWork]'s
+  /// own rule is what makes it safe to call from anywhere, because a sweep
+  /// that is `processing` is at the server and is left exactly where it is. No
+  /// `refreshCreatedAt`: nobody asked for this, it is the pipeline noticing
+  /// that the mailbox moved.
+  ///
+  /// Three callers: the mail sync at the end of its ingest, the chat sync at
+  /// the end of its, and the FAST lane after a drain that actually processed
+  /// something. The last is the interesting one — the sweep stands down over
+  /// an unsettled mailbox, and a fast lane that has gone quiet is the signal
+  /// it was waiting for.
+  Future<void> requeueSweep() =>
+      requeueWork('storyline_sweep', 'email', 'sweep');
 
   /// [requeueWork] that is also a RATE LIMIT, for a caller that would
   /// otherwise ask again on every arrival.

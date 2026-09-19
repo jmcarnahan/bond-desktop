@@ -499,11 +499,11 @@ class SyncService implements MailSync {
         }
       }
 
-      // The clustering pass over everything not in a storyline yet. One row, not
-      // one per thread — there is one mailbox to sweep — and a requeue rather
-      // than an enqueue, so the sweep that ran after the last sync runs again
-      // after this one instead of staying `done` forever.
-      await _store.requeueWork('storyline_sweep', _source, 'sweep');
+      // The clustering pass over everything not in a storyline yet. The sync's
+      // durable trigger for it: see [MessageStore.requeueSweep] for the row,
+      // its label and the other two callers. Whether the pass then runs or
+      // stands down is the sweep's own question, not this one's.
+      await _store.requeueSweep();
 
       // One reconcile per REGISTERED directory, linked or not, on every sync.
       // That is what makes a directory a living context rather than a

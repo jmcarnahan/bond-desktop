@@ -4,6 +4,8 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
+import 'package:bond_inbox/services/ai_worker.dart';
+import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
@@ -412,6 +414,39 @@ void main() {
       expect(identical(fast, storyline), isFalse);
       expect(identical(fast, draft), isFalse);
       expect(identical(storyline, draft), isFalse);
+    });
+
+    test('the fast lane requeues the sweep after a drain that did work',
+        () async {
+      // The real wiring, not a hand-built worker: `_lane`'s `beforeWaking`
+      // hook is what re-arms the sweep, and nothing else in the suite reads
+      // the provider that carries it. The two lanes it wakes are replaced by
+      // idle workers so this test starts no drain that would dial a server.
+      final idleStoryline =
+          AiWorker(store, handlers: const [], gate: DrainGate());
+      final idleDraft = AiWorker(store, handlers: const [], gate: DrainGate());
+      addTearDown(idleStoryline.dispose);
+      addTearDown(idleDraft.dispose);
+      final container = ProviderContainer(
+        overrides: [
+          dbProvider.overrideWithValue(db),
+          storylineWorkerProvider.overrideWithValue(idleStoryline),
+          draftWorkerProvider.overrideWithValue(idleDraft),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
+
+      // An extraction for a message that is not there: the handler closes it
+      // `skipped` before it reads a card, so the drain processes an item
+      // without dialling anything.
+      await store.enqueueWork('extract', 'email', 'gone');
+      await container.read(aiWorkerProvider).pump();
+      // `onDrained` schedules its own body rather than blocking the drain, so
+      // the requeue lands a turn later.
+      await pumpEventQueue();
+
+      expect(await store.workCounts('storyline_sweep'), {'pending': 1});
     });
 
     test('each lane drains exactly the kinds it owns', () async {
