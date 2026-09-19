@@ -47,6 +47,14 @@ draft. The lanes, their gates and the two writers that ride the storyline gate
 are in [10-model-routing.md](10-model-routing.md); `make bench-pipeline`
 measures the whole thing end to end.
 
+**None of it runs until the owner says so.** The sidebar's **AI processing**
+switch is off at every launch and gates all four drains through one `enabled`
+closure each, so a fresh launch reads and stores mail without spending a token.
+Sync, the read-ack queue, Settings' Check server probe and the Find field's
+query embedding all keep working while it is off. The switch, what it touches
+and what it deliberately does not are in
+[10-model-routing.md](10-model-routing.md).
+
 The attachment row sits here because this is where the two handlers register:
 `AttachmentTextHandler` and `AttachmentDigestHandler` go on the drain between
 Embed and StorylineAssign (`app_providers.dart`), so a document is read before

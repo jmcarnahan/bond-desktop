@@ -244,6 +244,10 @@ void main() {
       );
       addTearDown(made.dispose);
       await made.read(appPrefsProvider.notifier).ready;
+      // The processing switch, which every launch starts OFF: this test needs
+      // a message actually AT the model when the backend moves, and an off
+      // queue never claims one.
+      made.read(processingProvider.notifier).set(true);
 
       await store.upsertMessage({
         'source': 'email',

@@ -437,6 +437,10 @@ void main() {
       addTearDown(container.dispose);
       await container.read(appPrefsProvider.notifier).ready;
 
+      // The switch, which every launch starts OFF: this test is about what a
+      // drain that RAN does next, and an off lane never reaches the hook.
+      container.read(processingProvider.notifier).set(true);
+
       // An extraction for a message that is not there: the handler closes it
       // `skipped` before it reads a card, so the drain processes an item
       // without dialling anything.
@@ -469,6 +473,9 @@ void main() {
       );
       addTearDown(container.dispose);
       await container.read(appPrefsProvider.notifier).ready;
+      // ON, as in the test above: an off lane would leave the sweep alone for
+      // a reason that has nothing to do with the guard this is about.
+      container.read(processingProvider.notifier).set(true);
 
       await container.read(aiWorkerProvider).pump();
       await pumpEventQueue();
@@ -517,6 +524,55 @@ void main() {
         ...container.read(draftWorkerProvider).kinds,
       ];
       expect(all.toSet(), hasLength(all.length));
+    });
+
+    test('every lane and the triage queue carry the processing switch',
+        () async {
+      // The wiring nothing else can be asked about: a lane built without the
+      // `enabled` closure would run the moment anything pumped it, and the
+      // switch at the top of the rail would be a control over nothing. The
+      // switch defaults OFF, so a drain that took work here is a lane that
+      // was wired without it.
+      final container = ProviderContainer(
+        overrides: [dbProvider.overrideWithValue(db)],
+      );
+      addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
+
+      expect(container.read(processingProvider), isFalse,
+          reason: 'every launch starts off');
+
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'm1',
+        'conversation_key': 'c1',
+        'direction': 'inbound',
+        'subject': 'Launch date',
+        'from_name': 'Sarah',
+        'from_address': 'sarah@example.com',
+        'received_at': '2026-08-29T10:00:00Z',
+        'body_text': 'Any word on the launch?',
+        'triage_status': 'pending',
+      });
+      for (final (kind, id) in [
+        ('extract', 'm1'),
+        ('storyline_sweep', 'sweep'),
+        ('draft', 'm1'),
+      ]) {
+        await store.enqueueWork(kind, 'email', id);
+      }
+
+      await container.read(triageQueueProvider).pump();
+      await container.read(aiWorkerProvider).pump();
+      await container.read(storylineWorkerProvider).pump();
+      await container.read(draftWorkerProvider).pump();
+      await pumpEventQueue();
+
+      expect((await store.getMessageRow('email', 'm1'))!['triage_status'],
+          'pending');
+      expect(await store.workCounts('extract'), {'pending': 1});
+      expect(await store.workCounts('storyline_sweep'), {'pending': 1});
+      expect(await store.workCounts('draft'), {'pending': 1});
     });
   });
 }

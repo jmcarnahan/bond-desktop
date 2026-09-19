@@ -426,13 +426,19 @@ it is the question they raise: somebody reading when the last pull ran is asking
 how much of their mail is in here. One `LookbackField`
 (`app/lib/widgets/settings_lookback_field.dart`) per connector — `Mail` and
 `Teams`, keyed `settings-mail-lookback` and `settings-teams-lookback` — each a
-dropdown of day presets (**7 / 14 / 30 / 60 / 90**) plus **Custom…**, which
+dropdown of day presets (**1 / 7 / 14 / 30 / 60 / 90**) plus **Custom…**, which
 reveals an inline `YYYY-MM-DD` field prefilled with the day the current window
 reaches. **Not a `showDatePicker`**: that is a dialog, and `no_dialogs_test.dart`
 now fails on it too.
 
+Both sides default to **one day**, which is the value that applies where
+nothing is stored: a first sync on a new machine is a morning's mail, and
+somebody who wants history raises it here. A mailbox that already stored a
+choice keeps it.
+
 Under the control, in every mode, is the line the setting exists for:
-`Last 14 days · since Aug 22, 2026`. A day count is a span; the thing a person
+`Last 14 days · since Aug 22, 2026`, or `Last 1 day · since …` at the default.
+A day count is a span; the thing a person
 asking for "three months" actually wants to know is which morning the mailbox
 starts on. Both halves come from the same arithmetic the sync uses — UTC
 midnight minus the count — so the day named here is the day the window reaches.
@@ -454,6 +460,13 @@ the lookback is how much history to reach for and never a licence to delete.
 A deep window (90+ days) therefore means a long first drain and more AI work
 behind it, paced by the backlog caps rather than truncated by them — see
 [pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md).
+
+**Syncing is not processing.** Mail and Teams keep pulling while the **AI
+processing** switch at the top of the sidebar is off — the inbox stays current
+and the models stay idle — so a window widened during an off session is
+fetched, stored and left waiting for the switch. The rail's caption says how
+many are waiting. See
+[pipeline/10-model-routing.md](pipeline/10-model-routing.md).
 
 **The collapsed summary deliberately says nothing about it.** That line answers
 "is what I am looking at current?", which is a question about the stamps; adding

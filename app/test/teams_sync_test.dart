@@ -510,6 +510,10 @@ void main() {
     test('historical 1:1 chats are backfilled once', () async {
       /// A chat and one message in it as the pre-`addressed_me` syncs left
       /// them: the roster stored, the flag flat.
+      /// Hours rather than days: "historical" here means written by an older
+      /// BUILD, not older than the window — the backfill is bounded by the
+      /// connector's floor, which is one day now, and a two-day fixture would
+      /// be out of reach for a reason this test is not about.
       Future<void> historical(String id, String key, String participants) async {
         await store.upsertConversation({
           'source': 'teams',
@@ -519,14 +523,14 @@ void main() {
           'cta_urgency': 'normal',
           'message_count': 1,
           'inbound_count': 1,
-          'last_message_at': _iso(const Duration(days: 2)),
+          'last_message_at': _iso(const Duration(hours: 4)),
         });
         await store.upsertMessage({
           'source': 'teams',
           'source_message_id': id,
           'conversation_key': key,
           'direction': 'inbound',
-          'received_at': _iso(const Duration(days: 2)),
+          'received_at': _iso(const Duration(hours: 4)),
         });
       }
 
@@ -554,7 +558,8 @@ void main() {
         'source_message_id': 'later',
         'conversation_key': 'chat-old-1on1',
         'direction': 'inbound',
-        'received_at': _iso(const Duration(days: 2)),
+        // In the window too, so the pref is the only thing keeping it flat.
+        'received_at': _iso(const Duration(hours: 4)),
       });
       graph.chats
         ..clear()
@@ -1208,8 +1213,12 @@ void main() {
       final at = _iso(const Duration(hours: 2));
       graph.chats.add(_chat(id: 'chat-1', previewAt: at));
       graph.messages['chat-1'] = [_message(id: 'm1', at: at)];
-      final before = _isoDaysAgo(TeamsSync.syncFloorDays);
-      await build().syncNow();
+      // Thirty days first, then three. The first pass used to take the
+      // DEFAULT, which was a week and left room to narrow; the default is one
+      // day now, which is the bottom of the range, so the wide window this
+      // test narrows FROM has to be asked for.
+      final before = _isoDaysAgo(30);
+      await build(lookbackDays: () => 30).syncNow();
       graph.requests.clear();
 
       await build(lookbackDays: () => 3).syncNow();
@@ -1218,7 +1227,7 @@ void main() {
           reason: 'a narrower window is a preference about what to keep, not '
               'a reason to fetch anything');
       expect(await store.getPref(teamsBootstrapFloorKey),
-          _midnightDaysAgo(TeamsSync.syncFloorDays, before));
+          _midnightDaysAgo(30, before));
     });
 
     test('a widen that fails mid-list leaves the marker where it was',
@@ -1494,7 +1503,9 @@ void main() {
         String id, {
         String direction = 'inbound',
         String gateReason = teamsSourceGate,
-        Duration age = const Duration(days: 2),
+        // Hours: the window this re-queue is bounded by is the connector's
+        // floor, now one day, and `in-window` has to actually be in it.
+        Duration age = const Duration(hours: 2),
       }) =>
           store.upsertMessage({
             'source': 'teams',

@@ -244,6 +244,16 @@ class AiWorker {
   /// fresh drain and zeroes the count out from under it.
   int get lastDrainCount => _lastDrainCount;
 
+  /// Whether the app's processing switch is ON, or null where nobody wired
+  /// one — every test, and any caller from before the switch existed.
+  ///
+  /// A CLOSURE over session state rather than a flag set on this object, on
+  /// `WorkHandler.concurrency`'s precedent: the switch moves while a worker is
+  /// mid-drain, and a value captured at construction would only take effect at
+  /// the next rebuild. Read on every launch decision instead, so the drain
+  /// stops at the item after the one the user switched off during.
+  final bool Function()? _enabled;
+
   /// Told after every completed drain, so the lanes this one feeds can walk.
   ///
   /// `TriageQueue._onDrained`'s shape with one difference: it fires even when
@@ -259,6 +269,7 @@ class AiWorker {
     DrainGate? gate,
     ActivityLog? activityLog,
     PipelineProgress progress = const PipelineProgress.disabled(),
+    this._enabled,
     this._onDrained,
   })  : _handlers = List.unmodifiable(handlers),
         _gate = gate ?? DrainGate(),
@@ -266,6 +277,23 @@ class AiWorker {
         _pipeline = progress;
 
   Stream<WorkProgress> get progress => _progress.stream;
+
+  /// True only when a switch was wired AND says no. An unwired worker is on,
+  /// which is what keeps every existing caller and every test unchanged.
+  bool get _off => _enabled?.call() == false;
+
+  /// Whether this drain must end, and the one thing every loop below asks.
+  ///
+  /// It LATCHES: an off read here sets [_stopped], so a drain the switch cut
+  /// short ends the way a [stop] ends it — [_fireDrained] stays silent, the
+  /// repump loop finishes, and no sibling lane is woken while processing is
+  /// off. Without the latch a cut drain would still fire the callback, and the
+  /// fast lane's `beforeWaking` would re-arm the storyline sweep on a mailbox
+  /// nothing is allowed to look at.
+  bool get _halted {
+    if (_off) _stopped = true;
+    return _stopped;
+  }
 
   /// The kinds this worker drains, in drain order.
   ///
@@ -319,7 +347,26 @@ class AiWorker {
   /// once what it started has finished — which is the point of it being a
   /// `void` callback. "This lane is drained" is the fact a caller waits for,
   /// and waking the next lane must not extend this one's wall clock.
+  ///
+  /// With processing switched off it does nothing at all: no gate is taken, no
+  /// claim is made, and [_onDrained] does not fire — a wake while off would
+  /// re-arm the storyline sweep on every sixty-second poll. The flag is raised
+  /// on the way out rather than merely returned on, because a drain already
+  /// running has to learn about the switch too, and [_drainAll] is where it
+  /// reads it. A completed future and never null: callers both `await` this
+  /// and `unawaited(…)` it.
   Future<void> pump() {
+    if (_off) {
+      _stopped = true;
+      return _draining ?? Future<void>.value();
+    }
+    // Cleared on every ON pump, and this is what makes the switch reversible
+    // mid-drain: the latch in [_halted] leaves [_stopped] set, and a drain
+    // still finishing its last item would otherwise drop the [_repump] below
+    // on `while (_repump && !_stopped)` and go quiet until the next poll.
+    // [stop] already promises exactly this — the next pump starts draining
+    // again.
+    _stopped = false;
     final inFlight = _draining;
     if (inFlight != null) {
       _repump = true;
@@ -379,12 +426,22 @@ class AiWorker {
     } catch (_) {}
   }
 
+  /// This entry RESETS [_stopped], which is why the processing switch cannot
+  /// live in [stop] alone: a pump landing after an off would clear the flag
+  /// here and drain anyway. The reset reads the switch instead, so an off
+  /// worker starts every drain already stopped and returns before it takes a
+  /// claim.
   Future<void> _drainAll() async {
-    _stopped = false;
+    _stopped = _off;
+    if (_stopped) return;
     do {
       _repump = false;
       for (final handler in _handlers) {
-        if (_stopped) break;
+        // The switch is re-read per handler as well as per item: an off that
+        // lands mid-drain must stop the NEXT launch, while the item already at
+        // the server finishes and its answer is written — see the
+        // `Future.wait(_inFlight)` below, which is outside every break.
+        if (_halted) break;
         // Before the first item of each kind, not after it: a counter that
         // appears only once the first item lands is blank for exactly the
         // seconds someone would be looking at it.
@@ -400,9 +457,13 @@ class AiWorker {
         // null.
         var parkedKind = false;
         var parkedDrain = false;
-        while (!_stopped && !parkedKind && !parkedDrain) {
+        // [_halted] rather than [_stopped] in both conditions: a switch moved
+        // while this kind is draining must stop the next LAUNCH, not just the
+        // next kind — an off during a sixty-message backlog would otherwise
+        // keep dialling the model until that backlog ran out.
+        while (!_halted && !parkedKind && !parkedDrain) {
           while (_inFlight.length < handler.concurrency &&
-              !_stopped &&
+              !_halted &&
               !parkedKind &&
               !parkedDrain) {
             final item = await _store.claimPendingWork(

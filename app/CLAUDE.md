@@ -49,9 +49,17 @@ enforce the ones that are commands.
   never fires. Create temp dirs, servers and supervisors in `setUp`.
 - Fixture timestamps that a sync window or an age rule will judge are
   derived from `DateTime.now()` (`delta_paging_test.dart`'s `ago()` shape),
-  never written as absolute dates: the 14-day `syncFloorDays` window walks
+  never written as absolute dates: the one-day `syncFloorDays` window walks
   past a literal at midnight UTC and the test rots with no code change
-  (it happened twice on 2026-09-12).
+  (it happened twice on 2026-09-12). One day is a SHORT window — a fixture
+  two days old is outside it, and a fixture written as `Duration(days: 1)`
+  straddles the midnight-truncated floor; use hours for anything meant to be
+  inside.
+- Model work runs only while the session's processing switch is on
+  (`processingProvider`, off at every launch). `AiWorker` and `TriageQueue`
+  each take an `enabled` closure and read it on every launch decision, so a
+  test that builds either one WITHOUT that argument is unaffected. Turning it
+  off also calls `stop()` on all four drains.
 - `--plain-name` on a live `make` target is a SUBSTRING filter, so a new live
   test's name must not contain another target's word (`storyline`, `triage`,
   `reply`, `gates`, `sweep`) or it runs under that target too.
@@ -95,8 +103,9 @@ enforce the ones that are commands.
   `settings_screen_test.dart` and by the table in `docs/settings.md` — move
   all three together; a new segmented control is `SettingsSegments<T>`.
 - The clustering card is ONE recipe (`clusteringCardForConversationRow` in
-  `storyline_service.dart`) behind `StorylineTuning.participantsInClusteringCard`
-  and `EmbeddingsClient.modelTag`; a tag bump orphans every stored
+  `clustering_card.dart`, whose `ClusteringCardVariant` holds the five cards
+  and `shippedClusteringCard` names the one that ships) behind
+  `EmbeddingsClient.modelTag`; a tag bump orphans every stored
   conversation vector by construction, so it ships with a one-shot re-embed
   in `sync_service.dart` (Round A's pref idiom).
 - `_accepts` in `storyline_service.dart` is the one membership rule at all

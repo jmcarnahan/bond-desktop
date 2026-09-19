@@ -35,6 +35,7 @@ import '../providers/recipient_search_provider.dart';
 import '../providers/setup_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../providers/why_provider.dart';
+import '../services/ai_workers.dart' show pumpTriageThenWorkersQuietly;
 import '../services/attachments/attachment_bytes.dart';
 import '../services/attachments/file_dialogs.dart';
 import '../services/attachments/xlsx_reader.dart';
@@ -1743,6 +1744,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
+          _processingToggle(),
+          const SizedBox(height: BondSpacing.s8),
           Row(
             children: [
               Expanded(
@@ -1779,6 +1782,59 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           const SizedBox(height: BondSpacing.s8),
           _sourceFilterBar(),
           _triageProgress(),
+        ],
+      ),
+    );
+  }
+
+  /// Whether this session runs model work at all — the first thing in the
+  /// column, above the section label.
+  ///
+  /// Here rather than on the icon rail because the rail is 56 px of 44 px
+  /// stops: a labelled switch does not fit, and an eighth unlabelled glyph
+  /// would read as a place to go rather than a thing to turn off. This header
+  /// draws on every section, sits above the scroll, and already holds
+  /// [_triageProgress] — which is the caption that stops moving when the
+  /// switch goes off, so the question and its answer are one block.
+  Widget _processingToggle() {
+    final on = ref.watch(processingProvider);
+    // One node, not three: a switch, its name and its state read as a single
+    // control to a screen reader, and split across three siblings they arrive
+    // as an unlabelled toggle followed by two loose words.
+    return MergeSemantics(
+      child: Row(
+        children: [
+          // The compact Material switch: this is a rail control beside a
+          // caption, not a settings row.
+          Transform.scale(
+            scale: 0.8,
+            alignment: Alignment.centerLeft,
+            child: Switch(
+              key: const ValueKey('processing-toggle'),
+              value: on,
+              onChanged: (value) => unawaited(_setProcessing(value)),
+            ),
+          ),
+          const SizedBox(width: BondSpacing.s8),
+          Expanded(
+            child: Text(
+              'AI processing',
+              style: BondType.caption.copyWith(
+                color: BondColors.onDarkSecondary,
+                fontWeight: FontWeight.w600,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          // The word as well as the switch. A switch alone says which way it
+          // is thrown only to somebody who already knows which way is on.
+          Text(
+            on ? 'On' : 'Off',
+            style: BondType.caption.copyWith(
+              color: on ? BondColors.railAccent : BondColors.onDarkMuted,
+            ),
+          ),
         ],
       ),
     );
@@ -1958,6 +2014,43 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // drain this only sets the re-pump flag, and the future it returns is that
     // drain's.
     unawaited(worker.pump());
+  }
+
+  /// Turns model work on or off for this session, and makes the four drains
+  /// follow.
+  ///
+  /// [_setManagedServer]'s shape, and this host is the one place that can do
+  /// it for the same reason: the notifier holds a flag and knows nothing about
+  /// the queues, and the queues read the flag but are never told when it
+  /// moves. ON pumps triage and then the lanes, in that order and unawaited —
+  /// a drain is minutes of model time and a switch must not hang on it. OFF
+  /// calls `stop()` on all four, which is "finish the item in flight, then end
+  /// the drain": without it a fast drain that had already started would keep
+  /// dialling the model for as long as its backlog lasted.
+  ///
+  /// The activity row goes in either way, before the pumps, so the panel shows
+  /// who asked for the work that follows it.
+  Future<void> _setProcessing(bool on) async {
+    ref.read(processingProvider.notifier).set(on);
+    await ref
+        .read(activityLogProvider)
+        .record('processing', status: on ? 'on' : 'off');
+    if (!mounted) return;
+    if (on) {
+      // Quietly, because this is a button and nothing awaits what it starts:
+      // a triage drain parked on a dead server would otherwise throw into
+      // whatever zone the tap happened to be in, and cost the lanes their
+      // pump on the way past.
+      unawaited(pumpTriageThenWorkersQuietly(
+        triage: () => ref.read(triageQueueProvider).pump(),
+        workers: () => ref.read(aiWorkersProvider).pumpAll(),
+      ));
+      return;
+    }
+    // The queue, then the three lanes as one — see [AiWorkers.stopAll] for why
+    // triage is named separately.
+    ref.read(triageQueueProvider).stop();
+    ref.read(aiWorkersProvider).stopAll();
   }
 
   /// Turns the managed server on or off, and makes the process follow.
@@ -2543,7 +2636,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// there is none. Deliberately a quiet caption: triage is a background
   /// annotator, not something the user waits on, and the first sync of a real
   /// mailbox leaves it counting down for the better part of an hour.
+  ///
+  /// While processing is off the same count is still worth saying, and the
+  /// sentence changes rather than the number: a counter that had simply
+  /// stopped moving would read as a stall rather than as a switch somebody
+  /// threw. Nothing at all when there is nothing waiting — an off session with
+  /// an empty queue has no news.
   Widget _triageProgress() {
+    final on = ref.watch(processingProvider);
     return StreamBuilder<TriageProgress>(
       stream: ref.watch(triageQueueProvider).progress,
       builder: (context, snapshot) {
@@ -2552,7 +2652,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         return Padding(
           padding: const EdgeInsets.only(bottom: BondSpacing.s8),
           child: Text(
-            'Triaging $remaining remaining…',
+            on
+                ? 'Triaging $remaining remaining…'
+                : 'Processing is off · $remaining waiting',
             style: BondType.caption.copyWith(color: BondColors.onDarkMuted),
           ),
         );
@@ -2783,11 +2885,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // and the row's next re-read is what reports whether anything moved.
       // The one thing a re-read cannot say is that nothing was owed, because
       // the row looks the same afterwards — so that answer is spoken.
+      // While the switch is off the requeue still lands and nothing drains it,
+      // so the row sits exactly as it did and the press reads as ignored. The
+      // work is kept — turning processing on runs it — and the toast is the
+      // only place that can say which of the two just happened.
       onRetry: (source, id) => unawaited(() async {
         final stages =
             await ref.read(pipelineRepairServiceProvider).retryOwed(source, id);
-        if (!mounted || stages.isNotEmpty) return;
-        _toast('Nothing to retry — every stage has finished.');
+        if (!mounted) return;
+        if (stages.isEmpty) {
+          _toast('Nothing to retry — every stage has finished.');
+        } else if (!ref.read(processingProvider)) {
+          _toast('Queued until processing is on.');
+        }
       }()),
       // Two doors on every row — the stage bar and the Result cell — because
       // those are the two places a reader looks when the sentence is not the
@@ -4653,6 +4763,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onDismiss: () => _unstage(target),
       onEdited: notifier.markEdited,
       hint: hint,
+      // Watched, not read: the button has to come back the moment the switch
+      // at the top of the rail does.
+      processingOff: !ref.watch(processingProvider),
       focusNode: focusNode,
     );
 
@@ -4925,6 +5038,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onRestore: (source, id) {
           ref.read(archiveProvider.notifier).noteRestored(source, id);
           unawaited(ref.read(restoreServiceProvider).restore(source, id));
+          // The row leaves this pane either way, and while the switch is off
+          // nothing behind it moves — the message is restored and its stages
+          // are queued, which is a different thing from restored and read.
+          // Said only while off: with processing on, the pane shedding the row
+          // is the whole answer.
+          if (!ref.read(processingProvider)) {
+            _toast('Queued until processing is on.');
+          }
         },
         // The same door the home feed opens: a dropped row is exactly the one
         // somebody wants the reason for.

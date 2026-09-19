@@ -57,13 +57,15 @@ http.Response jsonOk(Object body) => http.Response(
       headers: const {'content-type': 'application/json'},
     );
 
-/// Yesterday, so a defaulted message is always inside the sync window.
+/// This morning, so a defaulted message is always inside the sync window.
 /// An absolute date here rots: it sat still while the window walked past it,
 /// and the backlog gate started skipping fixtures that were fresh the day they
-/// were written.
+/// were written. HOURS and not a whole day, since the default window became
+/// one day truncated to UTC midnight: a fixture a day back sits on the floor
+/// itself and a run that straddles midnight lands on the wrong side of it.
 final String _freshReceivedAt = DateTime.now()
     .toUtc()
-    .subtract(const Duration(days: 1))
+    .subtract(const Duration(hours: 2))
     .toIso8601String();
 
 /// One message as a delta page renders it — the tier-one fields only.
@@ -472,9 +474,12 @@ void main() {
     });
 
     test('mail older than the sync window arrives already skipped', () async {
+      // Hours rather than a day: the floor is `syncFloorDays` (now one)
+      // truncated to UTC midnight, so a fixture written as a whole day back
+      // sits on the boundary this test is about.
       final fresh = DateTime.now()
           .toUtc()
-          .subtract(const Duration(days: 1))
+          .subtract(const Duration(hours: 2))
           .toIso8601String();
       final stale = DateTime.now()
           .toUtc()
@@ -558,7 +563,9 @@ void main() {
           DateTime.now().toUtc().subtract(age).toIso8601String();
       final firstAsk = ago(const Duration(days: 2, hours: 6));
       final myReply = ago(const Duration(days: 1, hours: 6));
-      final newestWord = ago(const Duration(days: 1));
+      // Hours: the newest inbound is the one the fold reads, and under the
+      // one-day floor a fixture a whole day back sits on the boundary.
+      final newestWord = ago(const Duration(hours: 2));
       graph.queue('inbox', [
         () => jsonOk(deltaBody(
               [
@@ -913,9 +920,12 @@ void main() {
             'received_at': ago(age),
           });
 
-      await stored('historical', const [me], const Duration(days: 2));
+      // Hours for the two the backfill must REACH: the window it is bounded by
+      // is `syncFloorDays`, now one day, so a fixture two days old would be
+      // outside it and would pass the `ancient` assertion instead of its own.
+      await stored('historical', const [me], const Duration(hours: 2));
       await stored('historical-group', const [me, 'ops@x.com'],
-          const Duration(days: 2));
+          const Duration(hours: 2));
       await stored('ancient', const [me], const Duration(days: 40));
 
       queueInbox([graphMessage(id: 'fresh', to: const [me])]);
@@ -929,7 +939,9 @@ void main() {
       expect(await store.getPref('backfill_addressed_me_email'), '1');
 
       // Once means once: a flat row written after the pref is set stays flat.
-      await stored('later', const [me], const Duration(days: 2));
+      // Inside the window, so the pref is the only thing that can be keeping
+      // it flat.
+      await stored('later', const [me], const Duration(hours: 2));
       graph.queue('inbox', [
         () => jsonOk(deltaBody(const [], deltaLink: deltaCursor('inbox', 'c2'))),
       ]);

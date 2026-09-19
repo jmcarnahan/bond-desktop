@@ -119,6 +119,16 @@ class Composer extends StatefulWidget {
   /// box and a box addressed to somebody.
   final String hint;
 
+  /// The app's processing switch is off, so nothing would write this draft.
+  ///
+  /// [onGenerate] stays wired and the button stays visible, disabled with the
+  /// reason in its tooltip: the button is how a reader learns the switch is
+  /// down, and a control that vanished would read as a build without drafting
+  /// at all. It has to be here rather than left to the host, because asking
+  /// while off is not a no-op — the host writes the work row, the drain that
+  /// would claim it returns at once, and the spinner clears with no draft.
+  final bool processingOff;
+
   /// The HOST's focus node, never one of ours. This widget is rebuilt with a
   /// new key on every send epoch and on every change of thread, so a node owned
   /// here would be thrown away exactly when the cursor is meant to survive —
@@ -142,6 +152,7 @@ class Composer extends StatefulWidget {
     this.onEdited,
     this.sending = false,
     this.hint = 'Write a reply…',
+    this.processingOff = false,
     this.focusNode,
   });
 
@@ -438,11 +449,15 @@ class _ComposerState extends State<Composer> {
         ),
       );
     }
-    return TextButton.icon(
-      onPressed: widget.onGenerate,
+    final button = TextButton.icon(
+      onPressed: widget.processingOff ? null : widget.onGenerate,
       icon: Icon(hasDraft ? Icons.refresh : Icons.auto_awesome, size: 16),
       label: Text(hasDraft ? 'Regenerate' : 'Draft reply'),
     );
+    // Only while off. A tooltip on the working button would be a label saying
+    // what the label already says.
+    if (!widget.processingOff) return button;
+    return Tooltip(message: 'Processing is off', child: button);
   }
 
   /// Disabled on an empty field, and while a send is already in flight. Both

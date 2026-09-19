@@ -302,4 +302,60 @@ void main() {
     expect(progress['dropped'], 0);
     expect(progress['drop_reason'], null);
   });
+
+  testWidgets('a restore while processing is off says the work is queued',
+      (tester) async {
+    // The pane sheds the row whatever the switch says, and with processing
+    // off nothing behind it runs: the message is restored and its stages are
+    // queued, which is not the same as restored and read. The toast is the
+    // only place that difference can be said — the row is gone from this pane
+    // either way.
+    await seedDropped('Weekly roundup');
+    await pumpScreen(tester, overrides: [
+      restoreServiceProvider.overrideWith((ref) => RestoreService(
+            ref.watch(messageStoreProvider),
+            progress: ref.watch(pipelineProgressProvider),
+            ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
+          )),
+    ]);
+
+    await tester.tap(find.widgetWithText(BondFilterPill, 'Dropped'));
+    await tester.pump();
+    await tester.pump();
+
+    await tester.tap(find.text('Restore'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Queued until processing is on.'), findsOneWidget);
+  });
+
+  testWidgets('and says nothing about it once processing is on',
+      (tester) async {
+    // The other half, and the reason the sentence is conditional: with the
+    // switch on the row leaving the pile is the whole answer, and a toast
+    // after every restore would be noise on the common path.
+    await seedDropped('Weekly roundup');
+    await pumpScreen(tester, overrides: [
+      processingProvider.overrideWith((ref) => ProcessingNotifier()..set(true)),
+      restoreServiceProvider.overrideWith((ref) => RestoreService(
+            ref.watch(messageStoreProvider),
+            progress: ref.watch(pipelineProgressProvider),
+            ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
+          )),
+    ]);
+
+    await tester.tap(find.widgetWithText(BondFilterPill, 'Dropped'));
+    await tester.pump();
+    await tester.pump();
+
+    await tester.tap(find.text('Restore'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Queued until processing is on.'), findsNothing);
+    expect(find.text('Weekly roundup'), findsNothing);
+  });
 }

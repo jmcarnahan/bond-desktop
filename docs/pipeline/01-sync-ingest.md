@@ -25,15 +25,17 @@ Microsoft data; everything after it runs against local rows.
   `requeueWork` and the doc comments distinguishing them (why storylines need
   the revive path rather than a plain enqueue).
 
-**Windows and caps.** How far back a sync reaches is a preference — 7 days by
-default, set in Settings → Sync & data — and the AI pipeline reads that same
+**Windows and caps.** How far back a sync reaches is a preference — **one day**
+by default, set in Settings → Sync & data — and the AI pipeline reads that same
 window: mail inside the lookback is triaged, extracted, judged and embedded,
-with no separate 7-day AI window behind it. The backlog enqueue files at most
+with no separate AI window behind it. A first sync on a new machine is
+therefore a morning's mail; a stored choice is untouched by the default. The
+backlog enqueue files at most
 `backlogEnqueueCap` (150) rows per queue per pass, but skips messages that
 already have a work row, so a deep window drains across passes rather than
 being truncated to its newest 150. Work in flight is re-queued at the next
 launch, so a restart loses nothing. Teams carries its own lookback in the same
-Settings section, defaulting to the same 7 days: a chat's first fetch reaches
+Settings section, defaulting to the same one day: a chat's first fetch reaches
 back to that floor through a server-side date filter rather than taking one
 page of its newest messages. Two limits bound that walk and both are logged
 when hit — the chat list stops at 200 chats (4 pages of 50), and one chat's
@@ -96,6 +98,12 @@ for it, so this is a safety net rather than a fix. Every `reconcileEvery`
 of `inbox` and `sentitems` from scratch — no cursor, a `receivedDateTime ge`
 filter, walking `nextLink` itself — and ingests through the same idempotent
 page path, so anything already stored is neither counted nor re-folded.
+
+Since the default lookback became one day, that 24-hour window is the same
+size as the default sync window. On a fresh install the reconcile therefore
+re-enumerates the whole window every ten minutes, and what it finds lands at or
+just below the midnight-truncated floor. It is idempotent and cursor-free, so
+the cost is the enumeration rather than any double ingest.
 
 What it never does is the point. It never calls `setDeltaLink`, so the folder's
 delta position, its `synced_at` and the vacation rule that reads that stamp are

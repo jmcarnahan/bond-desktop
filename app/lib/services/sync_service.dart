@@ -20,11 +20,13 @@ import 'llm/embeddings_client.dart' show EmbeddingsClient;
 import 'mail_text.dart';
 import 'pipeline_progress.dart';
 
-/// How far back a mailbox that has never synced reaches. One week is enough
-/// context to thread the conversations that are actually live without
-/// dragging in a year of archive — and the smaller a first drain, the sooner a
-/// new sign-in has a usable inbox. A user who wants more raises it in Settings.
-const int syncFloorDays = 7;
+/// How far back a mailbox that has never synced reaches. One day: a first sync
+/// on a new machine is a morning's mail rather than a week of it, which is the
+/// difference between an inbox that is usable in minutes and one that spends
+/// an hour annotating history nobody asked about. A user who wants more raises
+/// it in Settings, and a mailbox that already stored a choice keeps it — this
+/// is the value that applies where nothing is stored.
+const int syncFloorDays = 1;
 
 /// The range a user may choose that floor from. A day is the shortest window
 /// that still means "recent mail" on a machine that syncs once a morning; a

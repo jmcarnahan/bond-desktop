@@ -106,6 +106,31 @@ final graphAuthProvider = Provider<GraphAuth>((ref) => GraphAuth());
 /// suddenly say "thinking…".
 final sessionStartProvider = Provider<DateTime?>((ref) => null);
 
+/// Whether this session is allowed to run model work at all.
+///
+/// SESSION state, on [sessionStartProvider]'s precedent, and deliberately not
+/// a preference: every launch starts OFF so the owner can point the stages at
+/// the servers they mean to use before anything is spent on the wrong one. A
+/// stored answer would make that impossible to get back to.
+///
+/// It gates the four drains and nothing else. Mail and Teams keep syncing
+/// while it is off — the inbox stays current, the models stay idle — and the
+/// two things that dial a server without being a drain keep working too:
+/// Settings' Check server probe, which is how a target is chosen in the first
+/// place, and the query embedding behind the Find field, which a person is
+/// waiting on.
+final processingProvider =
+    StateNotifierProvider<ProcessingNotifier, bool>(
+  (ref) => ProcessingNotifier(),
+);
+
+/// The switch's state, and the one thing that moves it.
+class ProcessingNotifier extends StateNotifier<bool> {
+  ProcessingNotifier() : super(false);
+
+  void set(bool on) => state = on;
+}
+
 /// The pane the app opens on.
 ///
 /// Home, because the whole point of that screen is to be left up: it is what
@@ -751,6 +776,8 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     gate: ref.watch(fastDrainGateProvider),
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
+    // The processing switch — see [processingProvider] and [_enabledReader].
+    enabled: _enabledReader(ref),
     // The knock on the worker's door. Extraction and needs-you are no longer
     // handed a message triage has not spoken about, so a worker drain that
     // won the gate first leaves them pending and would sit on them until the
@@ -1245,6 +1272,27 @@ OwnerLookup _ownerLookup(Ref ref) => () =>
                 ),
         );
 
+/// Reads the processing switch, for a drain that asks on every launch
+/// decision.
+///
+/// `ref.read` inside the closure and never `watch`, on
+/// [contextRetrieverProvider]'s `selectExpand` rule and for its reason: a
+/// watch would rebuild every queue in this file — and dispose the one
+/// mid-drain — the instant somebody moved the switch, which is the opposite of
+/// "finish the item in flight".
+///
+/// A torn-down container reads as OFF rather than throwing. The closure is
+/// called from inside a drain that outlives its container by however long the
+/// item at the server takes, and the safe answer there is to start nothing
+/// new: [AiWorker.dispose] is already handing back the claims.
+bool Function() _enabledReader(Ref ref) => () {
+      try {
+        return ref.read(processingProvider);
+      } catch (_) {
+        return false;
+      }
+    };
+
 /// One lane's worker, built the way all three are: the store, the lane's
 /// handlers and gate, the shared activity log and progress, and — for a lane
 /// that feeds others — the lanes to wake when its drain ends.
@@ -1278,6 +1326,8 @@ AiWorker _lane(
     gate: ref.watch(gate),
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
+    // The processing switch, on all three lanes — see [_enabledReader].
+    enabled: _enabledReader(ref),
     onDrained: wakes.isEmpty && beforeWaking == null
         ? null
         : () {

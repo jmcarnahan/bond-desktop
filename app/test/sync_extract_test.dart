@@ -161,11 +161,19 @@ void main() {
     graph.queue('inbox', [
       () => jsonOk(deltaBody(
             [
-              graphMessage(id: 'fresh-1', receivedDateTime: fresh(const Duration(days: 1))),
+              // Hours, not days: the floor is `syncFloorDays` (now one)
+              // truncated to UTC midnight, so anything meant to be INSIDE the
+              // default window is written in hours — a whole day back sits on
+              // the boundary and two days back is outside it, where `stale`
+              // is.
+              graphMessage(
+                id: 'fresh-1',
+                receivedDateTime: fresh(const Duration(hours: 2)),
+              ),
               graphMessage(
                 id: 'fresh-2',
                 conversationId: 'conv-2',
-                receivedDateTime: fresh(const Duration(days: 2)),
+                receivedDateTime: fresh(const Duration(hours: 5)),
               ),
               // Older than the sync window: skipped on insert, and outside the
               // window the backlog enqueue reads.
@@ -208,7 +216,13 @@ void main() {
   test('a second sync neither duplicates nor resurrects', () async {
     graph.queue('inbox', [
       () => jsonOk(deltaBody(
-            [graphMessage(id: 'm1', receivedDateTime: fresh(const Duration(days: 1)))],
+            // Inside the one-day window — see the fixture note above.
+            [
+              graphMessage(
+                id: 'm1',
+                receivedDateTime: fresh(const Duration(hours: 3)),
+              )
+            ],
             deltaLink: deltaCursor('inbox', 'c1'),
           )),
     ]);

@@ -188,7 +188,7 @@ class AppPrefs {
   /// because the two mailboxes are different sizes and a person who wants a
   /// quarter of email rarely wants a quarter of chat.
   ///
-  /// Both default to [syncFloorDays] — Teams' own floor is the same seven days,
+  /// Both default to [syncFloorDays] — Teams' own floor is the same one day,
   /// and its constant is class-static on `TeamsSync`, so naming it here would
   /// drag in that import to say a number this file already has.
   final int mailLookbackDays;

@@ -380,6 +380,34 @@ sits and waits for. Where the two prose lanes genuinely contend the SERVER
 queues them, so the worst case for an asked-for draft is one recap rather than
 a drain pass.
 
+**…and one switch.** Model work runs only while **AI processing** is on. The
+switch is the first row of the sidebar's list header (`InboxScreen._listHeader`,
+keyed `processing-toggle`) and its state is `processingProvider` — session
+state, never persisted, **off at every launch**, so the owner can point stages
+at servers before anything is spent on the wrong one. It reaches the pipeline
+as ONE `enabled` closure per drain: `AiWorker` and `TriageQueue` each take
+`bool Function()? enabled` and read it on every launch decision, so an off
+lands on the item after the one already at the server. `pump()` returns at once
+while off — no gate is taken, no claim is made, and `onDrained` does not fire,
+which is what stops an off session re-arming the storyline sweep on every
+poll. The one thing an off pump still does is EMIT: `TriageQueue.pump` reads
+the waiting count and puts it on its progress stream, because that stream is
+what the rail's `Processing is off · N waiting` caption reads and nothing else
+ever puts a first snapshot on it. Turning it off calls `stop()` on the queue
+and on the three lanes through `AiWorkers.stopAll()`; turning it on runs
+`pumpTriageThenWorkersQuietly` once. An on that lands while a drain is still
+finishing its last item lifts the stop rather than waiting for the next poll:
+`pump()` clears the flag on its way in, which is what `stop()` has always
+promised.
+
+What keeps running while it is off: mail and Teams sync, the read-ack queue,
+Settings → Models → **Check server** (a probe, not a pump, and it is how a
+target gets chosen in the first place), and the query embedding behind the Find
+field, which a person is waiting on. The composer's **Draft reply** is disabled
+with the tooltip `Processing is off`, because asking while off writes a work
+row that nothing would claim. The switch writes one activity row, kind
+`processing`, status `on` or `off`.
+
 **Order across lanes is enqueue-and-pump, not list position.** A fast handler
 writes the `storyline*` or `draft` row and something wakes the lane that owns
 it: `AiWorker.onDrained` fires after every completed drain, empty ones

@@ -48,8 +48,10 @@ class LookbackField extends StatefulWidget {
   });
 
   /// The day counts worth a click. Not a scale of anything — they are the
-  /// spans people ask for out loud, a week through a quarter.
-  static const List<int> presets = [7, 14, 30, 60, 90];
+  /// spans people ask for out loud, today's mail through a quarter. One day is
+  /// first because it is the default: a fresh install syncs a morning's mail
+  /// and the rest of the list is how somebody asks for history.
+  static const List<int> presets = [1, 7, 14, 30, 60, 90];
 
   /// The dropdown value that means "none of the presets": a sentinel rather
   /// than a null entry, because a null selection renders as an empty row and
@@ -208,7 +210,10 @@ class LookbackFieldState extends State<LookbackField> {
           decoration: InputDecoration(labelText: widget.label),
           items: [
             for (final preset in LookbackField.presets)
-              DropdownMenuItem(value: preset, child: Text('$preset days')),
+              DropdownMenuItem(
+                value: preset,
+                child: Text(preset == 1 ? '1 day' : '$preset days'),
+              ),
             const DropdownMenuItem(
               value: LookbackField.customSentinel,
               child: Text('Custom…'),
@@ -247,7 +252,8 @@ class LookbackFieldState extends State<LookbackField> {
         // Rendered in every mode, preset included: the span is what was
         // chosen, but the day is what the user is actually asking about.
         Text(
-          'Last $_days days · since ${absoluteDay(_dateFor(_days))}',
+          'Last $_days ${_days == 1 ? 'day' : 'days'} · '
+          'since ${absoluteDay(_dateFor(_days))}',
           style: BondType.caption,
         ),
       ],

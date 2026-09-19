@@ -91,6 +91,22 @@ class AiWorkers {
     await Future.wait([storyline.pump(), draft.pump()]);
   }
 
+  /// Ends every lane's drain after the items already in flight finish.
+  ///
+  /// [pumpAll]'s mirror, and here for its reason: which three workers "all of
+  /// them" means is this file's fact, and a caller that enumerated them would
+  /// be a caller that silently missed a fourth lane the day one is added.
+  /// Not chained and not awaited: [AiWorker.stop] is a flag, and the point of
+  /// it is that the three stop at the same instant rather than in an order.
+  ///
+  /// Triage is NOT here, for [pumpTriageThenWorkers]'s reason: it is a queue
+  /// of its own, and the caller that stops the lanes stops it beside them.
+  void stopAll() {
+    for (final worker in [fast, storyline, draft]) {
+      worker.stop();
+    }
+  }
+
   /// Drops the merge. The workers are disposed by their own providers — this
   /// owns the subscriptions and the controller and nothing else.
   Future<void> dispose() async {
