@@ -30,6 +30,7 @@ depends on a server being up, and each `make` target below runs it with
 | `make golden` | The golden set through triage, needs-you and extraction on the bulk slot — the run behind a golden-ledger row. Writes the run file and the timing/cost JSON. |
 | `make golden-prose` | Reply decisions for every gold-keep item and drafts for the reply-rubric items, on the prose slot. |
 | `make golden-sweep GOLDEN_RUN=…` | The app's own filing path over the golden set: the sweep, the naming pass, the per-member confirms and the assign shortlist, scored by membership against the gold registry. Needs the embed, bulk and prose servers. `SWEEP_CARD` picks whether the people on a thread are inside the clustering vector. See "The golden set". |
+| `make golden-vector GOLDEN_RUN=…` | The clustering vector alone, added 2026-09-19: the same seeding as `golden-sweep`, stopped the moment the mailbox is embedded. The clusters it WOULD form and their gold purity, every pool pair by cosine, by subject-word overlap and by shared people, and one separation line. Needs only the embedding server, takes about a minute, asks no model anything and scores nothing. See "The golden set". |
 | `make golden-gate` | Offline, no server: the golden set through the app's own gates — direction, sender address and body. Tier 2 (headers) and the Teams ingest gates are not in the set and go unmeasured. `GOLDEN_RUN=` adds the model's `notification` proxy column. See "The golden set". |
 
 The knobs, all `?=` in the `Makefile` and all overridable on the command line
@@ -64,14 +65,32 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
 - `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_EXTRACT_CTX`, `GOLDEN_K`,
   `GOLDEN_CHARTER_CAP`, `GOLDEN_OWNER_NAME` / `GOLDEN_OWNER_ADDRESS` — see
   "The golden set".
-- `SWEEP_CARD` — which clustering card `make golden-sweep` embeds: `topics`,
-  the card the app ships since 2026-09-18, with its people segment left empty,
-  or `participants`, the card it shipped before. Defaults to `topics`, which
-  is to say to the app. The variable that bench was built to price.
+- `SWEEP_CARD` — which clustering card `make golden-sweep` and `make
+  golden-vector` embed. Five words since 2026-09-19: `topics`, the card the app
+  ships since 2026-09-18 with its people segment left empty; `participants`,
+  the card it shipped before; `subject`, the subject line alone; `subject_topics`,
+  the durable half with the summary dropped; and `summary`, what the thread is
+  about with no subject line. Defaults to `topics`, which is to say to the app.
+  Anything else fails loudly rather than defaulting.
+- `SWEEP_STAGE` — how much of the sweep test runs: `full`, the whole filing
+  path on three servers, or `vector`, which stops after the seeding and reads
+  the geometry alone on one. Defaults to `full`; `make golden-vector` passes
+  `vector`. One test body and one seeding serve both, so the two readings of a
+  mailbox cannot drift apart.
+- `SWEEP_EMBED_PREFIX` — the instruction the embedding model is given about
+  what a card is FOR. Empty means the app's own `clusteringPrefix`; the literal
+  `none` means no prefix at all; anything else is sent verbatim. Quote it: most
+  candidate models document a wording that ends in a space, and a lost trailing
+  space is a different request. The bench prints its LENGTH and never the text.
 - `EMBED_URL` — the embedding server every bench dials, defaulting to
   `EMBED_PORT` on localhost. It reached only the app until `make golden-sweep`
   needed it: a bench run without it would embed against the compiled default
   whatever `local.mk` says.
+- `EMBED_ARGS` — extra flags on `make embed`'s `llama-server` line, for a
+  candidate embedding model whose pooling llama.cpp does not read off the GGUF.
+  Empty by default, so the shipping server's launch line is unchanged. `make
+  embed EMBED_PORT=8091 EMBED_HF=<repo> EMBED_ARGS='--pooling last'` is how a
+  candidate is stood up beside the shipping one.
 
 Name the weights in a label, not just the runtime: two quantizations of one
 model otherwise produce two identical-looking tables. Once two runs have
@@ -531,6 +550,28 @@ what the sweep then did with it, which separates a namer that declines pure
 groups from a clustering that builds mixed ones, and the cosine of every pool
 pair split by whether the two threads share a gold effort, which says whether
 a threshold separating in-effort pairs from the rest exists at all.
+
+**The vector, read alone (2026-09-19).** `make golden-vector` is the same test
+body and the same seeding with the stage define set to `vector`: it stops the
+moment the mailbox is embedded. Nothing in it asks a model anything, so there
+is no naming, no confirm, no assign, no run file, nothing to score and no
+contract check to run first. One server, the embedding one, and about a
+minute. What it prints is arithmetic over the vectors the seeding just wrote:
+the clusters the app's own `clusterBySimilarity` WOULD form over the pool with
+the same five tuning numbers in the same order, each one's gold purity beside
+it; every pool pair's cosine split by whether the two threads share a gold
+effort; the same pairs by subject-word overlap and by shared non-owner people,
+which is the lexical ruler the cosine line is held against; and one separation
+line saying how far apart the two populations lie at the shipped threshold,
+what a 70%-recall threshold would cost in cross-effort pairs and what a
+5%-cross threshold would cost in same-effort ones. The cluster line is a
+LADDER of three, one rung at each of those cosines, because the cosine scale
+moves with the model and a rung at the shipped 0.65 cannot compare two
+candidates. It exists
+because Round D ended with the filing stuck on the vector and no way to price a
+candidate vector without twenty minutes of model calls per pass. Its rows are
+the "Clustering vector" table below; `make golden-sweep`'s rows are unchanged
+and still the only ones that say what the app FILES.
 
 The owner in this bench keeps everything. After each sweep pass every
 suggestion is kept and the pass runs again, until a pass proposes nothing or
@@ -1408,7 +1449,113 @@ stands unmet and the rows say so. For E1, where targets become settings, the
 confirm stage defaults to `Local fast`, and to the GPU 27B target whenever one
 is configured.
 
+#### Clustering vector
 
+What `make golden-vector` reads, per "The vector, read alone." above. Every
+row is one pass over the same 95 seeded conversations, 71 of them embedded,
+under one embedding model, one card and one prefix. A read and not a ledger
+row in the protocol's sense, because the stage is deterministic: the same
+seeding and the same server give the same numbers twice, so one pass is
+enough. The baseline row must reproduce Round D Phase 6's 74% and 49% and its
+39% declined purity within a point, or the bench is wrong and nothing on the
+table can be compared.
+
+**Read the scale-free columns, not the 0.65 ones.** Twenty candidate passes on
+2026-09-19 settled this: the cosine SCALE moves with the model and with the
+prefix, and recall-70 ran from 0.31 to 0.72 across them. So a cluster count at
+the shipped 0.65, and the separation points read there, say how a candidate
+would behave under the numbers the app ships TODAY and nothing about whether
+its geometry is better. A model whose cosines sit low would form no cluster at
+0.65 and look worthless while separating the two populations perfectly. The
+two derived cosines and the rungs built on them are the comparison; the
+shipped column stays because adopting a winner without moving
+`clusterLinkThreshold` is the cheapest ship, and the column says whether that
+is on the table.
+
+The columns. `recall-70 cosine / cross %` is the highest cosine at which seven
+in ten same-effort pairs still link, and the cross-effort share that clears the
+same bar — highest and not lowest, because every cosine below it links seven in
+ten too, so the lowest would always be the smallest number in the list with
+100% beside it. `cross-5 cosine / same %` is the mirror and the precision
+point: the lowest cosine at which no more than one cross pair in twenty still
+links, and the same-effort share that survives it. The two `would-form at …`
+columns are the app's own clustering run at those two cosines, with the
+coherence floor one step under and the split ceiling four steps over, so every
+candidate is asked one question: clusters formed, mean purity over the ones
+carrying a gold slug, how many reach 70%, and how many pool pairs sit inside a
+formed cluster split by whether the two threads share a gold effort. Pairs
+inside is the precision-and-recall reading in two numbers: same is what the
+rung gathered out of the pool's 85, cross is what it mixed in. `shipped-0.65
+pairs` keeps Round D's own figures for continuity.
+
+| date | embed model | card | prefix (name, len) | dims | recall-70 cosine / cross % | cross-5 cosine / same % | would-form at recall-70: clusters / mean / >=70 / inside same / inside cross | would-form at cross-5: clusters / mean / >=70 / inside same / inside cross | shipped-0.65 pairs same / cross | note |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-09-19 | embeddinggemma-300M | topics | clustering (26) | 768 | 0.66 / 39% | 0.74 / 29% | 8 / 57% / 2 / 9 / 27 | 3 / 59% / 1 / 8 / 24 | 63 / 653 | the baseline, and the check on the ruler: reproduces Round D Phase 6's 63 / 653 / 531 exactly. What ships today |
+| 2026-09-19 | embeddinggemma-300M | topics | none (0) | 768 | 0.35 / 22% | 0.42 / 42% | 9 / 47% / 1 / 10 / 53 | 6 / 63% / 1 / 22 / 22 | 5 / 0 | dropping the prefix collapses the whole scale by 0.3 and costs the shipped rung everything |
+| 2026-09-19 | embeddinggemma-300M | topics | search result (29) | 768 | 0.31 / 20% | 0.37 / 47% | 6 / 38% / 1 / 10 / 64 | 5 / 68% / 3 / 22 / 17 | 3 / 0 | the runner-up: meets the rule on a prefix change alone |
+| 2026-09-19 | embeddinggemma-300M | topics | document (20) | 768 | 0.36 / 20% | 0.43 / 48% | 8 / 41% / 1 / 32 / 52 | 4 / 63% / 2 / 34 / 16 | 6 / 0 | the widest same-effort recall on the table, 34 of 85, at a mean purity under the bar |
+| 2026-09-19 | embeddinggemma-300M | participants | clustering (26) | 768 | 0.67 / 31% | 0.73 / 36% | 10 / 70% / 5 / 17 / 36 | 3 / 59% / 1 / 17 / 24 | 68 / 669 | Round D's retired card; its recall-70 rung is the purest embeddinggemma reaches, and its cross rate is twice the rule's |
+| 2026-09-19 | embeddinggemma-300M | summary | clustering (26) | 768 | 0.64 / 47% | 0.73 / 25% | 8 / 38% / 1 / 4 / 37 | 8 / 62% / 3 / 12 / 22 | 57 / 570 | dropping the subject line loses more than it saves |
+| 2026-09-19 | **Qwen3-Embedding-0.6B (Q8_0, --pooling last)** | **topics** | **instruction (86)** | **1024** | **0.43 / 15%** | **0.48 / 40%** | **6 / 61% / 2 / 10 / 54** | **5 / 76% / 3 / 30 / 16** | **10 / 0** | **the winner.** The lowest cross rate on the table at recall-70, and the only rung reaching a mean purity of 76% with three clusters at or above 70% while the same-effort pairs inside outnumber the cross ones |
+| 2026-09-19 | Qwen3-Embedding-0.6B (Q8_0, --pooling last) | participants | instruction (86) | 1024 | 0.44 / 16% | 0.49 / 41% | 9 / 53% / 1 / 14 / 53 | 7 / 58% / 1 / 26 / 28 | 11 / 0 | the people cost this model 18 points of purity, as they cost embeddinggemma eight in Round D |
+| 2026-09-19 | Qwen3-Embedding-0.6B (Q8_0, --pooling last) | summary | instruction (86) | 1024 | 0.41 / 19% | 0.48 / 40% | 8 / 60% / 3 / 20 / 35 | 5 / 64% / 2 / 18 / 14 | 9 / 0 | meets the rule at its recall-70 rung and is dominated by the topics card on every column of it |
+| 2026-09-19 | Qwen3-Embedding-0.6B (Q8_0, --pooling last) | topics | none (0) | 1024 | 0.47 / 26% | 0.63 / 48% | 6 / 40% / 1 / 19 / 49 | 2 / 68% / 1 / 16 / 11 | 35 / 50 | the instruction is worth 11 points of cross rate on this model |
+| 2026-09-19 | nomic-embed-text-v2-moe (Q8_0) | participants | clustering: (12) | 768 | 0.42 / 19% | 0.48 / 36% | 9 / 52% / 2 / 22 / 62 | 6 / 64% / 2 / 18 / 24 | 6 / 0 | under the purity bar at both rungs |
+| 2026-09-19 | nomic-embed-text-v2-moe (Q8_0) | topics | clustering: (12) | 768 | 0.39 / 22% | 0.45 / 34% | 6 / 49% / 0 / 19 / 44 | 6 / 57% / 2 / 16 / 21 | 7 / 0 | under the purity bar at both rungs |
+| 2026-09-19 | nomic-embed-text-v1.5 (Q8_0) | topics | none (0) | 768 | 0.62 / 27% | 0.67 / 40% | 8 / 45% / 0 / 7 / 42 | 5 / 59% / 1 / 19 / 19 | 47 / 155 | 43 separation points at 0.65, the highest on the table, and it buys no rung that meets the rule: the 0.65 column read alone would have picked this |
+| 2026-09-19 | bge-m3 (Q8_0) | participants | none (0) | 1024 | 0.48 / 31% | 0.55 / 39% | 6 / 73% / 3 / 17 / 16 | 5 / 61% / 2 / 14 / 22 | 13 / 2 | the second purest recall-70 rung, at twice the rule's cross rate |
+| 2026-09-19 | embeddinggemma-300M | topics | classification (30) | 768 | 0.49 / 32% | not read | not read | not read | 14 / 11 | first pass only, before the ladder shipped; the rescaled columns were never taken and the row is kept for its cross rate |
+| 2026-09-19 | embeddinggemma-300M | subject | clustering (26) | 768 | 0.67 / 82% | not read | not read | not read | 69 / 1,202 | first pass only, before the ladder shipped; the rescaled columns were never taken and the row is kept for its cross rate |
+| 2026-09-19 | embeddinggemma-300M | subject_topics | clustering (26) | 768 | 0.68 / 60% | not read | not read | not read | 67 / 1,081 | first pass only, before the ladder shipped; the rescaled columns were never taken and the row is kept for its cross rate |
+| 2026-09-19 | nomic-embed-text-v1.5 (Q8_0) | topics | clustering: (12) | 768 | 0.72 / 25% | not read | not read | not read | 80 / 1,100 | first pass only, before the ladder shipped; the rescaled columns were never taken and the row is kept for its cross rate |
+| 2026-09-19 | nomic-embed-text-v1.5 (Q8_0) | participants | clustering: (12) | 768 | 0.72 / 28% | not read | not read | not read | 80 / 1,179 | first pass only, before the ladder shipped; the rescaled columns were never taken and the row is kept for its cross rate |
+| 2026-09-19 | nomic-embed-text-v1.5 (Q8_0) | summary | clustering: (12) | 768 | 0.70 / 39% | not read | not read | not read | 78 / 1,056 | first pass only, before the ladder shipped; the rescaled columns were never taken and the row is kept for its cross rate |
+| 2026-09-19 | nomic-embed-text-v2-moe (Q8_0) | topics | none (0) | 768 | 0.34 / 29% | not read | not read | not read | 5 / 0 | first pass only, before the ladder shipped; the rescaled columns were never taken and the row is kept for its cross rate |
+| 2026-09-19 | nomic-embed-text-v2-moe (Q8_0) | summary | clustering: (12) | 768 | 0.35 / 34% | not read | not read | not read | 4 / 0 | first pass only, before the ladder shipped; the rescaled columns were never taken and the row is kept for its cross rate |
+| 2026-09-19 | bge-m3 (Q8_0) | topics | none (0) | 1024 | 0.46 / 36% | not read | not read | not read | 13 / 2 | first pass only, before the ladder shipped; the rescaled columns were never taken and the row is kept for its cross rate |
+| 2026-09-19 | bge-m3 (Q8_0) | summary | none (0) | 1024 | 0.46 / 39% | not read | not read | not read | 12 / 2 | first pass only, before the ladder shipped; the rescaled columns were never taken and the row is kept for its cross rate |
+
+**What the Phase 1 rows say (2026-09-19).** Twenty-four passes over one seed,
+four to ten seconds each, one embedding server at a time.
+
+The scale is not a constant. Recall-70 runs from 0.31 to 0.72 across these
+rows, and the prefix alone moves it further than the model does: embeddinggemma
+on the same card sits at 0.66 under its clustering prefix and at 0.35 with no
+prefix. So the `shipped-0.65 pairs` column says how a candidate would behave
+under the threshold the app ships today and nothing about whether its geometry
+is better. Read the scale-free columns. The clearest evidence for that is
+nomic-v1.5, which scores 43 separation points at 0.65, the highest here, and
+produces no rung that meets the rule at all: the 0.65 column read alone would
+have picked it.
+
+The base rate is the thing being fought. There are 1,346 cross-effort pairs in
+this pool against 85 same-effort ones, sixteen to one, so a threshold that
+admits even a modest share of the cross population drowns the same-effort
+pairs it catches. At the shipped vector's own cross-5 cosine of 0.74 its
+would-form clusters hold 24 cross pairs against 8 same. The arithmetic says a
+pairwise threshold can win here only when the cross rate falls well under 6%,
+and five of the twenty-four rungs manage it.
+
+**The winner is Qwen3-Embedding-0.6B on the topics card under the instruction
+prefix**, by decision 4's rule. Its recall-70 cross rate is 15% where the
+shipped vector's is 39%, and at its cross-5 rung, cosine 0.48, it forms 5
+clusters at a mean purity of 76% with 3 at or above 70%, holding 30 same-effort
+pairs against 16 cross. Three configurations meet the rule; this one dominates
+the other two on every column of it, so the tie-break on "changes least" never
+comes into play. The runner-up is worth naming anyway: embeddinggemma under the
+`search result` prefix meets the rule on a PREFIX change alone, at 68% mean
+purity and 22 same against 17 cross, and it is the fallback if the model change
+costs more in Phase 2 than these rows promise. Phase 2 ships the winner as a
+model, a prefix, 1,024 dimensions, a link threshold rescaled off that rung, and
+the tag `clustering-v3`, then measures it on the full sweep, which is the only
+number that says what the app files.
+
+The two lexical lines do not separate this mailbox, and that is recorded rather
+than shipped. Of the 85 same-effort pairs, 67 share no subject word at all, and
+only 3 share two or more non-owner people against 11 of the 1,346 cross pairs.
+Neither is a rule worth writing here. They stay on the bench because the same
+two lines on a different mailbox could say the opposite, and a round that
+changes the vector should be able to see that.
 
 ### Gate replay ledger
 
@@ -1959,7 +2106,8 @@ server started differently from the default.
 | 7 | prose (and as bulk) | vLLM 0.29.0 on an AWS `g6e.xlarge` (one L40S), `Qwen/Qwen3.8-27B-FP8` (served as the alias `qwen3.8` by `--served-model-name qwen3.8` on the box's vLLM command), served on the box's loopback :8000 and reached through `ssh -N -L 18100:127.0.0.1:8000 ubuntu@<box>` (local 18100, never 8000) | `make bench-prose PROSE_URL=http://localhost:18100/v1/chat/completions PROSE_MODEL=qwen3.8 PROSE_LABEL=vllm-g6e/Qwen3.8-27B-FP8` and the same three defines on `make golden-prose`; as bulk, the `BENCH_*` triple with `BENCH_LABEL='vllm-g6e/Qwen3.8-27B-FP8 (as bulk)'` on `make golden` and `make golden-storyline`; the MTP head with `/opt/bond/serve.sh --speculative-config '{"method":"mtp","num_speculative_tokens":2}'` on the box (label `…-FP8+MTP`). The harness prices a localhost URL at $0.00, so these rows carry the box's hourly rate by hand (`1000 / (msgs_per_min × 60) × $1.86`) |
 | 8 | both | **the pipeline end to end**, not a candidate — the app's own queues over the fixture corpus | `make bench-pipeline PIPE_SHAPE=single` and `make bench-pipeline PIPE_SHAPE=lanes`, each twice, with BOTH servers up; `PIPE_COPIES` sets the corpus size (3 ≈ 48 ungated messages), `PIPE_WIDTH` the drafts in flight (the server must have been started with that many slots — `make model SLOTS=2 MODEL_CTX=32768` for two), `PIPE_LATE=0` drops the late-arrival leg. A prose slot elsewhere is the usual three `PROSE_*` defines |
 | 9 | all three | **the app's own filing path**, not a candidate: the sweep, the naming, the confirms and the assign shortlist over the golden set | `make golden-sweep GOLDEN_RUN=<bulk run file>` twice on the default card, `topics`, which is the card the app ships; `SWEEP_CARD=participants` is the explicit alternative and takes two passes of its own. All of them with the embed, bulk and prose servers up. `make golden-score R=<sweep run file>` on each. The bulk run file is the newest local-4B `make golden` run; a storyline or sweep run file carries no cards and is refused |
-| 10 | — | further candidates | Added here as they come up, one command per row. What is worth trying is best judged after the rows above have numbers |
+| 10 | embed | **the clustering vector**, not a chat candidate: one card, one prefix, one embedding model over the golden pool | `make golden-vector GOLDEN_RUN=<bulk run file>` once per configuration, with only the embedding server up. The prefix ladder is `SWEEP_EMBED_PREFIX` on the shipped card, the card ladder is `SWEEP_CARD` on the shipped prefix, and a candidate MODEL is a second server: `make embed EMBED_PORT=8091 EMBED_HF=<repo> EMBED_ARGS='<pooling flags>'`, then the same target with `EMBED_URL=http://localhost:8091/v1/embeddings`, then `make embed-stop EMBED_PORT=8091`. Deterministic, so one pass per row. No score and no run file: the numbers are on the "Clustering vector" table |
+| 11 | — | further candidates | Added here as they come up, one command per row. What is worth trying is best judged after the rows above have numbers |
 
 ## Ledger
 

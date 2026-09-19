@@ -92,11 +92,17 @@ Map<String, Object?> benchResultJson({
 
 /// Writes the run to `BENCH_OUT` and returns the path, or null when no
 /// directory was defined and nothing was written.
+/// [label] names the run when there is no collector to name it — a stage that
+/// dials no model has no target, and two rows of one bench would otherwise
+/// land on one filename a second apart. It rides in `extra` as well as in the
+/// name, because the result schema has no column for it. Omitted, every
+/// filename is byte-identical to what it has always been.
 Future<String?> writeBenchResult({
   required String bench,
   required List<CallCollector> collectors,
   required List<Scorecard> accuracy,
   required DateTime startedAt,
+  String? label,
   Map<String, Object?> extra = const {},
 }) async {
   final dir = BenchTarget.outDir;
@@ -109,15 +115,20 @@ Future<String?> writeBenchResult({
     accuracy: accuracy,
     startedAt: startedAt,
     finishedAt: finishedAt,
-    extra: extra,
+    extra: label == null ? extra : {'label': label, ...extra},
   );
 
   await Directory(dir).create(recursive: true);
   // Named by what ran, against what, and when — because a bakeoff's second
   // question is always "was that before or after the flag change?", and a
   // filename that answered only the first would need a notebook beside it.
-  final name = '$bench-${slug(collectors.isEmpty ? bench : collectors.first.label)}'
-      '-${stamp(finishedAt.toUtc())}.json';
+  // The collector's label first, because that is what every existing filename
+  // was built from; then an explicit [label]; then the bench's own name, which
+  // is what a bench with neither has always fallen back to.
+  final named = collectors.isNotEmpty
+      ? collectors.first.label
+      : (label ?? bench);
+  final name = '$bench-${slug(named)}-${stamp(finishedAt.toUtc())}.json';
   final path = '$dir${Platform.pathSeparator}$name';
   await File(path)
       .writeAsString(const JsonEncoder.withIndent('  ').convert(json));

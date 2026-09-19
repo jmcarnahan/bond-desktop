@@ -18,6 +18,7 @@ import 'activity_log.dart';
 // progress recorder, and none of those imports this file.
 import 'ai_worker.dart' show AiWorker;
 import 'attachments/attachment_markers.dart';
+import 'clustering_card.dart';
 import 'conversation_state.dart';
 import 'extract_handler.dart';
 import 'llm/embeddings_client.dart';
@@ -293,35 +294,6 @@ class StorylineTuning {
   /// model's, and the 27B or whatever replaces it can be asked the same
   /// question without a code change.
   static const int charterCap = 400;
-
-  /// Whether the text a conversation is EMBEDDED from carries the people on
-  /// it — [buildClusteringCard]'s `withParticipants`.
-  ///
-  /// True is what shipped until 2026-09-18, and it was the suspect: in a
-  /// mailbox where one team is on everything, the participants segment is the
-  /// same handful of names in every card, so every pair of threads embeds
-  /// alike and the sweep proposes the team rather than the work. The cards the
-  /// MODEL reads are unaffected either way. This is the vector, not the
-  /// prompt.
-  ///
-  /// Measured in Round D Phase 1 by `make golden-sweep SWEEP_CARD=
-  /// participants|topics`, twice each, over the same 95 seeded conversations.
-  /// The rule was written before the runs: `topics` ships only if it beats
-  /// `participants` by at least four points on `storyline.id` on both passes,
-  /// or ties within four with a smaller largest-storyline share and no fewer
-  /// correct positives. It beat it by eight — 31 of 98 against 23 of 98 —
-  /// with purity over the storylines that carried gold members moving from
-  /// 44% to 71% and the largest storyline's share of every filed thread
-  /// falling from 56% to 47%. Neither card produced a correct positive, which
-  /// is the chaining the join rule above is what removes.
-  ///
-  /// So it ships false. Flipping it orphans every stored conversation vector
-  /// by construction, since every read filters on the tag, so it moved
-  /// together with [EmbeddingsClient.modelTag] (now `…/clustering-v2`) and the
-  /// `clustering_card_v2` one-shot in `sync_service.dart`, which requeues the
-  /// assign pass for the old-tag threads a slice at a time until they carry a
-  /// vector in the new geometry.
-  static const bool participantsInClusteringCard = false;
 }
 
 /// What one pass of [StorylineService.assignConversation] concluded.
@@ -4153,60 +4125,8 @@ String enrichedCardForConversationRow(
       for (final participant in conversation.participants)
         if (participant.display.isNotEmpty) participant.display,
     ],
-    topics: _topicsOf(cardData?['extraction_json']),
+    topics: topicsOfExtraction(cardData?['extraction_json']),
     summary: cardData?['summary'] as String?,
   );
 }
 
-/// The card a conversation is EMBEDDED from, built from the same row and the
-/// same stored facts [enrichedCardForConversationRow] reads.
-///
-/// Identical to that card only while
-/// [StorylineTuning.participantsInClusteringCard] is true, which it has not
-/// been since Round D shipped the `topics` card, and that is still the point of routing both through
-/// [buildClusteringCard] rather than leaving the embed path on the prompt
-/// path's recipe: the flag decides ONE of them. The prompts keep their people
-/// whatever the vector does.
-/// [withParticipants] defaults to the flag the app ships, so the one caller
-/// inside this file passes nothing and cannot drift from it. It is a parameter
-/// at all for the sweep bench, which prices both variants against one mailbox
-/// and must be able to ask for the card the app is NOT currently writing —
-/// through this same recipe, so what it measures is the app's card and not a
-/// second copy of it.
-String clusteringCardForConversationRow(
-  Map<String, Object?> row,
-  Map<String, Object?>? cardData, {
-  bool withParticipants = StorylineTuning.participantsInClusteringCard,
-}) {
-  final conversation = Conversation.fromRow(row);
-  return buildClusteringCard(
-    subject: stripReFw(conversation.subject),
-    participants: [
-      for (final participant in conversation.participants)
-        if (participant.display.isNotEmpty) participant.display,
-    ],
-    topics: _topicsOf(cardData?['extraction_json']),
-    summary: cardData?['summary'] as String?,
-    withParticipants: withParticipants,
-  );
-}
-
-/// The `topics` list out of a stored extraction blob, or nothing. Every step
-/// can fail against a row an older build wrote, and every failure is the same
-/// answer: no topics, which is the card this app sent before there were any.
-List<String> _topicsOf(Object? extractionJson) {
-  if (extractionJson is! String || extractionJson.isEmpty) return const [];
-  final Object? decoded;
-  try {
-    decoded = jsonDecode(extractionJson);
-  } on FormatException {
-    return const [];
-  }
-  if (decoded is! Map) return const [];
-  final topics = decoded['topics'];
-  if (topics is! List) return const [];
-  return [
-    for (final topic in topics)
-      if (topic is String && topic.isNotEmpty) topic,
-  ];
-}

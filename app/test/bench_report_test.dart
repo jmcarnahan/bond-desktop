@@ -72,6 +72,26 @@ void main() {
 
       expect(path, isNull);
     });
+
+    test('a label rides the document even when nothing is written', () {
+      // The write itself needs BENCH_OUT, which no test has, so the label's
+      // other half is pinned here: a stage that dials no model has no
+      // collector to name it, and the reader has to find the name somewhere.
+      final json = benchResultJson(
+        bench: 'golden-vector',
+        collectors: const [],
+        accuracy: const [],
+        startedAt: DateTime.utc(2026, 9, 19, 12),
+        finishedAt: DateTime.utc(2026, 9, 19, 12, 1),
+        extra: const {'label': 'embed local · topics · prefix 27', 'dims': 768},
+      );
+
+      expect((json['extra']! as Map)['label'], 'embed local · topics · prefix 27');
+      expect((json['targets']! as List), isEmpty);
+      // And the name that label produces, which is what keeps two rows of one
+      // bench a second apart from colliding.
+      expect(slug('embed local · topics · prefix 27'), 'embed-local-topics-prefix-27');
+    });
   });
 
   group('the result document', () {

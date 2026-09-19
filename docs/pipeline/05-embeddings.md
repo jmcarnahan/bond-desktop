@@ -14,35 +14,57 @@ are never mixed:
    in `EmbedHandler` (`app/lib/services/embed_handler.dart`) for anything the
    fast path missed.
 
-**The clustering card has a name and a flag.** `buildClusteringCard` in
-`extract_handler.dart` is the one recipe for the text a CONVERSATION is
-embedded from, and both writers go through it over the same stored facts:
+**The clustering card has a module and five variants.** `clustering_card.dart`
+is the one recipe for the text a CONVERSATION is embedded from, and both
+writers go through it over the same stored facts:
 `clusteringCardForConversationRow(conversationRow, newestInboundCardData(...))`
 at the extraction and at the heal alike. One recipe over one data source is
 what makes `embedded_hash` mean something. While the extraction built its card
 from the result in hand and the heal built its own from the newest kept
 inbound, extracting the fifth message of a thread wrote a hash over a card
 nothing else would ever produce, and the next heal re-embedded a thread that
-had not changed.
+had not changed. The module is its own file since Round E Phase 1, on
+2026-09-19: the builder used to live in `extract_handler.dart` and the row
+recipe in `storyline_service.dart`, each importing the other for its half, and
+neither could be read without the other.
 
-**The flag.** The clustering card is `buildConversationCard` with one decision
-folded in: whether the people on the thread are part of the vector.
-`StorylineTuning.participantsInClusteringCard` is what the app passes, and
-since Round D Phase 2, on 2026-09-18, it is FALSE: the people are out of the
-vector. The sweep bench read `topics` eight points better on `storyline.id`
-that day, with a smaller largest storyline and purity over the storylines
-carrying gold members moving from 44% to 71%. The flag exists because the
-participants segment is the same handful of names in every card of a one-team
-mailbox, which pulls every pair of threads together and has the sweep proposing
-the team rather than the work. Dropping them leaves the segment empty rather
-than removing it: the card is four segments joined by ` | ` by contract, and a
-shorter card would make `cardHash` disagree with itself about nothing. The
-cards a MODEL reads keep their people either way. This is the vector, not the
-prompt. `make golden-sweep SWEEP_CARD=participants|topics` is what priced the
-two, defaulting to the card the app ships, and `docs/model-bakeoff.md` holds
-the rows.
+**The five variants.** Every card is `buildConversationCard`'s four segments,
+`subject | participants | topics | summary`, joined by ` | `. A variant keeps
+some of them and leaves the rest EMPTY rather than removing them: the card is
+four segments by contract, and a shorter one would make `cardHash` disagree
+with itself about nothing.
 
-**A card change ships as a tag bump and a one-shot.** Flipping that flag
+| variant | segments kept |
+|---|---|
+| `topics` | subject, topics, summary |
+| `participants` | all four |
+| `subject` | subject |
+| `subject_topics` | subject, topics |
+| `summary` | topics, summary |
+
+`shippedClusteringCard` is what the app passes, and since Round D Phase 2, on
+2026-09-18, it is `topics`: the people are out of the vector. The sweep bench
+read `topics` eight points better on `storyline.id` that day, with a smaller
+largest storyline and purity over the storylines carrying gold members moving
+from 44% to 71%. The participants segment is the same handful of names in every
+card of a one-team mailbox, which pulls every pair of threads together and has
+the sweep proposing the team rather than the work. The other three exist
+because Round D then proved the filing is stuck on the vector itself, and the
+shapes worth trying next are the ones that drop what moves: `subject_topics`
+loses the summary, which changes every time somebody replies, and `summary`
+loses a subject line that in some mailboxes is boilerplate. The cards a MODEL
+reads keep their people whatever the variant says. This is the vector, not the
+prompt.
+
+**How a bench picks one.** `SWEEP_CARD` names a variant by the words in the
+table above, parsed by `parseClusteringCardVariant`, which refuses anything
+else rather than defaulting. It reaches both `make golden-sweep`, which runs
+the whole filing path, and `make golden-vector`, which stops after the
+embedding and reads the geometry alone. The second is the cheap one: one
+server, about a minute, and no model decides anything in it.
+`docs/model-bakeoff.md` holds the rows for both.
+
+**A card change ships as a tag bump and a one-shot.** Moving that constant
 orphans every stored conversation vector by construction, since every read
 filters on `EmbeddingsClient.modelTag`, so the three moved together. The tag is
 now `embeddinggemma-300M/clustering-v2`, and

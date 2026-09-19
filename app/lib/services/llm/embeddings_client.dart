@@ -114,7 +114,7 @@ class EmbeddingsClient {
   /// poisonous.
   ///
   /// `-v2` since 2026-09-18: the people left the clustering card that day
-  /// (`StorylineTuning.participantsInClusteringCard`, Round D Phase 2), and a
+  /// (`shippedClusteringCard` in `clustering_card.dart`, Round D Phase 2), and a
   /// card change is a geometry change. Every vector written under the old tag
   /// describes a different text, so mixing the two would compare threads by a
   /// card half of them do not have. Bumping the tag is how that is prevented

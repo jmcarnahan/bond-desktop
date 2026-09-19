@@ -1,5 +1,7 @@
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
+import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
@@ -85,15 +87,40 @@ class GoldenDefines {
     defaultValue: StorylineTuning.charterCap,
   );
 
-  /// Which clustering card the sweep replay embeds: `topics` (the card the app
-  /// ships since Round D Phase 2, its people segment left empty) or
-  /// `participants` (the card it shipped before). Parsed by [parseSweepCard],
-  /// which refuses anything else.
+  /// Which clustering card the sweep replay embeds, by name. Parsed by
+  /// `parseClusteringCardVariant`, which refuses anything that is not one of
+  /// the five variants.
   ///
   /// The default follows the app, like every other define here: a replay
   /// nobody passed a card to measures the card the app writes.
   static const String sweepCardRaw =
       String.fromEnvironment('SWEEP_CARD', defaultValue: 'topics');
+
+  /// How much of the sweep replay runs: `vector` stops after the seeding and
+  /// reads the clustering vector alone, `full` is the whole filing path.
+  /// Parsed by [parseSweepStage], which refuses anything else.
+  ///
+  /// One test body and one seeding serve both, which is what keeps the two
+  /// readings of one mailbox from drifting apart. `full` is the default
+  /// because it is what `make golden-sweep` has always run.
+  static const String sweepStageRaw =
+      String.fromEnvironment('SWEEP_STAGE', defaultValue: 'full');
+
+  /// The instruction the embedding model is given about what a card is FOR,
+  /// verbatim — a trailing space included, which is why nothing here trims it.
+  ///
+  /// Three readings, resolved by [sweepEmbedPrefix]: empty means nobody passed
+  /// one and the app's own `EmbeddingsClient.clusteringPrefix` is used; the
+  /// literal `none` means the card goes to the server bare; anything else is
+  /// sent as typed. Candidate embedding models document their own wording, and
+  /// a model asked in the wrong one measures the wrong thing.
+  static const String sweepEmbedPrefixRaw =
+      String.fromEnvironment('SWEEP_EMBED_PREFIX', defaultValue: '');
+
+  /// [sweepEmbedPrefixRaw] as the seeding sends it. Never printed: a run
+  /// prints its LENGTH, which is what shows a trailing space the shell ate.
+  static String get sweepEmbedPrefix =>
+      resolveEmbedPrefix(sweepEmbedPrefixRaw);
 
   /// The owner's name, or null when the define is empty or only whitespace.
   /// Null and not the empty string: `NeedsYouInput` takes a `String?` and
@@ -125,19 +152,51 @@ GoldenCtx parseExtractCtx(String raw) => switch (raw.trim().toLowerCase()) {
         ),
     };
 
-/// Whether `SWEEP_CARD` says the people ride inside the clustering vector.
+/// `SWEEP_EMBED_PREFIX`'s three readings, apart from the define so they can be
+/// pinned without one.
 ///
-/// Loud rather than defaulted, for [parseGoldenCtx]'s reason: this define IS
-/// the variable the sweep bench was built to price, and a typo that quietly
-/// measured one card twice would put two rows in the ledger that look like an
-/// A/B and are not.
-bool parseSweepCard(String raw) => switch (raw.trim().toLowerCase()) {
-      'participants' => true,
-      'topics' => false,
+/// Empty is "nobody passed one" and means the app's own prefix; the literal
+/// `none` is somebody asking for no prefix at all, which is a real candidate
+/// and not the same thing; anything else is sent verbatim, whitespace
+/// included, because a model's documented wording often ends in a space or a
+/// newline and losing it is a different request.
+String resolveEmbedPrefix(String raw) => switch (raw) {
+      '' => EmbeddingsClient.clusteringPrefix,
+      'none' => '',
+      final prefix => prefix,
+    };
+
+/// Which clustering card `SWEEP_CARD` names.
+///
+/// A delegation and not a second table: the app owns the variant list, and a
+/// bench that kept its own copy could offer a card the app cannot build.
+ClusteringCardVariant parseSweepCard(String raw) =>
+    parseClusteringCardVariant(raw);
+
+/// How much of the sweep replay one run performs.
+enum SweepStage {
+  /// Seed the mailbox, read the vector, stop. No chat model is dialled at all,
+  /// so the whole run is the embeddings plus arithmetic.
+  vector,
+
+  /// The whole filing path: clustering, naming, confirms and the assign
+  /// shortlist.
+  full,
+}
+
+/// The stage `SWEEP_STAGE` names, or a thrown [ArgumentError].
+///
+/// Loud rather than defaulted, for [parseSweepCard]'s reason and one of its
+/// own: the two stages write DIFFERENT result files, and a typo that quietly
+/// ran the full sweep would spend ninety minutes and three servers on a
+/// question somebody asked of one.
+SweepStage parseSweepStage(String raw) => switch (raw.trim().toLowerCase()) {
+      'vector' => SweepStage.vector,
+      'full' => SweepStage.full,
       _ => throw ArgumentError.value(
           raw,
-          'SWEEP_CARD',
-          'must be one of participants, topics',
+          'SWEEP_STAGE',
+          'must be one of vector, full',
         ),
     };
 

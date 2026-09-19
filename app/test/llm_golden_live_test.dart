@@ -10,6 +10,7 @@ import 'dart:typed_data';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/services/activity_log.dart';
+import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -37,6 +38,7 @@ import 'fixtures/golden_run.dart';
 import 'fixtures/golden_set.dart';
 import 'fixtures/golden_storyline.dart';
 import 'fixtures/golden_sweep.dart';
+import 'fixtures/live_bench.dart';
 import 'fixtures/storyline_seed.dart';
 import 'fixtures/vec_test_db.dart';
 
@@ -1136,7 +1138,9 @@ void main() {
             'GOLDEN_RUN wants a BULK run file from make golden (a storyline '
             'or sweep run file has the same shape and no topics or summary)');
       }
-      final withParticipants = parseSweepCard(GoldenDefines.sweepCardRaw);
+      final variant = parseSweepCard(GoldenDefines.sweepCardRaw);
+      final stage = parseSweepStage(GoldenDefines.sweepStageRaw);
+      final prefix = GoldenDefines.sweepEmbedPrefix;
 
       final db = vecTestDb();
       final store = MessageStore(db);
@@ -1149,7 +1153,8 @@ void main() {
           store,
           set,
           cards,
-          withParticipants: withParticipants,
+          variant: variant,
+          prefix: prefix,
           embeddings: EmbeddingsClient(),
           // Literals, exactly as the app hands the owner's identity to
           // needs-you: a bench has no keychain and must never grow a second
@@ -1159,7 +1164,8 @@ void main() {
         );
         // ignore: avoid_print
         print(
-          'card ${GoldenDefines.sweepCardRaw}, '
+          'stage ${stage.name}, card ${variant.wireName}, '
+          'prefix length ${report.prefixLength}, dims ${report.dims}, '
           'cards from the run for '
           '${set.items.where((i) => cards.byId.containsKey(i.id)).length} of '
           '${set.items.length} items\n'
@@ -1177,7 +1183,18 @@ void main() {
           // would be comparing two mailboxes.
           fail('${report.embedFailures} threads did not embed — fix the '
               'embedding server and rerun rather than scoring a pool that '
-              'mixes both SWEEP_CARD variants');
+              'mixes two SWEEP_CARD variants');
+        }
+
+        if (stage == SweepStage.vector) {
+          await _readTheVectorAlone(
+            store: store,
+            set: set,
+            report: report,
+            variant: variant,
+            startedAt: startedAt,
+          );
+          return;
         }
 
         // The app's own log, because the sweep's per-pass counts — the series
@@ -1335,6 +1352,17 @@ void main() {
         // rather than from the service, which keeps its clusters to itself.
         final vectors = <String, List<double>>{};
         final displays = <String, List<String>>{};
+        final subjects = <String, String>{};
+        // The threads the sweep would actually have clustered — `sweep()`
+        // diverts a finished one, and the pool lines below have to be over the
+        // same population as the vector stage's or the two readings of one
+        // mailbox would mean different things. The maps above stay COMPLETE:
+        // the in-cluster cosine line and the lint's participant list both walk
+        // storyline members, and a finished thread can JOIN a storyline even
+        // though it never seeds one. On the golden set nothing is `done`, so
+        // both populations are 71 and no measured number moves; this is the
+        // definition agreeing with itself, not a correction.
+        final poolKeys = <String>{};
         for (final row in await store.conversationsWithEmbeddings(
           embedModel: EmbeddingsClient.modelTag,
           sources: const ['email', 'teams'],
@@ -1344,9 +1372,15 @@ void main() {
             row['conversation_key'] as String? ?? '',
           );
           displays[key] = _displaysOfJson(row['participants_json']);
+          subjects[key] = row['subject'] as String? ?? '';
           final blob = row['embedding'];
           if (blob is Uint8List) vectors[key] = decodeEmbedding(blob);
+          if ((row['state'] as String?) != 'done') poolKeys.add(key);
         }
+        Map<String, T> poolOnly<T>(Map<String, T> all) => {
+              for (final entry in all.entries)
+                if (poolKeys.contains(entry.key)) entry.key: entry.value,
+            };
         final withinCluster = <double>[];
         for (final threads in membership.threadsByStoryline.values) {
           for (var i = 0; i < threads.length; i++) {
@@ -1370,8 +1404,25 @@ void main() {
         // the rest, and the pairs the clustering never joined are most of the
         // evidence for that.
         final pairs = pairCosinesOf(
-          vectors: vectors,
+          vectors: poolOnly(vectors),
           goldByThread: goldByThread,
+        );
+        // The two lexical readings and the separation, on the same pairs. They
+        // cost one walk of a map already in hand, so the full run prints them
+        // too rather than making a reader start a second bench to see whether
+        // the subject line alone would have done the vector's job.
+        final subjectOverlap = pairSubjectOverlapOf(
+          subjectByThread: poolOnly(subjects),
+          goldByThread: goldByThread,
+        );
+        final sharedPeople = pairSharedPeopleOf(
+          participantsByThread: poolOnly(displays),
+          goldByThread: goldByThread,
+          ownerDisplays: _ownerDisplays(),
+        );
+        final separation = separationOf(
+          sameEffort: pairs.sameEffort,
+          crossEffort: pairs.crossEffort,
         );
 
         // What SURVIVED that the lint would still refuse. Since Phase 3 the
@@ -1473,6 +1524,13 @@ void main() {
           sameEffortBins: cosineBins(pairs.sameEffort),
           crossEffortBins: cosineBins(pairs.crossEffort),
           withNoneBins: cosineBins(pairs.withNone),
+          sameSubjectBins: overlapBins(subjectOverlap.sameEffort),
+          crossSubjectBins: overlapBins(subjectOverlap.crossEffort),
+          withNoneSubjectBins: overlapBins(subjectOverlap.withNone),
+          samePeopleBins: sharedPeopleBins(sharedPeople.sameEffort),
+          crossPeopleBins: sharedPeopleBins(sharedPeople.crossEffort),
+          withNonePeopleBins: sharedPeopleBins(sharedPeople.withNone),
+          separation: separation,
         );
 
         final wall = DateTime.now().difference(startedAt);
@@ -1488,15 +1546,14 @@ void main() {
                     'sweep',
                 outDir: BenchTarget.outDir,
               );
-        final timingPath = await writeBenchResult(
-          bench: 'golden-sweep',
+        final timingPath = await _sweepBench.writeResult(
           collectors: [confirmCollector, nameCollector],
-          accuracy: const [],
           startedAt: startedAt,
           extra: {
             'run_file': runPath,
             'cards_from': GoldenDefines.runPath,
-            'card': GoldenDefines.sweepCardRaw,
+            'card': variant.wireName,
+            'prefix_length': report.prefixLength,
             'sweep': tally.toJson(),
             'seed': report.toJson(),
             'assign_outcomes': assignOutcomes,
@@ -1794,13 +1851,17 @@ Future<(GoldenSet, GoldenCtx)> _loadOrFail() async {
 /// which is the difference between a two-minute fix and an afternoon. The
 /// exception's text is not repeated beyond its message: a decode error can
 /// carry the source it choked on, and these files are real correspondence.
-Future<T> _decoded<T>(String path, Future<T> Function() load) async {
-  try {
-    return await load();
-  } on FormatException catch (e) {
-    throw StateError('could not read $path as JSON: ${e.message}');
-  }
-}
+/// The sweep test's two stages, which is the only pair of runs in this file
+/// that share a body. The other four benches keep their own header and their
+/// own write; see `LiveBench`'s doc for why they are not migrated.
+const LiveBench _sweepBench = LiveBench('golden-sweep');
+const LiveBench _vectorBench = LiveBench('golden-vector');
+
+/// Reading a file and printing a path do not depend on which bench is asking,
+/// so the other four tests reach them through the sweep's instance rather than
+/// keeping a second copy.
+Future<T> _decoded<T>(String path, Future<T> Function() load) =>
+    _sweepBench.decodeOrFail(path, load);
 
 /// Every storyline row the sweep has written, live and tombstoned alike.
 ///
@@ -1818,6 +1879,245 @@ Future<int> _storylineCount(MessageStore store) async => (await store
 /// half of them.
 int _callsMade(CallCollector collector) => collector.tasks
     .fold(0, (sum, metrics) => sum + metrics.n + metrics.failures);
+
+/// The owner, as the shared-people rule has to know them: their own name is on
+/// every thread in their own mailbox, so counting it would put every pair in
+/// one bucket.
+Set<String> _ownerDisplays() => {
+      if (GoldenDefines.ownerName != null) GoldenDefines.ownerName!,
+    };
+
+/// The clustering vector, read on its own — `make golden-vector`.
+///
+/// Everything here is arithmetic over the vectors the seeding just wrote, so
+/// no chat model is dialled, nothing is named or confirmed, no run file is
+/// produced and there is nothing to score: this is a READ of a geometry, not a
+/// measurement of the app. It answers the one question a sweep cannot answer
+/// in under an hour — whether the pairs that belong together sit above the
+/// pairs that do not — and the three lines beside it say what a cheaper rule
+/// would have managed on the same pool.
+///
+/// The clusters it prints are the ones the clustering WOULD form: the app's
+/// own `clusterBySimilarity` over the pool `sweep()` reads, in the store's
+/// order, with the fragments folded first exactly as `sweep()` folds them.
+///
+/// The SERIES pre-pass is NOT applied and its count is NOT printed. It is
+/// `StorylineService._seriesOf`, private and static, and nothing is widened
+/// for a bench; the golden pool has never contained a series in the first
+/// place, which Round D measured as `series 0 / excluded 0` on every sweep row
+/// it ever took. What this stage prints instead is `folded`, the one pre-pass
+/// it CAN reach, so a pool where that assumption stopped holding is visible
+/// even though the series half is not.
+///
+/// Counts, ratios and enums, like every other line this file prints.
+Future<void> _readTheVectorAlone({
+  required MessageStore store,
+  required GoldenSet set,
+  required SeedReport report,
+  required ClusteringCardVariant variant,
+  required DateTime startedAt,
+}) async {
+  // The pool exactly as `StorylineService.sweep` builds it: the tag every
+  // clustering read filters on, both connectors, a key and a vector required,
+  // finished threads diverted. Nothing is `taken` on a store this bench just
+  // seeded, so that filter has no work to do here.
+  final poolRows = <Map<String, Object?>>[];
+  final poolKeys = <String>[];
+  final poolVectors = <List<double>>[];
+  for (final row in await store.conversationsWithEmbeddings(
+    embedModel: EmbeddingsClient.modelTag,
+    sources: const ['email', 'teams'],
+  )) {
+    final key = row['conversation_key'] as String? ?? '';
+    if (key.isEmpty) continue;
+    if ((row['state'] as String?) == 'done') continue;
+    final blob = row['embedding'];
+    if (blob is! Uint8List) continue;
+    final vector = decodeEmbedding(blob);
+    if (vector.isEmpty) continue;
+    poolRows.add(row);
+    poolKeys.add(threadKeyOf(row['source'] as String? ?? 'email', key));
+    poolVectors.add(vector);
+  }
+  if (poolRows.isEmpty) {
+    fail('the seeded pool holds no vector under ${EmbeddingsClient.modelTag} — '
+        'nothing to read');
+  }
+
+  final goldByThread = goldSlugByThread(set);
+
+  final vectors = <String, List<double>>{
+    for (var i = 0; i < poolKeys.length; i++) poolKeys[i]: poolVectors[i],
+  };
+  final subjects = <String, String>{
+    for (var i = 0; i < poolKeys.length; i++)
+      poolKeys[i]: poolRows[i]['subject'] as String? ?? '',
+  };
+  final people = <String, List<String>>{
+    for (var i = 0; i < poolKeys.length; i++)
+      poolKeys[i]: _displaysOfJson(poolRows[i]['participants_json']),
+  };
+
+  final pairs = pairCosinesOf(vectors: vectors, goldByThread: goldByThread);
+  final subjectOverlap = pairSubjectOverlapOf(
+    subjectByThread: subjects,
+    goldByThread: goldByThread,
+  );
+  final sharedPeople = pairSharedPeopleOf(
+    participantsByThread: people,
+    goldByThread: goldByThread,
+    ownerDisplays: _ownerDisplays(),
+  );
+  final separation = separationOf(
+    sameEffort: pairs.sameEffort,
+    crossEffort: pairs.crossEffort,
+  );
+
+  // The would-form ladder: the same clustering at three link cosines, because
+  // the cosine SCALE moves with the model and the prefix. Measured 2026-09-19
+  // over twenty candidate passes, recall-70 ran from 0.31 to 0.72, so a rung
+  // at the shipped 0.65 says how a candidate would behave under the app's
+  // current numbers and NOT whether its geometry is better. The two derived
+  // rungs are the scale-free reading: the same rule set where this model's own
+  // recall and precision points fall.
+  //
+  // The fold is threshold-independent, so all three rungs report the same
+  // representative count and the same folded count.
+  final rungs = <({String label, double threshold})>[
+    (label: 'shipped', threshold: StorylineTuning.clusterLinkThreshold),
+    (label: 'recall-70', threshold: separation.recall70Cosine),
+    (label: 'cross-5', threshold: separation.cross5Cosine),
+  ];
+  final ladder = <
+      ({
+        String label,
+        double threshold,
+        ClusterPurity purity,
+        ({int same, int cross, int none}) inside,
+        int representatives,
+        int folded,
+      })>[];
+  for (final rung in rungs) {
+    // Pure, and pinned offline by `golden_sweep_test`: the fragment fold first
+    // and the representatives clustered, exactly as `sweep()` does it.
+    final formed = wouldFormClustersOf(
+      rows: poolRows,
+      vectors: poolVectors,
+      keys: poolKeys,
+      threshold: rung.threshold,
+    );
+    ladder.add((
+      label: rung.label,
+      threshold: rung.threshold,
+      purity: ClusterPurity.of(formed.clusters, goldByThread),
+      inside: pairsInsideClusters(formed.clusters, goldByThread),
+      representatives: formed.representatives,
+      folded: formed.folded,
+    ));
+  }
+
+  // `local` or `remote` and never the URL: the host is the one part of a
+  // bench's configuration that could carry somebody's machine name.
+  final host = Uri.tryParse(EmbeddingsClient.defaultBaseUrl)?.host ?? '';
+  final embedHost =
+      host == 'localhost' || host == '127.0.0.1' ? 'local' : 'remote';
+
+  // ignore: avoid_print
+  print(
+    'vector:\n'
+    '  stage vector · card ${variant.wireName} · '
+    'prefix length ${report.prefixLength} · dims ${report.dims} · '
+    'embed $embedHost\n'
+    '  pool ${poolRows.length} threads '
+    '(${ladder.first.representatives} representatives, '
+    'folded ${ladder.first.folded}), '
+    '${poolRows.length * (poolRows.length - 1) ~/ 2} pairs\n'
+    '${[
+      for (final rung in ladder)
+        wouldFormLine(
+          label: rung.label,
+          threshold: rung.threshold,
+          purity: rung.purity,
+          inside: rung.inside,
+          sameTotal: pairs.sameEffort.length,
+        ),
+    ].join('\n')}\n'
+    '  pool pairs by cosine  same effort  '
+    '${binsLine(cosineBinLabels, cosineBins(pairs.sameEffort))}'
+    '   cross effort  '
+    '${binsLine(cosineBinLabels, cosineBins(pairs.crossEffort))}'
+    '   with none  '
+    '${binsLine(cosineBinLabels, cosineBins(pairs.withNone))}\n'
+    '${subjectOverlapLine(
+      sameEffort: overlapBins(subjectOverlap.sameEffort),
+      crossEffort: overlapBins(subjectOverlap.crossEffort),
+      withNone: overlapBins(subjectOverlap.withNone),
+    )}\n'
+    '${sharedPeopleLine(
+      sameEffort: sharedPeopleBins(sharedPeople.sameEffort),
+      crossEffort: sharedPeopleBins(sharedPeople.crossEffort),
+      withNone: sharedPeopleBins(sharedPeople.withNone),
+    )}\n'
+    '  ${separationLine(separation)}\n',
+  );
+
+  final resultPath = await _vectorBench.writeResult(
+    label: 'embed $embedHost · ${variant.wireName} · '
+        'prefix ${report.prefixLength}',
+    startedAt: startedAt,
+    extra: {
+      'cards_from': GoldenDefines.runPath,
+      'vector': {
+        'card': variant.wireName,
+        'prefix_length': report.prefixLength,
+        'embed_host': embedHost,
+        'dims': report.dims,
+        'pool_threads': poolRows.length,
+        'representatives': ladder.first.representatives,
+        'folded': ladder.first.folded,
+        'would_form': {
+          for (final rung in ladder)
+            // `recall-70` → `recall_70`: a JSON key a reader greps for.
+            rung.label.replaceAll('-', '_'): wouldFormJson(
+              threshold: rung.threshold,
+              purity: rung.purity,
+              inside: rung.inside,
+            ),
+        },
+        'pairs': {
+          'same_bins': labelledBins(cosineBinLabels, cosineBins(pairs.sameEffort)),
+          'cross_bins':
+              labelledBins(cosineBinLabels, cosineBins(pairs.crossEffort)),
+          'none_bins': labelledBins(cosineBinLabels, cosineBins(pairs.withNone)),
+        },
+        'subject_overlap': {
+          'same_bins':
+              labelledBins(overlapBinLabels, overlapBins(subjectOverlap.sameEffort)),
+          'cross_bins': labelledBins(
+              overlapBinLabels, overlapBins(subjectOverlap.crossEffort)),
+          'none_bins':
+              labelledBins(overlapBinLabels, overlapBins(subjectOverlap.withNone)),
+        },
+        'shared_people': {
+          'same_bins': labelledBins(
+              sharedPeopleBinLabels, sharedPeopleBins(sharedPeople.sameEffort)),
+          'cross_bins': labelledBins(
+              sharedPeopleBinLabels, sharedPeopleBins(sharedPeople.crossEffort)),
+          'none_bins': labelledBins(
+              sharedPeopleBinLabels, sharedPeopleBins(sharedPeople.withNone)),
+        },
+        'separation': separationJson(separation),
+        'seed': report.toJson(),
+      },
+      'golden': {
+        'path': GoldenDefines.setPath,
+        'generated': set.generated,
+        'items': set.items.length,
+      },
+    },
+  );
+  _vectorBench.printPaths(resultPath: resultPath);
+}
 
 /// The display names on a stored `participants_json`, the way every card
 /// builder reads one: a blank display is not a person.
@@ -1921,18 +2221,8 @@ String _usd(double? value) =>
 /// Where the two halves of a run landed, and the command that scores one of
 /// them. Printed together because the scoring command is the next thing anyone
 /// types, and a path they have to reconstruct by hand is a path they mistype.
-void _printPaths(String? runPath, String? timingPath) {
-  final lines = [
-    if (runPath == null)
-      'BENCH_OUT not set — no run file written'
-    else
-      'wrote $runPath',
-    if (timingPath != null) 'wrote $timingPath',
-    if (runPath != null) 'next: make golden-score R=$runPath',
-  ];
-  // ignore: avoid_print
-  print(lines.join('\n'));
-}
+void _printPaths(String? runPath, String? timingPath) =>
+    _sweepBench.printPaths(runPath: runPath, resultPath: timingPath);
 
 /// The tripwire, exactly as every other bench states it: a build that ignores
 /// `enable_thinking` runs at half speed and every latency above would be

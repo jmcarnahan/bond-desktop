@@ -78,6 +78,13 @@ SETUP_WAIT   ?= 1800
 # embeddings at once. The app degrades quietly when it is not running.
 EMBED_PORT   ?= 8081
 EMBED_HF     ?= ggml-org/embeddinggemma-300M-GGUF
+# Whatever flags a CANDIDATE embedding model needs that llama.cpp does not read
+# off its GGUF. Pooling is the usual one: Qwen3-Embedding wants --pooling last,
+# nomic and bge-m3 want mean, and embeddinggemma needs nothing. Empty by
+# default, so the shipping server's launch line is byte-identical to what it
+# has always been. `make embed EMBED_PORT=8091 EMBED_HF=<repo> EMBED_ARGS=…`
+# is how a second server is stood up beside it for `make golden-vector`.
+EMBED_ARGS   ?=
 
 # The third server: the bulk-work model. Triage, extraction and
 # storyline-confirm all run here; the 27B on :$(MODEL_PORT) keeps drafting and
@@ -120,7 +127,7 @@ RESET  := \033[0m
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ab ab-membership drain bench-pipeline bench-compare \
         golden-check golden-baseline golden-score golden golden-prose \
-        golden-storyline golden-sweep golden-gate \
+        golden-storyline golden-sweep golden-vector golden-gate \
         golden-judge-pack golden-judge-tally \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
         dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
@@ -160,7 +167,8 @@ help:
 	@printf "  make golden        → the golden set through triage/needs-you/extraction on the bulk slot (GOLDEN_CTX=none|tail3|compressed|digest, GOLDEN_EXTRACT_CTX=none|tail3|digest, GOLDEN_K=…)\n"
 	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
 	@printf "  make golden-storyline GOLDEN_RUN=<run.json> → storyline confirm for every golden item against the gold registry, on the bulk slot (GOLDEN_CHARTER_CAP=…)\n"
-	@printf "  make golden-sweep GOLDEN_RUN=<run.json> → the golden set through the app's own sweep, naming, confirms and assign shortlist, scored against the gold registry (SWEEP_CARD=participants|topics)\n"
+	@printf "  make golden-sweep GOLDEN_RUN=<run.json> → the golden set through the app's own sweep, naming, confirms and assign shortlist, scored against the gold registry (SWEEP_CARD=participants|topics|subject|subject_topics|summary)\n"
+	@printf "  make golden-vector GOLDEN_RUN=<run.json> → the clustering vector alone: the clusters it would form and the pool pairs by cosine, subject and people; needs only the embed server (SWEEP_CARD=…, SWEEP_EMBED_PREFIX=…, EMBED_URL=…)\n"
 	@printf "  make golden-gate   → the golden set through the app's gates, offline (GOLDEN_RUN=<run.json> adds the model's notification proxy)\n"
 	@printf "  make golden-baseline → what the shipping app scores on the golden set (needs golden/)\n"
 	@printf "  make golden-score R=<run.json> → score a golden run file (BREAKDOWN= per-bucket tables, JSON= the tallies)\n"
@@ -383,6 +391,7 @@ embed:
 	 mkdir -p $(LOG_DIR); \
 	 printf "→ llama-server on :$(EMBED_PORT)  ($(EMBED_HF), embeddings)\n"; \
 	 nohup llama-server -hf $(EMBED_HF) --embeddings --port $(EMBED_PORT) \
+	   $(EMBED_ARGS) \
 	   > $(LOG_DIR)/model-$(EMBED_PORT).log 2>&1 &
 	@$(MAKE) --no-print-directory _wait-embed
 
@@ -691,6 +700,20 @@ GOLDEN_EXTRACT_CTX ?= none
 # one-team mailbox look alike, and dropping them scored eight points better.
 # The default follows the app.
 SWEEP_CARD ?= topics
+# How much of that bench runs. `full` is the whole filing path and needs three
+# servers; `vector` stops after the seeding, reads the clustering vector alone
+# and needs only the embedding server. One test body serves both, which is what
+# keeps the two readings of one mailbox from drifting apart.
+SWEEP_STAGE ?= full
+# The instruction the embedding model is given about what a card is FOR. Empty
+# means the app's own `EmbeddingsClient.clusteringPrefix`; the literal `none`,
+# matched EXACTLY and with no trimming, means no prefix at all; anything else
+# is sent verbatim, so `SWEEP_EMBED_PREFIX=' none '` is a five-character prefix
+# and not the keyword. QUOTE it — the
+# documented wording of most candidate models ends in a space, and a lost
+# trailing space is a different request. The bench prints its LENGTH, never the
+# prefix.
+SWEEP_EMBED_PREFIX ?=
 
 # Single-quoted values, every one: a label carries spaces and parentheses, and
 # an unquoted --dart-define would hand the shell a second word to run.
@@ -726,6 +749,8 @@ BENCH_DEFINES := \
   --dart-define=GOLDEN_RUN='$(if $(GOLDEN_RUN),$(abspath $(GOLDEN_RUN)),)' \
   --dart-define=GOLDEN_CHARTER_CAP='$(GOLDEN_CHARTER_CAP)' \
   --dart-define=SWEEP_CARD='$(SWEEP_CARD)' \
+  --dart-define=SWEEP_STAGE='$(SWEEP_STAGE)' \
+  --dart-define=SWEEP_EMBED_PREFIX='$(SWEEP_EMBED_PREFIX)' \
   --dart-define=EMBED_URL='$(if $(strip $(EMBED_URL)),$(EMBED_URL),http://localhost:$(EMBED_PORT)/v1/embeddings)' \
   --dart-define=BENCH_WIRE='$(BENCH_WIRE)' \
   --dart-define=PROSE_WIRE='$(PROSE_WIRE)' \
@@ -1092,11 +1117,38 @@ golden-storyline: golden-check
 # storyline.id — derived from MEMBERSHIP here, where golden-baseline derives
 # it from the app's stored title.
 golden-sweep: golden-check
-	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-sweep GOLDEN_RUN=<golden-run-….json from make golden> [SWEEP_CARD=participants|topics BENCH_URL=… PROSE_URL=…]\n"; exit 1; }
+	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-sweep GOLDEN_RUN=<golden-run-….json from make golden> [SWEEP_CARD=participants|topics|subject|subject_topics|summary BENCH_URL=… PROSE_URL=…]\n"; exit 1; }
 	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'sweep' $(BENCH_DEFINES)
+
+# The clustering VECTOR, read on its own — the same test body and the same
+# seeding as golden-sweep, stopped the moment the mailbox is embedded.
+#
+# What it measures: the clusters the app's own clusterBySimilarity WOULD form
+# over the seeded pool and how gold-pure each one is; every pool pair's cosine
+# split by whether the two threads share a gold effort; the same pairs by
+# subject-word overlap and by shared non-owner people, which is the lexical
+# ruler the cosine line is read against; and one separation line saying how far
+# apart the two populations lie and what a 70%-recall threshold would cost.
+#
+# What it does NOT measure: anything a model decides. No naming, no confirm, no
+# assign, no run file and nothing to score — so no bench-verify either, since
+# there is no chat contract to check. It needs ONE server, the embedding one,
+# and takes about a minute. GOLDEN_RUN is still required: the cards come from
+# it, and a thinner card is a different vector.
+#
+# SWEEP_CARD picks which of the five cards is embedded, SWEEP_EMBED_PREFIX what
+# the model is told the card is for, and EMBED_URL which server answers — so a
+# candidate model is `make embed EMBED_PORT=8091 EMBED_HF=<repo>
+# EMBED_ARGS='--pooling last'` and then EMBED_URL=http://localhost:8091/v1/embeddings
+# here. Writes the result JSON to $(BENCH_OUT); the ledger is
+# docs/model-bakeoff.md's "Clustering vector" table.
+golden-vector: golden-check
+	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-vector GOLDEN_RUN=<golden-run-….json from make golden> [SWEEP_CARD=participants|topics|subject|subject_topics|summary SWEEP_EMBED_PREFIX='…' EMBED_URL=…]\n"; exit 1; }
+	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'sweep' $(BENCH_DEFINES) --dart-define=SWEEP_STAGE=vector
 
 # The gate half, and the only golden target with no server in it: the app's
 # gates are pure, so this replays them over the set offline — the item's

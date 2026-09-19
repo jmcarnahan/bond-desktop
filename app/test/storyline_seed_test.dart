@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/conversation_state.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:drift/drift.dart' show Variable;
@@ -75,14 +76,16 @@ void main() {
   Future<SeedReport> seed(
     GoldenSet set, {
     GoldenCards? cards,
-    bool withParticipants = true,
+    ClusteringCardVariant variant = ClusteringCardVariant.participants,
+    String prefix = EmbeddingsClient.clusteringPrefix,
     FakeEmbedServer? server,
   }) =>
       seedGoldenMailbox(
         store,
         set,
         cards ?? const GoldenCards({}),
-        withParticipants: withParticipants,
+        variant: variant,
+        prefix: prefix,
         embeddings: (server ?? FakeEmbedServer()).client,
         ownerName: 'Alex Rivera',
         ownerAddress: 'alex@example.com',
@@ -297,7 +300,7 @@ void main() {
       await seed(
         set,
         cards: cardsFor('email:fx-keep-tail'),
-        withParticipants: false,
+        variant: ClusteringCardVariant.topics,
         server: server,
       );
 
@@ -320,6 +323,57 @@ void main() {
       expect(segments, hasLength(4));
       expect(segments[2], isEmpty);
       expect(segments[3], isEmpty);
+    });
+  });
+
+  group('the prefix and the width', () {
+    test('the prefix rides in front of the card, trailing space and all',
+        () async {
+      // The candidate models document their own wording and several of them
+      // end in a space. `make` and `--dart-define` both pass it through
+      // quoted, and nothing between the define and the wire may trim it.
+      const prefix = 'Instruct: group these | Query: ';
+      final server = FakeEmbedServer();
+      final report = await seed(setWith(), prefix: prefix, server: server);
+
+      expect(report.prefixLength, prefix.length);
+      for (final input in server.inputs) {
+        expect(input, startsWith(prefix));
+        // The card itself, not a second copy of the prefix.
+        expect(input.substring(prefix.length), isNot(startsWith('Instruct:')));
+      }
+    });
+
+    test('an empty prefix sends the card bare', () async {
+      final server = FakeEmbedServer();
+      final report = await seed(setWith(), prefix: '', server: server);
+
+      expect(report.prefixLength, 0);
+      expect(
+        server.inputs.first,
+        isNot(startsWith(EmbeddingsClient.clusteringPrefix)),
+      );
+    });
+
+    test('the report carries the width of the first vector', () async {
+      final report = await seed(setWith(), server: FakeEmbedServer());
+
+      // A candidate model that is not 768 wide is a different geometry, and a
+      // row that did not say so would read as a comparison of two vectors in
+      // one space.
+      expect(report.embedded, greaterThan(0));
+      expect(report.dims, 768);
+      expect(report.table(), contains('768 dims'));
+    });
+
+    test('nothing embedded leaves the width at zero', () async {
+      final report = await seed(
+        setWith(),
+        server: FakeEmbedServer(status: 500),
+      );
+
+      expect(report.embedded, 0);
+      expect(report.dims, 0);
     });
   });
 

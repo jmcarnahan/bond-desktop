@@ -1053,6 +1053,39 @@ same cosine band as its cross-effort pairs, 74% of them at or above 0.65
 against 49%. The vector, not the rule above it, is the ceiling on this
 mailbox.
 
+**Reading the vector on its own.** `make golden-vector` is the same test body
+and the same seeding, stopped the moment the mailbox is embedded. It needs one
+server, the embedding one, and takes about a minute, because nothing in it
+asks a model anything: no naming, no confirm, no assign, no run file and
+nothing to score. What it prints is four lines of arithmetic over the vectors
+the seeding just wrote. The first is the clusters this sweep WOULD form, put
+through `clusterBySimilarity` over the fragment representatives in the same
+pool order, each one's gold purity beside it. It is three lines and not one:
+the cosine scale moves with the embedding model and the prefix, so the ladder
+runs the same clustering at the shipped link threshold, at this model's own
+70%-recall cosine and at its 5%-cross cosine, with the coherence floor and the
+split ceiling moving with each rung. Beside each rung is how many pool pairs
+ended up inside a formed cluster, split by whether the two threads share a
+gold effort, which is the precision and the recall of that rung in two counts. The second is every pool pair's
+cosine split by whether the two threads share a gold effort. The third and
+fourth are the same pairs read lexically, by subject-word overlap and by
+shared non-owner people, which is the ruler the cosine line is held against: a
+pool whose same-effort pairs already share subject words is one a much cheaper
+rule could have grouped. A last line says how far apart the two populations
+lie at the shipped threshold, what a 70%-recall threshold would cost in
+cross-effort pairs and what a 5%-cross threshold would cost in same-effort
+ones. `SWEEP_CARD` picks which of the five clustering cards is
+embedded, `SWEEP_EMBED_PREFIX` what the model is told the card is for, and
+`EMBED_URL` which server answers, so a candidate model is one `make embed` on
+another port away. Counts, ratios and enums only, like every other bench here.
+The fragment fold IS applied, exactly as the sweep applies it, and its count
+prints beside the pool size. The series pre-pass is not: it is private to the
+service and nothing is widened for a bench, so the stage prints `folded` alone
+and no series count at all. That is safe on this pool rather than in general.
+Round D measured `series 0 / excluded 0` on every sweep row it took, so the
+golden set contains no series to miss, and the fold's own count is what would
+show a pool where the vector-only clusters had stopped being the sweep's.
+
 **Brute force is the fallback, and it is not exceptional.** The sweep does its
 own arithmetic when there is no usable index (the ordinary state of a build
 without the native extension), when the diff backfill cannot complete, when a
