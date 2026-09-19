@@ -265,6 +265,28 @@ class SettingsScreen extends StatefulWidget {
   final void Function(int days)? onMailLookbackChanged;
   final void Function(int days)? onTeamsLookbackChanged;
 
+  /// Whether this session is running model work right now — the sidebar
+  /// switch, mirrored here.
+  ///
+  /// It is read twice by the Processing section: once by the switch it draws,
+  /// and once by the two reset buttons, which are inert while it is true. A
+  /// reset races every drain it does not stop, and the honest way to say so
+  /// is a disabled button with the reason under it.
+  final bool processingOn;
+
+  /// Fired the instant the mirror switch moves, for
+  /// [onShowActivityLogChanged]'s reason: what it changes is the sidebar
+  /// behind this pane and the queues behind that.
+  final ValueChanged<bool>? onProcessingChanged;
+
+  /// Deletes every verdict, summary, storyline, draft and vector and keeps
+  /// the mail. Null hides the block.
+  final Future<void> Function()? onClearAiResults;
+
+  /// Deletes the mailbox as well, and keeps the person: the sign-in, their
+  /// texts, their sender rules and every setting. Null hides the block.
+  final Future<void> Function()? onForgetAndResync;
+
   /// Signs out AND wipes this device's copy of the mailbox — the rail's Sign
   /// out, in other words, and deliberately not [onSignOutOfServer], which
   /// leaves one server's session and keeps the mail. Null hides the block.
@@ -412,6 +434,10 @@ class SettingsScreen extends StatefulWidget {
     this.teamsLookbackDays = 1,
     this.onMailLookbackChanged,
     this.onTeamsLookbackChanged,
+    this.processingOn = false,
+    this.onProcessingChanged,
+    this.onClearAiResults,
+    this.onForgetAndResync,
     this.attachmentCacheBytes,
     this.onClearAttachmentCache,
     this.onSignOutAndClear,
@@ -445,6 +471,21 @@ class SettingsScreen extends StatefulWidget {
       ValueKey('settings-clear-attachment-cache-confirm');
   static const Key clearCacheKeepKey =
       ValueKey('settings-clear-attachment-cache-keep');
+
+  /// The Processing section's controls, keyed for the reason the three above
+  /// are: 'Clear AI results' is also most of the caption beside it, and both
+  /// confirm buttons carry the same words on purpose.
+  static const Key processingToggleKey = ValueKey('settings-processing-toggle');
+  static const Key clearAiResultsKey = ValueKey('settings-clear-ai-results');
+  static const Key clearAiResultsConfirmKey =
+      ValueKey('settings-clear-ai-results-confirm');
+  static const Key clearAiResultsKeepKey =
+      ValueKey('settings-clear-ai-results-keep');
+  static const Key forgetResyncKey = ValueKey('settings-forget-resync');
+  static const Key forgetResyncConfirmKey =
+      ValueKey('settings-forget-resync-confirm');
+  static const Key forgetResyncKeepKey =
+      ValueKey('settings-forget-resync-keep');
 
   /// Keyed for the same reason the buttons above are: 'Check for updates' is
   /// an ordinary phrase, and the caption beside it contains half of it.
@@ -517,6 +558,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _confirmingCacheClear = false;
   bool _clearingCache = false;
   String? _cacheClearError;
+
+  /// The same triple again, once per reset in the Processing section. Two
+  /// copies rather than one shared set: both buttons can be on screen at
+  /// once, and a failure under one of them must not arm or blame the other.
+  bool _confirmingAiClear = false;
+  bool _clearingAi = false;
+  String? _aiClearError;
+
+  bool _confirmingForget = false;
+  bool _forgetting = false;
+  String? _forgetError;
 
   late final TextEditingController _aboutMe = TextEditingController(
     text: widget.aboutMe,
@@ -712,6 +764,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           onSelectExpandChanged: widget.onContextSelectExpandChanged,
           now: widget.now,
         ),
+      // Before Sync & data and in BOTH scopes, with no `!ai` guard: whether
+      // the models are running at all, and whether what they wrote is thrown
+      // away, are questions about the model — so the AI stop is exactly where
+      // someone would look for them. Its premise is any one of the three
+      // wires: a host that offers only the switch gets only the switch.
+      if (_processingWired)
+        _section('Processing', _processingSummary(), _processingBody()),
       if (!ai && widget.onRefreshNow != null)
         _section('Sync & data', _syncSummary(now), _syncBody(now)),
       if (!ai && (widget.appVersion != null || widget.databasePath != null))
@@ -844,6 +903,281 @@ class _SettingsScreenState extends State<SettingsScreen> {
     proseParallel: widget.proseParallel,
     onProseParallelChanged: widget.onProseParallelChanged,
   );
+
+  // ── Processing ────────────────────────────────────────────────────────────
+
+  /// Whether the section has any wiring at all. Any ONE of the three is
+  /// enough — the same "absent wiring, absent control" discipline the rest of
+  /// the screen follows, read per control rather than per section.
+  bool get _processingWired =>
+      widget.onProcessingChanged != null ||
+      widget.onClearAiResults != null ||
+      widget.onForgetAndResync != null;
+
+  /// The state the section is about, which is the switch's. The two resets
+  /// have no state to report between presses.
+  String _processingSummary() => widget.processingOn ? 'On' : 'Off';
+
+  /// The mirror switch, then the two resets.
+  ///
+  /// The order is the argument: both resets are refused while processing is
+  /// on, so the control that turns it off has to be the thing above them
+  /// rather than a trip back to the sidebar.
+  Widget _processingBody() {
+    final onChanged = widget.onProcessingChanged;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (onChanged != null) ...[
+          // One node, not three: a switch, its name and its state read as a
+          // single control to a screen reader, and split across siblings they
+          // arrive as an unlabelled toggle followed by two loose words. The
+          // sidebar's copy of this switch says the same thing the same way.
+          MergeSemantics(
+            child: Row(
+              children: [
+                Switch(
+                  key: SettingsScreen.processingToggleKey,
+                  value: widget.processingOn,
+                  onChanged: onChanged,
+                ),
+                const SizedBox(width: BondSpacing.s8),
+                Expanded(
+                  child: Text(
+                    'AI processing',
+                    style: BondType.small.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                Text(
+                  widget.processingOn ? 'On' : 'Off',
+                  style: BondType.small,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: BondSpacing.s4),
+          Text(
+            'The same switch as the one at the top of the sidebar. Mail and '
+            'Teams keep syncing while it is off; only the models stand down.',
+            style: BondType.caption,
+          ),
+        ],
+        if (widget.onClearAiResults != null) ..._clearAiResultsBlock(),
+        if (widget.onForgetAndResync != null) ..._forgetResyncBlock(),
+      ],
+    );
+  }
+
+  /// What both resets say when they are refused.
+  static const String _turnOffFirst = 'Turn processing off first';
+
+  /// Whether either reset is out. Both arm buttons read it, not just their
+  /// own: the two delete overlapping rows, and a second one armed while the
+  /// first is mid-transaction is a race the database would have to settle.
+  bool get _resetting => _clearingAi || _forgetting;
+
+  /// What both captions say about how long it takes, because the button
+  /// gives no other sign: the refold walks every conversation and five
+  /// indexes are rebuilt after it, with nothing to stream in between.
+  static const String _resetTakesTime =
+      'On a large mailbox this can take a minute or two, and the buttons stay '
+      'disabled until it finishes.';
+
+  /// The second click's words, on both buttons.
+  ///
+  /// Deliberately the same sentence twice: the two-step is the protection
+  /// here (the house rule forbids a dialog), and what the second button has
+  /// to say is not which reset this is — the caption above it said that — but
+  /// that there is no way back from it.
+  static const String _confirmLabel = 'Confirm: this cannot be undone';
+
+  /// Throwing away what the models wrote, in the two clicks
+  /// [_clearCacheBlock] takes and for its reason.
+  List<Widget> _clearAiResultsBlock() {
+    return [
+      const SizedBox(height: BondSpacing.s24),
+      const Divider(height: 1, color: BondColors.border),
+      const SizedBox(height: BondSpacing.s12),
+      Text(
+        'Clear AI results',
+        style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(
+        'Deletes every triage verdict, summary, storyline, draft and '
+        'embedding. Mail, Teams messages, attachments, directories and your '
+        'settings stay. The next syncs re-queue the mailbox a slice at a time '
+        'and processing redoes it under the models now configured. '
+        '$_resetTakesTime',
+        style: BondType.caption,
+      ),
+      const SizedBox(height: BondSpacing.s8),
+      if (!_confirmingAiClear)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton(
+            key: SettingsScreen.clearAiResultsKey,
+            onPressed: widget.processingOn || _resetting
+                ? null
+                : () => setState(() => _confirmingAiClear = true),
+            child: const Text('Clear AI results'),
+          ),
+        )
+      else
+        OverflowBar(
+          alignment: MainAxisAlignment.start,
+          spacing: BondSpacing.s8,
+          children: [
+            FilledButton(
+              key: SettingsScreen.clearAiResultsConfirmKey,
+              style: FilledButton.styleFrom(
+                backgroundColor: BondColors.error,
+                foregroundColor: BondColors.surface,
+              ),
+              onPressed: _clearingAi ? null : () => unawaited(_clearAi()),
+              child: const Text(_confirmLabel),
+            ),
+            TextButton(
+              key: SettingsScreen.clearAiResultsKeepKey,
+              // Standing down drops the last failure with it, for the reason
+              // the wipe's Keep gives.
+              onPressed: _clearingAi
+                  ? null
+                  : () => setState(() {
+                      _confirmingAiClear = false;
+                      _aiClearError = null;
+                    }),
+              child: const Text('Keep'),
+            ),
+          ],
+        ),
+      if (widget.processingOn && !_confirmingAiClear) ...[
+        const SizedBox(height: BondSpacing.s4),
+        Text(_turnOffFirst, style: BondType.caption),
+      ],
+      if (_aiClearError case final error?) ...[
+        const SizedBox(height: BondSpacing.s8),
+        InlineAlert(severity: InlineAlertSeverity.error, text: error),
+      ],
+    ];
+  }
+
+  /// The bigger of the two, and the same shape: the mailbox goes as well as
+  /// what the models made of it, and the person stays.
+  List<Widget> _forgetResyncBlock() {
+    return [
+      const SizedBox(height: BondSpacing.s24),
+      const Divider(height: 1, color: BondColors.border),
+      const SizedBox(height: BondSpacing.s12),
+      Text(
+        'Forget everything and re-sync',
+        style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(
+        'Deletes everything synced and everything the pipeline made. Your '
+        'sign-in, your name, your rules and your settings stay. The next sync '
+        'fetches the lookback window again. $_resetTakesTime',
+        style: BondType.caption,
+      ),
+      const SizedBox(height: BondSpacing.s8),
+      if (!_confirmingForget)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton(
+            key: SettingsScreen.forgetResyncKey,
+            onPressed: widget.processingOn || _resetting
+                ? null
+                : () => setState(() => _confirmingForget = true),
+            child: const Text('Forget everything and re-sync'),
+          ),
+        )
+      else
+        OverflowBar(
+          alignment: MainAxisAlignment.start,
+          spacing: BondSpacing.s8,
+          children: [
+            FilledButton(
+              key: SettingsScreen.forgetResyncConfirmKey,
+              style: FilledButton.styleFrom(
+                backgroundColor: BondColors.error,
+                foregroundColor: BondColors.surface,
+              ),
+              onPressed: _forgetting ? null : () => unawaited(_forget()),
+              child: const Text(_confirmLabel),
+            ),
+            TextButton(
+              key: SettingsScreen.forgetResyncKeepKey,
+              onPressed: _forgetting
+                  ? null
+                  : () => setState(() {
+                      _confirmingForget = false;
+                      _forgetError = null;
+                    }),
+              child: const Text('Keep'),
+            ),
+          ],
+        ),
+      if (widget.processingOn && !_confirmingForget) ...[
+        const SizedBox(height: BondSpacing.s4),
+        Text(_turnOffFirst, style: BondType.caption),
+      ],
+      if (_forgetError case final error?) ...[
+        const SizedBox(height: BondSpacing.s8),
+        InlineAlert(severity: InlineAlertSeverity.error, text: error),
+      ],
+    ];
+  }
+
+  /// Runs the host's clear and disarms on the way out.
+  ///
+  /// Nothing here may escape as an unhandled async error, for [_clearCache]'s
+  /// reason: it runs off a button press nobody awaits. A failure leaves the
+  /// pair ARMED and says what happened — the user is about to press it again.
+  Future<void> _clearAi() async {
+    setState(() {
+      _clearingAi = true;
+      _aiClearError = null;
+    });
+    try {
+      await widget.onClearAiResults!();
+      if (!mounted) return;
+      setState(() {
+        _clearingAi = false;
+        _confirmingAiClear = false;
+      });
+    } on Object {
+      if (!mounted) return;
+      setState(() {
+        _clearingAi = false;
+        _aiClearError = 'The AI results could not be cleared.';
+      });
+    }
+  }
+
+  /// [_clearAi]'s twin, and the same contract on failure.
+  Future<void> _forget() async {
+    setState(() {
+      _forgetting = true;
+      _forgetError = null;
+    });
+    try {
+      await widget.onForgetAndResync!();
+      if (!mounted) return;
+      setState(() {
+        _forgetting = false;
+        _confirmingForget = false;
+      });
+    } on Object {
+      if (!mounted) return;
+      setState(() {
+        _forgetting = false;
+        _forgetError = 'The mailbox could not be cleared.';
+      });
+    }
+  }
 
   // ── Sync & data ───────────────────────────────────────────────────────────
 

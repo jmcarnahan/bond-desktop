@@ -44,6 +44,21 @@ sync** pair at the top of Settings → Sync & data — a preset per source or a
 custom `YYYY-MM-DD` date, with the calendar day the window reaches spelled out
 under it (see [../settings.md](../settings.md)).
 
+**After a clear.** Settings → Processing → **Clear AI results** empties the
+work table along with every other derived table and re-pends the messages the
+pipeline had gated, and it queues only the attachment work back for itself
+(there is no backlog call for `attachment_text`). It needs no other: these
+same three backlog calls and `requeueSweep()` run on **every** pass and are
+`OR IGNORE`-idempotent over the floor, so the next poll re-enqueues every kept
+message inside the lookback, `backlogEnqueueCap` rows per queue per pass, and
+the triage drain claims the re-pended rows on its own. A large mailbox
+therefore refills over several polls — the same pace, and for the same reason,
+as a first sync. The verdicts ingest wrote (`outbound`, `backlog`, and Teams'
+`auto_generated` and `teams_source`) survive the clear, because nothing in a
+later pass would write them again, and so does the owner's own `user` reason
+from Ignore; every other gate reason is re-derived at the next triage claim.
+See [../settings.md](../settings.md) → Processing.
+
 **Paging and re-entry.** A window-asking drain — first run, widen, 410
 recovery — sends its `min_received` floor on EVERY `sync_mail` page, not just
 the first. The Bond MCP server enforces the floor as a hard cap per page, but

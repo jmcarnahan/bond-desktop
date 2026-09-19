@@ -2053,6 +2053,163 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     ref.read(aiWorkersProvider).stopAll();
   }
 
+  /// Settings' **Clear AI results**: every verdict, summary, storyline, draft
+  /// and vector goes, and the mail it was written about stays.
+  Future<void> _clearAiResults() {
+    // The message store owns five indexes and rebuilds them itself; the two
+    // over `context_chunks` belong to the context store, and that one is
+    // reachable from here and not from there — the same split [_signOut]
+    // works to when it unlinks directories beside the wipe. Read before the
+    // first await, on [_resetPipeline]'s rule.
+    final context = ref.read(contextStoreProvider);
+    return _resetPipeline((store) async {
+      await store.clearDerived();
+      await context.rebuildIndexes();
+    });
+  }
+
+  /// Settings' **Forget everything and re-sync**: the mailbox goes too, and
+  /// the person stays.
+  ///
+  /// Deliberately NOT [_signOut] with a wipe: the session, the two texts, the
+  /// sender rules and every setting survive, and so do the registered
+  /// directories and their links. A sign-out unlinks those because the next
+  /// account's threads are different threads; here the same account re-syncs
+  /// the same conversation keys, so a link the user made still names what
+  /// they meant.
+  Future<void> _forgetAndResync() async {
+    final store = ref.read(messageStoreProvider);
+    await _resetPipeline((s) => s.wipeAll(keepIdentity: true));
+    // A second time, after the invalidates, and this is the call that matters
+    // — see [MessageStore.clearSyncCursors]. A mail pass that was already at
+    // Graph when the button went down writes its delta cursor back through
+    // `setDeltaLink` when it lands, long after the wipe deleted the row, and
+    // a resumed cursor over an empty mailbox is the re-sync quietly not
+    // happening.
+    await store.clearSyncCursors();
+  }
+
+  /// What both resets do around the one statement that differs.
+  ///
+  /// The order is the method, and every step of it is a race this would
+  /// otherwise lose:
+  ///
+  /// - Refused outright while processing is on. The buttons are already inert
+  ///   (`SettingsScreen.processingOn`), and this is the same rule read where
+  ///   it can be enforced rather than merely drawn.
+  /// - Every drain is QUIESCED, not stopped: `stop()` ends the loop and
+  ///   leaves the item at the server holding a claim, and a claim outliving
+  ///   the row it points at is a worker writing a result into a table that
+  ///   was emptied under it. `quiesce` waits for that item and hands the
+  ///   claim back.
+  /// - `resetInterruptedWork` afterwards, for the claim that was taken in the
+  ///   microsecond before the quiesce and released into a table that no
+  ///   longer holds the row.
+  /// - Then the invalidates, which are the only thing that drops what the
+  ///   providers are still holding: [_signOut]'s five are not enough here,
+  ///   because nobody is leaving the screen — `StorylinesNotifier` alone
+  ///   keeps an audit flag and live backstop timers that would fire against
+  ///   deleted rows.
+  ///
+  /// Mail and Teams sync keep running throughout. A message that lands a
+  /// millisecond after the delete is simply `pending`, which is where the
+  /// next drain wants it anyway.
+  ///
+  /// Everything below the switch check is read BEFORE the first await, on
+  /// [_saveNeedsYouRules]'s rule: this runs off a button press, a reset takes
+  /// as long as the item at the server does, and a Settings pane closed in
+  /// the middle of it must still get the delete it asked for. Only the
+  /// invalidates need a live host, and they check for one.
+  ///
+  /// The three lanes are named rather than asked of `AiWorkers`, which offers
+  /// `pumpAll` and `stopAll` but no `quiesceAll`; that file is another
+  /// agent's this phase.
+  ///
+  /// The pulls are waited out rather than stopped, because nothing can stop
+  /// them: a `sync_mail` request is at Graph and will land when it lands, and
+  /// what it writes on the way back — messages, a delta cursor — is written
+  /// against a mailbox this method may have deleted underneath it. The wait
+  /// is [_mailPulling] and [_teamsPulling], which every pull this screen
+  /// starts raises, polled a quarter-second at a time and given up on after
+  /// [_quietTimeout]. **The window it does not close** is a pull started
+  /// somewhere other than this screen, and a pull that outlasts the timeout:
+  /// for the mail rows that is harmless, since a message landing a moment
+  /// after the delete is simply `pending`, and for the cursor it is why
+  /// [_forgetAndResync] clears the cursors a second time on the way out.
+  ///
+  /// Throws rather than returning quietly when processing is on. The buttons
+  /// are already inert, so this is unreachable from the UI, and a caller that
+  /// got here anyway must see the refusal in the section's alert rather than
+  /// a silent success over a mailbox nothing touched.
+  Future<void> _resetPipeline(
+    Future<void> Function(MessageStore store) apply,
+  ) async {
+    if (ref.read(processingProvider)) {
+      throw StateError('Turn processing off first');
+    }
+    final triage = ref.read(triageQueueProvider);
+    final workers = ref.read(aiWorkersProvider);
+    final store = ref.read(messageStoreProvider);
+
+    await _waitForPullsToSettle();
+    await triage.quiesce();
+    for (final lane in [workers.fast, workers.storyline, workers.draft]) {
+      await lane.quiesce();
+    }
+    await apply(store);
+    await store.resetInterruptedWork();
+    if (!mounted) return;
+    // The five [_signOut] drops, and the ten more a reset needs because the
+    // screen stays open over them.
+    for (final provider in <ProviderOrFamily>[
+      conversationsProvider,
+      storylinesProvider,
+      threadProvider,
+      draftProvider,
+      storylineTimelineProvider,
+      storylineMembersProvider,
+      storylineThreadIdsProvider,
+      storylineBlockedThreadsProvider,
+      storylineBlocksProvider,
+      activitySnapshotProvider,
+      syncStampsProvider,
+      needsYouPendingProvider,
+      contextDirectoriesProvider,
+      homeMetricsProvider,
+      pipelinePulseProvider,
+    ]) {
+      ref.invalidate(provider);
+    }
+    // The thumbnails are a memory cache keyed by attachment, and a reset
+    // takes the rows they were drawn for. Not [_clearOverlays], deliberately:
+    // it would take the Settings pane the user is standing in off the screen
+    // as their own reset landed, and the panes it closes re-read through the
+    // providers above anyway.
+    _forgetThumbnails();
+  }
+
+  /// How long a reset waits for a pull to land before going ahead anyway.
+  ///
+  /// Long enough for an ordinary page, short enough that a button is never
+  /// stuck: a connector that has been out for thirty seconds is one the reset
+  /// cannot usefully keep waiting for, and the second cursor clear in
+  /// [_forgetAndResync] is what covers the pass that lands after it.
+  static const Duration _quietTimeout = Duration(seconds: 30);
+
+  /// Waits until neither connector has a pull out, or until [_quietTimeout].
+  ///
+  /// A poll rather than a future to await, because the two flags are what the
+  /// screen has: every pull it starts raises one and lowers it in a `finally`
+  /// (see [_notePulling]), and there is no completer behind them to hang on.
+  /// A quarter second is far below the length of a Graph page and far above
+  /// the cost of reading two booleans.
+  Future<void> _waitForPullsToSettle() async {
+    final until = DateTime.now().add(_quietTimeout);
+    while ((_mailPulling || _teamsPulling) && DateTime.now().isBefore(until)) {
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
+  }
+
   /// Turns the managed server on or off, and makes the process follow.
   ///
   /// The preference and the process are two writes, and this host is the one
@@ -2380,6 +2537,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           unawaited(notifier.setMailLookbackDays(days)),
       onTeamsLookbackChanged: (days) =>
           unawaited(notifier.setTeamsLookbackDays(days)),
+      // The sidebar switch, mirrored: `watch` because the two resets below
+      // are inert while it is on, and a section that learned about the flip
+      // on its next rebuild would offer a button that refuses itself.
+      processingOn: ref.watch(processingProvider),
+      onProcessingChanged: (on) => unawaited(_setProcessing(on)),
+      onClearAiResults: _clearAiResults,
+      onForgetAndResync: _forgetAndResync,
       // The rail's Sign out, the whole wipe — deliberately NOT
       // [onSignOutOfServer] above, which leaves one server's session and
       // keeps the mail on this device.

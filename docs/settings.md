@@ -81,6 +81,7 @@ body has the same shape in `settings_models_body.dart`.
 | Activity log | `onShowActivityLogChanged` wired | `Shown in the sidebar` / `Hidden` |
 | Storylines | `onStorylineNewestFirstChanged` wired | `Newest first` / `Oldest first` |
 | Context directories | when wired (both scopes) | `No directories yet` / `N directories · M files` |
+| Processing | any of `onProcessingChanged`, `onClearAiResults`, `onForgetAndResync` is wired (both scopes) | `On` / `Off` |
 | Sync & data | `onRefreshNow` wired | `Not synced yet`; `Mail synced <rel> · Teams <rel>`; a side that never ran says `not synced yet` in words (`Mail synced 4m ago · Teams not synced yet`, `Mail not synced yet · Teams synced 2h ago`) |
 | About | `appVersion` or `databasePath` is known | `Bond <version>` / `Version unknown` |
 
@@ -88,8 +89,8 @@ body has the same shape in `settings_models_body.dart`.
 optional row in the old dialog followed, and what lets the permissions tests
 wire `hasScope` alone. Under `SettingsScope.ai` four of them are absent for a
 second reason: the AI pane keeps About me, Models, Needs You, Suggested
-replies, Activity log, Storylines and Context directories, in this same order,
-and drops the rest.
+replies, Activity log, Storylines, Context directories and Processing, in this
+same order, and drops the rest.
 
 **These strings are pinned by tests** (`settings_screen_test.dart`,
 `settings_connection_test.dart`, `settings_models_test.dart`,
@@ -418,6 +419,77 @@ The mechanism, the two pre-gates and the activity notes are in
 [pipeline/07-replies.md](pipeline/07-replies.md), "When a draft is written".
 The control is `SettingsSegments<DraftPolicy>`, the same widget Notifications
 and Models › Drafts in flight use.
+
+## Processing
+
+Whether this session runs model work at all, and the two ways to throw away
+what it has already produced. In both scopes, because all three are questions
+about the model rather than about the app.
+
+**AI processing** is the same switch as the one at the top of the sidebar,
+drawn here as a `Switch` keyed `settings-processing-toggle` beside its name and
+the word `On` or `Off`. It is session state and never persisted — every launch
+starts off — and flipping it here moves the sidebar behind the pane, so the
+host hears about it the instant it moves rather than on the way out. Mail and
+Teams keep syncing while it is off; only the models stand down. See
+[pipeline/10-model-routing.md](pipeline/10-model-routing.md).
+
+Under it are two resets, each an inline two-step in the shape **Sign out and
+clear local data** and **Clear attachment cache** already use: the first tap
+replaces the button with a red **Confirm: this cannot be undone** beside a
+**Keep**, and the second click therefore lands on a different button, in a
+different place, that did not exist a moment ago. A failure renders as an
+`InlineAlert` with the pair still up; **Keep** disarms and drops the failure
+with it.
+
+| Action | Keys | What goes | What stays |
+|---|---|---|---|
+| **Clear AI results** | `settings-clear-ai-results{,-confirm,-keep}` | every triage verdict, summary, storyline, draft, digest and embedding — the sixteen `MessageStore.derivedTables`, the verdict columns on `messages` and `conversations`, and the stage markers on `attachments` and the library | mail, Teams messages, attachments, registered directories, the sign-in and every preference |
+| **Forget everything and re-sync** | `settings-forget-resync{,-confirm,-keep}` | everything above **and** the mailbox itself — `MessageStore.wipeAll(keepIdentity: true)`, cursors and bootstrap floors included | the sign-in, the about-me text, the Needs You rules, the sender rules, the registered directories and every setting |
+
+**Both are refused while processing is on.** The buttons are inert and the
+caption under them says `Turn processing off first`; the host refuses again for
+itself, because a reset races every drain it does not stop. With the switch
+off, each handler quiesces the triage queue and all three lanes — which is
+"finish the item at the server, then hand the claim back", not merely "stop" —
+runs the store's reset, calls `resetInterruptedWork`, and invalidates the
+fifteen providers holding rows in memory.
+
+Neither reset queues the mailbox. The next sync's own backlog calls are what
+refill the pipeline, one `backlogEnqueueCap` slice a poll, which is why the
+first button's caption says the mailbox is re-queued a slice at a time — see
+[pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md).
+
+**What the owner decided by hand survives a clear.** A message they restored
+keeps its `gate_override`, and one they ignored keeps `gate_reason = 'user'`
+and stays out; both are the owner's own hand on the gates, and nothing
+recomputes either on a later triage claim. The gate verdicts written at ingest
+survive too (`outbound`, `backlog`, and Teams' `auto_generated` and
+`teams_source`); every other gate reason is cleared and re-derived on the next
+claim.
+
+**Everything comes back on its own**, each by the path that would have
+written it the first time. Mail, chats, storylines, drafts and embeddings ride
+the sync's backlog calls; the library rides the reconcile, which is requeued
+per directory on every sync. Attachments are the one case the clear has to
+queue for itself, in the same transaction: `attachment_text` is enqueued at
+ingest, by a detail fetch and by Restore, and a message already stored with a
+body reaches none of the three, so the clear writes one `attachment_text` work
+row per attachment left `pending` and the digest follows the text pass. A
+refusal is not re-queued, because "too large" and "not text" are verdicts
+about the file rather than about the model that read it.
+
+**A marker that outlives its rows is the trap** the clear has to avoid, and
+three of them are handled inside the same transaction. `message_progress` is
+emptied and rebuilt from `messages` in the same breath, because every stage
+writes that table with an UPDATE and only the ingest ever inserts — left
+empty, the home feed would stay empty until the mailbox was fetched again.
+`attachments.text_status` and `digest_status` go back to `pending` wherever
+they said `done`, or the handlers would skip files whose words have just been
+deleted; a refusal stays refused, because that is a verdict about the file
+rather than about the model. And `context_files` loses `size`, `mtime` and
+`sha256` along with its digest columns: they are the reconcile's cheap diff,
+and a file whose stat still matched would never be opened again.
 
 ## Sync & data
 

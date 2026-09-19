@@ -312,12 +312,21 @@ class AiWorker {
   Future<void> resetInterrupted() => _store.resetInterruptedWork();
 
   /// Stops the drain and gives back every claim it is still holding — the
-  /// work queue's `TriageQueue.dispose`, in the same order and for the same
+  /// work queue's `TriageQueue.quiesce`, in the same order and for the same
   /// reasons.
-  Future<void> dispose() async {
+  ///
+  /// [dispose] minus the closing of the progress stream, so the worker is
+  /// REUSABLE afterwards: the caller is a reset that is about to delete the
+  /// rows this worker holds claims on, and the very next thing it wants is
+  /// this same worker draining again. The `_stopped` it leaves behind is per
+  /// drain, which [pump] clears.
+  ///
+  /// It does not touch the processing switch, either way. What the switch
+  /// says is the user's, and a reset that turned it on or off behind them
+  /// would be answering a question they did not ask.
+  Future<void> quiesce() async {
     _stopped = true;
-    _progress.close();
-    // A LOOP, not one wait — see `TriageQueue.dispose`: a claim already at
+    // A LOOP, not one wait — see `TriageQueue.quiesce`: a claim already at
     // the store when [_stopped] flipped joins [_inFlight] after the first
     // snapshot, and releasing under a still-running item would hand it to a
     // second worker.
@@ -330,6 +339,18 @@ class AiWorker {
       await _store.releaseWorkClaim(kind, source, id);
     }
     _claimed.clear();
+  }
+
+  /// [quiesce], and then the stream goes too — this worker is done.
+  ///
+  /// The close lands AFTER the wait rather than before it, which is the one
+  /// difference from the order this method used to keep. Nothing depends on
+  /// the old order: [_emit] guards on `isClosed` at both ends, so an item
+  /// landing during the wait either reports a count nobody is listening to or
+  /// finds the controller shut, and neither throws.
+  Future<void> dispose() async {
+    await quiesce();
+    await _progress.close();
   }
 
   /// Drains every handler's queue in order until nothing is pending, the

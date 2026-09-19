@@ -259,7 +259,7 @@ class TriageQueue {
   ///
   /// Writing to the store after this object is disposed is safe: the store
   /// outlives the queue, watching only the database provider. Closing the
-  /// progress stream first is safe for the same reason [_emit] guards on
+  /// progress stream around it is safe for the same reason [_emit] guards on
   /// `isClosed` — an in-flight message emitting into a closed controller is
   /// a no-op, not a crash.
   ///
@@ -267,9 +267,15 @@ class TriageQueue {
   /// which is exactly right: the release is a database write that either
   /// lands or is picked up by [MessageStore.reclaimStaleTriage] five minutes
   /// later. Tests await it.
-  Future<void> dispose() async {
+  ///
+  /// [dispose] minus the closing of the progress stream, so the queue is
+  /// REUSABLE afterwards: the caller is a reset that is about to delete the
+  /// rows this queue holds claims on, and the very next thing it wants is
+  /// this same queue draining again. The `_stopped` it leaves behind is per
+  /// drain, which [pump] clears. The processing switch is untouched either
+  /// way — what it says is the user's answer, not a reset's.
+  Future<void> quiesce() async {
     _stopped = true;
-    _progress.close();
     // A LOOP, not one wait: a claim that was already at the store when
     // [_stopped] flipped lands in [_inFlight] after the first snapshot was
     // taken. Waiting on the stale snapshot and then releasing would flip a
@@ -285,6 +291,18 @@ class TriageQueue {
       await _store.releaseTriageClaim(parts.first, parts.skip(1).join('|'));
     }
     _claimed.clear();
+  }
+
+  /// [quiesce], and then the stream goes too — this queue is done.
+  ///
+  /// The close lands AFTER the wait rather than before it, which is the one
+  /// difference from the order this method used to keep. Nothing depends on
+  /// the old order, for the reason the doc above gives: [_emit] guards on
+  /// `isClosed`, so a message landing during the wait either reports a count
+  /// nobody is listening to or finds the controller shut.
+  Future<void> dispose() async {
+    await quiesce();
+    await _progress.close();
   }
 
   /// Drains until nothing is pending, the queue is stopped, or the model
