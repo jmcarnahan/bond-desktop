@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_embed_server.dart' show embedDims;
 import 'fixtures/test_db.dart';
 
 /// Search on a connection the nearest-neighbour index cannot work on.
@@ -36,7 +37,7 @@ void main() {
 
   tearDown(() async => db.close());
 
-  /// Answers every request with a real 768-wide vector, so the only thing
+  /// Answers every request with a real full-width vector, so the only thing
   /// missing below is the index.
   EmbeddingsClient workingServer() => EmbeddingsClient(
         baseUrl: 'http://localhost:8081/v1/embeddings',
@@ -44,7 +45,7 @@ void main() {
           (_) async => http.Response(
             jsonEncode({
               'data': [
-                {'embedding': List.filled(768, 0.1)}
+                {'embedding': List.filled(embedDims, 0.1)}
               ]
             }),
             200,
@@ -72,7 +73,7 @@ void main() {
     // nothing to search WITH".
     expect(
       await store.semanticSearch(
-        encodeEmbedding(List.filled(768, 0.1)),
+        encodeEmbedding(List.filled(embedDims, 0.1)),
         embedModel: EmbeddingsClient.documentModelTag,
       ),
       isNull,

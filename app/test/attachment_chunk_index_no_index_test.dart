@@ -3,6 +3,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_embed_server.dart' show embedDims;
 import 'fixtures/test_db.dart';
 
 /// The chunk index on a connection that cannot have one.
@@ -56,8 +57,8 @@ void main() {
     ]);
     await store.setChunkEmbedding(
       ids.single,
-      embedding: encodeEmbedding(List.filled(768, 0.1)),
-      dims: 768,
+      embedding: encodeEmbedding(List.filled(embedDims, 0.1)),
+      dims: embedDims,
       embedModel: EmbeddingsClient.documentModelTag,
     );
 
@@ -65,7 +66,7 @@ void main() {
     // is on it. Only the thing that RANKS is missing, and both reads have to
     // say so with a null — `const []` would tell the reader their documents
     // say nothing about this, on the strength of a feature being switched off.
-    final query = encodeEmbedding(List.filled(768, 0.1));
+    final query = encodeEmbedding(List.filled(embedDims, 0.1));
     expect(
       await store.searchAttachmentChunks(
         query,

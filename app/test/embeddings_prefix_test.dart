@@ -41,30 +41,58 @@ void main() {
   group('the constants themselves', () {
     test('the clustering pair is exactly what every stored conversation '
         'vector was written under', () {
-      expect(EmbeddingsClient.clusteringPrefix, 'task: clustering | query: ');
-      expect(EmbeddingsClient.modelTag, 'embeddinggemma-300M/clustering-v2');
+      expect(
+        EmbeddingsClient.clusteringPrefix,
+        'Instruct: Group email threads that belong to the same project, '
+        'event or topic. Query: ',
+      );
+      expect(EmbeddingsClient.modelTag, 'Qwen3-Embedding-0.6B/clustering-v3');
     });
 
-    test('the retired tag is the one the clustering card change orphaned', () {
-      // `-v2` is 2026-09-18, when the people left the clustering card. The
-      // prefix did NOT move with it — a vector under the old tag is in the
-      // same space, taken over a different text — and the one-shot re-embed
-      // in `sync_service.dart` is what refills the corpus. Both strings are
-      // pinned because the one-shot reads one and writes the other.
+    test('the clustering prefix is 86 characters and ends in a space', () {
+      // The two things a shell, a make variable or a `--dart-define` can eat
+      // without anyone noticing. `make golden-vector` prints this LENGTH for
+      // exactly that reason, and the bench's rows were measured at 86.
+      expect(EmbeddingsClient.clusteringPrefix, hasLength(86));
+      expect(EmbeddingsClient.clusteringPrefix, endsWith(' '));
+      // A period where Qwen's documented instruction form has a newline: a
+      // make variable cannot carry one, so the period is what was measured.
+      expect(EmbeddingsClient.clusteringPrefix, isNot(contains('\n')));
+    });
+
+    test('the two retired tags are the ones the model swaps orphaned', () {
+      // `-v3` is 2026-09-19, when the whole vector moved to
+      // Qwen3-Embedding-0.6B; `-v2` is 2026-09-18, when the people left the
+      // clustering card. Both old strings are pinned because
+      // `retiredClusteringTags` reads them and the one-shots write the
+      // current one. A vector under either is in a different space, and under
+      // the v2 and v1 tags in a different WIDTH as well.
       expect(
         EmbeddingsClient.retiredModelTag,
+        'embeddinggemma-300M/clustering-v2',
+      );
+      expect(
+        EmbeddingsClient.retiredModelTagV1,
         'embeddinggemma-300M/clustering',
       );
       expect(
-        EmbeddingsClient.retiredModelTag,
-        isNot(EmbeddingsClient.modelTag),
+        {
+          EmbeddingsClient.retiredModelTag,
+          EmbeddingsClient.retiredModelTagV1,
+        },
+        isNot(contains(EmbeddingsClient.modelTag)),
       );
     });
 
     test('the document pair is exactly what every stored message vector was '
         'written under', () {
-      expect(EmbeddingsClient.documentPrefix, 'title: none | text: ');
-      expect(EmbeddingsClient.documentModelTag, 'embeddinggemma-300M/document');
+      // Empty, and empty is the contract rather than an unfilled slot: Qwen
+      // instructs the query alone and embeds a document as itself.
+      expect(EmbeddingsClient.documentPrefix, '');
+      expect(
+        EmbeddingsClient.documentModelTag,
+        'Qwen3-Embedding-0.6B/document',
+      );
     });
 
     test('a query is embedded as a question, not as a document', () {
@@ -72,11 +100,31 @@ void main() {
       // the model is trained on the query/document PAIR, not on either alone.
       expect(
         EmbeddingsClient.searchQueryPrefix,
-        'task: search result | query: ',
+        'Instruct: Given a search query, retrieve the messages and documents '
+        'that answer it. Query: ',
       );
+      expect(EmbeddingsClient.searchQueryPrefix, endsWith(' '));
       expect(
         EmbeddingsClient.searchQueryPrefix,
         isNot(EmbeddingsClient.documentPrefix),
+      );
+    });
+
+    test('the clustering and document corpora are never the same space', () {
+      // One server, one model, two prefixes: the ONLY thing keeping a
+      // conversation vector out of a search result is that these four strings
+      // differ pairwise.
+      expect(
+        EmbeddingsClient.clusteringPrefix,
+        isNot(EmbeddingsClient.documentPrefix),
+      );
+      expect(
+        EmbeddingsClient.clusteringPrefix,
+        isNot(EmbeddingsClient.searchQueryPrefix),
+      );
+      expect(
+        EmbeddingsClient.modelTag,
+        isNot(EmbeddingsClient.documentModelTag),
       );
     });
   });
@@ -89,7 +137,8 @@ void main() {
 
       expect(
         recorder.bodies.single,
-        '{"input":"task: clustering | query: hello","model":"embed"}',
+        '{"input":"Instruct: Group email threads that belong to the same '
+        'project, event or topic. Query: hello","model":"embed"}',
       );
     });
 
@@ -117,22 +166,23 @@ void main() {
 
       expect(
         byDefault.bodies.single,
-        '{"input":"task: clustering | query: hello","model":"embed"}',
+        '{"input":"Instruct: Group email threads that belong to the same '
+        'project, event or topic. Query: hello","model":"embed"}',
       );
       expect(explicit.bodies.single, byDefault.bodies.single);
     });
 
-    test('the document prefix goes out verbatim', () async {
+    test('a document goes out bare', () async {
+      // The empty document prefix, stated as the bytes on the wire: Qwen
+      // embeds a document as itself, so anything at all in front of the card
+      // would move every stored passage away from the queries trained to find
+      // it.
       final recorder = BodyRecorder();
 
       await recorder.client
           .embedResult('hello', prefix: EmbeddingsClient.documentPrefix);
 
-      expect(
-        recorder.bodies.single,
-        '{"input":"title: none | text: hello","model":"embed"}',
-      );
-      expect(recorder.bodies.single, contains('title: none | text: hello'));
+      expect(recorder.bodies.single, '{"input":"hello","model":"embed"}');
     });
 
     test('the search prefix goes out verbatim', () async {
@@ -143,11 +193,8 @@ void main() {
 
       expect(
         recorder.bodies.single,
-        '{"input":"task: search result | query: hello","model":"embed"}',
-      );
-      expect(
-        recorder.bodies.single,
-        contains('task: search result | query: hello'),
+        '{"input":"Instruct: Given a search query, retrieve the messages and '
+        'documents that answer it. Query: hello","model":"embed"}',
       );
     });
   });

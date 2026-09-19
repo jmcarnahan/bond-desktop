@@ -16,17 +16,18 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
+import 'fixtures/fake_embed_server.dart' show embedDims;
 import 'fixtures/test_db.dart';
 import 'fixtures/vec_test_db.dart';
 
-/// A 768-wide vector with a few named axes set — everything else zero.
+/// A full-width vector with a few named axes set — everything else zero.
 ///
 /// Distinct axes make the geometry arithmetic-free: two vectors' cosine
 /// distance is whatever the shared components say and nothing else, so a
 /// failing assertion below is a failure of the search, never of the fixture's
 /// maths.
 List<double> axes(Map<int, double> components) {
-  final v = List.filled(768, 0.0);
+  final v = List.filled(embedDims, 0.0);
   components.forEach((axis, value) => v[axis] = value);
   return v;
 }
@@ -427,7 +428,7 @@ void main() {
         source: 'email',
         sourceMessageId: 'ghost',
         embedding: encodeEmbedding(axes({0: 1.0})),
-        dims: 768,
+        dims: embedDims,
         embeddedHash: 'whatever',
         embedModel: EmbeddingsClient.modelTag,
       );
@@ -450,7 +451,7 @@ void main() {
         source: 'email',
         sourceMessageId: 'inv',
         embedding: encodeEmbedding(axes({0: 1.0})),
-        dims: 768,
+        dims: embedDims,
         embeddedHash: 'whatever',
         embedModel: EmbeddingsClient.documentModelTag,
       );

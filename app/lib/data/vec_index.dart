@@ -33,10 +33,16 @@ import 'database.dart';
 /// index over nothing, so a caller can hold one unconditionally.
 class MessageVectorIndex {
   /// The embedding width, fixed by the model on `:8081`
-  /// (`embeddinggemma-300M`, `n_embd` 768). It appears once, here, and the DDL
-  /// is built from it — a second literal is how the table and the writer
-  /// silently disagree.
-  static const int dims = 768;
+  /// (`Qwen3-Embedding-0.6B`, `n_embd` 1024, since Round E Phase 2 on
+  /// 2026-09-19). It appears once, here, and the DDL is built from it — a
+  /// second literal is how the table and the writer silently disagree.
+  ///
+  /// Widening it is not a migration, it is a rebuild: [_prepare] sees a table
+  /// declared at the old width and throws it away, and every durable row still
+  /// stored at 768 is then skipped by [backfill] rather than filed. Those rows
+  /// are already invisible to search, which filters on
+  /// `EmbeddingsClient.documentModelTag`, so the two agree about them.
+  static const int dims = 1024;
 
   /// The vec0 table, cosine because the embeddings are compared by direction
   /// and not by magnitude.
@@ -121,7 +127,7 @@ class MessageVectorIndex {
   /// which is also its `rowid` in the index.
   ///
   /// [embedding] must be exactly `dims * 4` bytes of little-endian float32
-  /// (a `Float32List(768).buffer.asUint8List()` on any machine this ships to).
+  /// (a `Float32List(dims).buffer.asUint8List()` on any machine this ships to).
   /// That byte layout is the contract sqlite-vec reads, and it is what every
   /// writer of `message_vectors.embedding` has to store.
   Future<void> upsert({required int id, required Uint8List embedding}) async {

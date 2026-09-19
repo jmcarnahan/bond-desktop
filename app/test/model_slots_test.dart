@@ -33,6 +33,7 @@ Set<String> taskSchemaNames() => {
       const ContextBriefTask().schemaName,
       const ContextSelectTask().schemaName,
       const ConfirmMembershipTask().schemaName,
+      const GroupThreadsTask().schemaName,
       const NameStorylineTask().schemaName,
       const RefineStorylineTask().schemaName,
       const StorylineRecapTask().schemaName,
@@ -82,6 +83,7 @@ void main() {
       'storyline_membership',
     });
     expect(idsOn(ModelSlot.prose), {
+      'storyline_group',
       'storyline_name',
       'storyline_refresh',
       'storyline_recap',

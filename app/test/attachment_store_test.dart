@@ -7,6 +7,7 @@ import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_embed_server.dart' show embedDims;
 import 'fixtures/test_db.dart';
 
 /// The rule the `attachments` table exists to hold: **a re-sync updates what
@@ -747,14 +748,14 @@ void main() {
 
       await store.setChunkEmbedding(
         ids.single,
-        embedding: encodeEmbedding(List.filled(768, 0.1)),
-        dims: 768,
+        embedding: encodeEmbedding(List.filled(embedDims, 0.1)),
+        dims: embedDims,
         embedModel: EmbeddingsClient.documentModelTag,
       );
 
       final stored = (await chunks()).single;
       expect(stored['embedding'], isNotNull);
-      expect(stored['dims'], 768);
+      expect(stored['dims'], embedDims);
       expect(stored['embed_model'], EmbeddingsClient.documentModelTag);
       expect(stored['embedded_at'], isNotNull);
       // Cleared, not stamped: stamping here would write the float into the
@@ -772,8 +773,8 @@ void main() {
       ]);
       await store.setChunkEmbedding(
         ids.first,
-        embedding: encodeEmbedding(List.filled(768, 0.1)),
-        dims: 768,
+        embedding: encodeEmbedding(List.filled(embedDims, 0.1)),
+        dims: embedDims,
         embedModel: EmbeddingsClient.documentModelTag,
       );
 
@@ -1108,8 +1109,8 @@ void main() {
       await store.upsertMessageVector(
         source: 'email',
         sourceMessageId: id,
-        embedding: encodeEmbedding(List.filled(768, 0.1)),
-        dims: 768,
+        embedding: encodeEmbedding(List.filled(embedDims, 0.1)),
+        dims: embedDims,
         embeddedHash: 'h-$id',
         embedModel: model,
       );
@@ -1122,7 +1123,7 @@ void main() {
       final blob = await store.messageVectorBlob('email', 'm1',
           embedModel: tag);
 
-      expect(decodeEmbedding(blob!).length, 768);
+      expect(decodeEmbedding(blob!).length, embedDims);
     });
 
     test('and nothing at all under any other model tag', () async {

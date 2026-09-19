@@ -1095,6 +1095,10 @@ seeds the GOLD gate verdict.
 | 2026-09-18 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260918-225817.json` | 48/98 (49%) | 6 | 60% over 2 of 2 storylines | 4% over 13 efforts | 80% | 2 / 12 / 3 refused | 14 / 76 | 203 s | Phase 4: the confirm prompt's three rules, `_accepts` with `high` for a suggested storyline, overlap needs two shared non-owner people, near-tie confirms both, catch-all detector; second of two passes, the first identical on every count; same servers, same cards from `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json`; seed 95 conversations / 71 kept / 24 gated / 71 embedded; 4 sweep passes, every suggestion kept, wall per pass 124665, 63993, 14826, 47 ms; incoherent 9, outliers dropped 3, series 0 seeded / 0 excluded; assign assigned 24 / rejected 41; unmapped 27, filed nowhere 67, forbidden hits 0 over 0; cosine bins 0 / 1 / 34 / 87 / 169 |
 | 2026-09-19 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260919-005938.json` | 46/98 (47%) | 0 | 47% over 1 of 1 storylines | 0% over 13 efforts | 100% | 1 / 10 / 1 refused | 11 / 71 | 213 s | Phase 5: the settle gate, the 14-day expiry and the fragment fold keyed on the raw subject; the gate and the expiry cannot fire on the bench store; the fold folds one row per pass and one storyline forms that maps to no gold effort and takes 16 assign adds; second of two passes, the first identical on every count except the lint / incoherent split of the ten tombstones, 2 / 8 against 1 / 9, the namer at temperature; same servers, same cards from `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json`; seed 95 / 71 / 24 / 71 / 0; 3 sweep passes, wall per pass 79004, 61751, 48 ms; incoherent 9, outliers dropped 3, series 0 seeded / 0 excluded, fragments joined 0, rows folded 1 per pass; assign assigned 16 / rejected 52; cosine bins 0 / 2 / 18 / 48 / 103 |
 | 2026-09-19 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260919-023532.json` | 46/98 (47%) | 0 | 47% over 1 of 1 storylines | 0% over 13 efforts | 100% | 1 / 10 / 1 refused | 11 / 71 | 214 s | Round D Phase 6, the final tree with the pre-naming observer: identical to the Phase 5 keeper on every count the sweep files; first pass identical except the lint/incoherent split 2/8 against 1/9 and 238 s; clusters judged 11, the one formed at 50% gold purity, the ten declined at a mean of 39% and none at 70%; pool pairs at or above 0.65: same effort 63 of 85, different efforts 653 of 1,346, with a gold-none thread 531 of 1,054; assign assigned 16 / rejected 52; unmapped 19 / filed nowhere 81; a third pass `…sweep-20260919-031635.json` at 234 s, after the review moved the member confirms' people list onto the kept threads, identical on every count |
+| 2026-09-19 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | vllm-g6e/Qwen3.8-27B-FP8 | topics | `…-vllm-qwen3-8-27b-fp8-box-sweep-20260919-203131.json` | 48/98 (49%) | 5 | 90% over the 2 formed, 54% over the 3 declined | not read | not read | 2 / 3 declined / not read | 5 / 77 | 102 s (sweep 27.4 s) | Round E Phase 2, the shoot-out's first finalist: embeddinggemma-300M kept, the clustering prefix moved to the `search result` one, and all five `StorylineTuning` gates scaled by 0.37 / 0.65 for the pass and restored after it. Prose on the box 27B-FP8, confirm on the local 4B, one deterministic pass; cards from `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json`; forbidden hits 4. A prefix change alone, which is what decision 4's tie-break preferred, and it neither clears `storyline.id` > 50 nor holds forbidden at or below 3 |
+| 2026-09-19 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | vllm-g6e/Qwen3.8-27B-FP8 | topics | `…-vllm-qwen3-8-27b-fp8-box-sweep-20260919-203428.json` | 50/98 (51%) | 9 | 78% over the 2 formed, 75% over the 3 declined | not read | not read | 2 / 3 declined / not read | 5 / 80 | 113 s (sweep 31.8 s) | Round E Phase 2, the shoot-out's second finalist and the one that ships: Qwen3-Embedding-0.6B on the instruction prefix at 1,024 dimensions, gates 0.48 / 0.43 / 0.68 / 0.44 / 0.37. Same prose, same confirm, same cards, one deterministic pass; forbidden hits 5. It wins every column against the row above — four more correct positives, twenty-one points of declined purity — and it too misses the pre-registered rule on forbidden hits, so the fallback applied: the vector moves to the better read and the grouping is built on top of it |
+| 2026-09-19 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | vllm-g6e/Qwen3.8-27B-FP8 | topics | `…-vllm-qwen3-8-27b-fp8-box-sweep-20260919-222240.json` | 50/98 (51%), by abstention | 0 | not read | not read | not read | 0 grouped | 6 grouping / not read | 6.9 s (grouping) | Round E Phase 2, `GroupingMode.model` flipped on for the pass: a model reads each cosine neighbourhood and says what belongs together. It said nothing. 6 grouping calls, 0 grouped, 4 came back empty and 6 neighbourhoods were judged unfit; the score is the Qwen vector's own, reached because the grouping abstained rather than because it helped. Two passes, the second `…-222513.json`, identical on every count; the same tree on the local 27B Q4_K_M is identical again at 54.9 s, `…-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260919-222835.json`. Not shipped; `GroupingMode.cosine` stays the default |
+| 2026-09-19 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `…-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260919-223525.json` | 45/98 (46%) | 5 | 78% over the 2 formed, 75% over the 3 declined | not read | 62% | 2 / 3 declined / not read | 5 / 76 | 159 s (sweep 76.5 s) | **The row of record for the shipped tree**: Qwen3-Embedding-0.6B, the instruction prefix, `clustering-v3`, the five rescaled gates, everything local. Second of two passes and the keeper; the first, `…-223246.json`, was identical on every count the sweep files at 251 s with a sweep wall of 90.8 s. The formed clusters are the SAME two as the box row above; what differs is the namer, so the eighteen-point gap between 50/98 with 9 positives there and 45/98 with 5 here is the naming model and nothing about the vector |
 
 **What the two sweep rows say (2026-09-18).** Both cards were run three
 times, twice before the phase's review and once after its fixes, and every
@@ -1449,6 +1453,38 @@ stands unmet and the rows say so. For E1, where targets become settings, the
 confirm stage defaults to `Local fast`, and to the GPU 27B target whenever one
 is configured.
 
+
+**Phase 2 (2026-09-19): the vector moved, the grouping did not.** Neither
+finalist cleared the pre-registered ship rule on its own. That rule wanted
+`storyline.id` above 50 with forbidden hits at or below 3; the Qwen vector
+reached 50 of 98 with five forbidden hits and the embeddinggemma prefix change
+reached 48 with four. So the plan's fallback applied. The vector moved to Qwen
+because it is the better read on every line that was measured — 15% cross-effort
+share at its recall-70 cosine against the shipped vector's 39%, nine correct
+positives against five, declined clusters 75% pure against 54% — and the
+model-read grouping was built on top of it in the same phase. The grouping then
+grouped nothing: six calls over three passes, zero groups, four empty answers
+and six neighbourhoods judged unfit, on the box 27B and on the local 27B alike.
+It ships dark behind `GroupingMode.cosine`, with its rows above, because a pass
+that abstains costs seven seconds and teaches the next round where to look.
+
+The namer is the lever the rows exposed by accident. The same two formed
+clusters, from the same vector over the same cards, file 50 of 98 with nine
+correct positives when the box 27B-FP8 names them and 45 of 98 with five when
+the local 27B Q4_K_M does. Nothing else differs between those two rows. That is
+Phase 3's case for making the naming stage's target a setting rather than a
+compiled default.
+
+Against Round D's closing row (46 of 98, zero correct positives, 214 s), the
+shipped tree is one point lower on `storyline.id` locally and ahead everywhere
+that matters to a reader: five correct positives where there were none, at the
+cost of four forbidden hits where there were none, and a sweep wall a third of
+what it was — 214 s down to 76.5 s on the keeper pass and 90.8 s on the first.
+The SEARCH side of the same model swap is unmeasured. There is no golden bench
+for search, so the document corpus moved on Qwen's documented contract alone;
+`docs/pipeline/05-embeddings.md` says so and says what goes quiet until it is
+re-embedded.
+
 #### Clustering vector
 
 What `make golden-vector` reads, per "The vector, read alone." above. Every
@@ -1514,6 +1550,7 @@ pairs` keeps Round D's own figures for continuity.
 | 2026-09-19 | nomic-embed-text-v2-moe (Q8_0) | summary | clustering: (12) | 768 | 0.35 / 34% | not read | not read | not read | 4 / 0 | first pass only, before the ladder shipped; the rescaled columns were never taken and the row is kept for its cross rate |
 | 2026-09-19 | bge-m3 (Q8_0) | topics | none (0) | 1024 | 0.46 / 36% | not read | not read | not read | 13 / 2 | first pass only, before the ladder shipped; the rescaled columns were never taken and the row is kept for its cross rate |
 | 2026-09-19 | bge-m3 (Q8_0) | summary | none (0) | 1024 | 0.46 / 39% | not read | not read | not read | 12 / 2 | first pass only, before the ladder shipped; the rescaled columns were never taken and the row is kept for its cross rate |
+| 2026-09-19 | Qwen3-Embedding-0.6B (Q8_0, --pooling last) | topics | instruction (86) | 1024 | 0.43 / 15% | 0.48 / 40% | not read | 5 / 76% / 3 / 30 / 16 | 10 / 0 | **the shipped tree**, re-read on the constants the app now compiles: shipped 2026-09-19 as `clustering-v3`, and it reproduces the Phase 1 finalist line. The recall-70 would-form rung was not re-taken because the app runs at 0.48, which IS this candidate's cross-5 rung: 5 clusters, mean gold purity 76%, 3 at or above 70% and 2 at 100%, holding 30 of the pool's 85 same-effort pairs against 16 cross. Separation 12 points. `golden-vector-embed-local-topics-prefix-86-20260919-223531.json`, 6 s |
 
 **What the Phase 1 rows say (2026-09-19).** Twenty-four passes over one seed,
 four to ten seconds each, one embedding server at a time.

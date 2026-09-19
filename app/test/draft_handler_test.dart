@@ -1327,7 +1327,7 @@ void main() {
       await vecStore.setChunkEmbedding(
         chunkIds.single,
         embedding: encodeEmbedding(axes({1: 1.0})),
-        dims: 768,
+        dims: embedDims,
         embedModel: EmbeddingsClient.documentModelTag,
       );
       await vecStore.indexPendingChunks();
@@ -1352,7 +1352,7 @@ void main() {
       await directories.setChunkEmbedding(
         chunkId,
         embedding: encodeEmbedding(axes({1: 1.0})),
-        dims: 768,
+        dims: embedDims,
         embedModel: EmbeddingsClient.documentModelTag,
       );
       await directories.indexPendingChunks();

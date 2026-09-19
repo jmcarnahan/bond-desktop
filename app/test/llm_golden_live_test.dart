@@ -1468,6 +1468,13 @@ void main() {
         var sweptSeriesExcluded = 0;
         var sweptFragments = 0;
         var sweptFolded = 0;
+        // The four the model-read grouping writes, zero on a tree running
+        // `GroupingMode.cosine` — which is the point of reading them in both
+        // modes rather than only in the one that moves them.
+        var sweptGroupCalls = 0;
+        var sweptGrouped = 0;
+        var sweptGroupFailed = 0;
+        var sweptGroupUnfit = 0;
         for (final row in await store.recentActivity(limit: 1000)) {
           if (row['kind'] != 'storyline_sweep') continue;
           final detail = ActivityEvent.fromRow(row).detail;
@@ -1488,6 +1495,10 @@ void main() {
           sweptSeriesExcluded += at('series_excluded');
           sweptFragments += at('fragments');
           sweptFolded += at('folded');
+          sweptGroupCalls += at('grouping_calls');
+          sweptGrouped += at('grouped');
+          sweptGroupFailed += at('grouping_failed');
+          sweptGroupUnfit += at('grouping_unfit');
         }
 
         final tally = SweepTally(
@@ -1500,6 +1511,10 @@ void main() {
           outliersDropped: sweptOutliers,
           fragmentsJoined: sweptFragments,
           fragmentsFolded: sweptFolded,
+          groupingCalls: sweptGroupCalls,
+          grouped: sweptGrouped,
+          groupingFailed: sweptGroupFailed,
+          groupingUnfit: sweptGroupUnfit,
           purityByStoryline: {
             for (final entry in membership.threadsByStoryline.entries)
               entry.key: purityOf(entry.value, goldByThread),

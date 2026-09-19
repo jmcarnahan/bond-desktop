@@ -72,19 +72,32 @@ WAIT_TIMEOUT ?= 120
 # Total seconds `make setup` waits for the first-run ~19GB download + model load.
 SETUP_WAIT   ?= 1800
 
-# The second server: a 300M embedding model the app uses to cluster
-# conversations. Its own llama-server on its own port, because --embeddings is
-# a whole-server mode — one process cannot serve chat completions and
-# embeddings at once. The app degrades quietly when it is not running.
+# The second server: a 0.6B embedding model the app uses to cluster
+# conversations and to answer search. Its own llama-server on its own port,
+# because --embeddings is a whole-server mode — one process cannot serve chat
+# completions and embeddings at once. The app degrades quietly when it is not
+# running.
+#
+# Qwen3-Embedding-0.6B since Round E Phase 2 (2026-09-19), replacing
+# embeddinggemma-300M: it was the only candidate of the twenty measured whose
+# cross-effort share stayed under 20% on every card
+# (docs/model-bakeoff.md, "Clustering vector"). A local.mk that pins EMBED_HF
+# back to ggml-org/embeddinggemma-300M-GGUF MUST be updated or deleted. Nothing
+# throws if it is not: the app would embed 768-wide vectors into indexes
+# declared at 1024, every clustering read would fall back to brute force over
+# an empty corpus, and search would find nothing new — quietly, because a
+# wrong-width blob is skipped rather than refused.
 EMBED_PORT   ?= 8081
-EMBED_HF     ?= ggml-org/embeddinggemma-300M-GGUF
-# Whatever flags a CANDIDATE embedding model needs that llama.cpp does not read
-# off its GGUF. Pooling is the usual one: Qwen3-Embedding wants --pooling last,
-# nomic and bge-m3 want mean, and embeddinggemma needs nothing. Empty by
-# default, so the shipping server's launch line is byte-identical to what it
-# has always been. `make embed EMBED_PORT=8091 EMBED_HF=<repo> EMBED_ARGS=…`
-# is how a second server is stood up beside it for `make golden-vector`.
-EMBED_ARGS   ?=
+EMBED_HF     ?= Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0
+# Whatever flags the embedding model needs that llama.cpp does not read off its
+# GGUF. Pooling is the usual one, and the shipping model needs it: Qwen3-
+# Embedding wants --pooling last, nomic and bge-m3 want mean, and
+# embeddinggemma needed nothing. A local.mk that overrides this to empty while
+# EMBED_HF is Qwen leaves the server pooling by its own default, which is a
+# different vector for the same text.
+# `make embed EMBED_PORT=8091 EMBED_HF=<repo> EMBED_ARGS=…` is how a second
+# server is stood up beside it for `make golden-vector`.
+EMBED_ARGS   ?= --pooling last
 
 # The third server: the bulk-work model. Triage, extraction and
 # storyline-confirm all run here; the 27B on :$(MODEL_PORT) keeps drafting and

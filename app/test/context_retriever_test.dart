@@ -83,7 +83,7 @@ void main() {
       source: 'email',
       sourceMessageId: id,
       embedding: encodeEmbedding(axes({axis: 1.0})),
-      dims: 768,
+      dims: embedDims,
       embeddedHash: 'h-$id',
       embedModel: tag,
       receivedAt: '2026-09-09T09:00:00.000Z',
@@ -139,7 +139,7 @@ void main() {
       await context.setChunkEmbedding(
         id,
         embedding: encodeEmbedding(axes(vector)),
-        dims: 768,
+        dims: embedDims,
         embedModel: tag,
       );
     }
@@ -1255,7 +1255,7 @@ The kitchen inventory is counted on the first of the month.
         await context.setChunkEmbedding(
           id,
           embedding: encodeEmbedding(axes({axis: 1.0})),
-          dims: 768,
+          dims: embedDims,
           embedModel: tag,
         );
       }
@@ -1403,7 +1403,7 @@ Standard freight is 41 credits per pallet.
         await context.setChunkEmbedding(
           part.chunkId,
           embedding: encodeEmbedding(axes({1: 1.0})),
-          dims: 768,
+          dims: embedDims,
           embedModel: tag,
         );
       }
@@ -1446,7 +1446,7 @@ Standard freight is 41 credits per pallet.
         await context.setChunkEmbedding(
           part.chunkId,
           embedding: encodeEmbedding(axes({1: 1.0})),
-          dims: 768,
+          dims: embedDims,
           embedModel: tag,
         );
       }
@@ -1487,7 +1487,7 @@ Standard freight is 41 credits per pallet.
         await context.setChunkEmbedding(
           id,
           embedding: encodeEmbedding(axes({1: 1.0})),
-          dims: 768,
+          dims: embedDims,
           embedModel: tag,
         );
       }

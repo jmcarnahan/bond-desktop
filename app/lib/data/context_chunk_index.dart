@@ -23,11 +23,12 @@ import 'vec_index.dart' show VecHit;
 /// model call, and a virtual table created during a migration would fail
 /// every pair in drift's `SchemaVerifier` suite.
 class ContextChunkIndex {
-  /// The embedding width, fixed by the model on `:8081`. Directory passages
-  /// are embedded under the same prefix and the same tag as message cards, so
-  /// a second number here would only be a chance to disagree with the
-  /// siblings.
-  static const int dims = 768;
+  /// The embedding width, fixed by the model on `:8081`
+  /// (`Qwen3-Embedding-0.6B`, 1024 since Round E Phase 2 on 2026-09-19).
+  /// Directory passages are embedded under the same prefix and the same tag as
+  /// message cards, so a second number here would only be a chance to disagree
+  /// with the siblings.
+  static const int dims = 1024;
 
   /// The vec0 table, cosine because the embeddings are compared by direction
   /// and not by magnitude.

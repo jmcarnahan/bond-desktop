@@ -66,7 +66,7 @@ void main() {
       source: 'email',
       sourceMessageId: id,
       embedding: encodeEmbedding(axes({axis: 1.0})),
-      dims: 768,
+      dims: embedDims,
       embeddedHash: 'h-$id',
       embedModel: model,
       receivedAt: '2026-09-04T10:00:00.000Z',
@@ -113,7 +113,7 @@ void main() {
       await store.setChunkEmbedding(
         ids[i],
         embedding: encodeEmbedding(axes({chunks[i].axis: 1.0})),
-        dims: 768,
+        dims: embedDims,
         embedModel: tag,
       );
     }
@@ -214,7 +214,7 @@ void main() {
       await store.setChunkEmbedding(
         own.data['id'] as int,
         embedding: encodeEmbedding(axes({3: 0.6, 11: 0.8})),
-        dims: 768,
+        dims: embedDims,
         embedModel: tag,
       );
 
@@ -412,12 +412,14 @@ void main() {
       );
 
       expect(excerpts.single.text, 'The tenant pays 2,400 monthly.');
-      // The DOCUMENT prefix, not the search prefix. A query-prefixed vector
-      // sits in a different corner of the space from every chunk it would be
+      // The DOCUMENT corpus, not the search one. A query-prefixed vector sits
+      // in a different corner of the space from every chunk it would be
       // compared against, and the comparison would still return something.
+      // The document prefix is the empty string, so the check is that nothing
+      // at all rode in front of the card.
       expect(server.inputs.single,
-          startsWith(EmbeddingsClient.documentPrefix));
-      expect(server.inputs.single, contains('Renewal paperwork'));
+          isNot(startsWith(EmbeddingsClient.searchQueryPrefix)));
+      expect(server.inputs.single, startsWith('Renewal paperwork'));
     });
 
     test('a vector under another model tag is re-embedded, not trusted',

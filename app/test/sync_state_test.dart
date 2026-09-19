@@ -507,9 +507,10 @@ void main() {
 
     test('the old clustering vectors are queued for a re-embed, once',
         () async {
-      // The card lost its people and the tag moved with it, so a vector under
-      // the retired tag describes a card this build no longer writes. The
-      // assign pass is the vehicle: it re-embeds before it judges anything.
+      // The model moved and the tag moved with it, so a vector under the
+      // retired tag sits in a space — and at a width — this build cannot
+      // read. The assign pass is the vehicle: it re-embeds before it judges
+      // anything.
       await seedVector('email', 'stale-1', EmbeddingsClient.retiredModelTag);
       await seedVector('email', 'stale-2', EmbeddingsClient.retiredModelTag);
       await seedVector('teams', 'stale-3', EmbeddingsClient.retiredModelTag);
@@ -524,7 +525,11 @@ void main() {
 
       expect(await queuedStorylineKeys(),
           {'email/stale-1', 'email/stale-2', 'teams/stale-3'});
-      // Three is short of the cap, so the pass closed the one-shot.
+      // Three is short of the cap, so the pass closed the one-shot. The v1
+      // one-shot closed on the same sync without costing a slice: this store
+      // has nothing under the tag before last, so the walk carried straight
+      // on to the one that did.
+      expect(await store.getPref('clustering_card_v3'), '1');
       expect(await store.getPref('clustering_card_v2'), '1');
       expect((await syncMailDetail())['requeued_clustering_reembeds'], 3);
 
@@ -552,7 +557,7 @@ void main() {
       await syncReaching(14).syncNow();
 
       expect(await queuedStorylineKeys(), hasLength(clusteringCardReembedCap));
-      expect(await store.getPref('clustering_card_v2'), isNull);
+      expect(await store.getPref('clustering_card_v3'), isNull);
       expect((await syncMailDetail())['requeued_clustering_reembeds'],
           clusteringCardReembedCap);
 
@@ -569,7 +574,37 @@ void main() {
       await syncReaching(14).syncNow();
 
       expect((await syncMailDetail())['requeued_clustering_reembeds'], 5);
+      expect(await store.getPref('clustering_card_v3'), '1');
+    });
+
+    test('an install carrying both old tags drains the older one first',
+        () async {
+      // Two model swaps in two days, and an install that was closed across
+      // both holds rows under each. The walk is oldest first and one SLICE a
+      // sync, so the pace stays at the cap however many tags have been
+      // retired — the whole reason `clusteringCardReembedCap` exists.
+      await seedVector('email', 'v1-a', EmbeddingsClient.retiredModelTagV1);
+      await seedVector('email', 'v1-b', EmbeddingsClient.retiredModelTagV1);
+      await seedVector('email', 'v2-a', EmbeddingsClient.retiredModelTag);
+      await seedVector('teams', 'v2-b', EmbeddingsClient.retiredModelTag);
+
+      await syncReaching(14).syncNow();
+
+      // The v1 rows alone, and the newer one-shot untouched: it has not run,
+      // so its pref is still owed.
+      expect(await queuedStorylineKeys(), {'email/v1-a', 'email/v1-b'});
       expect(await store.getPref('clustering_card_v2'), '1');
+      expect(await store.getPref('clustering_card_v3'), isNull);
+      expect((await syncMailDetail())['requeued_clustering_reembeds'], 2);
+
+      graph.requests.clear();
+      await syncReaching(14).syncNow();
+
+      // The next sync skips the closed one-shot and files the v2 slice.
+      expect(await queuedStorylineKeys(),
+          {'email/v1-a', 'email/v1-b', 'email/v2-a', 'teams/v2-b'});
+      expect(await store.getPref('clustering_card_v3'), '1');
+      expect((await syncMailDetail())['requeued_clustering_reembeds'], 2);
     });
   });
 

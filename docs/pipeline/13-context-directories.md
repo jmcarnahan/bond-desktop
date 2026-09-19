@@ -571,7 +571,7 @@ migration pair in the suite.
 
 | Index | Table | Shape |
 |---|---|---|
-| `ContextChunkIndex` (`app/lib/data/context_chunk_index.dart`) | `vec_context_chunks` | vec0, `float[768] distance_metric=cosine`; scope applied INSIDE the KNN as `file_id IN (SELECT id FROM context_files WHERE dir_id IN (…))` |
+| `ContextChunkIndex` (`app/lib/data/context_chunk_index.dart`) | `vec_context_chunks` | vec0, `float[1024] distance_metric=cosine`; scope applied INSIDE the KNN as `file_id IN (SELECT id FROM context_files WHERE dir_id IN (…))` |
 | `ContextKeywordIndex` (`app/lib/data/keyword_index.dart`) | `fts_context_chunks` | fts5 `(path, body, chars UNINDEXED)`, weights `[2.0, 1.0, 0]`, porter unicode61; scope applied INSIDE the ranked query as `rowid IN (SELECT c.id FROM context_chunks c JOIN context_files f …)` |
 
 A third pair rather than more rows in the attachment indexes, and the reason

@@ -13,7 +13,7 @@ anything watching it (see **Runtime overrides** below):
 |----------|------|---------|-----------|
 | `llmClientProvider` | prose / 27B | `LLAMA_URL` → `http://localhost:8080/v1/chat/completions`, `LLAMA_MODEL` → `qwen3.8` | `make model` (Qwen3.8-27B) |
 | `fastLlmClientProvider` | bulk / fast | `FAST_LLAMA_URL` → `http://localhost:8082/v1/chat/completions`, `FAST_LLAMA_MODEL` → `qwen3.8` | `make fast` (Qwen3-4B-Instruct) — note **8082**, not 8081 |
-| `embeddingsClientProvider` | embed | `EMBED_URL` → `http://localhost:8081/v1/embeddings` | `make embed` (embeddinggemma-300M) |
+| `embeddingsClientProvider` | embed | `EMBED_URL` → `http://localhost:8081/v1/embeddings` | `make embed` (Qwen3-Embedding-0.6B, `--pooling last`) |
 
 All are `--dart-define`-overridable, and the two chat slots are also
 overridable at runtime in **Settings → Models**; adopting a bakeoff winner is
@@ -25,9 +25,14 @@ Assignment: triage, extraction, the attachment digest
 (`attachment_digest`), the directory file digest (`context_file_digest`), the
 directory brief (`context_brief`), the directory section pick
 (`context_select`), and storyline membership-confirm get the
-fast client; storyline naming (`storyline_name`), storyline refresh
+fast client; storyline grouping (`storyline_group`), storyline naming
+(`storyline_name`), storyline refresh
 (`storyline_refresh`), storyline recap (`storyline_recap`), reply decision, and
-drafting get the 27B. Changing which slot serves a task is one line in
+drafting get the 27B. `storyline_group` is the sweep's model-read grouping and
+runs only under `StorylineTuning.groupingMode == GroupingMode.model`, which is
+not what ships — it has a stage row and a client of its own so that pointing it
+somewhere is a setting rather than a code change the day it does
+(see [06-storylines.md](06-storylines.md#grouping)). Changing which slot serves a task is one line in
 `app_providers.dart` — and an update to that task's page here.
 
 ## Runtime overrides
@@ -60,11 +65,13 @@ restart and without interrupting work in flight.
   llama-server answers with the single model it loaded; MLX-style runtimes list
   several, which is what makes the model NAME worth setting.
 - **Embeddings are not switchable.** Stored vectors are tagged
-  `embeddinggemma-300M/clustering-v2` and `…/document` and are only comparable
+  `Qwen3-Embedding-0.6B/clustering-v3` and `…/document` and are only comparable
   within a tag, so the embed slot is displayed and probed but never moved. The
-  `-v2` is 2026-09-18, when the people left the clustering card: a change to
-  the text a corpus is embedded from is a tag bump and a one-shot re-embed, and
-  `05-embeddings.md` has both.
+  `-v3` is 2026-09-19, when the clustering vector moved to Qwen: a change to
+  the model a corpus is embedded with, or to the text it is embedded from, is a
+  tag bump and a one-shot re-embed, and `05-embeddings.md` has both. The two
+  retired tags are still named in `embeddings_client.dart`, because a mailbox
+  embedded under either has to be recognised before it is re-embedded.
 - **What a wrong model name costs.** A runtime that routes on the name answers
   HTTP 400 for one it does not have, and a 400 is fatal — never retried (see
   below). Pick from the probe's list rather than typing.
@@ -227,9 +234,14 @@ twenty-seven-billion-parameter prose model is still being mapped.
 JSON has no comments, so the three flags that are not preferences are recorded
 here instead:
 
-- **`pooling = mean`** on the embedding model is not a taste. The stored
-  vectors were written under mean pooling, and a server that pooled
-  differently would answer plausible numbers in a different space.
+- **`pooling = last`** on the embedding model is not a taste. The embed role is
+  `Qwen/Qwen3-Embedding-0.6B-GGUF`, file `Qwen3-Embedding-0.6B-Q8_0.gguf`, and
+  its `serverArgs` are `{"embedding": "true", "pooling": "last",
+  "load-on-startup": "true"}`. Last-token pooling is the one flag llama.cpp
+  does not read off this model's GGUF, so a server left on the old `mean` would
+  answer plausible numbers in a different space from the vectors the app
+  stored. The flag moved from `mean` to `last` in Round E Phase 2 with the
+  vector itself (see [05-embeddings.md](05-embeddings.md)).
 - **`parallel = 4`** on the bulk model because the bulk slot is what the drain
   hammers: triage, needs-you, extraction and the digests all queue against it.
 - **`parallel = 1`** on the prose model because it is the memory ceiling on

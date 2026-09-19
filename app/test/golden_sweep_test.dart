@@ -929,6 +929,10 @@ void main() {
           unmapped: 4,
           filedNowhere: 11,
           callsByKind: const {'storyline_name': 2, 'storyline_membership': 9},
+          groupingCalls: 4,
+          grouped: 11,
+          groupingFailed: 1,
+          groupingUnfit: 2,
           callsPerPass: const [7, 4],
           wallPerPassMs: const [1200, 900],
           cosineBins: const [0, 1, 2, 3, 4],
@@ -1035,6 +1039,69 @@ void main() {
       expect(json['outliers'], 3);
       expect(json['fragments'], 4);
       expect(json['folded'], 6);
+      expect(json['grouping_calls'], 4);
+      expect(json['grouped'], 11);
+      expect(json['grouping_failed'], 1);
+      expect(json['grouping_unfit'], 2);
+    });
+
+    test('the grouping counts print on the calls line', () {
+      expect(
+        tally().table(),
+        contains('grouping calls 4  grouped 11  failed 1  unfit 2'),
+      );
+    });
+
+    test('a cosine row carries the four grouping keys as zeroes', () {
+      // The shipped mode makes no grouping call, and a row that simply left
+      // the keys out would read as a pass that grouped nothing rather than as
+      // one that never grouped — which is the whole comparison.
+      final json = SweepTally(
+        formed: 0,
+        tombstoned: 0,
+        lintRejected: 0,
+        incoherent: 0,
+        seriesSeeded: 0,
+        seriesExcluded: 0,
+        outliersDropped: 0,
+        fragmentsJoined: 0,
+        fragmentsFolded: 0,
+        purityByStoryline: const {},
+        coverageBySlug: const {},
+        largestShare: 0,
+        correctPositives: 0,
+        forbiddenByAnti: const {},
+        unmapped: 0,
+        filedNowhere: 0,
+        callsByKind: const {},
+        callsPerPass: const [],
+        wallPerPassMs: const [],
+        cosineBins: const [0, 0, 0, 0, 0],
+        lintCounts: const {},
+        clusterPurity: const {},
+        sameEffortBins: const [0, 0, 0, 0, 0],
+        crossEffortBins: const [0, 0, 0, 0, 0],
+        withNoneBins: const [0, 0, 0, 0, 0],
+        sameSubjectBins: const [0, 0, 0, 0],
+        crossSubjectBins: const [0, 0, 0, 0],
+        withNoneSubjectBins: const [0, 0, 0, 0],
+        samePeopleBins: const [0, 0, 0],
+        crossPeopleBins: const [0, 0, 0],
+        withNonePeopleBins: const [0, 0, 0],
+        separation: (
+          points: 0,
+          recall70Cosine: 0,
+          recall70CrossPct: 0,
+          cross5Cosine: 0,
+          cross5CrossPct: 0,
+          cross5SameRecallPct: 0,
+        ),
+      ).toJson();
+
+      expect(json['grouping_calls'], 0);
+      expect(json['grouped'], 0);
+      expect(json['grouping_failed'], 0);
+      expect(json['grouping_unfit'], 0);
     });
 
     test('the JSON carries clusters by outcome and the pair bins by name', () {

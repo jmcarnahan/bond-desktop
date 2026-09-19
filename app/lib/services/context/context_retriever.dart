@@ -1006,7 +1006,7 @@ class ContextRetriever {
     final rows = await _context.skillVectors(dirIds);
     if (rows.isEmpty) return;
     // Decoded once and reused: a project with thirty skills would otherwise
-    // rebuild the same 768 doubles thirty times.
+    // rebuild the same thousand-odd doubles thirty times.
     final vector = decodeEmbedding(query);
     final matches = <({ContextFile file, double distance})>[];
     for (final row in rows) {

@@ -76,6 +76,12 @@ Map<String, dynamic> confirmAnswer() => {
       'confidence': 'high',
     };
 
+Map<String, dynamic> groupAnswer(List<int> threads) => {
+      'groups': [
+        {'threads': threads, 'why': 'All three are the homepage rebuild.'},
+      ],
+    };
+
 Map<String, dynamic> nameAnswer() => {
       'evidence': 'shared deal',
       'title': 'Website redesign',
@@ -232,6 +238,69 @@ void main() {
         'storyline_membership',
       ]);
       expect(await store.loadStorylines(), hasLength(1));
+    });
+
+    test('the neighbourhood grouping goes to the naming client by default',
+        () async {
+      // The dark path, exercised with the test-only override rather than by
+      // flipping the const the rest of the suite reads. Grouping is prose
+      // work of the same kind naming is, so it lands on the 27B — and the
+      // membership questions it produces still go to the small server.
+      await seed('c1', vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed('c2',
+          vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
+      await seed('c3', vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed('c4', vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
+      final primary = FakeLlm('primary', {
+        'storyline_group': [groupAnswer([1, 2, 3])],
+        'storyline_name': [nameAnswer()],
+      });
+      final fast = FakeLlm('fast', {
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(
+        store,
+        primary,
+        confirmClient: fast,
+        groupingMode: GroupingMode.model,
+      ).sweep();
+
+      expect(primary.schemas, ['storyline_group', 'storyline_name']);
+      expect(fast.schemas, [
+        'storyline_membership',
+        'storyline_membership',
+        'storyline_membership',
+      ]);
+    });
+
+    test('a group client takes the grouping off the naming client', () async {
+      // The third handle Phase 3 points at a stage of its own. Naming stays
+      // where it was, which is what makes this a split rather than a move.
+      await seed('c1', vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed('c2',
+          vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
+      await seed('c3', vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      final primary = FakeLlm('primary', {
+        'storyline_name': [nameAnswer()],
+      });
+      final grouper = FakeLlm('grouper', {
+        'storyline_group': [groupAnswer([1, 2, 3])],
+      });
+      final fast = FakeLlm('fast', {
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(
+        store,
+        primary,
+        confirmClient: fast,
+        groupClient: grouper,
+        groupingMode: GroupingMode.model,
+      ).sweep();
+
+      expect(grouper.schemas, ['storyline_group']);
+      expect(primary.schemas, ['storyline_name']);
     });
 
     test('without a confirm client everything stays on the one it was given',

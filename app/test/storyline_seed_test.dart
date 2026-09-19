@@ -358,12 +358,13 @@ void main() {
     test('the report carries the width of the first vector', () async {
       final report = await seed(setWith(), server: FakeEmbedServer());
 
-      // A candidate model that is not 768 wide is a different geometry, and a
-      // row that did not say so would read as a comparison of two vectors in
-      // one space.
+      // A candidate model at another width is a different geometry, and a row
+      // that did not say so would read as a comparison of two vectors in one
+      // space. The fixture answers at the SHIPPED width, so this also pins
+      // that the report reads the vector rather than a constant.
       expect(report.embedded, greaterThan(0));
-      expect(report.dims, 768);
-      expect(report.table(), contains('768 dims'));
+      expect(report.dims, embedDims);
+      expect(report.table(), contains('$embedDims dims'));
     });
 
     test('nothing embedded leaves the width at zero', () async {

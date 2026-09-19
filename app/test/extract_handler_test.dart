@@ -75,9 +75,13 @@ class FakeEmbeddings {
           if (input.startsWith(EmbeddingsClient.clusteringPrefix)) input,
       ];
 
+  /// The document corpus is now told apart by the ABSENCE of the clustering
+  /// instruction, not by a prefix of its own: Qwen embeds a document bare, so
+  /// `EmbeddingsClient.documentPrefix` is the empty string and a `startsWith`
+  /// on it would match every call this class ever recorded.
   List<String> get documentInputs => [
         for (final input in inputs)
-          if (input.startsWith(EmbeddingsClient.documentPrefix)) input,
+          if (!input.startsWith(EmbeddingsClient.clusteringPrefix)) input,
       ];
 
   EmbeddingsClient get client => EmbeddingsClient(
@@ -806,11 +810,10 @@ void main() {
       expect(row['embed_model'], EmbeddingsClient.documentModelTag);
       expect(row['received_at'], '2026-08-29T10:00:00Z');
       expect(row['embedded_hash'], isNotNull);
-      // The message's OWN text, under the document prefix — not the thread's
-      // clustering card.
+      // The message's OWN text, bare — not the thread's clustering card, and
+      // with nothing at all in front of it.
       expect(
         embeddings.documentInputs.single,
-        '${EmbeddingsClient.documentPrefix}'
         'Launch date | From: Sarah <sarah@x.com> | '
         'Sarah needs the lock extended. | Can we still ship on Thursday?',
       );

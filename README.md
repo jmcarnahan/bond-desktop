@@ -167,8 +167,8 @@ an Azure app registration on this machine: see
 `make fast` is a much smaller model on `:8082` that does the bulk per-message
 work — triage and extraction — in seconds rather than tens of seconds, with
 several requests in flight at once. `make embed` is a third llama-server on
-`:8081` running `embeddinggemma-300M`, which is what turns conversations into
-vectors so they can be clustered — it needs its own process because
+`:8081` running `Qwen3-Embedding-0.6B`, which is what turns conversations into
+vectors so they can be clustered and searched — it needs its own process because
 `--embeddings` puts a server in embedding mode and one server cannot both chat
 and embed. With none of them running the inbox works fine and simply stays
 un-annotated; each missing server parks only the work that needs it, and the

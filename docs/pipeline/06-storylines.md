@@ -979,9 +979,9 @@ accepting members at `maxClusterSize`, twelve, because a proposal longer than
 that is more than a person reads before answering and the name it gets
 describes something more general with every thread added. After the pass, a
 cluster at the cap and a cluster whose mean pairwise cosine is under
-`clusterCoherenceFloor`, 0.60, are both re-clustered on their own members at
-0.05 higher, repeating up to 0.85. A group that is nearly two groups comes
-apart at the seam. What is still under the floor at the top of that ladder is
+`clusterCoherenceFloor`, 0.43, are both re-clustered on their own members at
+0.05 higher, repeating up to `clusterSplitCeiling`, 0.68. A group that is
+nearly two groups comes apart at the seam. What is still under the floor at the top of that ladder is
 dropped for this pass: no naming call is spent on a blob, and no tombstone is
 written either, because nothing was ever asked about it. A group that is merely
 large survives at the ceiling, since being at the cap is not a defect when
@@ -1086,6 +1086,111 @@ Round D measured `series 0 / excluded 0` on every sweep row it took, so the
 golden set contains no series to miss, and the fold's own count is what would
 show a pool where the vector-only clusters had stopped being the sweep's.
 
+### The five gates moved with the vector
+
+Round E Phase 2 put the clustering vector on `Qwen3-Embedding-0.6B` (see
+[05-embeddings.md](05-embeddings.md)), and the five cosines moved with it.
+They are the same distances read on a different scale, not a retuning: Phase 1
+ranked twenty-four vector configurations over the golden pool and read two
+rungs off the winner — its **cross-5** cosine, 0.48, where only 5% of
+cross-effort pairs still link, and its **recall-70** cosine, 0.43, where 70%
+of same-effort pairs still do. `clusterLinkThreshold` is the cross-5 rung and
+`clusterCoherenceFloor` is the recall-70 rung; the two assign gates are the
+old numbers times 0.48 / 0.65, rounded to two places; and `clusterSplitCeiling`
+keeps the four rungs of `clusterSplitStep` that separated the retired 0.65 from
+its 0.85.
+
+| Gate | Retired (embeddinggemma) | Shipped (Qwen) |
+|------|--------------------------|----------------|
+| `clusterLinkThreshold` | 0.65 | 0.48 |
+| `clusterCoherenceFloor` | 0.60 | 0.43 |
+| `clusterSplitCeiling` | 0.85 | 0.68 |
+| `assignCosineGate` | 0.60 | 0.44 |
+| `assignCosineGateWithOverlap` | 0.50 | 0.37 |
+
+### Grouping
+
+**A threshold cannot form pure clusters on this mailbox, and the reason is a
+base rate.** Over the golden pool there are 1,346 cross-effort pairs to 85
+same-effort ones, so at any cosine that keeps most of the real pairs the links
+a cluster forms on are mostly wrong ones, whatever the vector. Round D
+measured it from the other end: at the shipped threshold a link was a
+same-effort pair about 5% of the time, and the clusters the namer declined
+were 39% gold-pure. Phase 1 confirmed it holds across every vector it read.
+So the sweep has a second way to group, in which a model reads a whole
+neighbourhood at once and says what is inside it.
+
+`StorylineTuning.groupingMode` chooses between them, and it is a constant with
+no setting behind it. `GroupingMode.cosine` is what ships: the clustering
+above forms the proposals. `GroupingMode.model` keeps that pass and demotes it
+to a **neighbourhood finder** —
+
+- one sweep of `clusterBySimilarity` at `groupingNeighbourhoodThreshold`,
+  0.41, which is just under the recall-70 rung so that most same-effort pairs
+  survive into a neighbourhood, with `groupingNeighbourhoodMinSize` 3, a cap of
+  `groupingNeighbourhoodCap` 40, and **no coherence floor**: a neighbourhood is
+  a region, not a proposal, and splitting it on its mean would re-form exactly
+  the tight little clusters the cosine pass already makes;
+- one **`GroupThreadsTask`** call per neighbourhood, over its cards numbered
+  `[1]`…`[n]` in centrality order by the same recipe the naming call uses.
+  Twelve whole cards fit one call under `cardsCap`, so a neighbourhood above
+  that is re-clustered up the same `clusterSplitStep` ladder until every piece
+  fits; a piece that falls under the minimum size on the way down, and a piece
+  still too wide at `clusterSplitCeiling`, are dropped unasked;
+- each returned group of at least `proposeMinClusterSize` becomes a cluster
+  handed to `_propose` exactly as a cosine cluster is. The namer still runs,
+  the confirms still run, and the tombstone is still keyed on the member set —
+  so a group either pass proposes is recognised by a dismissal the other one
+  earned.
+
+Determinism holds the way the cosine pass's does: temperature 0, the
+neighbourhoods walked in the pool's own order, the cards inside one ordered by
+centrality, and every group's members returned ascending. A call that throws
+`LlmUnavailableException` parks the sweep exactly as the naming call does; a
+malformed answer or an answer naming no group leaves that neighbourhood
+ungrouped and the pass carries on.
+
+The sweep's activity row carries four counts in **both** modes, zeroes under
+`cosine`, so one row can be read against the other: `grouping_calls`,
+`grouped` (threads placed in a proposable group), `grouping_failed` (calls that
+left their piece ungrouped) and `grouping_unfit` (pieces dropped before any
+call). `make golden-sweep` prints them on its `calls` line.
+
+**It ships dark behind `GroupingMode.cosine` until a sweep row clears the
+rule.** The rule was registered before the first row was taken: correct
+positives at or above 10, forbidden hits at or below 3, `storyline.id` above 50
+(the abstention score — a sweep that files nothing scores 50), and the formed
+clusters at or above 60% pure before naming. Otherwise the mode and the task
+stay in the tree unused and the row is the record.
+
+Measured 2026-09-19 on the Qwen vector at `:8081`, 1,024 wide, prefix length
+86, with neighbourhoods at 0.41 / min 3 / cap 40, temperature 0, and the
+confirms on the local 4B. `GroupingMode` was flipped to `model` for each
+grouping pass and put back.
+
+| Row | storyline.id | Correct positives | Forbidden | Formed | Sweep wall |
+|-----|--------------|-------------------|-----------|--------|------------|
+| cosine, Qwen vector (the shipped configuration) | 50 | 9 | 5 | 2 formed, 3 declined | 113 s |
+| model grouping, box 27B-FP8, pass 1 | 50 | 0 | 0 | 0 | 6.9 s |
+| model grouping, box 27B-FP8, pass 2 (prompt aligned to the rules above) | 50 | 0 | 0 | 0 | 6.9 s |
+| model grouping, local 27B Q4_K_M + MTP | 50 | 0 | 0 | 0 | 54.9 s |
+
+The cosine row spent 80 confirms and 5 naming calls. All three grouping rows
+are the same counts: 6 grouping calls, 0 threads grouped, 4 calls naming no
+group, 6 unfit pieces, 0 wire failures, and a `storyline.id` of 50 of 98,
+which is the abstention score a sweep that files nothing gets. The runs took
+51 s, 41 s and 146 s.
+
+**The rule is not met, so `GroupingMode.cosine` ships and the task and the
+mode ship dark.** The reason is the neighbourhood rather than the model: at
+the neighbourhood cosine the linked pairs run about three cross-effort to one
+same-effort, and a model shown six such threads declines to call any two of
+them one thing. Six calls with four empty answers means two calls DID return
+a group, and every group they returned held two threads — the task allows a
+pair and `proposeMinClusterSize` does not, so all of them were dropped before
+a naming call. The model was not silent; it found nothing it would put a third
+thread in.
+
 **Brute force is the fallback, and it is not exceptional.** The sweep does its
 own arithmetic when there is no usable index (the ordinary state of a build
 without the native extension), when the diff backfill cannot complete, when a
@@ -1183,6 +1288,27 @@ matches either against either column in one query. Every write uses the new
 recipe; a dismissal made under the old one holds forever.
 
 ## The model calls
+
+**GroupThreadsTask** — `app/lib/services/llm/storyline_tasks.dart`, schema
+`storyline_group`, **prose / 27B slot** (`groupClient` in `StorylineService`,
+defaulting to the naming client), **temperature 0**, one call per sweep
+neighbourhood and only under `GroupingMode.model`. Given a numbered list of
+threads that sit near each other, it returns `{groups: [{threads, why}]}`: the
+numbers of the threads that are one specific project, event or topic, and one
+sentence saying which. The rules are the namer's rules turned outward — a
+thread is referred to only by its number; a group is one specific project,
+event or topic and never a team, a person or sender, or a kind of message such
+as invoices, newsletters or meeting invites; a group needs at least two
+threads and each number is used at most once; and a `why` that reads "same
+team", "same sender", "same kind of request" or "all work email" is a group
+that should not have been returned. The rule the other prompts do
+not have is that **leaving a thread out is the expected answer**: the
+neighbourhood is drawn generously on purpose, so most of what the model is
+shown belongs to nothing on the list, and an empty answer is honest. The
+validator drops rather than repairs — a number that is not one, a number under
+1, a number a group already used, and a group left with fewer than two threads
+each cost that entry and nothing else. The upper bound is the service's, since
+only it knows how many cards it showed.
 
 **ConfirmMembershipTask** — `app/lib/services/llm/storyline_tasks.dart`,
 schema `storyline_membership`, **fast / bulk slot** (`confirmClient` in

@@ -12,6 +12,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_embed_server.dart' show embedDims;
 import 'fixtures/test_db.dart';
 
 /// A fake embedding server that counts what it was asked.
@@ -48,7 +49,7 @@ class FakeEmbedServer {
           return http.Response(
             jsonEncode({
               'data': [
-                {'embedding': List.filled(768, 0.1)}
+                {'embedding': List.filled(embedDims, 0.1)}
               ]
             }),
             200,
@@ -130,22 +131,29 @@ void main() {
 
       final row = (await vectorRow('m1'))!;
       expect(row['embed_model'], EmbeddingsClient.documentModelTag);
-      expect(row['dims'], 768);
-      // 768 float32s, the exact width vec0 was built for. A wrong-width blob
-      // is refused by the index and the refusal is swallowed, so search would
+      expect(row['dims'], embedDims);
+      // One float32 per dimension, the exact width vec0 was built for. A
+      // wrong-width blob is refused by the index and the refusal is
+      // swallowed, so search would
       // simply go quiet.
-      expect((row['embedding'] as Uint8List).lengthInBytes, 768 * 4);
+      expect((row['embedding'] as Uint8List).lengthInBytes, embedDims * 4);
       expect(row['received_at'], '2026-08-29T10:00:00Z');
       expect(row['embedded_at'], isNotNull);
       expect(row['embedded_hash'], isNotEmpty);
 
-      // The document prefix, not the clustering one: a message vector that
+      // The document corpus, not the clustering one: a message vector that
       // landed in the conversation corpus is a vector search will never see.
+      // Stated as the absence of the other two prefixes, because the document
+      // prefix is now the empty string and `startsWith` on it says nothing.
       expect(
         server.inputs.single,
-        startsWith(EmbeddingsClient.documentPrefix),
+        isNot(startsWith(EmbeddingsClient.clusteringPrefix)),
       );
-      expect(server.inputs.single, contains('Launch date'));
+      expect(
+        server.inputs.single,
+        isNot(startsWith(EmbeddingsClient.searchQueryPrefix)),
+      );
+      expect(server.inputs.single, startsWith('Launch date'));
       expect(server.inputs.single, contains('From: Sarah <sarah@x.com>'));
       expect(
         server.inputs.single,
@@ -200,8 +208,8 @@ void main() {
       await store.upsertMessageVector(
         source: 'email',
         sourceMessageId: 'm1',
-        embedding: Uint8List(768 * 4),
-        dims: 768,
+        embedding: Uint8List(embedDims * 4),
+        dims: embedDims,
         embeddedHash: hash,
         embedModel: EmbeddingsClient.modelTag,
       );

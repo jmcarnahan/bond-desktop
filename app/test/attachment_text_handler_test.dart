@@ -152,9 +152,14 @@ void main() {
       // Filed as well as embedded: the passage is searchable the moment it is
       // read, not at the next unrelated drain.
       expect(chunks.single['indexed_at'], isNotNull);
-      // Under the DOCUMENT prefix, the same one message cards use — a query
-      // embedded as a query is what these are matched against.
-      expect(server.inputs.single, startsWith(EmbeddingsClient.documentPrefix));
+      // In the DOCUMENT corpus, the same one message cards go into — a query
+      // embedded as a query is what these are matched against. That corpus
+      // takes no prefix at all now, so the check is the absence of the other
+      // two.
+      expect(server.inputs.single,
+          isNot(startsWith(EmbeddingsClient.clusteringPrefix)));
+      expect(server.inputs.single,
+          isNot(startsWith(EmbeddingsClient.searchQueryPrefix)));
     });
 
     test('a link is read through the file inspector and learns its size',

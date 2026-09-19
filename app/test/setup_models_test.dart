@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:bond_inbox/screens/setup/setup_controls.dart';
@@ -19,7 +20,7 @@ import 'fixtures/test_manifest.dart';
 void main() {
   /// The real sizes, so the rows below say what a real first run says.
   final manifest = testManifest(sizes: {
-    routerEmbedId: 333590944,
+    routerEmbedId: 639150592,
     routerBulkId: 4280403520,
     routerProseId: 18973870432,
   });
@@ -53,7 +54,7 @@ void main() {
     expect(find.text('Finds related messages'), findsOneWidget);
     expect(find.text('Reads and sorts your mail'), findsOneWidget);
     expect(find.text('Writes drafts and replies'), findsOneWidget);
-    expect(find.text('318 MB'), findsOneWidget);
+    expect(find.text('610 MB'), findsOneWidget);
     expect(find.text('4.0 GB'), findsOneWidget);
     expect(find.text('17.7 GB'), findsOneWidget);
   });
@@ -62,7 +63,7 @@ void main() {
       (tester) async {
     await open(tester);
 
-    expect(find.text('Total download: 22.0 GB'), findsOneWidget);
+    expect(find.text('Total download: 22.3 GB'), findsOneWidget);
   });
 
   testWidgets('the licence opens through the host, and hides when unwired',
@@ -81,26 +82,45 @@ void main() {
     expect(find.byKey(SetupModelsBody.licenseKey(routerEmbedId)), findsNothing);
   });
 
-  testWidgets("the committed manifest's notice is shown verbatim",
+  /// The real asset, not a fixture. `flutter test` runs from `app/`, so it is
+  /// a plain file here.
+  String committedJson() => File('assets/models/manifest.json').readAsStringSync();
+
+  testWidgets('the committed manifest needs no notice, and shows none',
       (tester) async {
-    // Read off the real asset, not a fixture: the notice is what a licence
-    // REQUIRES to be shown, and a test against invented text would prove
-    // nothing about the thing that ships. `flutter test` runs from `app/`, so
-    // the asset is a plain file here.
-    final committed = ModelManifest.parse(
-      File('assets/models/manifest.json').readAsStringSync(),
-    );
-    final notice = committed.byRole(ModelRole.embed).notice;
-    expect(notice, isNotNull);
+    // All three checkpoints have been Apache-2.0 since the embedding model
+    // left EmbeddingGemma on 2026-09-19, and the Gemma Terms of Use went with
+    // it. Null and not an empty string is what lets this screen skip the line
+    // rather than render a blank one, so the absence is worth asserting.
+    final committed = ModelManifest.parse(committedJson());
+    for (final model in committed.models) {
+      expect(model.notice, isNull, reason: model.id);
+    }
 
     await open(tester, which: committed, onOpenLicense: (_) {});
 
-    expect(find.text(notice!), findsOneWidget);
-    expect(
-      notice,
-      'Gemma is provided under and subject to the Gemma Terms of Use found '
-      'at ai.google.dev/gemma/terms',
+    expect(find.byType(SetupModelsBody), findsOneWidget);
+  });
+
+  testWidgets('a notice is shown verbatim when a checkpoint carries one',
+      (tester) async {
+    // The property the screen exists to hold, kept alive against the day a
+    // non-permissive model comes back: a notice is what a licence REQUIRES to
+    // be shown, and paraphrasing or abbreviating it would be this app
+    // deciding what a licence meant. Injected into the real manifest rather
+    // than invented whole, so the rest of the screen is the shipping one.
+    const notice = 'Shown exactly as the licence demands, every word of it.';
+    final decoded = jsonDecode(committedJson()) as Map<String, Object?>;
+    (((decoded['models'] as List).first) as Map<String, Object?>)['notice'] =
+        notice;
+
+    await open(
+      tester,
+      which: ModelManifest.parse(jsonEncode(decoded)),
+      onOpenLicense: (_) {},
     );
+
+    expect(find.text(notice), findsOneWidget);
   });
 
   testWidgets('Continue fires the host callback', (tester) async {

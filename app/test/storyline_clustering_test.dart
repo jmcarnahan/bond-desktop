@@ -39,8 +39,18 @@ Map<String, double> clique(List<int> members, double value) => {
     };
 
 void main() {
-  /// The app's own numbers, so what these tests pin is the rule the sweep
-  /// runs and not a configuration of it nothing uses.
+  /// The RETIRED embeddinggemma scale — 0.65 / 0.60 / 0.85 — and deliberately
+  /// so, one round after the app moved to the Qwen scale above.
+  ///
+  /// What this file tests is the join rule, the cap, the coherence floor and
+  /// the split ladder, and not one of them is a function of where on the
+  /// number line the threshold sits: every compare in `clusterBySimilarity`
+  /// reads a similarity against the threshold it was handed. Re-writing the
+  /// forty hand-picked cosines below to move that threshold would risk the
+  /// rule the file exists to pin in order to restate a scale the test above
+  /// already holds. The one thing that has to stay true is that
+  /// `StorylineService._clusterBy` passes these five NAMES, and the test
+  /// above is what says which values they carry today.
   List<List<int>> cluster(
     int count,
     double Function(int, int) sim, {
@@ -67,13 +77,12 @@ void main() {
         ceiling: ceiling,
       );
 
-  test('the numbers these tests use are the numbers the sweep passes', () {
-    // Every test below calls [cluster] with the app's constants written out,
-    // because a rule is easier to read against literals than against names.
-    // The cost of that is a suite that would go on passing if
-    // `StorylineService._clusterBy` started passing something else, so the
-    // literals and the constants are pinned to each other here, once.
-    expect(StorylineTuning.clusterLinkThreshold, 0.65);
+  test('the numbers the sweep passes are pinned, once', () {
+    // The five cosines moved in Round E Phase 2 when the clustering vector
+    // became Qwen3-Embedding-0.6B: the same distances on a different scale,
+    // rescaled by 0.48 / 0.65 off that vector's cross-5 rung. They are pinned
+    // here so a sixth change has to be typed twice.
+    expect(StorylineTuning.clusterLinkThreshold, 0.48);
     // What `_clusterBy` passes as `minSize`: the PROPOSE floor. A pair is a
     // shape this rule can form and not a question worth a naming call, so
     // `minClusterSize` (2) is the survivor floor after the confirms and never
@@ -81,9 +90,15 @@ void main() {
     expect(StorylineTuning.proposeMinClusterSize, 3);
     expect(StorylineTuning.minClusterSize, 2);
     expect(StorylineTuning.maxClusterSize, 12);
-    expect(StorylineTuning.clusterCoherenceFloor, 0.60);
+    expect(StorylineTuning.clusterCoherenceFloor, 0.43);
     expect(StorylineTuning.clusterSplitStep, 0.05);
-    expect(StorylineTuning.clusterSplitCeiling, 0.85);
+    expect(StorylineTuning.clusterSplitCeiling, 0.68);
+
+    // And the neighbourhood numbers the model-read grouping draws with, which
+    // pass through this same module with no coherence floor.
+    expect(StorylineTuning.groupingNeighbourhoodThreshold, 0.41);
+    expect(StorylineTuning.groupingNeighbourhoodMinSize, 3);
+    expect(StorylineTuning.groupingNeighbourhoodCap, 40);
   });
 
   group('PairSimilarities', () {

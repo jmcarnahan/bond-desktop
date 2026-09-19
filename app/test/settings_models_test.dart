@@ -122,10 +122,13 @@ void main() {
       expect(find.text(stage.label), findsOneWidget,
           reason: '${stage.id} is missing from the table');
     }
-    // The authored mapping: eight bulk stages, five prose ones, one
-    // embedding.
+    // The authored mapping: eight bulk stages, six prose ones, one
+    // embedding. The sixth prose stage is `storyline_group`, which has a row
+    // although it only runs under `GroupingMode.model` — the table is the app
+    // telling the user what the wiring IS, and a stage with no row is a stage
+    // nothing could ever be pointed at.
     expect(chipsSaying(tester, 'Fast'), 8);
-    expect(chipsSaying(tester, 'Prose'), 5);
+    expect(chipsSaying(tester, 'Prose'), 6);
     expect(chipsSaying(tester, 'Embeddings'), 1);
   });
 
@@ -176,7 +179,7 @@ void main() {
       asked.add(url);
       return const ModelProbeResult(
         reachable: true,
-        modelIds: ['embeddinggemma-300M'],
+        modelIds: ['Qwen3-Embedding-0.6B'],
       );
     });
     await expand(tester, 'Models');

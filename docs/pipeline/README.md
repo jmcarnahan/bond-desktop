@@ -116,12 +116,13 @@ labels, the scorer and the populations a number is quoted on — is described in
 | Directory brief | fast / bulk | `:8082` |
 | Directory section pick | fast / bulk | `:8082` |
 | Storyline membership confirm | fast / bulk | `:8082` |
-| Storyline naming | prose / 27B | `:8080` Qwen3.8-27B (`make model`) |
+| Storyline grouping (dark; `GroupingMode.model` only) | prose / 27B | `:8080` Qwen3.8-27B (`make model`) |
+| Storyline naming | prose / 27B | `:8080` |
 | Storyline refresh | prose / 27B | `:8080` |
 | Storyline recap | prose / 27B | `:8080` |
 | Reply decision | prose / 27B | `:8080` |
 | Draft generation | prose / 27B | `:8080` |
-| Embeddings | embed | `:8081` embeddinggemma-300M (`make embed`) |
+| Embeddings | embed | `:8081` Qwen3-Embedding-0.6B (`make embed`) |
 
 Both chat slots can be re-pointed at runtime in Settings → Models; the mapping
 above does not change. See

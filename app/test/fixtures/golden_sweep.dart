@@ -928,9 +928,9 @@ Map<String, Object?> wouldFormJson({
     maxSize: StorylineTuning.maxClusterSize,
     // The coherence floor and the split ceiling ride WITH the threshold rather
     // than staying at the app's numbers, because the whole point of a rung
-    // other than the shipped one is that this model's cosines do not live
-    // where embeddinggemma's do. The gaps are the app's: the floor sits one
-    // step under the link and the ceiling four steps over it.
+    // other than the shipped one is that the candidate model's cosines do not
+    // live where the shipped one's do. The gaps are the app's: the floor sits
+    // one step under the link and the ceiling four steps over it.
     floor: threshold - StorylineTuning.clusterSplitStep,
     step: StorylineTuning.clusterSplitStep,
     ceiling: threshold + 4 * StorylineTuning.clusterSplitStep,
@@ -1093,6 +1093,27 @@ class SweepTally {
   /// Model calls per task label — `storyline_name`, `storyline_membership`.
   final Map<String, int> callsByKind;
 
+  /// Grouping calls the sweep made, summed off its own activity rows.
+  ///
+  /// Zero on a tree running `GroupingMode.cosine`, which is what ships: the
+  /// sweep writes all four of these keys in either mode so that a row from
+  /// the two trees is the same row with different numbers in it. The four
+  /// default to 0 here for the same reason a missing key reads 0 — a ledger
+  /// row taken before these existed is a cosine row, and that is what a
+  /// cosine row says.
+  final int groupingCalls;
+
+  /// Threads a grouping call placed in a group big enough to propose.
+  final int grouped;
+
+  /// Grouping calls that left their piece ungrouped: the call threw, or it
+  /// named no group at all.
+  final int groupingFailed;
+
+  /// Pieces dropped before any call — too few threads after a split, or still
+  /// too wide to show in one call at the top of the ladder.
+  final int groupingUnfit;
+
   /// Model calls made in each sweep pass, in pass order.
   final List<int> callsPerPass;
 
@@ -1165,6 +1186,10 @@ class SweepTally {
     required this.unmapped,
     required this.filedNowhere,
     required this.callsByKind,
+    this.groupingCalls = 0,
+    this.grouped = 0,
+    this.groupingFailed = 0,
+    this.groupingUnfit = 0,
     required this.callsPerPass,
     required this.wallPerPassMs,
     required this.cosineBins,
@@ -1241,6 +1266,10 @@ class SweepTally {
         'unmapped': unmapped,
         'filed_nowhere': filedNowhere,
         'calls_by_kind': callsByKind,
+        'grouping_calls': groupingCalls,
+        'grouped': grouped,
+        'grouping_failed': groupingFailed,
+        'grouping_unfit': groupingUnfit,
         'calls_per_pass': callsPerPass,
         'wall_per_pass_ms': wallPerPassMs,
         'cosine_bins': {
@@ -1306,7 +1335,9 @@ class SweepTally {
         '  items  correct positives $correctPositives  unmapped $unmapped'
         '  filed nowhere $filedNowhere  forbidden hits $forbiddenHits '
         'over ${forbiddenByAnti.length} buckets\n'
-        '  calls  $calls   per pass ${callsPerPass.join(', ')}\n'
+        '  calls  $calls   per pass ${callsPerPass.join(', ')}'
+        '   grouping calls $groupingCalls  grouped $grouped'
+        '  failed $groupingFailed  unfit $groupingUnfit\n'
         '  wall per pass ms ${wallPerPassMs.join(', ')}\n'
         '  in-cluster cosines  $bins\n'
         '  clusters judged $clustersJudged'

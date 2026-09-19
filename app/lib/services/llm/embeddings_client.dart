@@ -69,19 +69,20 @@ class EmbedResult {
 ///
 /// ## Two corpora, one server
 ///
-/// EmbeddingGemma is prompt-conditioned, so the prefix a text is embedded
-/// under decides which space its vector lives in. This app keeps TWO, and they
-/// are never mixed:
+/// Qwen3-Embedding-0.6B is instruction-conditioned, so the prefix a text is
+/// embedded under decides which space its vector lives in. This app keeps TWO,
+/// and they are never mixed:
 ///
 /// - **Conversation vectors**, written under [clusteringPrefix] and tagged
 ///   [modelTag]. They are compared against EACH OTHER — that is what a
 ///   storyline is — so they are symmetric by construction: every side of the
 ///   comparison went in under the same prefix.
-/// - **Message vectors**, written under [documentPrefix] and tagged
-///   [documentModelTag], and SEARCHED with a query embedded under
-///   [searchQueryPrefix]. That asymmetry is the model's own contract for
-///   retrieval: documents go in as documents, questions go in as questions,
-///   and the pair is trained to land near each other.
+/// - **Message vectors**, written under [documentPrefix] — which is now the
+///   EMPTY string — and tagged [documentModelTag], and SEARCHED with a query
+///   embedded under [searchQueryPrefix]. That asymmetry is the model's own
+///   contract for retrieval, and under Qwen it is one-sided: the instruction
+///   rides the QUERY alone and the document goes in bare, which is why an
+///   empty [documentPrefix] is the correct value here rather than an omission.
 ///
 /// A distance between two vectors from different corpora is a number with no
 /// meaning — not a bad answer, a meaningless one. The tag stored beside every
@@ -107,46 +108,81 @@ class EmbeddingsClient {
   /// byte more or less produces a vector in a different place — which would
   /// orphan every stored vector and quietly stop storylines from growing. The
   /// default is what keeps those call sites byte-identical.
-  static const String clusteringPrefix = 'task: clustering | query: ';
+  ///
+  /// Qwen3-Embedding's documented instruction form ends its instruction with a
+  /// NEWLINE before `Query: `. This one ends it with a period instead, and
+  /// that is deliberate rather than a transcription slip: the bench passes the
+  /// prefix down through `make` and `--dart-define`, neither of which can
+  /// carry a newline in a variable, so the string that was MEASURED is this
+  /// one. Shipping the documented form would ship a prefix no run ever read.
+  /// 86 characters, and the trailing space is part of it.
+  static const String clusteringPrefix =
+      'Instruct: Group email threads that belong to the same project, event '
+      'or topic. Query: ';
 
   /// Stored beside every conversation vector. Two vectors are only comparable
   /// when this matches, so a model swap is detectable rather than silently
   /// poisonous.
   ///
-  /// `-v2` since 2026-09-18: the people left the clustering card that day
-  /// (`shippedClusteringCard` in `clustering_card.dart`, Round D Phase 2), and a
-  /// card change is a geometry change. Every vector written under the old tag
-  /// describes a different text, so mixing the two would compare threads by a
-  /// card half of them do not have. Bumping the tag is how that is prevented
-  /// rather than hoped for: the old rows are simply invisible to every read.
-  static const String modelTag = 'embeddinggemma-300M/clustering-v2';
+  /// `-v3` since 2026-09-19: Round E moved the whole clustering vector to
+  /// Qwen3-Embedding-0.6B under the instruction above (Phase 1's ruler read it
+  /// best on every card, and Phase 2's sweep confirmed it). A model swap is a
+  /// geometry change twice over — a different space AND a different width —
+  /// so every vector written under a `-v2` tag is 768 floats describing a
+  /// point in a space this build cannot reach. Bumping the tag is how that is
+  /// prevented rather than hoped for: the old rows are simply invisible to
+  /// every read.
+  static const String modelTag = 'Qwen3-Embedding-0.6B/clustering-v3';
 
-  /// The tag the `clustering_card_v2` one-shot in `sync_service.dart` retires.
+  /// The tag the `clustering_card_v3` one-shot in `sync_service.dart` retires.
   ///
-  /// A vector under it is not wrong, it is in the wrong space: it was taken
-  /// over a card carrying the thread's participants, and nothing reads that
-  /// card any more. The one-shot requeues the assign pass for these threads a
-  /// slice at a time, and the pass re-embeds each one under [modelTag].
-  static const String retiredModelTag = 'embeddinggemma-300M/clustering';
+  /// A vector under it is not wrong, it is in the wrong space and the wrong
+  /// width: it came from embeddinggemma, 768 floats wide, and nothing in this
+  /// build can compare it against a Qwen vector. The one-shot requeues the
+  /// assign pass for these threads a slice at a time, and the pass re-embeds
+  /// each one under [modelTag].
+  static const String retiredModelTag = 'embeddinggemma-300M/clustering-v2';
+
+  /// The tag BEFORE that one, retired by the `clustering_card_v2` one-shot.
+  ///
+  /// Still named, and still drained first, because an install that has been
+  /// off since before 2026-09-18 holds rows under it and the two one-shots run
+  /// in order: v1 rows move to the current tag, the v1 pref closes, and only
+  /// then does the v3 one-shot see a short slice. A single one-shot over both
+  /// old tags would have been tidier and would also have re-opened a pref that
+  /// is already closed on most installs.
+  static const String retiredModelTagV1 = 'embeddinggemma-300M/clustering';
 
   /// The message corpus, written side: one message as a retrievable document.
   ///
-  /// `title: none` because a message's subject is already inside the card
-  /// text; the model's document form wants the slot filled either way.
-  static const String documentPrefix = 'title: none | text: ';
+  /// EMPTY under Qwen3-Embedding, and empty is the model's contract rather
+  /// than a slot nobody filled. Its instruction form conditions the QUERY
+  /// only; a document is embedded as itself, and prepending anything to it
+  /// would move every stored passage away from the queries trained to find it.
+  static const String documentPrefix = '';
 
   /// The message corpus, asking side: what a person typed into the search box.
   ///
   /// Deliberately NOT [documentPrefix]. The model is trained so a query under
-  /// this prefix lands near the documents that answer it, and embedding the
-  /// query as though it were a document instead is the classic way to build a
-  /// search that returns plausible-looking noise.
-  static const String searchQueryPrefix = 'task: search result | query: ';
+  /// an instruction lands near the bare documents that answer it, and
+  /// embedding the query as though it were a document instead is the classic
+  /// way to build a search that returns plausible-looking noise. Carries the
+  /// period-for-newline substitution [clusteringPrefix] explains.
+  static const String searchQueryPrefix =
+      'Instruct: Given a search query, retrieve the messages and documents '
+      'that answer it. Query: ';
 
   /// Stored beside every message vector, and filtered on by every search.
   /// Distinct from [modelTag] because the two corpora share one table's worth
   /// of habits and none of their geometry.
-  static const String documentModelTag = 'embeddinggemma-300M/document';
+  ///
+  /// It moves with the model for [modelTag]'s reason, and with one difference
+  /// worth saying out loud: there is no one-shot behind it and no golden bench
+  /// under it. Nothing measured the search side of this swap, and every
+  /// message, attachment passage and directory passage embedded under the old
+  /// tag goes quiet until something re-extracts it. See
+  /// `docs/pipeline/05-embeddings.md`.
+  static const String documentModelTag = 'Qwen3-Embedding-0.6B/document';
 
   /// The `model` field this client has always put on the wire.
   ///
@@ -158,7 +194,7 @@ class EmbeddingsClient {
   /// request carries.
   static const String requestModel = 'embed';
 
-  /// A 300M model on Metal answers in well under a second. This ceiling is for
+  /// A 0.6B model on Metal answers in well under a second. This ceiling is for
   /// a wedged server, not a slow one.
   static const Duration _timeout = Duration(seconds: 30);
 
