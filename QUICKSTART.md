@@ -81,6 +81,14 @@ BOND_MCP_SERVER_URL=https://<the URL you were given>/mcp
 Leave the three `MICROSOFT_*` lines blank. They are only for "This device"
 mode (see the appendix), which needs an Entra app registration you control.
 
+If the project runs a shared GPU box, add `BOND_BOX_URL=https://box.example.com`
+with the hostname you were given. It only prefills a field: the address shows
+up already filled in on the wizard's "Where the models run" step and in
+Settings, Models, and you can change it there or leave the line out and type
+it. The access key is never compiled in. You type it in the app once and it is
+kept in the macOS keychain. A separate `BOND_BOX_KEY` line is read only by the
+bench recipes, which have no keychain to read from.
+
 **Smaller Macs.** Create a git-ignored `local.mk` next to the `Makefile` with
 whichever lines apply. Nothing else in the repo needs to change:
 
@@ -332,5 +340,7 @@ of `README.md`.
 **Going further**
 
 `README.md` covers the agent REPL (`make chat`), the benchmarks,
-`docs/model-bakeoff.md` covers swapping models and runtimes, and
-`docs/settings.md` documents every setting in the app.
+`docs/model-bakeoff.md` covers swapping models and runtimes,
+`docs/inference-endpoint.md` covers running the prose model on a rented AWS
+GPU (`tools/inference.sh`), and `docs/settings.md` documents every setting in
+the app.

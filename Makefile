@@ -754,12 +754,14 @@ SWEEP_EMBED_PREFIX ?=
 # Single-quoted values, every one: a label carries spaces and parentheses, and
 # an unquoted --dart-define would hand the shell a second word to run.
 #
-# BENCH_BEARER is the exception, and deliberately: `:=` expands `$$` to a
-# literal `$` once, here, so what is STORED is the text `$(grep …)` and every
-# recipe that uses BENCH_DEFINES has its own shell run that grep at recipe
-# time. The key therefore never sits in a make variable, never appears in
-# `make -n` output, and never reaches the environment of anything but the one
-# flutter test that needs it.
+# BENCH_BEARER and BENCH_BOX_KEY are the exceptions, and deliberately: `:=`
+# expands `$$` to a literal `$` once, here, so what is STORED is the text
+# `$(grep …)` and every recipe that uses BENCH_DEFINES has its own shell run
+# that grep at recipe time. A key therefore never sits in a make variable,
+# never appears in `make -n` output, and never reaches the environment of
+# anything but the one flutter test that needs it. BENCH_BOX_KEY is the shared
+# GPU box's access key, which a bench needs because it runs outside the app and
+# has no keychain to read it from; BOND_BOX_KEY lives in `.env` alone.
 BENCH_DEFINES := \
   --dart-define=BENCH_URL='$(BENCH_URL)' \
   --dart-define=BENCH_LABEL='$(BENCH_LABEL)' \
@@ -791,7 +793,8 @@ BENCH_DEFINES := \
   --dart-define=EMBED_URL='$(if $(strip $(EMBED_URL)),$(EMBED_URL),http://localhost:$(EMBED_PORT)/v1/embeddings)' \
   --dart-define=BENCH_WIRE='$(BENCH_WIRE)' \
   --dart-define=PROSE_WIRE='$(PROSE_WIRE)' \
-  --dart-define=BENCH_BEARER="$$(grep -m1 '^BEDROCK_API_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)"
+  --dart-define=BENCH_BEARER="$$(grep -m1 '^BEDROCK_API_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)" \
+  --dart-define=BENCH_BOX_KEY="$$(grep -m1 '^BOND_BOX_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)"
 
 # ── the bakeoff: oMLX, the candidate runtime ───────────────────────────
 # oMLX is an MLX-based OpenAI-compatible server, and unlike llama-server it is
@@ -891,7 +894,9 @@ omlx-stop:
 # Emits --dart-define=MS_CLIENT_ID/MS_TENANT_ID/MS_CLIENT_SECRET=... for each
 # value that can be read; emits nothing for any that cannot (sign-in then
 # refuses with a config error; a missing secret alone means public-client
-# behavior).
+# behavior). BOND_BOX_URL rides along: it only prefills the box address in the
+# wizard and in Settings. The box's access key is NOT here. It is typed in the
+# app and kept in the keychain.
 define APP_SECRET_DEFINE
 $$(CID=$$(grep -m1 '^MICROSOFT_CLIENT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
    TID=$$(grep -m1 '^MICROSOFT_TENANT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
@@ -900,6 +905,8 @@ $$(CID=$$(grep -m1 '^MICROSOFT_CLIENT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-)
    if [ -n "$$CID" ]; then printf -- '--dart-define=MS_CLIENT_ID=%s ' "$$CID"; fi; \
    if [ -n "$$TID" ]; then printf -- '--dart-define=MS_TENANT_ID=%s ' "$$TID"; fi; \
    if [ -n "$$MCPURL" ]; then printf -- '--dart-define=BOND_MCP_SERVER_URL=%s ' "$$MCPURL"; fi; \
+   BOXURL=$$(grep -m1 '^BOND_BOX_URL=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
+   if [ -n "$$BOXURL" ]; then printf -- '--dart-define=BOND_BOX_URL=%s ' "$$BOXURL"; fi; \
    if [ -n "$$SECRET" ]; then printf -- '--dart-define=MS_CLIENT_SECRET=%s' "$$SECRET"; fi)
 endef
 
