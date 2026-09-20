@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/server/llama_binary.dart';
 import 'package:bond_inbox/services/server/model_server_supervisor.dart';
 import 'package:bond_inbox/services/server/router_preset.dart';
@@ -11,6 +12,7 @@ import 'package:path/path.dart' as p;
 
 import 'fixtures/fake_process_runner.dart';
 import 'fixtures/fake_router_server.dart';
+import 'fixtures/test_manifest.dart';
 
 /// The two-model preset every test here runs against.
 ///
@@ -191,6 +193,41 @@ void main() {
     // An empty directory, so `/models` lists the preset and nothing else.
     expect(start.environment['LLAMA_CACHE'], supervisor.emptyCacheDir.path);
     expect(await supervisor.emptyCacheDir.exists(), isTrue);
+  });
+
+  test('an inbox Mac starts the two models its tier resolved', () async {
+    // The tier reaches the server through the preset and nowhere else: the
+    // supervisor is handed a closure, and on a machine under the full tier's
+    // floor that closure answers a manifest with no writing model in it. The
+    // closure is ASYNCHRONOUS here, because the real one awaits the tier.
+    final inbox = testManifest().forTier(MachineTier.inbox);
+    final resolved = inbox.toPreset(models.path);
+    for (final model in resolved.models) {
+      final path = resolved.modelPath(model);
+      await Directory(p.dirname(path)).create(recursive: true);
+      await File(path).writeAsString('gguf');
+    }
+    server.loaded = {for (final id in resolved.modelIds) id: true};
+    await supervisor.dispose();
+    supervisor = ModelServerSupervisor(
+      runner: runner,
+      supportDir: root,
+      binaryPath: () => binaryOverride,
+      buildPreset: () async => resolved,
+      routerPort: () => server.port,
+      managed: () => managed,
+      healthInterval: const Duration(milliseconds: 10),
+      startTimeout: const Duration(milliseconds: 800),
+    );
+
+    await supervisor.start();
+    await waitFor((s) => s is ServerReady);
+
+    final written = await supervisor.presetFile.readAsString();
+    expect(written, contains('[bond-embed]'));
+    expect(written, contains('[bond-bulk]'));
+    expect(written, isNot(contains('[bond-prose]')));
+    expect(runner.starts.single.arguments, contains('2'));
   });
 
   test('the preset and the pid file record what was started', () async {

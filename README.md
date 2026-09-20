@@ -34,16 +34,19 @@ model vision. Both are downloaded automatically by `llama-server`'s `-hf` flag
 into `~/.cache/huggingface/hub/` the first time you run `make model` — nothing
 model-sized ever lands in this repo, and `make clean` never touches them.
 
-The model's native context is 262K tokens. The `Makefile` caps it at 32K
-(`CTX_SIZE`) because the KV cache is what actually costs RAM at runtime; 32K
-is roughly 2GB of cache and leaves headroom on a 64GB machine. Raise it when a
-workload needs it.
+The model's native context is 262K tokens. The `Makefile` caps it at 16K
+(`CTX_SIZE`) because the KV cache is what actually costs RAM at runtime, and
+because 16K is what every measured row in `docs/model-bakeoff.md` was taken at.
+Raise it when a workload needs it.
 
 ## Requirements
 
 - Apple Silicon Mac. Every layer is offloaded to Metal (`-ngl 99`).
 - 48GB RAM or more recommended for all three servers; 32GB works with a
   smaller `CTX_SIZE` in `local.mk`. Verified on an M1 Max with 64GB.
+- The shipped app decides for itself: at 40 GiB and up it downloads and starts
+  all three models, and below that it takes the embedding and inbox models only
+  (`docs/pipeline/10-model-routing.md`, "The manifest").
 - ~30GB free disk: ~24GB of weights across the three servers plus the app build.
 - [Homebrew](https://brew.sh), for `llama.cpp`.
 - Dart SDK on `PATH`. If you have Flutter installed you already have it.

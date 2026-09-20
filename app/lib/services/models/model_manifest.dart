@@ -35,6 +35,18 @@ const Map<ModelRole, String> _idForRole = {
   ModelRole.prose: routerProseId,
 };
 
+/// The tier ids the `tiers` array may use, spelled exactly as [MachineTier]
+/// spells them, so the JSON and the enum cannot drift apart.
+MachineTier _tierFrom(String value) {
+  for (final tier in MachineTier.values) {
+    if (tier.name == value) return tier;
+  }
+  throw FormatException(
+    'manifest: tier "id" "$value" is not a machine tier, expected one of '
+    '${MachineTier.values.map((t) => t.name).join(', ')}',
+  );
+}
+
 final RegExp _hex64 = RegExp(r'^[0-9a-f]{64}$');
 final RegExp _hex40 = RegExp(r'^[0-9a-f]{40}$');
 
@@ -74,7 +86,9 @@ class ModelFile {
   final String sha256;
 
   /// What the machine needs to have to run it at all — 0 when it always
-  /// fits. Phase 4's preflight reads it; nothing here refuses on it.
+  /// fits. Nothing refuses on it: which checkpoints a machine takes is the
+  /// TIER's answer, and this number is what the wizard's device step quotes
+  /// when it says why the writing model is not among them.
   final int minRamBytes;
 
   final String license;
@@ -210,6 +224,32 @@ class ModelFile {
   RouterModelSpec toSpec() =>
       RouterModelSpec(id: id, repo: repo, file: file, args: serverArgs);
 
+  /// The same checkpoint with [overrides] merged ONTO [serverArgs] — what a
+  /// tier's `serverArgs` block produces on a resolved manifest.
+  ///
+  /// A merge rather than a replacement, because a tier that narrows the
+  /// context has no business restating `load-on-startup`. Returns this file
+  /// unchanged when there is nothing to merge, so the resolved view of the
+  /// full tier is the manifest itself.
+  ModelFile withArgs(Map<String, String>? overrides) {
+    if (overrides == null || overrides.isEmpty) return this;
+    return ModelFile(
+      id: id,
+      role: role,
+      displayName: displayName,
+      repo: repo,
+      file: file,
+      revision: revision,
+      sizeBytes: sizeBytes,
+      sha256: sha256,
+      minRamBytes: minRamBytes,
+      license: license,
+      licenseUrl: licenseUrl,
+      notice: notice,
+      serverArgs: Map.unmodifiable({...serverArgs, ...overrides}),
+    );
+  }
+
   @override
   bool operator ==(Object other) =>
       other is ModelFile &&
@@ -260,6 +300,179 @@ class ModelFile {
       '${revision.substring(0, 7)}, $sizeBytes B)';
 }
 
+/// One rung of the machine ladder: which checkpoints a machine of this size
+/// downloads and starts, and the arguments it loads them with.
+///
+/// The ids are [ModelFile.id]s from the same manifest, so a tier cannot name a
+/// checkpoint this build does not ship, and [serverArgs] holds per-id
+/// overrides MERGED onto the entry's own arguments — a tier that only wants a
+/// narrower context says so in one line rather than restating the entry.
+@immutable
+class ManifestTier {
+  /// The rung, spelled as [MachineTier] spells it.
+  final MachineTier tier;
+
+  /// The memory at which this rung starts. Checked against [fullTierMinBytes]
+  /// at parse time, so the JSON and the Dart constant cannot drift.
+  final int minRamBytes;
+
+  /// The ids this tier downloads and starts. A resolved manifest keeps
+  /// MANIFEST order rather than this list's.
+  final List<String> models;
+
+  /// Per-id argument overrides, by [ModelFile.id].
+  final Map<String, Map<String, String>> serverArgs;
+
+  const ManifestTier({
+    required this.tier,
+    required this.minRamBytes,
+    required this.models,
+    this.serverArgs = const {},
+  });
+
+  factory ManifestTier.fromJson(Map<String, Object?> json) {
+    final rawId = json['id'];
+    if (rawId is! String || rawId.isEmpty) {
+      throw const FormatException(
+        'manifest: tier "id" must be a non-empty string',
+      );
+    }
+    final tier = _tierFrom(rawId);
+    final rawMin = json['minRamBytes'];
+    if (rawMin is! num) {
+      throw FormatException(
+        'manifest: tier "$rawId" must give "minRamBytes" as a number',
+      );
+    }
+    if (rawMin < 0) {
+      throw FormatException(
+        'manifest: tier "$rawId" has a negative "minRamBytes"',
+      );
+    }
+    final rawModels = json['models'];
+    if (rawModels is! List || rawModels.isEmpty) {
+      throw FormatException(
+        'manifest: tier "$rawId" must give "models" as a non-empty list',
+      );
+    }
+    final models = <String>[];
+    for (final entry in rawModels) {
+      if (entry is! String || entry.isEmpty) {
+        throw FormatException(
+          'manifest: tier "$rawId" lists a model that is not an id string',
+        );
+      }
+      if (models.contains(entry)) {
+        throw FormatException(
+          'manifest: tier "$rawId" lists "$entry" twice',
+        );
+      }
+      models.add(entry);
+    }
+    final rawArgs = json['serverArgs'];
+    if (rawArgs != null && rawArgs is! Map) {
+      throw FormatException(
+        'manifest: tier "$rawId" has a "serverArgs" that is not an object',
+      );
+    }
+    final serverArgs = <String, Map<String, String>>{};
+    if (rawArgs is Map) {
+      rawArgs.forEach((id, value) {
+        if (value is! Map) {
+          throw FormatException(
+            'manifest: tier "$rawId" serverArgs."$id" must be an object',
+          );
+        }
+        if (!models.contains('$id')) {
+          throw FormatException(
+            'manifest: tier "$rawId" overrides serverArgs for "$id", which it '
+            'does not list under "models"',
+          );
+        }
+        final args = <String, String>{};
+        value.forEach((key, arg) {
+          if (arg is! String) {
+            throw FormatException(
+              'manifest: tier "$rawId" serverArgs."$id"."$key" must be a '
+              'string — the INI writer prints it verbatim',
+            );
+          }
+          args['$key'] = arg;
+        });
+        serverArgs['$id'] = Map.unmodifiable(args);
+      });
+    }
+    return ManifestTier(
+      tier: tier,
+      minRamBytes: rawMin.toInt(),
+      models: List.unmodifiable(models),
+      serverArgs: Map.unmodifiable(serverArgs),
+    );
+  }
+
+  Map<String, Object?> toJson() => {
+        'id': tier.name,
+        'minRamBytes': minRamBytes,
+        'models': models,
+        if (serverArgs.isNotEmpty) 'serverArgs': serverArgs,
+      };
+
+  @override
+  bool operator ==(Object other) =>
+      other is ManifestTier &&
+      other.tier == tier &&
+      other.minRamBytes == minRamBytes &&
+      other.models.length == models.length &&
+      _sameIds(other.models, models) &&
+      _sameOverrides(other.serverArgs, serverArgs);
+
+  /// INDEX-WISE, as [ModelManifest] compares its models, because [hashCode]
+  /// hashes this list in order: a set-wise `==` would call two tiers equal
+  /// that hash differently.
+  static bool _sameIds(List<String> a, List<String> b) {
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  static bool _sameOverrides(
+    Map<String, Map<String, String>> a,
+    Map<String, Map<String, String>> b,
+  ) {
+    if (a.length != b.length) return false;
+    for (final entry in a.entries) {
+      final other = b[entry.key];
+      if (other == null || other.length != entry.value.length) return false;
+      for (final arg in entry.value.entries) {
+        if (other[arg.key] != arg.value) return false;
+      }
+    }
+    return true;
+  }
+
+  @override
+  int get hashCode => Object.hash(
+        tier,
+        minRamBytes,
+        Object.hashAll(models),
+        Object.hashAll([
+          for (final id in serverArgs.keys.toList()..sort())
+            '$id:${_argsKey(serverArgs[id]!)}',
+        ]),
+      );
+
+  /// One override map as a stable string, keys sorted — a map has no hash of
+  /// its own that two equal maps agree on.
+  static String _argsKey(Map<String, String> args) => [
+        for (final key in args.keys.toList()..sort()) '$key=${args[key]}',
+      ].join(',');
+
+  @override
+  String toString() =>
+      'ManifestTier(${tier.name}, >= $minRamBytes B, ${models.join(', ')})';
+}
+
 /// Which checkpoints this build downloads, as a committed asset.
 ///
 /// An ASSET rather than a table of Dart constants, and that is the whole
@@ -270,8 +483,16 @@ class ModelFile {
 /// named, so the preset, the downloader and the licence screen cannot drift
 /// apart from each other.
 ///
-/// It is versioned so a future shape change can refuse an old file loudly
-/// rather than read half of it.
+/// It is versioned so a shape change can refuse an old file loudly rather
+/// than read half of it. Version 2 added [tiers]; version 1 is refused.
+///
+/// TWO VIEWS of the same class. The one `main()` loads is the MASTER list:
+/// every checkpoint this build knows, exactly one per role. [forTier] returns
+/// a RESOLVED view holding only the checkpoints one machine wants, with that
+/// tier's argument overrides merged in — and a resolved view may be missing
+/// the prose model, which is the whole point. Everything downstream of the
+/// wizard's device step reads the resolved view; [byRoleOrNull] is how a
+/// caller asks for a role that a resolved view is allowed not to have.
 @immutable
 class ModelManifest {
   final int version;
@@ -279,19 +500,32 @@ class ModelManifest {
   /// In MANIFEST order, which is the order the INI's sections take.
   final List<ModelFile> models;
 
-  const ModelManifest({required this.version, required this.models});
+  /// The machine ladder, one entry per [MachineTier]. Empty on a manifest
+  /// built in code rather than parsed, which is what a test fixture of one
+  /// model is; [forTier] then answers with the whole list.
+  final List<ManifestTier> tiers;
+
+  const ModelManifest({
+    required this.version,
+    required this.models,
+    this.tiers = const [],
+  });
 
   static const String assetPath = 'assets/models/manifest.json';
+
+  /// The only shape this build reads. Bumped when the file's shape changes,
+  /// which is what lets an older app refuse a newer manifest loudly.
+  static const int manifestVersion = 2;
 
   factory ModelManifest.fromJson(Map<String, Object?> json) {
     final version = json['version'];
     if (version is! num) {
       throw const FormatException('manifest: "version" must be a number');
     }
-    if (version.toInt() != 1) {
+    if (version.toInt() != manifestVersion) {
       throw FormatException(
         'manifest: "version" ${version.toInt()} is not supported (this build '
-        'reads version 1)',
+        'reads version $manifestVersion)',
       );
     }
     final raw = json['models'];
@@ -336,10 +570,89 @@ class ModelManifest {
         );
       }
     }
+    final tiers = _tiersFromJson(json['tiers'], models);
     return ModelManifest(
       version: version.toInt(),
       models: List.unmodifiable(models),
+      tiers: tiers,
     );
+  }
+
+  /// The `tiers` array, checked against the models beside it.
+  ///
+  /// Five things have to hold, and each of them is a machine that would
+  /// otherwise fail later and further away: every [MachineTier] is named
+  /// exactly once (a tier with no entry is a Mac the wizard cannot answer
+  /// for); every id a tier lists exists (a preset pointing at a section with
+  /// no file); the embedding and inbox models are in every tier (the two the
+  /// app cannot work without, and `usableIds` says so); the ladder starts at
+  /// zero (no machine falls between two rungs); and the top rung starts
+  /// exactly at [fullTierMinBytes], so this file and `model_slots.dart`
+  /// cannot drift apart about where the writing model begins.
+  static List<ManifestTier> _tiersFromJson(
+    Object? raw,
+    List<ModelFile> models,
+  ) {
+    if (raw is! List || raw.isEmpty) {
+      throw const FormatException('manifest: "tiers" must be a non-empty list');
+    }
+    final tiers = <ManifestTier>[];
+    for (final entry in raw) {
+      if (entry is! Map) {
+        throw const FormatException('manifest: "tiers" must hold objects');
+      }
+      tiers.add(ManifestTier.fromJson(entry.cast<String, Object?>()));
+    }
+    final seen = <MachineTier>{};
+    for (final tier in tiers) {
+      if (!seen.add(tier.tier)) {
+        throw FormatException('manifest: duplicate tier "${tier.tier.name}"');
+      }
+    }
+    for (final expected in MachineTier.values) {
+      if (!seen.contains(expected)) {
+        throw FormatException(
+          'manifest: "tiers" names no "${expected.name}" tier',
+        );
+      }
+    }
+    final ids = {for (final model in models) model.id};
+    for (final tier in tiers) {
+      for (final id in tier.models) {
+        if (!ids.contains(id)) {
+          throw FormatException(
+            'manifest: tier "${tier.tier.name}" lists "$id", which is not a '
+            'model in this manifest',
+          );
+        }
+      }
+      for (final role in const [ModelRole.embed, ModelRole.bulk]) {
+        final required = _idForRole[role]!;
+        if (!tier.models.contains(required)) {
+          throw FormatException(
+            'manifest: tier "${tier.tier.name}" must list the '
+            '${_roleName(role)} model "$required"',
+          );
+        }
+      }
+    }
+    final ladder = [...tiers]
+      ..sort((a, b) => a.minRamBytes.compareTo(b.minRamBytes));
+    if (ladder.first.minRamBytes != 0) {
+      throw FormatException(
+        'manifest: the lowest tier "${ladder.first.tier.name}" must have '
+        '"minRamBytes" 0, not ${ladder.first.minRamBytes}',
+      );
+    }
+    final top = ladder.last;
+    if (top.tier != MachineTier.full || top.minRamBytes != fullTierMinBytes) {
+      throw FormatException(
+        'manifest: the "${MachineTier.full.name}" tier must have '
+        '"minRamBytes" $fullTierMinBytes, the fullTierMinBytes this build was '
+        'compiled with, not ${top.minRamBytes} on "${top.tier.name}"',
+      );
+    }
+    return List.unmodifiable(tiers);
   }
 
   factory ModelManifest.parse(String text) {
@@ -361,6 +674,7 @@ class ModelManifest {
   Map<String, Object?> toJson() => {
         'version': version,
         'models': [for (final model in models) model.toJson()],
+        'tiers': [for (final tier in tiers) tier.toJson()],
       };
 
   ModelFile byId(String id) => models.firstWhere(
@@ -368,11 +682,24 @@ class ModelManifest {
         orElse: () => throw StateError('manifest: no model with id "$id"'),
       );
 
-  ModelFile byRole(ModelRole role) => models.firstWhere(
-        (m) => m.role == role,
-        orElse: () =>
-            throw StateError('manifest: no model for role ${_roleName(role)}'),
-      );
+  /// The checkpoint filling [role], or null when this manifest has none.
+  ///
+  /// A MASTER manifest always has all three; a view from [forTier] may not,
+  /// and the inbox tier deliberately does not have a prose model. Every
+  /// caller that can be handed a resolved view asks through this one.
+  ModelFile? byRoleOrNull(ModelRole role) {
+    for (final model in models) {
+      if (model.role == role) return model;
+    }
+    return null;
+  }
+
+  /// The checkpoint filling [role]. THROWS when there is none, so it is for
+  /// the master manifest and for the two roles every tier carries; a caller
+  /// holding a resolved view wants [byRoleOrNull].
+  ModelFile byRole(ModelRole role) =>
+      byRoleOrNull(role) ??
+      (throw StateError('manifest: no model for role ${_roleName(role)}'));
 
   /// Ascending [ModelFile.sizeBytes] — the order the downloader works in, so
   /// the small models are usable while the large one is still arriving.
@@ -390,14 +717,49 @@ class ModelManifest {
   /// The two smallest ids — the embedding and bulk models, INFORMATIONAL.
   ///
   /// Nothing gates on this set. The wizard's Continue and
-  /// `ModelServerSupervisor._launch` both wait for all three, because the
-  /// preset names every file and the server refuses to start with one of them
-  /// missing. It is here for a screen that wants to say which models the
-  /// inbox itself leans on, and for the downloader's smallest-first order.
+  /// `ModelServerSupervisor._launch` both wait for every file the RESOLVED
+  /// manifest names, because the preset names every file and the server
+  /// refuses to start with one of them missing. It is here for a screen that
+  /// wants to say which models the inbox itself leans on, and for the
+  /// downloader's smallest-first order. Every tier carries both of these.
   Set<String> get usableIds => {
         byRole(ModelRole.embed).id,
         byRole(ModelRole.bulk).id,
       };
+
+  /// This manifest as [tier] wants it: only that tier's checkpoints, with its
+  /// argument overrides merged onto each entry.
+  ///
+  /// The RESOLVED view is what the wizard's rows and total, the disk
+  /// preflight, the download run, the ledger check and the preset are all
+  /// built from, so a Mac under [fullTierMinBytes] downloads two files rather
+  /// than three, starts two servers rather than three, and is never asked for
+  /// a file its tier never wanted. The one-per-role rule is a MASTER-list
+  /// rule and is not re-applied here: an inbox view has no prose model by
+  /// design.
+  ///
+  /// A manifest with no [tiers] — one built in code rather than parsed —
+  /// resolves to itself, so a fixture of one model needs no ladder.
+  ModelManifest forTier(MachineTier tier) {
+    if (tiers.isEmpty) return this;
+    ManifestTier? spec;
+    for (final candidate in tiers) {
+      if (candidate.tier == tier) spec = candidate;
+    }
+    if (spec == null) {
+      throw StateError('manifest: no tier "${tier.name}"');
+    }
+    final wanted = spec.models.toSet();
+    return ModelManifest(
+      version: version,
+      models: List.unmodifiable([
+        for (final model in models)
+          if (wanted.contains(model.id))
+            model.withArgs(spec.serverArgs[model.id]),
+      ]),
+      tiers: tiers,
+    );
+  }
 
   /// The preset the supervisor writes, pointed at [modelsFolder].
   RouterPreset toPreset(String modelsFolder) => RouterPreset(
@@ -410,7 +772,9 @@ class ModelManifest {
       other is ModelManifest &&
       other.version == version &&
       other.models.length == models.length &&
-      _sameModels(other.models, models);
+      _sameModels(other.models, models) &&
+      other.tiers.length == tiers.length &&
+      _sameTiers(other.tiers, tiers);
 
   static bool _sameModels(List<ModelFile> a, List<ModelFile> b) {
     for (var i = 0; i < a.length; i++) {
@@ -419,8 +783,16 @@ class ModelManifest {
     return true;
   }
 
+  static bool _sameTiers(List<ManifestTier> a, List<ManifestTier> b) {
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
   @override
-  int get hashCode => Object.hash(version, Object.hashAll(models));
+  int get hashCode =>
+      Object.hash(version, Object.hashAll(models), Object.hashAll(tiers));
 
   @override
   String toString() =>

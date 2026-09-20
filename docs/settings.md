@@ -278,6 +278,37 @@ that every key is a `pipelineStages` id and that no value contains `@`, `http`,
 `.com` or a newline. A stage the ledger never measured renders no line at all,
 which is the honest state rather than a blank one.
 
+**This Mac, and its defaults.** Above the Targets list and below the two slot
+editors sit one fact line and one button. The line reads `This Mac:` followed by
+the chip, the memory and what the machine runs: `runs all three models` at 40
+GiB of memory or more, `runs the inbox models` below that. The button is **Use
+this Mac's defaults**, keyed `settings-tier-defaults`, and the caption under it
+names exactly what a press rewrites. On a small Mac that is naming, refresh,
+recap, grouping, the reply decision and drafts, all moved to `Local fast`, with
+suggested replies moved to Only when asked. On a big Mac it is those same six
+stage picks cleared back to `Local prose`, with suggested replies back to For
+messages that need you. Both captions use the words the controls they move
+actually carry, so the mode named here is the mode shown under Suggested
+replies. Nothing else moves: the eight bulk stages, the storyline confirm stage,
+Improve a draft, the targets themselves, the cloud-drafts consent and every
+bearer are untouched, and a second press changes nothing.
+
+A Mac whose memory could not be read gets neither. The system channel answers
+`unknown` rather than failing, so that machine resolves to the full tier by the
+never-refuse rule, and writing defaults chosen from a number nobody read is not
+something to offer: the line reads `This Mac: memory could not be read` and
+there is no button, with a caption pointing at the stage table above.
+
+It is not a two-step, unlike Remove and Clear AI results, because nothing is
+destroyed. The six picks it overwrites are six rows a person can see in the
+table above, and any of them can be re-picked on the spot. While the app is
+still reading the machine the button is disabled and its caption reads `Reading
+this Mac…`; a host that cannot write the change offers neither the line nor the
+button. The tier is read from this Mac's memory each time it is asked for and
+stored nowhere, so a models folder carried to another Mac gets that Mac's
+answer. The wizard writes the same defaults once at Finish, through the same
+`AppPrefsNotifier.applyTierDefaults`.
+
 **Targets.** Below the two slot editors, under the heading **Targets**, is
 `SettingsTargetsBody` (`app/lib/widgets/settings_targets_body.dart`) — every
 server a stage may be pointed at, `AppPrefs.allTargets`, built-ins first. One row
@@ -980,13 +1011,13 @@ One `PaneSurface`, whose title is the step's and whose trailing slot reads
 | # | Title | Primary button | What it does |
 |---|---|---|---|
 | 1 | Welcome to Bond | `Get started` | What Bond is; the container-migration line when there was one |
-| 2 | Your Mac | `Continue` | Chip, memory, macOS. Intel or Rosetta renders **no** button at all; too little memory for the prose model is a warning that still continues |
-| 3 | Models | `Continue` | The manifest's three rows — name, role sentence, size, licence button, and any `notice` verbatim — and the total |
+| 2 | Your Mac | `Continue` | Chip, memory, macOS, and which models this Mac takes. Intel or Rosetta renders **no** button at all. At 40 GiB and up, one line saying it runs all three; below it, an alert naming the memory, saying the writing model is not downloaded here and that the writing stages run on the inbox model until a target is added under Settings, Models. Under 16 GiB the same alert gains one sentence about slower triage. All of it is a warning that still continues |
+| 3 | Models | `Continue` | The RESOLVED manifest's rows — name, role sentence, size, licence button, and any `notice` verbatim — and the total. Three rows and 22.3 GB on a full Mac, two rows and 4.6 GB on an inbox one, and the first sentence says which |
 | 4 | Storage | `Continue` | The effective folder, **Change folder…**, and `checkDisk`. Dead until the preflight answers and passes; free space that could not be asked counts as passing, a folder that cannot be WRITTEN does not — `Bond can't write to this folder. Choose another one.` |
-| 5 | Download | `Continue` | Three bars, smallest first. Enabled only when EVERY file is done — see below |
+| 5 | Download | `Continue` | One bar per file this Mac's tier wants, smallest first. Enabled only when EVERY file is done — see below |
 | 6 | Sign in | `Continue` | `SignInBody(showTitle: false)` when signed out (signing in advances, and there is no Continue); `You're signed in.` and a Continue when already signed in |
 | 7 | Notifications | `Continue` | The press IS the ask. Exactly one button, and the word `Allow` appears nowhere — macOS is about to put its own Allow up |
-| 8 | All set | `Finish` | Folder, port, account, notifications, then `managedServer = true` and `setup = 'done'`, and only then the server |
+| 8 | All set | `Finish` | Folder, port, account, notifications, then this Mac's tier defaults, `managedServer = true` and `setup = 'done'`, and only then the server |
 
 **`'done'` is written by Finish and by `returnToInbox`, and by nothing else.**
 The second writer never INVENTS the word: it only puts back a value

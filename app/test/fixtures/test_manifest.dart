@@ -10,14 +10,17 @@ import 'package:bond_inbox/services/server/router_preset.dart';
 /// would test a layout the app does not use. The sizes and digests are the
 /// test's to choose, which is what lets a downloader test build a 4 KiB
 /// "27B model".
-/// [minRams] is what a machine must HAVE, per id — 0 everywhere unless a
-/// test says otherwise, so nothing here refuses to run on the machine the
-/// suite is on. The first-run flow's low-memory warning is the one caller
-/// that needs a real number.
+/// `minRamBytes` is 0 on every entry, so nothing here refuses to run on the
+/// machine the suite is on. Nothing reads it any more either: the wizard's
+/// low-memory sentence asks the TIER, and the tier is read off the machine's
+/// memory rather than off a checkpoint's appetite.
+///
+/// The TIERS are the real ones: the same two rungs and the same floors the
+/// committed manifest carries, so a test that resolves a tier is resolving
+/// the ladder the app ships. The entries' own arguments stay fictional.
 ModelManifest testManifest({
   Map<String, int>? sizes,
   Map<String, String>? sha256s,
-  Map<String, int>? minRams,
   String revision = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
 }) {
   final defaultSha = '0' * 64;
@@ -39,13 +42,13 @@ ModelManifest testManifest({
         revision: revision,
         sizeBytes: sizes?[id] ?? size,
         sha256: sha256s?[id] ?? defaultSha,
-        minRamBytes: minRams?[id] ?? 0,
+        minRamBytes: 0,
         license: 'Fictional-1.0',
         licenseUrl: 'https://example.invalid/licence',
         serverArgs: args,
       );
 
-  return ModelManifest(version: 1, models: [
+  return ModelManifest(version: 2, tiers: testTiers, models: [
     file(
       id: routerEmbedId,
       role: ModelRole.embed,
@@ -80,10 +83,29 @@ ModelManifest testManifest({
   ]);
 }
 
+/// The two rungs the committed manifest declares: the full tier takes all
+/// three checkpoints, the inbox tier takes the embedding and inbox models and
+/// halves the inbox model's slots.
+final List<ManifestTier> testTiers = List.unmodifiable([
+  ManifestTier(
+    tier: MachineTier.full,
+    minRamBytes: fullTierMinBytes,
+    models: const [routerEmbedId, routerBulkId, routerProseId],
+  ),
+  const ManifestTier(
+    tier: MachineTier.inbox,
+    minRamBytes: 0,
+    models: [routerEmbedId, routerBulkId],
+    serverArgs: {
+      routerBulkId: {'c': '16384', 'parallel': '2'},
+    },
+  ),
+]);
+
 /// The preset [testManifest] writes, pointed at [folder].
 RouterPreset testPreset(String folder) => testManifest().toPreset(folder);
 
 /// A manifest holding exactly [files] — for the parser's refusals and for a
 /// downloader test that wants one model rather than three.
 ModelManifest manifestFor(List<ModelFile> files) =>
-    ModelManifest(version: 1, models: List.unmodifiable(files));
+    ModelManifest(version: 2, models: List.unmodifiable(files));

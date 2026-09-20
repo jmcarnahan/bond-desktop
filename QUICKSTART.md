@@ -22,9 +22,16 @@ content anywhere at inference time:
 You need:
 
 - **An Apple Silicon Mac.** Intel Macs are not supported.
-- **Memory.** 48 GB or more is comfortable with the defaults. 32 GB works with
-  a smaller context. 16 to 24 GB needs a smaller prose model. Step 2 shows the
-  one-line overrides.
+- **Memory.** 40 GiB is the line the app itself draws. At or above it every
+  machine runs all three servers, which is what the defaults below are sized
+  for; a 48 GB Mac is comfortable and a 36 GB one is not. Below it the shipped
+  app is on its INBOX tier: it downloads and starts the embedding model and the
+  4B only, the writing model is left out, and the writing stages run on the 4B
+  until a target is added under Settings, Models. 16 GiB is the smallest
+  machine any measured row was taken on, and under it triage is slower than any
+  number in `docs/model-bakeoff.md`. Running the three servers by hand from
+  this checkout ignores all of that: `make model` starts the 27B whatever the
+  machine has, and step 2 shows the one-line overrides for a smaller one.
 - **Disk.** About 30 GB free: the weights above plus the app build.
 - **macOS 14 or newer** with Xcode installed. That is the Mac you build on;
   the app itself deploys back to macOS 12. Xcode 26 on macOS 15 and 26 is
@@ -79,8 +86,9 @@ whichever lines apply. Nothing else in the repo needs to change:
 
 ```make
 # local.mk — personal overrides, never committed
-# 32 GB: keep the default models, halve the context window.
-CTX_SIZE = 16384
+# The context is 16K by default since Round F, so a CTX_SIZE line here is only
+# needed to go somewhere else.
+# CTX_SIZE = 16384
 # 16–24 GB: a smaller prose model. Its prose quality has not been benchmarked.
 # MODEL_HF = ggml-org/Qwen3-8B-GGUF:Q8_0
 # Ports, if something on your machine already uses one of ours.

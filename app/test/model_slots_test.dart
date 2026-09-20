@@ -1,3 +1,4 @@
+import 'package:bond_inbox/models/draft_policy.dart';
 import 'package:bond_inbox/services/llm/attachment_digest_task.dart';
 import 'package:bond_inbox/services/llm/context_brief_task.dart';
 import 'package:bond_inbox/services/llm/context_digest_task.dart';
@@ -277,5 +278,42 @@ void main() {
     expect(slotDefaults[ModelSlot.fast], fastSlotDefault);
     expect(slotDefaults[ModelSlot.prose], proseSlotDefault);
     expect(slotDefaults[ModelSlot.embed], embedSlotDefault);
+  });
+
+  group('the machine tier', () {
+    const gib = 1024 * 1024 * 1024;
+
+    test('is read off memory alone, and unknown memory never refuses', () {
+      expect(machineTierFor(0), MachineTier.full);
+      expect(machineTierFor(-1), MachineTier.full);
+      expect(machineTierFor(8 * gib), MachineTier.inbox);
+      expect(machineTierFor(16 * gib), MachineTier.inbox);
+      expect(machineTierFor(36 * gib), MachineTier.inbox);
+      expect(machineTierFor(40 * gib), MachineTier.full);
+      expect(machineTierFor(48 * gib), MachineTier.full);
+      expect(machineTierFor(64 * gib), MachineTier.full);
+      expect(fullTierMinBytes, 40 * gib);
+      expect(measuredFloorBytes, 16 * gib);
+    });
+
+    test('the full tier writes nothing, so a fresh install stays as it was',
+        () {
+      expect(tierStageDefaults(MachineTier.full), isEmpty);
+      expect(tierDraftPolicy(MachineTier.full), DraftPolicy.needsYou);
+    });
+
+    test('the inbox tier points every prose-slot stage at the fast built-in',
+        () {
+      final map = tierStageDefaults(MachineTier.inbox);
+      expect(map.keys.toSet(), proseStageIds.toSet());
+      expect(map.length, 6);
+      expect(map.values.toSet(), {builtInFastId});
+      expect(map.containsKey('draft_improve'), isFalse);
+      expect(map.containsKey('storyline_membership'), isFalse);
+      for (final id in bulkStageIds) {
+        expect(map.containsKey(id), isFalse, reason: id);
+      }
+      expect(tierDraftPolicy(MachineTier.inbox), DraftPolicy.onDemand);
+    });
   });
 }

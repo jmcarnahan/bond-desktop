@@ -264,6 +264,33 @@ void main() {
     expect(container.read(appPrefsProvider).managedServer, isTrue);
   });
 
+  testWidgets('a 16 GB Mac is told what it gets, and offered two models',
+      (tester) async {
+    // The same walk on the other rung. The wizard reads the machine at the
+    // device step and hands the RESOLVED manifest to every step after it.
+    system.hardwareInfo = const HardwareInfo(
+      chip: 'Apple M2',
+      memoryBytes: 17179869184,
+      appleSilicon: true,
+      rosetta: false,
+      osVersion: '15.6',
+    );
+    await mount(tester);
+    await tapContinue(tester);
+
+    expect(find.text('16.0 GB'), findsOneWidget);
+    expect(
+      find.textContaining('is not downloaded here'),
+      findsOneWidget,
+    );
+
+    await tapContinue(tester);
+
+    expect(find.text('Models'), findsOneWidget);
+    expect(find.textContaining('Bond downloads two models'), findsOneWidget);
+    expect(find.text('Writes drafts and replies'), findsNothing);
+  });
+
   testWidgets('signed out, the sign-in step is the only way past itself',
       (tester) async {
     // The fixture's flag is public so a test can be the other person: a

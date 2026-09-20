@@ -214,6 +214,37 @@ final contextStoreProvider =
 /// pattern; a test overrides it with `FakeSystemInfo` and touches no channel.
 final systemInfoProvider = Provider<SystemInfo>((ref) => const ChannelSystemInfo());
 
+/// This Mac's chip, memory and OS version, for the Settings fact line that
+/// says which tier the machine is in and why. A report, never a judgement:
+/// every decision made on this machine's size goes through
+/// [machineTierProvider], so there is one rule and one place it lives.
+final hardwareInfoProvider = FutureProvider<HardwareInfo>(
+  (ref) => ref.watch(systemInfoProvider).hardware(),
+);
+
+/// This Mac's tier, recomputed from its memory whenever it is asked for and
+/// stored nowhere: the models folder can move to another Mac, and the wizard,
+/// the gate and the server supervisor must each read the machine they are on.
+/// Unknown memory resolves to [MachineTier.full], the never-refuse rule.
+/// A read that FAILS answers [MachineTier.full] too, and that is the same rule
+/// as a zero rather than a second one. This future is awaited where the server
+/// is launched, on a path with no `try` above it and no way to report a
+/// [ServerFailed], so a rejected future would take the launch down over a fact
+/// the app could not read. Nothing is refused for that.
+final machineTierProvider = FutureProvider<MachineTier>((ref) async {
+  try {
+    // Over [hardwareInfoProvider] rather than the channel again: one round
+    // trip, and one future, so the Settings fact line and the button beside it
+    // cannot settle a frame apart and disagree about the machine they are
+    // describing.
+    final hardware = await ref.watch(hardwareInfoProvider.future);
+    return machineTierFor(hardware.memoryBytes);
+  } on Object catch (e) {
+    debugPrint('tier: could not read this Mac, assuming the full tier: $e');
+    return machineTierFor(HardwareInfo.unknown.memoryBytes);
+  }
+});
+
 /// Every folder the app owns. `main()` OVERRIDES this with the located
 /// directory, exactly as it overrides [dbProvider], because
 /// `getApplicationSupportDirectory()` is async and a provider body cannot be.
@@ -268,8 +299,15 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
     runner: const SystemProcessRunner(),
     supportDir: paths.support,
     binaryPath: LlamaBinary.resolve,
-    buildPreset: () => ref
+    // The manifest RESOLVED for this Mac, so a machine under the full tier's
+    // floor starts the two models it downloaded rather than refusing on a
+    // writing model it never fetched. Asked freshly each start, like the
+    // folder and the port beside it, and awaited rather than guessed: the
+    // tier is a future and a preset written before it answered would name the
+    // wrong set.
+    buildPreset: () async => ref
         .read(modelManifestProvider)
+        .forTier(await ref.read(machineTierProvider.future))
         .toPreset(ref.read(appPrefsProvider).effectiveModelsFolder(paths)),
     routerPort: () => ref.read(appPrefsProvider).routerPort,
     managed: () => ref.read(appPrefsProvider).managedServer,

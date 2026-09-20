@@ -10,6 +10,7 @@ import '../data/app_paths.dart';
 import '../data/setup_store.dart';
 import '../models/setup_step.dart';
 import '../services/backend/auth_session.dart';
+import '../services/llm/model_slots.dart';
 import '../services/models/disk_preflight.dart';
 import '../services/models/download_state.dart';
 import '../services/models/model_downloader.dart';
@@ -219,6 +220,17 @@ class SetupState {
       'complete: $downloadsComplete, signedIn: $signedIn)';
 }
 
+/// How long the wizard and the gate wait for the platform to describe this
+/// Mac before carrying on without it.
+///
+/// Two seconds is generous by three orders of magnitude: `hw.memsize` is an
+/// in-process `sysctl` and answers in microseconds, so anything near this is a
+/// channel that is not going to answer at all. Both readers fall back to
+/// [HardwareInfo.unknown], which is the full tier — nothing is refused for a
+/// fact the app could not read, and a hung channel must not hold the first
+/// frame or send a finished machine back through the wizard.
+const Duration hardwareProbeTimeout = Duration(seconds: 2);
+
 /// Drives the first run: which step, what each step probed, what it wrote.
 ///
 /// It takes its collaborators rather than reaching for providers, which is
@@ -243,6 +255,7 @@ class SetupController extends StateNotifier<SetupState> {
     required this.readPrefs,
     required this.setManagedServer,
     required this.setModelsFolder,
+    required this.applyTierDefaults,
     required this.auth,
     required this.notifier,
     required this.seedAuthorization,
@@ -250,6 +263,9 @@ class SetupController extends StateNotifier<SetupState> {
 
   final SetupStore store;
   final SystemInfo system;
+
+  /// The MASTER manifest, every checkpoint this build knows. Everything that
+  /// downloads, checks or starts reads [resolvedManifest] instead.
   final ModelManifest manifest;
   final ModelDownloader downloader;
   final ModelServerSupervisor supervisor;
@@ -257,6 +273,12 @@ class SetupController extends StateNotifier<SetupState> {
   final AppPrefs Function() readPrefs;
   final Future<void> Function(bool) setManagedServer;
   final Future<void> Function(String) setModelsFolder;
+
+  /// Writes this machine's tier defaults — the stage picks and the draft
+  /// policy. A CLOSURE for the same reason the two above are: the prefs
+  /// notifier's state is protected, and this controller is told what to do
+  /// rather than reaching for the provider.
+  final Future<void> Function(MachineTier) applyTierDefaults;
   final AuthSession Function() auth;
   final DesktopNotifier notifier;
   final void Function(bool granted) seedAuthorization;
@@ -290,6 +312,15 @@ class SetupController extends StateNotifier<SetupState> {
   /// Every read is guarded: a database that cannot answer must open the
   /// wizard at the top rather than fail to render a screen at all.
   Future<void> init() async {
+    // The machine is asked FIRST, before the ledger is read: the tier decides
+    // which files the ledger is compared against, and a resume that guessed
+    // the full tier on a small Mac would open the download step and fetch a
+    // writing model that machine is never going to start. It costs one
+    // in-process `sysctl`, and every later arrival re-asks anyway.
+    // [probeHardware] neither throws nor waits longer than
+    // [hardwareProbeTimeout], so it cannot cost the screen.
+    await probeHardware();
+    if (!mounted) return;
     final prefs = readPrefs();
     SetupStep step = SetupStep.welcome;
     MigrationReport? migration;
@@ -311,7 +342,9 @@ class SetupController extends StateNotifier<SetupState> {
     // where that gets put right — its `_onEnter` starts the transfer for
     // everything missing or stale.
     if (step == SetupStep.done) {
-      step = _ledger.matches(manifest) ? SetupStep.welcome : SetupStep.download;
+      step = _ledger.matches(resolvedManifest)
+          ? SetupStep.welcome
+          : SetupStep.download;
     }
     final folder = prefs.effectiveModelsFolder(paths);
     _folderAtInit = folder;
@@ -400,8 +433,23 @@ class SetupController extends StateNotifier<SetupState> {
     }
   }
 
+  /// Asks the platform what this Mac is. It never throws and never waits
+  /// longer than [hardwareProbeTimeout].
+  ///
+  /// `ChannelSystemInfo` already turns a missing plugin and a platform
+  /// exception into [HardwareInfo.unknown], so reaching the catch means a
+  /// channel that threw something else — or, past the timeout, one that did
+  /// not answer at all. The answer is the same either way, and it is the
+  /// never-refuse one: unknown memory, the full tier, and a device step that
+  /// says `unknown` rather than claiming a number.
   Future<void> probeHardware() async {
-    final info = await system.hardware();
+    HardwareInfo info;
+    try {
+      info = await system.hardware().timeout(hardwareProbeTimeout);
+    } on Object catch (e) {
+      debugPrint('setup: could not read this Mac: $e');
+      info = HardwareInfo.unknown;
+    }
     if (!mounted) return;
     state = state.copyWith(hardware: info);
   }
@@ -414,21 +462,46 @@ class SetupController extends StateNotifier<SetupState> {
     return !hardware.appleSilicon || hardware.rosetta;
   }
 
+  /// What this Mac runs, from the memory the last probe read.
+  ///
+  /// Recomputed on every read rather than stored, exactly as [lowMemory] was:
+  /// the machine is the thing that decides, the probe runs on every arrival,
+  /// and a tier written down somewhere would be the models folder's opinion
+  /// of a Mac it may have been moved away from. Before the first probe, and
+  /// on a machine whose memory could not be read, it is
+  /// [MachineTier.full] — the never-refuse rule [machineTierFor] states.
+  MachineTier get tier => machineTierFor(state.hardware?.memoryBytes ?? 0);
+
+  /// The manifest as [tier] wants it. THE view every step reads: the models
+  /// step's rows and total, the disk preflight, the download run, the ledger
+  /// check and the preset the supervisor starts.
+  ModelManifest get resolvedManifest => manifest.forTier(tier);
+
   /// Enough memory for the inbox, not enough for the writing model. A
   /// warning rather than a refusal: triage, extraction and search all run on
   /// the two small models, and they fit anywhere.
-  bool get lowMemory {
+  ///
+  /// It reads the TIER rather than a threshold of its own, so there is one
+  /// answer to "is this Mac small" and the sentence the device step shows
+  /// cannot disagree with the files the download step fetches.
+  bool get lowMemory => state.hardware != null && tier == MachineTier.inbox;
+
+  /// Below the smallest machine the golden set was measured on. Not a third
+  /// tier and not a refusal: one more sentence on the device step, because a
+  /// machine under [measuredFloorBytes] runs the same two models slower than
+  /// any row in the ledger.
+  bool get underMeasuredFloor {
     final hardware = state.hardware;
     if (hardware == null) return false;
     if (hardware.memoryBytes <= 0) return false;
-    return hardware.memoryBytes < manifest.byRole(ModelRole.prose).minRamBytes;
+    return hardware.memoryBytes < measuredFloorBytes;
   }
 
   Future<void> checkStorage() async {
     final folder = readPrefs().effectiveModelsFolder(paths);
     final preflight = await checkDisk(
       system: system,
-      manifest: manifest,
+      manifest: resolvedManifest,
       ledger: _currentLedger,
       folder: folder,
     );
@@ -474,7 +547,9 @@ class SetupController extends StateNotifier<SetupState> {
     if (!mounted) return;
     final Stream<DownloadProgress> stream;
     try {
-      stream = downloader.run();
+      // The RESOLVED set, smallest first: an inbox Mac fetches two files and
+      // is never shown a bar for a checkpoint it will not start.
+      stream = downloader.run(resolvedManifest.bySize);
     } on StateError catch (e) {
       // A disposed or already-running downloader. Neither is worth a red
       // screen on the step whose whole job is to make progress visible.
@@ -596,6 +671,12 @@ class SetupController extends StateNotifier<SetupState> {
     }
     var saved = false;
     try {
+      // BEFORE the managed preference and before the server: the stage picks
+      // are what the first drain resolves a target through, and a machine
+      // with no writing model must not have six stages pointing at a server
+      // this tier never starts. A write that throws leaves the wizard on this
+      // screen with the button again, exactly as a half-written setup does.
+      await applyTierDefaults(tier);
       await setManagedServer(true);
       // The stash exists only while the welcome step is offering a way back;
       // finishing is the end of that offer, and a leftover value would have
@@ -669,7 +750,7 @@ class SetupController extends StateNotifier<SetupState> {
   bool _allFilesPresent(String folder) {
     if (folder.isEmpty) return false;
     final ledger = _currentLedger;
-    for (final model in manifest.models) {
+    for (final model in resolvedManifest.models) {
       if (!ledger.isCurrent(model)) return false;
       if (!File(p.join(folder, model.relativePath)).existsSync()) return false;
     }
@@ -723,6 +804,8 @@ final setupControllerProvider =
         ref.read(appPrefsProvider.notifier).setManagedServer(on),
     setModelsFolder: (path) =>
         ref.read(appPrefsProvider.notifier).setModelsFolder(path),
+    applyTierDefaults: (tier) =>
+        ref.read(appPrefsProvider.notifier).applyTierDefaults(tier),
     auth: () => ref.read(authSessionProvider),
     notifier: ref.watch(desktopNotifierProvider),
     // Late-bound: reading the service provider here would build the whole
