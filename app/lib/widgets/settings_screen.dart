@@ -384,6 +384,11 @@ class SettingsScreen extends StatefulWidget {
   /// behind this pane and the queues behind that.
   final ValueChanged<bool>? onProcessingChanged;
 
+  /// Points both draft stages back at a local target and withdraws the
+  /// cloud-drafts consent. Null hides the block, the same discipline every
+  /// other optional control here follows.
+  final Future<void> Function()? onStopCloudDrafts;
+
   /// Deletes every verdict, summary, storyline, draft and vector and keeps
   /// the mail. Null hides the block.
   final Future<void> Function()? onClearAiResults;
@@ -558,6 +563,7 @@ class SettingsScreen extends StatefulWidget {
     this.onTeamsLookbackChanged,
     this.processingOn = false,
     this.onProcessingChanged,
+    this.onStopCloudDrafts,
     this.onClearAiResults,
     this.onForgetAndResync,
     this.attachmentCacheBytes,
@@ -616,6 +622,15 @@ class SettingsScreen extends StatefulWidget {
   static const Key cloudStandingKey = ValueKey('settings-cloud-standing');
   static const Key cloudLedgerKey = ValueKey('settings-cloud-ledger');
   static const Key cloudCapKey = ValueKey('settings-cloud-cap');
+
+  /// The revoke, in the two-step the resets above use and keyed for the same
+  /// reason: its label is also most of the caption beside it, and its Confirm
+  /// carries the same words theirs do.
+  static const Key stopCloudDraftsKey = ValueKey('settings-stop-cloud-drafts');
+  static const Key stopCloudDraftsConfirmKey =
+      ValueKey('settings-stop-cloud-drafts-confirm');
+  static const Key stopCloudDraftsKeepKey =
+      ValueKey('settings-stop-cloud-drafts-keep');
 
   /// Keyed for the same reason the buttons above are: 'Check for updates' is
   /// an ordinary phrase, and the caption beside it contains half of it.
@@ -708,6 +723,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _confirmingForget = false;
   bool _forgetting = false;
   String? _forgetError;
+
+  /// And once more for the revoke, which is a two-step of the same shape over
+  /// three prefs writes rather than over a DELETE.
+  bool _confirmingStopDrafts = false;
+  bool _stoppingDrafts = false;
+  String? _stopDraftsError;
 
   late final TextEditingController _aboutMe = TextEditingController(
     text: widget.aboutMe,
@@ -1217,6 +1238,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// the screen follows, read per control rather than per section.
   bool get _processingWired =>
       widget.onProcessingChanged != null ||
+      widget.cloudDraftsToday != null ||
+      widget.onStopCloudDrafts != null ||
       widget.onClearAiResults != null ||
       widget.onForgetAndResync != null;
 
@@ -1271,6 +1294,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
         if (widget.cloudDraftsToday != null) ..._cloudLedgerBlock(),
+        if (widget.onStopCloudDrafts != null) ..._stopDraftsBlock(),
         if (widget.onClearAiResults != null) ..._clearAiResultsBlock(),
         if (widget.onForgetAndResync != null) ..._forgetResyncBlock(),
       ],
@@ -1345,6 +1369,104 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// to say is not which reset this is — the caption above it said that — but
   /// that there is no way back from it.
   static const String _confirmLabel = 'Confirm: this cannot be undone';
+
+  /// Taking the consent back, in the two clicks the resets below take.
+  ///
+  /// NOT refused while processing is on, which is the one way it differs from
+  /// the two blocks under it: it writes three preferences and touches no
+  /// rows, so there is no drain it could race. Somebody who has just realised
+  /// their drafts are leaving the machine should not have to find a switch
+  /// first.
+  ///
+  /// The same [_confirmLabel] as the resets, even though this one CAN be
+  /// undone by granting again. The second button's job is not to say which
+  /// control this is, and a softer sentence here would make the pair read as
+  /// two grades of confirmation.
+  List<Widget> _stopDraftsBlock() {
+    return [
+      const SizedBox(height: BondSpacing.s24),
+      const Divider(height: 1, color: BondColors.border),
+      const SizedBox(height: BondSpacing.s12),
+      Text(
+        'Stop sending drafts anywhere',
+        style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: BondSpacing.s8),
+      if (!_confirmingStopDrafts)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton(
+            key: SettingsScreen.stopCloudDraftsKey,
+            onPressed: () => setState(() => _confirmingStopDrafts = true),
+            child: const Text('Stop sending drafts anywhere'),
+          ),
+        )
+      else
+        OverflowBar(
+          alignment: MainAxisAlignment.start,
+          spacing: BondSpacing.s8,
+          children: [
+            FilledButton(
+              key: SettingsScreen.stopCloudDraftsConfirmKey,
+              style: FilledButton.styleFrom(
+                backgroundColor: BondColors.error,
+                foregroundColor: BondColors.surface,
+              ),
+              onPressed:
+                  _stoppingDrafts ? null : () => unawaited(_stopDrafts()),
+              child: const Text(_confirmLabel),
+            ),
+            TextButton(
+              key: SettingsScreen.stopCloudDraftsKeepKey,
+              // Standing down drops the last failure with it, for the reason
+              // the resets' Keep gives.
+              onPressed: _stoppingDrafts
+                  ? null
+                  : () => setState(() {
+                      _confirmingStopDrafts = false;
+                      _stopDraftsError = null;
+                    }),
+              child: const Text('Keep'),
+            ),
+          ],
+        ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(
+        'Points Draft reply back at local, clears the Improve a draft target, '
+        'and withdraws the consent to send drafts to a third-party target. '
+        'Granting again is one screen.',
+        style: BondType.caption,
+      ),
+      if (_stopDraftsError case final error?) ...[
+        const SizedBox(height: BondSpacing.s8),
+        InlineAlert(severity: InlineAlertSeverity.error, text: error),
+      ],
+    ];
+  }
+
+  /// Runs the host's revoke and disarms on the way out. [_clearAi]'s contract,
+  /// and for its reason: nothing here may escape as an unhandled async error,
+  /// and a failure leaves the pair ARMED with a line saying what happened.
+  Future<void> _stopDrafts() async {
+    setState(() {
+      _stoppingDrafts = true;
+      _stopDraftsError = null;
+    });
+    try {
+      await widget.onStopCloudDrafts!();
+      if (!mounted) return;
+      setState(() {
+        _stoppingDrafts = false;
+        _confirmingStopDrafts = false;
+      });
+    } on Object {
+      if (!mounted) return;
+      setState(() {
+        _stoppingDrafts = false;
+        _stopDraftsError = 'The drafts could not be stopped.';
+      });
+    }
+  }
 
   /// Throwing away what the models wrote, in the two clicks
   /// [_clearCacheBlock] takes and for its reason.

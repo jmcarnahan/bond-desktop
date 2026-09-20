@@ -650,25 +650,44 @@ host hears about it the instant it moves rather than on the way out. Mail and
 Teams keep syncing while it is off; only the models stand down. See
 [pipeline/10-model-routing.md](pipeline/10-model-routing.md).
 
-Under it are two resets, each an inline two-step in the shape **Sign out and
-clear local data** and **Clear attachment cache** already use: the first tap
-replaces the button with a red **Confirm: this cannot be undone** beside a
-**Keep**, and the second click therefore lands on a different button, in a
+Under it are three controls, a revoke and two resets, each an inline two-step
+in the shape **Sign out and clear local data** and **Clear attachment cache**
+already use: the first tap replaces the button with a red **Confirm: this
+cannot be undone** beside a **Keep**, and the second click therefore lands on
+a different button, in a
 different place, that did not exist a moment ago. A failure renders as an
 `InlineAlert` with the pair still up; **Keep** disarms and drops the failure
 with it.
 
 | Action | Keys | What goes | What stays |
 |---|---|---|---|
+| **Stop sending drafts anywhere** | `settings-stop-cloud-drafts{,-confirm,-keep}` | the `draft_reply` and `draft_improve` stage entries and `cloud_drafts_consent`, so both draft stages resolve locally again and Improve is gone | every row, every target, every keychain bearer and every other stage entry |
 | **Clear AI results** | `settings-clear-ai-results{,-confirm,-keep}` | every triage verdict, summary, storyline, draft, digest and embedding — the sixteen `MessageStore.derivedTables`, the verdict columns on `messages` and `conversations`, and the stage markers on `attachments` and the library; the activity log is one of the sixteen, so today's **Cloud drafts** count starts again at zero, which the caption above the buttons says | mail, Teams messages, attachments, registered directories, the sign-in and every preference |
 | **Forget everything and re-sync** | `settings-forget-resync{,-confirm,-keep}` | everything above **and** the mailbox itself — `MessageStore.wipeAll(keepIdentity: true)`, cursors and bootstrap floors included | the sign-in, the about-me text, the Needs You rules, the sender rules, the registered directories and every setting |
 
-Consent, once given, is not withdrawn by any single control: `cloud_drafts_consent`
-is a machine setting that both resets keep. To stop drafts leaving the machine,
-point `draft_reply` and `draft_improve` back at a local target under Models, or
-remove the third-party target, which clears both entries; the standing switch
-under Suggested replies stops the automatic ones alone. A one-button revoke is
-Round F's.
+**Stop sending drafts anywhere** is the one-button revoke, in the same
+two-step and above the two resets. It makes three preference writes in one
+order that matters: `clearStageTarget('draft_reply')`, then
+`clearStageTarget('draft_improve')`, then `setCloudDraftsConsent(false)`. The
+stages go first and the flag last, which is the grant's order reversed, and
+for the grant's reason: `AppPrefs.specForStage` sends a third-party draft
+target back to the local one while the flag is false, so clearing the stages
+first means they are already local by the moment consent goes. Consent first
+would leave two stage entries pointing off this machine with nothing but the
+resolver between them and a draft.
+
+The `draft_reply` stage falls back to the local prose target and
+`draft_improve` resolves to nothing at all, which is that stage's own rule, so
+the Improve button goes rather than quietly running on this machine. It is the
+one control in this section that is **not** refused while processing is on. It writes preferences and touches no rows, so there is no drain it
+could race, and somebody who has just realised their drafts are leaving the
+machine should not have to find a switch first. Nothing else goes with it: the
+third-party target stays in the list, its keychain bearer stays in the
+keychain, and any other stage pointed at it keeps pointing at it. Granting
+again is the consent pane, one screen, so the second button says
+`Confirm: this cannot be undone` for the reason both resets do rather than
+because this one cannot be redone. The standing switch under Suggested replies
+stops the automatic improves alone and leaves the rest.
 
 Above the two resets, once the host has a count, is the cloud-draft ledger:
 one line **Cloud drafts today: N of cap** (`settings-cloud-ledger`) and a
@@ -685,13 +704,16 @@ once the count reaches the cap, and each of the four refuses with the same
 sentence. The cap in force is also the
 number the consent pane quotes before the first draft ever leaves.
 
-**Both are refused while processing is on.** The buttons are inert and the
-caption under them says `Turn processing off first`; the host refuses again for
-itself, because a reset races every drain it does not stop. With the switch
-off, each handler quiesces the triage queue and all three lanes — which is
-"finish the item at the server, then hand the claim back", not merely "stop" —
-runs the store's reset, calls `resetInterruptedWork`, and invalidates the
-fifteen providers holding rows in memory.
+**Both resets are refused while processing is on.** Their buttons are inert
+and the caption under them says `Turn processing off first`; the host refuses
+again for itself, because a reset races every drain it does not stop. With the
+switch off, each handler quiesces the triage queue, all three lanes and the
+draft handler — which is "finish the item at the server, then hand the claim
+back", not merely "stop" — runs the store's reset, calls
+`resetInterruptedWork`, and invalidates the sixteen providers holding rows in
+memory. The draft handler is the fourth because `DraftHandler.improve` is a
+button press rather than queue work, so the draft lane's own quiesce knows
+nothing about it.
 
 Neither reset queues the mailbox. The next sync's own backlog calls are what
 refill the pipeline, one `backlogEnqueueCap` slice a poll, which is why the

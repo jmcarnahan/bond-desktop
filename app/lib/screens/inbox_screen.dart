@@ -2152,17 +2152,24 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final triage = ref.read(triageQueueProvider);
     final workers = ref.read(aiWorkersProvider);
     final store = ref.read(messageStoreProvider);
+    final drafts = ref.read(draftHandlerProvider);
 
     await _waitForPullsToSettle();
     await triage.quiesce();
     for (final lane in [workers.fast, workers.storyline, workers.draft]) {
       await lane.quiesce();
     }
+    // The fourth thing that writes: Improve is a button press and not queue
+    // work, so the draft lane's quiesce above knows nothing about it. One
+    // improve still at the server would write its row into the table the
+    // next line empties.
+    await drafts.quiesce();
     await apply(store);
     await store.resetInterruptedWork();
     if (!mounted) return;
-    // The five [_signOut] drops, and the ten more a reset needs because the
-    // screen stays open over them.
+    // The [_signOut] drops, and the rest a reset needs because the screen
+    // stays open over them. Counted by the list below rather than in a
+    // sentence: the last two counts here were both wrong by one.
     for (final provider in <ProviderOrFamily>[
       conversationsProvider,
       storylinesProvider,
@@ -2555,6 +2562,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             : notifier.setStageTarget(stageId, targetId),
       ),
       onCloudDraftsConsent: () => notifier.setCloudDraftsConsent(true),
+      // The grant's order reversed, and that order is the protection.
+      // `AppPrefs.specForStage` sends a third-party draft target back to the
+      // local one while the flag is false, so clearing the two stages first
+      // and the flag last means the stages are already local by the moment
+      // consent goes. Consent first would leave two stage entries pointing
+      // off this machine with nothing but the resolver between them and a
+      // draft. Awaited in turn rather than fired together: three writes to
+      // one prefs row.
+      onStopCloudDrafts: () async {
+        await notifier.clearStageTarget('draft_reply');
+        await notifier.clearStageTarget('draft_improve');
+        await notifier.setCloudDraftsConsent(false);
+      },
       cloudDraftsStanding: prefs.cloudDraftsStanding,
       onCloudDraftsStandingChanged: (on) =>
           unawaited(notifier.setCloudDraftsStanding(on)),

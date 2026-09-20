@@ -7,6 +7,7 @@ import '../services/llm/model_slots.dart' show LlmTarget, ModelSlot;
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'inline_alert.dart';
+import 'model_name_control.dart';
 
 /// One model slot's server, its model name, and a way to find out what that
 /// server is actually serving.
@@ -132,14 +133,6 @@ class _ModelSlotEditorState extends State<ModelSlotEditor> {
   /// server, so it renders as the field's own `errorText` rather than as a
   /// status line claiming something is unreachable.
   String? _urlError;
-
-  /// The ids to pick between, or null when there is no usable listing. A
-  /// reachable server with an empty list is not a picker — it is a live server
-  /// with nothing loaded, and the typed name is still the right answer.
-  List<String>? get _listed =>
-      _probe?.reachable == true && _probe!.modelIds.isNotEmpty
-          ? _probe!.modelIds
-          : null;
 
   bool get _dirty =>
       _url.text != _saved.baseUrl || _model.text != _saved.model;
@@ -334,7 +327,7 @@ class _ModelSlotEditorState extends State<ModelSlotEditor> {
           ProbeStatus(probing: _probing, result: _probe),
           const SizedBox(height: BondSpacing.s8),
         ],
-        ..._modelControl(),
+        _modelControl(),
         const SizedBox(height: BondSpacing.s8),
         // An OverflowBar rather than a Row: three buttons with words on them
         // do not fit the pane at a doubled text scale, and wrapping is the
@@ -364,76 +357,18 @@ class _ModelSlotEditorState extends State<ModelSlotEditor> {
     );
   }
 
-  /// The model name: a picker over what the server listed, or a free field
-  /// when nothing has listed anything.
+  /// The model name: [ModelNameControl], with this slot's two keys.
   ///
-  /// The picker is preferred wherever it can be built because a name the
-  /// server does not serve is the failure mode that costs the most — llama.cpp
-  /// ignores the field entirely and an MLX runtime answers HTTP 400, which is
-  /// fatal and never retried.
-  List<Widget> _modelControl() {
-    final listed = _listed;
-    if (listed == null) {
-      return [
-        TextField(
-          key: ModelSlotEditor.modelFieldKey(widget.slot),
-          controller: _model,
-          decoration: const InputDecoration(
-            labelText: 'Model name',
-            hintText: 'qwen3.8',
-          ),
-        ),
-        const SizedBox(height: BondSpacing.s4),
-        Text(
-          'Check the server to pick from what it serves; llama.cpp ignores '
-          'this name, MLX runtimes require it.',
-          style: BondType.caption,
-        ),
-      ];
-    }
-
-    final typed = _model.text;
-    final unlisted = typed.isNotEmpty && !listed.contains(typed);
-    return [
-      InputDecorator(
-        decoration: const InputDecoration(labelText: 'Model'),
-        child: DropdownButtonHideUnderline(
-          child: DropdownButton<String>(
-            key: ModelSlotEditor.modelPickerKey(widget.slot),
-            isExpanded: true,
-            value: typed.isEmpty ? null : typed,
-            hint: const Text('Pick a model'),
-            items: [
-              for (final id in listed)
-                DropdownMenuItem(value: id, child: Text(id)),
-              // The name already in the field stays selectable even when this
-              // server does not offer it — dropping it would silently change
-              // which model the app asks for.
-              if (unlisted)
-                DropdownMenuItem(
-                  value: typed,
-                  child: Text('$typed (not listed)'),
-                ),
-            ],
-            onChanged: (value) {
-              if (value == null) return;
-              // The controller's own listener is what rebuilds; this is the
-              // whole of the change.
-              setState(() => _model.text = value);
-            },
-          ),
-        ),
-      ),
-      if (unlisted) ...[
-        const SizedBox(height: BondSpacing.s4),
-        Text(
-          'This server did not list that name. llama.cpp will ignore it; an '
-          'MLX runtime will refuse the request.',
-          style: BondType.caption,
-        ),
-      ],
-    ];
-  }
+  /// The control itself is shared with `LlmTargetEditor` — the two copies of
+  /// it differed only in those keys. The probe stays here, because it is this
+  /// editor's URL that was checked.
+  Widget _modelControl() => ModelNameControl(
+        controller: _model,
+        probe: _probe,
+        fieldKey: ModelSlotEditor.modelFieldKey(widget.slot),
+        pickerKey: ModelSlotEditor.modelPickerKey(widget.slot),
+        onPicked: () => setState(() {}),
+      );
 }
 
 /// What the last look at a server found, in one line.

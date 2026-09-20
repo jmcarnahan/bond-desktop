@@ -750,6 +750,49 @@ void main() {
       expect(prefs.state.specForStage('draft_reply')!.parallel, 4);
     });
 
+    test('the revoke takes the two stages and the flag, and keeps the target',
+        () async {
+      // The three calls Settings' **Stop sending drafts anywhere** makes, in
+      // the order it makes them: the stages FIRST and the flag LAST, the
+      // grant's order reversed. `specForStage` sends a third-party draft
+      // target back to the local one while the flag is false, so clearing the
+      // stages first means they are already local by the moment consent goes.
+      final tokens = MemoryTokenStore();
+      final prefs = await notifier(tokens);
+      await prefs.upsertTarget(bedrock, bearer: 'sk-fixture-not-a-real-token');
+      await prefs.setCloudDraftsConsent(true);
+      await prefs.setStageTarget('draft_reply', 'cloud-1');
+      await prefs.setStageTarget('draft_improve', 'cloud-1');
+      await prefs.setStageTarget('storyline_recap', 'cloud-1');
+
+      await prefs.clearStageTarget('draft_reply');
+      await prefs.clearStageTarget('draft_improve');
+      await prefs.setCloudDraftsConsent(false);
+
+      expect(prefs.state.stageTargets.containsKey('draft_reply'), isFalse);
+      expect(prefs.state.stageTargets.containsKey('draft_improve'), isFalse);
+      expect(prefs.state.cloudDraftsConsent, isFalse);
+      // Drafts are local again, and Improve is gone rather than quietly
+      // pointed at this machine.
+      expect(prefs.state.specForStage('draft_reply')!.id, builtInProseId);
+      expect(prefs.state.specForStage('draft_improve'), isNull);
+
+      // The target the person added survives, with its keychain bearer and
+      // its other stage: the control withdraws consent, it does not throw
+      // away configuration or a secret.
+      expect(prefs.state.targets.single.id, 'cloud-1');
+      expect(prefs.state.stageTargets['storyline_recap'], 'cloud-1');
+      expect(tokens.values['${llmTargetBearerKeyPrefix}cloud-1'],
+          'sk-fixture-not-a-real-token');
+      expect(prefs.targetForStage('storyline_recap').bearer,
+          'sk-fixture-not-a-real-token');
+
+      // And it is what a relaunch reads, not just what this notifier holds.
+      final fresh = await AppPrefsNotifier.read(store);
+      expect(fresh.cloudDraftsConsent, isFalse);
+      expect(fresh.stageTargets.keys, ['storyline_recap']);
+    });
+
     test('the consent round-trips', () async {
       final prefs = await notifier();
       await prefs.setCloudDraftsConsent(true);

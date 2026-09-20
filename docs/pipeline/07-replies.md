@@ -268,6 +268,14 @@ yet, an empty answer, a refused call, the cap. Improve records its own
 `draft_improve` activity row — `ok`, `error` or `skipped` with a reason —
 carrying the target id and, for a third-party one, `cloud: 1`.
 
+**A reset waits for an improve in flight.** Because the button calls the
+handler straight, an improve is not queue work and the draft lane's `quiesce`
+knows nothing about it, so `DraftHandler` keeps its own set of the calls that
+have not landed and its own `quiesce()` over them. Both resets under Settings,
+Processing await it after the triage queue and the three lanes and before the
+delete. Without that wait, an answer landing a moment later would write a
+`drafts` row into the table the reset had just emptied.
+
 **The standing rule.** `cloud_drafts_standing` (default off, Settings →
 Suggested replies) improves a draft with nobody pressing anything, for
 messages where `needs_you_verdict = 1` and `urgency` is `urgent` or `high` —
