@@ -6,6 +6,8 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/conversation_state.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
+import 'package:bond_inbox/services/storyline_service.dart'
+    show StorylineService, StorylineTuning;
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -499,6 +501,75 @@ void main() {
       ];
       expect(subjects, hasLength(2));
       expect(seriesKeyFor(subjects.first), isNot(seriesKeyFor(subjects.last)));
+    });
+  });
+
+  group('StorylineService.seriesOf', () {
+    // Public since Round F so `make golden-vector` can print `series` beside
+    // `folded`, on `fragmentsOf`'s precedent. Pinned directly here, over rows
+    // built by hand: the pre-pass reads four fields off a pool row and
+    // nothing else, and a store round trip would only put the seeding fixture
+    // between the rule and its test.
+    Map<String, Object?> row(
+      String subject, {
+      int messageCount = 4,
+      int inboundCount = 3,
+      String from = 'sarah@example.com',
+    }) =>
+        {
+          'subject': subject,
+          'message_count': messageCount,
+          'inbound_count': inboundCount,
+          'newest_kept_from': from,
+        };
+
+    test('seeds a series people take part in and excludes a feed', () {
+      // Three issues of one answered series: `seriesKeyFor` folds the digits,
+      // so all three share a key, and somebody has replied in each.
+      // Three issues of one feed: same key, nobody ever replied, one sender.
+      // And two singletons whose keys are their own, which are neither.
+      final rows = [
+        for (var i = 1; i <= StorylineTuning.seriesMinSize; i++)
+          row('Budget review $i'),
+        for (var i = 1; i <= StorylineTuning.seriesMinSize; i++)
+          row('Nightly build $i',
+              messageCount: 1, inboundCount: 1, from: 'ci@example.com'),
+        row('Lease renewal'),
+        row('Offsite agenda'),
+      ];
+
+      final series = StorylineService.seriesOf(rows);
+
+      expect(series.seeded, hasLength(1));
+      expect(series.seeded.single, [0, 1, 2]);
+      expect(series.excluded, {3, 4, 5});
+    });
+
+    test('a group under the floor is neither seeded nor excluded', () {
+      final rows = [
+        for (var i = 1; i < StorylineTuning.seriesMinSize; i++)
+          row('Budget review $i'),
+      ];
+
+      final series = StorylineService.seriesOf(rows);
+
+      expect(series.seeded, isEmpty);
+      expect(series.excluded, isEmpty);
+    });
+
+    test('a seeded group stops at the cluster cap, and the rest stay in the '
+        'pool', () {
+      final rows = [
+        for (var i = 1; i <= StorylineTuning.maxClusterSize + 2; i++)
+          row('Budget review $i'),
+      ];
+
+      final series = StorylineService.seriesOf(rows);
+
+      // The first of them in row order, which is the newest; the two left
+      // over are not excluded, so the cosine pass still sees them.
+      expect(series.seeded.single, hasLength(StorylineTuning.maxClusterSize));
+      expect(series.excluded, isEmpty);
     });
   });
 }

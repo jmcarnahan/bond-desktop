@@ -1503,6 +1503,25 @@ void main() {
       });
     });
 
+    test('the gap between the two wide policies is what PIPE_POLICY measures',
+        () async {
+      // `make bench-pipeline` runs `all` by default, which is the worst case
+      // and the shape every row in the ledger was taken at; `needsYou` is what
+      // the app ships. The difference between the two is prose calls that were
+      // never made, and this is the offline pin under that: one message shape,
+      // two policies, one draft row. Nothing about the bench can be run
+      // offline, so what is provable here is the behaviour the knob selects.
+      await seedOrdinary(id: 'm1');
+      await seedOrdinary(id: 'm2');
+
+      await extract(policy: DraftPolicy.all, id: 'm1');
+      await extract(policy: DraftPolicy.needsYou, id: 'm2');
+
+      expect(await queuedDrafts(), ['m1']);
+      expect(await draftStateOf('m1'), 'pending');
+      expect(await draftStateOf('m2'), 'skipped');
+    });
+
     group('the prefetch cap', () {
       /// [count] draft rows already in the queue, across BOTH connectors —
       /// the count the cap reads is over `email`, `teams` and `local`, because

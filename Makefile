@@ -175,7 +175,7 @@ help:
 	@printf "  make ab           → 27B vs fast model, side by side (needs both up)\n"
 	@printf "  make ab-membership → membership eval, 27B vs fast model (needs both up)\n"
 	@printf "  make drain        → drain concurrency race, BENCH_K rounds (needs make fast up)\n"
-	@printf "  make bench-pipeline → the backlog end to end, PIPE_SHAPE=single|lanes (needs fast + model up)\n"
+	@printf "  make bench-pipeline → the backlog end to end, PIPE_SHAPE=single|lanes, PIPE_POLICY=all|needsYou|onDemand (needs fast + model up)\n"
 	@printf "  make bench-compare A=<a.json> B=<b.json> → diff two bench results\n"
 	@printf "  make golden        → the golden set through triage/needs-you/extraction on the bulk slot (GOLDEN_CTX=none|tail3|compressed|digest, GOLDEN_EXTRACT_CTX=none|tail3|digest, GOLDEN_K=…)\n"
 	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
@@ -200,7 +200,8 @@ help:
 	@printf "Each run writes JSON to $(BENCH_OUT); PROSE_* points the other slot.\n"
 	@printf "BENCH_VERIFY=0 skips the contract check; BENCH_K=1,3,6 picks the drain\n"
 	@printf "rounds (start the server with FAST_SLOTS >= max(K)).\n"
-	@printf "PIPE_COPIES/PIPE_WIDTH/PIPE_SHAPE/PIPE_LATE tune the pipeline bench;\n"
+	@printf "PIPE_COPIES/PIPE_WIDTH/PIPE_SHAPE/PIPE_LATE/PIPE_POLICY tune the pipeline\n"
+	@printf "bench, and PIPE_POLICY=all is the worst case every ledger row was taken at;\n"
 	@printf "MODEL_CTX widens the prose server's total context for SLOTS > 1.\n\n"
 	@printf "First run downloads ~19GB of weights before the port binds —\n"
 	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n\n"
@@ -656,6 +657,12 @@ PIPE_SHAPE   ?= lanes
 # the first draft call starts, timed from upsert to its extraction being done.
 # 0 skips it.
 PIPE_LATE    ?= 1
+# needsYou | all | onDemand — AppPrefs.draftPolicy, which decides how many of
+# the backlog's messages get a draft prefetched. The app ships `needsYou`; the
+# bench has always run `all`, the worst case, by passing no policy at all. The
+# default stays `all` so every row in the ledger keeps the meaning it was
+# written with, and `needsYou` is how the shipped default is measured.
+PIPE_POLICY  ?= all
 
 # ── the bakeoff: Bedrock as a target ────────────────────────────────────
 # Two wires. Most Bedrock models speak the OpenAI shape at
@@ -752,6 +759,7 @@ BENCH_DEFINES := \
   --dart-define=PIPE_WIDTH='$(PIPE_WIDTH)' \
   --dart-define=PIPE_SHAPE='$(PIPE_SHAPE)' \
   --dart-define=PIPE_LATE=$(if $(filter-out 0,$(PIPE_LATE)),true,false) \
+  --dart-define=PIPE_POLICY='$(PIPE_POLICY)' \
   --dart-define=GOLDEN_SET='$(GOLDEN)' \
   --dart-define=GOLDEN_REGISTRY='$(GOLDEN_REGISTRY)' \
   --dart-define=GOLDEN_OWNER_NAME='$(GOLDEN_OWNER_NAME)' \

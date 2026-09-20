@@ -1,4 +1,5 @@
-/// The four questions every golden loader asks of a decoded JSON tree.
+/// The four questions every golden loader asks of a decoded JSON tree, and
+/// the one rule about how it decodes one.
 ///
 /// One copy, because there were three: `golden_set.dart`,
 /// `golden_registry.dart` and `golden_storyline.dart` each carried their own
@@ -32,3 +33,24 @@ List<String> asStrings(Object? value) =>
 /// [value] as a string, or [fallback].
 String asString(Object? value, [String fallback = '']) =>
     value is String ? value : fallback;
+
+/// [load], with a malformed file named rather than thrown at.
+///
+/// `jsonDecode`'s own `FormatException` says "Unexpected character at 41231"
+/// and nothing about WHICH file it gave up on, which is the difference between
+/// a two-minute fix and an afternoon: a golden run reads a set, a registry and
+/// a run file, and the loaders are handed their paths by a define nobody
+/// reads twice.
+///
+/// The exception's text is not repeated beyond its message. A decode error can
+/// carry the bytes it choked on, and these files are real correspondence.
+///
+/// One copy, for the reason at the top of this file: `LiveBench.decodeOrFail`
+/// is this function under the name the benches already call it by.
+Future<T> decodeJsonOrFail<T>(String path, Future<T> Function() load) async {
+  try {
+    return await load();
+  } on FormatException catch (e) {
+    throw StateError('could not read $path as JSON: ${e.message}');
+  }
+}

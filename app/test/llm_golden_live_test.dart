@@ -27,7 +27,6 @@ import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
-import 'fixtures/bench_report.dart';
 import 'fixtures/bench_stats.dart';
 import 'fixtures/bench_target.dart';
 import 'fixtures/golden_gate.dart';
@@ -102,10 +101,11 @@ void main() {
   test(
     'the golden set through triage, needs-you and extraction',
     () async {
-      final (set, ctx) = await _loadOrFail();
-      // Extraction's rung is its own knob, read HERE rather than in
-      // `_loadOrFail`: the prose, storyline and gate tests share that helper
-      // and none of them runs an extraction.
+      final set = await _loadOrFail();
+      // Both rungs are read HERE rather than in `_loadOrFail`: the prose,
+      // storyline and gate tests share that helper and not one of them runs
+      // an extraction or a context rung.
+      final ctx = parseGoldenCtx(GoldenDefines.ctxRaw);
       final extractCtx = parseExtractCtx(GoldenDefines.extractCtxRaw);
       final k = checkK(GoldenDefines.k);
       const target = BenchTarget.bulk;
@@ -327,20 +327,12 @@ void main() {
           for (final entry in entries)
             if (entry.attempted) entry,
         ];
-        final runPath = BenchTarget.outDir.isEmpty
-            ? null
-            : await writeGoldenRun(
-                written,
-                bench: 'golden-bulk',
-                label: target.label,
-                outDir: BenchTarget.outDir,
-              );
-        final timingPath = await writeBenchResult(
-          bench: 'golden-bulk',
+        final paths = await _triageBench.writeRun(
+          entries: written,
+          label: target.label,
           collectors: [master],
-          accuracy: const [],
           startedAt: startedAt,
-          extra: {
+          extra: (runPath) => {
             'run_file': runPath,
             'ctx': ctx.name,
             'extract_ctx': extractCtx.name,
@@ -365,7 +357,10 @@ void main() {
             if (ctx == GoldenCtx.compressed) 'context_caveat': _compressedCaveat,
           },
         );
-        _printPaths(runPath, timingPath);
+        _triageBench.printPaths(
+          runPath: paths.runPath,
+          resultPath: paths.resultPath,
+        );
       }
 
       // Shape, never quality. Every word inside these fields is the model's
@@ -403,7 +398,7 @@ void main() {
   test(
     'the golden set through reply decision and drafts',
     () async {
-      final (set, _) = await _loadOrFail();
+      final set = await _loadOrFail();
       final k = checkK(GoldenDefines.k);
       const target = BenchTarget.prose;
 
@@ -590,20 +585,12 @@ void main() {
           '\n${_costBlock(cost, target.url)}\n',
         );
 
-        final runPath = BenchTarget.outDir.isEmpty
-            ? null
-            : await writeGoldenRun(
-                written,
-                bench: 'golden-prose',
-                label: target.label,
-                outDir: BenchTarget.outDir,
-              );
-        final timingPath = await writeBenchResult(
-          bench: 'golden-prose',
+        final paths = await _proseBench.writeRun(
+          entries: written,
+          label: target.label,
           collectors: [master],
-          accuracy: const [],
           startedAt: startedAt,
-          extra: {
+          extra: (runPath) => {
             'run_file': runPath,
             'ctx': 'tail (fixed)',
             'draft_context': 'message + tail only',
@@ -625,7 +612,10 @@ void main() {
             },
           },
         );
-        _printPaths(runPath, timingPath);
+        _proseBench.printPaths(
+          runPath: paths.runPath,
+          resultPath: paths.resultPath,
+        );
       }
 
       expect(
@@ -676,7 +666,7 @@ void main() {
   test(
     'the golden set through storyline confirm',
     () async {
-      final (set, _) = await _loadOrFail();
+      final set = await _loadOrFail();
       final k = checkK(GoldenDefines.k);
       final charterCap = checkCharterCap(GoldenDefines.charterCap);
       const target = BenchTarget.bulk;
@@ -935,6 +925,13 @@ void main() {
         final caveat =
             target.wire == LlmWire.bedrockConverse ? '$_converseCaveat\n' : '';
 
+        // The calls MADE, which is what a rate has to be divided by. `calls`
+        // is what the shortlist PLANNED: the two agree on a pass where nothing
+        // failed and nothing was retried, and where they disagree the planned
+        // number flatters a server that refused half of them. Both are
+        // printed, so a reader can see which pass this was.
+        final callsMade = _callsMade(master);
+
         // ignore: avoid_print
         print(
           '\n${master.banner}\n'
@@ -943,10 +940,11 @@ void main() {
           '\n${lines.whereType<String>().join('\n')}\n'
           '\n${tally.table()}\n'
           '\n${_failureLine(master, retries)}\n'
-          'k $k, charter cap $charterCap, $items items, $calls calls in '
+          'k $k, charter cap $charterCap, $items items, '
+          '$callsMade of $calls calls in '
           '${wall.inSeconds}s, '
           '${msgsPerMinute(items, wall).toStringAsFixed(1)} msgs/min, '
-          '${msgsPerMinute(calls, wall).toStringAsFixed(1)} calls/min\n'
+          '${msgsPerMinute(callsMade, wall).toStringAsFixed(1)} calls/min\n'
           '\n${_costBlock(cost, target.url)}\n',
         );
 
@@ -954,25 +952,17 @@ void main() {
           for (final entry in entries)
             if (entry.attempted) entry,
         ];
-        final runPath = BenchTarget.outDir.isEmpty
-            ? null
-            : await writeGoldenRun(
-                written,
-                bench: 'golden-storyline',
-                // The label carries the half, so `slug()` names the file
-                // `…-storyline-<stamp>.json`. A bulk run and a storyline run
-                // under one BENCH_LABEL would otherwise differ by a timestamp
-                // alone, and feeding the wrong one back as GOLDEN_RUN is
-                // exactly the mistake the zero-cards guard above catches.
-                label: '${target.label} storyline',
-                outDir: BenchTarget.outDir,
-              );
-        final timingPath = await writeBenchResult(
-          bench: 'golden-storyline',
+        final paths = await _storylineBench.writeRun(
+          entries: written,
+          // The label carries the half, so `slug()` names the file
+          // `…-storyline-<stamp>.json`. A bulk run and a storyline run
+          // under one BENCH_LABEL would otherwise differ by a timestamp
+          // alone, and feeding the wrong one back as GOLDEN_RUN is
+          // exactly the mistake the zero-cards guard above catches.
+          label: '${target.label} storyline',
           collectors: [master],
-          accuracy: const [],
           startedAt: startedAt,
-          extra: {
+          extra: (runPath) => {
             'run_file': runPath,
             'cards_from': GoldenDefines.runPath,
             'k': k,
@@ -980,9 +970,12 @@ void main() {
             'retries': retries,
             'items': items,
             'calls': calls,
+            'calls_made': callsMade,
             'wall_ms': wall.inMilliseconds,
             msgsPerMinKey: msgsPerMinute(items, wall),
-            'calls_per_min': msgsPerMinute(calls, wall),
+            // The calls MADE, failures included, from Round F on. Before it
+            // this divided `calls`, the number the shortlist planned.
+            'calls_per_min': msgsPerMinute(callsMade, wall),
             costKey: cost,
             'storyline': {
               ...tally.toJson(),
@@ -1006,7 +999,10 @@ void main() {
             },
           },
         );
-        _printPaths(runPath, timingPath);
+        _storylineBench.printPaths(
+          runPath: paths.runPath,
+          resultPath: paths.resultPath,
+        );
       }
 
       // Shape, never quality — and there is unusually little shape left to
@@ -1534,11 +1530,22 @@ void main() {
           callsPerPass: callsPerPass,
           wallPerPassMs: wallPerPassMs,
           cosineBins: cosineBins(withinCluster),
+          // The same pairs on the scale the shipped gates sit at. Counted
+          // twice rather than rescaled, so a Round D row and a Round F row
+          // still read against each other.
+          cosineBinsQwen:
+              cosineBins(withinCluster, edges: cosineBinEdgesQwen),
           lintCounts: lintCounts,
           clusterPurity: clusterPurity,
           sameEffortBins: cosineBins(pairs.sameEffort),
           crossEffortBins: cosineBins(pairs.crossEffort),
           withNoneBins: cosineBins(pairs.withNone),
+          sameEffortBinsQwen:
+              cosineBins(pairs.sameEffort, edges: cosineBinEdgesQwen),
+          crossEffortBinsQwen:
+              cosineBins(pairs.crossEffort, edges: cosineBinEdgesQwen),
+          withNoneBinsQwen:
+              cosineBins(pairs.withNone, edges: cosineBinEdgesQwen),
           sameSubjectBins: overlapBins(subjectOverlap.sameEffort),
           crossSubjectBins: overlapBins(subjectOverlap.crossEffort),
           withNoneSubjectBins: overlapBins(subjectOverlap.withNone),
@@ -1606,7 +1613,7 @@ void main() {
           ].join('  ')}\n'
           '  ${set.items.length} items in ${wall.inSeconds}s\n',
         );
-        _printPaths(runPath, timingPath);
+        _sweepBench.printPaths(runPath: runPath, resultPath: timingPath);
 
         // Shape, never quality. Every judgement in this run belongs to the
         // scorer: what is asserted here is that the replay had a mailbox to
@@ -1641,7 +1648,7 @@ void main() {
   test(
     'the golden set through the gates',
     () async {
-      final (set, _) = await _loadOrFail();
+      final set = await _loadOrFail();
 
       // Optional on purpose: the verdicts below do not depend on it, so a run
       // without a bulk run file to hand is a run with one column fewer rather
@@ -1773,18 +1780,18 @@ void main() {
 
       // A run file and no timing JSON: nothing here is timed, and a timing
       // row of zeros beside the real ones would be a row a reader compares.
-      final runPath = BenchTarget.outDir.isEmpty
-          ? null
-          : await writeGoldenRun(
-              [
-                for (final entry in entries)
-                  if (entry.attempted) entry,
-              ],
-              bench: 'golden-gate',
-              label: 'app-gates',
-              outDir: BenchTarget.outDir,
-            );
-      _printPaths(runPath, null);
+      // No `extra` is what says so.
+      final paths = await _gatesBench.writeRun(
+        entries: [
+          for (final entry in entries)
+            if (entry.attempted) entry,
+        ],
+        label: 'app-gates',
+        // Read only by a result file, and this bench writes none: a hundred
+        // pure functions have no wall worth reporting.
+        startedAt: DateTime.now(),
+      );
+      _gatesBench.printPaths(runPath: paths.runPath);
 
       // Shape, never accuracy — the same rule as every other bench in this
       // repo. Whether the gates agree with gold is the scorer's question and
@@ -1827,12 +1834,19 @@ String? _goldGateReason(GoldenItem item) {
   return reason is String ? reason : null;
 }
 
-/// The set and the rung both halves run on, or a failure that says what to run.
+/// The set all four halves run on, or a failure that says what to run.
 ///
 /// A missing `GOLDEN_SET` is the one failure worth catching before anything
 /// else happens: `loadGoldenSet('')` would report that no file exists at the
 /// empty path, which is true and tells nobody what to do about it.
-Future<(GoldenSet, GoldenCtx)> _loadOrFail() async {
+///
+/// `GOLDEN_CTX` is NOT read here, on `GOLDEN_EXTRACT_CTX`'s rule: the triage
+/// half is the only one of the four that runs a context rung at all. The prose
+/// half's context is fixed, the storyline half's cards come out of
+/// `GOLDEN_RUN`, and the gate replay reads no message body — so a header line
+/// saying `ctx tail3` above any of those three was describing a knob the run
+/// never touched, and a typo in it failed a run that would not have used it.
+Future<GoldenSet> _loadOrFail() async {
   if (GoldenDefines.setPath.isEmpty) {
     fail('GOLDEN_SET is not defined — run via make golden / make golden-prose '
         '/ make golden-storyline / make golden-gate (the Makefile passes it); '
@@ -1843,7 +1857,6 @@ Future<(GoldenSet, GoldenCtx)> _loadOrFail() async {
     fail('the golden set at ${GoldenDefines.setPath} holds no items — '
         'nothing to replay');
   }
-  final ctx = parseGoldenCtx(GoldenDefines.ctxRaw);
   final k = checkK(GoldenDefines.k);
   final owner = GoldenDefines.ownerName != null ||
       GoldenDefines.ownerAddress != null;
@@ -1854,27 +1867,34 @@ Future<(GoldenSet, GoldenCtx)> _loadOrFail() async {
     'directness mismatches ${_directnessMismatches(set)}, '
     'owner ${owner ? 'set' : 'NOT set (GOLDEN_OWNER_NAME/ADDRESS empty — '
         'needs-you reads no owner line)'}, '
-    'ctx ${ctx.name}, k $k',
+    'k $k',
   );
-  return (set, ctx);
+  return set;
 }
+
+/// One bench per test, named for the result and run files it writes.
+///
+/// The names are the ones every existing file in `BENCH_OUT` already carries,
+/// and they are what `bench_compare` and the ledger read a row by, so none of
+/// them moved when the four tests came onto [LiveBench] in Round F. The sweep
+/// keeps two, because its two STAGES share one body and one seeding and write
+/// under a name each.
+const LiveBench _triageBench = LiveBench('golden-bulk');
+const LiveBench _proseBench = LiveBench('golden-prose');
+const LiveBench _storylineBench = LiveBench('golden-storyline');
+const LiveBench _gatesBench = LiveBench('golden-gate');
+const LiveBench _sweepBench = LiveBench('golden-sweep');
+const LiveBench _vectorBench = LiveBench('golden-vector');
 
 /// [load], with a decode failure rethrown as a sentence naming the FILE.
 ///
 /// `jsonDecode`'s own `FormatException` says "Unexpected character at 41231"
 /// and nothing about which of the three machine-local files it was reading,
-/// which is the difference between a two-minute fix and an afternoon. The
-/// exception's text is not repeated beyond its message: a decode error can
-/// carry the source it choked on, and these files are real correspondence.
-/// The sweep test's two stages, which is the only pair of runs in this file
-/// that share a body. The other four benches keep their own header and their
-/// own write; see `LiveBench`'s doc for why they are not migrated.
-const LiveBench _sweepBench = LiveBench('golden-sweep');
-const LiveBench _vectorBench = LiveBench('golden-vector');
-
-/// Reading a file and printing a path do not depend on which bench is asking,
-/// so the other four tests reach them through the sweep's instance rather than
-/// keeping a second copy.
+/// which is the difference between a two-minute fix and an afternoon. Reading
+/// a file does not depend on which bench is asking, so the sweep's instance
+/// answers for all of them. The set and the registry name themselves from
+/// inside their own loaders as well, which is what covers the four tests that
+/// reach those two through `_loadOrFail`.
 Future<T> _decoded<T>(String path, Future<T> Function() load) =>
     _sweepBench.decodeOrFail(path, load);
 
@@ -1916,13 +1936,16 @@ Set<String> _ownerDisplays() => {
 /// own `clusterBySimilarity` over the pool `sweep()` reads, in the store's
 /// order, with the fragments folded first exactly as `sweep()` folds them.
 ///
-/// The SERIES pre-pass is NOT applied and its count is NOT printed. It is
-/// `StorylineService._seriesOf`, private and static, and nothing is widened
-/// for a bench; the golden pool has never contained a series in the first
-/// place, which Round D measured as `series 0 / excluded 0` on every sweep row
-/// it ever took. What this stage prints instead is `folded`, the one pre-pass
-/// it CAN reach, so a pool where that assumption stopped holding is visible
-/// even though the series half is not.
+/// The SERIES pre-pass is COUNTED and not APPLIED, and the difference is the
+/// point of printing it. `StorylineService.seriesOf` is read over the same
+/// pool rows the would-form clusters are built from, so `series` and
+/// `series_excluded` say how many rows the sweep would have taken out of the
+/// cosine pool before it clustered anything — which is exactly how far these
+/// clusters can differ from the ones a sweep would form. Both read zero on the
+/// golden pool, which has never held a series: Round D measured `series 0 /
+/// excluded 0` on every sweep row it ever took, and a pool where that stopped
+/// being true now says so here rather than only in an hour-long sweep.
+/// `folded`, the other pre-pass, is applied as well as counted.
 ///
 /// Counts, ratios and enums, like every other line this file prints.
 Future<void> _readTheVectorAlone({
@@ -2031,6 +2054,13 @@ Future<void> _readTheVectorAlone({
     ));
   }
 
+  // Counted over the SAME rows the ladder clustered, which is what makes the
+  // two numbers readable against each other: a sweep would have taken these
+  // rows out of the cosine pool first, and this stage did not.
+  final series = StorylineService.seriesOf(poolRows);
+  final seriesSeeded = series.seeded.length;
+  final seriesExcluded = series.excluded.length;
+
   // `local` or `remote` and never the URL: the host is the one part of a
   // bench's configuration that could carry somebody's machine name.
   final host = Uri.tryParse(EmbeddingsClient.defaultBaseUrl)?.host ?? '';
@@ -2045,7 +2075,8 @@ Future<void> _readTheVectorAlone({
     'embed $embedHost\n'
     '  pool ${poolRows.length} threads '
     '(${ladder.first.representatives} representatives, '
-    'folded ${ladder.first.folded}), '
+    'folded ${ladder.first.folded}, '
+    'series $seriesSeeded  series_excluded $seriesExcluded), '
     '${poolRows.length * (poolRows.length - 1) ~/ 2} pairs\n'
     '${[
       for (final rung in ladder)
@@ -2057,12 +2088,27 @@ Future<void> _readTheVectorAlone({
           sameTotal: pairs.sameEffort.length,
         ),
     ].join('\n')}\n'
-    '  pool pairs by cosine  same effort  '
+    '  pool pairs by cosine (0.50..0.65)  same effort  '
     '${binsLine(cosineBinLabels, cosineBins(pairs.sameEffort))}'
     '   cross effort  '
     '${binsLine(cosineBinLabels, cosineBins(pairs.crossEffort))}'
     '   with none  '
     '${binsLine(cosineBinLabels, cosineBins(pairs.withNone))}\n'
+    '  pool pairs by cosine (0.35..0.50)  same effort  '
+    '${binsLine(cosineBinLabelsQwen, cosineBins(
+      pairs.sameEffort,
+      edges: cosineBinEdgesQwen,
+    ))}'
+    '   cross effort  '
+    '${binsLine(cosineBinLabelsQwen, cosineBins(
+      pairs.crossEffort,
+      edges: cosineBinEdgesQwen,
+    ))}'
+    '   with none  '
+    '${binsLine(cosineBinLabelsQwen, cosineBins(
+      pairs.withNone,
+      edges: cosineBinEdgesQwen,
+    ))}\n'
     '${subjectOverlapLine(
       sameEffort: overlapBins(subjectOverlap.sameEffort),
       crossEffort: overlapBins(subjectOverlap.crossEffort),
@@ -2092,6 +2138,11 @@ Future<void> _readTheVectorAlone({
         'pool_threads': poolRows.length,
         'representatives': ladder.first.representatives,
         'folded': ladder.first.folded,
+        // Counted, never applied: see this stage's doc. The sweep's own tally
+        // writes the same two keys, so a vector row and a sweep row on one
+        // pool are read side by side.
+        'series': seriesSeeded,
+        'series_excluded': seriesExcluded,
         'would_form': {
           for (final rung in ladder)
             // `recall-70` → `recall_70`: a JSON key a reader greps for.
@@ -2106,6 +2157,21 @@ Future<void> _readTheVectorAlone({
           'cross_bins':
               labelledBins(cosineBinLabels, cosineBins(pairs.crossEffort)),
           'none_bins': labelledBins(cosineBinLabels, cosineBins(pairs.withNone)),
+          // The same three on the shipped gates' scale, under their own keys:
+          // a row written before Round F carries only the first three, and one
+          // key cannot mean two scales.
+          'same_bins_qwen': labelledBins(
+            cosineBinLabelsQwen,
+            cosineBins(pairs.sameEffort, edges: cosineBinEdgesQwen),
+          ),
+          'cross_bins_qwen': labelledBins(
+            cosineBinLabelsQwen,
+            cosineBins(pairs.crossEffort, edges: cosineBinEdgesQwen),
+          ),
+          'none_bins_qwen': labelledBins(
+            cosineBinLabelsQwen,
+            cosineBins(pairs.withNone, edges: cosineBinEdgesQwen),
+          ),
         },
         'subject_overlap': {
           'same_bins':
@@ -2234,12 +2300,6 @@ String _costBlock(Map<String, Object?> cost, String url) {
 
 String _usd(double? value) =>
     value == null ? '—' : '\$${value.toStringAsFixed(4)}';
-
-/// Where the two halves of a run landed, and the command that scores one of
-/// them. Printed together because the scoring command is the next thing anyone
-/// types, and a path they have to reconstruct by hand is a path they mistype.
-void _printPaths(String? runPath, String? timingPath) =>
-    _sweepBench.printPaths(runPath: runPath, resultPath: timingPath);
 
 /// The tripwire, exactly as every other bench states it: a build that ignores
 /// `enable_thinking` runs at half speed and every latency above would be

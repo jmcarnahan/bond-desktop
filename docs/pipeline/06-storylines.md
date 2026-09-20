@@ -1038,7 +1038,12 @@ settle gate can never bite there, and a scored row that was really a deferral
 would read as a measurement of a pass that never ran. The golden pool holds no
 series and no fragments of one thread, so `series`, `series_excluded`,
 `fragments` and `folded` are read from the unit tests and from the live rail
-rather than from this bench. Its `charter lint` line changed meaning with them.
+rather than from this bench. Since Round F the vector stage, `make
+golden-vector`, prints `series` and `series_excluded` beside `folded` as well,
+counted over the same pool rows its would-form clusters are built from and
+never applied to them: on a pool that held a series the two numbers would say
+how far those clusters stand from the ones a sweep would form. The sweep
+bench's `charter lint` line changed meaning with them.
 Before the lint was wired it was the whole reading, counted over every live
 storyline and applied to none. Now that a lint hit tombstones a cluster before
 its confirms, what that line counts is what SURVIVED and would still be

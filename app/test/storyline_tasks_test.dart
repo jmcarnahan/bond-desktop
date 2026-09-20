@@ -1188,6 +1188,28 @@ void main() {
       expect(GroupThreadsTask.cardsCap, NameStorylineTask.cardsCap);
     });
 
+    test('three meanings, one number, each pinned on its own', () {
+      // They are equal today and each is free to move: the card budget is
+      // what the prompt can show and what the service's split ladder reads,
+      // the two ceilings are what the grammar will let the answer say. An
+      // `expect` each, so a change to one of them is a deliberate change to
+      // that one. While all three read 12 the schema half below pins the
+      // VALUES the grammar carries, not which name fed them; the day one moves
+      // the two expectations start telling them apart.
+      expect(GroupThreadsTask.cardsPerCall, 12);
+      expect(GroupThreadsTask.maxGroups, 12);
+      expect(GroupThreadsTask.maxThreadsPerGroup, 12);
+
+      // And the ceilings are where the schema puts them, each on its own
+      // array: the answer's groups and one group's threads.
+      final properties = grouper.schema['properties'] as Map<String, dynamic>;
+      final groups = properties['groups'] as Map;
+      expect(groups['maxItems'], GroupThreadsTask.maxGroups);
+      final fields = (groups['items'] as Map)['properties'] as Map;
+      expect((fields['threads'] as Map)['maxItems'],
+          GroupThreadsTask.maxThreadsPerGroup);
+    });
+
     test('the prompt asks for one specific thing and allows an empty answer',
         () {
       expect(grouper.systemPrompt, contains('ONE specific project, event, or '

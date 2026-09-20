@@ -30,7 +30,7 @@ depends on a server being up, and each `make` target below runs it with
 | `make golden` | The golden set through triage, needs-you and extraction on the bulk slot — the run behind a golden-ledger row. Writes the run file and the timing/cost JSON. |
 | `make golden-prose` | Reply decisions for every gold-keep item and drafts for the reply-rubric items, on the prose slot. |
 | `make golden-sweep GOLDEN_RUN=…` | The app's own filing path over the golden set: the sweep, the naming pass, the per-member confirms and the assign shortlist, scored by membership against the gold registry. Needs the embed, bulk and prose servers. `SWEEP_CARD` picks whether the people on a thread are inside the clustering vector. See "The golden set". |
-| `make golden-vector GOLDEN_RUN=…` | The clustering vector alone, added 2026-09-19: the same seeding as `golden-sweep`, stopped the moment the mailbox is embedded. The clusters it WOULD form and their gold purity, every pool pair by cosine, by subject-word overlap and by shared people, and one separation line. Needs only the embedding server, takes about a minute, asks no model anything and scores nothing. See "The golden set". |
+| `make golden-vector GOLDEN_RUN=…` | The clustering vector alone, added 2026-09-19: the same seeding as `golden-sweep`, stopped the moment the mailbox is embedded. The clusters it WOULD form and their gold purity, every pool pair by cosine on two scales, by subject-word overlap and by shared people, and one separation line. Since Round F it also counts the series pre-pass it does not apply, printing `series` and `series_excluded` beside `folded`, which is how far its clusters could differ from a sweep's on the same pool. Needs only the embedding server, takes about a minute, asks no model anything and scores nothing. See "The golden set". |
 | `make golden-gate` | Offline, no server: the golden set through the app's own gates — direction, sender address and body. Tier 2 (headers) and the Teams ingest gates are not in the set and go unmeasured. `GOLDEN_RUN=` adds the model's `notification` proxy column. See "The golden set". |
 
 The knobs, all `?=` in the `Makefile` and all overridable on the command line
@@ -58,6 +58,13 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
   drafting, sharing the triage gate — the pre-Round-C shape) or `lanes` (what
   ships: a fast worker on the triage gate, a draft worker on its own).
 - `PIPE_LATE` — `0` skips the late-arrival leg.
+- `PIPE_POLICY` — which messages get a draft prefetched: `all`, `needsYou` or
+  `onDemand`, the three `AppPrefs.draftPolicy` words. Defaults to `all`, the
+  worst case and what every row in this ledger was taken at: before Round F
+  the bench passed no policy at all and the handler answers a missing one with
+  `all`. The app ships `needsYou`, so that is the run that measures the
+  shipping shape. The result carries `policy` and a `drafts_gated` count, the
+  messages the policy turned down.
 - `MODEL_CTX` — the total context the prose server is launched with, when it
   wants a different one from `CTX_SIZE`. llama.cpp splits `-c` across
   `--parallel` slots, so `SLOTS=2` at 16K is 8K a slot; `make model SLOTS=2
@@ -1010,6 +1017,12 @@ The confirm task against the gold registry, per the block above.
 `storyline.id` is the scorer's number over the items it counts — a `may` item
 is skipped unless it was filed under a forbidden slug, so the denominator is
 98 or 99 — and the rest are the replay's own rates.
+From Round F on, the `calls/min` column is the calls the run MADE divided by
+its wall, failures included, which is how `make golden-sweep` has always
+counted. Every row before it divided the calls the shortlist PLANNED. The two
+are the same number on a pass where nothing failed and nothing retried, which
+is what every row above was; where they differ, the planned figure flatters a
+server that refused some of them.
 
 | date | bulk label | cards from | run file | storyline.id | gold-accept must / should | forbidden-accept | extra-accept | derived none on gold-none | low-yes | p50 ms | calls/min | msgs/min | $/1K msgs | note |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -2112,7 +2125,11 @@ remain unmeasured by the set.
    `calls_per_min` divides the planned call count rather than the made one; a
    decode error escapes the loaders without the file's path; a pseudonymised
    public fixture; and whether `golden/tools/` should be versioned separately
-   from the data it sits beside.
+   from the data it sits beside. — the first four done 2026-09-20 (Round F
+   Phase 2): the shape helpers were already one file, `golden_json.dart`; the
+   `GOLDEN_CTX` parse left the shared loader; `calls_per_min` divides the calls
+   made; `decodeJsonOrFail` names the file. The fixture and the versioning are
+   the owner's decisions and stay open.
 7. **The prose critical path**, the roadmap's Round C — done 2026-09-17:
    three drain lanes (fast, storyline, draft) so the 4B's work never queues
    behind the 27B's; **Suggested replies** as a setting, "For messages that
@@ -2246,7 +2263,7 @@ server started differently from the default.
 | 5 | prose | oMLX, Qwen3.8-27B 4bit (same `:8090` server) | `make bench-prose PROSE_URL=http://localhost:8090/v1/chat/completions PROSE_MODEL='mlx-community--Qwen3.8-27B-4bit' PROSE_LABEL='omlx/Qwen3.8-27B-4bit'` |
 | 6 | bulk | llama.cpp, DeepSeek-R1-Distill-Qwen-14B Q4_K_M, `:8083` | `make fast FAST_PORT=8083 FAST_HF=unsloth/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q4_K_M FAST_SLOTS=6`, then `make bench BENCH_URL=http://localhost:8083/v1/chat/completions BENCH_LABEL='llamacpp/R1-Distill-Qwen-14B-Q4_K_M' BENCH_THINK=1` — always reasoning, so `BENCH_THINK=1` stops sending `enable_thinking:false` and relaxes the leak gate |
 | 7 | prose (and as bulk) | vLLM 0.29.0 on an AWS `g6e.xlarge` (one L40S), `Qwen/Qwen3.8-27B-FP8` (served as the alias `qwen3.8` by `--served-model-name qwen3.8` on the box's vLLM command), served on the box's loopback :8000 and reached through `ssh -N -L 18100:127.0.0.1:8000 ubuntu@<box>` (local 18100, never 8000) | `make bench-prose PROSE_URL=http://localhost:18100/v1/chat/completions PROSE_MODEL=qwen3.8 PROSE_LABEL=vllm-g6e/Qwen3.8-27B-FP8` and the same three defines on `make golden-prose`; as bulk, the `BENCH_*` triple with `BENCH_LABEL='vllm-g6e/Qwen3.8-27B-FP8 (as bulk)'` on `make golden` and `make golden-storyline`; the MTP head with `/opt/bond/serve.sh --speculative-config '{"method":"mtp","num_speculative_tokens":2}'` on the box (label `…-FP8+MTP`). The harness prices a localhost URL at $0.00, so these rows carry the box's hourly rate by hand (`1000 / (msgs_per_min × 60) × $1.86`) |
-| 8 | both | **the pipeline end to end**, not a candidate — the app's own queues over the fixture corpus | `make bench-pipeline PIPE_SHAPE=single` and `make bench-pipeline PIPE_SHAPE=lanes`, each twice, with BOTH servers up; `PIPE_COPIES` sets the corpus size (3 ≈ 48 ungated messages), `PIPE_WIDTH` the drafts in flight (the server must have been started with that many slots — `make model SLOTS=2 MODEL_CTX=32768` for two), `PIPE_LATE=0` drops the late-arrival leg. A prose slot elsewhere is the usual three `PROSE_*` defines |
+| 8 | both | **the pipeline end to end**, not a candidate — the app's own queues over the fixture corpus | `make bench-pipeline PIPE_SHAPE=single` and `make bench-pipeline PIPE_SHAPE=lanes`, each twice, with BOTH servers up; `PIPE_COPIES` sets the corpus size (3 ≈ 48 ungated messages), `PIPE_WIDTH` the drafts in flight (the server must have been started with that many slots — `make model SLOTS=2 MODEL_CTX=32768` for two), `PIPE_LATE=0` drops the late-arrival leg, and `PIPE_POLICY` picks the draft policy the run measures: it defaults to `all`, which is what every row here was taken at, and `PIPE_POLICY=needsYou` is the shipping default with a `drafts_gated` count beside the drafts written. A prose slot elsewhere is the usual three `PROSE_*` defines |
 | 9 | all three | **the app's own filing path**, not a candidate: the sweep, the naming, the confirms and the assign shortlist over the golden set | `make golden-sweep GOLDEN_RUN=<bulk run file>` twice on the default card, `topics`, which is the card the app ships; `SWEEP_CARD=participants` is the explicit alternative and takes two passes of its own. All of them with the embed, bulk and prose servers up. `make golden-score R=<sweep run file>` on each. The bulk run file is the newest local-4B `make golden` run; a storyline or sweep run file carries no cards and is refused. The prose slot can be pointed elsewhere for the naming stage with `PROSE_URL=http://localhost:18100/v1/chat/completions PROSE_MODEL=qwen3.8`, which is how the Round E shoot-out rows were taken on the box; Bedrock was not a sweep target this round |
 | 10 | embed | **the clustering vector**, not a chat candidate: one card, one prefix, one embedding model over the golden pool | `make golden-vector GOLDEN_RUN=<bulk run file>` once per configuration, with only the embedding server up; the target is the sweep test under `SWEEP_STAGE=vector`, which is what stops it after the seeding. The prefix ladder is `SWEEP_EMBED_PREFIX` on the shipped card, the card ladder is `SWEEP_CARD` on the shipped prefix, and a candidate MODEL is a second server: `make embed EMBED_PORT=8091 EMBED_HF=<repo> EMBED_ARGS='<pooling flags>'`, then the same target with `EMBED_URL=http://localhost:8091/v1/embeddings`, then `make embed-stop EMBED_PORT=8091`. Deterministic, so one pass per row. No score and no run file: the numbers are on the "Clustering vector" table |
 | 11 | — | further candidates | Added here as they come up, one command per row. What is worth trying is best judged after the rows above have numbers |
