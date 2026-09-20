@@ -1677,6 +1677,50 @@ void main() {
     });
   });
 
+  group('two clients', () {
+    test('the decision goes to one and the draft to the other', () async {
+      await seedInbound();
+      final decider = FakeLlm([decision()]);
+      final writer = FakeLlm([answer()]);
+
+      await runOne(
+        DraftHandler(store, writer, decisionClient: decider, progress: progress),
+      );
+
+      // Two stages, `reply_decision` and `draft_reply`, so a machine with a
+      // second server can put the cheap half of a prefetch somewhere else.
+      expect(decider.schemaNames, ['reply_decision']);
+      expect(writer.schemaNames, ['draft_reply']);
+      expect((await store.getDraftForMessage('email', 'm2'))!['body'],
+          startsWith('Hi Sarah — Friday works.'));
+    });
+
+    test('a no from the decision client still costs no draft', () async {
+      await seedInbound();
+      final decider = FakeLlm([decision(needsReply: false)]);
+      final writer = FakeLlm([answer()]);
+
+      await runOne(
+        DraftHandler(store, writer, decisionClient: decider, progress: progress),
+      );
+
+      expect(decider.schemaNames, ['reply_decision']);
+      expect(writer.schemaNames, isEmpty);
+      expect(await store.getDraftForMessage('email', 'm2'), isNull);
+    });
+
+    test('without one, both halves stay on the client it was given', () async {
+      await seedInbound();
+      final only = FakeLlm([decision(), answer()]);
+
+      await runOne(DraftHandler(store, only, progress: progress));
+
+      // The pre-Round-E behaviour, and what every other test in this file and
+      // every bench relies on.
+      expect(only.schemaNames, ['reply_decision', 'draft_reply']);
+    });
+  });
+
   group('streaming', () {
     test('publishes the words a person reads, and nothing else', () async {
       await seedInbound();
@@ -1746,6 +1790,56 @@ void main() {
       expect(llm.schemaNames.last, 'draft_reply');
       expect((await store.getDraftForMessage('email', 'm2'))!['body'],
           startsWith('Hi Sarah — Friday works.'));
+    });
+
+    test('a target that does not stream makes the plain call', () async {
+      await seedInbound();
+      final bus = DraftStreamBus();
+      addTearDown(bus.dispose);
+      final events = <DraftStreamEvent>[];
+      final sub = bus.stream.listen(events.add);
+      addTearDown(sub.cancel);
+      final llm = StreamingFakeLlm([decision(), answer()]);
+
+      await runOne(
+        DraftHandler(
+          store,
+          llm,
+          progress: progress,
+          // An enabled bus AND a target that cannot stream — one on the
+          // Converse wire has nothing to stream at all — so the bus is live
+          // and the call is still the plain one.
+          stream: bus,
+          streams: () => false,
+        ),
+      );
+
+      expect(llm.streamedCalls, 0);
+      expect(llm.schemaNames, ['reply_decision', 'draft_reply']);
+      expect(events, isEmpty);
+      // And the draft still lands, which is the whole point of degrading
+      // rather than refusing.
+      expect((await store.getDraftForMessage('email', 'm2'))!['body'],
+          startsWith('Hi Sarah — Friday works.'));
+    });
+
+    test('and a closure saying true leaves the streamed path alone', () async {
+      await seedInbound();
+      final bus = DraftStreamBus();
+      addTearDown(bus.dispose);
+      final llm = StreamingFakeLlm([decision()]);
+
+      await runOne(
+        DraftHandler(
+          store,
+          llm,
+          progress: progress,
+          stream: bus,
+          streams: () => true,
+        ),
+      );
+
+      expect(llm.streamedCalls, 1);
     });
 
     test('a draft call that fails still says it has stopped', () async {

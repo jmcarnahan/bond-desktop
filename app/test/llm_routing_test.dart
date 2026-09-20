@@ -8,6 +8,7 @@ import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -86,6 +87,24 @@ Map<String, dynamic> nameAnswer() => {
       'evidence': 'shared deal',
       'title': 'Website redesign',
       'summary': 'The studio is reviewing the homepage copy.',
+    };
+
+/// The refresh pass's answer — the description coming back unchanged, which
+/// is what it does most of the time. The same shape
+/// `storyline_service_test.dart` uses; it is here rather than imported
+/// because these two files script different passes for different reasons.
+Map<String, dynamic> refineAnswer() => {
+      'evidence': 'Every thread is still the website redesign.',
+      'title': 'Website redesign',
+      'summary': 'The studio is reviewing the homepage copy.',
+      'charter': 'The redesign of the Northline Studio website.',
+    };
+
+Map<String, dynamic> recapAnswer() => {
+      'evidence': 'The studio moved the launch date.',
+      'recap': 'The homepage copy is approved and the launch moved.',
+      'open_items': <String>['Sarah owes the photo selects to Dana'],
+      'decisions': <String>['The launch moved a week'],
     };
 
 void main() {
@@ -323,27 +342,37 @@ void main() {
   });
 
   group('providers', () {
-    test('the two clients point at different servers', () async {
-      // Both client providers now watch the activity log, which watches the
-      // store — so even this read-only test needs a real database under it.
+    test('a stage client defaults to its slot\'s server', () async {
+      // The family watches the activity log, which watches the store — so
+      // even this read-only test needs a real database under it.
       final container = ProviderContainer(
         overrides: [dbProvider.overrideWithValue(db)],
       );
       addTearDown(container.dispose);
-      // And reading `baseUrl` now resolves the stored slot, so the settings
-      // have to be in before the assertion rather than landing on a database
-      // this test's tearDown has already closed.
+      // And reading `baseUrl` resolves the stage map, so the settings have to
+      // be in before the assertion rather than landing on a database this
+      // test's tearDown has already closed.
       await container.read(appPrefsProvider.notifier).ready;
 
-      expect(container.read(llmClientProvider).baseUrl, LlmClient.defaultBaseUrl);
-      expect(container.read(fastLlmClientProvider).baseUrl,
+      expect(container.read(stageLlmClientProvider('draft_reply')).baseUrl,
+          LlmClient.defaultBaseUrl);
+      expect(container.read(stageLlmClientProvider('triage')).baseUrl,
           LlmClient.fastBaseUrl);
-      // Not the same server, and not the same object — two clients is the
-      // point, and one provider accidentally delegating to the other would
-      // route every label back onto the 27B.
+      // Not the same server, and not the same object — two servers is the
+      // point, and one stage accidentally aliasing the other would route
+      // every label back onto the 27B.
       expect(LlmClient.fastBaseUrl, isNot(LlmClient.defaultBaseUrl));
-      expect(identical(container.read(llmClientProvider),
-          container.read(fastLlmClientProvider)), isFalse);
+      expect(
+        identical(container.read(stageLlmClientProvider('draft_reply')),
+            container.read(stageLlmClientProvider('triage'))),
+        isFalse,
+      );
+      // One instance per stage id, cached exactly as the two clients were.
+      expect(
+        identical(container.read(stageLlmClientProvider('triage')),
+            container.read(stageLlmClientProvider('triage'))),
+        isTrue,
+      );
     });
 
     test('storylineServiceProvider wires the split', () async {
@@ -358,8 +387,9 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           dbProvider.overrideWithValue(db),
-          llmClientProvider.overrideWithValue(primary),
-          fastLlmClientProvider.overrideWithValue(fast),
+          stageLlmClientProvider.overrideWith(
+            (ref, id) => stageSlot(id) == ModelSlot.fast ? fast : primary,
+          ),
         ],
       );
       addTearDown(container.dispose);
@@ -374,6 +404,61 @@ void main() {
       expect(primary.schemas, ['storyline_name']);
     });
 
+    test('the storyline provider hands each pass its own stage client',
+        () async {
+      await seedUnnamedStoryline();
+      await seed('c1', vector: vectorAt(0.9));
+      // One fake per stage, so which client answered is the assertion — the
+      // service defaults all four to the naming client, and a provider that
+      // forgot one would be invisible with a single fake.
+      final clients = {
+        for (final id in [
+          'storyline_membership',
+          'storyline_name',
+          'storyline_refresh',
+          'storyline_recap',
+        ])
+          id: FakeLlm(id, {
+            'storyline_membership': [confirmAnswer()],
+            'storyline_name': [nameAnswer()],
+            'storyline_refresh': [refineAnswer()],
+            'storyline_recap': [recapAnswer()],
+          }),
+      };
+      final container = ProviderContainer(
+        overrides: [
+          dbProvider.overrideWithValue(db),
+          stageLlmClientProvider.overrideWith(
+            (ref, id) => clients[id] ?? FakeLlm(id, const {}),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final service = container.read(storylineServiceProvider);
+      await service.assignConversation('email', 'c1');
+      // The first refresh has nothing to evolve, so it BOOTSTRAPS — the
+      // naming task.
+      await service.refresh('sl-1');
+      // A described storyline EVOLVES instead, which is the refine task, and
+      // a moved member hash is what re-fires the pass at all.
+      await store.updateStoryline(
+        'sl-1',
+        summary: 'The studio is reviewing the homepage copy.',
+        charter: 'The redesign of the Northline Studio website.',
+      );
+      await seed('c2', vector: vectorAt(0.92));
+      await service.assignConversation('email', 'c2');
+      await service.refresh('sl-1');
+      await service.recap('sl-1');
+
+      expect(clients['storyline_membership']!.schemas,
+          everyElement('storyline_membership'));
+      expect(clients['storyline_name']!.schemas, ['storyline_name']);
+      expect(clients['storyline_refresh']!.schemas, ['storyline_refresh']);
+      expect(clients['storyline_recap']!.schemas, ['storyline_recap']);
+    });
+
     test('a stored target moves the fast client without rebuilding it',
         () async {
       final container = ProviderContainer(
@@ -382,7 +467,7 @@ void main() {
       addTearDown(container.dispose);
       await container.read(appPrefsProvider.notifier).ready;
 
-      final client = container.read(fastLlmClientProvider);
+      final client = container.read(stageLlmClientProvider('triage'));
       expect(client.baseUrl, LlmClient.fastBaseUrl);
 
       await container.read(appPrefsProvider.notifier).setFastLlmTarget(
@@ -392,7 +477,8 @@ void main() {
 
       // The SAME instance follows the setting — that is the whole design. A
       // rebuild here would abort a drain to change the next request's server.
-      expect(identical(container.read(fastLlmClientProvider), client), isTrue);
+      expect(identical(container.read(stageLlmClientProvider('triage')), client),
+          isTrue);
       expect(client.baseUrl, 'http://127.0.0.1:9/v1/chat/completions');
       expect(client.model, 'mlx-4b');
     });
@@ -404,15 +490,18 @@ void main() {
       addTearDown(container.dispose);
       await container.read(appPrefsProvider.notifier).ready;
 
-      final prose = container.read(llmClientProvider);
-      final fast = container.read(fastLlmClientProvider);
+      final prose = container.read(stageLlmClientProvider('draft_reply'));
+      final fast = container.read(stageLlmClientProvider('triage'));
 
       await container.read(appPrefsProvider.notifier).setProseLlmTarget(
             url: 'http://127.0.0.1:9/v1/chat/completions',
             model: 'mlx-27b',
           );
 
-      expect(identical(container.read(llmClientProvider), prose), isTrue);
+      expect(
+          identical(
+              container.read(stageLlmClientProvider('draft_reply')), prose),
+          isTrue);
       expect(prose.baseUrl, 'http://127.0.0.1:9/v1/chat/completions');
       expect(prose.model, 'mlx-27b');
       // Two slots, not one setting: moving prose must not move the bulk work.
@@ -423,6 +512,78 @@ void main() {
       // answer in seconds, so its 120 costs nothing and stays.
       expect(prose.timeout, LlmClient.proseTimeout);
       expect(fast.timeout, const Duration(seconds: 120));
+    });
+
+    test('a stage map entry moves one stage and leaves the others', () async {
+      final container = ProviderContainer(
+        overrides: [dbProvider.overrideWithValue(db)],
+      );
+      addTearDown(container.dispose);
+      final prefs = container.read(appPrefsProvider.notifier);
+      await prefs.ready;
+
+      final triage = container.read(stageLlmClientProvider('triage'));
+      final extraction = container.read(stageLlmClientProvider('extraction'));
+      expect(triage.baseUrl, LlmClient.fastBaseUrl);
+
+      await prefs.upsertTarget(
+        const LlmTargetSpec(
+          id: 'gpu-1',
+          name: 'GPU box',
+          url: 'http://127.0.0.1:9/v1/chat/completions',
+          model: 'qwen3-4b',
+        ),
+      );
+      await prefs.setStageTarget('triage', 'gpu-1');
+
+      // Per STAGE, which is what the map buys over the two slots: one stage
+      // moves and its neighbour on the same slot does not.
+      expect(triage.baseUrl, 'http://127.0.0.1:9/v1/chat/completions');
+      expect(triage.model, 'qwen3-4b');
+      expect(extraction.baseUrl, LlmClient.fastBaseUrl);
+      // And still the same instances, for the reason above.
+      expect(identical(container.read(stageLlmClientProvider('triage')), triage),
+          isTrue);
+      expect(
+        identical(
+            container.read(stageLlmClientProvider('extraction')), extraction),
+        isTrue,
+      );
+    });
+
+    test('pointing a stage elsewhere rebuilds no worker', () async {
+      final container = ProviderContainer(
+        overrides: [dbProvider.overrideWithValue(db)],
+      );
+      addTearDown(container.dispose);
+      final prefs = container.read(appPrefsProvider.notifier);
+      await prefs.ready;
+
+      final triage = container.read(triageQueueProvider);
+      final worker = container.read(aiWorkerProvider);
+      final storyline = container.read(storylineWorkerProvider);
+      final drafts = container.read(draftWorkerProvider);
+
+      await prefs.upsertTarget(
+        const LlmTargetSpec(
+          id: 'gpu-1',
+          name: 'GPU box',
+          url: 'http://127.0.0.1:9/v1/chat/completions',
+          model: 'qwen3.8',
+        ),
+      );
+      await prefs.setStageTarget('draft_reply', 'gpu-1');
+
+      // The same requirement as the slot test below, one level up: the stage
+      // map is reached by `ref.read` of the NOTIFIER inside a resolver
+      // closure, so a write creates no dependency edge. The day someone makes
+      // it a `ref.watch`, every one of these becomes a new object and a drain
+      // in flight is disposed to change where the NEXT request goes.
+      expect(identical(container.read(triageQueueProvider), triage), isTrue);
+      expect(identical(container.read(aiWorkerProvider), worker), isTrue);
+      expect(identical(container.read(storylineWorkerProvider), storyline),
+          isTrue);
+      expect(identical(container.read(draftWorkerProvider), drafts), isTrue);
     });
 
     test('the queues keep the clients they were built with', () async {

@@ -50,6 +50,7 @@ import '../services/identity_guard.dart';
 import '../services/profile_photos.dart';
 import '../services/llm/embeddings_client.dart';
 import '../services/llm/llm_client.dart';
+import '../services/llm/model_slots.dart';
 import '../services/mcp/bond_mcp_client.dart';
 import '../services/mcp/mcp_attachment_backend.dart';
 import '../services/mcp/mcp_auth.dart';
@@ -254,7 +255,7 @@ final setupStoreProvider =
 ///
 /// It watches the PATHS and the PLATFORM and nothing else. Every preference it
 /// needs — the port, the folder, whether it is managed at all — is read inside
-/// a closure with `ref.read`, on the rule [llmClientProvider] states: a
+/// a closure with `ref.read`, on the rule [stageLlmClientProvider] states: a
 /// provider that watched the prefs would be rebuilt the moment somebody moved
 /// a setting, and rebuilding this one mid-drain would tear down the supervisor
 /// holding the server the drain is talking to. Late binding costs nothing here
@@ -596,7 +597,8 @@ final syncServiceProvider = Provider<MailSync>(
     attentionThreshold: attentionThresholdReader(ref.watch(messageStoreProvider)),
     // `ref.read` inside the closure, never `watch`: watching would rebuild
     // this provider — and abort the drain running on it — the moment someone
-    // moved the setting, the same hazard [llmClientProvider] documents below.
+    // moved the setting, the same hazard [stageLlmClientProvider] documents
+    // below.
     lookbackDays: () => ref.read(appPrefsProvider).mailLookbackDays,
     // What puts one `context_reconcile` per registered directory at the tail
     // of every pass — the whole mechanism by which a directory stays level
@@ -642,69 +644,63 @@ final teamsSyncProvider = Provider<TeamsSync>((ref) {
   );
 });
 
-/// The local model. Constructing it opens nothing — the first call is what
-/// discovers whether a server is listening.
+/// One chat client per pipeline stage. Constructing one opens nothing — the
+/// first call is what discovers whether a server is listening.
 ///
-/// Every round trip it makes is reported to the activity log, which holds the
-/// tally until the queue that made the calls records the item they were for —
-/// so the panel shows "three model calls, nine seconds" on one extraction row
-/// rather than three rows nobody can attribute.
+/// **Routing is data.** Which server and model a stage dials is resolved at
+/// the top of every request from `stage_targets` and the target list, so
+/// pointing a stage somewhere is a setting rather than an edit here. What this
+/// file still decides is the stage's COMPILED fallback — the slot's default,
+/// which is what the client answers with if the resolver ever throws — and its
+/// timeout.
 ///
-/// It still watches ONLY the activity log. The user's choice of model reaches
-/// it through [LlmClient]'s resolver, which is read at call time: a model
-/// change must not rebuild this provider, because everything downstream —
-/// [aiWorkerProvider], [storylineServiceProvider], [triageQueueProvider] —
-/// watches it, and rebuilding those mid-drain would abort work in flight to
-/// change which server the NEXT request goes to.
+/// **Two servers, and why.** The 27B answers a triage call in about thirteen
+/// seconds; the small model answers the same call in about two. Everything on
+/// a fast-slot stage is a LABEL under a tight schema that Dart re-validates
+/// afterwards — triage, extraction, storyline membership — and none of it
+/// needs 27B judgement to come out right. The prose-slot stages are the prose:
+/// drafted replies, storyline titles, the reply decision, where the difference
+/// between the two models is something a person reads. That split is now the
+/// `slot` column of `pipelineStages` and the two built-in targets it names.
 ///
-/// `ref.read` inside the closure, not `watch`, on the precedent
-/// [embeddingsClientProvider] set: the callback outlives this body, and the
-/// client guards the read itself.
-final llmClientProvider = Provider<LlmClient>(
-  (ref) => LlmClient(
-    resolveTarget: () => ref.read(appPrefsProvider).proseTarget,
-    onCall: ref.watch(activityLogProvider).noteLlmCall,
-    // Sized to the longest draft this app can legitimately ask for; see
-    // [LlmClient.proseTimeout] for the arithmetic.
-    timeout: LlmClient.proseTimeout,
-  ),
-);
-
-/// The second chat model, on its own server (`make fast`), and the reason
-/// there are two.
-///
-/// The 27B answers a triage call in about thirteen seconds; the small model
-/// answers the same call in about two. Everything routed here is a LABEL under
-/// a tight schema that Dart re-validates afterwards — triage, extraction,
-/// storyline membership — and none of it needs 27B judgement to come out
-/// right. What stays on [llmClientProvider] is the prose: drafted replies and
-/// storyline titles, where the difference between the two models is something
-/// a person reads.
-///
-/// Down is down, per server: a call to a server that is not running throws
+/// **Down is down, per server.** A call to a server that is not running throws
 /// [LlmUnavailableException] and the drain parks, exactly as it always has.
-/// There is deliberately no fallback to the other server — silently answering
+/// There is deliberately no fallback to another target — silently answering
 /// bulk work on the 27B would turn "the fast server is off" into "the app got
 /// mysteriously slow".
 ///
-/// Observed by the same activity log as the 27B: since the split THIS is the
-/// client that makes most of the app's model calls, and a log that only saw
-/// the 27B would show a mailbox that apparently triaged itself for free.
-final fastLlmClientProvider = Provider<LlmClient>(
-  (ref) => LlmClient(
-    // Still the constructed fallback, and it still matters: it is what the
-    // client answers with if the resolver ever throws, and what
-    // `llm_routing_test.dart` pins the compiled default against.
-    baseUrl: LlmClient.fastBaseUrl,
-    // Its own name as well as its own URL: a runtime that serves more than one
-    // model routes on this field, so the bulk server's client must say which
-    // of them it is asking for rather than inherit the big server's answer.
-    model: LlmClient.fastModel,
-    // Read at call time, exactly as [llmClientProvider] explains: the stored
-    // slot moves the next request without rebuilding this client.
-    resolveTarget: () => ref.read(appPrefsProvider).fastTarget,
-    onCall: ref.watch(activityLogProvider).noteLlmCall,
-  ),
+/// **One activity log for all of them.** Most of the app's model calls are
+/// bulk ones, and a log that only saw the prose stages would show a mailbox
+/// that apparently triaged itself for free.
+///
+/// It watches ONLY the activity log. The stage map, the specs and the bearer
+/// are reached by `ref.read` of the NOTIFIER — not the state — INSIDE the
+/// resolver closure, on the precedent [embeddingsClientProvider] set: the
+/// callback outlives this body, the client guards the read itself, and a
+/// `.notifier` read subscribes to nothing. That is what keeps a prefs write
+/// from rebuilding a client, and so from tearing down the worker mid-drain
+/// that holds it — `llm_routing_test.dart` is what pins it.
+final stageLlmClientProvider = Provider.family<LlmClient, String>(
+  (ref, stageId) {
+    final slot = stageSlot(stageId);
+    final fallback = slotDefaults[slot]!;
+    return LlmClient(
+      baseUrl: fallback.baseUrl,
+      // Its own name as well as its own URL: a runtime that serves more than
+      // one model routes on this field, so a bulk stage's client must say
+      // which of them it is asking for rather than inherit the big server's
+      // answer.
+      model: fallback.model,
+      resolveTarget: () =>
+          ref.read(appPrefsProvider.notifier).targetForStage(stageId),
+      onCall: ref.watch(activityLogProvider).noteLlmCall,
+      // Sized to the longest draft this app can legitimately ask for; see
+      // [LlmClient.proseTimeout] for the arithmetic. A bulk stage keeps the
+      // generic 120, where the number only ever describes how long a dead
+      // server is waited on.
+      timeout: slot == ModelSlot.prose ? LlmClient.proseTimeout : null,
+    );
+  },
 );
 
 /// The FAST lane's gate: the triage drain and the fast worker, and nothing
@@ -765,8 +761,8 @@ final gateRepairServiceProvider = Provider<GateRepairService>(
 final triageQueueProvider = Provider<TriageQueue>((ref) {
   final queue = TriageQueue(
     ref.watch(messageStoreProvider),
-    // Bulk work: the fast server. See [fastLlmClientProvider].
-    ref.watch(fastLlmClientProvider),
+    // Bulk work by default: the fast server. See [stageLlmClientProvider].
+    ref.watch(stageLlmClientProvider('triage')),
     // Triage fetches its own bodies rather than waiting for a human to open
     // the thread. Taken off [MailSync], so this stays typed to the interface
     // a test can override.
@@ -884,8 +880,8 @@ final contextRetrieverProvider = Provider<ContextRetriever>(
     ref.watch(embeddingsClientProvider),
     // Bulk work on the fast server: one small structured call per
     // directory-fed draft, which is the slot every other per-item call in
-    // this app already lands on — [fastLlmClientProvider].
-    fastClient: ref.watch(fastLlmClientProvider),
+    // this app already lands on — [stageLlmClientProvider].
+    fastClient: ref.watch(stageLlmClientProvider('context_select')),
     // `ref.read` inside the closure, never `watch`, in the `lookbackDays`
     // shape above and for its reason: watching would rebuild this provider —
     // and the worker holding it, mid-drain — the moment somebody moved the
@@ -973,8 +969,8 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       // written yet.
       NeedsYouHandler(
         ref.watch(messageStoreProvider),
-        // Bulk work: the fast server. See [fastLlmClientProvider].
-        ref.watch(fastLlmClientProvider),
+        // Bulk work by default: the fast server. See [stageLlmClientProvider].
+        ref.watch(stageLlmClientProvider('needs_you')),
         activityLog: ref.watch(activityLogProvider),
         // A verdict this pass CHANGES has to move the chip beside it, and
         // moving it means re-asking `notifyWorthy` — which needs the recorder
@@ -990,8 +986,8 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       // would have them clustering a mailbox half of which has no vector yet.
       ExtractHandler(
         ref.watch(messageStoreProvider),
-        // Bulk work: the fast server. See [fastLlmClientProvider].
-        ref.watch(fastLlmClientProvider),
+        // Bulk work by default: the fast server. See [stageLlmClientProvider].
+        ref.watch(stageLlmClientProvider('extraction')),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
         progress: ref.watch(pipelineProgressProvider),
@@ -1040,8 +1036,8 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       ),
       AttachmentDigestHandler(
         ref.watch(messageStoreProvider),
-        // Bulk work: the fast server. See [fastLlmClientProvider].
-        ref.watch(fastLlmClientProvider),
+        // Bulk work by default: the fast server. See [stageLlmClientProvider].
+        ref.watch(stageLlmClientProvider('attachment_digest')),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
         // The worker this handler runs inside, read at CALL time — the same
@@ -1075,14 +1071,14 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       // drain reads a brief that already knows what changed this morning.
       ContextDigestHandler(
         ref.watch(contextStoreProvider),
-        // Bulk work: the fast server. See [fastLlmClientProvider].
-        ref.watch(fastLlmClientProvider),
+        // Bulk work by default: the fast server. See [stageLlmClientProvider].
+        ref.watch(stageLlmClientProvider('context_file_digest')),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
       ),
       ContextBriefHandler(
         ref.watch(contextStoreProvider),
-        ref.watch(fastLlmClientProvider),
+        ref.watch(stageLlmClientProvider('context_brief')),
         activityLog: ref.watch(activityLogProvider),
         // A new brief is a new answer to "what is this project", which is the
         // other thing a charter can be. Riverpod resolves a provider when it
@@ -1233,7 +1229,11 @@ final Provider<AiWorker> draftWorkerProvider = Provider<AiWorker>((ref) {
       // next draft after a sweep has it.
       DraftHandler(
         ref.watch(messageStoreProvider),
-        ref.watch(llmClientProvider),
+        ref.watch(stageLlmClientProvider('draft_reply')),
+        // Its own stage, and its own client: the decision is a yes/no under a
+        // tight schema and the draft is prose, so a machine with a second
+        // server can put the cheap half of a prefetch somewhere else.
+        decisionClient: ref.watch(stageLlmClientProvider('reply_decision')),
         activityLog: ref.watch(activityLogProvider),
         attachments: ref.watch(attachmentRetrieverProvider),
         contextDirs: ref.watch(contextRetrieverProvider),
@@ -1241,11 +1241,23 @@ final Provider<AiWorker> draftWorkerProvider = Provider<AiWorker>((ref) {
         // so the message being answered is embedded once for the two of them.
         embeddings: ref.watch(embeddingsClientProvider),
         progress: ref.watch(pipelineProgressProvider),
-        // The prose server's width, read at every launch decision — see
-        // `DraftHandler.concurrency`. `read` inside the closure, never
-        // `watch`: a width change must move the next draft, not rebuild the
-        // worker holding the drain that is writing this one.
-        concurrency: () => ref.read(appPrefsProvider).proseParallel,
+        // The DRAFT TARGET's width, read at every launch decision — see
+        // `DraftHandler.concurrency`. Through the resolved spec rather than
+        // off `proseParallel` directly, so a draft pointed at a GPU box reads
+        // that box's slots; the local prose target's width IS `proseParallel`,
+        // so a machine that has added nothing reads exactly what it read
+        // before. `read` inside the closure, never `watch`: a width change
+        // must move the next draft, not rebuild the worker holding the drain
+        // that is writing this one.
+        concurrency: () =>
+            ref.read(appPrefsProvider).specForStage('draft_reply')?.parallel ??
+            1,
+        // Whether the draft target can stream, on the same rule. A target on
+        // the Converse wire has nothing to stream, and one that answers a
+        // streamed request badly is a setting away from the plain call.
+        streams: () =>
+            ref.read(appPrefsProvider).specForStage('draft_reply')?.streams ??
+            true,
         // The live bus, so the draft streams. Every other build of this
         // handler takes the disabled default and makes the plain call.
         stream: ref.watch(draftStreamBusProvider),
@@ -1366,8 +1378,11 @@ final Provider<AiWorkers> aiWorkersProvider = Provider<AiWorkers>((ref) {
 /// be harmless — it is a provider because the handlers and the notifier must
 /// agree on the same store.
 ///
-/// The one place the routing split runs through a single object: membership is
-/// a label and goes to the fast server, naming is prose and stays on the 27B.
+/// The one place the routing split runs through a single object: five of the
+/// six storyline passes carry their own client, each on its own stage, so
+/// membership can sit on the fast server while naming, refresh, recap and the
+/// dark grouping sit on the prose one — and any of the five can be pointed
+/// somewhere else from Settings without touching the other four.
 ///
 /// The same embedding client the extraction handler holds, deliberately: a
 /// thread whose embed failed there is one this service re-embeds itself when
@@ -1376,8 +1391,13 @@ final Provider<AiWorkers> aiWorkersProvider = Provider<AiWorkers>((ref) {
 final storylineServiceProvider = Provider<StorylineService>(
   (ref) => StorylineService(
     ref.watch(messageStoreProvider),
-    ref.watch(llmClientProvider),
-    confirmClient: ref.watch(fastLlmClientProvider),
+    ref.watch(stageLlmClientProvider('storyline_name')),
+    confirmClient: ref.watch(stageLlmClientProvider('storyline_membership')),
+    // Dark until `StorylineTuning.groupingMode` says otherwise, and routable
+    // anyway: the stage exists so that turning it on is a setting.
+    groupClient: ref.watch(stageLlmClientProvider('storyline_group')),
+    refreshClient: ref.watch(stageLlmClientProvider('storyline_refresh')),
+    recapClient: ref.watch(stageLlmClientProvider('storyline_recap')),
     activityLog: ref.watch(activityLogProvider),
     embeddings: ref.watch(embeddingsClientProvider),
     // Only the user actions write through it — see [StorylineService]. The

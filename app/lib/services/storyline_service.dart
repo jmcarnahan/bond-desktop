@@ -567,6 +567,20 @@ class StorylineService {
   /// [GroupingMode.cosine], which is what ships.
   final LlmClient _groupClient;
 
+  /// Where a storyline's REFRESH goes — the re-read of a group as it grows.
+  ///
+  /// Its own handle for [_groupClient]'s reason: `storyline_refresh` is a
+  /// stage of its own, so it can be pointed at a different server from the
+  /// naming one without moving either. Defaults to [_client], which is what
+  /// every caller that passes one client gets.
+  final LlmClient _refreshClient;
+
+  /// Where a storyline's RECAP goes, on [_refreshClient]'s rule. The most
+  /// expensive of the prose passes — it reads what people actually said
+  /// rather than the cards — and so the one most worth pointing at a bigger
+  /// server on a machine that has one.
+  final LlmClient _recapClient;
+
   /// Which pass this service's sweep groups with.
   ///
   /// [StorylineTuning.groupingMode] for every caller in `lib/`; a test may
@@ -631,6 +645,8 @@ class StorylineService {
     LlmClient client, {
     LlmClient? confirmClient,
     LlmClient? groupClient,
+    LlmClient? refreshClient,
+    LlmClient? recapClient,
     ActivityLog? activityLog,
     this._embeddings,
     this._progress = const PipelineProgress.disabled(),
@@ -641,6 +657,8 @@ class StorylineService {
   })  : _client = client,
         _confirmClient = confirmClient ?? client,
         _groupClient = groupClient ?? client,
+        _refreshClient = refreshClient ?? client,
+        _recapClient = recapClient ?? client,
         // A named parameter cannot be an initializing formal for a private
         // field, and this one is named for the constant it defaults to.
         // ignore: prefer_initializing_formals
@@ -1170,7 +1188,7 @@ class StorylineService {
     final directoryLines = await _directoryRecapLines(storylineId);
 
     final result = await runTask(
-      _client,
+      _recapClient,
       const StorylineRecapTask(),
       RecapInput(
         title: storyline.title,
@@ -1472,7 +1490,7 @@ class StorylineService {
     List<String> removedCards,
   ) async {
     final result = await runTask(
-      _client,
+      _refreshClient,
       const RefineStorylineTask(),
       RefineInput(
         currentTitle: storyline.title,

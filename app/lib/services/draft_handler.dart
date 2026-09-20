@@ -90,6 +90,14 @@ class DraftHandler extends WorkHandler {
 
   final MessageStore _store;
   final LlmClient _client;
+
+  /// Where the reply DECISION goes. Its own stage (`reply_decision`) and so
+  /// its own client: the decision is a yes/no under a tight schema and the
+  /// draft is prose, so a machine with a second server can put the cheap half
+  /// of a prefetch somewhere else. Defaults to [_client], which is the
+  /// one-client behaviour every test and every bench here gets.
+  final LlmClient _decisionClient;
+
   final ActivityLog _log;
 
   /// Finds the passages of this thread's documents worth quoting, or null in a
@@ -127,6 +135,7 @@ class DraftHandler extends WorkHandler {
   DraftHandler(
     this._store,
     this._client, {
+    LlmClient? decisionClient,
     ActivityLog? activityLog,
     this._attachments,
     // NAMED `contextDirs` rather than taken as `this._contextDirs`: around
@@ -137,8 +146,9 @@ class DraftHandler extends WorkHandler {
     EmbeddingsClient? embeddings,
     this._progress = const PipelineProgress.disabled(),
     this._concurrency,
+    this._streams,
     this._stream = const DraftStreamBus.disabled(),
-  })  :
+  })  : _decisionClient = decisionClient ?? _client,
         // ignore: prefer_initializing_formals
         _contextDirs = contextDirs,
         // ignore: prefer_initializing_formals
@@ -163,6 +173,15 @@ class DraftHandler extends WorkHandler {
 
   @override
   int get concurrency => _concurrency?.call() ?? 1;
+
+  /// Whether the draft TARGET can stream, read at the same moment the width
+  /// is — a closure and not a flag for [_concurrency]'s reason: both are
+  /// facts about wherever `draft_reply` currently points, and pointing it
+  /// somewhere else must move the next draft rather than the next launch.
+  ///
+  /// True when nobody says otherwise, which is what every test and every
+  /// bench here gets.
+  final bool Function()? _streams;
 
   @override
   Future<void> run(Map<String, Object?> item) async {
@@ -283,7 +302,7 @@ class DraftHandler extends WorkHandler {
     final decision = request.asked
         ? null
         : await runTask(
-            _client,
+            _decisionClient,
             const ReplyDecisionTask(),
             ReplyDecisionInput(
               context: context,
@@ -310,7 +329,13 @@ class DraftHandler extends WorkHandler {
     // One reader per draft, because the paths it reports are positions in THIS
     // answer's object and nothing else. Null when nobody is listening, which
     // is what keeps the call itself unchanged.
-    final reader = _stream.enabled ? PartialJsonStrings() : null;
+    //
+    // And null when the TARGET does not stream — one on the Converse wire has
+    // nothing to stream at all — so a draft written there makes the plain
+    // call rather than a streamed one that would deliver its whole answer in
+    // a single delta at the end.
+    final reader =
+        _stream.enabled && (_streams?.call() ?? true) ? PartialJsonStrings() : null;
 
     try {
       final result = await runTask(

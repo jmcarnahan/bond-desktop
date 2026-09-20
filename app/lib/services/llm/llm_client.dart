@@ -7,6 +7,11 @@ import 'package:http/http.dart' as http;
 
 import 'model_slots.dart';
 
+/// [LlmWire] lives in `model_slots.dart` — a resolved [LlmTarget] carries one,
+/// and that file may not import this one. Re-exported so every importer of
+/// this file reads the enum where it always did.
+export 'model_slots.dart' show LlmWire;
+
 /// The one HTTP call this app makes to the local model.
 ///
 /// llama-server speaks the OpenAI chat-completions shape, so this is a plain
@@ -32,12 +37,15 @@ import 'model_slots.dart';
 /// OpenAI-compatible endpoint takes the same body this app already sends and
 /// only wants the header.
 ///
-/// NOTHING in `lib/` sets either: the providers build this client on the
-/// OpenAI wire with no token, so routing and the app's failure policy are
-/// exactly what they were. The seam exists for the bakeoff
-/// (`docs/model-bakeoff.md`, "Bedrock as a target") and for the speed design's
-/// opt-in cloud drafts. The token is a request header and nothing else: it
-/// never reaches an [LlmCallRecord], an exception message, or a log line.
+/// Either can arrive two ways: on the CONSTRUCTOR, which is the bench's path
+/// (`app/test/fixtures/bench_target.dart`) and fixes them for the life of the
+/// client, or on the RESOLVED TARGET, which is the app's since Round E — a
+/// user's target spec carries a wire and, through the keychain, a bearer, and
+/// [LlmTarget.wire] / [LlmTarget.bearer] win over the constructor's when they
+/// are set. Every provider still CONSTRUCTS on the OpenAI wire with no token,
+/// so a machine that has added no target behaves exactly as it always did.
+/// The token is a request header and nothing else: it never reaches an
+/// [LlmCallRecord], an exception message, or a log line.
 
 /// A failed call to the local model. [message] is safe to show a user.
 class LlmException implements Exception {
@@ -65,18 +73,6 @@ class LlmUnavailableException extends LlmException {
 /// The model answered, but not with the JSON object that was asked for.
 class LlmFormatException extends LlmException {
   const LlmFormatException(super.message);
-}
-
-/// Which request shape a client puts on the wire.
-enum LlmWire {
-  /// OpenAI chat completions: llama-server, oMLX, and Bedrock's
-  /// OpenAI-compatible endpoint. The app's own wire.
-  openAi,
-
-  /// AWS Bedrock Converse: the only wire Anthropic models are served on
-  /// there. A JSON answer is a forced tool call rather than a
-  /// `response_format`.
-  bedrockConverse,
 }
 
 /// One call to the local model, as the HTTP layer saw it.
@@ -262,13 +258,15 @@ class LlmClient {
   final http.Client _http;
   final LlmCallObserver? _onCall;
 
-  /// Sent as `Authorization: Bearer …` on either wire when set, and read
-  /// nowhere else in this file. Null for every client the app builds.
+  /// The FALLBACK token: sent as `Authorization: Bearer …` on either wire when
+  /// the resolved target names none, and read nowhere else in this file. Null
+  /// for every client the app builds — a user's target carries its own, out of
+  /// the keychain.
   final String? _bearerToken;
 
-  /// Which request shape this client speaks. [LlmWire.openAi] everywhere in
-  /// the app; a bench pointed at an Anthropic model on Bedrock passes
-  /// [LlmWire.bedrockConverse].
+  /// The FALLBACK wire: what this client speaks when the resolved target names
+  /// none. [LlmWire.openAi] for every client the app builds; a bench pointed
+  /// at an Anthropic model on Bedrock passes [LlmWire.bedrockConverse].
   final LlmWire wire;
 
   /// Fires with the tripwire below, so a test can catch a thinking regression.
@@ -310,22 +308,34 @@ class LlmClient {
   String get baseUrl => target.baseUrl;
   String get model => target.model;
 
-  /// Whether this client is talking to somebody else's machine.
+  /// Which wire THIS request speaks: the resolved target's when it names one,
+  /// and the constructor's otherwise. The whole of how a user's target can put
+  /// a Converse request out of a client every provider built on the OpenAI
+  /// wire.
+  LlmWire _wireOf(LlmTarget target) => target.wire ?? wire;
+
+  /// The token THIS request carries, by the same rule. Read here and in
+  /// [_headersFor], and nowhere else in this file.
+  String? _bearerOf(LlmTarget target) => target.bearer ?? _bearerToken;
+
+  /// Whether this request is going to somebody else's machine.
   ///
   /// Only the WORDING below turns on it. "start it, or change it in Settings"
   /// is advice about a server on this desk, and a cloud endpoint that answers
   /// 403 is not something the reader can go and launch.
-  bool get _remote => _bearerToken != null || wire == LlmWire.bedrockConverse;
+  bool _remoteFor(LlmTarget target) =>
+      _bearerOf(target) != null || _wireOf(target) == LlmWire.bedrockConverse;
 
-  String get _serverNoun =>
-      _remote ? 'The model server' : 'The local model server';
+  String _serverNoun(LlmTarget target) =>
+      _remoteFor(target) ? 'The model server' : 'The local model server';
 
-  String get _modelNoun => _remote ? 'The model' : 'The local model';
+  String _modelNoun(LlmTarget target) =>
+      _remoteFor(target) ? 'The model' : 'The local model';
 
   /// Names the server that did not answer. The old constant said
   /// "run: make model" for BOTH clients, which was wrong for the fast slot
   /// and wronger now that either can point anywhere.
-  String _unreachable(String url) => _remote
+  String _unreachable(LlmTarget target, String url) => _remoteFor(target)
       ? 'The model server at $url is not reachable — check the network and '
           'the URL'
       : 'The local model server at $url is not reachable — start it, or change '
@@ -340,19 +350,28 @@ class LlmClient {
     double temperature = 0.2,
     bool think = false,
   }) async {
-    final reply = await _post((
-      system: system,
-      user: user,
-      maxTokens: maxTokens,
-      temperature: temperature,
-      think: think,
-      schema: null,
-      schemaName: 'complete',
-      label: 'complete',
-    ));
+    // ONE resolution per request, taken HERE rather than inside [_post] so
+    // this method's own failure message can name the same server the request
+    // went to. A second read could describe a target saved since.
+    final target = this.target;
+    final reply = await _post(
+      (
+        system: system,
+        user: user,
+        maxTokens: maxTokens,
+        temperature: temperature,
+        think: think,
+        schema: null,
+        schemaName: 'complete',
+        label: 'complete',
+      ),
+      target: target,
+    );
     final text = reply.text;
     if (text == null) {
-      throw LlmFormatException('$_modelNoun answered with no message content.');
+      throw LlmFormatException(
+        '${_modelNoun(target)} answered with no message content.',
+      );
     }
     return text;
   }
@@ -445,6 +464,8 @@ class LlmClient {
     required bool think,
     void Function(String delta)? onText,
   }) async {
+    // ONE resolution per request — see [complete].
+    final target = this.target;
     final reply = await _post(
       (
         system: system,
@@ -456,6 +477,7 @@ class LlmClient {
         schemaName: schemaName,
         label: schemaName,
       ),
+      target: target,
       onText: onText,
     );
 
@@ -464,7 +486,9 @@ class LlmClient {
     // does not live in this method.
     final json = reply.json;
     if (json == null) {
-      throw LlmFormatException('$_modelNoun answered with no message content.');
+      throw LlmFormatException(
+        '${_modelNoun(target)} answered with no message content.',
+      );
     }
     return json;
   }
@@ -482,11 +506,11 @@ class LlmClient {
   /// golden storyline replay caught it on 2026-09-15: one unfiled item, zero
   /// recorded failures. A call whose answer cannot be used is a failed call,
   /// and the record has to say so.
-  _Reply _decoded(_Reply reply, _Request request) {
+  _Reply _decoded(_Reply reply, _Request request, LlmTarget target) {
     if (request.schema == null || reply.json != null) return reply;
     return (
       text: reply.text,
-      json: _decodeObject(reply.text),
+      json: _decodeObject(reply.text, target),
       promptTokens: reply.promptTokens,
       completionTokens: reply.completionTokens,
       serverPromptMs: reply.serverPromptMs,
@@ -495,21 +519,22 @@ class LlmClient {
     );
   }
 
-  Map<String, dynamic> _decodeObject(String? content) {
+  Map<String, dynamic> _decodeObject(String? content, LlmTarget target) {
+    final noun = _modelNoun(target);
     if (content == null) {
-      throw LlmFormatException('$_modelNoun answered with no message content.');
+      throw LlmFormatException('$noun answered with no message content.');
     }
     final Object? decoded;
     try {
       decoded = jsonDecode(content);
     } on FormatException {
       throw LlmFormatException(
-        '$_modelNoun did not answer with JSON: ${_snippet(content)}',
+        '$noun did not answer with JSON: ${_snippet(content)}',
       );
     }
     if (decoded is! Map<String, dynamic>) {
       throw LlmFormatException(
-        '$_modelNoun answered with ${decoded.runtimeType}, not a JSON '
+        '$noun answered with ${decoded.runtimeType}, not a JSON '
         'object: ${_snippet(content)}',
       );
     }
@@ -591,7 +616,7 @@ class LlmClient {
   /// addresses the model in the PATH, so the base URL is a host and the id —
   /// `…-v1:0` and all — is percent-encoded into it.
   Uri _endpoint(LlmTarget target) {
-    switch (wire) {
+    switch (_wireOf(target)) {
       case LlmWire.openAi:
         return Uri.parse(target.baseUrl);
       case LlmWire.bedrockConverse:
@@ -614,14 +639,19 @@ class LlmClient {
   /// request that asked to stream degrades to one plain call rather than
   /// failing, because the wire has nothing to stream and the caller's answer
   /// is the same either way.
-  Future<_Reply> _post(_Request request, {void Function(String)? onText}) async {
-    // ONE resolution per request, for both the URL and the model name.
-    final target = this.target;
-    final body = switch (wire) {
+  Future<_Reply> _post(
+    _Request request, {
+    required LlmTarget target,
+    void Function(String)? onText,
+  }) async {
+    // The wire is the RESOLVED target's where it names one — so a user's
+    // Converse target puts a Converse body out of a client every provider
+    // built on the OpenAI wire.
+    final body = switch (_wireOf(target)) {
       LlmWire.openAi => _openAiBody(request, target),
       LlmWire.bedrockConverse => _converseBody(request),
     };
-    final streamed = onText != null && wire == LlmWire.openAi;
+    final streamed = onText != null && _wireOf(target) == LlmWire.openAi;
     // One closure so the instrumented try below stays a single try over either
     // path, exactly as it was over the only path there used to be.
     Future<_Reply> send() => streamed
@@ -630,12 +660,12 @@ class LlmClient {
 
     final observer = _onCall;
     if (observer == null) {
-      return _decoded(await send(), request);
+      return _decoded(await send(), request, target);
     }
 
     final sw = Stopwatch()..start();
     try {
-      final result = _decoded(await send(), request);
+      final result = _decoded(await send(), request, target);
       observer(LlmCallRecord(
         label: request.label,
         durationMs: sw.elapsedMilliseconds,
@@ -684,12 +714,17 @@ class LlmClient {
   }
 
   /// What every request carries, plain or streamed.
-  Map<String, String> get _headers => {
-        'Content-Type': 'application/json',
-        // The one place the token appears. It is never logged, never
-        // recorded, and never put into an exception message.
-        if (_bearerToken != null) 'Authorization': 'Bearer $_bearerToken',
-      };
+  ///
+  /// The one place the token appears — the resolved target's when it carries
+  /// one, the constructor's otherwise. It is never logged, never recorded, and
+  /// never put into an exception message.
+  Map<String, String> _headersFor(LlmTarget target) {
+    final bearer = _bearerOf(target);
+    return {
+      'Content-Type': 'application/json',
+      if (bearer != null) 'Authorization': 'Bearer $bearer',
+    };
+  }
 
   /// NOT [LlmUnavailableException]: the server accepted the connection, so
   /// this is one request going wrong rather than a server that is down.
@@ -698,25 +733,30 @@ class LlmClient {
   /// The three ways a request fails before the server has answered, mapped
   /// ONCE for both paths: no socket and a client-side abort are the server
   /// being unreachable, and the ceiling is the timeout the observer counts.
-  Future<T> _guardTransport<T>(Uri url, Future<T> Function() send) async {
+  Future<T> _guardTransport<T>(
+    Uri url,
+    LlmTarget target,
+    Future<T> Function() send,
+  ) async {
     try {
       return await send();
     } on SocketException {
-      throw LlmUnavailableException(_unreachable(url.toString()));
+      throw LlmUnavailableException(_unreachable(target, url.toString()));
     } on http.ClientException {
-      throw LlmUnavailableException(_unreachable(url.toString()));
+      throw LlmUnavailableException(_unreachable(target, url.toString()));
     } on TimeoutException {
-      throw _timeoutException();
+      throw _timeoutException(target);
     }
   }
 
-  LlmException _timeoutException() => LlmException(
-        '$_modelNoun did not answer within ${timeout.inSeconds} seconds.',
+  LlmException _timeoutException(LlmTarget target) => LlmException(
+        '${_modelNoun(target)} did not answer within ${timeout.inSeconds} '
+        'seconds.',
       );
 
   /// The one status mapping, read by the plain path and the streamed one.
   /// Never returns — every status that reaches it is a failure.
-  Never _throwForStatus(int statusCode, String bodyText) {
+  Never _throwForStatus(LlmTarget target, int statusCode, String bodyText) {
     // A 5xx is the SERVER's condition, not this request's: llama-server
     // answers 503 for every request while its weights load. Counting that
     // against the item would burn the whole backlog's attempts against a
@@ -724,7 +764,8 @@ class LlmClient {
     // exactly as it does for a refused connection.
     if (statusCode >= 500) {
       throw LlmUnavailableException(
-        '$_serverNoun is not ready (HTTP $statusCode). ${_snippet(bodyText)}',
+        '${_serverNoun(target)} is not ready (HTTP $statusCode). '
+        '${_snippet(bodyText)}',
       );
     }
 
@@ -734,13 +775,13 @@ class LlmClient {
     // exactly as a 503 does.
     if (statusCode == 429) {
       throw LlmUnavailableException(
-        '$_serverNoun is throttling requests '
+        '${_serverNoun(target)} is throttling requests '
         '(HTTP 429). ${_snippet(bodyText)}',
       );
     }
 
     throw LlmException(
-      '$_modelNoun rejected the request (HTTP $statusCode). '
+      '${_modelNoun(target)} rejected the request (HTTP $statusCode). '
       '${_snippet(bodyText)}',
       statusCode,
     );
@@ -754,13 +795,14 @@ class LlmClient {
     final url = _endpoint(target);
     final response = await _guardTransport(
       url,
+      target,
       () => _http
-          .post(url, headers: _headers, body: jsonEncode(body))
+          .post(url, headers: _headersFor(target), body: jsonEncode(body))
           .timeout(timeout),
     );
 
     if (response.statusCode != 200) {
-      _throwForStatus(response.statusCode, _text(response));
+      _throwForStatus(target, response.statusCode, _text(response));
     }
 
     final Object? decoded;
@@ -768,18 +810,20 @@ class LlmClient {
       decoded = jsonDecode(_text(response));
     } on FormatException {
       throw LlmFormatException(
-        '$_modelNoun answered with something that is not JSON.',
+        '${_modelNoun(target)} answered with something that is not JSON.',
       );
     }
     if (decoded is! Map) {
       throw LlmFormatException(
-        '$_modelNoun answered with an unexpected payload shape.',
+        '${_modelNoun(target)} answered with an unexpected payload shape.',
       );
     }
 
-    return switch (wire) {
-      LlmWire.openAi => _readOpenAi(decoded, think: request.think),
-      LlmWire.bedrockConverse => _readConverse(decoded, request: request),
+    return switch (_wireOf(target)) {
+      LlmWire.openAi =>
+        _readOpenAi(decoded, target: target, think: request.think),
+      LlmWire.bedrockConverse =>
+        _readConverse(decoded, target: target, request: request),
     };
   }
 
@@ -807,7 +851,7 @@ class LlmClient {
     final sw = Stopwatch()..start();
 
     final streamRequest = http.Request('POST', url)
-      ..headers.addAll(_headers)
+      ..headers.addAll(_headersFor(target))
       ..body = jsonEncode({
         ...body,
         'stream': true,
@@ -818,6 +862,7 @@ class LlmClient {
       });
     final response = await _guardTransport(
       url,
+      target,
       () => _http.send(streamRequest).timeout(timeout),
     );
 
@@ -837,9 +882,10 @@ class LlmClient {
       try {
         body = await response.stream.toBytes().timeout(remaining);
       } on TimeoutException {
-        throw _timeoutException();
+        throw _timeoutException(target);
       }
       _throwForStatus(
+        target,
         response.statusCode,
         utf8.decode(body, allowMalformed: true),
       );
@@ -875,7 +921,7 @@ class LlmClient {
       // chunk rather than as a status — the request was already 200 by then.
       if (chunk['error'] != null) {
         throw LlmException(
-          '$_modelNoun failed mid-stream: ${_snippet(payload)}',
+          '${_modelNoun(target)} failed mid-stream: ${_snippet(payload)}',
         );
       }
 
@@ -943,7 +989,7 @@ class LlmClient {
         if (done.isCompleted) return;
         done.completeError(
           e is SocketException || e is http.ClientException
-              ? LlmUnavailableException(_unreachable(url.toString()))
+              ? LlmUnavailableException(_unreachable(target, url.toString()))
               : e,
         );
       },
@@ -956,7 +1002,7 @@ class LlmClient {
     try {
       await done.future.timeout(remaining);
     } on TimeoutException {
-      throw _timeoutException();
+      throw _timeoutException(target);
     } finally {
       // Every exit, not just the timeout: the `[DONE]` that ended the answer,
       // an error mid-stream, and the ceiling all leave a live subscription
@@ -982,12 +1028,18 @@ class LlmClient {
   /// The content is returned as it came — a caller that asked for JSON decodes
   /// it, and a non-string content is that caller's format failure, which is
   /// where it has always been raised.
-  _Reply _readOpenAi(Map<Object?, Object?> decoded, {required bool think}) {
+  _Reply _readOpenAi(
+    Map<Object?, Object?> decoded, {
+    required LlmTarget target,
+    required bool think,
+  }) {
     final choices = decoded['choices'];
     final first = choices is List && choices.isNotEmpty ? choices.first : null;
     final message = first is Map ? first['message'] : null;
     if (message is! Map) {
-      throw LlmFormatException('$_modelNoun answered with no message content.');
+      throw LlmFormatException(
+        '${_modelNoun(target)} answered with no message content.',
+      );
     }
 
     _checkReasoningLeak(message['reasoning_content'], think: think);
@@ -1048,13 +1100,15 @@ class LlmClient {
   /// failure rather than as a successful call somebody threw away afterwards.
   _Reply _readConverse(
     Map<Object?, Object?> decoded, {
+    required LlmTarget target,
     required _Request request,
   }) {
+    final noun = _modelNoun(target);
     final output = decoded['output'];
     final message = output is Map ? output['message'] : null;
     final blocks = message is Map ? message['content'] : null;
     if (blocks is! List) {
-      throw LlmFormatException('$_modelNoun answered with no message content.');
+      throw LlmFormatException('$noun answered with no message content.');
     }
 
     // Every text block, joined: Converse may split one assistant turn across
@@ -1081,7 +1135,7 @@ class LlmClient {
 
     if (request.schema != null && json == null) {
       throw LlmFormatException(
-        '$_modelNoun answered with no tool call, so it answered with no JSON.',
+        '$noun answered with no tool call, so it answered with no JSON.',
       );
     }
     // Parity with the other wire, where a constrained answer cut off by
@@ -1090,12 +1144,12 @@ class LlmClient {
     // well-formed PARTIAL object — and only `stopReason` says so.
     if (request.schema != null && decoded['stopReason'] == 'max_tokens') {
       throw LlmFormatException(
-        '$_modelNoun ran out of tokens before finishing the answer '
+        '$noun ran out of tokens before finishing the answer '
         '(stopReason max_tokens).',
       );
     }
     if (request.schema == null && text == null) {
-      throw LlmFormatException('$_modelNoun answered with no message content.');
+      throw LlmFormatException('$noun answered with no message content.');
     }
 
     final usage = decoded['usage'];

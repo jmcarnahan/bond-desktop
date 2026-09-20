@@ -1,64 +1,123 @@
 # 10 · Model routing, failure policy, and the prompt fence
 
-## Routing is decided at construction; the TARGET is resolved per call
+## Routing is data: every stage names a target, resolved per call
 
-There is no per-call router. Each queue/handler is handed one `LlmClient`
-instance when the providers are built, and that wiring — with the prose
-explaining it — lives in `app/lib/providers/app_providers.dart`. Which
-*server and model* that client dials is resolved at call time instead, so a
-settings change moves the next request without rebuilding the client or
-anything watching it (see **Runtime overrides** below):
+Since Round E (2026-09-19) the stage→server mapping is a preference, not
+wiring. Every stage that dials a model gets its own `LlmClient` from
+`stageLlmClientProvider(stageId)` (`app/lib/providers/app_providers.dart`),
+constructed on that stage's compiled DEFAULT and resolving
+`AppPrefsNotifier.targetForStage(stageId)` at the top of every request — so
+pointing a stage at another server moves its next request without rebuilding
+the client or anything watching it (see **Runtime overrides** below).
 
-| Provider | Slot | Compiled default | Served by |
-|----------|------|---------|-----------|
-| `llmClientProvider` | prose / 27B | `LLAMA_URL` → `http://localhost:8080/v1/chat/completions`, `LLAMA_MODEL` → `qwen3.8` | `make model` (Qwen3.8-27B) |
-| `fastLlmClientProvider` | bulk / fast | `FAST_LLAMA_URL` → `http://localhost:8082/v1/chat/completions`, `FAST_LLAMA_MODEL` → `qwen3.8` | `make fast` (Qwen3-4B-Instruct) — note **8082**, not 8081 |
-| `embeddingsClientProvider` | embed | `EMBED_URL` → `http://localhost:8081/v1/embeddings` | `make embed` (Qwen3-Embedding-0.6B, `--pooling last`) |
+| Stage | Default target | Which server that is by default |
+|-------|----------------|---------------------------------|
+| `triage` | `Local fast` | `make fast` |
+| `needs_you` | `Local fast` | `make fast` |
+| `extraction` | `Local fast` | `make fast` |
+| `attachment_digest` | `Local fast` | `make fast` |
+| `context_file_digest` | `Local fast` | `make fast` |
+| `context_brief` | `Local fast` | `make fast` |
+| `context_select` | `Local fast` | `make fast` |
+| `storyline_membership` | `Local fast` | `make fast` |
+| `storyline_group` | `Local prose` | `make model` |
+| `storyline_name` | `Local prose` | `make model` |
+| `storyline_refresh` | `Local prose` | `make model` |
+| `storyline_recap` | `Local prose` | `make model` |
+| `reply_decision` | `Local prose` | `make model` |
+| `draft_reply` | `Local prose` | `make model` |
+| `draft_improve` | none until picked | nothing — the button is hidden |
+| `embeddings` | not routed | `make embed` |
+
+The two built-in targets are the two slots this app has always had, named:
+
+| Built-in | Compiled default | Served by |
+|----------|------------------|-----------|
+| `Local prose` (`local-prose`) | `LLAMA_URL` → `http://localhost:8080/v1/chat/completions`, `LLAMA_MODEL` → `qwen3.8` | `make model` (Qwen3.8-27B) |
+| `Local fast` (`local-fast`) | `FAST_LLAMA_URL` → `http://localhost:8082/v1/chat/completions`, `FAST_LLAMA_MODEL` → `qwen3.8` | `make fast` (Qwen3-4B-Instruct) — note **8082**, not 8081 |
+| embeddings (`embeddingsClientProvider`) | `EMBED_URL` → `http://localhost:8081/v1/embeddings` | `make embed` (Qwen3-Embedding-0.6B, `--pooling last`) |
 
 All are `--dart-define`-overridable, and the two chat slots are also
 overridable at runtime in **Settings → Models**; adopting a bakeoff winner is
 config in `local.mk` or a setting, not code (see `docs/model-bakeoff.md`).
 llama-server ignores the model name field, but MLX-style runtimes route on it
-— which is why each slot carries its own name (`model_slots.dart`).
+— which is why each target carries its own name (`model_slots.dart`).
 
-Assignment: triage, extraction, the attachment digest
-(`attachment_digest`), the directory file digest (`context_file_digest`), the
-directory brief (`context_brief`), the directory section pick
-(`context_select`), and storyline membership-confirm get the
-fast client; storyline grouping (`storyline_group`), storyline naming
-(`storyline_name`), storyline refresh
-(`storyline_refresh`), storyline recap (`storyline_recap`), reply decision, and
-drafting get the 27B. `storyline_group` is the sweep's model-read grouping and
-runs only under `StorylineTuning.groupingMode == GroupingMode.model`, which is
-not what ships — it has a stage row and a client of its own so that pointing it
-somewhere is a setting rather than a code change the day it does
-(see [06-storylines.md](06-storylines.md#grouping)). Changing which slot serves a task is one line in
-`app_providers.dart` — and an update to that task's page here.
+Why that split: everything defaulting to `Local fast` is a LABEL under a tight
+schema that Dart re-validates afterwards, and the 4B answers those in about
+two seconds where the 27B takes thirteen. Everything defaulting to `Local
+prose` is text a person reads. `storyline_group` is the sweep's model-read
+grouping and runs only under `StorylineTuning.groupingMode ==
+GroupingMode.model`, which is not what ships — it has a stage row, a client
+and a default so that pointing it somewhere is a setting rather than a code
+change the day it does (see [06-storylines.md](06-storylines.md#grouping)).
+`draft_improve` is the one OPTIONAL stage: it has no target until the user
+picks one, it runs `DraftReplyTask` rather than a task of its own, and its
+button is hidden until then.
+
+Changing a stage's DEFAULT is one row in `pipelineStages`
+(`app/lib/services/llm/model_slots.dart`) and an edit here; changing where a
+stage goes on one machine is Settings → Models, and costs no code at all.
+`model_slots_test.dart` is what keeps the table honest against the handler
+list and against the three presets.
 
 ## Runtime overrides
 
-The table above is what a build is COMPILED with. Either chat slot can be
-pointed somewhere else while the app runs, from Settings → Models, without a
-restart and without interrupting work in flight.
+The tables above are what a build is COMPILED with. Any stage can be pointed
+at any target while the app runs, from Settings → Models, without a restart
+and without interrupting work in flight.
 
-- **Per slot, not per stage.** The stage→slot mapping is fixed in
-  `app_providers.dart`; the settings screen only displays it, from the authored
-  `pipelineStages` table in `app/lib/services/llm/model_slots.dart`. Moving a
-  stage between slots is still a code change and still an edit to this file.
+- **Per stage, from data.** Targets are a LIST: `llm_targets` holds the specs
+  the user added (`LlmTargetSpec {id, name, url, model, wire, bearer,
+  parallel, streams}`, JSON), and the two built-ins `local-fast` /
+  `local-prose` are DERIVED from the four slot prefs below and never stored —
+  one source of truth, so the two slot editors and the managed router keep
+  meaning what they meant. The map `stage_targets` (stage id → target id)
+  holds NON-DEFAULT entries only, so a fresh install is an empty object and
+  resolves byte-identically to the two-slot app. An entry naming a target that
+  no longer exists, or a row that does not parse, falls back to the stage's
+  default rather than throwing; a removed target takes its stage entries with
+  it in the same write. The three presets on the add screen — prose stages,
+  storyline confirm, all bulk stages — are `proseStageIds`,
+  `confirmStageIds` and `bulkStageIds` in `model_slots.dart`, and neither
+  `draft_improve` nor `embeddings` is in any of them.
+- **A bearer lives in the keychain.** `llm_target_bearer:<id>` via
+  `SecureTokenStore`; the JSON carries only the boolean `bearer`, a presence
+  flag. It is read once per launch into a private cache on `AppPrefsNotifier`
+  (the resolver is synchronous and runs on a drain's hot path) and reaches the
+  wire as the `Authorization` header and nowhere else — never `app_prefs`,
+  never an `LlmCallRecord`, never an exception message, never
+  `LlmTarget.toString()`. A keychain that refuses costs the header on the next
+  request, never the launch and never the write of the spec.
+- **Third-party drafts sit behind one consent.** A target is THIRD PARTY when
+  it speaks the Converse wire or its host is under `amazonaws.com`,
+  `anthropic.com`, `openai.com` or `deepseek.com` (`isThirdPartyHost`).
+  Loopback is deliberately not the test: the GPU box arrives on an `ssh`
+  tunnel at `localhost:18100`. Such a target on `draft_reply` or
+  `draft_improve` needs `cloud_drafts_consent`; without it `draft_reply`
+  resolves back to `Local prose` and `draft_improve` resolves to nothing. The
+  check lives in `AppPrefs.specForStage`, where the target is RESOLVED, so a
+  stage map restored from a backup cannot route a draft off the machine on its
+  own. Every other stage may be pointed anywhere without asking.
 - **Late binding.** `LlmClient` holds an optional `LlmTarget Function()` and
-  resolves it ONCE at the top of every request (`_post`), so the URL and the
-  model name can never come from two different settings. The client providers
-  therefore still watch only `activityLogProvider`: a model change rebuilds
-  nothing, and a drain already running finishes on the server it started with,
-  request by request.
-- **Where it is stored.** Four prefs — `fast_llm_url`, `fast_llm_model`,
-  `prose_llm_url`, `prose_llm_model` — in `app_prefs`, read into `AppPrefs` and
-  composed by `AppPrefs.fastTarget` / `proseTarget`. **Empty means "follow the
-  build"**, deliberately unlike `mcp_server_url`, which resolves its default on
-  read: a model default is a fact about this machine's `local.mk`, and freezing
-  today's value into the database would make a changed dart-define invisible.
-  They survive `wipeAll` for the same reason the backend mode does — machine
-  configuration, not one account's data.
+  resolves it ONCE at the top of every request, so the URL, the model name,
+  the wire and the token can never come from two different settings. The stage
+  clients therefore still watch only `activityLogProvider`, and the resolver
+  reads `appPrefsProvider.notifier` — the notifier, not the state, which
+  subscribes to nothing: a settings change rebuilds no client and no worker,
+  and a drain already running finishes on the server it started with, request
+  by request.
+- **Where it is stored.** Seven prefs in `app_prefs`. Four define the
+  built-ins — `fast_llm_url`, `fast_llm_model`, `prose_llm_url`,
+  `prose_llm_model`, read into `AppPrefs` and composed by `AppPrefs.fastTarget`
+  / `proseTarget`, which `fastSpec` / `proseSpec` are a second view of.
+  **Empty means "follow the build"**, deliberately unlike `mcp_server_url`,
+  which resolves its default on read: a model default is a fact about this
+  machine's `local.mk`, and freezing today's value into the database would make
+  a changed dart-define invisible. Three more carry the routing:
+  `llm_targets`, `stage_targets` and `cloud_drafts_consent`. All seven survive
+  `wipeAll` for the same reason the backend mode does — machine configuration,
+  not one account's data.
 - **Discovery.** `ModelServerProbe` (`app/lib/services/llm/model_probe.dart`)
   turns a completions URL into its `/v1/models` listing and GETs it with a 5 s
   timeout. It never throws: reachable means HTTP 200 with a readable list.
@@ -75,11 +134,15 @@ restart and without interrupting work in flight.
 - **What a wrong model name costs.** A runtime that routes on the name answers
   HTTP 400 for one it does not have, and a 400 is fatal — never retried (see
   below). Pick from the probe's list rather than typing.
-- **A note on the KV cache.** Switching a slot's server sends the next request's
-  byte-identical system prompt to a cold prefix cache — one slower call per
-  task, then back to normal. Pointing BOTH slots at one server is worse and
-  permanent: two prompts evicting each other, which is the thing the split
-  exists to avoid.
+- **A note on the KV cache.** Switching a target's server sends the next
+  request's byte-identical system prompt to a cold prefix cache — one slower
+  call per task, then back to normal. Pointing BOTH slots at one server is
+  worse and permanent: two prompts evicting each other, which is the thing the
+  split exists to avoid. Pointing several STAGES at one target is the same
+  trade at finer grain — each stage's prompt is its own prefix, so a target
+  serving six of them holds six, and a single-slot server evicts on every
+  switch between them. A GPU-served target with room for the lot is where the
+  presets are aimed.
 
 Every call records which model answered it: `LlmCallRecord` carries `model` and
 `baseUrl`, and the activity log folds the model into the row as `llm_model`
@@ -92,13 +155,21 @@ call in every table built from these records.
 
 **Two wires, one client.** `LlmClient` can also carry a bearer token and speak
 Bedrock's Converse wire (`LlmWire.bedrockConverse`) alongside the OpenAI one.
-Nothing in `lib/` sets either — every provider still constructs the client on
-the OpenAI wire with no token — so routing, the slots and the failure policy
-below are exactly what they were. The seam exists for the bakeoff
-(`docs/model-bakeoff.md`, "Bedrock as a target") and for the speed design's
-opt-in cloud drafts. On Converse a JSON answer is a forced tool call rather
-than a `response_format`, `temperature` is not sent, and the response carries
-no server timings.
+On Converse a JSON answer is a forced tool call rather than a
+`response_format`, `temperature` is not sent, and the response carries no
+server timings.
+
+Either can arrive two ways. On the CONSTRUCTOR, which fixes them for the life
+of the client and is the bench's path (`app/test/fixtures/bench_target.dart`,
+`docs/model-bakeoff.md`, "Bedrock as a target"); or on the RESOLVED TARGET,
+which is what `lib/` uses since Round E. `LlmTarget` carries an optional
+`wire` and an optional `bearer`, and `_wireOf` / `_bearerOf` prefer the
+target's over the constructor's — so a user's Converse target puts a Converse
+body and path out of a client every provider built on the OpenAI wire. Null on
+the target means "follow the client's own", which is what an OpenAI target
+resolves to and why the bench path is unchanged. `LlmWire` itself now lives in
+`model_slots.dart`, beside the target that carries it, and `llm_client.dart`
+re-exports it.
 
 **One streamed call.** `LlmClient.completeJsonStreamed` is the same request with
 `"stream": true` and `"stream_options": {"include_usage": true}`, read back as
@@ -434,11 +505,18 @@ what schedules the sweep and an idle pump schedules nothing.
 together — is what a caller outside the pipeline pumps, and its chained shape
 is what keeps "the sync's pump completed" meaning "and the drafts are done".
 
-**How wide the draft lane runs is a setting.** `AppPrefs.proseParallel`
-(`prose_parallel`, 1–8, default 1) is read by `DraftHandler.concurrency`
-through a closure, and `AiWorker` re-reads that on every launch decision — so
-Settings → Models → **Drafts in flight** moves the next draft rather than the
-next launch. One per slot the prose server was started with (`SLOTS` in
+**How wide the draft lane runs is a property of the draft TARGET.**
+`DraftHandler.concurrency` is a closure over
+`AppPrefs.specForStage('draft_reply')?.parallel`, and `AiWorker` re-reads it on
+every launch decision — so Settings → Models → **Drafts in flight** moves the
+next draft rather than the next launch. On the built-in prose target that
+width IS `AppPrefs.proseParallel` (`prose_parallel`, 1–8, default 1), so a
+machine that has added no target reads exactly the number it always read; a
+draft pointed at a GPU-served target reads that target's own width instead.
+`DraftHandler` takes a second closure beside it, `streams`, over the same
+resolved spec: a target that cannot stream — one on the Converse wire has
+nothing to stream at all — makes the plain call and publishes nothing to the
+draft bus. One per slot the prose server was started with (`SLOTS` in
 `local.mk`, `--max-num-seqs` on vLLM); extra requests queue at the server
 rather than fail. Drafts only: a recap and a refresh both write the storyline
 they are about and stay at one. Measured 2026-09-17: a second local slot on

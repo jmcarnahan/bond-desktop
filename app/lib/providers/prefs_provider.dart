@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart' show immutable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -11,6 +13,7 @@ import '../services/attention.dart';
 import '../services/llm/embeddings_client.dart' show EmbeddingsClient;
 import '../services/llm/model_slots.dart';
 import '../services/sync_service.dart';
+import '../services/token_store.dart';
 import 'app_providers.dart';
 
 export '../data/message_store.dart' show aboutMeKey, needsYouRulesKey;
@@ -37,8 +40,11 @@ export '../models/home_sort.dart'
     show HomeSort, HomeSortLabel, HomeFilter, HomeFilterLabel;
 
 /// So the settings screen reaches a slot's value and its name through one
-/// import — the prefs are where both are composed.
-export '../services/llm/model_slots.dart' show LlmTarget, ModelSlot;
+/// import — the prefs are where both are composed. [LlmTargetSpec] and
+/// [LlmWire] ride along for the same reason: the Targets list reads and writes
+/// them through this file.
+export '../services/llm/model_slots.dart'
+    show LlmTarget, LlmTargetSpec, LlmWire, ModelSlot;
 
 /// Which Microsoft backend the app talks through.
 ///
@@ -244,6 +250,29 @@ class AppPrefs {
   /// fact about whoever is signed in.
   final int proseParallel;
 
+  /// The targets the user added, and ONLY those.
+  ///
+  /// The two built-ins are derived — see [fastSpec] and [proseSpec] — so there
+  /// is one source of truth for where the local servers are: the four slot
+  /// prefs the two editors and the managed router already write. Stored as a
+  /// JSON array under [llmTargetsKey]; a row that does not parse is dropped on
+  /// the read rather than throwing.
+  final List<LlmTargetSpec> targets;
+
+  /// Which target each stage is pointed at — stage id to target id, and only
+  /// the entries that are NOT the stage's default.
+  ///
+  /// Storing non-defaults only is what makes a fresh install byte-identical to
+  /// the two-slot app: an absent entry resolves through [stageSlot] to the
+  /// built-in the stage always used.
+  final Map<String, String> stageTargets;
+
+  /// Whether the owner has acknowledged what a third-party draft target
+  /// receives. One acknowledgement for the machine, not one per target: what
+  /// it explains is what leaves this computer, and that is the same text
+  /// whichever company is on the other end.
+  final bool cloudDraftsConsent;
+
   /// What [routerPort] means when nothing is stored — llama-server's own
   /// default port, which is also what `make model` uses, so a user who never
   /// touches the field gets the port every doc in this repo names.
@@ -279,6 +308,9 @@ class AppPrefs {
     this.routerPort = defaultRouterPort,
     this.modelsFolder = '',
     this.proseParallel = defaultProseParallel,
+    this.targets = const [],
+    this.stageTargets = const {},
+    this.cloudDraftsConsent = false,
   });
 
   /// The managed router's origin — one server, three models.
@@ -365,6 +397,77 @@ class AppPrefs {
         ModelSlot.embed => true,
       };
 
+  /// The built-in fast target, as a spec.
+  ///
+  /// DERIVED from [fastTarget] rather than stored, which is the whole of why
+  /// targets-as-data did not fork the model settings: the four slot prefs, the
+  /// two slot editors, [slotBaseline] and the managed router all still mean
+  /// exactly what they meant, and this is a second view of them.
+  LlmTargetSpec get fastSpec => LlmTargetSpec(
+        id: builtInFastId,
+        name: builtInFastName,
+        url: fastTarget.baseUrl,
+        model: fastTarget.model,
+      );
+
+  /// The built-in prose target, on [fastSpec]'s rule. Its width is
+  /// [proseParallel] — the pref the segmented control writes — so a draft
+  /// pointed at this target reads the number it always read.
+  LlmTargetSpec get proseSpec => LlmTargetSpec(
+        id: builtInProseId,
+        name: builtInProseName,
+        url: proseTarget.baseUrl,
+        model: proseTarget.model,
+        parallel: proseParallel,
+      );
+
+  /// Every target a stage may be pointed at, the two built-ins first.
+  List<LlmTargetSpec> get allTargets => [fastSpec, proseSpec, ...targets];
+
+  /// One target by id, or null when nothing carries it.
+  LlmTargetSpec? specById(String id) {
+    for (final spec in allTargets) {
+      if (spec.id == id) return spec;
+    }
+    return null;
+  }
+
+  /// Which target id a stage resolves to: the stored entry when it names a
+  /// target that still exists, and the slot's default otherwise.
+  ///
+  /// Null for `embeddings`, which is not routed at all, and for an optional
+  /// stage with no valid entry — that is what "the feature is off" looks like
+  /// in the data.
+  String? targetIdForStage(String stageId) {
+    final stored = stageTargets[stageId];
+    if (stored != null && specById(stored) != null) return stored;
+    if (stageIsOptional(stageId)) return null;
+    final slot = stageSlot(stageId);
+    if (slot == ModelSlot.embed) return null;
+    return defaultTargetIdFor(slot);
+  }
+
+  /// The spec a stage will dial, with the consent rule applied.
+  ///
+  /// A THIRD-PARTY target on `draft_reply` without [cloudDraftsConsent]
+  /// resolves to the prose default instead, and on `draft_improve` to null —
+  /// the two stages whose prompt carries the message, the thread tail and
+  /// whatever the directories contributed. Consent is checked HERE rather than
+  /// only on the screen that sets it so that a stage map restored from a
+  /// backup, or edited by hand, cannot route a draft off this machine on its
+  /// own. Never null for a non-optional chat stage.
+  LlmTargetSpec? specForStage(String stageId) {
+    final id = targetIdForStage(stageId);
+    if (id == null) return null;
+    final spec = specById(id);
+    if (spec == null) return null;
+    final gated = stageId == 'draft_reply' || stageId == 'draft_improve';
+    if (gated && spec.isThirdParty && !cloudDraftsConsent) {
+      return stageIsOptional(stageId) ? null : proseSpec;
+    }
+    return spec;
+  }
+
   /// The folder the router is pointed at: the user's choice, or the app's own
   /// `models/` under Application Support when they have not made one.
   String effectiveModelsFolder(AppPaths paths) =>
@@ -401,6 +504,9 @@ class AppPrefs {
     int? routerPort,
     String? modelsFolder,
     int? proseParallel,
+    List<LlmTargetSpec>? targets,
+    Map<String, String>? stageTargets,
+    bool? cloudDraftsConsent,
   }) =>
       AppPrefs(
         attentionThreshold: attentionThreshold ?? this.attentionThreshold,
@@ -428,6 +534,9 @@ class AppPrefs {
         routerPort: routerPort ?? this.routerPort,
         modelsFolder: modelsFolder ?? this.modelsFolder,
         proseParallel: proseParallel ?? this.proseParallel,
+        targets: targets ?? this.targets,
+        stageTargets: stageTargets ?? this.stageTargets,
+        cloudDraftsConsent: cloudDraftsConsent ?? this.cloudDraftsConsent,
       );
 }
 
@@ -465,6 +574,22 @@ const String modelsFolderKey = 'models_folder';
 /// three keys above's reason — see [AppPrefs.proseParallel].
 const String proseParallelKey = 'prose_parallel';
 
+/// The three routing keys. Machine configuration like the four above and out
+/// of `wipeAll`'s list for their reason: which servers this machine can reach
+/// is not a fact about whoever is signed in.
+///
+/// [llmTargetsKey] is a JSON array of user-added [LlmTargetSpec]s;
+/// [stageTargetsKey] a JSON object of stage id to target id, non-defaults
+/// only; [cloudDraftsConsentKey] the string `'true'` or nothing.
+const String llmTargetsKey = 'llm_targets';
+const String stageTargetsKey = 'stage_targets';
+const String cloudDraftsConsentKey = 'cloud_drafts_consent';
+
+/// Where a target's bearer token lives: the KEYCHAIN, under this prefix and
+/// the target's id. Never `app_prefs` — the table is read by anything with the
+/// database file, and a token is the one thing here that is a credential.
+const String llmTargetBearerKeyPrefix = 'llm_target_bearer:';
+
 /// The switch [notifyStyleKey] replaced. Still read — and only read — so an
 /// install that had turned the ribbon off stays quiet across the upgrade
 /// instead of being handed OS notifications it never asked for.
@@ -473,8 +598,22 @@ const String notifyRibbonKey = 'notify_ribbon';
 class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   final MessageStore _store;
 
+  /// Where a target's bearer token is kept. Null in a build with no keychain
+  /// behind it — every test that does not pass one, and that is deliberate:
+  /// `flutter_secure_storage` throws `MissingPluginException` under
+  /// `flutter test`, which [SecureTokenStore] does not catch.
+  final TokenStore? _tokens;
+
+  /// The tokens themselves, by target id. A PRIVATE cache on the notifier and
+  /// nowhere else: the resolver that builds a request's target is synchronous
+  /// and the keychain is not, so the token has to already be in hand when a
+  /// drain asks. Never rendered, never copied into [state], never written to
+  /// `app_prefs`.
+  final Map<String, String> _bearers = {};
+
   /// Completes when the stored settings have replaced the defaults this
-  /// notifier starts on. Already complete when [initial] was supplied.
+  /// notifier starts on, AND the bearer prefetch has run. Already complete
+  /// when [initial] was supplied and nothing has a token.
   late final Future<void> ready;
 
   /// [initial] is what `main()` read before the first frame, and passing it is
@@ -484,15 +623,63 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   ///
   /// Without it the settings arrive one microtask later and [ready] is how a
   /// caller waits for them.
-  AppPrefsNotifier(this._store, {AppPrefs? initial})
-      : super(initial ?? const AppPrefs()) {
-    ready = initial != null ? Future.value() : _load();
+  ///
+  /// [tokens] is the keychain. Optional because most callers have no target
+  /// with a bearer and every one under `flutter test` has no keychain at all.
+  AppPrefsNotifier(this._store, {AppPrefs? initial, TokenStore? tokens})
+      // A named parameter cannot be an initializing formal for a private
+      // field, which is the same reason `StorylineService` carries this
+      // ignore.
+      // ignore: prefer_initializing_formals
+      : _tokens = tokens,
+        super(initial ?? const AppPrefs()) {
+    // The load FIRST and the prefetch after it, in that order and not in
+    // parallel: the prefetch reads `state.targets` to know which ids have a
+    // token, and a `Future.wait` of the two would run it against the defaults.
+    ready = (initial != null ? Future<void>.value() : _load())
+        .then((_) => _loadBearers());
   }
 
   Future<void> _load() async {
     final prefs = await read(_store);
     if (!mounted) return;
     state = prefs;
+  }
+
+  /// Fills the bearer cache from the keychain, once.
+  ///
+  /// A no-op with no keychain and a no-op when no target claims a token, which
+  /// is every fresh install and every existing one. Guarded whole: a keychain
+  /// that refuses costs the header on the next request — one 401 the user can
+  /// see and act on — and never the launch.
+  Future<void> _loadBearers() async {
+    final tokens = _tokens;
+    if (tokens == null) return;
+    final wanted = [
+      for (final spec in state.targets)
+        if (spec.hasBearer) spec.id,
+    ];
+    if (wanted.isEmpty) return;
+    try {
+      for (final id in wanted) {
+        final value = await tokens.read('$llmTargetBearerKeyPrefix$id');
+        if (value != null && value.isNotEmpty) _bearers[id] = value;
+      }
+    } catch (_) {
+      // Deliberately silent and deliberately broad: see the doc above. The
+      // exception carries a key name and nothing else worth a log line.
+    }
+  }
+
+  /// Where a stage's next request goes, bearer included.
+  ///
+  /// The one resolver `stageLlmClientProvider` calls, at the top of every
+  /// request. Synchronous by construction — the token is already in
+  /// [_bearers] — because it runs on a drain's hot path.
+  LlmTarget targetForStage(String stageId) {
+    final spec = state.specForStage(stageId);
+    if (spec == null) return state.targetFor(stageSlot(stageId));
+    return spec.toTarget(bearer: spec.hasBearer ? _bearers[spec.id] : null);
   }
 
   /// Reads every setting once. A stored value that does not parse —
@@ -565,7 +752,59 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       routerPort: _routerPort(await store.getPref(routerPortKey)),
       modelsFolder: _slotValue(await store.getPref(modelsFolderKey)),
       proseParallel: _proseParallel(await store.getPref(proseParallelKey)),
+      targets: _targets(await store.getPref(llmTargetsKey)),
+      stageTargets: _stageTargets(await store.getPref(stageTargetsKey)),
+      cloudDraftsConsent:
+          await store.getPref(cloudDraftsConsentKey) == 'true',
     );
+  }
+
+  /// The stored target list, or none of it.
+  ///
+  /// Every layer is forgiving on its own terms, and none of them throws: text
+  /// that is not JSON, or JSON that is not an array, reads as no targets at
+  /// all; a row [LlmTargetSpec.tryParse] refuses is dropped and the rest
+  /// survive; a row claiming a BUILT-IN id is dropped because those two are
+  /// derived and a stored copy would shadow the live slot prefs; and a
+  /// duplicate id keeps the first, because the alternative is two rows one
+  /// stage map entry cannot choose between.
+  static List<LlmTargetSpec> _targets(String? raw) {
+    final decoded = _json(raw);
+    if (decoded is! List) return const [];
+    final seen = <String>{};
+    final specs = <LlmTargetSpec>[];
+    for (final row in decoded) {
+      final spec = LlmTargetSpec.tryParse(row);
+      if (spec == null || spec.isBuiltIn) continue;
+      if (!seen.add(spec.id)) continue;
+      specs.add(spec);
+    }
+    return specs;
+  }
+
+  /// The stored stage map, on [_targets]' rule: not an object reads as empty,
+  /// and an entry whose value is not a string is dropped. An entry naming a
+  /// target that no longer exists is NOT dropped here — it is ignored by
+  /// [AppPrefs.targetIdForStage] instead, so removing a target and putting it
+  /// back does not silently lose where it was pointed.
+  static Map<String, String> _stageTargets(String? raw) {
+    final decoded = _json(raw);
+    if (decoded is! Map) return const {};
+    final map = <String, String>{};
+    decoded.forEach((key, value) {
+      if (key is String && value is String) map[key] = value;
+    });
+    return map;
+  }
+
+  /// Decoded JSON, or null for anything that is not.
+  static Object? _json(String? raw) {
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      return jsonDecode(raw);
+    } on FormatException {
+      return null;
+    }
   }
 
   /// A stored port, or the default. Unparseable is the default and
@@ -837,6 +1076,205 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _store.setPref(proseParallelKey, clamped.toString());
   }
 
+  /// Adds a target, or replaces the one with the same id.
+  ///
+  /// [bearer] is the only way a token is ever written, and it goes to the
+  /// KEYCHAIN and the in-memory cache — never to `app_prefs`, where the spec's
+  /// `bearer` field is a boolean saying only that one exists. The three cases:
+  /// a non-null [bearer] stores it and sets the flag; a null [bearer] on a
+  /// spec that claims none deletes whatever was there, which is how a token is
+  /// cleared; and a null [bearer] on a spec that claims one KEEPS the stored
+  /// token, which is what an edit of the name or the model has to do — the
+  /// screen shows "set" and cannot show the secret back, so it cannot resend
+  /// it either.
+  ///
+  /// The keychain first and the pref after it, because a spec that claims a
+  /// token the keychain refused would send an unauthenticated request every
+  /// time. Throws on a built-in id: those two are derived from the slot prefs
+  /// and are edited through the slot editors.
+  Future<void> upsertTarget(LlmTargetSpec spec, {String? bearer}) async {
+    if (spec.isBuiltIn) {
+      throw ArgumentError.value(
+        spec.id,
+        'spec.id',
+        'the built-in targets are derived from the slot prefs',
+      );
+    }
+    final key = '$llmTargetBearerKeyPrefix${spec.id}';
+    var hasBearer = spec.hasBearer;
+    if (bearer != null) {
+      hasBearer = true;
+      _bearers[spec.id] = bearer;
+      await _writeToken(key, bearer);
+    } else if (!spec.hasBearer) {
+      _bearers.remove(spec.id);
+      await _writeToken(key, null);
+    }
+
+    final stored = spec.copyWith(
+      hasBearer: hasBearer,
+      parallel: clampProseParallel(spec.parallel),
+    );
+    final targets = [
+      for (final existing in state.targets)
+        if (existing.id == stored.id) stored else existing,
+    ];
+    if (!targets.any((t) => t.id == stored.id)) targets.add(stored);
+
+    state = state.copyWith(targets: targets);
+    await _writeTargets(targets);
+  }
+
+  /// Forgets a target: its token, its row, and every stage pointed at it.
+  ///
+  /// The stage entries go in the SAME write rather than being left to resolve
+  /// as defaults, because a stale entry would silently re-point those stages
+  /// the day somebody added a target with the same id back.
+  ///
+  /// A no-op for a built-in id — they cannot be removed — and for an id
+  /// nothing carries.
+  Future<void> removeTarget(String id) async {
+    if (id == builtInFastId || id == builtInProseId) return;
+    if (!state.targets.any((spec) => spec.id == id)) return;
+
+    _bearers.remove(id);
+    await _writeToken('$llmTargetBearerKeyPrefix$id', null);
+
+    final targets = [
+      for (final spec in state.targets)
+        if (spec.id != id) spec,
+    ];
+    final stageTargets = {
+      for (final entry in state.stageTargets.entries)
+        if (entry.value != id) entry.key: entry.value,
+    };
+    state = state.copyWith(targets: targets, stageTargets: stageTargets);
+    await _writeTargets(targets);
+    await _writeStageTargets(stageTargets);
+  }
+
+  /// Points one stage at one target.
+  ///
+  /// Writing the stage's own DEFAULT removes the entry instead of storing it,
+  /// so the map holds non-defaults only and a fresh install stays empty. An
+  /// OPTIONAL stage is the exception: there the entry IS the feature being
+  /// turned on, so it is stored even when it names the slot's default target.
+  ///
+  /// A no-op for an unknown target id and for `embeddings`, which is not
+  /// routed at all.
+  Future<void> setStageTarget(String stageId, String targetId) async {
+    if (stageId == 'embeddings') return;
+    if (state.specById(targetId) == null) return;
+
+    final slot = stageSlot(stageId);
+    final optional = stageIsOptional(stageId);
+    final isDefault =
+        slot != ModelSlot.embed && targetId == defaultTargetIdFor(slot);
+    if (isDefault && !optional) return clearStageTarget(stageId);
+
+    if (state.stageTargets[stageId] == targetId) return;
+    final map = {...state.stageTargets, stageId: targetId};
+    state = state.copyWith(stageTargets: map);
+    await _writeStageTargets(map);
+  }
+
+  /// Puts a stage back on its default target — and, for an optional stage,
+  /// turns its feature off again.
+  Future<void> clearStageTarget(String stageId) async {
+    if (!state.stageTargets.containsKey(stageId)) return;
+    final map = {...state.stageTargets}..remove(stageId);
+    state = state.copyWith(stageTargets: map);
+    await _writeStageTargets(map);
+  }
+
+  /// Points whole groups of stages at one target, the way the add screen's
+  /// three checkboxes do.
+  ///
+  /// One state write and one pref write for the lot: a preset that wrote each
+  /// stage separately would put a dozen rebuilds and a dozen round trips
+  /// behind one tick. [proseStageIds], [confirmStageIds] and [bulkStageIds]
+  /// are the sets, and `model_slots_test` pins them against `pipelineStages`.
+  ///
+  /// A preset onto a THIRD-PARTY target skips the two draft stages until the
+  /// consent stands. [AppPrefs.specForStage] would gate those back to the
+  /// local prose target anyway, but only until consent was granted for some
+  /// other reason — and at that moment drafts would start leaving the machine
+  /// from a stage nobody was asked about. Writing nothing is what keeps the
+  /// acknowledgement about the stage it was given for.
+  Future<void> applyPreset({
+    required String targetId,
+    bool prose = false,
+    bool confirm = false,
+    bool bulk = false,
+  }) async {
+    final target = state.specById(targetId);
+    if (target == null) return;
+    final skipDrafts = target.isThirdParty && !state.cloudDraftsConsent;
+    final map = {...state.stageTargets};
+    for (final stageId in [
+      if (prose) ...proseStageIds,
+      if (confirm) ...confirmStageIds,
+      if (bulk) ...bulkStageIds,
+    ]) {
+      // Untouched, not cleared: a stage the user pointed somewhere by hand is
+      // theirs, and a preset that silently reset it would be a second
+      // surprise on top of the one this guard exists to prevent.
+      if (skipDrafts &&
+          (stageId == 'draft_reply' || stageId == 'draft_improve')) {
+        continue;
+      }
+      final slot = stageSlot(stageId);
+      final isDefault =
+          slot != ModelSlot.embed && targetId == defaultTargetIdFor(slot);
+      if (isDefault && !stageIsOptional(stageId)) {
+        map.remove(stageId);
+      } else {
+        map[stageId] = targetId;
+      }
+    }
+    if (_sameMap(map, state.stageTargets)) return;
+    state = state.copyWith(stageTargets: map);
+    await _writeStageTargets(map);
+  }
+
+  /// Records that the owner has read what a third-party draft target
+  /// receives. Until it is true, [AppPrefs.specForStage] sends `draft_reply`
+  /// back to the local prose target and leaves `draft_improve` unrouted.
+  Future<void> setCloudDraftsConsent(bool value) async {
+    state = state.copyWith(cloudDraftsConsent: value);
+    await _store.setPref(cloudDraftsConsentKey, value.toString());
+  }
+
+  Future<void> _writeTargets(List<LlmTargetSpec> targets) => _store.setPref(
+        llmTargetsKey,
+        jsonEncode([for (final spec in targets) spec.toJson()]),
+      );
+
+  Future<void> _writeStageTargets(Map<String, String> map) =>
+      _store.setPref(stageTargetsKey, jsonEncode(map));
+
+  /// One keychain write, guarded on [_loadBearers]' rule and for its reason: a
+  /// refusal costs the header on the next request, never the spec — which is
+  /// written either way, so the target still appears in the list and the user
+  /// can see that it is the token that did not stick.
+  Future<void> _writeToken(String key, String? value) async {
+    final tokens = _tokens;
+    if (tokens == null) return;
+    try {
+      await tokens.write(key, value);
+    } catch (_) {
+      // Silent and broad: see [_loadBearers].
+    }
+  }
+
+  static bool _sameMap(Map<String, String> a, Map<String, String> b) {
+    if (a.length != b.length) return false;
+    for (final entry in a.entries) {
+      if (b[entry.key] != entry.value) return false;
+    }
+    return true;
+  }
+
   /// Points the downloader and the router at a folder. Empty means the app's
   /// own — see [AppPrefs.effectiveModelsFolder]. Trimmed on the way in as well
   /// as on the way out, for [_slotValue]'s reason: a path with a trailing
@@ -877,5 +1315,10 @@ final appPrefsProvider = StateNotifierProvider<AppPrefsNotifier, AppPrefs>(
   (ref) => AppPrefsNotifier(
     ref.watch(messageStoreProvider),
     initial: ref.watch(initialAppPrefsProvider),
+    // The real keychain, constructed const exactly as `graph_auth.dart` and
+    // `mcp_auth.dart` construct theirs. A test builds this notifier itself and
+    // passes an in-memory store, because the plugin behind this one throws
+    // under `flutter test`.
+    tokens: const SecureTokenStore(),
   ),
 );

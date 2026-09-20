@@ -239,7 +239,7 @@ void main() {
       final made = ProviderContainer(
         overrides: [
           dbProvider.overrideWithValue(db),
-          fastLlmClientProvider.overrideWithValue(llm),
+          stageLlmClientProvider.overrideWith((ref, _) => llm),
         ],
       );
       addTearDown(made.dispose);
