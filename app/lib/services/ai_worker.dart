@@ -716,7 +716,7 @@ class AiWorker {
       source,
       id,
       status: fatal ? 'error' : 'pending',
-      error: '$error',
+      error: redactEndpoints('$error'),
       attempts: attempts,
     );
     // `error` only once the retries are gone: an item that will be tried again
@@ -751,7 +751,11 @@ class AiWorker {
       entityId: id,
       durationMs: durationMs,
       detail: {
-        'error': '$error',
+        // Redacted, not raw. An unreachable server never reaches this write
+        // (`_park` takes it first), but a 4xx body snippet or a handler's own
+        // sentence can still echo an address, and an address is a setting,
+        // not a row.
+        'error': redactEndpoints('$error'),
         'attempts': attempts,
         'status_code': ?statusCode,
       },

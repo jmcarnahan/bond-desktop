@@ -47,6 +47,21 @@ export 'model_slots.dart' show LlmWire;
 /// The token is a request header and nothing else: it never reaches an
 /// [LlmCallRecord], an exception message, or a log line.
 
+/// [text] with every endpoint URL replaced by the word `<endpoint>`.
+///
+/// The one choke point between an exception's sentence and a stored row. The
+/// sentences this client throws name the server they could not reach, which
+/// is right on a screen and wrong in `activity_events` or a work row: a
+/// target's URL is a setting, a stored row outlives the setting, and the
+/// activity panel is copied into bug reports. Every [LlmCallRecord.error] and
+/// every failure row the two queues write passes through here; the exception
+/// itself is untouched, so the composer and the probe still read the full
+/// sentence.
+String redactEndpoints(String text) =>
+    text.replaceAll(_endpointPattern, '<endpoint>');
+
+final RegExp _endpointPattern = RegExp(r"""https?://[^\s'"<>\)\]]+""");
+
 /// A failed call to the local model. [message] is safe to show a user.
 class LlmException implements Exception {
   final String message;
@@ -686,7 +701,7 @@ class LlmClient {
         outcome: 'unavailable',
         model: target.model,
         baseUrl: target.baseUrl,
-        error: e.message,
+        error: redactEndpoints(e.message),
       ));
       rethrow;
     } on LlmFormatException catch (e) {
@@ -696,7 +711,7 @@ class LlmClient {
         outcome: 'format',
         model: target.model,
         baseUrl: target.baseUrl,
-        error: e.message,
+        error: redactEndpoints(e.message),
       ));
       rethrow;
     } on LlmException catch (e) {
@@ -707,7 +722,7 @@ class LlmClient {
         model: target.model,
         baseUrl: target.baseUrl,
         statusCode: e.statusCode,
-        error: e.message,
+        error: redactEndpoints(e.message),
       ));
       rethrow;
     }

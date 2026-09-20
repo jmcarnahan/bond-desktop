@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
+import 'package:bond_inbox/services/ai_workers.dart';
 import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
@@ -235,6 +236,57 @@ void main() {
 
       expect(downstream.seen, isEmpty);
       expect(await store.workCounts('draft'), {'pending': 1});
+    });
+  });
+
+  group('AiWorkers.stopAll', () {
+    test('stops all three lanes after the item each has in flight', () async {
+      final held = <String, Completer<void>>{
+        'extract': Completer<void>(),
+        'storyline': Completer<void>(),
+        'draft': Completer<void>(),
+      };
+      final handlers = <String, _Handler>{
+        for (final kind in held.keys)
+          kind: _Handler(kind, onRun: (_) => held[kind]!.future),
+      };
+      for (final kind in held.keys) {
+        await store.enqueueWork(kind, 'email', '$kind-1');
+        await store.enqueueWork(kind, 'email', '$kind-2');
+      }
+      final workers = AiWorkers(
+        fast: AiWorker(store, handlers: [handlers['extract']!]),
+        storyline: AiWorker(store, handlers: [handlers['storyline']!]),
+        draft: AiWorker(store, handlers: [handlers['draft']!]),
+      );
+      addTearDown(workers.dispose);
+
+      final drains = [
+        workers.fast.pump(),
+        workers.storyline.pump(),
+        workers.draft.pump(),
+      ];
+      // Until each lane has an item at the server, rather than a fixed wait
+      // that a slow machine could beat.
+      while (handlers.values.any((h) => h.seen.isEmpty)) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      workers.stopAll();
+      for (final c in held.values) {
+        c.complete();
+      }
+      await Future.wait(drains);
+
+      // One item landed per lane, the second of each is still waiting: a
+      // stop is "finish what is at the server, then end", on all three at
+      // once, which is the promise the processing switch's OFF rests on.
+      for (final kind in held.keys) {
+        // Which of the two landed is the claim order's business (newest
+        // first); that exactly one did is this test's.
+        expect(handlers[kind]!.seen, hasLength(1), reason: kind);
+        expect(await store.workCounts(kind), {'done': 1, 'pending': 1},
+            reason: kind);
+      }
     });
   });
 

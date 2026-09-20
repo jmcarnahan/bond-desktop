@@ -814,7 +814,7 @@ class TriageQueue {
       source,
       id,
       status: fatal ? 'error' : 'pending',
-      error: '$error',
+      error: redactEndpoints('$error'),
       attempts: attempts,
     );
     // `retry` while the message still has an attempt left, `error` once it
@@ -827,7 +827,9 @@ class TriageQueue {
       entityId: id,
       durationMs: durationMs,
       detail: {
-        'error': '$error',
+        // Redacted, as the worker's twin is: a 4xx body or a handler's own
+        // sentence can echo an address, and an address is a setting, not a row.
+        'error': redactEndpoints('$error'),
         'attempts': attempts,
         'status_code': ?statusCode,
       },

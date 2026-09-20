@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:bond_inbox/data/attachment_chunk_index.dart';
+import 'package:bond_inbox/data/context_chunk_index.dart';
+import 'package:bond_inbox/data/context_store.dart';
 import 'package:bond_inbox/data/conversation_vec_index.dart';
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/keyword_index.dart';
@@ -896,6 +898,57 @@ void main() {
       expect((await store.keywordSearchMessages('invoice'))?.length, 1);
       // The chunk half has nothing to come back from.
       expect(await store.keywordSearchChunks('invoice'), isEmpty);
+    });
+
+    test('the context chunk index is emptied by the pair the host runs',
+        () async {
+      if (!vecAvailable) return;
+      // `clearDerived` cannot reach `vec_context_chunks`: that index belongs
+      // to `ContextStore`, and the host calls `rebuildIndexes()` on it right
+      // after the clear (`_resetPipeline`). This pins the pair, which is the
+      // fourth vec table the test above cannot see.
+      final context = ContextStore(db);
+      final dirId = await context.registerDirectory(
+        path: '/Users/wren/projects/atlas',
+        displayName: 'atlas',
+      );
+      final fileId = await context.upsertFile(
+        dirId: dirId,
+        relPath: 'notes.md',
+        size: 13,
+        mtime: '2026-09-09T11:00:00Z',
+        sha256: 'sha-notes',
+        kind: 'doc',
+        claudeChain: const [],
+        textChars: 13,
+      );
+      await context.setFileText(fileId, 'invoice notes');
+      final chunkId = await context.appendChunk(
+        fileId,
+        locator: 'p1',
+        text: 'invoice notes',
+      );
+      await context.setChunkEmbedding(
+        chunkId,
+        embedding: encodeEmbedding(
+          List<double>.filled(ContextChunkIndex.dims, 0.1),
+        ),
+        dims: ContextChunkIndex.dims,
+        embedModel: EmbeddingsClient.documentModelTag,
+      );
+      expect(await context.indexPendingChunks(), 1);
+      expect(await rows('vec_context_chunks'), 1);
+
+      await store.clearDerived();
+      // Still there after the clear alone: this is the half the store cannot
+      // reach, and the proof that the rebuild is what empties it.
+      expect(await rows('vec_context_chunks'), 1);
+      await context.rebuildIndexes();
+
+      expect(await rows('vec_context_chunks'), 0);
+      // And the passage itself is gone with the rest of the derived text, so
+      // nothing refills the index until the file is chunked again.
+      expect(await rows('context_chunks'), 0);
     });
 
     test('the next sync re-enqueues every kept message', () async {
