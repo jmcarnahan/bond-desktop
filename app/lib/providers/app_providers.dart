@@ -296,6 +296,30 @@ final machineTierProvider = FutureProvider<MachineTier>((ref) async {
   return answer.future;
 });
 
+/// What this install actually runs, placement included.
+///
+/// [machineTierProvider] answers what this MAC could run, off its memory
+/// alone, and stays the right question for the Settings fact line and for
+/// **Use this Mac's defaults**. This one answers what it WILL run: on
+/// [ModelPlacement.box] the inbox and writing stages are on the box and only
+/// the embedding model is served here, which is [MachineTier.remote]. The
+/// manifest resolves to one file, so the downloader fetches one, the managed
+/// server starts one, and the gate asks for one.
+///
+/// Composed rather than folded into [machineTierProvider] so that provider
+/// stays a pure reading of the hardware, and so nothing downstream has to
+/// know both facts.
+/// Watched through a `select` on the one field: [AppPrefs] has no `==`, so
+/// watching the whole object would re-derive this on every preference write in
+/// the app, and each re-derivation hands the supervisor and the gate a new
+/// future to await.
+final effectiveTierProvider = FutureProvider<MachineTier>((ref) async {
+  final placement =
+      ref.watch(appPrefsProvider.select((prefs) => prefs.modelPlacement));
+  if (placement == ModelPlacement.box) return MachineTier.remote;
+  return ref.watch(machineTierProvider.future);
+});
+
 /// Every folder the app owns. `main()` OVERRIDES this with the located
 /// directory, exactly as it overrides [dbProvider], because
 /// `getApplicationSupportDirectory()` is async and a provider body cannot be.
@@ -356,9 +380,12 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
     // folder and the port beside it, and awaited rather than guessed: the
     // tier is a future and a preset written before it answered would name the
     // wrong set.
+    // The EFFECTIVE tier, so the box placement starts the embedding model
+    // alone: the two chat models drop out of memory, which is the whole point
+    // of pointing the inbox and the writing stages at the box.
     buildPreset: () async => ref
         .read(modelManifestProvider)
-        .forTier(await ref.read(machineTierProvider.future))
+        .forTier(await ref.read(effectiveTierProvider.future))
         .toPreset(ref.read(appPrefsProvider).effectiveModelsFolder(paths)),
     routerPort: () => ref.read(appPrefsProvider).routerPort,
     managed: () => ref.read(appPrefsProvider).managedServer,
@@ -1501,6 +1528,84 @@ final Provider<AiWorkers> aiWorkersProvider = Provider<AiWorkers>((ref) {
   );
   ref.onDispose(workers.dispose);
   return workers;
+});
+
+/// Whether the pipeline is parked, and how much is waiting on it.
+///
+/// Built from the two drains' own progress streams rather than from a health
+/// poll. Both of them already know they parked and why; today that fact dies
+/// inside them, and one sentence in the rail is all it takes to turn it into
+/// something a person can act on. Nothing here dials anything.
+class ParkedFact {
+  /// `'model_unavailable'`, `'unauthorized'`, `'session'`, or null when
+  /// nothing is parked.
+  final String? reason;
+
+  /// Items the two drains still owe, parked or not.
+  final int waiting;
+
+  const ParkedFact({this.reason, this.waiting = 0});
+
+  @override
+  bool operator ==(Object other) =>
+      other is ParkedFact && other.reason == reason && other.waiting == waiting;
+
+  @override
+  int get hashCode => Object.hash(reason, waiting);
+}
+
+/// The drains' parked state, merged.
+///
+/// Triage's reason wins when more than one drain has one: it is at the front
+/// of the pipeline, and a second sentence about the same server being down is
+/// not more information. The count is the sum, because "3 waiting" is about
+/// the backlog rather than about which queue holds it.
+///
+/// **One entry per work KIND, not one `WorkProgress` for the lot.**
+/// [AiWorkers] forwards three lanes onto one stream and `_drainAll` emits per
+/// handler even when that handler had no rows, so a single slot would let the
+/// storyline lane's empty emit overwrite the fast lane's park with null a
+/// microsecond after it happened, and replace the whole backlog's count with
+/// one kind's. Each kind therefore keeps its own last value, the reason is the
+/// first non-null across them in a stable order, and the count is their sum.
+///
+/// `autoDispose`, because the only listener is the rail and nothing needs this
+/// running behind a closed inbox.
+final parkedProvider = StreamProvider.autoDispose<ParkedFact>((ref) {
+  final controller = StreamController<ParkedFact>();
+  TriageProgress? triage;
+  // Insertion-ordered by construction, which is the stable order the reason is
+  // read in: whichever kind parked first keeps the sentence until it clears.
+  final work = <String, WorkProgress>{};
+
+  void emit() {
+    if (controller.isClosed) return;
+    String? reason = triage?.parkedReason;
+    var waiting = triage?.remaining ?? 0;
+    for (final progress in work.values) {
+      reason ??= progress.parkedReason;
+      waiting += progress.remaining;
+    }
+    controller.add(ParkedFact(reason: reason, waiting: waiting));
+  }
+
+  // Errors are swallowed on both: this stream exists to say whether work is
+  // stuck, and a failing progress stream must not take the rail down with it.
+  final a = ref.watch(triageQueueProvider).progress.listen((event) {
+    triage = event;
+    emit();
+  }, onError: (Object _) {});
+  final b = ref.watch(aiWorkersProvider).progress.listen((event) {
+    work[event.kind] = event;
+    emit();
+  }, onError: (Object _) {});
+
+  ref.onDispose(() {
+    unawaited(a.cancel());
+    unawaited(b.cancel());
+    unawaited(controller.close());
+  });
+  return controller.stream;
 });
 
 /// The storyline logic, shared by the two work handlers and by the UI's user

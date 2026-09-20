@@ -147,6 +147,21 @@ enforce the ones that are commands.
   so a prefs write rebuilds no worker, and `llm_routing_test` pins all four
   queues identical across a `setStageTarget`. A null `LlmTarget.wire` means
   the client's own wire; `toTarget` stamps only Converse.
+- Stages resolve through the PLACEMENT as well as the stage map
+  (`AppPrefs.modelPlacement`, `ModelPlacement {box, local}`). `adoptBox` writes
+  two fixed-id targets and the whole map; `adoptLocal` removes them and applies
+  the machine tier's. So a test asserting which target a stage resolves to has
+  to say which placement it is in, and the effective manifest tier is
+  `effectiveTierProvider` (`remote` on the box) rather than
+  `machineTierProvider`, which still answers what this Mac could run.
+- A probe of a target with a stored bearer PASSES it:
+  `ModelServerProbe.probe(url, bearer:)`, resolved through
+  `AppPrefsNotifier.bearerFor(id)` at the moment of the press. The widgets take
+  a `storedBearer` LOOKUP, never the value, and the token never enters widget
+  state, a `ProbeStatus`, a log line, a test name or a test expectation. Assert
+  that a field obscures it and that no rendered `Text` carries it, never that
+  the string is absent from the tree: `find.text` reads an `EditableText`'s
+  controller rather than the bullets it draws.
 - A bearer is a SECRET. It belongs in the keychain under
   `llm_target_bearer:<id>`, in the notifier's cache, on the resolved
   `LlmTarget.bearer` and in the `Authorization` header, and nowhere else:

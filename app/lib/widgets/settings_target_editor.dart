@@ -31,7 +31,16 @@ class LlmTargetEditor extends StatefulWidget {
 
   /// Asks a server what it serves. Null takes **Check server** off the pane and
   /// leaves the model a typed name, the slot editors' discipline.
-  final Future<ModelProbeResult> Function(String url)? probe;
+  final Future<ModelProbeResult> Function(String url, {String? bearer})? probe;
+
+  /// Looks up the stored token for one target id, so **Check server** can
+  /// reach a keyed endpoint on an edit where the field is deliberately empty.
+  ///
+  /// A LOOKUP rather than the value, for the reason the field is empty in the
+  /// first place: a secret is never read back onto a screen and never held in
+  /// widget state. A typed token wins over the stored one, so the button is
+  /// usable while a key is being replaced.
+  final String? Function(String targetId)? storedBearer;
 
   /// Save. [bearer] is the typed token or null: null with `spec.hasBearer`
   /// true keeps the stored one, null with `hasBearer` false clears it. That
@@ -52,6 +61,7 @@ class LlmTargetEditor extends StatefulWidget {
     super.key,
     this.initial,
     this.probe,
+    this.storedBearer,
     required this.onSave,
     required this.onCancel,
   });
@@ -458,13 +468,22 @@ class _LlmTargetEditorState extends State<LlmTargetEditor> {
     final probe = widget.probe;
     if (probe == null) return;
     final input = _url.text.trim();
+    // Resolved here and handed straight to the probe: the typed token when
+    // there is one, else the stored one when the pane is keeping it. Nothing
+    // is written back into state.
+    final typed = _bearer.text.trim();
+    final token = typed.isNotEmpty
+        ? typed
+        : (_keepBearer && widget.initial != null
+            ? widget.storedBearer?.call(widget.initial!.id)
+            : null);
     setState(() {
       _probing = true;
       _probe = null;
       _probedInput = input;
     });
     try {
-      final result = await probe(input);
+      final result = await probe(input, bearer: token);
       if (!mounted) return;
       // The field moved on while the answer was out, so this is a report about
       // a server the user is no longer pointing at.

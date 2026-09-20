@@ -58,6 +58,11 @@
       "minRamBytes": 0,
       "models": ["bond-embed", "bond-bulk"],
       "serverArgs": { "bond-bulk": { "c": "16384", "parallel": "2" } }
+    },
+    {
+      "id": "remote",
+      "minRamBytes": 0,
+      "models": ["bond-embed"]
     }
   ]
 }

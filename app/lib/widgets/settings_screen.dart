@@ -14,6 +14,7 @@ import '../providers/prefs_provider.dart'
         defaultMcpServerUrl,
         mcpDeployedUrl;
 import '../screens/consent_screen.dart' show CloudDraftsConsentPane;
+import '../screens/setup/setup_where_body.dart' show SetupWhereBody;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart';
 import '../services/system/system_info.dart' show HardwareInfo;
@@ -50,6 +51,12 @@ class _ConsentPane extends _Subpane {
   final String stageId;
   final LlmTargetSpec target;
   const _ConsentPane(this.stageId, this.target);
+}
+
+/// The box address and the access key, on the way to adopting the shared GPU
+/// box. A pane with a back arrow, never a dialog.
+class _BoxPane extends _Subpane {
+  const _BoxPane();
 }
 
 /// How much of Settings a host is asking for.
@@ -222,7 +229,28 @@ class SettingsScreen extends StatefulWidget {
   /// the button off every editor and the embeddings card — the editors still
   /// work, with the model as a typed name — on the same discipline as every
   /// other optional control here: a host that cannot ask does not offer to.
-  final Future<ModelProbeResult> Function(String url)? probeServer;
+  final Future<ModelProbeResult> Function(String url, {String? bearer})? probeServer;
+
+  /// Looks up one target's stored token for [probeServer]'s `Authorization`
+  /// header. A LOOKUP, never the value: no secret is held in widget state.
+  final String? Function(String targetId)? storedBearer;
+
+  /// Where this install's model work runs, for the Models section's placement
+  /// line and its one button.
+  final ModelPlacement modelPlacement;
+
+  /// Adopts the shared GPU box with the address and the key from the pane.
+  /// **Null takes the adopt button off the section**, this screen's usual
+  /// discipline. [key] is a SECRET and passes straight through.
+  final Future<void> Function(String baseUrl, String key)? onAdoptBox;
+
+  /// Puts the install back on this Mac's own models. What the same button
+  /// does when the placement is already the box.
+  final Future<void> Function()? onAdoptLocal;
+
+  /// The pipeline is parked because the box is not answering. One sentence in
+  /// the Models section, on the same fact the rail reads.
+  final bool boxParked;
 
   /// Fired by a slot editor's Save. **Null hides the whole Models section**,
   /// the same discipline every other optional section follows: a host that
@@ -528,6 +556,7 @@ class SettingsScreen extends StatefulWidget {
     this.compiledDefaults = slotDefaults,
     this.stages = pipelineStages,
     this.probeServer,
+    this.storedBearer,
     this.onSlotTargetChanged,
     this.onSlotReset,
     this.proseParallel = 1,
@@ -541,6 +570,10 @@ class SettingsScreen extends StatefulWidget {
     this.hardware,
     this.machineTier,
     this.onApplyTierDefaults,
+    this.modelPlacement = ModelPlacement.local,
+    this.onAdoptBox,
+    this.onAdoptLocal,
+    this.boxParked = false,
     this.onStageTargetChanged,
     this.onCloudDraftsConsent,
     this.cloudDraftsStanding = false,
@@ -686,6 +719,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// expansion state lives here, so swapping only the child is what brings a
   /// person back to the Models section still open at the row they left.
   _Subpane? _subpane;
+
+  /// The box pane's three values. The address and the probe result live here
+  /// because the pane is opened and closed inside this State; the ACCESS KEY
+  /// does not, and never will: it lives in [SetupWhereBody]'s own controller
+  /// and arrives here only as the argument of one call.
+  late String _boxUrl = boxUrlDefault;
+  ModelProbeResult? _boxProbe;
+  bool _boxProbing = false;
 
   /// Whether the wipe button has been armed — see [_signOutBlock]. Reset by
   /// 'Keep' and by the wipe completing, never by a rebuild: an armed button is
@@ -889,6 +930,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _TargetEditorPane(initial: null) => 'Add target',
           _TargetEditorPane() => 'Edit target',
           _ConsentPane() => 'Cloud drafts',
+          _BoxPane() => 'Shared GPU box',
         },
         onBack: _closeSubpane,
         onHome: onHome,
@@ -896,6 +938,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _TargetEditorPane(:final initial) => LlmTargetEditor(
               initial: initial,
               probe: widget.probeServer,
+              storedBearer: widget.storedBearer,
               onSave: _saveTarget,
               onCancel: _closeSubpane,
             ),
@@ -906,6 +949,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onContinue: () => unawaited(_acceptCloudDrafts(stageId, target)),
               // Back and Not now are the same answer, and neither writes.
               onNotNow: _closeSubpane,
+            ),
+          // The SAME widget the wizard's Where the models run step renders,
+          // with the choice already made: one form, one set of keys, and no
+          // second copy of a field that takes a secret.
+          _BoxPane() => SetupWhereBody(
+              placement: ModelPlacement.box,
+              boxUrl: _boxUrl,
+              probeResult: _boxProbe,
+              probing: _boxProbing,
+              showChoices: false,
+              continueLabel: 'Use this box',
+              onUrlChanged: (value) => setState(() {
+                _boxUrl = value;
+                _boxProbe = null;
+              }),
+              onCheck: widget.probeServer == null
+                  ? null
+                  : (key) => unawaited(_checkBox(key)),
+              onContinue: (key) => unawaited(_adoptBox(key)),
             ),
         },
       );
@@ -1159,6 +1221,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     compiledDefaults: widget.compiledDefaults,
     stages: widget.stages,
     probe: widget.probeServer,
+    storedBearer: widget.storedBearer,
     onSave: widget.onSlotTargetChanged!,
     onReset: widget.onSlotReset ?? (_) {},
     proseParallel: widget.proseParallel,
@@ -1178,6 +1241,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     onRemoveTarget: widget.onTargetRemoved,
     hardware: widget.hardware,
     machineTier: widget.machineTier,
+    modelPlacement: widget.modelPlacement,
+    boxParked: widget.boxParked,
+    onOpenBoxPane: widget.onAdoptBox == null
+        ? null
+        : () => setState(() => _subpane = const _BoxPane()),
+    onAdoptLocal: widget.onAdoptLocal,
     onApplyTierDefaults: widget.onApplyTierDefaults,
     onConsentNeeded: (stageId, target) =>
         setState(() => _subpane = _ConsentPane(stageId, target)),
@@ -1228,6 +1297,58 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await widget.onCloudDraftsConsent?.call();
     widget.onStageTargetChanged?.call(stageId, target.id);
     if (!mounted) return;
+    _closeSubpane();
+  }
+
+  /// **Check server** on the box pane, with the typed key.
+  ///
+  /// The key goes onto one request's `Authorization` header and is not stored
+  /// here, in the result or anywhere else. Guarded, on the slot editors'
+  /// shape: the probe promises never to throw, and a diagnostics call must not
+  /// be able to crash a settings screen anyway.
+  Future<void> _checkBox(String key) async {
+    final probe = widget.probeServer;
+    if (probe == null) return;
+    final base = normalizeBoxBaseUrl(_boxUrl);
+    if (base.isEmpty) return;
+    setState(() {
+      _boxProbing = true;
+      _boxProbe = null;
+    });
+    ModelProbeResult result;
+    try {
+      result = await probe(
+        '$base/prose/v1/chat/completions',
+        bearer: key.isEmpty ? null : key,
+      );
+    } on Object {
+      result = const ModelProbeResult(
+        reachable: false,
+        error: 'Could not check the server',
+      );
+    }
+    if (!mounted) return;
+    setState(() {
+      _boxProbing = false;
+      _boxProbe = result;
+    });
+  }
+
+  /// Adopts the box and closes the pane. A press with an empty address or an
+  /// empty key does nothing: the widget disables the button in that state, and
+  /// this is the same refusal read from the other side.
+  Future<void> _adoptBox(String key) async {
+    final adopt = widget.onAdoptBox;
+    if (adopt == null) return;
+    final base = normalizeBoxBaseUrl(_boxUrl);
+    final token = key.trim();
+    if (base.isEmpty || token.isEmpty) return;
+    await adopt(base, token);
+    if (!mounted) return;
+    setState(() {
+      _boxProbe = null;
+      _boxProbing = false;
+    });
     _closeSubpane();
   }
 

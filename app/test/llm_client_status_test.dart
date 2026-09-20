@@ -32,6 +32,59 @@ void main() {
     expect(ask(clientAnswering(502)), throwsA(isA<LlmUnavailableException>()));
   });
 
+  test('a 401 and a 403 park, and say the key was refused', () async {
+    // Deliberately changed in Round G. These used to be a plain
+    // [LlmException], which cost one attempt PER ITEM against a key that was
+    // going to refuse every one of them and filled the activity log with the
+    // same error a hundred times. They are a fact about the SERVER, so they
+    // park, and the subclass is what lets the drains record `unauthorized`
+    // and the rail say the key was refused rather than that the box is down.
+    for (final status in [401, 403]) {
+      await expectLater(
+        ask(clientAnswering(status, 'no')),
+        throwsA(
+          isA<LlmUnauthorizedException>()
+              .having((e) => e, 'parks', isA<LlmUnavailableException>())
+              .having((e) => e.message, 'message',
+                  allOf(contains('refused the access key'),
+                      contains('Settings, Models'))),
+        ),
+        reason: '$status',
+      );
+    }
+  });
+
+  test('a 401 message names the URL and never a key', () async {
+    // The sentence spells the endpoint on purpose, for the screen; every row
+    // it is written into goes through `redactEndpoints` first. The key was
+    // never in it to begin with.
+    final client = LlmClient(
+      baseUrl: 'https://box.example.com/prose/v1/chat/completions',
+      httpClient: MockClient((_) async => http.Response('no', 401)),
+      bearerToken: 'sekret',
+    );
+
+    await expectLater(
+      client.complete(system: 's', user: 'u'),
+      throwsA(isA<LlmUnauthorizedException>()
+          .having((e) => e.message, 'message',
+              contains('https://box.example.com/prose/v1/chat/completions'))
+          .having((e) => e.message, 'message', isNot(contains('sekret')))),
+    );
+  });
+
+  test('a 429 still parks and a 404 still costs the item', () {
+    // The two neighbours of the pair above, unchanged: a throttle is the
+    // server one step further out, and a 404 is this app asking for something
+    // that is not there.
+    expect(ask(clientAnswering(429)), throwsA(isA<LlmUnavailableException>()));
+    expect(
+      ask(clientAnswering(404)),
+      throwsA(isA<LlmException>()
+          .having((e) => e, 'type', isNot(isA<LlmUnavailableException>()))),
+    );
+  });
+
   test('a 400 stays an item failure — it is always this app\'s bug', () {
     final client = clientAnswering(400, 'schema conversion failed');
     expect(

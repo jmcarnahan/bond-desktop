@@ -85,6 +85,20 @@ class LlmUnavailableException extends LlmException {
   const LlmUnavailableException(super.message);
 }
 
+/// The server answered, and refused the access key: HTTP 401 or 403.
+///
+/// A subclass of [LlmUnavailableException] on purpose. It says nothing about
+/// the message being sent either, so every existing `on
+/// LlmUnavailableException` arm catches it and the drains PARK rather than
+/// spending one attempt per item against a key that will refuse all of them.
+/// The drains tell it apart by type to record the reason `unauthorized`,
+/// which is what lets the rail say the key was refused rather than that the
+/// box is down. Unlike its parent, coming back later will not help: somebody
+/// has to fix the key.
+class LlmUnauthorizedException extends LlmUnavailableException {
+  const LlmUnauthorizedException(super.message);
+}
+
 /// The model answered, but not with the JSON object that was asked for.
 class LlmFormatException extends LlmException {
   const LlmFormatException(super.message);
@@ -781,6 +795,19 @@ class LlmClient {
       throw LlmUnavailableException(
         '${_serverNoun(target)} is not ready (HTTP $statusCode). '
         '${_snippet(bodyText)}',
+      );
+    }
+
+    // A 401 or a 403 is the server refusing the key, and it will refuse every
+    // other item in the backlog for exactly the same reason. Parking costs one
+    // attempt and stops; the plain `LlmException` this used to throw cost one
+    // attempt PER ITEM and filled the activity log with the same error. The
+    // sentence names the URL, which `redactEndpoints` takes back out of any
+    // row it is written into, and never the key.
+    if (statusCode == 401 || statusCode == 403) {
+      throw LlmUnauthorizedException(
+        'The model server at ${_endpoint(target)} refused the access key. '
+        'Check it in Settings, Models.',
       );
     }
 

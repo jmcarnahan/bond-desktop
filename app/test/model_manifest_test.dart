@@ -77,6 +77,13 @@ Map<String, Object?> inboxTierJson() => {
       },
     };
 
+/// The placement tier: the embedding model alone, and never a memory rung.
+Map<String, Object?> remoteTierJson() => {
+      'id': 'remote',
+      'minRamBytes': 0,
+      'models': [routerEmbedId],
+    };
+
 String manifestText(
   List<Map<String, Object?>> models, {
   int version = 2,
@@ -85,7 +92,7 @@ String manifestText(
     jsonEncode({
       'version': version,
       'models': models,
-      'tiers': tiers ?? [fullTierJson(), inboxTierJson()],
+      'tiers': tiers ?? [fullTierJson(), inboxTierJson(), remoteTierJson()],
     });
 
 void main() {
@@ -235,15 +242,49 @@ load-on-startup = true
   });
 
   group('tiers', () {
-    test('the committed asset declares both rungs, at the compiled floors',
-        () {
+    test(
+        'the committed asset declares both rungs and the placement, at the '
+        'compiled floors', () {
       final manifest = realManifest();
 
       expect([for (final t in manifest.tiers) t.tier],
-          [MachineTier.full, MachineTier.inbox]);
+          [MachineTier.full, MachineTier.inbox, MachineTier.remote]);
       expect(
         {for (final t in manifest.tiers) t.tier: t.minRamBytes},
-        {MachineTier.full: fullTierMinBytes, MachineTier.inbox: 0},
+        {
+          MachineTier.full: fullTierMinBytes,
+          MachineTier.inbox: 0,
+          // Zero, and not a rung: the ladder is built over the other two.
+          MachineTier.remote: 0,
+        },
+      );
+    });
+
+    test('the remote tier is the embedding model alone', () {
+      final remote = realManifest().forTier(MachineTier.remote);
+
+      expect([for (final m in remote.models) m.id], [routerEmbedId]);
+      expect(remote.byRoleOrNull(ModelRole.bulk), isNull);
+      expect(remote.byRoleOrNull(ModelRole.prose), isNull);
+      expect(remote.byRoleOrNull(ModelRole.embed)?.id, routerEmbedId);
+    });
+
+    test('a remote tier may list the inbox model and still validate', () {
+      // Nothing REFUSES a remote tier that carries more; the exemption is on
+      // the required role, not a cap. A future placement that wanted the 4B
+      // local for the fast lane would parse without a validator change.
+      final manifest = ModelManifest.parse(manifestText(
+        [embedJson(), bulkJson(), proseJson()],
+        tiers: [
+          fullTierJson(),
+          inboxTierJson(),
+          {...remoteTierJson(), 'models': [routerEmbedId, routerBulkId]},
+        ],
+      ));
+
+      expect(
+        [for (final m in manifest.forTier(MachineTier.remote).models) m.id],
+        [routerEmbedId, routerBulkId],
       );
     });
 
@@ -501,6 +542,7 @@ load-on-startup = true
           'models': [routerEmbedId, routerBulkId, 'bond-writer'],
         },
         inboxTierJson(),
+        remoteTierJson(),
       ]),
       allOf(contains('full'), contains('bond-writer')),
     );
@@ -514,6 +556,7 @@ load-on-startup = true
           'models': [routerBulkId],
           'serverArgs': <String, Object?>{},
         },
+        remoteTierJson(),
       ]),
       allOf(contains('inbox'), contains(routerEmbedId)),
     );
@@ -527,6 +570,7 @@ load-on-startup = true
           'models': [routerEmbedId],
           'serverArgs': <String, Object?>{},
         },
+        remoteTierJson(),
       ]),
       allOf(contains('inbox'), contains(routerBulkId)),
     );
@@ -534,7 +578,12 @@ load-on-startup = true
     refuses(
       'the same tier twice',
       manifestText(models,
-          tiers: [fullTierJson(), fullTierJson(), inboxTierJson()]),
+          tiers: [
+            fullTierJson(),
+            fullTierJson(),
+            inboxTierJson(),
+            remoteTierJson(),
+          ]),
       contains('duplicate tier'),
     );
 
@@ -543,6 +592,7 @@ load-on-startup = true
       manifestText(models, tiers: [
         fullTierJson(),
         {...inboxTierJson(), 'id': 'tiny'},
+        remoteTierJson(),
       ]),
       allOf(contains('tiny'), contains('machine tier')),
     );
@@ -561,6 +611,7 @@ load-on-startup = true
       manifestText(models, tiers: [
         {...fullTierJson(), 'minRamBytes': 34359738368},
         inboxTierJson(),
+        remoteTierJson(),
       ]),
       allOf(contains('full'), contains('$fullTierMinBytes')),
     );
@@ -570,6 +621,7 @@ load-on-startup = true
       manifestText(models, tiers: [
         fullTierJson(),
         {...inboxTierJson(), 'minRamBytes': 8589934592},
+        remoteTierJson(),
       ]),
       allOf(contains('inbox'), contains('minRamBytes')),
     );
@@ -584,8 +636,45 @@ load-on-startup = true
             routerProseId: {'c': '4096'},
           },
         },
+        remoteTierJson(),
       ]),
       allOf(contains('inbox'), contains(routerProseId)),
+    );
+
+    // The remote tier's whole point: the inbox stages are on the box, so it
+    // carries no bulk model and the required-role loop must not ask for one.
+    // Every OTHER tier still must, and the full tier is the one this would
+    // silently stop checking if the exemption were written too widely.
+    refuses(
+      'a full tier without the inbox model',
+      manifestText(models, tiers: [
+        {
+          ...fullTierJson(),
+          'models': [routerEmbedId, routerProseId],
+        },
+        inboxTierJson(),
+        remoteTierJson(),
+      ]),
+      allOf(contains('full'), contains(routerBulkId)),
+    );
+
+    refuses(
+      'a manifest with no remote tier',
+      manifestText(models, tiers: [fullTierJson(), inboxTierJson()]),
+      contains('remote'),
+    );
+
+    // A placement, not a memory rung. A non-zero floor here would put a second
+    // rung in the ladder and the "lowest tier" message would name whichever
+    // of two zeroes an unstable sort picked.
+    refuses(
+      'a remote tier with a memory floor',
+      manifestText(models, tiers: [
+        fullTierJson(),
+        inboxTierJson(),
+        {...remoteTierJson(), 'minRamBytes': 8589934592},
+      ]),
+      allOf(contains('remote'), contains('minRamBytes')),
     );
   });
 }

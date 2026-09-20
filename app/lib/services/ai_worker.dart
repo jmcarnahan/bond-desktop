@@ -20,7 +20,17 @@ class WorkProgress {
   /// `status` → row count. Statuses with no rows are absent.
   final Map<String, int> counts;
 
-  const WorkProgress(this.kind, this.counts);
+  /// Why the last claim parked, or null when nothing is parked.
+  ///
+  /// `'model_unavailable'`, `'unauthorized'` or `'session'` — the same words
+  /// the parked activity row carries. It rides the progress stream because
+  /// the fact already exists inside the drain and dies there otherwise, and
+  /// the alternative would be a health poller nobody wants. Cleared on the
+  /// next pump and on the next item that succeeds, so the rail's sentence
+  /// goes away by work getting done rather than by a timer.
+  final String? parkedReason;
+
+  const WorkProgress(this.kind, this.counts, {this.parkedReason});
 
   int get remaining => (counts['pending'] ?? 0) + (counts['processing'] ?? 0);
 
@@ -216,6 +226,10 @@ class AiWorker {
   final Set<Future<void>> _inFlight = {};
 
   bool _stopped = false;
+
+  /// Why the last claim parked, or null. Published on every [WorkProgress],
+  /// set by [_park], and cleared by a pump and by an item that succeeded.
+  String? _parkedReason;
 
   int _lastDrainCount = 0;
 
@@ -419,6 +433,10 @@ class AiWorker {
     // [stop] already promises exactly this — the next pump starts draining
     // again.
     _stopped = false;
+    // A new pump is a fresh attempt, so the last park is no longer the news.
+    // If the server is still down the first claim parks again and the reason
+    // comes straight back.
+    _parkedReason = null;
     final inFlight = _draining;
     if (inFlight != null) {
       _repump = true;
@@ -613,19 +631,27 @@ class AiWorker {
         entityId: id,
         durationMs: sw.elapsedMilliseconds,
       );
+      // An item got through, so whatever the last park was about is over.
+      // Cleared BEFORE the emit, so the progress this success publishes
+      // carries a null reason and the rail's sentence goes with it.
+      _parkedReason = null;
       await _emit(handler.kind);
       return _RunOutcome.ok;
-    } on LlmUnavailableException {
+    } on LlmUnavailableException catch (e) {
       // Nothing about this item failed, so it does not spend an attempt. This
       // kind stops too: every item of it behind this one would fail
       // identically, and marking a hundred of them is just noise on a laptop
       // where that model server is not running.
+      //
+      // A refused key is the same park with a different reason, because it is
+      // the same fact about every item behind this one — and the rail can then
+      // say which of the two it is.
       return _park(
         handler.kind,
         source,
         id,
         _RunOutcome.parkKind,
-        'model_unavailable',
+        e is LlmUnauthorizedException ? 'unauthorized' : 'model_unavailable',
         sw.elapsedMilliseconds,
       );
     } on NotSignedIn {
@@ -695,6 +721,7 @@ class AiWorker {
     String reason,
     int durationMs,
   ) async {
+    _parkedReason = reason;
     await _writeWork(kind, source, id, status: 'pending');
     // Back to waiting, not failed: nothing about this item went wrong.
     if (kind == 'extract') {
@@ -786,6 +813,6 @@ class AiWorker {
     if (_progress.isClosed) return;
     final counts = await _store.workCounts(kind, sources: sources);
     if (_progress.isClosed) return;
-    _progress.add(WorkProgress(kind, counts));
+    _progress.add(WorkProgress(kind, counts, parkedReason: _parkedReason));
   }
 }

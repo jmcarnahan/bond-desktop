@@ -45,7 +45,7 @@ import '../services/llm/model_probe.dart';
 // [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
 // re-exports them; `pipelineStages` is not re-exported, and the settings host
 // needs it to ask where every stage currently points.
-import '../services/llm/model_slots.dart' show pipelineStages;
+import '../services/llm/model_slots.dart' show ModelPlacement, pipelineStages;
 import '../services/llm/needs_you_task.dart'
     show needsYouDefaultRules, needsYouOutputContract, needsYouRulesCap;
 import '../services/profile_photos.dart' show photoKeyFor;
@@ -101,6 +101,51 @@ import 'new_message_screen.dart';
 /// behind it. The screen never waits on the network to render: it reads what
 /// is stored, asks for a refresh, and shows a banner if that refresh did not
 /// land.
+/// The one sentence under the inbox's list: how much is waiting, and whether
+/// anything is stuck.
+///
+/// A pure function, apart from the screen, because the WORDING is the thing
+/// worth pinning and the screen it lives on owns a sixty-second timer.
+///
+/// Processing being off wins over every park: a queue nobody is draining is
+/// not a queue that is stuck. `session` keeps today's wording, because a
+/// sign-out is already routed by the inbox notifier and a second sentence
+/// about it here would be the app saying the same thing twice. Only
+/// `model_unavailable` reads differently on the two placements, because only
+/// there does the answer change what a person should go and look at.
+///
+/// "Retrying each minute" is the inbox's own poll and the supervisor's
+/// `onReady`, and it is the only cadence this sentence may claim: nothing
+/// polls the box's health.
+String railProgressLine({
+  required bool on,
+  required int remaining,
+  required String? reason,
+  required int waiting,
+  required bool onBox,
+}) {
+  // [waiting] rather than [remaining], because the switch is about the whole
+  // pipeline and the worker lanes have backlogs of their own. The two numbers
+  // are the same whenever triage is the only queue holding rows.
+  if (!on) return 'Processing is off · $waiting waiting';
+  switch (reason) {
+    case 'model_unavailable':
+      return onBox
+          ? 'GPU box unreachable · $waiting waiting · retrying each minute'
+          : 'Model server unreachable · $waiting waiting · retrying each '
+              'minute';
+    // Named for the machine that refused, like the arm above it: a local
+    // server behind a reverse proxy can answer 401 too, and telling that
+    // person to go and look at a GPU box would send them to the wrong place.
+    case 'unauthorized':
+      return onBox
+          ? 'GPU box refused the access key · $waiting waiting'
+          : 'Model server refused the access key · $waiting waiting';
+    default:
+      return 'Triaging $remaining remaining…';
+  }
+}
+
 class InboxScreen extends ConsumerStatefulWidget {
   /// Fired after the stored credentials are cleared, so the gate above can
   /// swap back to the sign-in screen.
@@ -2491,6 +2536,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         for (final slot in ModelSlot.values) slot: prefs.slotBaseline(slot),
       },
       probeServer: _probe.probe,
+      // A LOOKUP by id, never the token: the closure reads one bearer out of
+      // the notifier's cache at the moment Check server is pressed, hands it
+      // to the probe and drops it. Nothing holds it.
+      storedBearer: (id) => ref.read(appPrefsProvider.notifier).bearerFor(id),
       onSlotTargetChanged: (slot, {required url, required model}) =>
           unawaited(switch (slot) {
             ModelSlot.fast => notifier.setFastLlmTarget(url: url, model: model),
@@ -2555,6 +2604,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         final tier = await ref.read(machineTierProvider.future);
         if (!mounted) return;
         await notifier.applyTierDefaults(tier);
+      },
+      modelPlacement: prefs.modelPlacement,
+      boxParked: ref.watch(parkedProvider).valueOrNull?.reason ==
+          'model_unavailable',
+      onAdoptBox: (baseUrl, key) =>
+          notifier.adoptBox(baseUrl: baseUrl, bearer: key),
+      // This Mac's HARDWARE tier, not the effective one: going back to local
+      // means going back to what this machine can run.
+      onAdoptLocal: () async {
+        if (!mounted) return;
+        final tier = await ref.read(machineTierProvider.future);
+        if (!mounted) return;
+        await notifier.adoptLocal(tier);
       },
       onStageTargetChanged: (stageId, targetId) => unawaited(
         targetId == null
@@ -2914,19 +2976,45 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// stopped moving would read as a stall rather than as a switch somebody
   /// threw. Nothing at all when there is nothing waiting — an off session with
   /// an empty queue has no news.
+  ///
+  /// A PARKED pipeline is the third sentence, and it is the one a person can
+  /// act on: the reason rides the drains' own progress streams, so there is no
+  /// health poll behind it and the line clears when the next pump gets an item
+  /// through. "Retrying each minute" is the inbox's own sixty-second poll and
+  /// is the only cadence this sentence may claim. Processing being off still
+  /// wins: a queue nobody is draining is not a queue that is stuck.
   Widget _triageProgress() {
     final on = ref.watch(processingProvider);
+    final parked = ref.watch(parkedProvider).valueOrNull;
+    final onBox =
+        ref.watch(appPrefsProvider).modelPlacement == ModelPlacement.box;
     return StreamBuilder<TriageProgress>(
       stream: ref.watch(triageQueueProvider).progress,
       builder: (context, snapshot) {
         final remaining = snapshot.data?.remaining ?? 0;
-        if (remaining == 0) return const SizedBox.shrink();
+        final waiting = parked?.waiting ?? remaining;
+        // The TRIAGE queue being empty is not the pipeline being empty: the
+        // three worker lanes have backlogs of their own, and a parked draft
+        // lane with nothing left to triage is exactly the case somebody needs
+        // told about.
+        //
+        // A park with something waiting therefore speaks even when triage is
+        // done. An unparked worker backlog does NOT: the only sentence there
+        // is to say is "Triaging N remaining…", which would read `0` and be a
+        // worse answer than silence. What the rail is for is the two states a
+        // person can act on, a queue moving and a queue stuck.
+        final stuck = parked?.reason != null && waiting > 0;
+        if (remaining == 0 && !stuck) return const SizedBox.shrink();
         return Padding(
           padding: const EdgeInsets.only(bottom: BondSpacing.s8),
           child: Text(
-            on
-                ? 'Triaging $remaining remaining…'
-                : 'Processing is off · $remaining waiting',
+            railProgressLine(
+              on: on,
+              remaining: remaining,
+              reason: parked?.reason,
+              waiting: waiting,
+              onBox: onBox,
+            ),
             style: BondType.caption.copyWith(color: BondColors.onDarkMuted),
           ),
         );

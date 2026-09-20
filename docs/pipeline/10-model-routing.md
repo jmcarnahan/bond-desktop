@@ -46,6 +46,34 @@ presses **Use this Mac's defaults** under Settings, Models. It writes the way a
 preset does, so an entry equal to a stage's own default is removed rather than
 stored and a fresh install on a big Mac still holds an empty object.
 
+**The shared GPU box is a PLACEMENT, and the default one.** `ModelPlacement`
+(`box` or `local`, stored in `model_placement`) is a machine preference, not a
+reading of the hardware: the same Mac can be pointed at the box today and at its
+own servers tomorrow. On the box placement the map above is replaced wholesale:
+
+| Stage group | Target | Model |
+|-------------|--------|-------|
+| the eight bulk stages | `GPU box · inbox` (`box-bulk`) | `qwen3-4b` |
+| the six prose stages | `GPU box · writing` (`box-prose`) | `qwen3.8` |
+| `storyline_membership`, the confirm | `GPU box · writing` (`box-prose`) | `qwen3.8` |
+| `draft_improve` | none until picked | nothing |
+| `embeddings` | not routed, and stays on this Mac | `make embed` |
+
+`storyline_membership` appears twice on purpose: it is in both `bulkStageIds`
+and `confirmStageIds`, and `adoptBox` applies the bulk preset FIRST and the
+prose-and-confirm preset SECOND, which is what leaves the confirm on the
+writing model. That is the row of record, 84 of 98 with 8% wrong accepts.
+`llm_targets_test.dart` pins the order, because swapping the two calls drops
+the confirm to the 4B and moves the storyline numbers with no code looking
+wrong.
+
+**What travels, on that placement.** Message text, attachment text and drafts
+go to the owner's own AWS instance over TLS, keyed with an api-key that lives
+in this Mac's keychain. The embedding model stays here, so every vector is
+written on this machine. That is the whole of what leaves, and it is why the
+box is not a third-party target: it is a machine this install's owner rents,
+pays for and runs.
+
 The map is only half of what `applyTierDefaults` writes. The other half is the
 draft policy: the `inbox` tier gets `DraftPolicy.onDemand`, because the inbox
 model's drafts are unmeasured and nobody should pay for one unasked, and the
@@ -115,10 +143,14 @@ and without interrupting work in flight.
   `LlmTarget.toString()`. A keychain that refuses costs the header on the next
   request, never the launch and never the write of the spec.
 - **Third-party drafts sit behind one consent.** A target is THIRD PARTY when
-  it speaks the Converse wire or its host is under `amazonaws.com`,
-  `anthropic.com`, `openai.com` or `deepseek.com` (`isThirdPartyHost`).
-  Loopback is deliberately not the test: the GPU box arrives on an `ssh`
-  tunnel at `localhost:18100`. Such a target on `draft_reply` or
+  it speaks the Converse wire, or its host is under `anthropic.com`,
+  `openai.com` or `deepseek.com`, or it is a Bedrock runtime host — `bedrock`
+  at the front and `.amazonaws.com` at the end (`isThirdPartyHost`). AWS as a
+  whole is NOT the test, and was until Round G: the shared GPU box is an EC2
+  instance the owner rents and runs, whether it is reached by a Route 53 name
+  or by the public name AWS gave it, and mail going there is not mail going to
+  a vendor. Loopback is deliberately not the test either: the box also arrives
+  on an `ssh` tunnel at `localhost:18100`. Such a target on `draft_reply` or
   `draft_improve` needs `cloud_drafts_consent`; without it `draft_reply`
   resolves back to `Local prose` and `draft_improve` resolves to nothing. The
   check lives in `AppPrefs.specForStage`, where the target is RESOLVED, so a
@@ -334,13 +366,26 @@ twenty-seven-billion-parameter prose model is still being mapped.
 | `serverArgs` | llama-server's long flags with the leading dashes stripped — the spelling the preset INI wants. Values are strings; the INI writer prints them verbatim. |
 | `tiers` | The machine ladder, one entry per tier: `id` (a `MachineTier` name), `minRamBytes`, the `models` that tier downloads and starts, and optional `serverArgs` overrides per id, merged onto the entry's own. |
 
-**The tiers, and what a resolved manifest is.** Two rungs, chosen from
-`hw.memsize` alone and stored nowhere:
+**The tiers, and what a resolved manifest is.** Two rungs chosen from
+`hw.memsize` alone and stored nowhere, and one that is not a rung at all:
 
 | tier | starts at | models | what differs |
 |---|---|---|---|
 | `full` | 40 GiB | the embedding model, the inbox model, the writing model | nothing; this is the manifest as written |
 | `inbox` | 0 | the embedding model, the inbox model | the writing model is neither downloaded nor started, and the inbox model runs at `c = 16384` over `parallel = 2` |
+| `remote` | not a memory rung | the embedding model | the inbox and writing stages are on the shared GPU box, so this Mac downloads and starts one model |
+
+`remote` is what the box PLACEMENT resolves to, not what a machine's memory
+says: `machineTierFor` never returns it at any byte count, and
+`effectiveTierProvider` answers it whenever `model_placement` is `box`. Its
+`minRamBytes` must be 0 and the parser refuses anything else, because the
+ladder that decides which memory rung a Mac is on is built over the other two
+and a second zero in it would make "the lowest tier" a coin toss.
+`tierStageDefaults(remote)` is empty and must stay empty:
+`applyTierDefaults` builds the set of stages it governs from the union of every
+tier's keys, so a stage named there would be cleared on a machine that never
+saw the box. `applyTierDefaults` returns at once on `remote` for the same
+reason from the other side: `adoptBox` owns that placement's stage map.
 
 `ModelManifest.forTier(MachineTier)` returns a RESOLVED manifest: the same
 class, holding only that tier's entries with its overrides merged in. The
@@ -354,7 +399,8 @@ carries exactly one model per role.
 
 The parser refuses a ladder it cannot trust: a tier id that is not a
 `MachineTier` name, a rung named twice, a rung missing, a model id the manifest
-does not ship, a tier without the embedding or the inbox model, a ladder that
+does not ship, a tier without the embedding model, a tier other than `remote`
+without the inbox model, a `remote` tier with a memory floor, a ladder that
 does not start at zero, and a `full` tier whose `minRamBytes` is not the
 `fullTierMinBytes` this build was compiled with. The last one is what keeps the
 JSON and `model_slots.dart` from drifting apart about where the writing model
@@ -509,9 +555,48 @@ what Bond is would be the app asking for credentials as its opening line.
 - Per-request timeout, per slot (`llm_client.dart`): **90 s on the prose
   client** (`LlmClient.proseTimeout`), **120 s on the bulk one**. 5xx →
   unavailable/park;
-  429 (a throttled cloud server) → unavailable/park as well; timeout →
+  429 (a throttled cloud server) → unavailable/park as well; **401 and 403 →
+  unavailable/park too**, as `LlmUnauthorizedException`, since Round G; timeout →
   counted against the item; HTTP 400 → fatal, never retried — which
   is what a model name the server does not have looks like.
+- **A refused key parks rather than spending the backlog.** A wrong api-key
+  answers every item identically, so counting it against each one would burn
+  the whole queue's attempts in seconds and fill the activity log with one
+  error a hundred times. `LlmUnauthorizedException` is a subclass of
+  `LlmUnavailableException`, so every existing `on LlmUnavailableException` arm
+  catches it unchanged; what the subclass buys is the reason the drains record.
+  Its sentence reads `The model server at <url> refused the access key. Check
+  it in Settings, Models.`, and `redactEndpoints` takes the URL out of every
+  row it is written into.
+- **Parking is VISIBLE, and nothing polls for it.** Both drains carry the
+  reason on their progress streams — `WorkProgress.parkedReason` and
+  `TriageProgress.parkedReason`, one of `model_unavailable`, `unauthorized` or
+  `session` — and `parkedProvider` merges them. Triage keeps one slot and the
+  worker lanes keep ONE SLOT PER KIND, because `AiWorkers` forwards three lanes
+  onto one stream and a drain emits per handler even when that handler had no
+  rows: a single slot would let the storyline lane's empty emit erase the fast
+  lane's park a microsecond after it happened. The reason is triage's, else the
+  first non-null across the kinds in a stable order; the count is triage plus
+  the sum over the kinds. The inbox rail renders one sentence from it:
+
+  | reason | placement | sentence |
+  |---|---|---|
+  | `model_unavailable` | box | `GPU box unreachable · N waiting · retrying each minute` |
+  | `model_unavailable` | local | `Model server unreachable · N waiting · retrying each minute` |
+  | `unauthorized` | box | `GPU box refused the access key · N waiting` |
+  | `unauthorized` | local | `Model server refused the access key · N waiting` |
+  | `session` | either | today's `Triaging N remaining…` |
+
+  Processing being off still wins over all five. Settings, Models carries the
+  same fact as one line under the placement block. **What clears it is the next
+  pump**: the reason is dropped at the top of `pump()` and again on the first
+  item that gets through, so the line goes away because work got done rather
+  than on a timer. Pumps come from the inbox's own sixty-second poll and from
+  `ModelServerSupervisor.onReady`, which is the only cadence the sentence
+  claims. A refused key claims no retry at all, because retrying will not help
+  until somebody fixes it. `N` is the WHOLE pipeline's backlog, triage and the
+  three lanes together, so a parked worker queue is still reported once triage
+  itself has nothing left.
 - `TriageQueue` and the FAST `AiWorker` share one `DrainGate`
   (`app/lib/services/drain_gate.dart`) so those two drains never compete for
   the fast server's slots. The storyline and draft lanes hold their own gates

@@ -21,7 +21,17 @@ class TriageProgress {
   /// `triage_status` → row count. Statuses with no rows are absent.
   final Map<String, int> counts;
 
-  const TriageProgress(this.counts);
+  /// Why the last claim parked, or null when nothing is parked.
+  ///
+  /// `'model_unavailable'`, `'unauthorized'` or `'session'` — the same words
+  /// the parked activity row carries. It rides the progress stream because
+  /// the fact already exists inside the drain and dies there otherwise, and
+  /// the alternative would be a health poller nobody wants. Cleared on the
+  /// next pump and on the next message that reached a verdict, so the rail's
+  /// sentence goes away by work getting done rather than by a timer.
+  final String? parkedReason;
+
+  const TriageProgress(this.counts, {this.parkedReason});
 
   /// Messages the worker still has to look at. The only number the UI shows —
   /// [total] counts every message ever synced, most of which were skipped as
@@ -192,6 +202,11 @@ class TriageQueue {
   /// it describes the drain that just ended rather than the session.
   int _drainWrote = 0;
 
+  /// Why the last claim parked, or null. Published on every [TriageProgress],
+  /// set at the two park sites, and cleared by a pump and by a message that
+  /// reached a verdict.
+  String? _parkedReason;
+
   String? _userAddress;
   bool _running = false;
   bool _stopped = false;
@@ -361,6 +376,10 @@ class TriageQueue {
     // wait for the next poll. This is [stop]'s promise — the next pump drains
     // again — read the only way it can be while a drain is still open.
     _stopped = false;
+    // A new pump is a fresh attempt, so the last park is no longer the news.
+    // If the server is still down the first claim parks again and the reason
+    // comes straight back.
+    _parkedReason = null;
     if (_running) return;
     _running = true;
     // Before the first message, not after it: the header counter would
@@ -673,13 +692,20 @@ class TriageQueue {
       );
       await _emit();
       return true;
-    } on LlmUnavailableException {
+    } on LlmUnavailableException catch (e) {
       // Nothing about this message failed, so it does not spend an attempt.
       // The drain launches nothing more either: every message behind it would
       // fail identically, and marking a hundred of them is just noise on a
       // laptop where the model server is not running. Triage is one kind on
       // one server, so unlike the AI worker there is no other queue here that
       // a different server could still be answering for.
+      //
+      // A refused key is the same park with a different reason, because it is
+      // the same fact about every message behind this one — and the rail can
+      // then say which of the two it is.
+      final reason =
+          e is LlmUnauthorizedException ? 'unauthorized' : 'model_unavailable';
+      _parkedReason = reason;
       await _writeTriage(source, id, status: 'pending');
       await _log.record(
         'triage',
@@ -687,7 +713,7 @@ class TriageQueue {
         source: source,
         entityId: id,
         durationMs: sw.elapsedMilliseconds,
-        detail: {'reason': 'model_unavailable'},
+        detail: {'reason': reason},
       );
       await _emit();
       return false;
@@ -789,7 +815,13 @@ class TriageQueue {
     // claimable, but it is not counted here: it arrives on a drain the model
     // was failing through, and waking a second drain onto the same servers is
     // the last thing that moment needs. The next sync's pump picks it up.
-    if (status == 'triaged' || status == 'skipped') _drainWrote++;
+    if (status == 'triaged' || status == 'skipped') {
+      _drainWrote++;
+      // A message got through, so whatever the last park was about is over.
+      // Here rather than at the two verdict call sites, so a third one cannot
+      // be added that forgets to clear it.
+      _parkedReason = null;
+    }
     _claimed.remove('$source|$id');
   }
 
@@ -799,6 +831,7 @@ class TriageQueue {
   /// sign-out routing lives in the inbox notifier; triage's whole job here is
   /// to stop burning model time on previews it cannot improve on.
   Future<bool> _parkForSession(String source, String id, int durationMs) async {
+    _parkedReason = 'session';
     await _writeTriage(source, id, status: 'pending');
     await _log.record(
       'triage',
@@ -929,6 +962,6 @@ class TriageQueue {
     if (_progress.isClosed) return;
     final counts = await _store.triageCounts(sources: sources);
     if (_progress.isClosed) return;
-    _progress.add(TriageProgress(counts));
+    _progress.add(TriageProgress(counts, parkedReason: _parkedReason));
   }
 }

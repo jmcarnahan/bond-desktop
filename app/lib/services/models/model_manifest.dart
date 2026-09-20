@@ -626,7 +626,13 @@ class ModelManifest {
           );
         }
       }
-      for (final role in const [ModelRole.embed, ModelRole.bulk]) {
+      // Every tier serves the embedding model, because vectors are written on
+      // this Mac whatever the placement. Only the memory rungs must also serve
+      // the bulk model: the remote tier's inbox stages are on the box.
+      final roles = tier.tier == MachineTier.remote
+          ? const [ModelRole.embed]
+          : const [ModelRole.embed, ModelRole.bulk];
+      for (final role in roles) {
         final required = _idForRole[role]!;
         if (!tier.models.contains(required)) {
           throw FormatException(
@@ -636,8 +642,22 @@ class ModelManifest {
         }
       }
     }
-    final ladder = [...tiers]
-      ..sort((a, b) => a.minRamBytes.compareTo(b.minRamBytes));
+    for (final tier in tiers) {
+      if (tier.tier == MachineTier.remote && tier.minRamBytes != 0) {
+        throw FormatException(
+          'manifest: the "${MachineTier.remote.name}" tier is a placement '
+          'rather than a memory rung and must have "minRamBytes" 0, not '
+          '${tier.minRamBytes}',
+        );
+      }
+    }
+    // The ladder is the MEMORY rungs alone. With the remote tier in it there
+    // would be two rungs at zero bytes, an unstable sort would pick either as
+    // the lowest, and the message below would name the wrong tier.
+    final ladder = [
+      for (final tier in tiers)
+        if (tier.tier != MachineTier.remote) tier,
+    ]..sort((a, b) => a.minRamBytes.compareTo(b.minRamBytes));
     if (ladder.first.minRamBytes != 0) {
       throw FormatException(
         'manifest: the lowest tier "${ladder.first.tier.name}" must have '
@@ -721,7 +741,11 @@ class ModelManifest {
   /// manifest names, because the preset names every file and the server
   /// refuses to start with one of them missing. It is here for a screen that
   /// wants to say which models the inbox itself leans on, and for the
-  /// downloader's smallest-first order. Every tier carries both of these.
+  /// downloader's smallest-first order.
+  ///
+  /// A MASTER-manifest read: it asks for the bulk model, which a
+  /// [MachineTier.remote] view does not carry, so it throws on one. Nothing in
+  /// `lib/` calls it.
   Set<String> get usableIds => {
         byRole(ModelRole.embed).id,
         byRole(ModelRole.bulk).id,

@@ -31,7 +31,16 @@ class SettingsTargetsBody extends StatefulWidget {
   /// Asks a server what it serves. Null takes **Check server** off every row,
   /// the same discipline the slot editors follow: a host that cannot ask does
   /// not offer to.
-  final Future<ModelProbeResult> Function(String url)? probe;
+  final Future<ModelProbeResult> Function(String url, {String? bearer})? probe;
+
+  /// Looks up the stored token for one target id, for the probe's
+  /// `Authorization` header.
+  ///
+  /// A LOOKUP rather than the value: a secret must not sit in a widget field
+  /// where a rebuild, a `toString` or a devtools inspection could reach it.
+  /// The answer is read at the moment of the press, handed to [probe], and
+  /// dropped again.
+  final String? Function(String targetId)? storedBearer;
 
   /// Opens the editor pane on a new target. Null hides **Add target**.
   final VoidCallback? onAdd;
@@ -49,6 +58,7 @@ class SettingsTargetsBody extends StatefulWidget {
     super.key,
     required this.targets,
     this.probe,
+    this.storedBearer,
     this.onAdd,
     this.onEdit,
     this.onRemove,
@@ -258,7 +268,10 @@ class _SettingsTargetsBodyState extends State<SettingsTargetsBody> {
       _probes.remove(spec.id);
     });
     try {
-      final result = await probe(spec.url);
+      final result = await probe(
+        spec.url,
+        bearer: spec.hasBearer ? widget.storedBearer?.call(spec.id) : null,
+      );
       if (!mounted) return;
       setState(() {
         _probingId = null;

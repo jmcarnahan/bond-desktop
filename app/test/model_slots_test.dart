@@ -155,12 +155,31 @@ void main() {
     }
   });
 
-  test('a third-party host is the four domains and their subdomains', () {
+  test('a third-party host is Bedrock and the three vendors', () {
     expect(isThirdPartyHost('https://bedrock-runtime.us-east-2.amazonaws.com/x'),
         isTrue);
     expect(isThirdPartyHost('https://api.anthropic.com/v1'), isTrue);
     expect(isThirdPartyHost('https://api.openai.com/v1'), isTrue);
     expect(isThirdPartyHost('https://api.deepseek.com/v1'), isTrue);
+
+    // AWS as a whole is NOT a vendor here, and this is the point of the rule.
+    // The shared GPU box is an EC2 instance this install's owner rents, pays
+    // for and runs, whether it is reached by a Route 53 name or by the public
+    // name AWS gave it. Mail going there is not mail going to a company.
+    expect(
+      isThirdPartyHost('https://box.example.com/prose/v1/chat/completions'),
+      isFalse,
+    );
+    expect(
+      isThirdPartyHost(
+        'https://ec2-1-2-3-4.us-east-2.compute.amazonaws.com/prose/v1/chat/'
+        'completions',
+      ),
+      isFalse,
+    );
+    expect(isThirdPartyHost('https://s3.amazonaws.com/x'), isFalse);
+    // The prefix is not enough on its own: `bedrock` has to be under AWS.
+    expect(isThirdPartyHost('https://notbedrock.example.com/v1'), isFalse);
 
     // Loopback is NOT a signal: the GPU box arrives on an `ssh` tunnel, so a
     // rule of "not loopback" would miss it and one of "loopback is safe"
@@ -249,6 +268,20 @@ void main() {
       isTrue,
     );
 
+    // The wire outranks the host in the other direction too: a Converse spec
+    // on the box's own hostname is still third party, because Converse is
+    // served by one company wherever the URL points.
+    expect(
+      const LlmTargetSpec(
+        id: 'box-converse',
+        name: 'Box on Converse',
+        url: 'https://box.example.com/prose/v1/chat/completions',
+        model: 'us.anthropic.claude-opus-5',
+        wire: LlmWire.bedrockConverse,
+      ).isThirdParty,
+      isTrue,
+    );
+
     // The id never moves, which is what the stage map and the keychain entry
     // are keyed on.
     expect(local.copyWith(name: 'Renamed').id, 'box');
@@ -296,6 +329,16 @@ void main() {
       expect(measuredFloorBytes, 16 * gib);
     });
 
+    test('never answers remote, at any byte count', () {
+      // The remote tier is a PLACEMENT. Nothing about a machine's memory can
+      // say whether its owner points it at the shared GPU box, and a reading
+      // of the hardware that answered it would be inventing that fact.
+      for (final bytes in [-1, 0, 1, 8 * gib, 16 * gib, 40 * gib, 512 * gib]) {
+        expect(machineTierFor(bytes), isNot(MachineTier.remote),
+            reason: '$bytes');
+      }
+    });
+
     test('the full tier writes nothing, so a fresh install stays as it was',
         () {
       expect(tierStageDefaults(MachineTier.full), isEmpty);
@@ -314,6 +357,47 @@ void main() {
         expect(map.containsKey(id), isFalse, reason: id);
       }
       expect(tierDraftPolicy(MachineTier.inbox), DraftPolicy.onDemand);
+    });
+
+    test('the remote tier writes no stage, so it cannot widen what a tier '
+        'clears', () {
+      // `applyTierDefaults` builds its governed set from the UNION of every
+      // tier's keys, so a stage named here would be cleared on a machine that
+      // has never seen the box. `adoptBox` owns the box's stage map, and this
+      // is what keeps the two from fighting.
+      expect(tierStageDefaults(MachineTier.remote), isEmpty);
+      expect(tierDraftPolicy(MachineTier.remote), DraftPolicy.needsYou);
+    });
+
+    test('the box constants are the ids, names and models adoptBox writes',
+        () {
+      expect(boxProseId, 'box-prose');
+      expect(boxBulkId, 'box-bulk');
+      expect(boxProseModel, 'qwen3.8');
+      expect(boxBulkModel, 'qwen3-4b');
+      // User-facing, so no em-dash and no parenthetical.
+      for (final name in [boxProseName, boxBulkName]) {
+        expect(name, isNot(contains('—')));
+        expect(name, isNot(contains('(')));
+      }
+      // Empty in every build that did not pass the define, which is the test
+      // suite: the wizard then asks for the address.
+      expect(boxUrlDefault, isEmpty);
+    });
+
+    test('a typed box address is trimmed and loses every trailing slash', () {
+      // One function rather than the same two lines in the wizard, the
+      // Settings pane and `adoptBox`: three copies of the strip is three
+      // places for `https://box.example.com//prose/…` to come from.
+      expect(normalizeBoxBaseUrl('  https://box.example.com/  '),
+          'https://box.example.com');
+      expect(normalizeBoxBaseUrl('https://box.example.com///'),
+          'https://box.example.com');
+      expect(normalizeBoxBaseUrl('https://box.example.com'),
+          'https://box.example.com');
+      // Empty in, empty out: what both callers read as "nothing typed yet".
+      expect(normalizeBoxBaseUrl('   '), isEmpty);
+      expect(normalizeBoxBaseUrl('///'), isEmpty);
     });
   });
 }

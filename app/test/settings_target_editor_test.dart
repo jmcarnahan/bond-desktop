@@ -42,7 +42,8 @@ void main() {
   Future<void> open(
     WidgetTester tester, {
     LlmTargetSpec? initial,
-    Future<ModelProbeResult> Function(String url)? probe,
+    Future<ModelProbeResult> Function(String url, {String? bearer})? probe,
+    String? Function(String targetId)? storedBearer,
     // A Save that throws, for the failure test; the default records.
     Object? saveThrows,
   }) async {
@@ -53,6 +54,7 @@ void main() {
         body: LlmTargetEditor(
           initial: initial,
           probe: probe,
+          storedBearer: storedBearer,
           onSave: (spec, {bearer, prose = false, confirm = false, bulk = false}) async {
             if (saveThrows != null) throw saveThrows;
             saved.add((
@@ -304,7 +306,7 @@ void main() {
   testWidgets('a checked server offers its own models to pick between',
       (tester) async {
     final asked = <String>[];
-    await open(tester, probe: (url) async {
+    await open(tester, probe: (url, {bearer}) async {
       asked.add(url);
       return const ModelProbeResult(
         reachable: true,
@@ -322,6 +324,116 @@ void main() {
     expect(saveEnabled(tester), isTrue);
   });
 
+  group('Check server and the key', () {
+    /// One editor over the keyed target, recording what each press asked.
+    Future<List<(String, String?)>> asks(
+      WidgetTester tester, {
+      String? stored = 'sk-fixture-stored-not-a-real-token',
+    }) async {
+      final asked = <(String, String?)>[];
+      await open(
+        tester,
+        initial: _stored,
+        probe: (url, {bearer}) async {
+          asked.add((url, bearer));
+          return const ModelProbeResult(reachable: true);
+        },
+        storedBearer: (_) => stored,
+      );
+      return asked;
+    }
+
+    testWidgets('an edit with the key untouched sends the STORED one',
+        (tester) async {
+      // The field is EMPTY on an edit, deliberately: a secret is never read
+      // back onto a screen. Without the lookup, Check server against a keyed
+      // endpoint would report its 401 and read as a broken server.
+      final asked = await asks(tester);
+
+      await press(tester, find.byKey(LlmTargetEditor.checkKey));
+
+      expect(asked, [(_stored.url, 'sk-fixture-stored-not-a-real-token')]);
+    });
+
+    testWidgets('a TYPED key wins over the stored one', (tester) async {
+      // What makes the button usable while a key is being replaced: the
+      // thing being checked is the key that is about to be saved.
+      final asked = await asks(tester);
+      await type(
+        tester,
+        LlmTargetEditor.bearerKey,
+        'sk-fixture-typed-not-a-real-token',
+      );
+
+      await press(tester, find.byKey(LlmTargetEditor.checkKey));
+
+      expect(asked, [(_stored.url, 'sk-fixture-typed-not-a-real-token')]);
+    });
+
+    testWidgets('a cleared key sends none, not the one being removed',
+        (tester) async {
+      final asked = await asks(tester);
+      await press(tester, find.byKey(LlmTargetEditor.bearerClearKey));
+
+      await press(tester, find.byKey(LlmTargetEditor.checkKey));
+
+      expect(asked, [(_stored.url, null)]);
+    });
+
+    testWidgets('a target with no key sends none, and asks for none',
+        (tester) async {
+      var looked = 0;
+      final asked = <(String, String?)>[];
+      await open(
+        tester,
+        initial: _stored.copyWith(hasBearer: false),
+        probe: (url, {bearer}) async {
+          asked.add((url, bearer));
+          return const ModelProbeResult(reachable: true);
+        },
+        storedBearer: (_) {
+          looked++;
+          return 'sk-fixture-stored-not-a-real-token';
+        },
+      );
+
+      await press(tester, find.byKey(LlmTargetEditor.checkKey));
+
+      expect(asked, [(_stored.url, null)]);
+      expect(looked, 0);
+    });
+
+    testWidgets('an ADD sends only what was typed', (tester) async {
+      // There is no stored token for a target that does not exist yet, and a
+      // lookup on a null `initial` would have nothing to key on.
+      final asked = <(String, String?)>[];
+      await open(
+        tester,
+        probe: (url, {bearer}) async {
+          asked.add((url, bearer));
+          return const ModelProbeResult(reachable: true);
+        },
+        storedBearer: (_) => 'sk-fixture-stored-not-a-real-token',
+      );
+      await fillIn(tester);
+
+      await press(tester, find.byKey(LlmTargetEditor.checkKey));
+
+      expect(asked.single.$2, isNull);
+    });
+
+    testWidgets('no token text is rendered after a check', (tester) async {
+      await asks(tester);
+      await press(tester, find.byKey(LlmTargetEditor.checkKey));
+
+      final rendered = [
+        for (final t in tester.widgetList<Text>(find.byType(Text)))
+          t.data ?? '',
+      ];
+      expect(rendered, everyElement(isNot(contains('sk-fixture'))));
+    });
+  });
+
   testWidgets('Cancel reaches the host and writes nothing', (tester) async {
     await open(tester);
     await fillIn(tester);
@@ -336,7 +448,7 @@ void main() {
     tester.platformDispatcher.textScaleFactorTestValue = 2.0;
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
 
-    await open(tester, probe: (_) async => const ModelProbeResult(reachable: true));
+    await open(tester, probe: (_, {bearer}) async => const ModelProbeResult(reachable: true));
     await fillIn(tester);
 
     expect(tester.takeException(), isNull);

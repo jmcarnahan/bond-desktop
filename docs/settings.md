@@ -278,10 +278,70 @@ that every key is a `pipelineStages` id and that no value contains `@`, `http`,
 `.com` or a newline. A stage the ledger never measured renders no line at all,
 which is the honest state rather than a blank one.
 
-**This Mac, and its defaults.** Above the Targets list and below the two slot
-editors sit one fact line and one button. The line reads `This Mac:` followed by
+**Where the models run.** Above the Targets list and below the two slot
+editors, the section opens with the placement. One heading, **Where the models
+run**, one line naming the placement this install is on, and one button that is
+always the other one.
+
+On this Mac the line reads `Everything runs on this Mac.` and the button reads
+**Use the shared GPU box**. On the box it reads `The inbox and writing steps run
+on the shared GPU box. The embedding model runs here.` and the button reads
+**Use this Mac's models**. Both spellings carry the key
+`settings-adopt-box`, because it is one control with two destinations.
+
+**Use the shared GPU box** opens a pane titled **Shared GPU box** — a pane with
+a back arrow, never a dialog. It is the same widget the wizard's **Where the
+models run** step renders, so the three controls carry the same three keys in
+both places: `setup-box-url` (**Box address**, hinting `https://box.example.com`),
+`setup-box-key` (**Access key**, obscured) and `setup-box-check` (**Check
+server**). The way forward is disabled until both fields have something in them:
+adopting a box with no address or no key would write two targets that cannot be
+dialled and a placement that parks everything.
+
+Saving calls `AppPrefsNotifier.adoptBox`, which writes, in one go:
+
+- two targets at fixed ids, `box-prose` at `<address>/prose/v1/chat/completions`
+  on `qwen3.8` and `box-bulk` at `<address>/bulk/v1/chat/completions` on
+  `qwen3-4b`, both four wide and both streaming;
+- the one access key, in the keychain under `llm_target_bearer:box-prose` and
+  `llm_target_bearer:box-bulk`, and in no preference anywhere;
+- the stage map: the eight bulk stages on `box-bulk`, the six prose stages and
+  storyline confirm on `box-prose`. Confirm is in both preset lists and the
+  prose preset runs second, which is what leaves it on the writing model, the
+  row of record;
+- suggested replies set to For messages that need you;
+- the placement itself, in `model_placement`, which survives a wipe like every
+  other machine preference.
+
+Adopting twice replaces the pair rather than stacking it, because the two ids
+are fixed. The local inbox and writing models STOP: on this placement the
+managed server starts the embedding model alone, which is the whole point of
+pointing the other stages at the box.
+
+**Use this Mac's models** calls `adoptLocal` and needs no pane. It removes both
+targets, both keychain entries and every stage entry pointing at either, then
+applies this Mac's own tier defaults, so a big Mac is back to an empty stage map
+and a small one is back to the inbox tier's six picks.
+
+**Check server** sends the key. A probe of a target with a stored bearer looks
+it up by id through `AppPrefsNotifier.bearerFor` and passes it on that one
+request; the box pane passes the key that is typed in front of it. Without
+this, a keyed endpoint would answer HTTP 401 and read as a broken server. The
+key reaches the `Authorization` header and nothing else: not a probe result, not
+a log line, not a widget field.
+
+When the pipeline is parked because the box is not answering, one more line sits
+under the placement: `The box is not answering. Work is waiting and will retry
+each minute.` It is the same fact the inbox rail reads, from the drains' own
+progress streams, and nothing polls the box to produce it.
+
+**This Mac, and its defaults.** Below the placement block sit one fact line and
+one button. The line reads `This Mac:` followed by
 the chip, the memory and what the machine runs: `runs all three models` at 40
-GiB of memory or more, `runs the inbox models` below that. The button is **Use
+GiB of memory or more, `runs the inbox models` below that. It is about the
+MACHINE and reads `machineTierProvider`, which never answers `remote`, so it
+says the same thing on either placement. Where the work actually goes is the
+placement line above it. The button is **Use
 this Mac's defaults**, keyed `settings-tier-defaults`, and the caption under it
 names exactly what a press rewrites. On a small Mac that is naming, refresh,
 recap, grouping, the reply decision and drafts, all moved to `Local fast`, with
@@ -318,7 +378,8 @@ per target, keyed `llm-target-row-<id>`: the name, `hostPort(url)`, the model, a
 chip for the wire (`OpenAI` / `Converse`), a chip saying `Bearer set` or `No
 bearer`, and `Parallel N` when the width is not one. Beside them **Check server**
 (`llm-target-check-<id>`, the same probe closure the slot editors use, with a
-`ProbeStatus` under the row), and for a user's own target **Edit**
+`ProbeStatus` under the row; a row whose chip says `Bearer set` has its stored
+key looked up by id and sent on that one request), and for a user's own target **Edit**
 (`llm-target-edit-<id>`) and **Remove** (`llm-target-remove-<id>`). Remove is the
 Processing section's two-step: the first press swaps the button for **Confirm
 remove** beside **Keep**, and the row's buttons go inert while the write is out.

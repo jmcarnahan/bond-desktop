@@ -1767,6 +1767,49 @@ void main() {
       expect(last!.remaining, 0);
       expect(last!.counts, {'triaged': 1, 'skipped': 1});
     });
+
+    test('a park carries its reason, and the next verdict clears it',
+        () async {
+      // The fact already exists inside the drain; before Round G it died
+      // there. No poller: the reason rides the stream the counts already ride,
+      // and the next pump is what clears it.
+      await seedMessage(id: 'm1');
+      final llm = FakeLlm([
+        const LlmUnavailableException('down'),
+        answer(),
+      ]);
+      final queue = TriageQueue(store, llm, concurrency: 1);
+      final seen = <String?>[];
+      final subscription =
+          queue.progress.listen((p) => seen.add(p.parkedReason));
+
+      await queue.pump();
+      await Future<void>.delayed(Duration.zero);
+      expect(seen.last, 'model_unavailable');
+
+      await queue.pump();
+      await Future<void>.delayed(Duration.zero);
+      await subscription.cancel();
+
+      expect(seen.last, isNull);
+      expect(seen.first, isNull, reason: 'nothing is parked before the first');
+    });
+
+    test('a refused key parks with its own reason', () async {
+      await seedMessage(id: 'm1');
+      final llm = FakeLlm([const LlmUnauthorizedException('refused')]);
+      final queue = TriageQueue(store, llm, concurrency: 1);
+      TriageProgress? last;
+      final subscription = queue.progress.listen((p) => last = p);
+
+      await queue.pump();
+      await Future<void>.delayed(Duration.zero);
+      await subscription.cancel();
+
+      expect(last!.parkedReason, 'unauthorized');
+      // Parked, so the message is still waiting and cost no attempt.
+      expect((await messageRow('m1'))['triage_status'], 'pending');
+    });
   });
 
   /// The knock on the AI worker's door. Extraction and needs-you are not

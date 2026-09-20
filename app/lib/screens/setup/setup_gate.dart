@@ -72,11 +72,19 @@ class _SetupGateState extends ConsumerState<SetupGate> {
   /// ledger is the cheap way to notice: the wizard opens on its download step
   /// and fetches what has moved.
   ///
-  /// The comparison is against the TIER's manifest, resolved from the memory
-  /// of the Mac this launch is on. A models folder carried to a smaller Mac
-  /// holds a writing model that machine will not start, and a gate demanding
-  /// it would send a finished setup back through the wizard for a file it is
-  /// never going to want.
+  /// The comparison is against the EFFECTIVE tier's manifest: the memory of
+  /// the Mac this launch is on, or the embedding model alone when this install
+  /// is pointed at the shared GPU box. A models folder carried to a smaller
+  /// Mac holds a writing model that machine will not start, and a gate
+  /// demanding it would send a finished setup back through the wizard for a
+  /// file it is never going to want.
+  ///
+  /// `DownloadLedger.matches` asks whether every file the RESOLVED manifest
+  /// names is current and says nothing about the rest, so an install that
+  /// adopts the box after a full download keeps three files on disk and still
+  /// passes. Confirmed before this provider was wired in here; a ledger that
+  /// demanded an exact set would send every such install back into the
+  /// wizard.
   Future<bool> _decide() async {
     if (SetupGate.skipsSetup(SetupGate.skipDefine)) return true;
     try {
@@ -95,7 +103,7 @@ class _SetupGateState extends ConsumerState<SetupGate> {
       MachineTier tier;
       try {
         tier = await ref
-            .read(machineTierProvider.future)
+            .read(effectiveTierProvider.future)
             .timeout(hardwareProbeTimeout);
       } on Object {
         tier = machineTierFor(HardwareInfo.unknown.memoryBytes);

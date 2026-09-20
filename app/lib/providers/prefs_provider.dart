@@ -155,6 +155,15 @@ class AppPrefs {
   /// work, not anything about the mailbox that was wiped.
   final DraftPolicy draftPolicy;
 
+  /// Where this install's model work runs. [ModelPlacement.local] by default:
+  /// a fresh install runs everything on this Mac until somebody adopts the
+  /// box, in the wizard or under Settings, Models.
+  ///
+  /// Read by `effectiveTierProvider`, which answers [MachineTier.remote] here
+  /// so the manifest resolves to the embedding model alone, and by the rail's
+  /// parked line, which names the box rather than a local server.
+  final ModelPlacement modelPlacement;
+
   /// How the People directory is ordered. [PeopleSort.recent] by default,
   /// which is the order [peopleRooms] already hands it in: the person who
   /// spoke last is the person most likely to be looked for.
@@ -311,6 +320,7 @@ class AppPrefs {
     this.storylineNewestFirst = false,
     this.needsYouSort = NeedsYouSort.priority,
     this.draftPolicy = DraftPolicy.needsYou,
+    this.modelPlacement = ModelPlacement.local,
     this.peopleSort = PeopleSort.recent,
     this.roomSort = RoomSort.newest,
     this.notifyStyle = NotifyStyle.native,
@@ -509,6 +519,7 @@ class AppPrefs {
     bool? storylineNewestFirst,
     NeedsYouSort? needsYouSort,
     DraftPolicy? draftPolicy,
+    ModelPlacement? modelPlacement,
     PeopleSort? peopleSort,
     RoomSort? roomSort,
     NotifyStyle? notifyStyle,
@@ -541,6 +552,7 @@ class AppPrefs {
             storylineNewestFirst ?? this.storylineNewestFirst,
         needsYouSort: needsYouSort ?? this.needsYouSort,
         draftPolicy: draftPolicy ?? this.draftPolicy,
+        modelPlacement: modelPlacement ?? this.modelPlacement,
         peopleSort: peopleSort ?? this.peopleSort,
         roomSort: roomSort ?? this.roomSort,
         notifyStyle: notifyStyle ?? this.notifyStyle,
@@ -607,6 +619,13 @@ const String proseParallelKey = 'prose_parallel';
 const String llmTargetsKey = 'llm_targets';
 const String stageTargetsKey = 'stage_targets';
 const String cloudDraftsConsentKey = 'cloud_drafts_consent';
+
+/// Where this install's model work runs — `ModelPlacement.name`.
+///
+/// Machine configuration like the three keys above and out of `wipeAll`'s list
+/// for their reason: whether this Mac reaches the shared GPU box is not a fact
+/// about whoever is signed in.
+const String modelPlacementKey = 'model_placement';
 
 /// The two cloud-draft rules the consent stands in front of. Machine
 /// configuration like the three keys above and out of `wipeAll`'s list for
@@ -717,6 +736,17 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     return spec.toTarget(bearer: spec.hasBearer ? _bearers[spec.id] : null);
   }
 
+  /// One target's stored token, or null when there is none.
+  ///
+  /// The ONLY door onto [_bearers] besides [targetForStage], and it exists
+  /// for exactly one caller: **Check server**, which must reach a keyed
+  /// endpoint rather than report its 401. One token, by id, for one request.
+  /// What comes back never enters widget state, a `ProbeStatus`, a log line,
+  /// an activity row or a test expectation. Null when nothing is stored and
+  /// in every build with no keychain, which is every `flutter test` that
+  /// hands this notifier a `MemoryTokenStore` it never wrote to.
+  String? bearerFor(String targetId) => _bearers[targetId];
+
   /// Reads every setting once. A stored value that does not parse —
   /// hand-edited, or written by a build that meant something else by the key —
   /// falls back to the default rather than throwing: a bad preference must not
@@ -751,6 +781,11 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
         DraftPolicy.values,
         await store.getPref(draftPolicyKey),
         DraftPolicy.needsYou,
+      ),
+      modelPlacement: _enumOrDefault(
+        ModelPlacement.values,
+        await store.getPref(modelPlacementKey),
+        ModelPlacement.local,
       ),
       peopleSort: _enumOrDefault(
         PeopleSort.values,
@@ -1303,6 +1338,11 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// confirm stage, `draft_improve`, the targets themselves, the consent and
   /// the bearers are all untouched. Calling it twice changes nothing.
   Future<void> applyTierDefaults(MachineTier tier) async {
+    // [MachineTier.remote] is a PLACEMENT, and [adoptBox] owns its stage map.
+    // Falling through would clear every governed stage back to a local
+    // built-in, because `wanted[stageId]` is null for all of them there — the
+    // box's picks would be undone by the very call meant to leave them alone.
+    if (tier == MachineTier.remote) return;
     final wanted = tierStageDefaults(tier);
     final governed = <String>{
       for (final other in MachineTier.values) ...tierStageDefaults(other).keys,
@@ -1329,6 +1369,108 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       await _writeStageTargets(map);
     }
     await setDraftPolicy(tierDraftPolicy(tier));
+  }
+
+  /// Records where this install's model work runs. State first and the write
+  /// after it, like every setter here.
+  Future<void> setModelPlacement(ModelPlacement value) async {
+    state = state.copyWith(modelPlacement: value);
+    await _store.setPref(modelPlacementKey, value.name);
+  }
+
+  /// Points this install at the shared GPU box: two targets, one key, the
+  /// stage map, the draft policy and the placement, in one call.
+  ///
+  /// [baseUrl] is the box's root, `https://box.example.com`; the two
+  /// completions URLs are derived from it, because the two path prefixes are
+  /// the endpoint's contract rather than anything a person should have to
+  /// type. [bearer] is a SECRET: it reaches the keychain under both target
+  /// ids through [upsertTarget] and goes nowhere else. Adopting twice
+  /// REPLACES the pair rather than stacking duplicates, because the ids are
+  /// fixed.
+  ///
+  /// Two presets rather than a stage map written out here, deliberately: the
+  /// preset sets are pinned against `pipelineStages` by `model_slots_test`,
+  /// and a map written in this method would be a second copy of the stage
+  /// table that nothing keeps honest. The cost is one extra `stage_targets`
+  /// write, once.
+  ///
+  /// NOT ATOMIC, and it cannot be: the two targets, the stage map, the draft
+  /// policy and the placement are four preference writes. A throw partway
+  /// leaves the earlier ones standing, which is an install with one box target
+  /// and no placement rather than a corrupt one, and a second adopt repairs it
+  /// because both target ids are fixed and both presets are idempotent.
+  ///
+  /// Throws [ArgumentError] on a [baseUrl] that is not an http or https origin.
+  /// Both doors in front of this one already refuse an empty field, so the
+  /// guard is a last line rather than the validation: what it stops is two
+  /// targets nothing can dial and a placement that parks the whole pipeline.
+  Future<void> adoptBox({
+    required String baseUrl,
+    required String bearer,
+  }) async {
+    final base = normalizeBoxBaseUrl(baseUrl);
+    final origin = Uri.tryParse(base);
+    if (origin == null ||
+        (origin.scheme != 'http' && origin.scheme != 'https') ||
+        origin.host.isEmpty) {
+      throw ArgumentError.value(
+        baseUrl,
+        'baseUrl',
+        'must be an http or https origin',
+      );
+    }
+
+    await upsertTarget(
+      LlmTargetSpec(
+        id: boxProseId,
+        name: boxProseName,
+        url: '$base/prose/v1/chat/completions',
+        model: boxProseModel,
+        parallel: 4,
+        streams: true,
+      ),
+      bearer: bearer,
+    );
+    await upsertTarget(
+      LlmTargetSpec(
+        id: boxBulkId,
+        name: boxBulkName,
+        url: '$base/bulk/v1/chat/completions',
+        model: boxBulkModel,
+        parallel: 4,
+        streams: true,
+      ),
+      bearer: bearer,
+    );
+
+    // ORDER IS LOAD BEARING. `storyline_membership` is in BOTH [bulkStageIds]
+    // and [confirmStageIds], so whichever preset runs second owns it. The box
+    // row of record puts the confirm on the 27B (84 of 98, 8% wrong accepts),
+    // so prose-and-confirm runs SECOND and leaves it on the writing slot.
+    // Swap these two lines and the confirm silently drops to the 4B with no
+    // code looking wrong, which is what the pinning test in
+    // `llm_targets_test.dart` exists to catch.
+    await applyPreset(targetId: boxBulkId, bulk: true);
+    await applyPreset(targetId: boxProseId, prose: true, confirm: true);
+
+    await setModelPlacement(ModelPlacement.box);
+    await setDraftPolicy(DraftPolicy.needsYou);
+  }
+
+  /// Puts this install back on its own models: the placement, both box
+  /// targets and their keychain entries gone, and [tier]'s defaults applied.
+  ///
+  /// [removeTarget] already drops each id's token and every stage pointed at
+  /// it, so the bulk stages fall back to the built-in fast target before
+  /// [applyTierDefaults] re-writes the prose picks. The placement moves FIRST
+  /// so that a rebuild racing the removals reads this Mac rather than a box
+  /// with no targets behind it.
+  Future<void> adoptLocal(MachineTier tier) async {
+    await setModelPlacement(ModelPlacement.local);
+    await removeTarget(boxProseId);
+    await removeTarget(boxBulkId);
+    await applyTierDefaults(tier);
   }
 
   /// Records that the owner has read what a third-party draft target

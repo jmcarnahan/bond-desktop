@@ -51,7 +51,7 @@ class ModelSlotEditor extends StatefulWidget {
   /// Null renders no 'Check server' at all, and the model stays a free field:
   /// a host that cannot ask has nothing to offer, and a button whose only
   /// answer is "nothing is wired" would be a fault report dressed as a control.
-  final Future<ModelProbeResult> Function(String url)? probe;
+  final Future<ModelProbeResult> Function(String url, {String? bearer})? probe;
 
   /// Fired by Save and by nothing else. Both halves travel together: a URL
   /// with the previous model's name against it is an HTTP 400 on an MLX

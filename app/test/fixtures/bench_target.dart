@@ -1,4 +1,5 @@
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/model_slots.dart' show isThirdPartyHost;
 import 'package:http/http.dart' as http;
 
 import 'bench_stats.dart';
@@ -100,11 +101,20 @@ class BenchTarget {
   /// every local run.
   static const String bearer = String.fromEnvironment('BENCH_BEARER');
 
+  /// The shared GPU box's api-key, for both slots at once — one box, one key,
+  /// and the prose slot has no define of its own.
+  ///
+  /// Resolved by the same recipe-time shell read [bearer] is, out of
+  /// `BOND_BOX_KEY` in `.env`, so it never sits in a make variable and
+  /// `make -n` prints the grep rather than the key. Empty means none, which is
+  /// every local run and every tunnelled run.
+  static const String boxKey = String.fromEnvironment('BENCH_BOX_KEY');
+
   /// Which wire this target's client speaks.
   LlmWire get wire => parseWire(wireName);
 
   /// The key this target is entitled to, or null — see [bearerFor].
-  String? get bearerToken => bearerFor(url, bearer);
+  String? get bearerToken => bearerFor(url, bearer, boxKey: boxKey);
 
   LlmClient client({LlmCallObserver? onCall, http.Client? httpClient}) =>
       LlmClient(
@@ -147,19 +157,34 @@ List<int> parseDrainK([String raw = BenchTarget.drainK]) {
 
 /// The key a target at [url] may be handed, or null.
 ///
-/// The key is Bedrock's, so it goes to Bedrock and nowhere else: only a host
-/// under `amazonaws.com` receives it. A llama-server on this desk, on the LAN
-/// or on a `.local` name has no use for it and is not shown it, so a `.env`
-/// that carries a key does not change a single byte of what any other run
-/// sends. A URL that cannot be parsed gets nothing, for the same reason
-/// `isLocalUrl` in `golden_prices.dart` treats one as remote: "could not read
-/// where this went" must never resolve to "so send the credential".
-String? bearerFor(String url, String key) {
-  if (key.isEmpty) return null;
-  final host = Uri.tryParse(url)?.host ?? '';
-  final isBedrock =
-      host == 'amazonaws.com' || host.endsWith('.amazonaws.com');
-  return isBedrock ? key : null;
+/// Two keys, each to exactly one place. [key] is Bedrock's, so it goes to a
+/// host under `amazonaws.com` and nowhere else. [boxKey] is the shared GPU
+/// box's, so it goes to an HTTPS host that is neither under `amazonaws.com`
+/// nor a third party: the box is reached by its Route 53 name over TLS.
+///
+/// The [isThirdPartyHost] gate is the load-bearing half of that second
+/// condition. Without it "https and not AWS" would hand the box's key to
+/// `api.anthropic.com`, `api.openai.com` and `api.deepseek.com` on any run
+/// that pointed a slot at one with `BOND_BOX_KEY` set in `.env` — a
+/// credential sent to a company that never needed it, by a bench that was
+/// only supposed to be measuring a model.
+///
+/// A llama-server on this desk, on the LAN, on a `.local` name or behind the
+/// operator's `http://localhost:18100` tunnel has no use for either and is
+/// shown neither, so a `.env` that carries both does not change a single byte
+/// of what a local run sends. The tunnel is plain HTTP, which is what keeps it
+/// out of the box branch. A URL that cannot be parsed gets nothing, for the
+/// same reason `isLocalUrl` in `golden_prices.dart` treats one as remote:
+/// "could not read where this went" must never resolve to "so send the
+/// credential".
+String? bearerFor(String url, String key, {String boxKey = ''}) {
+  final uri = Uri.tryParse(url);
+  final host = uri?.host ?? '';
+  final isAws = host == 'amazonaws.com' || host.endsWith('.amazonaws.com');
+  if (isAws) return key.isEmpty ? null : key;
+  if (boxKey.isEmpty) return null;
+  if (uri?.scheme != 'https' || host.isEmpty) return null;
+  return isThirdPartyHost(url) ? null : boxKey;
 }
 
 /// [BenchTarget.wireName] as the wire it names.

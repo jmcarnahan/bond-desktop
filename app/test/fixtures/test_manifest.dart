@@ -83,9 +83,10 @@ ModelManifest testManifest({
   ]);
 }
 
-/// The two rungs the committed manifest declares: the full tier takes all
-/// three checkpoints, the inbox tier takes the embedding and inbox models and
-/// halves the inbox model's slots.
+/// The three the committed manifest declares: the full tier takes all three
+/// checkpoints, the inbox tier takes the embedding and inbox models and halves
+/// the inbox model's slots, and the remote tier takes the embedding model
+/// alone, because on the shared GPU box placement that is all this Mac serves.
 final List<ManifestTier> testTiers = List.unmodifiable([
   ManifestTier(
     tier: MachineTier.full,
@@ -99,6 +100,11 @@ final List<ManifestTier> testTiers = List.unmodifiable([
     serverArgs: {
       routerBulkId: {'c': '16384', 'parallel': '2'},
     },
+  ),
+  const ManifestTier(
+    tier: MachineTier.remote,
+    minRamBytes: 0,
+    models: [routerEmbedId],
   ),
 ]);
 

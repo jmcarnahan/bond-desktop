@@ -116,6 +116,50 @@ void main() {
           isNull);
     });
 
+    test('the box key goes to the box and never to a vendor', () {
+      const boxKey = 'box-key';
+      // The box: an HTTPS host that is neither AWS nor a third party.
+      expect(
+        bearerFor(
+          'https://box.example.com/prose/v1/chat/completions',
+          '',
+          boxKey: boxKey,
+        ),
+        boxKey,
+      );
+
+      // The point of the `isThirdPartyHost` gate. "https and not AWS" alone
+      // would hand the box's credential to a company that never needed it, on
+      // any run that pointed a slot at one with BOND_BOX_KEY set in `.env`.
+      for (final vendor in [
+        'https://api.anthropic.com/v1/chat/completions',
+        'https://api.openai.com/v1/chat/completions',
+        'https://api.deepseek.com/v1/chat/completions',
+      ]) {
+        expect(bearerFor(vendor, '', boxKey: boxKey), isNull, reason: vendor);
+      }
+
+      // Plain HTTP is never the box: the operator's tunnel is
+      // `http://localhost:18100`, and the box itself is only ever reached over
+      // TLS.
+      for (final other in [
+        'http://localhost:18100/v1/chat/completions',
+        'http://box.example.com/prose/v1/chat/completions',
+        'not a url',
+        '',
+      ]) {
+        expect(bearerFor(other, '', boxKey: boxKey), isNull, reason: other);
+      }
+
+      // AWS still gets the Bedrock key and never the box's, whichever is set.
+      const aws = 'https://bedrock-runtime.us-east-1.amazonaws.com';
+      expect(bearerFor(aws, 'cloud-key', boxKey: boxKey), 'cloud-key');
+      expect(bearerFor(aws, '', boxKey: boxKey), isNull);
+
+      // No box key is no box key anywhere.
+      expect(bearerFor('https://box.example.com/prose/v1', ''), isNull);
+    });
+
     test('a target reads its key through the same guard', () {
       const local = BenchTarget(
         slot: 'bulk',
