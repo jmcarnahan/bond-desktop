@@ -41,11 +41,21 @@ class DraftProvenance {
   /// written under.
   final List<String> skills;
 
+  /// The id of the target that rewrote this draft, or null when the local
+  /// model wrote it and nothing has replaced it.
+  ///
+  /// Not a source — it is not something the model READ — which is why
+  /// [isEmpty] ignores it and [isNone] does not: the caption is about what
+  /// went into the prompt, and the row still has to remember where the words
+  /// came back from after the caption has nothing else to say.
+  final String? improvedBy;
+
   const DraftProvenance({
     required this.documents,
     required this.directories,
     required this.files,
     required this.skills,
+    this.improvedBy,
   });
 
   static const DraftProvenance none = DraftProvenance(
@@ -71,6 +81,19 @@ class DraftProvenance {
       files.isEmpty &&
       skills.isEmpty;
 
+  /// Whether there is nothing here worth storing at all — no sources AND no
+  /// improving target. [isEmpty] keeps meaning "no sources", because that is
+  /// the question the caption asks; this is the one the writer asks.
+  bool get isNone => isEmpty && improvedBy == null;
+
+  DraftProvenance copyWith({String? improvedBy}) => DraftProvenance(
+        documents: documents,
+        directories: directories,
+        files: files,
+        skills: skills,
+        improvedBy: improvedBy ?? this.improvedBy,
+      );
+
   /// Snake_case keys and all four of them, always — including the empty ones,
   /// on `ContextFileDigest.toJson`'s reasoning: a reader that has to ask
   /// whether a key is there is a reader that will one day forget.
@@ -90,6 +113,10 @@ class DraftProvenance {
             },
         ],
         'skills': skills,
+        // Only when there is one, unlike the four above: every draft has
+        // sources to report and only a rewritten one has a target, so writing
+        // `null` here would say a draft was looked at and improved by nobody.
+        if (improvedBy != null) 'improved_by': improvedBy,
       });
 
   /// A `context_json` column as a [DraftProvenance], or null.
@@ -109,6 +136,7 @@ class DraftProvenance {
         directories: _strings(decoded['directories']),
         files: _files(decoded['files']),
         skills: _strings(decoded['skills']),
+        improvedBy: _id(decoded['improved_by']),
       );
     } on FormatException {
       return null;
@@ -179,6 +207,12 @@ class DraftProvenance {
     return '${items.sublist(0, items.length - 1).join(', ')} '
         'and ${items.last}';
   }
+
+  /// A target id, or null. Anything that is not a non-empty string reads as
+  /// "nothing rewrote this", on [_files]' rule: a row written by something
+  /// this app did not write must cost the sentence, never the caption.
+  static String? _id(Object? raw) =>
+      raw is String && raw.isNotEmpty ? raw : null;
 
   static List<String> _strings(Object? raw) {
     if (raw is! List) return const [];

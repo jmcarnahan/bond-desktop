@@ -4130,6 +4130,9 @@ SELECT conversation_key FROM (
     'storyline',
     'storyline_sweep',
     'draft',
+    // A model call of its own: the Improve button runs the draft prompt again
+    // on another target, and the header's median is about model calls.
+    'draft_improve',
     // The digest, and not `attachment_text`: this list is the model-call kinds
     // the header's median is about, and text extraction is a fetch and an
     // embed, the same shape as `embed_message`, which is already left out.
@@ -4325,6 +4328,22 @@ SELECT conversation_key FROM (
         aiItemCount: aiItemCount,
       );
     });
+  }
+
+  /// How many drafts have left for a third-party target since [sinceIso]:
+  /// the sum of the `cloud` counts the draft handler notes on its `draft`
+  /// and `draft_improve` rows. A count and not a row tally because one
+  /// prefetch can send two — the draft and the standing improve.
+  Future<int> cloudDraftsSince(String sinceIso) async {
+    final row = await db
+        .customSelect(
+          "SELECT COALESCE(SUM(json_extract(detail_json, '\$.cloud')), 0) AS n "
+          "FROM activity_events WHERE kind IN ('draft', 'draft_improve') "
+          'AND created_at >= ? AND json_valid(detail_json)',
+          variables: _args([sinceIso]),
+        )
+        .getSingle();
+    return (row.data['n'] as num?)?.toInt() ?? 0;
   }
 
   /// Sets, or with a null [disposition] removes, one sender's standing rule.

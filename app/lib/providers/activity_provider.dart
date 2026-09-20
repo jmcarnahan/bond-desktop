@@ -116,6 +116,20 @@ final needsYouPendingProvider = FutureProvider.autoDispose<int>((ref) async {
   return (counts['pending'] ?? 0) + (counts['processing'] ?? 0);
 });
 
+/// How many drafts have gone to a third-party target since local midnight —
+/// the number beside the cap in Settings, Processing.
+///
+/// Here rather than beside [cloudDraftLedgerProvider] in `app_providers.dart`
+/// only because this file imports that one: the live tick is
+/// [activityEventsProvider], which lives here, and the import the other way
+/// round would be a cycle. Watching that tick is the whole liveness
+/// mechanism, exactly as it is for the three providers above — the draft
+/// handler records a row, and the line moves.
+final cloudDraftsTodayProvider = FutureProvider.autoDispose<int>((ref) {
+  ref.watch(activityEventsProvider);
+  return ref.watch(cloudDraftLedgerProvider).usedToday();
+});
+
 /// The activity pane's read model, re-read on every recorded event.
 ///
 /// Watching [activityEventsProvider] is what keeps it live: each event is a new

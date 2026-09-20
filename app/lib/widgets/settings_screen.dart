@@ -1,10 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show FilteringTextInputFormatter;
 
 import '../providers/context_provider.dart' show ContextDirRow;
 import '../providers/prefs_provider.dart'
     show
+        AppPrefs,
         DraftPolicy,
         DraftPolicyLabel,
         NotifyStyle,
@@ -278,6 +280,32 @@ class SettingsScreen extends StatefulWidget {
   /// host that stores no consent flag has.
   final Future<void> Function()? onCloudDraftsConsent;
 
+  /// Whether a draft for an urgent message that needs the owner is improved
+  /// on the `draft_improve` target without anybody pressing anything.
+  final bool cloudDraftsStanding;
+
+  /// Fired by that switch. Null leaves it off the Suggested replies section
+  /// entirely, the same discipline every optional control here follows.
+  final ValueChanged<bool>? onCloudDraftsStandingChanged;
+
+  /// What the `draft_improve` stage's target is called, or null when the
+  /// stage points nowhere. The standing switch cannot be turned on without
+  /// one, and the caption says so.
+  final String? improveTargetName;
+
+  /// How many drafts have gone to a third-party target since local midnight.
+  /// Null leaves the ledger line off Processing, which is what a host that
+  /// has not read the count yet passes.
+  final int? cloudDraftsToday;
+
+  /// How many may go in a day. Shown beside the count and quoted by the
+  /// consent pane, so the person reading the promise sees the number in force.
+  final int cloudDraftsDailyCap;
+
+  /// Fired by the Daily cap field on commit. Null leaves the field off and the
+  /// line a read-only report.
+  final ValueChanged<int>? onCloudDraftsDailyCapChanged;
+
   /// Drawn at the top of the Models section — the host's Local server card.
   /// Null leaves the section exactly as it was before there was one.
   final Widget? modelsHeader;
@@ -493,6 +521,12 @@ class SettingsScreen extends StatefulWidget {
     this.onTargetRemoved,
     this.onStageTargetChanged,
     this.onCloudDraftsConsent,
+    this.cloudDraftsStanding = false,
+    this.onCloudDraftsStandingChanged,
+    this.improveTargetName,
+    this.cloudDraftsToday,
+    this.cloudDraftsDailyCap = AppPrefs.defaultCloudDraftsDailyCap,
+    this.onCloudDraftsDailyCapChanged,
     this.modelsHeader,
     this.localServerSummary,
     this.lastMailSyncIso,
@@ -558,6 +592,14 @@ class SettingsScreen extends StatefulWidget {
   static const Key forgetResyncKeepKey =
       ValueKey('settings-forget-resync-keep');
 
+  /// The cloud-draft controls: the standing switch under Suggested replies,
+  /// and the ledger line and cap field under Processing. Keyed for the reason
+  /// the buttons above are — each one's label is also most of the caption
+  /// beside it.
+  static const Key cloudStandingKey = ValueKey('settings-cloud-standing');
+  static const Key cloudLedgerKey = ValueKey('settings-cloud-ledger');
+  static const Key cloudCapKey = ValueKey('settings-cloud-cap');
+
   /// Keyed for the same reason the buttons above are: 'Check for updates' is
   /// an ordinary phrase, and the caption beside it contains half of it.
   static const Key checkForUpdatesKey = ValueKey('settings-check-for-updates');
@@ -577,6 +619,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _showActivityLog = widget.showActivityLog;
   late NotifyStyle _notifyStyle = widget.notifyStyle;
   late DraftPolicy _draftPolicy = widget.draftPolicy;
+  late bool _cloudDraftsStanding = widget.cloudDraftsStanding;
   late bool _storylineNewestFirst = widget.storylineNewestFirst;
 
   /// Ten stops. Enough that the slider feels like it has an opinion, few enough
@@ -653,6 +696,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     text: widget.aboutMe,
   );
 
+  /// The Daily cap field, and the node that tells it when the reader has
+  /// looked away. Committed on Enter AND on losing focus, which is the
+  /// [LookbackField] contract: a half-typed number is not a cap, and the two
+  /// ways out of a field are submitting and leaving it.
+  late final TextEditingController _cloudCap = TextEditingController(
+    text: '${widget.cloudDraftsDailyCap}',
+  );
+  late final FocusNode _cloudCapFocus = FocusNode();
+
+  /// The last cap actually handed to the host. Enter both submits and drops
+  /// focus, so without this one keystroke would commit twice.
+  late int _cloudCapCommitted = widget.cloudDraftsDailyCap;
+
   /// The last about-me text actually handed to the host. Cancel restores it,
   /// Save replaces it, and it is what "dirty" is measured against — the same
   /// contract [NeedsYouRulesEditor] keeps for the rules beside it.
@@ -675,6 +731,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // Save and Cancel are both enabled by what is in the field, so the buttons
     // have to hear every keystroke.
     _aboutMe.addListener(_onAboutMeChanged);
+    // The other way out of the cap field. A blur is not an event the field
+    // itself reports, so the node is what carries it.
+    _cloudCapFocus.addListener(_onCloudCapFocusChanged);
     // Started once, here, rather than in build: the section rebuilds on every
     // keystroke in the fields above it, and a future created in build would
     // walk the cache tree each time.
@@ -700,9 +759,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _onAboutMeChanged() => setState(() {});
 
+  void _onCloudCapFocusChanged() {
+    if (!_cloudCapFocus.hasFocus) _commitCloudCap();
+  }
+
+  /// Hands the typed cap to the host, or leaves it alone.
+  ///
+  /// A number that does not parse is IGNORED rather than corrected: the field
+  /// takes digits only, so the only way to get here with nothing readable is
+  /// an empty box, and emptying a box is not a request to change anything.
+  /// The notifier clamps, so a number outside the range is still a number
+  /// this can report.
+  void _commitCloudCap() {
+    final value = int.tryParse(_cloudCap.text.trim());
+    if (value == null || value == _cloudCapCommitted) return;
+    _cloudCapCommitted = value;
+    widget.onCloudDraftsDailyCapChanged?.call(value);
+  }
+
   @override
   void didUpdateWidget(SettingsScreen old) {
     super.didUpdateWidget(old);
+    // The host clamps: a typed 5000 comes back as 1000, and the field has to
+    // say what the ledger line beside it says. Only while the field still
+    // holds the number last handed over — a reader mid-way through typing a
+    // new one is not overwritten.
+    if (old.cloudDraftsDailyCap != widget.cloudDraftsDailyCap &&
+        int.tryParse(_cloudCap.text.trim()) == _cloudCapCommitted) {
+      _cloudCapCommitted = widget.cloudDraftsDailyCap;
+      _cloudCap.text = '${widget.cloudDraftsDailyCap}';
+    }
     // A wipe underneath us, not an edit of ours: a sign-in from inside this
     // screen that changes the identity clears the previous person's about-me.
     // An unsaved edit is the user's and is never overwritten; a clean field
@@ -723,6 +809,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // write here, that whole hazard is gone.
     _aboutMe.removeListener(_onAboutMeChanged);
     _aboutMe.dispose();
+    _cloudCapFocus.removeListener(_onCloudCapFocusChanged);
+    _cloudCapFocus.dispose();
+    _cloudCap.dispose();
     super.dispose();
   }
 
@@ -751,6 +840,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _ConsentPane(:final stageId, :final target) => CloudDraftsConsentPane(
               targetName: target.name,
               stageLabel: _stageLabel(stageId),
+              dailyCap: widget.cloudDraftsDailyCap,
               onContinue: () => unawaited(_acceptCloudDrafts(stageId, target)),
               // Back and Not now are the same answer, and neither writes.
               onNotNow: _closeSubpane,
@@ -1136,10 +1226,56 @@ class _SettingsScreenState extends State<SettingsScreen> {
             style: BondType.caption,
           ),
         ],
+        if (widget.cloudDraftsToday != null) ..._cloudLedgerBlock(),
         if (widget.onClearAiResults != null) ..._clearAiResultsBlock(),
         if (widget.onForgetAndResync != null) ..._forgetResyncBlock(),
       ],
     );
+  }
+
+  /// What has gone to somebody else's machine today, and the ceiling on it.
+  ///
+  /// In Processing rather than in Models because it is about what the app is
+  /// DOING, not about where a stage points — the same reason the switch above
+  /// it is here.
+  List<Widget> _cloudLedgerBlock() {
+    final onCap = widget.onCloudDraftsDailyCapChanged;
+    return [
+      const SizedBox(height: BondSpacing.s16),
+      Text(
+        'Cloud drafts today: ${widget.cloudDraftsToday} of '
+        '${widget.cloudDraftsDailyCap}',
+        key: SettingsScreen.cloudLedgerKey,
+        style: BondType.small,
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(
+        'Drafts sent to a third-party target, by the Improve button, the '
+        'standing rule, or a draft stage pointed at one. Nothing more goes '
+        'today once the cap is reached.',
+        style: BondType.caption,
+      ),
+      if (onCap != null) ...[
+        const SizedBox(height: BondSpacing.s8),
+        SizedBox(
+          width: 160,
+          child: TextField(
+            key: SettingsScreen.cloudCapKey,
+            controller: _cloudCap,
+            focusNode: _cloudCapFocus,
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            style: BondType.mono,
+            decoration: const InputDecoration(
+              isDense: true,
+              labelText: 'Daily cap',
+              border: OutlineInputBorder(),
+            ),
+            onSubmitted: (_) => _commitCloudCap(),
+          ),
+        ),
+      ],
+    ];
   }
 
   /// What both resets say when they are refused.
@@ -1905,6 +2041,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// choice governs, and one can land while this section is open.
   Widget _suggestedRepliesBody() {
     final onChanged = widget.onDraftPolicyChanged!;
+    final onStanding = widget.onCloudDraftsStandingChanged;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _draftPolicySegments(onChanged),
+        if (onStanding != null) ..._standingBlock(onStanding),
+      ],
+    );
+  }
+
+  /// Which messages get a reply before anyone asks.
+  Widget _draftPolicySegments(void Function(DraftPolicy value) onChanged) {
     return SettingsSegments<DraftPolicy>(
       // Off the enum, in its own declaration order: the labels belong to
       // `DraftPolicyLabel` beside the modes they name, and a second list here
@@ -1926,6 +2075,53 @@ class _SettingsScreenState extends State<SettingsScreen> {
           'like it wants a reply. When asked writes nothing until you press '
           'Draft reply, which works in every mode.',
     );
+  }
+
+  /// The standing rule: after a local draft is written for an urgent message
+  /// that needs the owner, the same prompt goes to the Improve target and its
+  /// answer replaces the draft.
+  ///
+  /// Inert without a target, because there is nowhere for it to send. The
+  /// caption is the whole explanation of which way it is inert.
+  List<Widget> _standingBlock(ValueChanged<bool> onStanding) {
+    final target = widget.improveTargetName;
+    return [
+      const SizedBox(height: BondSpacing.s16),
+      // One node, not two: the switch and its sentence read as a single
+      // control to a screen reader, exactly as the Processing mirror does.
+      MergeSemantics(
+        child: Row(
+          children: [
+            Switch(
+              key: SettingsScreen.cloudStandingKey,
+              value: _cloudDraftsStanding,
+              onChanged: target == null
+                  ? null
+                  : (on) {
+                      setState(() => _cloudDraftsStanding = on);
+                      onStanding(on);
+                    },
+            ),
+            const SizedBox(width: BondSpacing.s8),
+            Expanded(
+              child: Text(
+                'Improve drafts for messages that need you and are urgent',
+                style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+              ),
+            ),
+          ],
+        ),
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(
+        target == null
+            ? 'Pick a target for Improve a draft under Models first.'
+            : 'After the local draft is written, the same prompt goes to '
+                '$target and its answer replaces the draft. Counts toward the '
+                'daily cap under Processing.',
+        style: BondType.caption,
+      ),
+    ];
   }
 
   // ── Activity log ──────────────────────────────────────────────────────────

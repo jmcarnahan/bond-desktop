@@ -351,6 +351,9 @@ excerpts from the user's own directories.
 The pane says what goes and what never goes, shows the two measured numbers in a
 table (`Local 27B | 6 of 25 drafts passed`, `Opus 5 | 17 of 25 drafts passed`,
 measured on 25 replies from the golden set, 2026-09-17) and names the daily cap.
+The cap it names is the one in force — `cloud_drafts_daily_cap`, the field
+under Processing — not a number compiled into the pane, so the promise the
+person reads is the promise the ledger keeps.
 **I understand, continue** (`consent-continue`) records the consent FIRST and
 writes the stage after it — that order is the protection, because
 `AppPrefs.specForStage` sends a third-party draft target back to the local one
@@ -551,10 +554,23 @@ decision — pressing the button is that decision — so it arrives about five
 seconds sooner. The cap is soft: extraction drains three wide, so twelve is the
 real ceiling rather than ten.
 
-The mechanism, the two pre-gates and the activity notes are in
-[pipeline/07-replies.md](pipeline/07-replies.md), "When a draft is written".
-The control is `SettingsSegments<DraftPolicy>`, the same widget Notifications
-and Models › Drafts in flight use.
+Under the segments is one switch, **Improve drafts for messages that need you
+and are urgent** (`settings-cloud-standing`, stored `cloud_drafts_standing`,
+default off). It is the standing rule: after a local draft is written for a
+message the needs-you pass judged the owner is needed on, with `urgency`
+`urgent` or `high`, the same prompt goes again to whichever target the
+**Improve a draft** stage points at, and that answer replaces the draft. It
+needs such a target to be turned on at all — without one the switch is inert
+and the caption reads *"Pick a target for Improve a draft under Models
+first."*; with one it names it: *"After the local draft is written, the same
+prompt goes to `<name>` and its answer replaces the draft. Counts toward the
+daily cap under Processing."*
+
+The mechanism, the two pre-gates, the Improve button and the activity notes
+are in [pipeline/07-replies.md](pipeline/07-replies.md), "When a draft is
+written" and "Improve a draft". The policy control is
+`SettingsSegments<DraftPolicy>`, the same widget Notifications and Models ›
+Drafts in flight use.
 
 ## Processing
 
@@ -582,6 +598,21 @@ with it.
 |---|---|---|---|
 | **Clear AI results** | `settings-clear-ai-results{,-confirm,-keep}` | every triage verdict, summary, storyline, draft, digest and embedding — the sixteen `MessageStore.derivedTables`, the verdict columns on `messages` and `conversations`, and the stage markers on `attachments` and the library | mail, Teams messages, attachments, registered directories, the sign-in and every preference |
 | **Forget everything and re-sync** | `settings-forget-resync{,-confirm,-keep}` | everything above **and** the mailbox itself — `MessageStore.wipeAll(keepIdentity: true)`, cursors and bootstrap floors included | the sign-in, the about-me text, the Needs You rules, the sender rules, the registered directories and every setting |
+
+Above the two resets, once the host has a count, is the cloud-draft ledger:
+one line **Cloud drafts today: N of cap** (`settings-cloud-ledger`) and a
+compact numeric **Daily cap** field beside it (`settings-cloud-cap`, stored
+`cloud_drafts_daily_cap`, default 50, clamped 1..1000, committed on Enter and
+on losing focus, an unreadable entry ignored). N is
+`MessageStore.cloudDraftsSince(local midnight)` — the sum of the `cloud`
+counts on today's `draft` and `draft_improve` activity rows, re-read on every
+recorded event — so it covers all four doors a draft can leave by: the
+Improve button, the standing rule above, a prefetched draft on a draft stage
+pointed at a third-party target, and a draft a person presses for on such a
+stage, which the composer refuses before anything is queued. Nothing more goes
+once the count reaches the cap, and each of the four refuses with the same
+sentence. The cap in force is also the
+number the consent pane quotes before the first draft ever leaves.
 
 **Both are refused while processing is on.** The buttons are inert and the
 caption under them says `Turn processing off first`; the host refuses again for

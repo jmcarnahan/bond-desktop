@@ -26,6 +26,7 @@ import '../services/teams_sync.dart' show TeamsSync;
 import '../widgets/composer.dart' show SendCapability;
 import 'app_providers.dart';
 import 'conversations_provider.dart';
+import 'prefs_provider.dart' show appPrefsProvider;
 
 /// One conversation's suggested replies, and the send that a person — and only
 /// a person — can trigger.
@@ -199,6 +200,11 @@ class DraftState {
   /// A draft is being written right now.
   final bool generating;
 
+  /// The stored draft is being rewritten on the `draft_improve` target right
+  /// now. Its own flag and not [generating]: the box already holds an answer
+  /// and keeps holding it, so the Improve button is what spins.
+  final bool improving;
+
   /// A send is in flight. The composer's button disables on this, which is
   /// what stops a double click sending twice.
   final bool sending;
@@ -239,6 +245,7 @@ class DraftState {
     this.draft,
     this.threadDrafts = const {},
     this.generating = false,
+    this.improving = false,
     this.sending = false,
     this.capability = SendCapability.copyOnly,
     this.error,
@@ -333,6 +340,7 @@ class DraftState {
     Object? draft = _unset,
     Map<String, Map<String, Object?>>? threadDrafts,
     bool? generating,
+    bool? improving,
     bool? sending,
     SendCapability? capability,
     Object? error = _unset,
@@ -347,6 +355,7 @@ class DraftState {
             : draft as Map<String, Object?>?,
         threadDrafts: threadDrafts ?? this.threadDrafts,
         generating: generating ?? this.generating,
+        improving: improving ?? this.improving,
         sending: sending ?? this.sending,
         capability: capability ?? this.capability,
         error: identical(error, _unset) ? this.error : error as String?,
@@ -419,6 +428,16 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// send; production never passes it.
   final Duration _undoWindow;
 
+  /// Rewrites one stored draft on the `draft_improve` target and answers with
+  /// the one line to show, or null when it worked. Null here hides the
+  /// Improve button's whole path — a host with no handler wired.
+  final Future<String?> Function(String source, String messageId)? _improve;
+
+  /// Whether one more draft may leave for a third-party target today, and the
+  /// line to show when it may not. Null means nothing is capped, which is what
+  /// every test that does not care about the ledger passes.
+  final Future<String?> Function()? _cloudRefusal;
+
   StreamSubscription<WorkProgress>? _progress;
 
   /// This conversation's share of the draft stream, or null when no bus was
@@ -455,7 +474,15 @@ class DraftNotifier extends StateNotifier<DraftState> {
     Future<bool> Function(Uri url)? launch,
     Duration? undoWindow,
     DraftStreamBus? stream,
+    Future<String?> Function(String source, String messageId)? improve,
+    Future<String?> Function()? cloudRefusal,
   })  : _source = target.source,
+        // Named parameters without the leading underscore, because a private
+        // named parameter is not a thing Dart has.
+        // ignore: prefer_initializing_formals
+        _improve = improve,
+        // ignore: prefer_initializing_formals
+        _cloudRefusal = cloudRefusal,
         conversationKey = target.conversationKey,
         _worker = worker,
         _undoWindow = undoWindow ?? DraftNotifier.undoWindow,
@@ -664,6 +691,22 @@ class DraftNotifier extends StateNotifier<DraftState> {
   }) async {
     if (state.generating) return;
     state = state.copyWith(generating: true, error: null);
+    // Before ANY store write: a draft that would leave this machine and
+    // cannot is a sentence, not a deleted row and a queued item that the
+    // handler would then refuse.
+    String? refusal;
+    try {
+      refusal = await _cloudRefusal?.call();
+    } catch (_) {
+      // The ledger could not be read, so nothing can be shown to be under the
+      // cap — and nothing goes. A sentence, not a spinner that never stops.
+      refusal = 'Could not read today\'s cloud draft count, so nothing was '
+          'sent.';
+    }
+    if (refusal != null) {
+      state = state.copyWith(generating: false, error: refusal);
+      return;
+    }
     try {
       final newest =
           await _store.newestInboundMessage(_source, conversationKey);
@@ -724,6 +767,32 @@ class DraftNotifier extends StateNotifier<DraftState> {
         if (mounted) state = state.copyWith(generating: false);
       }),
     );
+  }
+
+  /// Improve with `<target>`: the same prompt on the `draft_improve` target,
+  /// replacing the stored draft. One line on failure; the local draft stays.
+  ///
+  /// Nothing is deleted and nothing is queued. The handler rewrites the row in
+  /// place, so a failure costs a sentence and the answer already in the box is
+  /// still there.
+  Future<void> improve() async {
+    final improve = _improve;
+    final id = _draftKey;
+    if (improve == null || id == null || state.improving) return;
+    state = state.copyWith(improving: true, error: null);
+    String? line;
+    try {
+      line = await improve(_source, id);
+    } catch (e) {
+      line = 'Could not improve the draft: $e';
+    }
+    if (!mounted) return;
+    if (line != null) {
+      state = state.copyWith(improving: false, error: line);
+      return;
+    }
+    await _reloadDrafts();
+    if (mounted) state = state.copyWith(improving: false);
   }
 
   /// The user changed the text. Records it so the suggestion stops being the
@@ -1142,5 +1211,18 @@ final draftProvider =
     // the bus the draft handler publishes on.
     stream: ref.watch(draftStreamBusProvider),
     onSent: () => ref.read(conversationsProvider.notifier).load(),
+    // The composer's Improve button, straight to the handler. `read` and never
+    // `watch` inside the closure, on the rule the whole routing layer follows:
+    // pointing a stage somewhere else must move the next press, not rebuild
+    // this notifier and lose the draft it is holding.
+    improve: (source, id) =>
+        ref.read(draftHandlerProvider).improve(source, id),
+    // Only when the DRAFT stage itself points at somebody else's machine. A
+    // local draft is not capped by anything, so the ledger is not even read.
+    cloudRefusal: () async {
+      final prefs = ref.read(appPrefsProvider);
+      if (prefs.specForStage('draft_reply')?.isThirdParty != true) return null;
+      return ref.read(cloudDraftLedgerProvider).refusal();
+    },
   ),
 );

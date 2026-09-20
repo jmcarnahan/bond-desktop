@@ -35,6 +35,7 @@ import '../services/context/context_digest_handler.dart';
 import '../services/context/context_reconcile_handler.dart';
 import '../services/context/context_retriever.dart';
 import '../services/context/directory_access.dart';
+import '../services/cloud_drafts.dart';
 import '../services/draft_handler.dart';
 import '../services/draft_stream.dart';
 import '../services/drain_gate.dart';
@@ -1205,6 +1206,93 @@ final Provider<AiWorker> storylineWorkerProvider = Provider<AiWorker>((ref) {
   );
 });
 
+/// Today's cloud-draft count against the cap, for the three places a draft
+/// can leave this machine.
+///
+/// The cap is `read` inside the closure and never watched, on the rule the
+/// rest of this file's routing follows: moving the number has to move the
+/// next draft rather than rebuild the worker writing this one.
+final cloudDraftLedgerProvider = Provider<CloudDraftLedger>(
+  (ref) => CloudDraftLedger(
+    ref.watch(messageStoreProvider),
+    cap: () => ref.read(appPrefsProvider).cloudDraftsDailyCap,
+  ),
+);
+
+/// The one handler on the DRAFT lane, hoisted so the composer can reach it.
+///
+/// Its own provider because [DraftHandler.improve] is not queue work: the
+/// Improve button calls it straight, while the lane below drains the same
+/// object. One instance for both, so the routing closures and the ledger can
+/// only ever say one thing.
+///
+/// It watches the store, its three stage clients, the recorder, the two
+/// retrievers, the embedder, progress, the bus and the ledger — and NEVER
+/// `appPrefsProvider`. That omission is the whole of why pointing a stage
+/// somewhere else rebuilds no worker and aborts no drain.
+final draftHandlerProvider = Provider<DraftHandler>((ref) {
+  // The only handler on its lane, and the only one of the fourteen a person
+  // sits and waits for. A draft is prose they send under their own name — the
+  // one place the bigger model earns its seconds.
+  //
+  // It still reads the storyline summary as background, which used to be
+  // guaranteed by drafting LAST in one list. It no longer is: a draft
+  // prefetched seconds after its extraction may be written before the sweep
+  // that would have named its storyline. That is the trade the split makes on
+  // purpose — a background sentence against minutes of waiting — and the
+  // storyline lane's `onDrained` pumps this one, so the next draft after a
+  // sweep has it.
+  return DraftHandler(
+    ref.watch(messageStoreProvider),
+    ref.watch(stageLlmClientProvider('draft_reply')),
+    // Its own stage, and its own client: the decision is a yes/no under a
+    // tight schema and the draft is prose, so a machine with a second
+    // server can put the cheap half of a prefetch somewhere else.
+    decisionClient: ref.watch(stageLlmClientProvider('reply_decision')),
+    activityLog: ref.watch(activityLogProvider),
+    attachments: ref.watch(attachmentRetrieverProvider),
+    contextDirs: ref.watch(contextRetrieverProvider),
+    // The same client both retrievers above hold, handed to the handler
+    // so the message being answered is embedded once for the two of them.
+    embeddings: ref.watch(embeddingsClientProvider),
+    progress: ref.watch(pipelineProgressProvider),
+    // The DRAFT TARGET's width, read at every launch decision — see
+    // `DraftHandler.concurrency`. Through the resolved spec rather than
+    // off `proseParallel` directly, so a draft pointed at a GPU box reads
+    // that box's slots; the local prose target's width IS `proseParallel`,
+    // so a machine that has added nothing reads exactly what it read
+    // before. `read` inside the closure, never `watch`: a width change
+    // must move the next draft, not rebuild the worker holding the drain
+    // that is writing this one.
+    concurrency: () =>
+        ref.read(appPrefsProvider).specForStage('draft_reply')?.parallel ??
+        1,
+    // Whether the draft target can stream, on the same rule. A target on
+    // the Converse wire has nothing to stream, and one that answers a
+    // streamed request badly is a setting away from the plain call.
+    streams: () =>
+        ref.read(appPrefsProvider).specForStage('draft_reply')?.streams ??
+        true,
+    // The live bus, so the draft streams. Every other build of this
+    // handler takes the disabled default and makes the plain call.
+    stream: ref.watch(draftStreamBusProvider),
+    // Where an Improve goes. An optional stage, so this client is built on a
+    // target that may not exist; `routes.improveTarget` is what says whether
+    // the button is offered at all.
+    improveClient: ref.watch(stageLlmClientProvider('draft_improve')),
+    // Every routing question the handler asks, as closures over the prefs —
+    // `read`, never `watch`, for [concurrency]'s reason.
+    routes: DraftRoutes(
+      draftTarget: () =>
+          ref.read(appPrefsProvider).specForStage('draft_reply'),
+      improveTarget: () =>
+          ref.read(appPrefsProvider).specForStage('draft_improve'),
+      standing: () => ref.read(appPrefsProvider).cloudDraftsStanding,
+      ledger: ref.watch(cloudDraftLedgerProvider),
+    ),
+  );
+});
+
 /// The DRAFT lane's worker: one handler, on the 27B, at the width the prose
 /// server was started with.
 ///
@@ -1215,54 +1303,7 @@ final Provider<AiWorker> storylineWorkerProvider = Provider<AiWorker>((ref) {
 final Provider<AiWorker> draftWorkerProvider = Provider<AiWorker>((ref) {
   return _lane(
     ref,
-    handlers: [
-      // The only handler on this lane, and the only one of the fourteen a
-      // person sits and waits for. A draft is prose they send under their own
-      // name — the one place the bigger model earns its seconds.
-      //
-      // It still reads the storyline summary as background, which used to be
-      // guaranteed by drafting LAST in one list. It no longer is: a draft
-      // prefetched seconds after its extraction may be written before the
-      // sweep that would have named its storyline. That is the trade the
-      // split makes on purpose — a background sentence against minutes of
-      // waiting — and the storyline lane's `onDrained` pumps this one, so the
-      // next draft after a sweep has it.
-      DraftHandler(
-        ref.watch(messageStoreProvider),
-        ref.watch(stageLlmClientProvider('draft_reply')),
-        // Its own stage, and its own client: the decision is a yes/no under a
-        // tight schema and the draft is prose, so a machine with a second
-        // server can put the cheap half of a prefetch somewhere else.
-        decisionClient: ref.watch(stageLlmClientProvider('reply_decision')),
-        activityLog: ref.watch(activityLogProvider),
-        attachments: ref.watch(attachmentRetrieverProvider),
-        contextDirs: ref.watch(contextRetrieverProvider),
-        // The same client both retrievers above hold, handed to the handler
-        // so the message being answered is embedded once for the two of them.
-        embeddings: ref.watch(embeddingsClientProvider),
-        progress: ref.watch(pipelineProgressProvider),
-        // The DRAFT TARGET's width, read at every launch decision — see
-        // `DraftHandler.concurrency`. Through the resolved spec rather than
-        // off `proseParallel` directly, so a draft pointed at a GPU box reads
-        // that box's slots; the local prose target's width IS `proseParallel`,
-        // so a machine that has added nothing reads exactly what it read
-        // before. `read` inside the closure, never `watch`: a width change
-        // must move the next draft, not rebuild the worker holding the drain
-        // that is writing this one.
-        concurrency: () =>
-            ref.read(appPrefsProvider).specForStage('draft_reply')?.parallel ??
-            1,
-        // Whether the draft target can stream, on the same rule. A target on
-        // the Converse wire has nothing to stream, and one that answers a
-        // streamed request badly is a setting away from the plain call.
-        streams: () =>
-            ref.read(appPrefsProvider).specForStage('draft_reply')?.streams ??
-            true,
-        // The live bus, so the draft streams. Every other build of this
-        // handler takes the disabled default and makes the plain call.
-        stream: ref.watch(draftStreamBusProvider),
-      ),
-    ],
+    handlers: [ref.watch(draftHandlerProvider)],
     gate: draftDrainGateProvider,
   );
 });

@@ -273,6 +273,23 @@ class AppPrefs {
   /// whichever company is on the other end.
   final bool cloudDraftsConsent;
 
+  /// Whether a draft for an urgent message that needs the owner is improved
+  /// on the `draft_improve` target without anybody pressing anything.
+  ///
+  /// Off until somebody turns it on, which is the answer that sends nothing:
+  /// the consent above says a third-party target MAY be used, and this says
+  /// the app may reach for it on its own.
+  final bool cloudDraftsStanding;
+
+  /// How many drafts a day may go to a third-party target, counting the
+  /// Improve button, the standing rule above and a draft stage pointed at
+  /// one. The ceiling is a spend control, so it stops all three.
+  final int cloudDraftsDailyCap;
+
+  /// The cap nobody set. Fifty drafts is a heavy day of asking and a small
+  /// bill, which is the balance a default here has to strike.
+  static const int defaultCloudDraftsDailyCap = 50;
+
   /// What [routerPort] means when nothing is stored — llama-server's own
   /// default port, which is also what `make model` uses, so a user who never
   /// touches the field gets the port every doc in this repo names.
@@ -311,6 +328,8 @@ class AppPrefs {
     this.targets = const [],
     this.stageTargets = const {},
     this.cloudDraftsConsent = false,
+    this.cloudDraftsStanding = false,
+    this.cloudDraftsDailyCap = defaultCloudDraftsDailyCap,
   });
 
   /// The managed router's origin — one server, three models.
@@ -507,6 +526,8 @@ class AppPrefs {
     List<LlmTargetSpec>? targets,
     Map<String, String>? stageTargets,
     bool? cloudDraftsConsent,
+    bool? cloudDraftsStanding,
+    int? cloudDraftsDailyCap,
   }) =>
       AppPrefs(
         attentionThreshold: attentionThreshold ?? this.attentionThreshold,
@@ -537,6 +558,8 @@ class AppPrefs {
         targets: targets ?? this.targets,
         stageTargets: stageTargets ?? this.stageTargets,
         cloudDraftsConsent: cloudDraftsConsent ?? this.cloudDraftsConsent,
+        cloudDraftsStanding: cloudDraftsStanding ?? this.cloudDraftsStanding,
+        cloudDraftsDailyCap: cloudDraftsDailyCap ?? this.cloudDraftsDailyCap,
       );
 }
 
@@ -584,6 +607,16 @@ const String proseParallelKey = 'prose_parallel';
 const String llmTargetsKey = 'llm_targets';
 const String stageTargetsKey = 'stage_targets';
 const String cloudDraftsConsentKey = 'cloud_drafts_consent';
+
+/// The two cloud-draft rules the consent stands in front of. Machine
+/// configuration like the three keys above and out of `wipeAll`'s list for
+/// their reason: how much this machine may send elsewhere is not a fact about
+/// whoever is signed in.
+///
+/// [cloudDraftsStandingKey] is the string `'true'` or nothing;
+/// [cloudDraftsDailyCapKey] an integer written as a string.
+const String cloudDraftsStandingKey = 'cloud_drafts_standing';
+const String cloudDraftsDailyCapKey = 'cloud_drafts_daily_cap';
 
 /// Where a target's bearer token lives: the KEYCHAIN, under this prefix and
 /// the target's id. Never `app_prefs` — the table is read by anything with the
@@ -756,8 +789,22 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       stageTargets: _stageTargets(await store.getPref(stageTargetsKey)),
       cloudDraftsConsent:
           await store.getPref(cloudDraftsConsentKey) == 'true',
+      // Only the string this notifier writes reads as on, on the rule every
+      // boolean above follows: the standing rule sends drafts off this
+      // machine by itself, so anything unrecognised has to leave it off.
+      cloudDraftsStanding:
+          await store.getPref(cloudDraftsStandingKey) == 'true',
+      cloudDraftsDailyCap:
+          _cloudDraftsDailyCap(await store.getPref(cloudDraftsDailyCapKey)),
     );
   }
+
+  /// A stored cap, or fifty. [_proseParallel]'s rule and its reason: a number
+  /// nothing wrote, or one somebody typed into the table by hand, must not be
+  /// able to uncap what leaves this machine.
+  static int _cloudDraftsDailyCap(String? raw) => clampCloudDraftsDailyCap(
+        int.tryParse(raw ?? '') ?? AppPrefs.defaultCloudDraftsDailyCap,
+      );
 
   /// The stored target list, or none of it.
   ///
@@ -1245,6 +1292,27 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _store.setPref(cloudDraftsConsentKey, value.toString());
   }
 
+  /// Turns the standing rule on or off.
+  ///
+  /// State first and the write after it, like every setter here. The draft
+  /// handler reads this through a closure at the moment a draft is written,
+  /// so a flip moves the NEXT draft rather than the next relaunch.
+  Future<void> setCloudDraftsStanding(bool value) async {
+    state = state.copyWith(cloudDraftsStanding: value);
+    await _store.setPref(cloudDraftsStandingKey, value.toString());
+  }
+
+  /// Moves how many drafts a day may leave for a third-party target.
+  ///
+  /// Clamped on the way in as well as on the way out, exactly as
+  /// [setProseParallel] is: the field takes digits and this guards a caller
+  /// that hands over a number no control on screen could have produced.
+  Future<void> setCloudDraftsDailyCap(int value) async {
+    final clamped = clampCloudDraftsDailyCap(value);
+    state = state.copyWith(cloudDraftsDailyCap: clamped);
+    await _store.setPref(cloudDraftsDailyCapKey, clamped.toString());
+  }
+
   Future<void> _writeTargets(List<LlmTargetSpec> targets) => _store.setPref(
         llmTargetsKey,
         jsonEncode([for (final spec in targets) spec.toJson()]),
@@ -1306,6 +1374,14 @@ int clampRouterPort(int value) => value.clamp(1024, 65535);
 /// latency — which is what the person waiting cares about — grows faster than
 /// the batch is worth.
 int clampProseParallel(int value) => value.clamp(1, 8);
+
+/// How many drafts a day may leave for a third-party target: at least one, and
+/// never more than a thousand. A free function beside [clampProseParallel], on
+/// its precedent, so the read, the setter and the settings field all mean the
+/// same thing by "a usable cap". Zero is excluded deliberately — a cap of none
+/// is what pointing the stage nowhere already says, and a field that could be
+/// emptied into silence would be a second off switch nobody looked for.
+int clampCloudDraftsDailyCap(int value) => value.clamp(1, 1000);
 
 /// What `main()` read from the database before the first frame, or null where
 /// nothing preloaded them — see [AppPrefsNotifier]'s constructor.

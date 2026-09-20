@@ -2527,6 +2527,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             : notifier.setStageTarget(stageId, targetId),
       ),
       onCloudDraftsConsent: () => notifier.setCloudDraftsConsent(true),
+      cloudDraftsStanding: prefs.cloudDraftsStanding,
+      onCloudDraftsStandingChanged: (on) =>
+          unawaited(notifier.setCloudDraftsStanding(on)),
+      improveTargetName: prefs.specForStage('draft_improve')?.name,
+      // Watched for the reason the sync stamps are: the count re-reads on
+      // every recorded event, so a draft that leaves behind an open Settings
+      // moves the line without the reader touching anything.
+      cloudDraftsToday: ref.watch(cloudDraftsTodayProvider).valueOrNull,
+      cloudDraftsDailyCap: prefs.cloudDraftsDailyCap,
+      onCloudDraftsDailyCapChanged: (value) =>
+          unawaited(notifier.setCloudDraftsDailyCap(value)),
       // The width is the DRAFT TARGET's since Round E, not the prose slot's: a
       // GPU box has slots this Mac does not. The old pref is still what the
       // built-in prose target's width is stored in, which is why the write
@@ -4903,6 +4914,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // column, and decoding it twice per build would be two chances to disagree
     // about what the draft read.
     final provenance = DraftProvenance.decode(draft.contextJson);
+    // Watched, like the switch below: pointing the Improve stage somewhere
+    // else — or clearing it — has to move the button on the next frame.
+    final prefs = ref.watch(appPrefsProvider);
+    final improveSpec = prefs.specForStage('draft_improve');
+    // The caption, plus the sentence only a rewritten draft has. Appended
+    // rather than folded into `caption()`, because the provenance sentence is
+    // about what the model READ and this is about which model wrote it.
+    final caption = provenance?.caption() ?? _provenance;
+    final improvedBy = provenance?.improvedBy;
 
     final composer = Composer(
       // Keyed on the conversation so switching threads builds a fresh field
@@ -4929,7 +4949,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // What the model actually read, when the handler wrote it down. The
       // decode is tolerant and the `??` covers every way it can say nothing,
       // so a malformed column costs the specific line and not the caption.
-      provenance: provenance?.caption() ?? _provenance,
+      provenance: improvedBy == null
+          ? caption
+          : '$caption. Improved with '
+              '${prefs.specById(improvedBy)?.name ?? 'another target'}',
       // Only the files with an id behind them. A draft written before the id
       // was stored names its files in the caption and opens none of them,
       // which is the right answer rather than a chip that goes nowhere.
@@ -4970,6 +4993,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         _stageQuietly(target);
         notifier.generate();
       },
+      // Hidden until the stage is routed, which is decision 10's default:
+      // nothing leaves this machine because a button was there to press.
+      improveLabel:
+          improveSpec == null ? null : 'Improve with ${improveSpec.name}',
+      // Staged first, for the reason Draft reply is: the rewritten row lands
+      // in the box the reader is looking at.
+      onImprove: () {
+        _stageQuietly(target);
+        unawaited(notifier.improve());
+      },
+      improving: draft.improving,
       // The ✕ empties the BOX and nothing else. The suggestion is not thrown
       // away by closing the thing it was copied into — deleting one is still
       // the card's own ×, with its two-step confirm.

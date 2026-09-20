@@ -88,7 +88,10 @@ void main() {
     await open(tester, dailyCap: 12);
 
     expect(
-      find.text('At most 12 drafts a day go to a third-party target.'),
+      find.text(
+        'At most 12 drafts a day go to a third-party target. You can change '
+        'the cap under Settings, Processing.',
+      ),
       findsOneWidget,
     );
   });

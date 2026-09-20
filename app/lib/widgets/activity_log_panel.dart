@@ -81,6 +81,7 @@ class ActivityLogPanel extends StatefulWidget {
     'triage': 'Triage',
     'extract': 'Extract',
     'draft': 'Draft',
+    'draft_improve': 'Improve a draft',
     'mark_read': 'Mark read',
     'compose': 'New message',
     'storyline': 'Storylines',

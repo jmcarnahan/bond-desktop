@@ -86,7 +86,8 @@ class CloudDraftsConsentPane extends StatelessWidget {
           ),
           const SizedBox(height: BondSpacing.s16),
           Text(
-            'At most $dailyCap drafts a day go to a third-party target.',
+            'At most $dailyCap drafts a day go to a third-party target. You '
+            'can change the cap under Settings, Processing.',
             style: BondType.small,
           ),
           const SizedBox(height: BondSpacing.s24),
