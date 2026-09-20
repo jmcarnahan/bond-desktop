@@ -11,6 +11,7 @@ import '../providers/prefs_provider.dart'
         backendModeMcp,
         defaultMcpServerUrl,
         mcpDeployedUrl;
+import '../screens/consent_screen.dart' show CloudDraftsConsentPane;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart';
 import '../theme/tokens.dart';
@@ -24,7 +25,29 @@ import 'settings_lookback_field.dart';
 import 'settings_models_body.dart';
 import 'settings_section.dart';
 import 'settings_segments.dart';
+import 'settings_target_editor.dart' show LlmTargetEditor;
 import 'time_format.dart' show relativeTime;
+
+/// Which sub-pane of Settings is on screen. Null is the sections themselves.
+///
+/// A sealed type rather than an enum and two nullable fields, so the pane's
+/// title, its body and the values it needs cannot disagree: there is no way to
+/// be on the consent pane without the target it is asking about.
+sealed class _Subpane {
+  const _Subpane();
+}
+
+/// Add when [initial] is null, edit otherwise.
+class _TargetEditorPane extends _Subpane {
+  final LlmTargetSpec? initial;
+  const _TargetEditorPane(this.initial);
+}
+
+class _ConsentPane extends _Subpane {
+  final String stageId;
+  final LlmTargetSpec target;
+  const _ConsentPane(this.stageId, this.target);
+}
 
 /// How much of Settings a host is asking for.
 ///
@@ -214,6 +237,46 @@ class SettingsScreen extends StatefulWidget {
   /// Fired by the **Drafts in flight** segments. Null takes that one control
   /// off the Models section and leaves the rest of it exactly as it was.
   final void Function(int width)? onProseParallelChanged;
+
+  /// Whose width **Drafts in flight** is about — the name of the target the
+  /// `draft_reply` stage resolves to. Null names the built-in prose target,
+  /// which is what a host with no stage map has.
+  final String? proseParallelTargetName;
+
+  /// Every server a stage may be pointed at, built-ins first —
+  /// `AppPrefs.allTargets`. Empty leaves the Models section rendering exactly
+  /// as it did before routing was data.
+  final List<LlmTargetSpec> targets;
+
+  /// Which target id each stage resolves to now, by stage id.
+  final Map<String, String?> stageTargetIds;
+
+  /// Whether the owner has read what a third-party draft target receives.
+  final bool cloudDraftsConsent;
+
+  /// Fired by the target editor's Save, with the typed bearer and the three
+  /// presets. **Null hides Add and Edit** and leaves the Targets list a
+  /// read-only report, the same discipline every optional control here
+  /// follows.
+  final Future<void> Function(
+    LlmTargetSpec spec, {
+    String? bearer,
+    bool prose,
+    bool confirm,
+    bool bulk,
+  })? onTargetSaved;
+
+  /// Fired by a row's confirmed Remove. Null takes Remove off the rows.
+  final Future<void> Function(String id)? onTargetRemoved;
+
+  /// Fired by a stage's picker. Null keeps the stage table's chips and offers
+  /// no pickers at all.
+  final void Function(String stageId, String? targetId)? onStageTargetChanged;
+
+  /// Fired by the consent pane's Continue, before the stage is written. Null
+  /// leaves the pane's Continue writing the stage alone, which is the shape a
+  /// host that stores no consent flag has.
+  final Future<void> Function()? onCloudDraftsConsent;
 
   /// Drawn at the top of the Models section — the host's Local server card.
   /// Null leaves the section exactly as it was before there was one.
@@ -422,6 +485,14 @@ class SettingsScreen extends StatefulWidget {
     this.onSlotReset,
     this.proseParallel = 1,
     this.onProseParallelChanged,
+    this.proseParallelTargetName,
+    this.targets = const [],
+    this.stageTargetIds = const {},
+    this.cloudDraftsConsent = false,
+    this.onTargetSaved,
+    this.onTargetRemoved,
+    this.onStageTargetChanged,
+    this.onCloudDraftsConsent,
     this.modelsHeader,
     this.localServerSummary,
     this.lastMailSyncIso,
@@ -532,6 +603,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// Which sections are open, by title. Several may be; none is by default.
   /// Deliberately not persisted — see the [SettingsSection] doc.
   final Set<String> _open = <String>{};
+
+  /// Which sub-pane of Settings is on screen, or null for the sections.
+  ///
+  /// State on THIS object rather than a route, for two reasons. The house rule
+  /// is panes with a back arrow and no `Navigator` routes; and the sections'
+  /// expansion state lives here, so swapping only the child is what brings a
+  /// person back to the Models section still open at the row they left.
+  _Subpane? _subpane;
 
   /// Whether the wipe button has been armed — see [_signOutBlock]. Reset by
   /// 'Keep' and by the wipe completing, never by a rebuild: an armed button is
@@ -650,6 +729,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final onHome = widget.onHome;
+    // A sub-pane REPLACES the sections rather than floating over them: the
+    // house rule is one pane at a time with a way back, and the sections stay
+    // in this State so closing the sub-pane restores them untouched.
+    if (_subpane case final subpane?) {
+      return PaneSurface(
+        title: switch (subpane) {
+          _TargetEditorPane(initial: null) => 'Add target',
+          _TargetEditorPane() => 'Edit target',
+          _ConsentPane() => 'Cloud drafts',
+        },
+        onBack: _closeSubpane,
+        onHome: onHome,
+        child: switch (subpane) {
+          _TargetEditorPane(:final initial) => LlmTargetEditor(
+              initial: initial,
+              probe: widget.probeServer,
+              onSave: _saveTarget,
+              onCancel: _closeSubpane,
+            ),
+          _ConsentPane(:final stageId, :final target) => CloudDraftsConsentPane(
+              targetName: target.name,
+              stageLabel: _stageLabel(stageId),
+              onContinue: () => unawaited(_acceptCloudDrafts(stageId, target)),
+              // Back and Not now are the same answer, and neither writes.
+              onNotNow: _closeSubpane,
+            ),
+        },
+      );
+    }
     return PaneSurface(
       title: widget.scope == SettingsScope.ai ? 'AI' : 'Settings',
       // Both ways out commit a half-typed server URL and a typed lookback date
@@ -723,6 +831,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           SettingsModelsBody.summary(
             widget.slotTargets,
             server: widget.localServerSummary,
+            userTargets: _userTargetCount,
           ),
           _modelsBody(),
         ),
@@ -893,7 +1002,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _modelsBody() => SettingsModelsBody(
     header: widget.modelsHeader,
-    targets: widget.slotTargets,
+    slotTargets: widget.slotTargets,
     isDefault: widget.slotIsDefault,
     compiledDefaults: widget.compiledDefaults,
     stages: widget.stages,
@@ -902,7 +1011,70 @@ class _SettingsScreenState extends State<SettingsScreen> {
     onReset: widget.onSlotReset ?? (_) {},
     proseParallel: widget.proseParallel,
     onProseParallelChanged: widget.onProseParallelChanged,
+    proseParallelTargetName:
+        widget.proseParallelTargetName ?? builtInProseName,
+    targets: widget.targets,
+    stageTargetIds: widget.stageTargetIds,
+    cloudDraftsConsent: widget.cloudDraftsConsent,
+    onStageTargetChanged: widget.onStageTargetChanged,
+    onAddTarget: widget.onTargetSaved == null
+        ? null
+        : () => setState(() => _subpane = const _TargetEditorPane(null)),
+    onEditTarget: widget.onTargetSaved == null
+        ? null
+        : (spec) => setState(() => _subpane = _TargetEditorPane(spec)),
+    onRemoveTarget: widget.onTargetRemoved,
+    onConsentNeeded: (stageId, target) =>
+        setState(() => _subpane = _ConsentPane(stageId, target)),
   );
+
+  /// How many servers the user ADDED. The collapsed summary counts those and
+  /// not the two built-ins, so a machine with neither reads exactly as it did
+  /// before routing was data.
+  int get _userTargetCount =>
+      widget.targets.where((spec) => !spec.isBuiltIn).length;
+
+  void _closeSubpane() => setState(() => _subpane = null);
+
+  /// The stage's own word, for the consent pane's first line. The id itself is
+  /// a schema name and is not what a person calls the thing.
+  String _stageLabel(String stageId) {
+    for (final stage in widget.stages) {
+      if (stage.id == stageId) return stage.label;
+    }
+    return stageId;
+  }
+
+  Future<void> _saveTarget(
+    LlmTargetSpec spec, {
+    String? bearer,
+    bool prose = false,
+    bool confirm = false,
+    bool bulk = false,
+  }) async {
+    await widget.onTargetSaved?.call(
+      spec,
+      bearer: bearer,
+      prose: prose,
+      confirm: confirm,
+      bulk: bulk,
+    );
+    if (!mounted) return;
+    _closeSubpane();
+  }
+
+  /// Continue: the consent is recorded FIRST and the stage written after it.
+  ///
+  /// That order is the whole protection. `AppPrefs.specForStage` sends a
+  /// third-party draft target back to the local one while the flag is false,
+  /// so a stage written before the flag would resolve locally until something
+  /// else happened to rebuild it.
+  Future<void> _acceptCloudDrafts(String stageId, LlmTargetSpec target) async {
+    await widget.onCloudDraftsConsent?.call();
+    widget.onStageTargetChanged?.call(stageId, target.id);
+    if (!mounted) return;
+    _closeSubpane();
+  }
 
   // ── Processing ────────────────────────────────────────────────────────────
 

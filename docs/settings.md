@@ -74,7 +74,7 @@ body has the same shape in `settings_models_body.dart`.
 |---|---|---|
 | About me | always | the saved text, whitespace collapsed to one line, cut at 80 characters with `…`; `Not written yet` when empty |
 | Microsoft connection | any of `onBackendModeChanged`, `connectionStatus`, `hasScope`, `onSignIn` is wired | `MCP` or `This device`, then (MCP only) `Deployed` / `Local` / `Custom`, then `Checking…` / `Not signed in` / `Signed in as <label>` / `Signed in`, joined by ` · ` |
-| Models | `onSlotTargetChanged` wired | `[<local server summary> · ]Fast <model> @ <host:port> · Prose <model> @ <host:port> · Embeddings <host:port>` — the prefix is present only when the host wires the Local server card (`localServerSummary`), so a screen without one reads exactly as it always did |
+| Models | `onSlotTargetChanged` wired | `[<local server summary> · ]Fast <model> @ <host:port> · Prose <model> @ <host:port> · Embeddings <host:port>[ · N more targets]` — the prefix is present only when the host wires the Local server card (`localServerSummary`), and the suffix only when the user has ADDED targets (`1 more target` at one, the two built-ins never counted), so a screen with neither reads exactly as it always did |
 | Needs You | always | the threshold wording, plus ` · custom rules` or ` · default rules` when `onNeedsYouRulesSaved` is wired, plus ` · judging N message(s)` while `needsYouRejudging` (the whole needs-you queue, from `needsYouPendingProvider`) is above zero — "judging", not "re-judging", because the count cannot tell a Save's rows from a sync's |
 | Suggested replies | `onDraftPolicyChanged` wired (both scopes) | `For messages that need you` / `For every reply-worthy message` / `Only when asked` |
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
@@ -217,19 +217,148 @@ outlives the pane — a sign-in still out in the browser, a sign-out from the ra
 — and a dead host must answer with nothing rather than with "ref after
 dispose".
 
+**The Models section's own wires**, added 2026-09-19 with routing-as-data. The
+host reads them off the prefs so the picker's items and its selection come from
+one resolver rather than two guesses:
+
+- `targets: prefs.allTargets` and `stageTargetIds: {for (final stage in
+  pipelineStages) stage.id: prefs.targetIdForStage(stage.id)}`, with
+  `cloudDraftsConsent: prefs.cloudDraftsConsent`.
+- `onTargetSaved` awaits `notifier.upsertTarget(spec, bearer: bearer)` and THEN,
+  only when one of the three presets is set, `notifier.applyPreset(...)` — that
+  order because `applyPreset` refuses a target id it cannot find, and until the
+  upsert lands a new target is not in the list.
+- `onTargetRemoved: notifier.removeTarget`, which also deletes the keychain entry
+  and clears every stage that pointed at it, in one write.
+- `onStageTargetChanged` calls `clearStageTarget` for a null target id and
+  `setStageTarget` otherwise; `onCloudDraftsConsent` is
+  `notifier.setCloudDraftsConsent(true)`.
+- `proseParallel` and `proseParallelTargetName` come from
+  `prefs.specForStage('draft_reply')`, and `onProseParallelChanged` writes
+  `setProseParallel` for a built-in target and `upsertTarget(spec.copyWith(
+  parallel: width))` for any other. See **Drafts in flight** below.
+
+`pipelineStages` is imported directly in `inbox_screen.dart`: `prefs_provider.dart`
+re-exports `ModelSlot`, `LlmTarget`, `LlmTargetSpec` and `LlmWire` but not the
+stage table, and the host needs it to ask where every stage currently points.
+
 ## Models
 
 Which model each step of the pipeline uses, and the two slots the user may
 move. The body lives in its own file — `app/lib/widgets/settings_models_body.dart`
 — because `settings_screen.dart` was already thirteen hundred lines.
 
-**The stage table is AUTHORED**, not derived. The stage → slot mapping is decided
-in `app_providers.dart` when the clients are constructed, and there is no
-per-call router anything can interrogate at runtime, so `pipelineStages` in
-`app/lib/services/llm/model_slots.dart` is the app telling the user what its own
-wiring is. `model_slots_test.dart` is what keeps that table honest against the
-handler list. Fourteen rows: eight on the fast slot, five on prose, one on
-embeddings.
+**The stage table is AUTHORED**, not derived, and since Round E each row has a
+**picker**. `pipelineStages` in `app/lib/services/llm/model_slots.dart` is the
+app telling the user what its own wiring is, and `model_slots_test.dart` is what
+keeps that table honest against the handler list. Sixteen rows: eight on the
+fast slot, seven on prose, one on embeddings. What changed is the meaning of the
+`slot` column — it is now each stage's **default target**, not its wiring. Where
+a stage actually goes is data in `stage_targets`, resolved per call through
+`stageLlmClientProvider`, and re-pointing one costs no code at all
+(`docs/pipeline/10-model-routing.md`).
+
+Each row's right-hand cell is a `DropdownButton<String>` keyed
+`SettingsModelsBody.stagePickerKey(stageId)` over every target, labelled with the
+target's name. An **optional** stage — `draft_improve` today — gets a first item
+`None` whose value is the empty string, and picking it reports null, which is
+what "the Improve button is not there" looks like in the data. `embeddings` keeps
+its chip and model name and gets no picker for the reason it gets no editor:
+every stored vector carries a corpus tag, so there is nothing to choose between.
+A stored id that names a target which has since been removed falls back to the
+stage's own default rather than throwing — a `DropdownButton` asserts on a value
+that is not among its items, and a settings screen may not crash on stale data.
+A host that wires no `onStageTargetChanged` gets the chips the table always had.
+
+**The golden notes.** Under a picker, where the ledger has measured that stage,
+sits one caption from `stage_golden_notes.dart` — `Golden set: verdict 92 on the
+local 4B, 93 on the 27B` and six more. Numbers and model sizes only: this is a
+public repo and the golden set is real mail, so the table is pinned by a test
+that every key is a `pipelineStages` id and that no value contains `@`, `http`,
+`.com` or a newline. A stage the ledger never measured renders no line at all,
+which is the honest state rather than a blank one.
+
+**Targets.** Below the two slot editors, under the heading **Targets**, is
+`SettingsTargetsBody` (`app/lib/widgets/settings_targets_body.dart`) — every
+server a stage may be pointed at, `AppPrefs.allTargets`, built-ins first. One row
+per target, keyed `llm-target-row-<id>`: the name, `hostPort(url)`, the model, a
+chip for the wire (`OpenAI` / `Converse`), a chip saying `Bearer set` or `No
+bearer`, and `Parallel N` when the width is not one. Beside them **Check server**
+(`llm-target-check-<id>`, the same probe closure the slot editors use, with a
+`ProbeStatus` under the row), and for a user's own target **Edit**
+(`llm-target-edit-<id>`) and **Remove** (`llm-target-remove-<id>`). Remove is the
+Processing section's two-step: the first press swaps the button for **Confirm
+remove** beside **Keep**, and the row's buttons go inert while the write is out.
+Under the rows, **Add target** (`llm-target-add`).
+
+The two built-ins have no Edit and no Remove. They are derived from the four slot
+prefs rather than stored, so their row carries the caption `Edited above, under
+Fast and Prose` and the two `ModelSlotEditor`s further up the section are where
+they change. `AppPrefsNotifier.removeTarget` refuses a built-in id on its own
+account as well, so the missing button is a courtesy rather than the protection.
+
+**Add and Edit are PANES**, not dialogs — the house rule. `SettingsScreen` holds
+which sub-pane is open as state and swaps its own child for a `PaneSurface`
+titled **Add target** or **Edit target**, so the sections and their expansion
+state are still there when the back arrow closes it. The body is
+`LlmTargetEditor` (`app/lib/widgets/settings_target_editor.dart`), prop-only like
+everything else here, with controls keyed `llm-target-name`, `-url`, `-model`,
+`-wire`, `-bearer`, `-parallel`, `-streams`, `-check`, `-save`, `-cancel`. Save
+waits for a name, a URL and a model, and for a URL that parses with a host;
+until then it is disabled with the reason as a caption under it. A probe never
+blocks a Save, on the slot editors' rule. A new target's id is `t-` and eight hex
+characters, never derived from the name: the stage map and the keychain entry are
+keyed on that string, and two targets a person happened to call the same thing
+would otherwise share a token.
+
+**The bearer is a secret and is treated as one.** The field is obscured. On an
+edit it opens EMPTY with the hint `Stored. Type to replace`, because a token that
+has reached the keychain is never read back onto a screen — which is why
+"unchanged" has to be a state the empty field can be in. The three outcomes:
+typing a token sends it with `hasBearer` true; leaving the field empty sends
+`bearer: null` with `hasBearer` true, which keeps the stored one; **Remove
+bearer** (`llm-target-bearer-clear`) sends `bearer: null` with `hasBearer` false,
+which clears it. The value reaches the host once and appears in no key, no
+summary, no log and no row — the list says only `Bearer set` or `No bearer`.
+
+**The three presets**, on the ADD pane only, under **Use this target for**:
+*Prose stages* (`llm-target-preset-prose`, `proseStageIds` — storyline naming,
+refresh, recap and grouping, the reply decision and drafts), *Storyline confirm*
+(`llm-target-preset-confirm`, `storyline_membership`) and *All bulk stages*
+(`llm-target-preset-bulk`, the eight fast-slot rows). The first two are
+**pre-checked for every new target** and the user unticks. That is deliberate and
+it is not a guess about the host: the GPU box arrives over an ssh tunnel at
+`localhost:18100`, so "not loopback" would miss the one machine these presets
+exist for, and a Bedrock endpoint proxied onto loopback would read as local.
+Bulk is not pre-checked, because moving eight stages onto a paid target is not a
+default anybody should arrive at by pressing Save. They are absent on an EDIT: a
+preset is a write rather than a property of the target, so a checkbox showing the
+current grouping would need a fourth state. The host applies them with
+`AppPrefsNotifier.applyPreset` AFTER the upsert, because `applyPreset` refuses a
+target id it cannot find.
+
+**Cloud drafts consent.** Picking a **third-party** target for `draft_reply` or
+`draft_improve` while `cloud_drafts_consent` is false writes NOTHING. Instead the
+screen opens a third pane, `PaneSurface` titled **Cloud drafts** over
+`CloudDraftsConsentPane` (`app/lib/screens/consent_screen.dart`), whose back
+arrow is the same answer as **Not now**. Third party means the `converse` wire or
+a host under `amazonaws.com`, `anthropic.com`, `openai.com` or `deepseek.com`
+(`isThirdPartyHost`); loopback is not a signal in either direction. No other
+stage ever asks — a triage or a storyline-name prompt carries a subject line and
+a summary, and a draft prompt carries the message, the tail of its thread and
+excerpts from the user's own directories.
+
+The pane says what goes and what never goes, shows the two measured numbers in a
+table (`Local 27B | 6 of 25 drafts passed`, `Opus 5 | 17 of 25 drafts passed`,
+measured on 25 replies from the golden set, 2026-09-17) and names the daily cap.
+**I understand, continue** (`consent-continue`) records the consent FIRST and
+writes the stage after it — that order is the protection, because
+`AppPrefs.specForStage` sends a third-party draft target back to the local one
+while the flag is false, so a stage written first would resolve locally until
+something else rebuilt it. **Not now** (`consent-not-now`) and the back arrow
+write nothing. The prefs enforce the same rule independently of this screen, so a
+`stage_targets` restored from a backup or edited by hand cannot route a draft off
+the machine on its own.
 
 **Two editors, one per switchable slot.** `ModelSlotEditor`
 (`app/lib/widgets/model_slot_editor.dart`) is prop-only: it takes the effective
@@ -253,15 +382,22 @@ change still moves it. **A probe never blocks a Save**: somebody about to start
 a server has to be able to point the app at it first.
 
 **Drafts in flight** — a `SegmentedButton<int>` of 1 / 2 / 4 / 8 directly under
-the prose editor, captioned "One per slot the prose server was started with
-(SLOTS in local.mk, --max-num-seqs on vLLM). Extra requests queue at the server
-rather than fail." It writes `AppPrefs.proseParallel` (`prose_parallel`, 1–8,
-default 1), which `DraftHandler` reads through a closure at every launch
-decision — so the change moves the next draft rather than the next launch of
-the app. It is here rather than in a section of its own because it is a fact
-about the prose SERVER, and it does not touch the collapsed summary, which
-names where the three slots point and nothing else. Optional, like every other
-control here: a host that wires no `onProseParallelChanged` gets no segments.
+the prose editor, captioned "For &lt;name&gt;. One per slot the server was started
+with (SLOTS in local.mk, --max-num-seqs on vLLM). Extra requests queue at the
+server rather than fail." Since Round E the width is the **draft target's**,
+not the prose slot's: the host passes the `draft_reply` stage's resolved
+`parallel` and its name, because a GPU-served box has slots this Mac does not
+and a caption still saying "the prose server" would be describing a machine the
+number no longer governs. Where the number is WRITTEN forks on the same
+resolution: for the built-in `Local prose` target it is `AppPrefs.proseParallel`
+(`prose_parallel`, 1–8, default 1) exactly as before, and for a user's target it
+is that spec's `parallel` through `upsertTarget`. `DraftHandler` reads it through
+a closure at every launch decision either way, so the change moves the next draft
+rather than the next launch of the app. It is here rather than in a section of
+its own because it is a fact about the SERVER, and it does not touch the
+collapsed summary, which names where the three slots point and how many targets
+were added. Optional, like every other control here: a host that wires no
+`onProseParallelChanged` gets no segments.
 Drafts only — a recap and a refresh both write the storyline they are about and
 stay at one (`docs/pipeline/10-model-routing.md`). Measured 2026-09-17: a second
 local slot on this Mac's 27B did not pay (width 2 slower end to end than width

@@ -42,8 +42,10 @@ import '../services/attachments/xlsx_reader.dart';
 import '../services/backend/backend_types.dart';
 import '../services/llm/draft_task.dart' show DraftOption;
 import '../services/llm/model_probe.dart';
-// [ModelSlot] arrives with `prefs_provider.dart`, which re-exports it — a
-// second import of `model_slots.dart` for the same declaration is redundant.
+// [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
+// re-exports them; `pipelineStages` is not re-exported, and the settings host
+// needs it to ask where every stage currently points.
+import '../services/llm/model_slots.dart' show pipelineStages;
 import '../services/llm/needs_you_task.dart'
     show needsYouDefaultRules, needsYouOutputContract, needsYouRulesCap;
 import '../services/profile_photos.dart' show photoKeyFor;
@@ -2490,9 +2492,56 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ModelSlot.embed => Future<void>.value(),
           }),
       onSlotReset: (slot) => unawaited(notifier.clearSlotTarget(slot)),
-      proseParallel: prefs.proseParallel,
-      onProseParallelChanged: (width) =>
-          unawaited(notifier.setProseParallel(width)),
+      // Every server a stage may be pointed at, and where each stage points
+      // now. Built by the prefs so the picker's items and its selection come
+      // from one resolver rather than from two guesses.
+      targets: prefs.allTargets,
+      stageTargetIds: {
+        for (final stage in pipelineStages)
+          stage.id: prefs.targetIdForStage(stage.id),
+      },
+      cloudDraftsConsent: prefs.cloudDraftsConsent,
+      // The spec first and the presets after it, in that order: `applyPreset`
+      // refuses a target id it cannot find, and until the upsert lands this
+      // one is not in the list.
+      onTargetSaved: (
+        spec, {
+        String? bearer,
+        bool prose = false,
+        bool confirm = false,
+        bool bulk = false,
+      }) async {
+        await notifier.upsertTarget(spec, bearer: bearer);
+        if (!prose && !confirm && !bulk) return;
+        await notifier.applyPreset(
+          targetId: spec.id,
+          prose: prose,
+          confirm: confirm,
+          bulk: bulk,
+        );
+      },
+      onTargetRemoved: notifier.removeTarget,
+      onStageTargetChanged: (stageId, targetId) => unawaited(
+        targetId == null
+            ? notifier.clearStageTarget(stageId)
+            : notifier.setStageTarget(stageId, targetId),
+      ),
+      onCloudDraftsConsent: () => notifier.setCloudDraftsConsent(true),
+      // The width is the DRAFT TARGET's since Round E, not the prose slot's: a
+      // GPU box has slots this Mac does not. The old pref is still what the
+      // built-in prose target's width is stored in, which is why the write
+      // below forks on `isBuiltIn` rather than always writing the spec.
+      proseParallel:
+          prefs.specForStage('draft_reply')?.parallel ?? prefs.proseParallel,
+      proseParallelTargetName: prefs.specForStage('draft_reply')?.name,
+      onProseParallelChanged: (width) {
+        final spec = prefs.specForStage('draft_reply');
+        unawaited(
+          spec == null || spec.isBuiltIn
+              ? notifier.setProseParallel(width)
+              : notifier.upsertTarget(spec.copyWith(parallel: width)),
+        );
+      },
       localServerSummary: SettingsLocalServerBody.summary(
         serverState,
         managed: prefs.managedServer,
