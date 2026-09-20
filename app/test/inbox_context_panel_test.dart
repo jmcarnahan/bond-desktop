@@ -22,6 +22,7 @@ import 'package:bond_inbox/widgets/context_panel.dart';
 import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/widgets/settings_context_section.dart';
 import 'package:bond_inbox/widgets/side_panel.dart';
+import 'package:bond_inbox/services/system/system_info.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -142,6 +143,10 @@ void main() {
       initialAppPrefsProvider.overrideWithValue(prefs),
       syncServiceProvider.overrideWithValue(_FakeSync()),
       teamsSyncProvider.overrideWithValue(_FakeTeamsSync()),
+      // The tier's hardware read: the null platform answers `unknown` at once,
+      // so the tier provider's probe timer is cancelled inside the test instead
+      // of pending past this container's late teardown.
+      systemInfoProvider.overrideWithValue(const NullSystemInfo()),
       // No Runner behind a `flutter test` binary: the seam's whole point is
       // that "this build keeps no bookmark" is a legal answer.
       directoryAccessProvider.overrideWithValue(const PlainDirectoryAccess()),

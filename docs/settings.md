@@ -289,14 +289,16 @@ suggested replies moved to Only when asked. On a big Mac it is those same six
 stage picks cleared back to `Local prose`, with suggested replies back to For
 messages that need you. Both captions use the words the controls they move
 actually carry, so the mode named here is the mode shown under Suggested
-replies. Nothing else moves: the eight bulk stages, the storyline confirm stage,
-Improve a draft, the targets themselves, the cloud-drafts consent and every
-bearer are untouched, and a second press changes nothing.
+replies. Nothing else moves: the eight bulk stages, storyline confirm among
+them, Improve a draft, the targets themselves, the cloud-drafts consent and
+every bearer are untouched, and a second press changes nothing.
 
-A Mac whose memory could not be read gets neither. The system channel answers
-`unknown` rather than failing, so that machine resolves to the full tier by the
-never-refuse rule, and writing defaults chosen from a number nobody read is not
-something to offer: the line reads `This Mac: memory could not be read` and
+A Mac whose memory could not be read gets neither. The system channel usually
+answers `unknown` rather than failing, and when it throws anything else or
+goes quiet past the two-second probe timeout the hardware read is a rejection
+while the tier, read off the same future, still resolves to the full tier by
+the never-refuse rule. Either way the machine is unreadable, and writing
+defaults chosen from a number nobody read is not something to offer: the line reads `This Mac: memory could not be read` and
 there is no button, with a caption pointing at the stage table above.
 
 It is not a two-step, unlike Remove and Clear AI results, because nothing is
@@ -661,7 +663,7 @@ with it.
 
 | Action | Keys | What goes | What stays |
 |---|---|---|---|
-| **Stop sending drafts anywhere** | `settings-stop-cloud-drafts{,-confirm,-keep}` | the `draft_reply` and `draft_improve` stage entries and `cloud_drafts_consent`, so both draft stages resolve locally again and Improve is gone | every row, every target, every keychain bearer and every other stage entry |
+| **Stop sending drafts anywhere** | `settings-stop-cloud-drafts{,-confirm,-keep}` | the `draft_reply` and `draft_improve` stage entries and `cloud_drafts_consent`, so Draft reply resolves to `Local prose` again, `draft_improve` resolves to nothing at all and the Improve a draft button goes with it, and the consent is withdrawn | every row, every target, every keychain bearer and every other stage entry |
 | **Clear AI results** | `settings-clear-ai-results{,-confirm,-keep}` | every triage verdict, summary, storyline, draft, digest and embedding — the sixteen `MessageStore.derivedTables`, the verdict columns on `messages` and `conversations`, and the stage markers on `attachments` and the library; the activity log is one of the sixteen, so today's **Cloud drafts** count starts again at zero, which the caption above the buttons says | mail, Teams messages, attachments, registered directories, the sign-in and every preference |
 | **Forget everything and re-sync** | `settings-forget-resync{,-confirm,-keep}` | everything above **and** the mailbox itself — `MessageStore.wipeAll(keepIdentity: true)`, cursors and bootstrap floors included | the sign-in, the about-me text, the Needs You rules, the sender rules, the registered directories and every setting |
 
@@ -678,12 +680,13 @@ resolver between them and a draft.
 
 The `draft_reply` stage falls back to the local prose target and
 `draft_improve` resolves to nothing at all, which is that stage's own rule, so
-the Improve button goes rather than quietly running on this machine. It is the
-one control in this section that is **not** refused while processing is on. It writes preferences and touches no rows, so there is no drain it
-could race, and somebody who has just realised their drafts are leaving the
-machine should not have to find a switch first. Nothing else goes with it: the
-third-party target stays in the list, its keychain bearer stays in the
-keychain, and any other stage pointed at it keeps pointing at it. Granting
+the Improve button goes rather than quietly running on this machine. It is
+**not** refused while processing is on, unlike the two resets it sits above:
+it writes preferences and touches no rows, so there is no drain it could race,
+and somebody who has just realised their drafts are leaving the machine should
+not have to find a switch first. Nothing else goes with it: the third-party
+target stays in the list, its keychain bearer stays in the keychain, and any
+other stage pointed at it keeps pointing at it. Granting
 again is the consent pane, one screen, so the second button says
 `Confirm: this cannot be undone` for the reason both resets do rather than
 because this one cannot be redone. The standing switch under Suggested replies

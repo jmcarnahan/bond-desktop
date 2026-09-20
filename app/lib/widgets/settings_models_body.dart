@@ -409,13 +409,18 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
     final hardware = widget.hardware;
     final tier = widget.machineTier;
 
-    // Zero bytes is `HardwareInfo.unknown`'s memory, and the channel ANSWERS
-    // with it rather than failing: a `MissingPluginException` and a
-    // `PlatformException` both degrade to it. So a machine whose memory could
-    // not be read reaches here with a resolved tier, `full` by the never-refuse
-    // rule, and it must not be offered a button that would write defaults
-    // chosen from a number nobody has. It gets the fact and nothing to press.
-    final unreadable = hardware != null && hardware.memoryBytes <= 0;
+    // Zero bytes is `HardwareInfo.unknown`'s memory, and the channel usually
+    // ANSWERS with it rather than failing: a `MissingPluginException` and a
+    // `PlatformException` both degrade to it. Anything else it throws rejects
+    // the hardware future while the tier, read off the SAME future, still
+    // resolves `full` by the never-refuse rule. So a resolved tier beside a
+    // null hardware means the read failed or timed out, and it is the zero
+    // case in every way that matters here: a machine whose memory could not be
+    // read must not be offered a button that would write defaults chosen from
+    // a number nobody has. Both get the fact and nothing to press. While BOTH
+    // are null the machine is still being read, and that is the branch below.
+    final unreadable =
+        tier != null && (hardware == null || hardware.memoryBytes <= 0);
     if (unreadable) {
       return [
         Text(

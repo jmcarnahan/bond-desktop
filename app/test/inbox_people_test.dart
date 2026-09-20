@@ -18,6 +18,7 @@ import 'package:bond_inbox/widgets/room_header.dart';
 import 'package:bond_inbox/widgets/settings_screen.dart';
 import 'package:bond_inbox/widgets/side_panel.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
+import 'package:bond_inbox/services/system/system_info.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -143,6 +144,10 @@ void main() {
       initialAppPrefsProvider.overrideWithValue(prefs),
       syncServiceProvider.overrideWithValue(_FakeSync()),
       teamsSyncProvider.overrideWithValue(_FakeTeamsSync()),
+      // The tier's hardware read: the null platform answers `unknown` at once,
+      // so the tier provider's probe timer is cancelled inside the test instead
+      // of pending past this container's late teardown.
+      systemInfoProvider.overrideWithValue(const NullSystemInfo()),
       notificationCoordinatorProvider
           .overrideWithValue(NotificationCoordinator(store)),
     ]);

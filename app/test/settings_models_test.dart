@@ -728,6 +728,27 @@ void main() {
       expect(find.textContaining('0 B'), findsNothing);
     });
 
+    testWidgets('a hardware read that threw gets the fact and no button',
+        (tester) async {
+      // The rejection rather than the zero. `ChannelSystemInfo.hardware()`
+      // catches a missing plugin and a `PlatformException` and answers
+      // `unknown`; anything else it throws, and a channel that goes quiet
+      // times out, so the hardware future rejects while the tier — read off
+      // that same future — still resolves `full` by the never-refuse rule.
+      // A resolved tier beside no hardware is the unreadable machine, and it
+      // must not be offered a press that writes the full tier's defaults.
+      await open(
+        tester,
+        wireTier: true,
+        machineTier: MachineTier.full,
+      );
+      await expand(tester, 'Models');
+
+      expect(find.text('This Mac: memory could not be read'), findsOneWidget);
+      expect(find.byKey(SettingsModelsBody.tierDefaultsKey), findsNothing);
+      expect(find.text(fullCaption), findsNothing);
+    });
+
     testWidgets('a host that cannot write it does not offer it',
         (tester) async {
       await open(tester, hardware: big, machineTier: MachineTier.full);

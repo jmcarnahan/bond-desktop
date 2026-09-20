@@ -34,15 +34,25 @@ which is a machine with 40 GiB of memory or more, and also a machine whose
 memory could not be read at all: `machineTierFor` answers `full` for zero bytes,
 the never-refuse rule `HardwareInfo.unknown` states, so nothing is withheld over
 a fact the app failed to read. Below the threshold the machine is the INBOX
-tier: the writing model is neither downloaded nor started, and the six
-prose-slot rows above start on `Local fast` instead, meaning `storyline_group`,
-`storyline_name`, `storyline_refresh`, `storyline_recap`, `reply_decision` and
-`draft_reply`. `AppPrefsNotifier.applyTierDefaults` is the one writer of that
-map, called by the setup wizard at Finish and again whenever somebody presses
-**Use this Mac's defaults** under Settings, Models. It writes the way a preset
-does, so an entry equal to a stage's own default is removed rather than stored
-and a fresh install on a big Mac still holds an empty object. The tier itself is
-read from the machine's memory every time it is asked for and is stored nowhere.
+tier: the writing model is neither downloaded nor started, and six of the seven
+prose-slot rows above, every one but `draft_improve`, start on `Local fast`
+instead, meaning `storyline_group`, `storyline_name`, `storyline_refresh`,
+`storyline_recap`, `reply_decision` and `draft_reply`. `draft_improve` is the
+seventh and no tier writes it, for the reason no preset writes it either: it is
+the one stage a person picks explicitly, and a tier that turned it on would be
+consent by accident. `AppPrefsNotifier.applyTierDefaults` is the one writer of
+that map, called by the setup wizard at Finish and again whenever somebody
+presses **Use this Mac's defaults** under Settings, Models. It writes the way a
+preset does, so an entry equal to a stage's own default is removed rather than
+stored and a fresh install on a big Mac still holds an empty object.
+
+The map is only half of what `applyTierDefaults` writes. The other half is the
+draft policy: the `inbox` tier gets `DraftPolicy.onDemand`, because the inbox
+model's drafts are unmeasured and nobody should pay for one unasked, and the
+`full` tier gets `needsYou`, which is the shipped default. That is the setting
+under **Suggested replies**, so a press moves a control the reader can see. The
+tier itself is read from the machine's memory every time it is asked for and is
+stored nowhere.
 
 The two built-in targets are the two slots this app has always had, named:
 

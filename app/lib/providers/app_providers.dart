@@ -231,18 +231,69 @@ final hardwareInfoProvider = FutureProvider<HardwareInfo>(
 /// is launched, on a path with no `try` above it and no way to report a
 /// [ServerFailed], so a rejected future would take the launch down over a fact
 /// the app could not read. Nothing is refused for that.
+/// A channel that never answers resolves [MachineTier.full] too, after
+/// [hardwareProbeTimeout], because `ModelServerSupervisor._launch` awaits
+/// `buildPreset()` before it emits anything: an unbounded wait there is no
+/// server, no `ServerFailed` and nothing on screen, which is worse than every
+/// answer this provider can give. That blind answer is REVISABLE: a channel
+/// that answers after the timeout re-derives the tier, so the Settings fact
+/// line and the button beside it cannot end up describing different machines.
 final machineTierProvider = FutureProvider<MachineTier>((ref) async {
-  try {
-    // Over [hardwareInfoProvider] rather than the channel again: one round
-    // trip, and one future, so the Settings fact line and the button beside it
-    // cannot settle a frame apart and disagree about the machine they are
-    // describing.
-    final hardware = await ref.watch(hardwareInfoProvider.future);
-    return machineTierFor(hardware.memoryBytes);
-  } on Object catch (e) {
+  // Set when the timeout answered for a read that had not landed yet. It is
+  // what makes that answer revisable, and it is false on every other path.
+  var answeredBlind = false;
+
+  // LISTEN rather than watch, and the difference is the whole design here.
+  // Watching the hardware STATE would invalidate this provider on the ordinary
+  // loading-to-data step, and every caller reads `.future` exactly ONCE —
+  // `setup_gate.dart`, `inbox_screen.dart` and the supervisor's preset. An
+  // invalidation mid-flight drops the future they are holding, and it is never
+  // completed: the gate then never decides and the launch never starts. So the
+  // rebuild is asked for by hand, in the one case where the tier and the
+  // machine can disagree: a channel that answered AFTER the timeout had
+  // already resolved [MachineTier.full] off nothing. Without it a 16 GiB Mac
+  // whose channel was slow would sit under a fact line reading 16 GB beside an
+  // enabled button writing the full tier's stage picks.
+  //
+  // Nothing fires on the fast path, where the value arrives before the timeout
+  // and `answeredBlind` is still false, and a channel that never answers never
+  // changes state, so it stays `full` — the never-refuse rule. A rejection is
+  // not a value either, and re-deriving one would only answer `full` again.
+  ref.listen<AsyncValue<HardwareInfo>>(hardwareInfoProvider, (_, next) {
+    if (answeredBlind && next.hasValue) ref.invalidateSelf();
+  });
+
+  // The timeout is a Timer of this provider's own, cancelled on dispose, and
+  // NOT `Future.timeout`: that helper's timer belongs to nobody, so a host
+  // whose hardware read never lands (every widget test that mounts Settings
+  // over a silent platform) tears its tree down with the timer still pending,
+  // which the test binding reports as a failure. Here the timer dies with the
+  // provider, and a hardware answer that lands first cancels it.
+  final answer = Completer<MachineTier>();
+  final timer = Timer(hardwareProbeTimeout, () {
+    if (answer.isCompleted) return;
+    answeredBlind = true;
+    debugPrint('tier: this Mac has not answered in $hardwareProbeTimeout, '
+        'assuming the full tier until it does');
+    answer.complete(machineTierFor(HardwareInfo.unknown.memoryBytes));
+  });
+  ref.onDispose(timer.cancel);
+
+  // Over [hardwareInfoProvider] rather than the channel again: one round trip
+  // and one future, so the fact line and the button are reading the same
+  // answer about the same machine. Watched synchronously, as a watch must be.
+  ref.watch(hardwareInfoProvider.future).then<void>((hardware) {
+    if (!answer.isCompleted) {
+      answer.complete(machineTierFor(hardware.memoryBytes));
+    }
+  }, onError: (Object e) {
     debugPrint('tier: could not read this Mac, assuming the full tier: $e');
-    return machineTierFor(HardwareInfo.unknown.memoryBytes);
-  }
+    if (!answer.isCompleted) {
+      answer.complete(machineTierFor(HardwareInfo.unknown.memoryBytes));
+    }
+  }).whenComplete(timer.cancel);
+
+  return answer.future;
 });
 
 /// Every folder the app owns. `main()` OVERRIDES this with the located

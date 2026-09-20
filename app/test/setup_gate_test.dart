@@ -235,6 +235,80 @@ void main() {
     expect(await container.read(machineTierProvider.future), MachineTier.full);
   });
 
+  testWidgets('a channel that goes quiet answers the full tier at the timeout',
+      (tester) async {
+    // The hang rather than the throw, one level below the gate. The SERVER
+    // launch awaits this provider with no `try` above it and emits nothing
+    // until `buildPreset()` returns, so an unbounded wait here is no server,
+    // no `ServerFailed` and nothing on screen. The timeout lives inside the
+    // provider's own `try`, so the wait ends the way a refusal does.
+    final container = ProviderContainer(overrides: [
+      hardwareInfoProvider
+          .overrideWith((ref) => Completer<HardwareInfo>().future),
+    ]);
+    addTearDown(container.dispose);
+
+    MachineTier? tier;
+    unawaited(
+      container.read(machineTierProvider.future).then((value) => tier = value),
+    );
+
+    await tester.pump(hardwareProbeTimeout + const Duration(seconds: 1));
+    await tester.pump();
+
+    expect(tier, MachineTier.full);
+  });
+
+  testWidgets('a channel that answers after the timeout re-derives the tier',
+      (tester) async {
+    // The timeout answers off a read that has not landed, so the answer has to
+    // be revisable: a machine left pinned at `full` by a slow channel would be
+    // offered the full tier's stage picks under a fact line reading 16 GB, off
+    // the same hardware future. Watching the `AsyncValue` and not only the
+    // future is what rebuilds this provider when the read finally lands.
+    final answers = Completer<HardwareInfo>();
+    final container = ProviderContainer(overrides: [
+      hardwareInfoProvider.overrideWith((ref) => answers.future),
+    ]);
+    addTearDown(container.dispose);
+
+    MachineTier? atTimeout;
+    unawaited(
+      container
+          .read(machineTierProvider.future)
+          .then((value) => atTimeout = value),
+    );
+
+    await tester.pump(const Duration(milliseconds: 2500));
+    expect(atTimeout, MachineTier.full, reason: 'nothing has answered yet');
+
+    answers.complete(const HardwareInfo(
+      chip: 'Apple M2',
+      memoryBytes: 17179869184,
+      appleSilicon: true,
+      rosetta: false,
+      osVersion: '15.6',
+    ));
+    await tester.pump();
+    await tester.pump();
+
+    MachineTier? afterTheAnswer;
+    unawaited(
+      container
+          .read(machineTierProvider.future)
+          .then((value) => afterTheAnswer = value),
+    );
+    await tester.pump();
+
+    expect(afterTheAnswer, MachineTier.inbox);
+
+    // `invalidateSelf` files a zero-duration timer on Riverpod's own refresh
+    // scheduler, and the read above rebuilt before it ran. Draining it keeps
+    // the binding's "no pending timers" invariant, which is a test fact and
+    // not a fact about the provider.
+    await tester.pump(const Duration(milliseconds: 1));
+  });
+
   testWidgets('a platform that never answers does not hold the launch',
       (tester) async {
     // The hang rather than the throw. The gate awaits the tier before it can

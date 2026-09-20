@@ -551,6 +551,35 @@ void main() {
       expect(await embeddedChunks(tag: _staleTag), 0);
     });
 
+    test('a chat document gated only by the retired teams reason is in the '
+        'slice', () async {
+      // The third arm of the policy's own gate clause, and the one with no
+      // case until now. Every Teams message is born `skipped` under
+      // `teams_source` — a routing fact about a channel with no detail fetch,
+      // not a judgement that the message is junk — so `attachmentTextPolicy`
+      // excuses it by name and this slice has to as well. A clause that read
+      // `skipped` alone would refuse every chat attachment there has ever
+      // been, and those passages would sit under the old tag for good.
+      await seedAttachment(
+        'legacy-chat',
+        'a1',
+        tag: _staleTag,
+        source: 'teams',
+        triageStatus: 'skipped',
+        gateReason: 'teams_source',
+      );
+
+      await sync().syncNow();
+
+      expect(
+        await workRows('attachment_text'),
+        {'teams/${attachmentEntityId('legacy-chat', 'a1')}': 'pending'},
+      );
+      expect(await embeddedChunks(tag: _staleTag), 0);
+      expect((await syncMailDetail())['requeued_attachment_embeds'], 1);
+      expect(await store.getPref(searchEmbedAttachmentsPref), '1');
+    });
+
     test('a document at the server is left whole and taken by a later slice',
         () async {
       // `requeueWork` leaves a `processing` row alone, so the requeue would be
@@ -722,6 +751,42 @@ void main() {
 
       expect(await embeddedDescriptions(), 1);
       expect((await syncMailDetail())['cleared_description_embeds'], isNull);
+    });
+
+    test('a corpus over the cap is cleared in one pass and the one-shot '
+        'still closes', () async {
+      // What `uncapped: true` buys, and the only case that can tell. Every
+      // other fixture here seeds one or two descriptions, so a walk paced like
+      // the other three would close on a short pass and look identical. Over
+      // the cap it would not: `_retireOnce` would see 201 found against a cap
+      // of 200, leave `search_embed_v2_descriptions` owed, and the next sync
+      // would run the unconditional `UPDATE context_files SET desc_embedding =
+      // NULL` again — throwing away whatever the reconcile had re-embedded in
+      // between, on every sync, for the life of the database.
+      for (var i = 0; i < clusteringCardReembedCap + 1; i++) {
+        await seedDirectory('/w/skill-$i', tag: _currentTag, chunks: 1);
+      }
+
+      await sync().syncNow();
+
+      expect(await embeddedDescriptions(), 0);
+      expect(
+        (await syncMailDetail())['cleared_description_embeds'],
+        clusteringCardReembedCap + 1,
+        reason: 'the count is a rowcount, not a slice size',
+      );
+      expect(
+        await store.getPref(searchEmbedDescriptionsPref),
+        '1',
+        reason: 'the pref closes on the pass that ran the statement, '
+            'whatever it reports',
+      );
+
+      await sync().syncNow();
+
+      expect(await embeddedDescriptions(), 0);
+      expect((await syncMailDetail())['cleared_description_embeds'], isNull);
+      expect(await store.getPref(searchEmbedDescriptionsPref), '1');
     });
 
     test('a closed one-shot leaves the descriptions alone', () async {

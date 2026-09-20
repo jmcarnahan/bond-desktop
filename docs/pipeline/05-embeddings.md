@@ -207,11 +207,14 @@ document down to `skipped` having already lost its vectors. The other is a
 document whose `attachment_text` row is `processing`, because `requeueWork`
 leaves a claimed item alone and the requeue would be swallowed. Both keep their
 stale vectors, which is where the backfill found them. Descriptions terminate
-because there is no second slice: the
-statement is unconditional and uncapped, one pass takes the whole corpus, and
-the walk reports a slice of zero so the pref closes on the pass that ran it. An
-uncapped statement that ran twice would null the vectors the reconcile had just
-paid for, every sync, forever.
+because there is no second slice: the statement is unconditional and uncapped,
+one pass takes the whole corpus, and the walk is run with `uncapped: true`, so
+the pref closes on the pass that ran the statement whatever count comes back.
+That count is a rowcount and not a slice size: it is the number of description
+vectors the pass nulled, and it is what `cleared_description_embeds` carries on
+the `sync_mail` detail whenever it is above zero. An uncapped statement that ran
+twice would null the vectors the reconcile had just paid for, every sync,
+forever.
 
 **No schema change, and two consequences of that.** Three corpora already carry
 `embed_model` and the fourth is served by its pref, so the walks cost no

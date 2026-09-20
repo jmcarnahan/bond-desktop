@@ -61,6 +61,26 @@ void main() {
           reason: '$variable in ../Makefile asks for the ${parts[1]} quant; '
               'app/assets/models/manifest.json ships ${model.file} for "$id"',
         );
+      } else {
+        // A repo that already carries its quantisation in its NAME, which is
+        // how a single-quant repo is published and how `FAST_HF` is written.
+        // With no `:quant` to compare there was nothing checking the quant at
+        // all here, and swapping the manifest's file for another quant out of
+        // the same repo stayed green — the two worlds serving different
+        // weights under one name, which is the drift this file exists to stop.
+        // So the quant is taken off the manifest's FILE and the repo name has
+        // to carry it.
+        final token = _quant.firstMatch(model.file)?.group(1);
+        if (token != null) {
+          expect(
+            parts.first.toLowerCase(),
+            contains(token.toLowerCase()),
+            reason: '$variable in ../Makefile names ${parts.first} with no '
+                '`:quant`, so the repo name is the only quant it states; '
+                'app/assets/models/manifest.json ships ${model.file} for '
+                '"$id", which is the $token quant',
+          );
+        }
       }
     }
 
@@ -98,6 +118,30 @@ void main() {
       matchesArg('FAST_SLOTS', routerBulkId, 'parallel');
     });
 
+    test('the embed pooling is the same word', () {
+      // The Makefile's own comment above `EMBED_HF` says what a mismatch here
+      // costs: pooling is not a taste, it is what the checkpoint was trained
+      // for, and the wrong one produces vectors of the wrong shape silently
+      // while search quietly finds nothing. Two worlds set it — a launch flag
+      // and a `serverArgs` value — and nothing but this compares them.
+      final args = defaults['EMBED_ARGS'];
+      expect(
+        args,
+        isNotNull,
+        reason: '../Makefile has no `EMBED_ARGS ?=` default to read '
+            '--pooling out of',
+      );
+      final flag = RegExp(r'--pooling\s+(\S+)').firstMatch(args!)?.group(1);
+      expect(
+        flag,
+        full.byId(routerEmbedId).serverArgs['pooling'],
+        reason: 'EMBED_ARGS in ../Makefile launches the embedding server with '
+            '--pooling $flag; app/assets/models/manifest.json gives the embed '
+            'entry pooling = '
+            '${full.byId(routerEmbedId).serverArgs['pooling']}',
+      );
+    });
+
     test('the prose spec-type agrees, or the manifest carries none', () {
       // `--spec-type` is a plain long flag, so the preset INI could carry it
       // as `spec-type = draft-mtp`. It deliberately does not: the managed
@@ -130,6 +174,21 @@ void main() {
     });
   }, skip: _skipReason(makefile));
 }
+
+/// The quantisation token inside a GGUF file name — `Q4_K_M`, `Q8_0`, `IQ4_XS`,
+/// `F16`. Wide on purpose: an unmatched name states no quant and is compared
+/// on the repo alone, which is what the checkpoints before GGUF quantisation
+/// look like.
+///
+/// LONGEST SPELLING FIRST, and that ordering is the whole check. Dart tries the
+/// alternatives left to right at the same position, so a bare `q\d` in front
+/// would take `q4` out of `q4_0` and out of `q4_k_m` alike, and a `Q4_0` file
+/// would then pass against a `…-Q4_K_M-GGUF` repo name: the same-digit drift,
+/// which is the one a reader is least likely to spot by eye.
+final RegExp _quant = RegExp(
+  r'(q\d_k(?:_[msl])?|q\d_\d|iq\d_\w+|q\d|f16|bf16|mxfp4)',
+  caseSensitive: false,
+);
 
 /// Null when the Makefile is there, a sentence when it is not.
 String? _skipReason(File makefile) => makefile.existsSync()

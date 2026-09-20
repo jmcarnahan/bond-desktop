@@ -63,6 +63,23 @@ class HardwareInfo {
       'appleSilicon: $appleSilicon, rosetta: $rosetta, os: $osVersion)';
 }
 
+/// How long a caller waits for the platform to describe this Mac before
+/// carrying on without it.
+///
+/// Two seconds is generous by three orders of magnitude: `hw.memsize` is an
+/// in-process `sysctl` and answers in microseconds, so anything near this is a
+/// channel that is not going to answer at all. Every reader falls back to
+/// [HardwareInfo.unknown], which is the full tier — nothing is refused for a
+/// fact the app could not read, and a hung channel must not hold the first
+/// frame, send a finished machine back through the wizard, or park a server
+/// launch.
+///
+/// It lives here, beside the fact it bounds, rather than beside any one of its
+/// three readers: the wizard, the setup gate and `machineTierProvider` are a
+/// provider, a screen and a provider, and a `services/` file must never import
+/// `providers/` to reach a number about the platform.
+const Duration hardwareProbeTimeout = Duration(seconds: 2);
+
 /// The handful of things only the platform can answer.
 ///
 /// One interface rather than four, because everything on it is the same kind

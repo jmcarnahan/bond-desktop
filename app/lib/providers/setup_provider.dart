@@ -220,17 +220,6 @@ class SetupState {
       'complete: $downloadsComplete, signedIn: $signedIn)';
 }
 
-/// How long the wizard and the gate wait for the platform to describe this
-/// Mac before carrying on without it.
-///
-/// Two seconds is generous by three orders of magnitude: `hw.memsize` is an
-/// in-process `sysctl` and answers in microseconds, so anything near this is a
-/// channel that is not going to answer at all. Both readers fall back to
-/// [HardwareInfo.unknown], which is the full tier — nothing is refused for a
-/// fact the app could not read, and a hung channel must not hold the first
-/// frame or send a finished machine back through the wizard.
-const Duration hardwareProbeTimeout = Duration(seconds: 2);
-
 /// Drives the first run: which step, what each step probed, what it wrote.
 ///
 /// It takes its collaborators rather than reaching for providers, which is
