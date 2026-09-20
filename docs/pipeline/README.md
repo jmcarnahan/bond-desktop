@@ -47,6 +47,14 @@ draft. The lanes, their gates and the two writers that ride the storyline gate
 are in [10-model-routing.md](10-model-routing.md); `make bench-pipeline`
 measures the whole thing end to end.
 
+**None of it runs until the owner says so.** The sidebar's **AI processing**
+switch is off at every launch and gates all four drains through one `enabled`
+closure each, so a fresh launch reads and stores mail without spending a token.
+Sync, the read-ack queue, Settings' Check server probe and the Find field's
+query embedding all keep working while it is off. The switch, what it touches
+and what it deliberately does not are in
+[10-model-routing.md](10-model-routing.md).
+
 The attachment row sits here because this is where the two handlers register:
 `AttachmentTextHandler` and `AttachmentDigestHandler` go on the drain between
 Embed and StorylineAssign (`app_providers.dart`), so a document is read before
@@ -98,25 +106,29 @@ labels, the scorer and the populations a number is quoted on — is described in
 
 ## The two-model split at a glance
 
-| Task | Slot | Default server (compile-time) |
+| Task | Default target | Default server (compile-time) |
 |------|------|----------------|
-| Triage | fast / bulk | `:8082` Qwen3-4B-Instruct (`make fast`) |
-| Needs-you verdict | fast / bulk | `:8082` |
-| Extraction | fast / bulk | `:8082` |
-| Attachment digest | fast / bulk | `:8082` |
-| Directory file digest | fast / bulk | `:8082` |
-| Directory brief | fast / bulk | `:8082` |
-| Directory section pick | fast / bulk | `:8082` |
-| Storyline membership confirm | fast / bulk | `:8082` |
-| Storyline naming | prose / 27B | `:8080` Qwen3.8-27B (`make model`) |
-| Storyline refresh | prose / 27B | `:8080` |
-| Storyline recap | prose / 27B | `:8080` |
-| Reply decision | prose / 27B | `:8080` |
-| Draft generation | prose / 27B | `:8080` |
-| Embeddings | embed | `:8081` embeddinggemma-300M (`make embed`) |
+| Triage | Local fast | `:8082` Qwen3-4B-Instruct (`make fast`) |
+| Needs-you verdict | Local fast | `:8082` |
+| Extraction | Local fast | `:8082` |
+| Attachment digest | Local fast | `:8082` |
+| Directory file digest | Local fast | `:8082` |
+| Directory brief | Local fast | `:8082` |
+| Directory section pick | Local fast | `:8082` |
+| Storyline membership confirm | Local fast | `:8082` |
+| Storyline grouping (dark; `GroupingMode.model` only) | Local prose | `:8080` Qwen3.8-27B (`make model`) |
+| Storyline naming | Local prose | `:8080` |
+| Storyline refresh | Local prose | `:8080` |
+| Storyline recap | Local prose | `:8080` |
+| Reply decision | Local prose | `:8080` |
+| Draft generation | Local prose | `:8080` |
+| Improve a draft (optional; no target until picked) | none | none |
+| Embeddings | embed | `:8081` Qwen3-Embedding-0.6B (`make embed`) |
 
-Both chat slots can be re-pointed at runtime in Settings → Models; the mapping
-above does not change. See
+Every chat stage can be re-pointed at any target in Settings → Models; the
+mapping above is the default, and what a stage resolves to is data in
+`stage_targets` rather than wiring in the code. Embeddings is the exception and
+is not routed at all. See
 [10-model-routing.md](10-model-routing.md#runtime-overrides).
 
 The home screen's five-segment stage bar (triage · extract · storyline ·

@@ -106,6 +106,20 @@ void main() {
     expect(await store.getPref(teamsLookbackDaysKey), isNull);
   });
 
+  testWidgets('the one-day preset stores the same way a longer one does',
+      (tester) async {
+    // The default is one day, so the interesting write is the one back TO it
+    // after a person has widened the window: an unset key and a stored `1`
+    // mean the same thing to the sync, and only the stored one survives a
+    // change of default.
+    await openSync(tester);
+
+    await pick(tester, const ValueKey('settings-mail-lookback'), '90 days');
+    await pick(tester, const ValueKey('settings-mail-lookback'), '1 day');
+
+    expect(await store.getPref(mailLookbackDaysKey), '1');
+  });
+
   testWidgets('and a Teams preset lands under its own key', (tester) async {
     await openSync(tester);
 

@@ -117,6 +117,21 @@ void main() {
     expect(find.text('Last 14 days · since Aug 22, 2026'), findsOneWidget);
   });
 
+  testWidgets('one day is a preset, and it is named in the singular',
+      (tester) async {
+    // The default since the lookback became a day: a first sync on a new
+    // machine is a morning's mail. `1 days` would be the giveaway that the
+    // label is a template rather than a sentence.
+    final mail = <int>[];
+    await open(tester, onMail: mail.add);
+    await expand(tester, 'Sync & data');
+
+    await pick(tester, mailKey, '1 day');
+
+    expect(mail, [1]);
+    expect(find.text('Last 1 day · since Sep 4, 2026'), findsOneWidget);
+  });
+
   testWidgets('Teams is its own setting', (tester) async {
     final mail = <int>[];
     final teams = <int>[];

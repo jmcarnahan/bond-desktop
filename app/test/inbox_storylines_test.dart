@@ -357,6 +357,11 @@ void main() {
       await seedWithRemoval();
 
       await openStoryline(tester, 'Website redesign');
+      // The processing switch, off at every launch. This test is about a pass
+      // that is RUNNING, and `auditNow` arms a two-minute backstop that only
+      // the lane reporting back cancels — with the lane switched off nothing
+      // reports, and the timer outlives the widget tree.
+      container.read(processingProvider.notifier).set(true);
       expect(find.text('Re-check members'), findsOneWidget);
 
       await tester.tap(

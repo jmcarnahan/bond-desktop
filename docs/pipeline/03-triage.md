@@ -18,7 +18,7 @@ through `refoldThreadState` before it emits, because the state machine folded
 | Prompt | `_triageRules` at the top of that file, composed with the shared untrusted-data fence (`prompt_guard.dart`) |
 | Schema | `triage` — flat; **key order is load-bearing** (the doc comment above the schema explains why) |
 | Output | urgency, category, 2–4 word label, one- or two-sentence summary, `needs_action`, action items, `addressed_me`, `reply_expected`, `deadline` |
-| Slot | **fast / bulk** (`fastLlmClientProvider`, wired in `app_providers.dart`) |
+| Slot | **fast / bulk** by default (`stageLlmClientProvider('triage')`, wired in `app_providers.dart`; re-pointable per stage in Settings → Models, see [10-model-routing.md](10-model-routing.md)) |
 | Params | temperature 0.2, maxTokens 512 (the `json_task.dart` defaults) |
 | Concurrency | 3 in-flight requests |
 

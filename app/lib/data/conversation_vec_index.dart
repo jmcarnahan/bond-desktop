@@ -37,10 +37,11 @@ import 'database.dart';
 /// return false rather than throwing, and [neighbors] returns `const []`.
 class ConversationVectorIndex {
   /// The embedding width, fixed by the model on `:8081` — the same
-  /// `embeddinggemma-300M` behind [MessageVectorIndex.dims], reached for
+  /// `Qwen3-Embedding-0.6B` behind [MessageVectorIndex.dims], reached for
   /// through its own constant because the two corpora are free to diverge and
-  /// a shared literal would hide the day they did.
-  static const int dims = 768;
+  /// a shared literal would hide the day they did. 1024 since Round E Phase 2
+  /// on 2026-09-19, when the clustering vector left embeddinggemma's 768.
+  static const int dims = 1024;
 
   /// The vec0 table. Cosine for the same reason the message index is cosine —
   /// the sweep compares direction, not magnitude — and the conversion in

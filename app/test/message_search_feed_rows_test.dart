@@ -13,6 +13,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
+import 'fixtures/fake_embed_server.dart' show embedDims;
 import 'fixtures/test_db.dart';
 import 'fixtures/vec_test_db.dart';
 
@@ -28,12 +29,12 @@ import 'fixtures/vec_test_db.dart';
 /// fixture the moment it were shared — nothing here cares which vector comes
 /// back, only that one does.
 
-/// A server that answers every text with the same 768-wide vector, so every
+/// A server that answers every text with the same full-width vector, so every
 /// message is exactly as near the query as every other one.
 EmbeddingsClient flatServer() => EmbeddingsClient(
       baseUrl: 'http://localhost:8081/v1/embeddings',
       httpClient: MockClient((_) async {
-        final vector = List.filled(768, 0.0)..[0] = 1.0;
+        final vector = List.filled(embedDims, 0.0)..[0] = 1.0;
         return http.Response(
           jsonEncode({
             'data': [

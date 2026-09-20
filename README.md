@@ -167,8 +167,8 @@ an Azure app registration on this machine: see
 `make fast` is a much smaller model on `:8082` that does the bulk per-message
 work — triage and extraction — in seconds rather than tens of seconds, with
 several requests in flight at once. `make embed` is a third llama-server on
-`:8081` running `embeddinggemma-300M`, which is what turns conversations into
-vectors so they can be clustered — it needs its own process because
+`:8081` running `Qwen3-Embedding-0.6B`, which is what turns conversations into
+vectors so they can be clustered and searched — it needs its own process because
 `--embeddings` puts a server in embedding mode and one server cannot both chat
 and embed. With none of them running the inbox works fine and simply stays
 un-annotated; each missing server parks only the work that needs it, and the
@@ -210,7 +210,7 @@ Outlook Drafts, or copies to the clipboard.
 Triage's cheap gates (the user's own address, no-reply, monitoring and service
 senders, per-sender drop rules, list and auto-generated headers) skip what is
 not worth a model call; the rest go through one at a time, newest first. A sync
-reaches back as far as the lookback set in Settings → Sync & data — 7 days by
+reaches back as far as the lookback set in Settings → Sync & data — one day by
 default, separately for mail and Teams — and the whole window is what the
 models read: the backlog queues 150 messages per pass, so a deep window drains
 over successive passes rather than being cut to its newest 150. On the fast

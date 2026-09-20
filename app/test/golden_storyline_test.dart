@@ -59,7 +59,7 @@ void main() {
 
     expect(cards.size, 3);
     // A non-string topic and an empty one are dropped, the way the app's own
-    // `_topicsOf` drops them.
+    // `topicsOfExtraction` drops them.
     expect(cards.byId['email:fx-a']!.topics, ['the addendum', 'the allowance']);
     expect(cards.byId['email:fx-a']!.summary, 'A term is still open.');
     expect(cards.byId['email:fx-b']!.topics, isEmpty);

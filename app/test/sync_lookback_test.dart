@@ -189,9 +189,17 @@ void main() {
     expect(floorOf(graph.requestsFor('sentitems').first), away);
   });
 
-  test('a sync that finished yesterday leaves the rolling window in charge',
-      () async {
-    final recent = isoDaysAgo(2);
+  test('a sync that finished a few hours ago leaves the rolling window in '
+      'charge', () async {
+    // Hours, not days: the default floor is ONE day and midnight-truncated, so
+    // a stamp two days old is older than the window and the vacation rule
+    // above would take over — which is the other test's subject, not this
+    // one's. Six hours is inside the window whatever time of day this runs.
+    final recent = DateTime.now()
+        .toUtc()
+        .subtract(const Duration(hours: 6))
+        .toIso8601String()
+        .replaceFirst(RegExp(r'\.\d+Z$'), 'Z');
     await store.setSyncedAt('inbox', recent);
     await store.setSyncedAt('sentitems', recent);
 

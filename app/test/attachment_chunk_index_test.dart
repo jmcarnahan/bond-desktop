@@ -104,7 +104,7 @@ void main() {
       await store.setChunkEmbedding(
         id,
         embedding: encodeEmbedding(axes({axis: 1.0})),
-        dims: 768,
+        dims: embedDims,
         embedModel: tag,
       );
     }
@@ -131,7 +131,7 @@ void main() {
       await store.setChunkEmbedding(
         ids.first,
         embedding: encodeEmbedding(axes({0: 1.0})),
-        dims: 768,
+        dims: embedDims,
         embedModel: tag,
       );
 
@@ -149,7 +149,7 @@ void main() {
       await store.setChunkEmbedding(
         ids.last,
         embedding: encodeEmbedding(axes({1: 1.0})),
-        dims: 768,
+        dims: embedDims,
         embedModel: tag,
       );
       expect(await store.indexPendingChunks(), 1);
@@ -168,7 +168,7 @@ void main() {
       await store.setChunkEmbedding(
         ids.single,
         embedding: encodeEmbedding(axes({5: 1.0})),
-        dims: 768,
+        dims: embedDims,
         embedModel: tag,
       );
       expect(await store.indexPendingChunks(), 1);
@@ -273,7 +273,7 @@ void main() {
       await store.setChunkEmbedding(
         ids.single,
         embedding: encodeEmbedding(axes({0: 1.0})),
-        dims: 768,
+        dims: embedDims,
         embedModel: 'some-older-model/document',
       );
 
@@ -311,7 +311,7 @@ void main() {
       await store.setChunkEmbedding(
         other.single,
         embedding: encodeEmbedding(axes({0: 0.9, 2: 0.4359})),
-        dims: 768,
+        dims: embedDims,
         embedModel: tag,
       );
 
@@ -387,7 +387,7 @@ void main() {
         await store.setChunkEmbedding(
           ids[i],
           embedding: encodeEmbedding(axes({0: 1.0 - i * 0.2, i + 1: 0.2})),
-          dims: 768,
+          dims: embedDims,
           embedModel: tag,
         );
       }

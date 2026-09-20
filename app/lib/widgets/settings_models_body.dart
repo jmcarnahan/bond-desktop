@@ -4,11 +4,20 @@ import 'package:flutter/material.dart';
 
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart'
-    show LlmTarget, ModelSlot, PipelineStageInfo, slotDefaults;
+    show
+        LlmTarget,
+        LlmTargetSpec,
+        ModelSlot,
+        PipelineStageInfo,
+        builtInProseName,
+        defaultTargetIdFor,
+        slotDefaults;
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'model_slot_editor.dart';
 import 'settings_segments.dart';
+import 'settings_targets_body.dart';
+import 'stage_golden_notes.dart';
 
 /// The Models section's body: which model each step of the pipeline uses, and
 /// the two slots the user is allowed to move.
@@ -19,7 +28,11 @@ import 'settings_segments.dart';
 /// this whole section is drivable from a test with three closures.
 class SettingsModelsBody extends StatefulWidget {
   /// The EFFECTIVE target per slot, defaults already resolved by the host.
-  final Map<ModelSlot, LlmTarget> targets;
+  ///
+  /// Named for the slot rather than `targets` since Round E, because [targets]
+  /// is now the list of servers a stage may be pointed AT and the two are
+  /// different questions: this map is what the two slot editors open on.
+  final Map<ModelSlot, LlmTarget> slotTargets;
 
   /// Whether each slot is still on the build's own values. The host's answer,
   /// read back from the stored prefs, never a guess made here.
@@ -55,10 +68,46 @@ class SettingsModelsBody extends StatefulWidget {
   /// answer to hand over.
   final Widget? header;
 
+  /// Every server a stage may be pointed at, built-ins first —
+  /// `AppPrefs.allTargets`. Empty renders the section exactly as it rendered
+  /// before routing was data: a chip per stage and no list.
+  final List<LlmTargetSpec> targets;
+
+  /// Which target id each stage resolves to now, by stage id. Null for
+  /// `embeddings`, which is not routed at all, and for an optional stage
+  /// nobody has turned on.
+  final Map<String, String?> stageTargetIds;
+
+  /// Whether the owner has already read what a third-party draft target
+  /// receives. False sends the first such pick to [onConsentNeeded] instead of
+  /// writing it.
+  final bool cloudDraftsConsent;
+
+  /// Fired by a stage's picker. **Null keeps today's rendering** — a chip and
+  /// a model name per stage, no pickers — on the same discipline every other
+  /// optional control here follows: a host that cannot store a change must not
+  /// offer the control that makes one.
+  final void Function(String stageId, String? targetId)? onStageTargetChanged;
+
+  /// Opens the editor pane on a new target. **Null takes the Targets list off
+  /// the section**, which is its premise the way [onSave] is the section's.
+  final VoidCallback? onAddTarget;
+  final void Function(LlmTargetSpec spec)? onEditTarget;
+  final Future<void> Function(String id)? onRemoveTarget;
+
+  /// A third-party target was picked for a draft stage and consent has not
+  /// been given. The host opens the consent pane; NOTHING is written here, and
+  /// the write happens on the other side of Continue.
+  final void Function(String stageId, LlmTargetSpec target)? onConsentNeeded;
+
+  /// Whose width **Drafts in flight** is about: the name of the target the
+  /// `draft_reply` stage resolves to.
+  final String proseParallelTargetName;
+
   const SettingsModelsBody({
     super.key,
     this.header,
-    required this.targets,
+    required this.slotTargets,
     required this.isDefault,
     required this.compiledDefaults,
     required this.stages,
@@ -67,6 +116,15 @@ class SettingsModelsBody extends StatefulWidget {
     required this.onReset,
     this.proseParallel = 1,
     this.onProseParallelChanged,
+    this.targets = const [],
+    this.stageTargetIds = const {},
+    this.cloudDraftsConsent = false,
+    this.onStageTargetChanged,
+    this.onAddTarget,
+    this.onEditTarget,
+    this.onRemoveTarget,
+    this.onConsentNeeded,
+    this.proseParallelTargetName = builtInProseName,
   });
 
   /// The collapsed summary — where the three slots point, in one line.
@@ -77,14 +135,56 @@ class SettingsModelsBody extends StatefulWidget {
   /// [server] is the local server's own one-liner, prefixed when there is one.
   /// Null leaves the summary byte-identical to what it has always said, which
   /// is what a host that wires no server card gets.
-  static String summary(Map<ModelSlot, LlmTarget> targets, {String? server}) {
-    final fast = _resolve(targets, ModelSlot.fast);
-    final prose = _resolve(targets, ModelSlot.prose);
-    final embed = _resolve(targets, ModelSlot.embed);
+  ///
+  /// [userTargets] is how many servers the user has ADDED, and it is appended
+  /// only when there are some. A machine with the two built-ins and nothing
+  /// else reads exactly as it did before routing was data, which is what
+  /// `settings_models_test.dart` pins.
+  static String summary(
+    Map<ModelSlot, LlmTarget> slotTargets, {
+    String? server,
+    int userTargets = 0,
+  }) {
+    final fast = _resolve(slotTargets, ModelSlot.fast);
+    final prose = _resolve(slotTargets, ModelSlot.prose);
+    final embed = _resolve(slotTargets, ModelSlot.embed);
     final slots = 'Fast ${fast.model} @ ${hostPort(fast.baseUrl)} · '
         'Prose ${prose.model} @ ${hostPort(prose.baseUrl)} · '
         'Embeddings ${hostPort(embed.baseUrl)}';
-    return server == null ? slots : '$server · $slots';
+    final line = server == null ? slots : '$server · $slots';
+    if (userTargets <= 0) return line;
+    return userTargets == 1
+        ? '$line · 1 more target'
+        : '$line · $userTargets more targets';
+  }
+
+  /// The key on one stage's target picker. Every picker carries the same
+  /// words, so a test that tapped by label would be tapping whichever came
+  /// first — the reason the slot editors' controls are keyed too.
+  static Key stagePickerKey(String stageId) =>
+      ValueKey('stage-target-picker-$stageId');
+
+  /// The key on the line under a picker that says the app is dialling
+  /// somewhere else than the row names — see [_gatedNote].
+  static Key stageGatedKey(String stageId) =>
+      ValueKey('stage-target-gated-$stageId');
+
+  /// The nearest width the 1 / 2 / 4 / 8 segments actually offer.
+  ///
+  /// A stored 3 — hand-typed into the database, or a default this app never
+  /// wrote — has to select SOMETHING, and `SegmentedButton` throws on a
+  /// selection that is not one of its values.
+  ///
+  /// DISPLAY ONLY: snapping 3 down to 2 draws the control, it does not write
+  /// anything. The stored number stays 3 and the draft lane keeps running
+  /// three wide until somebody taps a segment, and then what is written is the
+  /// number they tapped. Public and shared because the target editor's width
+  /// control is the same control asking the same question, and two copies of a
+  /// snapping rule are two copies that drift.
+  static int knownWidth(int value) {
+    const offered = [1, 2, 4, 8];
+    if (offered.contains(value)) return value;
+    return offered.lastWhere((w) => w <= value, orElse: () => 1);
   }
 
   /// `localhost:8082` out of a full completions URL — the part a person reads
@@ -103,8 +203,11 @@ class SettingsModelsBody extends StatefulWidget {
 
   /// The compiled default is the last resort, not an empty target: a host that
   /// passed an incomplete map still gets a summary that names a real server.
-  static LlmTarget _resolve(Map<ModelSlot, LlmTarget> targets, ModelSlot slot) =>
-      targets[slot] ?? slotDefaults[slot]!;
+  static LlmTarget _resolve(
+    Map<ModelSlot, LlmTarget> slotTargets,
+    ModelSlot slot,
+  ) =>
+      slotTargets[slot] ?? slotDefaults[slot]!;
 
   @override
   State<SettingsModelsBody> createState() => _SettingsModelsBodyState();
@@ -120,33 +223,18 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
   /// finger rather than after a round trip through the store — the host is
   /// told on the spot either way. Seeded from the prop and re-seeded when the
   /// host hands over a different one.
-  late int _width = _knownWidth(widget.proseParallel);
+  late int _width = SettingsModelsBody.knownWidth(widget.proseParallel);
 
   @override
   void didUpdateWidget(SettingsModelsBody oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.proseParallel != widget.proseParallel) {
-      _width = _knownWidth(widget.proseParallel);
+      _width = SettingsModelsBody.knownWidth(widget.proseParallel);
     }
   }
 
-  /// The nearest segment this control actually offers. A stored 3 — hand-typed
-  /// into the database, or a default this app never wrote — has to select
-  /// SOMETHING, and `SegmentedButton` throws on a selection that is not one of
-  /// its values.
-  ///
-  /// DISPLAY ONLY: snapping 3 down to 2 draws the control, it does not write
-  /// anything. The pref stays 3 and the draft lane keeps running three wide
-  /// until somebody taps a segment, and then what is written is the number
-  /// they tapped.
-  static int _knownWidth(int value) {
-    const offered = [1, 2, 4, 8];
-    if (offered.contains(value)) return value;
-    return offered.lastWhere((w) => w <= value, orElse: () => 1);
-  }
-
   LlmTarget _target(ModelSlot slot) =>
-      widget.targets[slot] ??
+      widget.slotTargets[slot] ??
       widget.compiledDefaults[slot] ??
       slotDefaults[slot]!;
 
@@ -204,6 +292,27 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
           const SizedBox(height: BondSpacing.s16),
           ..._draftsInFlight(onChanged),
         ],
+        if (widget.onAddTarget != null) ...[
+          const SizedBox(height: BondSpacing.s24),
+          Text(
+            'Targets',
+            style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: BondSpacing.s4),
+          Text(
+            'Every server a step above may be pointed at. The two built-in '
+            'ones are the slots edited above.',
+            style: BondType.caption,
+          ),
+          const SizedBox(height: BondSpacing.s8),
+          SettingsTargetsBody(
+            targets: widget.targets,
+            probe: widget.probe,
+            onAdd: widget.onAddTarget,
+            onEdit: widget.onEditTarget,
+            onRemove: widget.onRemoveTarget,
+          ),
+        ],
         const SizedBox(height: BondSpacing.s8),
         Text(
           'Pointing both slots at one server makes them share its cache and '
@@ -243,21 +352,26 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
           setState(() => _width = value);
           onChanged(value);
         },
-        caption:
-            'One per slot the prose server was started with (SLOTS in '
-            'local.mk, --max-num-seqs on vLLM). Extra requests queue at the '
-            'server rather than fail.',
+        // The target's NAME leads the caption, because the width is the
+        // target's rather than the slot's since Round E: a draft stage pointed
+        // at a GPU box reads that box's slot count, and a caption that still
+        // said "the prose server" would be describing a machine this number no
+        // longer governs.
+        caption: 'For ${widget.proseParallelTargetName}. One per slot the '
+            'server was started with (SLOTS in local.mk, --max-num-seqs on '
+            'vLLM). Extra requests queue at the server rather than fail.',
       ),
     ];
   }
 
-  /// One authored row: what the stage is, what it does, and which slot answers
-  /// it.
+  /// One authored row: what the stage is, what it does, and which target
+  /// answers it.
   ///
-  /// The table is AUTHORED — see `pipelineStages`. The stage → slot mapping is
-  /// decided when the providers are built and there is no runtime router to
-  /// interrogate, so this is the app telling the user what its own wiring is,
-  /// kept honest by `model_slots_test.dart`.
+  /// The table is AUTHORED — see `pipelineStages` — and since Round E the
+  /// stage's `slot` is its DEFAULT rather than its wiring: the right cell is a
+  /// picker over every target, and what it selects is data in `stage_targets`.
+  /// A host that wires no [SettingsModelsBody.onStageTargetChanged] gets the
+  /// chip the row has always shown instead.
   Widget _stageRow(PipelineStageInfo stage) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: BondSpacing.s4),
@@ -278,24 +392,134 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
             ),
           ),
           const SizedBox(width: BondSpacing.s12),
-          Expanded(
-            flex: 2,
-            // A Wrap rather than a Row: the chip and a long model name do not
-            // fit two fifths of the pane at a doubled text scale, and wrapping
-            // is the right failure.
-            child: Wrap(
-              spacing: BondSpacing.s8,
-              runSpacing: BondSpacing.s4,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                BondChip.metric(ModelSlotEditor.slotLabel(stage.slot)),
-                Text(_target(stage.slot).model, style: BondType.small),
-              ],
-            ),
-          ),
+          Expanded(flex: 2, child: _stageCell(stage)),
         ],
       ),
     );
+  }
+
+  /// The right-hand cell: a picker where the stage is routable and a chip
+  /// where it is not.
+  ///
+  /// `embeddings` keeps the chip whatever the host wired. Its vectors carry a
+  /// corpus tag and a swapped model would compare two different spaces, so
+  /// there is nothing here to pick between — the same reason it has no editor.
+  Widget _stageCell(PipelineStageInfo stage) {
+    final onChanged = widget.onStageTargetChanged;
+    if (onChanged == null || stage.slot == ModelSlot.embed) {
+      // A Wrap rather than a Row: the chip and a long model name do not fit
+      // two fifths of the pane at a doubled text scale, and wrapping is the
+      // right failure.
+      return Wrap(
+        spacing: BondSpacing.s8,
+        runSpacing: BondSpacing.s4,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          BondChip.metric(ModelSlotEditor.slotLabel(stage.slot)),
+          Text(_target(stage.slot).model, style: BondType.small),
+        ],
+      );
+    }
+
+    final note = stageGoldenNotes[stage.id];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        DropdownButton<String>(
+          key: SettingsModelsBody.stagePickerKey(stage.id),
+          isExpanded: true,
+          value: _pickerValue(stage),
+          hint: const Text('None'),
+          items: [
+            // An optional stage can be turned OFF, and off is a value rather
+            // than an absence: `draft_improve` with no target is the Improve
+            // button not being there.
+            if (stage.optional)
+              const DropdownMenuItem(value: '', child: Text('None')),
+            for (final spec in widget.targets)
+              DropdownMenuItem(value: spec.id, child: Text(spec.name)),
+          ],
+          onChanged: (picked) => _pick(stage, picked, onChanged),
+        ),
+        if (_gatedNote(stage)) ...[
+          const SizedBox(height: BondSpacing.s4),
+          Text(
+            key: SettingsModelsBody.stageGatedKey(stage.id),
+            'Sends to $builtInProseName until you allow cloud drafts',
+            style: BondType.caption,
+          ),
+        ],
+        if (note != null) ...[
+          const SizedBox(height: BondSpacing.s4),
+          Text(note, style: BondType.caption),
+        ],
+      ],
+    );
+  }
+
+  /// Whether this row NAMES one target and the app dials another.
+  ///
+  /// `AppPrefs.specForStage` sends a third-party target on `draft_reply` back
+  /// to the built-in prose one while `cloud_drafts_consent` is false, and on
+  /// `draft_improve` leaves the stage unrouted. That can be the state on
+  /// arrival — a `stage_targets` restored from a backup, or a consent the owner
+  /// never gave — and a picker showing the stored id with no line under it
+  /// would be the screen quietly lying about where the work goes.
+  bool _gatedNote(PipelineStageInfo stage) {
+    if (widget.cloudDraftsConsent) return false;
+    if (stage.id != 'draft_reply' && stage.id != 'draft_improve') return false;
+    final picked = widget.stageTargetIds[stage.id];
+    if (picked == null) return false;
+    for (final spec in widget.targets) {
+      if (spec.id == picked) return spec.isThirdParty;
+    }
+    return false;
+  }
+
+  /// Which item is selected, or null when none of them is.
+  ///
+  /// `DropdownButton` throws on a value that is not among its items, and the
+  /// host's map can name a target that has since been removed or one this
+  /// build has never heard of. The fall-back ladder is the stored id, then the
+  /// stage's own default, then nothing at all — never an exception on a
+  /// settings screen.
+  String? _pickerValue(PipelineStageInfo stage) {
+    bool known(String? id) =>
+        id != null && widget.targets.any((spec) => spec.id == id);
+
+    final stored = widget.stageTargetIds[stage.id];
+    if (known(stored)) return stored;
+    if (stage.optional) return '';
+    final fallback = defaultTargetIdFor(stage.slot);
+    return known(fallback) ? fallback : null;
+  }
+
+  /// What a pick means.
+  ///
+  /// A third-party target on a DRAFT stage without consent writes nothing: the
+  /// host is told to open the consent pane and the write happens on the far
+  /// side of Continue. Every other pick is reported the instant it moves, like
+  /// the rest of this screen.
+  void _pick(
+    PipelineStageInfo stage,
+    String? picked,
+    void Function(String stageId, String? targetId) onChanged,
+  ) {
+    if (picked == null) return;
+    if (picked.isEmpty) {
+      onChanged(stage.id, null);
+      return;
+    }
+    for (final spec in widget.targets) {
+      if (spec.id != picked) continue;
+      final drafting = stage.id == 'draft_reply' || stage.id == 'draft_improve';
+      if (drafting && spec.isThirdParty && !widget.cloudDraftsConsent) {
+        widget.onConsentNeeded?.call(stage.id, spec);
+        return;
+      }
+      break;
+    }
+    onChanged(stage.id, picked);
   }
 
   /// The embeddings slot: where it points and whether it answers, and nothing

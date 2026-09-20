@@ -34,6 +34,8 @@ void main() {
     VoidCallback? onBack,
     VoidCallback? onHome,
     int needsYouRejudging = 0,
+    ValueChanged<bool>? onProcessingChanged,
+    Future<void> Function()? onClearAiResults,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -56,6 +58,8 @@ void main() {
           hasScope: hasScope,
           onSignInAgain: onSignInAgain,
           needsYouRejudging: needsYouRejudging,
+          onProcessingChanged: onProcessingChanged,
+          onClearAiResults: onClearAiResults,
         ),
       ),
     ));
@@ -452,14 +456,19 @@ void main() {
       hasScope: (_) async => true,
       onSignInAgain: () {},
       onHome: () {},
+      onProcessingChanged: (_) {},
+      onClearAiResults: () async {},
     );
 
+    // In render order, which is where Processing sits: after the log and
+    // before Sync & data, neither of which is wired here.
     for (final title in const [
       'About me',
       'Microsoft connection',
       'Needs You',
       'Notifications',
       'Activity log',
+      'Processing',
     ]) {
       await expand(tester, title);
     }

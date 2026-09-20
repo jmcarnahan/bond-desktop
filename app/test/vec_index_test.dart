@@ -10,12 +10,12 @@ import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
 import 'fixtures/vec_test_db.dart';
 
-/// A unit vector: 768 float32s, all zero but for a 1.0 at [hotIndex].
+/// A unit vector at the model width, all zero but for a 1.0 at [hotIndex].
 ///
 /// Distinct axes make the geometry arithmetic-free — under cosine, two of
 /// these are exactly 1.0 apart and one is exactly 0.0 from itself — so a
 /// failure here is a failure of the index, never of the fixture's maths.
-Uint8List vec768(int hotIndex) {
+Uint8List unitVec(int hotIndex) {
   final floats = Float32List(MessageVectorIndex.dims);
   floats[hotIndex] = 1.0;
   return floats.buffer.asUint8List();
@@ -38,7 +38,7 @@ Future<int> seedVector(
       Variable<Uint8List>(embedding),
       Variable<int>(dims),
       Variable<String>('hash-$messageId'),
-      const Variable<String>('embeddinggemma-300M'),
+      const Variable<String>('Qwen3-Embedding-0.6B'),
       const Variable<String>('2026-09-03T10:00:00.000Z'),
       const Variable<String>('2026-09-03T10:00:01.000Z'),
     ],
@@ -57,13 +57,13 @@ void main() {
 
     test('upsert is a no-op rather than a throw', () async {
       await expectLater(
-        index.upsert(id: 1, embedding: vec768(0)),
+        index.upsert(id: 1, embedding: unitVec(0)),
         completes,
       );
     });
 
     test('knn finds nothing', () async {
-      expect(await index.knn(vec768(0), k: 5), isEmpty);
+      expect(await index.knn(unitVec(0), k: 5), isEmpty);
     });
 
     test('backfill indexes nothing', () async {
@@ -117,16 +117,16 @@ void main() {
     test('ensureReady creates vec_messages at the model width', () async {
       if (!available) return;
       expect(await index.ensureReady(), isTrue);
-      expect(await vecTableSql(), contains('float[768]'));
+      expect(await vecTableSql(), contains('float[${MessageVectorIndex.dims}]'));
     });
 
     test('knn returns the nearest vector first', () async {
       if (!available) return;
-      await index.upsert(id: 1, embedding: vec768(0));
-      await index.upsert(id: 2, embedding: vec768(1));
-      await index.upsert(id: 3, embedding: vec768(2));
+      await index.upsert(id: 1, embedding: unitVec(0));
+      await index.upsert(id: 2, embedding: unitVec(1));
+      await index.upsert(id: 3, embedding: unitVec(2));
 
-      final hits = await index.knn(vec768(0), k: 3);
+      final hits = await index.knn(unitVec(0), k: 3);
       expect(hits, hasLength(3));
       expect(hits.first.id, 1);
       expect(hits.first.distance, lessThan(0.001));
@@ -136,44 +136,44 @@ void main() {
         [...hits.map((h) => h.distance)]..sort(),
       ));
 
-      expect(await index.knn(vec768(0), k: 2), hasLength(2));
+      expect(await index.knn(unitVec(0), k: 2), hasLength(2));
     });
 
     test('upserting the same id twice keeps only the second vector', () async {
       if (!available) return;
-      await index.upsert(id: 7, embedding: vec768(0));
-      await index.upsert(id: 7, embedding: vec768(5));
+      await index.upsert(id: 7, embedding: unitVec(0));
+      await index.upsert(id: 7, embedding: unitVec(5));
 
       // One row, not two — the DELETE before the INSERT is what makes this an
       // upsert on a table that has no UPSERT.
-      expect(await index.knn(vec768(5), k: 10), hasLength(1));
+      expect(await index.knn(unitVec(5), k: 10), hasLength(1));
 
-      final hits = await index.knn(vec768(5), k: 1);
+      final hits = await index.knn(unitVec(5), k: 1);
       expect(hits.single.id, 7);
       expect(hits.single.distance, lessThan(0.001));
       // And the vector it replaced is genuinely gone.
-      expect((await index.knn(vec768(0), k: 1)).single.distance,
+      expect((await index.knn(unitVec(0), k: 1)).single.distance,
           greaterThan(0.9));
     });
 
     test('backfill indexes every un-indexed vector and stamps it', () async {
       if (!available) return;
-      final a = await seedVector(db, messageId: 'm-a', embedding: vec768(0));
-      final b = await seedVector(db, messageId: 'm-b', embedding: vec768(1));
-      await seedVector(db, messageId: 'm-c', embedding: vec768(2));
+      final a = await seedVector(db, messageId: 'm-a', embedding: unitVec(0));
+      final b = await seedVector(db, messageId: 'm-b', embedding: unitVec(1));
+      await seedVector(db, messageId: 'm-c', embedding: unitVec(2));
 
       expect(await index.backfill(), 3);
       expect(await indexedStamps(), everyElement(isNotNull));
 
-      expect((await index.knn(vec768(0), k: 1)).single.id, a);
-      expect((await index.knn(vec768(1), k: 1)).single.id, b);
+      expect((await index.knn(unitVec(0), k: 1)).single.id, a);
+      expect((await index.knn(unitVec(1), k: 1)).single.id, b);
       // And a second pass has nothing left to do.
       expect(await index.backfill(), 0);
     });
 
     test('a blob vec0 refuses does not wedge the backfill', () async {
       if (!available) return;
-      final good = await seedVector(db, messageId: 'm-good', embedding: vec768(0));
+      final good = await seedVector(db, messageId: 'm-good', embedding: unitVec(0));
       // Right dims column, wrong byte length — the shape a truncated write or
       // a writer that disagreed about float32 would leave behind.
       await seedVector(
@@ -181,7 +181,7 @@ void main() {
         messageId: 'm-short',
         embedding: Float32List(4).buffer.asUint8List(),
       );
-      final tail = await seedVector(db, messageId: 'm-tail', embedding: vec768(3));
+      final tail = await seedVector(db, messageId: 'm-tail', embedding: unitVec(3));
 
       // All three are attempted, and all three are stamped — an unstamped bad
       // row would sit at the head of the next page forever.
@@ -191,15 +191,15 @@ void main() {
 
       // The good rows around it are searchable; the bad one simply is not
       // there.
-      expect((await index.knn(vec768(0), k: 1)).single.id, good);
-      expect((await index.knn(vec768(3), k: 1)).single.id, tail);
-      expect(await index.knn(vec768(0), k: 10), hasLength(2));
+      expect((await index.knn(unitVec(0), k: 1)).single.id, good);
+      expect((await index.knn(unitVec(3), k: 1)).single.id, tail);
+      expect(await index.knn(unitVec(0), k: 10), hasLength(2));
     });
 
     test('a row whose dims column disagrees is skipped, not attempted',
         () async {
       if (!available) return;
-      final good = await seedVector(db, messageId: 'm-good', embedding: vec768(0));
+      final good = await seedVector(db, messageId: 'm-good', embedding: unitVec(0));
       // dims and blob AGREE with each other, and both disagree with the
       // index — the shape a model change would leave behind. This exercises
       // the dims-column check, where the short-blob test above exercises
@@ -217,26 +217,26 @@ void main() {
       expect(await indexedStamps(), everyElement(isNotNull));
       expect(await index.backfill(), 0);
 
-      expect((await index.knn(vec768(0), k: 1)).single.id, good);
-      expect(await index.knn(vec768(0), k: 10), hasLength(1));
+      expect((await index.knn(unitVec(0), k: 1)).single.id, good);
+      expect(await index.knn(unitVec(0), k: 10), hasLength(1));
     });
 
     test('rebuild re-creates the index from the durable vectors', () async {
       if (!available) return;
-      final a = await seedVector(db, messageId: 'm-a', embedding: vec768(0));
-      await seedVector(db, messageId: 'm-b', embedding: vec768(1));
+      final a = await seedVector(db, messageId: 'm-a', embedding: unitVec(0));
+      await seedVector(db, messageId: 'm-b', embedding: unitVec(1));
       expect(await index.backfill(), 2);
       final before = await indexedStamps();
 
       await index.rebuild();
 
       // Same rows, freshly stamped, and no model was asked for anything.
-      expect(await vecTableSql(), contains('float[768]'));
+      expect(await vecTableSql(), contains('float[${MessageVectorIndex.dims}]'));
       final after = await indexedStamps();
       expect(after, everyElement(isNotNull));
       expect(after, hasLength(before.length));
-      expect((await index.knn(vec768(0), k: 1)).single.id, a);
-      expect(await index.knn(vec768(0), k: 10), hasLength(2));
+      expect((await index.knn(unitVec(0), k: 1)).single.id, a);
+      expect(await index.knn(unitVec(0), k: 10), hasLength(2));
     });
 
     test('an index built at another width is thrown away', () async {
@@ -247,11 +247,11 @@ void main() {
       expect(await vecTableSql(), contains('float[4]'));
 
       expect(await index.ensureReady(), isTrue);
-      expect(await vecTableSql(), contains('float[768]'));
+      expect(await vecTableSql(), contains('float[${MessageVectorIndex.dims}]'));
 
       // And it is usable at the new width immediately.
-      await index.upsert(id: 1, embedding: vec768(0));
-      expect((await index.knn(vec768(0), k: 1)).single.id, 1);
+      await index.upsert(id: 1, embedding: unitVec(0));
+      expect((await index.knn(unitVec(0), k: 1)).single.id, 1);
     });
   });
 }

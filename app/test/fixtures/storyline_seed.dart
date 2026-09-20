@@ -2,11 +2,10 @@ import 'dart:convert';
 
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/extract_handler.dart' show cardHash;
 import 'package:bond_inbox/services/gates.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
-import 'package:bond_inbox/services/storyline_service.dart'
-    show clusteringCardForConversationRow;
 
 import 'golden_set.dart';
 import 'golden_storyline.dart';
@@ -95,6 +94,19 @@ class SeedReport {
   final int embedded;
   final int embedFailures;
 
+  /// How wide the first vector written was, or 0 when nothing embedded.
+  ///
+  /// The candidate embedding models are not all 768 wide, and a run that
+  /// silently measured a 1024-wide model at 768 would be measuring a truncated
+  /// geometry. A count, so it prints.
+  final int dims;
+
+  /// How many characters of prefix rode in front of every card. The prefix
+  /// itself never prints: a length is enough to see that a trailing space
+  /// survived the shell, and the prefix is the one part of the request that
+  /// could carry an instruction somebody typed.
+  final int prefixLength;
+
   /// Every thread, in the order the items named them. The replay walks this
   /// rather than asking the store again: it already knows which threads it
   /// wrote and which of them have something kept.
@@ -106,6 +118,8 @@ class SeedReport {
     required this.gatedThreads,
     required this.embedded,
     required this.embedFailures,
+    required this.dims,
+    required this.prefixLength,
     required this.threads,
   });
 
@@ -115,12 +129,16 @@ class SeedReport {
         'gated_threads': gatedThreads,
         'embedded': embedded,
         'embed_failures': embedFailures,
+        'dims': dims,
+        'prefix_length': prefixLength,
       };
 
-  /// Counts and nothing else — no key, no subject, no participant.
+  /// Counts and nothing else — no key, no subject, no participant, and the
+  /// prefix as a LENGTH.
   String table() => 'seed: $conversations conversations, '
       '$keptThreads with a kept inbound message, $gatedThreads fully gated, '
-      '$embedded embedded, $embedFailures embed failures';
+      '$embedded embedded, $embedFailures embed failures, '
+      '$dims dims, prefix length $prefixLength';
 }
 
 /// One message row, before it is written: the message the set recorded and the
@@ -164,11 +182,17 @@ class _SeedMessage {
 /// so the only honest card is the one the app would carry if the model that
 /// wrote that run file were the one shipping.
 ///
-/// [withParticipants] is `SWEEP_CARD`, passed straight to the app's own
-/// `clusteringCardForConversationRow`. It is the variable this bench prices,
-/// so it is a parameter rather than a read of the app's own
-/// `StorylineTuning.participantsInClusteringCard` — a seeding that consulted
-/// the const could only ever measure the const.
+/// [variant] is `SWEEP_CARD`, passed straight to the app's own
+/// `clusteringCardForConversationRow`. It is one of the two variables this
+/// bench prices, so it is a parameter rather than a read of the app's own
+/// `shippedClusteringCard` — a seeding that consulted the constant could only
+/// ever measure the constant.
+///
+/// [prefix] is the other one: the instruction the embedding model is given
+/// about what the card is FOR, which a candidate model documents its own
+/// wording for. It defaults to the app's clustering prefix for [variant]'s
+/// reason. An empty string is a legitimate value and means the card goes to
+/// the server bare.
 ///
 /// [ownerName] and [ownerAddress] are the inbox owner, who is the sender of
 /// every `You` message in a thread tail. Empty strings are tolerated and leave
@@ -181,7 +205,8 @@ Future<SeedReport> seedGoldenMailbox(
   MessageStore store,
   GoldenSet set,
   GoldenCards cards, {
-  required bool withParticipants,
+  required ClusteringCardVariant variant,
+  String prefix = EmbeddingsClient.clusteringPrefix,
   required EmbeddingsClient embeddings,
   required String ownerName,
   required String ownerAddress,
@@ -199,6 +224,7 @@ Future<SeedReport> seedGoldenMailbox(
   final threads = <SeededThread>[];
   var embedded = 0;
   var embedFailures = 0;
+  var dims = 0;
 
   for (final group in grouped.values) {
     final first = group.first;
@@ -356,13 +382,16 @@ Future<SeedReport> seedGoldenMailbox(
       final card = clusteringCardForConversationRow(
         stored!,
         await store.newestInboundCardData(source, key),
-        withParticipants: withParticipants,
+        variant: variant,
       );
-      final result = await embeddings.embedResult(card);
+      final result = await embeddings.embedResult(card, prefix: prefix);
       final vector = result.vector;
       if (vector == null) {
         embedFailures++;
       } else {
+        // The first vector's width, kept because a candidate model that is not
+        // 768 wide is a different geometry and the row has to say so.
+        if (dims == 0) dims = vector.length;
         // The identical write `StorylineService._reembed` makes, tag included.
         await store.upsertConversationAi(
           source,
@@ -391,6 +420,8 @@ Future<SeedReport> seedGoldenMailbox(
     gatedThreads: threads.where((t) => !t.keptInbound).length,
     embedded: embedded,
     embedFailures: embedFailures,
+    dims: dims,
+    prefixLength: prefix.length,
     threads: threads,
   );
 }

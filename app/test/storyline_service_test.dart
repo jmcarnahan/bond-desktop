@@ -185,8 +185,9 @@ class UnindexedStore extends MessageStore {
 }
 
 /// A unit vector whose cosine against `[1, 0]` is exactly [c]. Two dimensions
-/// is all these tests need — the gates are cosine thresholds, and a 768-wide
-/// vector would only make the arithmetic harder to read.
+/// is all these tests need — the gates are cosine thresholds, and a vector of
+/// the width the app actually embeds at would only make the arithmetic harder
+/// to read.
 List<double> vectorAt(double c) => [c, math.sqrt(1 - c * c)];
 
 Map<String, dynamic> confirmAnswer({
@@ -548,8 +549,8 @@ void main() {
 
     test('a candidate under the gate never reaches the model', () async {
       await seedStoryline(store);
-      // 0.55 is under the plain gate of 0.60 and there is nobody in common.
-      await seed(store, 'c1', vector: vectorAt(0.55), participants: const ['Ann Lu']);
+      // 0.40 is under the plain gate of 0.44 and there is nobody in common.
+      await seed(store, 'c1', vector: vectorAt(0.40), participants: const ['Ann Lu']);
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
@@ -559,14 +560,14 @@ void main() {
     });
 
     test('two shared people lower the gate, one does not', () async {
-      // The same vector as the test above, and the same 0.55 cosine. What
+      // The same vector as the test above, and the same 0.40 cosine. What
       // buys the discount is a GROUP in common: one shared person is what
       // every pair of threads in a one-team mailbox has, so the old rule made
-      // 0.50 the real gate. Two is a group.
+      // the discounted gate the real one. Two is a group.
       await seedStoryline(store,
           memberParticipants: const ['Sarah Chen', 'Ann Lu']);
       await seed(store, 'c1',
-          vector: vectorAt(0.55), participants: const ['sarah chen']);
+          vector: vectorAt(0.40), participants: const ['sarah chen']);
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
@@ -575,7 +576,7 @@ void main() {
       expect(await store.membersOf('sl-1'), hasLength(1));
 
       await seed(store, 'c2',
-          vector: vectorAt(0.55), participants: const ['sarah chen', 'ann lu']);
+          vector: vectorAt(0.40), participants: const ['sarah chen', 'ann lu']);
 
       expect(await StorylineService(store, llm).assignConversation('email', 'c2'),
           AssignOutcome.assigned);
@@ -590,7 +591,7 @@ void main() {
       await seedStoryline(store,
           memberParticipants: const ['Pat Owner', 'Ann Lu']);
       await seed(store, 'c1',
-          vector: vectorAt(0.55), participants: const ['Pat Owner', 'Ann Lu']);
+          vector: vectorAt(0.40), participants: const ['Pat Owner', 'Ann Lu']);
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
       final service = StorylineService(
         store,
@@ -618,7 +619,7 @@ void main() {
       await seed(
         store,
         'c1',
-        vector: vectorAt(0.55),
+        vector: vectorAt(0.40),
         participants: const ['Ann Lu'],
         participantRecords: const [
           (name: 'Pat Owner', email: 'pat.owner@partner.example.com'),
@@ -645,7 +646,7 @@ void main() {
       await seed(
         store,
         'c1',
-        vector: vectorAt(0.55),
+        vector: vectorAt(0.40),
         participants: const ['Ann Lu'],
         // The same person the storyline knows as "Pat Owner", writing from a
         // client that spells the display differently. The address is what
@@ -673,9 +674,9 @@ void main() {
       await seedStoryline(store,
           memberParticipants: const ['Pat Owner', 'Ann Lu']);
       await seed(store, 'c1',
-          vector: vectorAt(0.55), participants: const ['Pat Owner', 'Ann Lu']);
+          vector: vectorAt(0.40), participants: const ['Pat Owner', 'Ann Lu']);
       await seed(store, 'c2',
-          vector: vectorAt(0.55), participants: const ['Pat Owner', 'Ann Lu']);
+          vector: vectorAt(0.40), participants: const ['Pat Owner', 'Ann Lu']);
       // A no, so the storyline's centroid does not move between the two
       // threads and the only thing that changed is who the owner is.
       final llm = FakeLlm({
@@ -693,7 +694,7 @@ void main() {
       );
 
       // Pat is a person like any other while the lookup is silent: two shared
-      // people, so the discount applies, 0.55 clears 0.50 and the model is
+      // people, so the discount applies, 0.40 clears 0.37 and the model is
       // asked.
       expect(await service.assignConversation('email', 'c1'),
           AssignOutcome.rejected);
@@ -1112,7 +1113,7 @@ void main() {
     test('nothing over the gate is noCandidate — the common case', () async {
       await seedStoryline(store);
       await seed(store, 'c1',
-          vector: vectorAt(0.55), participants: const ['Ann Lu']);
+          vector: vectorAt(0.40), participants: const ['Ann Lu']);
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       expect(
@@ -3570,10 +3571,13 @@ void main() {
 
     test('a finished thread joins at most one storyline per pass', () async {
       // Two clusters that do not link to each other — the b-trio sits about
-      // 70° off the c-trio, well under `clusterLinkThreshold` — with one
+      // 84° off the c-trio, well under `clusterLinkThreshold` — with one
       // finished thread parked between them, over the probe's gate against
       // both centroids. Three threads a side, because a cosine pair is under
-      // `proposeMinClusterSize` and would never be named.
+      // `proposeMinClusterSize` and would never be named. The gap is wider
+      // than it was: `clusterLinkThreshold` came down to 0.48 with the Qwen
+      // vector, and at 70° apart the nearest cross pair sat at 0.58 and
+      // welded the two trios into one.
       await seed(store, 'c1',
           vector: vectorAt(1), lastMessageAt: '2026-08-29T06:00:00Z');
       await seed(store, 'c2',
@@ -3581,11 +3585,11 @@ void main() {
       await seed(store, 'c3',
           vector: vectorAt(0.95), lastMessageAt: '2026-08-29T04:00:00Z');
       await seed(store, 'b1',
-          vector: vectorAt(0.3), lastMessageAt: '2026-08-29T03:00:00Z');
+          vector: vectorAt(0.10), lastMessageAt: '2026-08-29T03:00:00Z');
       await seed(store, 'b2',
-          vector: vectorAt(0.2), lastMessageAt: '2026-08-29T02:00:00Z');
+          vector: vectorAt(0.05), lastMessageAt: '2026-08-29T02:00:00Z');
       await seed(store, 'b3',
-          vector: vectorAt(0.15), lastMessageAt: '2026-08-29T01:00:00Z');
+          vector: vectorAt(0), lastMessageAt: '2026-08-29T01:00:00Z');
       await seedDone(store, 'd1', vector: vectorAt(0.73));
       final llm = FakeLlm({
         'storyline_name': [nameAnswer(), nameAnswer(title: 'Vendor invoices')],
@@ -4795,10 +4799,10 @@ void main() {
 
     test('the gate is the LOWER one even with nobody in common', () async {
       await seedStoryline(store, memberParticipants: const ['Sarah Chen']);
-      // 0.55 with disjoint people: assignment would demand 0.60 here. The
+      // 0.40 with disjoint people: assignment would demand 0.44 here. The
       // user's charter is what buys the look instead of a shared name.
       await seed(store, 'c1',
-          vector: vectorAt(0.55), participants: const ['Ann Lu']);
+          vector: vectorAt(0.40), participants: const ['Ann Lu']);
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await recruitAndRecord(llm);
@@ -4851,7 +4855,7 @@ void main() {
 
     test('under the gate never reaches the model', () async {
       await seedStoryline(store);
-      await seed(store, 'c1', vector: vectorAt(0.45));
+      await seed(store, 'c1', vector: vectorAt(0.30));
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       final detail = await recruitAndRecord(llm);

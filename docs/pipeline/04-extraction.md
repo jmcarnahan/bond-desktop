@@ -89,7 +89,7 @@ It also embeds the message's own document vector on the fast path
 | Prompt | top of that file, fenced by `prompt_guard.dart` |
 | Schema | `extraction` |
 | Output | evidence sentence (written first), topics, people, organizations, a stable project label, an intent enum, an importance enum |
-| Slot | **fast / bulk** |
+| Slot | **fast / bulk** by default (`stageLlmClientProvider('extraction')`; re-pointable per stage in Settings → Models, see [10-model-routing.md](10-model-routing.md)) |
 | Params | **temperature 0** (set in `extract_handler.dart`), maxTokens 512 |
 | Concurrency | 3 (the handler's `concurrency` override) |
 

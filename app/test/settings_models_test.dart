@@ -1,9 +1,12 @@
+import 'package:bond_inbox/screens/consent_screen.dart';
 import 'package:bond_inbox/services/llm/model_probe.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/model_slot_editor.dart';
+import 'package:bond_inbox/widgets/settings_models_body.dart';
 import 'package:bond_inbox/widgets/settings_screen.dart';
 import 'package:bond_inbox/widgets/settings_section.dart';
+import 'package:bond_inbox/widgets/settings_targets_body.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -25,7 +28,7 @@ const LlmTarget _fastCustom = LlmTarget(
 void main() {
   Future<void> open(
     WidgetTester tester, {
-    Map<ModelSlot, LlmTarget>? targets,
+    Map<ModelSlot, LlmTarget>? slotTargets,
     Map<ModelSlot, bool>? isDefault,
     Future<ModelProbeResult> Function(String)? probe,
     void Function(ModelSlot, {required String url, required String model})?
@@ -37,6 +40,20 @@ void main() {
     int proseParallel = 1,
     void Function(int)? onProseParallelChanged,
     bool wireWidth = true,
+    String? proseParallelTargetName,
+    List<LlmTargetSpec> targets = const [],
+    Map<String, String?> stageTargetIds = const {},
+    bool cloudDraftsConsent = false,
+    Future<void> Function(
+      LlmTargetSpec spec, {
+      String? bearer,
+      bool prose,
+      bool confirm,
+      bool bulk,
+    })? onTargetSaved,
+    void Function(String stageId, String? targetId)? onStageTargetChanged,
+    Future<void> Function()? onCloudDraftsConsent,
+    bool wireTargets = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -48,7 +65,7 @@ void main() {
           onThresholdChanged: (_) {},
           onAboutMeChanged: (_) {},
           onBack: () {},
-          slotTargets: targets ?? slotDefaults,
+          slotTargets: slotTargets ?? slotDefaults,
           slotIsDefault: isDefault ??
               const {
                 ModelSlot.fast: true,
@@ -64,6 +81,17 @@ void main() {
           onProseParallelChanged: wireWidth
               ? (onProseParallelChanged ?? (_) {})
               : null,
+          proseParallelTargetName: proseParallelTargetName,
+          targets: targets,
+          stageTargetIds: stageTargetIds,
+          cloudDraftsConsent: cloudDraftsConsent,
+          onTargetSaved: wireTargets
+              ? (onTargetSaved ??
+                  (spec, {bearer, prose = false, confirm = false, bulk = false}) async {})
+              : null,
+          onStageTargetChanged:
+              wireTargets ? (onStageTargetChanged ?? (_, _) {}) : null,
+          onCloudDraftsConsent: onCloudDraftsConsent,
           modelsHeader: modelsHeader,
           localServerSummary: localServerSummary,
         ),
@@ -93,7 +121,7 @@ void main() {
       (tester) async {
     await open(
       tester,
-      targets: {
+      slotTargets: {
         ModelSlot.fast: _fastCustom,
         ModelSlot.prose: proseSlotDefault,
         ModelSlot.embed: embedSlotDefault,
@@ -122,10 +150,15 @@ void main() {
       expect(find.text(stage.label), findsOneWidget,
           reason: '${stage.id} is missing from the table');
     }
-    // The authored mapping: eight bulk stages, five prose ones, one
-    // embedding.
+    // The authored mapping: eight bulk stages, seven prose ones, one
+    // embedding. Two of the prose rows describe features that are off until
+    // something turns them on — `storyline_group` runs only under
+    // `GroupingMode.model`, and `draft_improve` only once somebody points it
+    // at a target — and both have a row anyway, because the table is the app
+    // telling the user what its wiring IS, and a stage with no row is a stage
+    // nothing could ever be pointed at.
     expect(chipsSaying(tester, 'Fast'), 8);
-    expect(chipsSaying(tester, 'Prose'), 5);
+    expect(chipsSaying(tester, 'Prose'), 7);
     expect(chipsSaying(tester, 'Embeddings'), 1);
   });
 
@@ -176,7 +209,7 @@ void main() {
       asked.add(url);
       return const ModelProbeResult(
         reachable: true,
-        modelIds: ['embeddinggemma-300M'],
+        modelIds: ['Qwen3-Embedding-0.6B'],
       );
     });
     await expand(tester, 'Models');
@@ -226,7 +259,7 @@ void main() {
     final resets = <ModelSlot>[];
     await open(
       tester,
-      targets: {
+      slotTargets: {
         ModelSlot.fast: fastSlotDefault,
         ModelSlot.prose: const LlmTarget(
           baseUrl: 'http://127.0.0.1:9001/v1/chat/completions',
@@ -304,8 +337,8 @@ void main() {
       expect(find.text('Drafts in flight'), findsOneWidget);
       expect(
         find.text(
-          'One per slot the prose server was started with (SLOTS in '
-          'local.mk, --max-num-seqs on vLLM). Extra requests queue at the '
+          'For Local prose. One per slot the server was started with (SLOTS '
+          'in local.mk, --max-num-seqs on vLLM). Extra requests queue at the '
           'server rather than fail.',
         ),
         findsOneWidget,
@@ -330,6 +363,34 @@ void main() {
       // Reported the instant it moves, like every other control here: the next
       // draft is what it governs, and one can be queued while this is open.
       expect(reported, [4]);
+    });
+
+    /// The width is the DRAFT TARGET's since Round E, not the prose slot's: a
+    /// box has slots this Mac does not, so the caption has to say whose number
+    /// the segments are about.
+    testWidgets('it names the draft target and reports the width',
+        (tester) async {
+      final reported = <int>[];
+      await open(
+        tester,
+        proseParallel: 4,
+        proseParallelTargetName: 'GPU box',
+        onProseParallelChanged: reported.add,
+      );
+      await expand(tester, 'Models');
+
+      expect(find.textContaining('For GPU box.'), findsOneWidget);
+
+      final eight = find.descendant(
+        of: find.byType(SegmentedButton<int>),
+        matching: find.text('8'),
+      );
+      await tester.ensureVisible(eight);
+      await tester.pumpAndSettle();
+      await tester.tap(eight);
+      await tester.pumpAndSettle();
+
+      expect(reported, [8]);
     });
 
     testWidgets('a host that cannot store it is offered no control',
@@ -357,6 +418,183 @@ void main() {
             'Embeddings localhost:8081'),
         findsOneWidget,
       );
+    });
+  });
+
+  /// The summary a machine with no added targets reads is BYTE-IDENTICAL to
+  /// what it read before routing was data. The count is news only when there
+  /// is something to count, and the two built-ins are not additions.
+  testWidgets('the summary counts added targets and nothing else',
+      (tester) async {
+    const builtIns = [
+      LlmTargetSpec(
+        id: builtInFastId,
+        name: builtInFastName,
+        url: 'http://localhost:8082/v1/chat/completions',
+        model: 'qwen3.8',
+      ),
+      LlmTargetSpec(
+        id: builtInProseId,
+        name: builtInProseName,
+        url: 'http://localhost:8080/v1/chat/completions',
+        model: 'qwen3.8',
+      ),
+    ];
+    const unchanged = 'Fast qwen3.8 @ localhost:8082 · '
+        'Prose qwen3.8 @ localhost:8080 · '
+        'Embeddings localhost:8081';
+
+    await open(tester, targets: builtIns);
+    expect(find.text(unchanged), findsOneWidget);
+
+    await open(tester, targets: const [
+      ...builtIns,
+      LlmTargetSpec(
+        id: 't-1a2b3c4d',
+        name: 'Studio box',
+        url: 'http://localhost:18100/v1/chat/completions',
+        model: 'qwen3-27b-fp8',
+      ),
+    ]);
+    expect(find.text('$unchanged · 1 more target'), findsOneWidget);
+
+    await open(tester, targets: const [
+      ...builtIns,
+      LlmTargetSpec(
+        id: 't-1a2b3c4d',
+        name: 'Studio box',
+        url: 'http://localhost:18100/v1/chat/completions',
+        model: 'qwen3-27b-fp8',
+      ),
+      LlmTargetSpec(
+        id: 't-99887766',
+        name: 'Bedrock Opus',
+        url: 'https://bedrock-runtime.us-east-2.amazonaws.com/',
+        model: 'us.example.opus',
+        wire: LlmWire.bedrockConverse,
+      ),
+    ]);
+    expect(find.text('$unchanged · 2 more targets'), findsOneWidget);
+  });
+
+  /// The house rule is one pane at a time with a way back, so the sub-panes
+  /// REPLACE the sections rather than floating over them — and the sections'
+  /// expansion state lives on the screen's own State, which is what brings a
+  /// person back to the section they left rather than to a closed list.
+  group('the sub-panes', () {
+    const box = LlmTargetSpec(
+      id: 't-1a2b3c4d',
+      name: 'Studio box',
+      url: 'http://localhost:18100/v1/chat/completions',
+      model: 'qwen3-27b-fp8',
+    );
+    const bedrock = LlmTargetSpec(
+      id: 't-99887766',
+      name: 'Bedrock Opus',
+      url: 'https://bedrock-runtime.us-east-2.amazonaws.com/',
+      model: 'us.example.opus',
+      wire: LlmWire.bedrockConverse,
+    );
+    const builtIns = [
+      LlmTargetSpec(
+        id: builtInFastId,
+        name: builtInFastName,
+        url: 'http://localhost:8082/v1/chat/completions',
+        model: 'qwen3.8',
+      ),
+      LlmTargetSpec(
+        id: builtInProseId,
+        name: builtInProseName,
+        url: 'http://localhost:8080/v1/chat/completions',
+        model: 'qwen3.8',
+      ),
+    ];
+
+    Future<void> press(WidgetTester tester, Finder finder) async {
+      await tester.ensureVisible(finder);
+      await tester.pumpAndSettle();
+      await tester.tap(finder);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('Add target opens the editor and Back leaves Models open',
+        (tester) async {
+      await open(tester, wireTargets: true, targets: builtIns);
+      await expand(tester, 'Models');
+
+      await press(tester, find.byKey(SettingsTargetsBody.addKey));
+      expect(find.text('Add target'), findsOneWidget);
+      // The sections are gone while the pane is up: one surface at a time.
+      expect(find.text('Which model each step uses'), findsNothing);
+
+      await press(tester, find.byTooltip('Back'));
+      // Back where it was, still expanded, not collapsed to the list.
+      expect(find.text('Which model each step uses'), findsOneWidget);
+      expect(find.text('Add target'), findsOneWidget);
+    });
+
+    testWidgets('Edit opens the pane on that target', (tester) async {
+      await open(
+        tester,
+        wireTargets: true,
+        targets: const [...builtIns, box],
+      );
+      await expand(tester, 'Models');
+
+      await press(tester, find.byKey(SettingsTargetsBody.editKey(box.id)));
+
+      expect(find.text('Edit target'), findsOneWidget);
+      expect(find.text('qwen3-27b-fp8'), findsOneWidget);
+    });
+
+    testWidgets('a third-party draft target opens the consent pane, and '
+        'Continue records the consent before the stage', (tester) async {
+      final order = <String>[];
+      await open(
+        tester,
+        wireTargets: true,
+        targets: const [...builtIns, bedrock],
+        onStageTargetChanged: (stage, target) => order.add('stage $stage $target'),
+        onCloudDraftsConsent: () async => order.add('consent'),
+      );
+      await expand(tester, 'Models');
+
+      final picker =
+          find.byKey(SettingsModelsBody.stagePickerKey('draft_reply'));
+      await press(tester, picker);
+      await press(tester, find.text('Bedrock Opus').last);
+
+      expect(find.text('Send drafts to Bedrock Opus?'), findsOneWidget);
+      expect(order, isEmpty);
+
+      await press(tester, find.byKey(CloudDraftsConsentPane.continueKey));
+
+      // The flag first, then the stage: `specForStage` sends a third-party
+      // draft target back to the local one while the flag is false.
+      expect(order, ['consent', 'stage draft_reply ${bedrock.id}']);
+      expect(find.text('Which model each step uses'), findsOneWidget);
+    });
+
+    testWidgets('Not now writes nothing and goes back', (tester) async {
+      final order = <String>[];
+      await open(
+        tester,
+        wireTargets: true,
+        targets: const [...builtIns, bedrock],
+        onStageTargetChanged: (stage, target) => order.add('stage'),
+        onCloudDraftsConsent: () async => order.add('consent'),
+      );
+      await expand(tester, 'Models');
+
+      await press(
+        tester,
+        find.byKey(SettingsModelsBody.stagePickerKey('draft_reply')),
+      );
+      await press(tester, find.text('Bedrock Opus').last);
+      await press(tester, find.byKey(CloudDraftsConsentPane.notNowKey));
+
+      expect(order, isEmpty);
+      expect(find.text('Which model each step uses'), findsOneWidget);
     });
   });
 

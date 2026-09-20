@@ -234,4 +234,45 @@ void main() {
       );
     });
   });
+
+  group('the target that rewrote it', () {
+    test('round-trips, and a column without it reads as nobody', () {
+      final improved = full.copyWith(improvedBy: 't-cloud');
+
+      expect(improved.encode(), contains('"improved_by":"t-cloud"'));
+      expect(DraftProvenance.decode(improved.encode())?.improvedBy, 't-cloud');
+      // The key is absent rather than null when nothing rewrote the draft, so
+      // an older row reads exactly as a new unimproved one does.
+      expect(full.encode(), isNot(contains('improved_by')));
+      expect(DraftProvenance.decode(full.encode())?.improvedBy, isNull);
+    });
+
+    test('an empty or wrongly typed id reads as nobody', () {
+      expect(
+        DraftProvenance.decode('{"improved_by":""}')?.improvedBy,
+        isNull,
+      );
+      expect(
+        DraftProvenance.decode('{"improved_by":7}')?.improvedBy,
+        isNull,
+      );
+    });
+
+    test('isEmpty is about SOURCES; isNone is about the whole row', () {
+      final onlyImproved = DraftProvenance.none.copyWith(improvedBy: 't-box');
+
+      expect(onlyImproved.isEmpty, isTrue);
+      expect(onlyImproved.isNone, isFalse);
+      expect(DraftProvenance.none.isNone, isTrue);
+      expect(full.isNone, isFalse);
+    });
+
+    test('the caption says nothing about it', () {
+      // The sentence is about what the model READ. Which model wrote the
+      // words is the host's own line, appended beside this one.
+      expect(full.copyWith(improvedBy: 't-cloud').caption(), full.caption());
+      expect(DraftProvenance.none.copyWith(improvedBy: 't-box').caption(),
+          isNull);
+    });
+  });
 }

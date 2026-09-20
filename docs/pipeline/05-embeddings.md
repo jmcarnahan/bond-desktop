@@ -14,52 +14,166 @@ are never mixed:
    in `EmbedHandler` (`app/lib/services/embed_handler.dart`) for anything the
    fast path missed.
 
-**The clustering card has a name and a flag.** `buildClusteringCard` in
-`extract_handler.dart` is the one recipe for the text a CONVERSATION is
-embedded from, and both writers go through it over the same stored facts:
+**The clustering card has a module and five variants.** `clustering_card.dart`
+is the one recipe for the text a CONVERSATION is embedded from, and both
+writers go through it over the same stored facts:
 `clusteringCardForConversationRow(conversationRow, newestInboundCardData(...))`
 at the extraction and at the heal alike. One recipe over one data source is
 what makes `embedded_hash` mean something. While the extraction built its card
 from the result in hand and the heal built its own from the newest kept
 inbound, extracting the fifth message of a thread wrote a hash over a card
 nothing else would ever produce, and the next heal re-embedded a thread that
-had not changed.
+had not changed. The module is its own file since Round E Phase 1, on
+2026-09-19: the builder used to live in `extract_handler.dart` and the row
+recipe in `storyline_service.dart`, each importing the other for its half, and
+neither could be read without the other.
 
-**The flag.** The clustering card is `buildConversationCard` with one decision
-folded in: whether the people on the thread are part of the vector.
-`StorylineTuning.participantsInClusteringCard` is what the app passes, and
-since Round D Phase 2, on 2026-09-18, it is FALSE: the people are out of the
-vector. The sweep bench read `topics` eight points better on `storyline.id`
-that day, with a smaller largest storyline and purity over the storylines
-carrying gold members moving from 44% to 71%. The flag exists because the
-participants segment is the same handful of names in every card of a one-team
-mailbox, which pulls every pair of threads together and has the sweep proposing
-the team rather than the work. Dropping them leaves the segment empty rather
-than removing it: the card is four segments joined by ` | ` by contract, and a
-shorter card would make `cardHash` disagree with itself about nothing. The
-cards a MODEL reads keep their people either way. This is the vector, not the
-prompt. `make golden-sweep SWEEP_CARD=participants|topics` is what priced the
-two, defaulting to the card the app ships, and `docs/model-bakeoff.md` holds
-the rows.
+**The five variants.** Every card is `buildConversationCard`'s four segments,
+`subject | participants | topics | summary`, joined by ` | `. A variant keeps
+some of them and leaves the rest EMPTY rather than removing them: the card is
+four segments by contract, and a shorter one would make `cardHash` disagree
+with itself about nothing.
 
-**A card change ships as a tag bump and a one-shot.** Flipping that flag
-orphans every stored conversation vector by construction, since every read
-filters on `EmbeddingsClient.modelTag`, so the three moved together. The tag is
-now `embeddinggemma-300M/clustering-v2`, and
-`EmbeddingsClient.retiredModelTag` names the one it replaced. The
-`clustering_card_v2` one-shot in `sync_service.dart` requeues the assign pass
-for up to 200 old-tag conversations a sync, and that pass re-embeds each thread
-under the new tag on its way past. The slice asks for the pool's own
+| variant | segments kept |
+|---|---|
+| `topics` | subject, topics, summary |
+| `participants` | all four |
+| `subject` | subject |
+| `subject_topics` | subject, topics |
+| `summary` | topics, summary |
+
+`shippedClusteringCard` is what the app passes, and since Round D Phase 2, on
+2026-09-18, it is `topics`: the people are out of the vector. The sweep bench
+read `topics` eight points better on `storyline.id` that day, with a smaller
+largest storyline and purity over the storylines carrying gold members moving
+from 44% to 71%. The participants segment is the same handful of names in every
+card of a one-team mailbox, which pulls every pair of threads together and has
+the sweep proposing the team rather than the work. The other three exist
+because Round D then proved the filing is stuck on the vector itself, and the
+shapes worth trying next are the ones that drop what moves: `subject_topics`
+loses the summary, which changes every time somebody replies, and `summary`
+loses a subject line that in some mailboxes is boilerplate. The cards a MODEL
+reads keep their people whatever the variant says. This is the vector, not the
+prompt.
+
+**How a bench picks one.** `SWEEP_CARD` names a variant by the words in the
+table above, parsed by `parseClusteringCardVariant`, which refuses anything
+else rather than defaulting. It reaches both `make golden-sweep`, which runs
+the whole filing path, and `make golden-vector`, which stops after the
+embedding and reads the geometry alone. The second is the cheap one: one
+server, about a minute, and no model decides anything in it.
+`docs/model-bakeoff.md` holds the rows for both.
+
+**The model is Qwen3-Embedding-0.6B, since Round E Phase 2 on 2026-09-19.**
+Round D ended by proving the storyline filing was stuck on the clustering
+VECTOR rather than on any rule above it, so Round E built `make golden-vector`
+and measured twenty-four configurations: five models, five cards, five
+prefixes. Qwen3-Embedding-0.6B (GGUF `Q8_0`, `--pooling last`, 1,024 wide)
+under the instruction prefix
+
+```
+Instruct: Group email threads that belong to the same project, event or topic. Query:
+```
+
+was the only candidate whose cross-effort share stayed under 20% on every
+card. Two numbers carry the decision. On the ruler, the cross-effort share at
+the recall-70 cosine falls from 39% under the retired vector to 15% under this
+one. On the app's own filing path, the shipped tree reads 45 of 98 on
+`storyline.id` with five correct positives when the local 27B names the
+clusters, and 50 of 98 with nine when the box 27B does, against Round D's
+closing 46 of 98 with none. Everything else, including the shoot-out against
+the runner-up and the grouping pass that shipped dark, is in
+`docs/model-bakeoff.md` under **Clustering vector** and **Storyline sweep**.
+The prefix ends its instruction with a PERIOD where Qwen's documented form has
+a newline, because the bench passes the prefix through `make` and
+`--dart-define` and neither can carry a newline in a variable, so the period is
+what was measured. Shipping the documented form would ship a string no run ever
+read. It is 86 characters and the trailing space is part of it;
+`embeddings_prefix_test.dart` pins both.
+
+**The five gates moved with it, and they are not a retune.** A cosine scale is
+a property of the model and the prefix, not of the app, so
+`clusterLinkThreshold` 0.48, `clusterCoherenceFloor` 0.43,
+`clusterSplitCeiling` 0.68, `assignCosineGate` 0.44 and
+`assignCosineGateWithOverlap` 0.37 in `StorylineTuning` are the old numbers
+read off the Phase 1 rung on the new scale and confirmed by the Phase 2 sweep
+rows. Nothing about the membership RULES changed.
+
+**A tag bump and a one-shot is how any of this ships.** Moving the model, the
+prefix or the card orphans every stored conversation vector by construction,
+since every read filters on `EmbeddingsClient.modelTag`, so they move together.
+The tag is now `Qwen3-Embedding-0.6B/clustering-v3`;
+`EmbeddingsClient.retiredModelTag` is the v2 tag it replaced and
+`retiredModelTagV1` the one before that. `retiredClusteringTags` in
+`sync_service.dart` lists them oldest first beside the pref that closes each
+one's one-shot, and `SyncService._retireEmbedTag` is the single body they
+share, and a fourth tag is one list entry rather than a fourth copy of twenty
+lines. Each sync walks the list and stops at the first one-shot still open, so
+the pace stays 200 conversations a sync however many tags have been retired:
+an install that has been off since before 2026-09-18 drains its v1 rows to
+completion first, then its v2 rows. The requeued assign pass re-embeds each
+thread under the current tag on its way past. The slice asks for the pool's own
 kept-inbound clause, so it holds only threads that pass can actually re-embed:
 a thread the gates emptied would be turned away as `gated` and would come back
 in every slice forever. It runs before the sweep is requeued, so the
 sweep reads the pool it refilled; it has no source filter, so one one-shot on
 the mail sync covers chat threads too; and its pref is written only by a pass
 that came back short, so the slices continue until the old tag is gone.
-`ExtractHandler._refreshCard`'s skip is now hash AND tag, matching the message
+`ExtractHandler._refreshCard`'s skip is hash AND tag, matching the message
 corpus in `EmbedHandler`: without the tag half, a re-extracted thread whose
-card had not changed would keep an orphaned vector forever. The document corpus
-and its `documentModelTag` are untouched by any of this.
+card had not changed would keep an orphaned vector forever.
+
+**The document corpus moved too, and nothing measured it.** A model swap is
+not a card change: there is one embedding server, so the search corpora had to
+follow the clustering corpus off embeddinggemma or every vector in the app
+would be 768 floats wide against indexes declared at 1,024.
+`documentModelTag` is now `Qwen3-Embedding-0.6B/document`, `documentPrefix` is
+the EMPTY string, since Qwen instructs the QUERY alone and embeds a document
+as itself, and `searchQueryPrefix` is
+
+```
+Instruct: Given a search query, retrieve the messages and documents that answer it. Query:
+```
+
+There is no golden bench for search, so unlike the clustering side this is a
+change made on the model's documented contract and not on a measurement.
+
+**And there is no one-shot behind it.** The three search corpora key their
+worklists on `embedding IS NULL`, never on the tag: `enqueueEmbedBacklog`
+excludes any message that already has an `embed_message` work row,
+`ContextStore.unembeddedChunks` and `unembeddedChunksForDir` ask for
+passages with a null `embedding`, and
+`skillsNeedingDescEmbedding` asks for a null `desc_embedding`. So every
+message vector, attachment passage and directory passage written before
+2026-09-19 is now **invisible to vector search**, and stays invisible until
+something re-embeds it: a re-extraction of the message, a re-chunk of the
+document, or a directory file whose bytes move. Three things make that quiet
+rather than wrong, and all three were checked: every read filters on
+`documentModelTag`, so an old vector cannot be compared against a new one; the
+vec0 indexes are declared at `float[1024]` and drop and recreate themselves on
+the width change, and their backfills skip a row whose stored `dims` is not
+the index's; and `desc_embedding`, which carries no tag at all, is compared
+through `cosine()`, which answers 0 for mismatched lengths rather than a
+number. The KEYWORD half of search is untouched and still finds every one of
+those rows. Building a tag-keyed backfill for the three corpora was left out
+of Round E deliberately and is OWED to Round F: a walk in the shape of
+`retireEmbedTag` over the message, attachment and directory corpora, listed in
+the roadmap's §10 among the Round E candidates. Until it lands, an upgrading
+install's search covers what was embedded after the upgrade plus whatever a
+Clear AI results re-embeds.
+
+**The recovery ships in the same branch, and it is one button.** Settings,
+Processing, **Clear AI results** empties every derived table, and that list
+holds `message_vectors`, `attachment_chunks`, `attachment_text`,
+`context_chunks`, `context_text` and `work_items`, while the same pass nulls
+`context_files.desc_embedding`. Emptying `work_items` is the part that makes
+it work: with no finished `embed_message` or extraction rows left to exclude,
+the next syncs' backlog calls re-enqueue every kept message, the attachments
+are read again and the directory reconcile rewrites its passages, all under
+the new tag. So an existing install moves its whole search corpus to the new
+model in one step, paying the embedding calls a slice a sync rather than
+carrying a corpus it cannot see. It is still not a measurement: nothing on the
+search side of this swap was benched.
 
 **Attachment markers and the card hash.** `embedMessageRow` strips
 `[[att:…]]` / `[[img:…]]` markers out of the body before building the card, and
@@ -75,7 +189,7 @@ sender. See [12-attachments.md](12-attachments.md).
 through them.** `MessageVectorIndex` (`vec_messages`, over `message_vectors`)
 answers search; `ConversationVectorIndex` (`vec_conversations`, over
 `conversation_ai`) answers the sweep. Both are `vec0` virtual tables at
-`float[768] distance_metric=cosine`, both are created **lazily on first use and
+`float[1024] distance_metric=cosine`, both are created **lazily on first use and
 never in a migration or `beforeOpen`** — drift's `SchemaVerifier` diffs the
 whole of `sqlite_master`, so a virtual table appearing during a migration step
 fails every migration pair in the suite — and both are derived, so losing one
@@ -111,8 +225,8 @@ revisiting if the clustering corpus ever reaches the tens of thousands.
 |---|---|
 | Client | `EmbeddingsClient` — `app/lib/services/llm/embeddings_client.dart` |
 | Server | `EMBED_URL`, default `http://localhost:8081/v1/embeddings` (`make embed`) |
-| Model | embeddinggemma-300M |
-| Corpus separation | clustering prefix/tag vs document/query prefixes + tag — constants in `embeddings_client.dart`; EmbeddingGemma is prefix-sensitive, so a vector's corpus is baked in at embed time |
+| Model | Qwen3-Embedding-0.6B, GGUF `Q8_0`, started `--pooling last` (`EMBED_HF` / `EMBED_ARGS` in the `Makefile`), 1,024 wide |
+| Corpus separation | clustering prefix/tag vs document/query prefixes + tag, constants in `embeddings_client.dart`; Qwen3-Embedding is instruction-sensitive, so a vector's corpus is baked in at embed time |
 
 **Failure behavior.** Embed failures park and self-heal instead of silently
 dropping storyline work (PR #9): stranded claims are released, heartbeated,

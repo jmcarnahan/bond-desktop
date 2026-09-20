@@ -196,6 +196,13 @@ class TriageQueue {
   bool _running = false;
   bool _stopped = false;
 
+  /// Whether the app's processing switch is ON, or null where nobody wired one
+  /// — every test, and any caller from before the switch existed. A CLOSURE,
+  /// for `AiWorker._enabled`'s reason: the switch moves while a drain is
+  /// running and a value captured here would only take effect at the next
+  /// rebuild.
+  final bool Function()? _enabled;
+
   TriageQueue(
     this._store,
     this._client, {
@@ -205,6 +212,7 @@ class TriageQueue {
     this._concurrency = 3,
     ActivityLog? activityLog,
     PipelineProgress progress = const PipelineProgress.disabled(),
+    this._enabled,
     this._onDrained,
     this._onGated,
   })  : _gate = gate ?? DrainGate(),
@@ -220,6 +228,17 @@ class TriageQueue {
   /// Ends the current drain after the messages already in flight finish. Not
   /// permanent: the next [pump] starts a fresh drain.
   void stop() => _stopped = true;
+
+  /// True only when a switch was wired AND says no. An unwired queue is on.
+  bool get _off => _enabled?.call() == false;
+
+  /// Whether this drain must end — `AiWorker._halted`, in the same words and
+  /// for the same reason: an off read here LATCHES [_stopped], so a drain the
+  /// switch cut short cannot knock on the worker's door on its way out.
+  bool get _halted {
+    if (_off) _stopped = true;
+    return _stopped;
+  }
 
   /// Clears claims a previous run left behind. Startup only — it must not run
   /// while a worker holds a claim, or it would hand that message to a second
@@ -240,7 +259,7 @@ class TriageQueue {
   ///
   /// Writing to the store after this object is disposed is safe: the store
   /// outlives the queue, watching only the database provider. Closing the
-  /// progress stream first is safe for the same reason [_emit] guards on
+  /// progress stream around it is safe for the same reason [_emit] guards on
   /// `isClosed` — an in-flight message emitting into a closed controller is
   /// a no-op, not a crash.
   ///
@@ -248,24 +267,53 @@ class TriageQueue {
   /// which is exactly right: the release is a database write that either
   /// lands or is picked up by [MessageStore.reclaimStaleTriage] five minutes
   /// later. Tests await it.
-  Future<void> dispose() async {
+  ///
+  /// [dispose] minus the closing of the progress stream, so the queue is
+  /// REUSABLE afterwards: the caller is a reset that is about to delete the
+  /// rows this queue holds claims on, and the very next thing it wants is
+  /// this same queue draining again. The `_stopped` it leaves behind is per
+  /// drain, which [pump] clears. The processing switch is untouched either
+  /// way — what it says is the user's answer, not a reset's.
+  Future<void> quiesce() async {
     _stopped = true;
-    _progress.close();
-    // A LOOP, not one wait: a claim that was already at the store when
-    // [_stopped] flipped lands in [_inFlight] after the first snapshot was
-    // taken. Waiting on the stale snapshot and then releasing would flip a
-    // message that is STILL RUNNING back to `pending`, where a second queue
-    // could claim it and spend a second model call on the same mail.
-    while (_inFlight.isNotEmpty) {
-      await Future.wait(_inFlight.toList()).catchError((_) => const <void>[]);
+    _quiescing = true;
+    try {
+      // A LOOP, not one wait: a claim that was already at the store when
+      // [_stopped] flipped lands in [_inFlight] after the first snapshot was
+      // taken. Waiting on the stale snapshot and then releasing would flip a
+      // message that is STILL RUNNING back to `pending`, where a second queue
+      // could claim it and spend a second model call on the same mail.
+      while (_inFlight.isNotEmpty) {
+        await Future.wait(_inFlight.toList())
+            .catchError((_) => const <void>[]);
+      }
+      for (final claim in _claimed.toList()) {
+        final parts = claim.split('|');
+        // Guarded on `processing` in the statement itself, so a claim
+        // released here cannot reopen a message that finished while this was
+        // deciding.
+        await _store.releaseTriageClaim(parts.first, parts.skip(1).join('|'));
+      }
+      _claimed.clear();
+    } finally {
+      _quiescing = false;
     }
-    for (final claim in _claimed.toList()) {
-      final parts = claim.split('|');
-      // Guarded on `processing` in the statement itself, so a claim released
-      // here cannot reopen a message that finished while this was deciding.
-      await _store.releaseTriageClaim(parts.first, parts.skip(1).join('|'));
-    }
-    _claimed.clear();
+  }
+
+  /// Raised for the whole of [quiesce] and read by [pump] as "off", so a
+  /// pump landing mid-wait cannot lift [_stopped] and restart the drain.
+  bool _quiescing = false;
+
+  /// [quiesce], and then the stream goes too — this queue is done.
+  ///
+  /// The close lands AFTER the wait rather than before it, which is the one
+  /// difference from the order this method used to keep. Nothing depends on
+  /// the old order, for the reason the doc above gives: [_emit] guards on
+  /// `isClosed`, so a message landing during the wait either reports a count
+  /// nobody is listening to or finds the controller shut.
+  Future<void> dispose() async {
+    await quiesce();
+    await _progress.close();
   }
 
   /// Drains until nothing is pending, the queue is stopped, or the model
@@ -273,10 +321,33 @@ class TriageQueue {
   /// running returns immediately rather than starting a racing one. The drain
   /// itself runs under the shared [DrainGate], so it never interleaves model
   /// calls with an AI-worker drain already at the server.
+  ///
+  /// With processing switched off it takes no gate, claims nothing, calls no
+  /// model and knocks on no door — but it still EMITS. The count is a local
+  /// read, and it is the whole of what the rail's "Processing is off · N
+  /// waiting" caption has to say: a queue that returned in silence would leave
+  /// that caption blank on the one launch it was written for, because nothing
+  /// else ever puts a first snapshot on this stream.
+  ///
+  /// The stop flag is raised on the way out rather than merely returned on,
+  /// because a drain already running has to learn about the switch too.
   Future<void> pump() async {
+    // A quiesce in progress counts as off — `AiWorker.pump`, same reason: a
+    // pump landing mid-wait would clear [_stopped] and let the drain claim
+    // again under `_claimed.clear()`.
+    if (_off || _quiescing) {
+      _stopped = true;
+      await _emit();
+      return;
+    }
+    // Cleared before the running check, not after it: an ON landing while a
+    // drain is in its tail has to lift the latch the switch left on THAT
+    // drain, or the pass would end early and the rest of the backlog would
+    // wait for the next poll. This is [stop]'s promise — the next pump drains
+    // again — read the only way it can be while a drain is still open.
+    _stopped = false;
     if (_running) return;
     _running = true;
-    _stopped = false;
     // Before the first message, not after it: the header counter would
     // otherwise sit blank for the seventeen seconds that message takes, which
     // is exactly when a user with a fresh backlog is looking for it.
@@ -314,8 +385,11 @@ class TriageQueue {
     _drainWrote = 0;
     _deferred.clear();
     var parked = false;
-    while (!_stopped && !parked) {
-      while (_inFlight.length < _concurrency && !_stopped && !parked) {
+    // [_halted] and not [_stopped]: the processing switch is read on every
+    // launch decision, so an off lands on the message after the one already at
+    // the server rather than at the end of the backlog.
+    while (!_halted && !parked) {
+      while (_inFlight.length < _concurrency && !_halted && !parked) {
         // Past the store's exclusion cap a deferred row would be handed
         // straight back — its second attempt spent in this drain rather than
         // the next, which is the opposite of what a deferral is for. So the
@@ -740,7 +814,7 @@ class TriageQueue {
       source,
       id,
       status: fatal ? 'error' : 'pending',
-      error: '$error',
+      error: redactEndpoints('$error'),
       attempts: attempts,
     );
     // `retry` while the message still has an attempt left, `error` once it
@@ -753,7 +827,9 @@ class TriageQueue {
       entityId: id,
       durationMs: durationMs,
       detail: {
-        'error': '$error',
+        // Redacted, as the worker's twin is: a 4xx body or a handler's own
+        // sentence can echo an address, and an address is a setting, not a row.
+        'error': redactEndpoints('$error'),
         'attempts': attempts,
         'status_code': ?statusCode,
       },

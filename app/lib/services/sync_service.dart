@@ -20,11 +20,13 @@ import 'llm/embeddings_client.dart' show EmbeddingsClient;
 import 'mail_text.dart';
 import 'pipeline_progress.dart';
 
-/// How far back a mailbox that has never synced reaches. One week is enough
-/// context to thread the conversations that are actually live without
-/// dragging in a year of archive — and the smaller a first drain, the sooner a
-/// new sign-in has a usable inbox. A user who wants more raises it in Settings.
-const int syncFloorDays = 7;
+/// How far back a mailbox that has never synced reaches. One day: a first sync
+/// on a new machine is a morning's mail rather than a week of it, which is the
+/// difference between an inbox that is usable in minutes and one that spends
+/// an hour annotating history nobody asked about. A user who wants more raises
+/// it in Settings, and a mailbox that already stored a choice keeps it — this
+/// is the value that applies where nothing is stored.
+const int syncFloorDays = 1;
 
 /// The range a user may choose that floor from. A day is the shortest window
 /// that still means "recent mail" on a machine that syncs once a morning; a
@@ -44,7 +46,7 @@ int clampLookbackDays(int days) => days.clamp(minLookbackDays, maxLookbackDays);
 /// newest this-many forever.
 const int backlogEnqueueCap = 150;
 
-/// How many threads the `clustering_card_v2` one-shot re-embeds per sync.
+/// How many threads a retired-tag one-shot re-embeds per sync.
 ///
 /// [backlogEnqueueCap]'s shape and the gate repair's number: a pace, not a
 /// truncation. Each queued thread costs one embedding call on the storyline
@@ -53,6 +55,29 @@ const int backlogEnqueueCap = 150;
 /// filing for the rest of the drain. The pref closes only on a pass that comes
 /// back short, so the slices continue until the old tag is gone.
 const int clusteringCardReembedCap = 200;
+
+/// Every clustering tag this build has retired, OLDEST FIRST, each beside the
+/// pref that closes its one-shot.
+///
+/// A list rather than a block of code per tag, since Round E Phase 2: the
+/// second bump wanted a byte-for-byte copy of the first one's twenty lines,
+/// and a third would have wanted a third. [SyncService._retireEmbedTag] is the
+/// body they all share, and a future bump is one entry here.
+///
+/// Oldest first, and one SLICE at a time: the sync walks the list and stops at
+/// the first tag that actually had rows, so an install carrying both drains
+/// its v1 rows to completion before the v2 slice begins. That keeps the pace
+/// at [clusteringCardReembedCap] a sync however many tags have been retired,
+/// which is the whole reason the cap exists. A tag with nothing under it does
+/// not cost a sync: its one-shot closes and the walk carries on to the next,
+/// so the usual install — which has no v1 rows at all — reaches its v2 slice
+/// on the first pass. Each old pref key stays exactly as it is spelled: an
+/// install that already closed `clustering_card_v2` must not be made to walk
+/// it again.
+const List<({String tag, String prefKey})> retiredClusteringTags = [
+  (tag: EmbeddingsClient.retiredModelTagV1, prefKey: 'clustering_card_v2'),
+  (tag: EmbeddingsClient.retiredModelTag, prefKey: 'clustering_card_v3'),
+];
 
 /// How far back the reconcile re-enumerates, and how often it does it.
 ///
@@ -456,11 +481,13 @@ class SyncService implements MailSync {
         source: _source,
       );
 
-      // The conversation vectors written before the people left the clustering
-      // card (Round D Phase 2, 2026-09-18). A card change is a geometry
-      // change, so `EmbeddingsClient.modelTag` was bumped with it and every
-      // vector under the old tag is invisible to the sweep — which is correct,
-      // and also means those threads are out of the pool until something
+      // The conversation vectors written under a clustering tag this build has
+      // retired — the card change of Round D Phase 2 on 2026-09-18, and the
+      // move to Qwen3-Embedding of Round E Phase 2 on 2026-09-19. A card
+      // change is a geometry change and a model change is two of them, so
+      // `EmbeddingsClient.modelTag` was bumped with each and every vector
+      // under an older tag is invisible to the sweep — which is correct, and
+      // also means those threads are out of the pool until something
       // re-embeds them. Same one-shot idiom as the four above, capped the same
       // way, and BEFORE the sweep requeue so the sweep reads what this queued.
       //
@@ -477,25 +504,15 @@ class SyncService implements MailSync {
       // `teams_sync.dart` needs no one-shot of its own: the query has no
       // source filter, so this covers chat threads as well as mail.
       int? requeuedReembeds;
-      if (await _store.getPref('clustering_card_v2') == null) {
-        final stale = await _store.conversationKeysWithEmbedModel(
-          EmbeddingsClient.retiredModelTag,
-          cap: clusteringCardReembedCap,
-        );
-        for (final thread in stale) {
-          await _store.requeueWork('storyline', thread.source, thread.key);
-        }
-        // The size of the slice this pass found, which is the same thing the
-        // gate repair's count reports.
-        requeuedReembeds = stale.length;
-        // A full slice leaves the pref unset, so the next sync walks the next
-        // one; only a pass that came back short closes the one-shot. That
-        // terminates because the slice holds nothing but threads the assign
-        // pass will actually re-embed: each sync moves its whole slice to the
-        // new tag, the query has that many fewer rows to answer with, and a
-        // short pass arrives.
-        if (stale.length < clusteringCardReembedCap) {
-          await _store.setPref('clustering_card_v2', '1');
+      for (final retired in retiredClusteringTags) {
+        final found = await _retireEmbedTag(retired.tag, retired.prefKey);
+        // Null is "this one-shot has already closed" and zero is "it ran and
+        // there was nothing under that tag" — both mean walk on. Only a slice
+        // that queued something stops the walk, so one slice is filed a sync
+        // and an empty tag costs nothing but its own closing pref.
+        if (found != null && found > 0) {
+          requeuedReembeds = found;
+          break;
         }
       }
 
@@ -600,6 +617,38 @@ class SyncService implements MailSync {
       );
       rethrow;
     }
+  }
+
+  /// Queues one slice of the conversations still embedded under [oldTag], and
+  /// answers how many it found — or null when the one-shot behind [prefKey]
+  /// has already closed.
+  ///
+  /// The body every retired tag shares (see [retiredClusteringTags]). Null and
+  /// zero are different answers on purpose: zero is "this one-shot ran and the
+  /// tag is gone", which closes the pref on the same pass, and null is "this
+  /// one-shot had already closed". BOTH let the caller walk on to the next tag
+  /// (the call site says the same); only a full slice stops the walk.
+  ///
+  /// A full slice leaves the pref unset, so the next sync walks the next one;
+  /// only a pass that came back short closes the one-shot. That terminates
+  /// because the slice holds nothing but threads the assign pass will actually
+  /// re-embed: each sync moves its whole slice to the current tag, the query
+  /// has that many fewer rows to answer with, and a short pass arrives.
+  Future<int?> _retireEmbedTag(String oldTag, String prefKey) async {
+    if (await _store.getPref(prefKey) != null) return null;
+    final stale = await _store.conversationKeysWithEmbedModel(
+      oldTag,
+      cap: clusteringCardReembedCap,
+    );
+    for (final thread in stale) {
+      await _store.requeueWork('storyline', thread.source, thread.key);
+    }
+    if (stale.length < clusteringCardReembedCap) {
+      await _store.setPref(prefKey, '1');
+    }
+    // The size of the slice this pass found, which is the same thing the gate
+    // repair's count reports.
+    return stale.length;
   }
 
   /// The signed-in address, or null when there is not one to be had.

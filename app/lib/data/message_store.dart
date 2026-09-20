@@ -1280,10 +1280,17 @@ WHERE source = ? AND conversation_key = ?
   /// the read of `state` and the write that answers it are one decision: an
   /// ingest landing between them would be judged by the row this method
   /// already read and then overwritten by the state it computed.
+  ///
+  /// [bothWays] is the one caller that is allowed to move a thread in either
+  /// direction: [clearDerived] has just undone every gate the pipeline wrote,
+  /// so a thread a wrong gate settled has to be able to come back up as well
+  /// as down. It is not a third mode — `restored` still names which way a
+  /// SINGLE move goes — and `done` is still nobody's to overturn.
   Future<String?> _refoldThreadByKey(
     String source,
     String key, {
     required bool restored,
+    bool bothWays = false,
   }) async {
     final current = await db
         .customSelect(
@@ -1320,18 +1327,26 @@ WHERE source = ? AND conversation_key = ?
         : 'waiting';
     if (computed == state) return null;
 
-    if (restored) {
-      if (!(state == 'waiting' && computed == 'needs_reply')) return null;
+    final raising = state == 'waiting' && computed == 'needs_reply';
+    final lowering = state == 'needs_reply' && computed == 'waiting';
+    if (bothWays) {
+      if (!raising && !lowering) return null;
+    } else if (restored) {
+      if (!raising) return null;
     } else {
-      if (!(state == 'needs_reply' && computed == 'waiting')) return null;
-      if (keptInbound == null) {
-        await db.customUpdate(
-          "UPDATE conversations SET cta_text = NULL, cta_urgency = 'normal', "
-          'updated_at = ? WHERE source = ? AND conversation_key = ?',
-          variables: _args([_nowIso(), source, key]),
-        );
-        await clearNeedsYou(source, key);
-      }
+      if (!lowering) return null;
+    }
+    // The lowering leg's own clean-up, and it belongs to the DIRECTION rather
+    // than to the caller: an ask can only come from a kept message, so a
+    // thread that just lost its last one has nothing anybody could be
+    // answering.
+    if (lowering && keptInbound == null) {
+      await db.customUpdate(
+        "UPDATE conversations SET cta_text = NULL, cta_urgency = 'normal', "
+        'updated_at = ? WHERE source = ? AND conversation_key = ?',
+        variables: _args([_nowIso(), source, key]),
+      );
+      await clearNeedsYou(source, key);
     }
 
     await setConversationState(
@@ -1358,11 +1373,18 @@ WHERE source = ? AND conversation_key = ?
   /// whole walk would fix that too and hold a write lock over every thread in
   /// the store while it did — on a first run that is the length of the
   /// repair, with the syncs behind it.
-  Future<int> refoldAllThreadStates() async {
+  ///
+  /// [everyThread] widens the walk to every conversation and lets each one
+  /// move in either direction. That is [clearDerived]'s reset rather than the
+  /// one-shot repair: every gate the pipeline wrote has just been cleared, so
+  /// a thread a wrong gate settled has to be able to come back up, and only a
+  /// walk that reads `waiting` rows can find one. `done` is still a human's
+  /// decision and neither mode touches it.
+  Future<int> refoldAllThreadStates({bool everyThread = false}) async {
     final rows = await db
         .customSelect(
-          'SELECT source, conversation_key FROM conversations '
-          "WHERE state = 'needs_reply'",
+          'SELECT source, conversation_key FROM conversations'
+          "${everyThread ? '' : " WHERE state = 'needs_reply'"}",
         )
         .get();
     var moved = 0;
@@ -1372,6 +1394,7 @@ WHERE source = ? AND conversation_key = ?
           row.data['source'] as String? ?? 'email',
           row.data['conversation_key'] as String? ?? '',
           restored: false,
+          bothWays: everyThread,
         ),
       );
       if (written != null) moved++;
@@ -2811,77 +2834,458 @@ RETURNING *
     );
   }
 
+  /// Every table the PIPELINE wrote and can write again from what is left.
+  ///
+  /// The first of three lists that partition the schema, and the rule that
+  /// sorts a table into one of them is who wrote its rows. These are the
+  /// model's output and the queues that produced it: delete them and the app
+  /// has lost nothing it cannot recompute, at the cost of the model time it
+  /// takes to do so. `clear_derived_test.dart` reads all three off this class
+  /// and checks them against `schema.drift`, so a table added without a
+  /// classification fails there rather than being silently kept forever.
+  ///
+  /// The four vec0 tables are deliberately absent: they are not in
+  /// `schema.drift` either, they are derived from four of the tables above,
+  /// and nothing outside their index classes may DELETE or DROP one — see
+  /// [_rebuildDerivedIndexes].
+  static const List<String> derivedTables = [
+    'work_items',
+    'message_ai',
+    'conversation_ai',
+    'storylines',
+    'storyline_members',
+    'storyline_member_blocks',
+    'feedback_events',
+    'activity_events',
+    'drafts',
+    'message_notify',
+    'message_progress',
+    'message_vectors',
+    'attachment_text',
+    'attachment_chunks',
+    'context_text',
+    'context_chunks',
+  ];
+
+  /// Every table a CONNECTOR or the user's own directory scan wrote.
+  ///
+  /// Nothing here can be recomputed: it came off a server or off this disk,
+  /// and getting it back means fetching it again. [clearDerived] keeps every
+  /// row of all seven and only nulls the derived COLUMNS that sit on three of
+  /// them.
+  static const List<String> syncedTables = [
+    'messages',
+    'conversations',
+    'sync_state',
+    'attachments',
+    'context_dirs',
+    'context_links',
+    'context_files',
+  ];
+
+  /// Configuration and identity: what the user chose and who they are.
+  ///
+  /// Neither reset touches these as tables. [wipeAll] names the handful of
+  /// `app_prefs` KEYS that describe one person rather than this machine, and
+  /// deletes `sender_prefs` with the mailbox those rules were written about.
+  static const List<String> keptTables = [
+    'app_prefs',
+    'sender_prefs',
+    'setup_state',
+  ];
+
+  /// The five tables a wipe leaves alone although two of them are derived.
+  ///
+  /// Registered directories are the user's own folders and this machine's
+  /// configuration, not the mailbox's data — the sign-out path unlinks them
+  /// from threads (`InboxScreen._signOut`) and leaves the registrations
+  /// standing. Their passages and words go with them: re-walking a folder the
+  /// next account still has registered is cheap and happens on the first sync
+  /// either way.
+  static const List<String> _machineContextTables = [
+    'context_dirs',
+    'context_links',
+    'context_files',
+    'context_text',
+    'context_chunks',
+  ];
+
+  /// The one-shot markers [clearDerived] drops, because each one says a
+  /// catch-up has already run over rows it has just deleted or reset.
+  ///
+  /// Four one-shots are deliberately NOT here — `backfill_addressed_me_email`,
+  /// `backfill_addressed_me_teams`, `sender_tip_strip` and
+  /// `participant_names_backfill` — because all four write SYNCED columns
+  /// (`addressed_me`, `body_text`, participant names) that this reset does not
+  /// touch. Nor are `mail_last_reconcile` and the `activity_last_sync_*`
+  /// stamps: they describe the sync, and the sync has not been undone.
+  ///
+  /// The last two are the re-embed one-shots, whose keys live beside their
+  /// tags in `sync_service.dart` (`retiredClusteringTags`). Named again here
+  /// because this layer imports nothing above itself, and pinned there by
+  /// `clear_derived_test.dart` so a third retired tag cannot be missed.
+  static const List<String> derivedOneShotPrefs = [
+    'needs_you_model_revive',
+    'needs_you_flag_backfill',
+    'thread_state_refold',
+    'gated_conversation_repair',
+    'clustering_card_v2',
+    'clustering_card_v3',
+  ];
+
+  /// What [wipeAll] deletes from, derived rather than hand-copied so a table
+  /// added to either list above cannot be missed here.
+  static List<String> _wipeTables({required bool keepIdentity}) => [
+        for (final table in [...syncedTables, ...derivedTables])
+          if (!_machineContextTables.contains(table)) table,
+        // With the identity kept, so are the owner's standing rules about who
+        // to drop: they are that person's judgement about senders, not this
+        // mailbox's data, and the mail they were written about is what is
+        // going.
+        if (!keepIdentity) 'sender_prefs',
+      ];
+
+  /// Throws away everything the pipeline decided and keeps everything it was
+  /// decided ABOUT. The reset behind Settings' **Clear AI results**.
+  ///
+  /// The difference from [wipeAll] is the whole method: mail, chats,
+  /// attachments, registered directories, the sign-in and every preference
+  /// stay exactly where they are, and what goes is every verdict, summary,
+  /// storyline, draft, digest and vector written over them. A user who has
+  /// just changed a model asks for this; a user leaving the machine asks for
+  /// the other one.
+  ///
+  /// Four things happen, and the order is the method:
+  ///
+  /// 1. One transaction: the sixteen [derivedTables] are emptied, the verdict
+  ///    columns on `messages` and `conversations` are reset, the derived
+  ///    columns on `context_dirs` and `context_files` are nulled, and the
+  ///    one-shot markers that describe rows this just deleted are dropped.
+  ///    One transaction because a half-cleared database is worse than either
+  ///    end of it — a `messages` row reset while its `message_ai` row survived
+  ///    would be re-extracted into a table that already had an answer.
+  /// 2. [refoldAllThreadStates] with `everyThread`, OUTSIDE that transaction:
+  ///    it opens one transaction per thread on purpose (see it for why), and
+  ///    it has to read the `messages` rows this method has just re-pended —
+  ///    a gate that was wrong is only undone once the row it gated is back.
+  /// 3. [_rebuildDerivedIndexes], outside for the reason [wipeAll] gives: a
+  ///    DELETE does not reach inside a virtual table.
+  /// 4. Nothing. The caller re-queues NOTHING, because nothing needs it:
+  ///    `SyncService._syncMail` calls `enqueueExtractBacklog`,
+  ///    `enqueueNeedsYouBacklog`, `enqueueEmbedBacklog` and [requeueSweep] on
+  ///    every pass, all `OR IGNORE`-idempotent over the floor, and the triage
+  ///    drain claims `pending` rows on its own. A large mailbox refills at
+  ///    `backlogEnqueueCap` a poll, which is what the button's caption says.
+  ///
+  /// The `messages` reset keys on WHAT WROTE the verdict, which is the one
+  /// subtle part. `gate_override` is never touched — it is the owner's own
+  /// hand on the gates and outranks every future derivation (see the column's
+  /// doc in `schema.drift`) — and neither is `gate_reason = 'user'`, which is
+  /// the same hand in the other direction. The verdicts INGEST wrote are kept
+  /// too, because nothing would write them again from a row already stored:
+  /// `outbound` and `backlog` from `triageStatusOnInsert`, and Teams'
+  /// `auto_generated` and `teams_source`, which `TeamsSync` stamps from what
+  /// the wire said. Every other reason is CLEARED, because `TriageQueue`
+  /// re-derives it on every claim. `teamsBotGate` is the literal
+  /// `'auto_generated'` — the same word the mail header gate writes — so the
+  /// `source` half of that predicate is load-bearing rather than decorative.
+  Future<void> clearDerived() async {
+    final now = _nowIso();
+    // The gate verdicts nothing would write a second time. Everything else
+    // `TriageQueue` recomputes on the next claim, so clearing it is free.
+    // `'user'` is in this list although the plan that specified this method
+    // put it under CLEAR: it is the owner's own Ignore ([dropMessage]) and
+    // nothing recomputes it on a claim, so clearing it would be this reset
+    // silently un-ignoring mail the owner threw out by hand. It is the same
+    // durable user intent `gate_override` is, written in the other direction.
+    const keptGate = "(gate_reason IN ('outbound', 'backlog', 'user') "
+        "OR (source = 'teams' "
+        "AND gate_reason IN ('auto_generated', 'teams_source')))";
+    // What `upsertMessage` means by gated, read off the row AFTER the reset
+    // above: a kept verdict is the only way a row is still `skipped`.
+    const gated = "(triage_status = 'skipped' AND gate_reason IS NOT NULL)";
+    await db.transaction(() async {
+      for (final table in derivedTables) {
+        await db.customUpdate('DELETE FROM $table');
+      }
+
+      // One UPDATE over every row: the CASE is what keeps the ingest verdicts
+      // and re-pends the rest, and a second statement for the second half
+      // would be a second scan of the same table.
+      await db.customUpdate(
+        'UPDATE messages SET '
+        "  triage_status = CASE WHEN $keptGate THEN 'skipped' ELSE 'pending' END, "
+        '  gate_reason = CASE WHEN $keptGate THEN gate_reason ELSE NULL END, '
+        '  triage_attempts = 0, '
+        '  triage_error = NULL, '
+        '  urgency = NULL, '
+        '  category = NULL, '
+        '  summary = NULL, '
+        '  needs_action = NULL, '
+        '  action_items_json = NULL, '
+        '  label = NULL, '
+        '  reply_expected = NULL, '
+        '  deadline = NULL, '
+        '  needs_you_verdict = NULL, '
+        '  needs_you_reason = NULL, '
+        '  updated_at = ?',
+        variables: _args([now]),
+      );
+
+      // `message_progress` is derived in the strongest sense — one row per
+      // message, rebuildable from `messages` with no model call — and it is
+      // the ONLY derived table nothing downstream would ever recreate: every
+      // stage writes it with an UPDATE (see [writeTriageProgress]), and the
+      // only INSERT is `upsertMessage`'s, which an already-stored message
+      // never reaches again. Emptied and rebuilt in the same breath, under
+      // the same rule `upsertMessage` applies: a row the gate has thrown out
+      // lands finished and dropped, and everything else lands pending.
+      await db.customUpdate(
+        '''
+INSERT INTO message_progress (
+  source, source_message_id, conversation_key, received_at,
+  ingest_state, triage_state, extract_state, storyline_state, draft_state,
+  settle_state, outcome, dropped, drop_reason, created_at, updated_at
+)
+SELECT source, source_message_id, conversation_key,
+  COALESCE(received_at, created_at),
+  'done',
+  CASE WHEN $gated THEN 'skipped' ELSE 'pending' END,
+  CASE WHEN $gated THEN 'skipped' ELSE 'pending' END,
+  CASE WHEN $gated THEN 'skipped' ELSE 'pending' END,
+  CASE WHEN $gated THEN 'skipped' ELSE 'pending' END,
+  CASE WHEN $gated THEN 'done' ELSE 'pending' END,
+  CASE WHEN $gated THEN 'dropped' ELSE 'pending' END,
+  CASE WHEN $gated THEN 1 ELSE 0 END,
+  CASE WHEN $gated THEN gate_reason ELSE NULL END,
+  created_at, ?
+FROM messages
+''',
+        variables: _args([now]),
+      );
+
+      // `cta_urgency` is TEXT NOT NULL DEFAULT 'normal' under STRICT, so the
+      // reset writes the word rather than a NULL, which would fail. `state`
+      // is not here: it is derived from the messages above and is re-folded
+      // below, once they are back.
+      await db.customUpdate(
+        'UPDATE conversations SET category = NULL, cta_text = NULL, '
+        "cta_urgency = 'normal', updated_at = ?",
+        variables: _args([now]),
+      );
+
+      // The derived COLUMNS on the synced tables, and every one of them is a
+      // marker saying a stage has already run over rows this method has just
+      // deleted. Left alone, each would make its own stage skip the work
+      // forever: the words and passages would be gone and nothing would read
+      // the file again.
+      //
+      // `attachments`: the metadata row is the connector's, the blob on disk
+      // is real, and the text and digest verdicts belong to the passes whose
+      // output has just gone. Only `done` moves — a refusal ('skipped' with a
+      // reason: too large, an image, a policy) is a standing verdict about the
+      // FILE, and re-attempting it would spend the same call for the same no.
+      await db.customUpdate(
+        'UPDATE attachments SET '
+        "  text_status = CASE WHEN text_status = 'done' THEN 'pending' "
+        '    ELSE text_status END, '
+        "  text_chars = CASE WHEN text_status = 'done' THEN 0 "
+        '    ELSE text_chars END, '
+        "  text_truncated = CASE WHEN text_status = 'done' THEN 0 "
+        '    ELSE text_truncated END, '
+        "  digest_status = CASE WHEN digest_status = 'done' THEN 'pending' "
+        '    ELSE digest_status END, '
+        '  digest_json = NULL, '
+        '  updated_at = ?',
+        variables: _args([now]),
+      );
+      // And the work rows that put those two passes back on a queue, which is
+      // the one place this reset has to enqueue for itself. Everything else
+      // rides the sync's own idempotent backlog calls; `attachment_text` has
+      // none — it is enqueued at ingest, by a detail fetch and by Restore
+      // (`sync_service.dart`, `teams_sync.dart`, `restore_service.dart`), and
+      // a message already stored with a body reaches none of the three. The
+      // digest follows: its handler is queued by the text pass.
+      //
+      // `text_status = 'pending'` is exactly the eligible set. A refusal is
+      // `skipped` with a reason — `attachmentTextPolicy` wrote it at ingest,
+      // for a file that is too large or not text — and it has just been left
+      // alone by the UPDATE above.
+      //
+      // The entity id is `attachmentEntityId`'s, composed in SQL because this
+      // is one statement over every row rather than a walk; the separator is
+      // pinned to that function by `clear_derived_test.dart`.
+      await db.customUpdate(
+        'INSERT OR IGNORE INTO work_items '
+        '(task_kind, source, entity_id, status, attempts, error, '
+        'payload_json, created_at, updated_at) '
+        "SELECT 'attachment_text', source, "
+        "  source_message_id || '|' || attachment_id, "
+        "  'pending', 0, NULL, NULL, ?, ? "
+        "FROM attachments WHERE text_status = 'pending'",
+        variables: _args([now, now]),
+      );
+
+      await db.customUpdate(
+        'UPDATE context_dirs SET brief_json = NULL, brief_hash = NULL, '
+        'updated_at = ?',
+        variables: _args([now]),
+      );
+      // `size`, `mtime` and `sha256` go back to their defaults with the
+      // digest columns, and that is not cosmetic: they are
+      // `ContextReconcileHandler`'s cheap diff, and a file whose stat still
+      // matches is never opened — so the passages this method just deleted
+      // would never be written again. Back at the defaults every registered
+      // file is re-read, re-chunked and re-embedded on the next reconcile,
+      // which is the full re-walk emptying `context_chunks` implies.
+      // `text_chars` goes with them: it counts the words in `context_text`,
+      // which is empty as of the DELETE above, and a stale count is a row
+      // claiming a file was read when nothing of it is left.
+      await db.customUpdate(
+        'UPDATE context_files SET digest_json = NULL, '
+        "digest_status = 'pending', desc_embedding = NULL, "
+        "size = 0, mtime = '', sha256 = '', text_chars = 0, updated_at = ?",
+        variables: _args([now]),
+      );
+
+      // The one-shots that describe rows this method just deleted or reset —
+      // see [derivedOneShotPrefs] for which and for the four it leaves alone.
+      // Left set, each would tell the next sync that a catch-up had already
+      // run over a mailbox nothing has read since.
+      await db.customUpdate(
+        'DELETE FROM app_prefs WHERE key IN '
+        '(${_placeholders(derivedOneShotPrefs.length)})',
+        variables: _args(derivedOneShotPrefs),
+      );
+    });
+
+    // Every thread, both ways: the gates that settled a thread are undone
+    // above, so this one is allowed to RAISE as well as lower — which the
+    // one-shot repair never is.
+    await refoldAllThreadStates(everyThread: true);
+    await _rebuildDerivedIndexes();
+  }
+
   /// Empties every table, in one transaction. Sign-out calls this: the rows
   /// are one account's mailbox, and a different account signing in must not
   /// find them — mail, AI output, drafts, feedback, sender rules, and the
   /// delta cursors that would otherwise resume the OLD account's sync
   /// position against the new account's mailbox.
   ///
-  /// `app_prefs` SURVIVES, with eight exceptions. What this method isolates is
+  /// `app_prefs` SURVIVES, with ten exceptions, seven of them under
+  /// [keepIdentity]. What this method isolates is
   /// one person's presence: which backend the app talks through, which server
   /// it points at, and where the slider sits are the machine's configuration,
   /// not the previous account's data, and wiping them turned every account
-  /// switch into a re-setup. The exceptions are [dbOwnerKey] — the identity
-  /// claim on these rows, which must not outlive the rows it describes, or
-  /// the next sign-in would read the wiped mailbox as still owned — the two
-  /// texts one person wrote about themselves and their inbox ([aboutMeKey],
-  /// which would otherwise be inherited by the next identity and steer THEIR
-  /// triage, and [needsYouRulesKey], which would decide what interrupts
-  /// them) — and the two bootstrap-floor markers, [mailBootstrapFloorKey] and
-  /// [teamsBootstrapFloorKey], which describe how far back THIS account's
-  /// mail was drained and would otherwise tell the next account's first
-  /// bootstrap that its window had already been covered — and the three
-  /// one-shot markers, which say a catch-up has already run over rows this
-  /// method is deleting: left behind, they would tell the next account's first
-  /// sync that its mailbox had been reconciled and its verdicts backfilled
-  /// when nothing had read a single row of it. Both callers depend on the
-  /// first: sign-out leaves the database unclaimed, and `IdentityGuard`
-  /// writes the new owner immediately after.
-  Future<void> wipeAll() async {
-    const tables = [
-      'messages',
-      'conversations',
-      'sync_state',
-      'work_items',
-      'message_ai',
-      'conversation_ai',
-      'storylines',
-      'storyline_members',
-      'storyline_member_blocks',
-      'feedback_events',
-      'activity_events',
-      'sender_prefs',
-      'drafts',
-      'message_notify',
-      'message_progress',
-      'message_vectors',
-      'attachments',
-      'attachment_text',
-      'attachment_chunks',
-    ];
+  /// switch into a re-setup. The exceptions are, in three groups.
+  ///
+  /// The person, and the only ones [keepIdentity] spares: [dbOwnerKey] — the
+  /// identity claim on these rows, which must not outlive the rows it
+  /// describes, or the next sign-in would read the wiped mailbox as still
+  /// owned — and the two texts one person wrote about themselves and their
+  /// inbox ([aboutMeKey], which would otherwise be inherited by the next
+  /// identity and steer THEIR triage, and [needsYouRulesKey], which would
+  /// decide what interrupts them).
+  ///
+  /// The sync's own bookkeeping: `mail_last_reconcile`, and the two
+  /// bootstrap-floor markers through [clearSyncCursors] below, which describe
+  /// how far back THIS mailbox was drained and would otherwise tell the next
+  /// bootstrap that its window had already been covered.
+  ///
+  /// And every marker in [derivedOneShotPrefs] — six of them — each saying a
+  /// catch-up has already run over rows this method is deleting: left behind,
+  /// they would tell the next first sync that its mailbox had been reconciled,
+  /// its verdicts backfilled and its vectors re-embedded when nothing had read
+  /// a single row of it.
+  ///
+  /// Both callers of the full wipe depend on the identity clear: sign-out
+  /// leaves the database unclaimed, and `IdentityGuard` writes the new owner
+  /// immediately after.
+  ///
+  /// [keepIdentity] is the Settings action **Forget everything and re-sync**,
+  /// which is this wipe with the person left in place: the sign-in, the two
+  /// texts they wrote and their standing sender rules survive, and the
+  /// mailbox does not. Everything else still goes, `sync_state` and both
+  /// bootstrap floors included — the next poll has to fetch the lookback
+  /// window again from nothing, which is exactly what that button promises.
+  Future<void> wipeAll({bool keepIdentity = false}) async {
     await db.transaction(() async {
-      for (final table in tables) {
+      for (final table in _wipeTables(keepIdentity: keepIdentity)) {
         await db.customUpdate('DELETE FROM $table');
       }
+      final keys = <String>[
+        // The three that describe one PERSON — the identity claim on these
+        // rows, and the two texts they wrote about themselves and their
+        // inbox. Kept only when the person is staying.
+        if (!keepIdentity) ...[dbOwnerKey, aboutMeKey, needsYouRulesKey],
+        // The one-shot markers. Each says "this catch-up has already run
+        // over these rows" — and the rows are about to be deleted, so on
+        // the next account they would be a claim about a mailbox that was
+        // never read. The catch-ups are cheap and self-exhausting; a
+        // marker that outlived its data is not.
+        //
+        // [derivedOneShotPrefs] rather than a hand-named pair: the argument
+        // above covers every one of them equally, and a wipe deletes strictly
+        // more than a clear does. `mail_last_reconcile` is not in that list
+        // because a CLEAR leaves the sync alone, and it is named here because
+        // a wipe does not.
+        ...derivedOneShotPrefs,
+        'mail_last_reconcile',
+      ];
       await db.customUpdate(
-        'DELETE FROM app_prefs WHERE key IN (?, ?, ?, ?, ?, ?, ?, ?)',
-        variables: _args([
-          dbOwnerKey,
-          aboutMeKey,
-          needsYouRulesKey,
-          mailBootstrapFloorKey,
-          teamsBootstrapFloorKey,
-          // The one-shot markers. Each says "this catch-up has already run
-          // over these rows" — and the rows are about to be deleted, so on
-          // the next account they would be a claim about a mailbox that was
-          // never read. The catch-ups are cheap and self-exhausting; a
-          // marker that outlived its data is not.
-          'needs_you_flag_backfill',
-          'needs_you_model_revive',
-          'mail_last_reconcile',
-        ]),
+        'DELETE FROM app_prefs WHERE key IN (${_placeholders(keys.length)})',
+        variables: _args(keys),
       );
     });
+    // After the transaction and not inside it, so this is the same call the
+    // host makes again once the reset has settled — see [clearSyncCursors].
+    // `sync_state` is emptied twice over as a result, which costs one DELETE
+    // against an empty table and buys one spelling of "where the next sync
+    // starts from".
+    await clearSyncCursors();
+    await _rebuildDerivedIndexes();
+  }
+
+  /// Forgets where the next sync would resume: the delta cursors and the two
+  /// bootstrap floors, and nothing else.
+  ///
+  /// One method because they are one fact. A cursor says "the server has
+  /// already told me everything up to here" and a floor says "this much
+  /// history has already been drained"; either one surviving a wipe is the
+  /// re-sync quietly not happening, and they have to go together or the pass
+  /// that resumes from a cursor never consults the floor at all.
+  ///
+  /// Called TWICE around a forget: once by [wipeAll] and again by the host
+  /// after the reset has settled. The second call is the cheap answer to a
+  /// sync pass that was already in flight when the button was pressed — it
+  /// read its cursor before the delete and writes it back after, through
+  /// [setDeltaLink], with no idea the mailbox underneath it is gone. Two
+  /// DELETEs against an empty table cost nothing; a resumed cursor over a
+  /// wiped mailbox costs the user their mail until they widen the lookback.
+  Future<void> clearSyncCursors() async {
+    await db.transaction(() async {
+      await db.customUpdate('DELETE FROM sync_state');
+      await db.customUpdate(
+        'DELETE FROM app_prefs WHERE key IN (?, ?)',
+        variables: _args([mailBootstrapFloorKey, teamsBootstrapFloorKey]),
+      );
+    });
+  }
+
+  /// The five indexes this store owns, thrown away and rebuilt — the tail
+  /// [wipeAll] and [clearDerived] share, and the one place that knows a
+  /// DELETE is not enough.
+  ///
+  /// Outside the caller's transaction, every time: these are DROP and CREATE
+  /// against virtual tables, and each index memoizes `Future<bool>? _ready`,
+  /// so the drop has to go through the index's own method or the cached flag
+  /// starts lying about a table that is gone.
+  ///
+  /// [ContextStore] owns two more over `context_chunks` and this store does
+  /// not reach it; the HOST calls `ContextStore.rebuildIndexes()` beside
+  /// [clearDerived] for the same reason the same host unlinks directories
+  /// beside [wipeAll].
+  Future<void> _rebuildDerivedIndexes() async {
     // The vec0 index is derived from `message_vectors`, and the DELETE above
     // does not reach inside a virtual table: without this, the previous
     // mailbox's floats would survive the wipe in the index's shadow tables —
@@ -2902,7 +3306,10 @@ RETURNING *
     // The two word indexes, for the same reason once more: an FTS5 table is a
     // virtual table, the DELETEs above do not reach inside one, and the
     // previous mailbox's subject lines would otherwise stay findable in the
-    // shadow tables long after the mail they came from was gone.
+    // shadow tables long after the mail they came from was gone. After a
+    // [clearDerived] the message half is derived from rows that SURVIVED, so
+    // there it is a re-scan rather than a necessity: `keywordSearchMessages`
+    // backfills before it matches, and the first search pays for it.
     await _keywordIndex.rebuild();
     await _chunkKeywordIndex.rebuild();
   }
@@ -3723,6 +4130,9 @@ SELECT conversation_key FROM (
     'storyline',
     'storyline_sweep',
     'draft',
+    // A model call of its own: the Improve button runs the draft prompt again
+    // on another target, and the header's median is about model calls.
+    'draft_improve',
     // The digest, and not `attachment_text`: this list is the model-call kinds
     // the header's median is about, and text extraction is a fetch and an
     // embed, the same shape as `embed_message`, which is already left out.
@@ -3918,6 +4328,22 @@ SELECT conversation_key FROM (
         aiItemCount: aiItemCount,
       );
     });
+  }
+
+  /// How many drafts have left for a third-party target since [sinceIso]:
+  /// the sum of the `cloud` counts the draft handler notes on its `draft`
+  /// and `draft_improve` rows. A count and not a row tally because one
+  /// prefetch can send two — the draft and the standing improve.
+  Future<int> cloudDraftsSince(String sinceIso) async {
+    final row = await db
+        .customSelect(
+          "SELECT COALESCE(SUM(json_extract(detail_json, '\$.cloud')), 0) AS n "
+          "FROM activity_events WHERE kind IN ('draft', 'draft_improve') "
+          'AND created_at >= ? AND json_valid(detail_json)',
+          variables: _args([sinceIso]),
+        )
+        .getSingle();
+    return (row.data['n'] as num?)?.toInt() ?? 0;
   }
 
   /// Sets, or with a null [disposition] removes, one sender's standing rule.
@@ -4713,8 +5139,9 @@ FROM storylines s''';
   /// The threads still carrying a vector under [embedModel], newest first, at
   /// most [cap] of them.
   ///
-  /// Written for the `clustering_card_v2` one-shot in `SyncService`, which
-  /// asks it for the RETIRED tag: a conversation still under the old tag is
+  /// Written for the retired-tag one-shots (`retiredClusteringTags` in
+  /// `sync_service.dart`), each of which asks it for ITS retired tag: a
+  /// conversation still under an old tag is
   /// one whose vector was taken over a card this build no longer writes, and
   /// every clustering read filters the tag, so the thread is invisible to the
   /// sweep until something re-embeds it. The one-shot requeues the assign pass

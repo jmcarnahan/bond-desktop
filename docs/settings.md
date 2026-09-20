@@ -74,13 +74,14 @@ body has the same shape in `settings_models_body.dart`.
 |---|---|---|
 | About me | always | the saved text, whitespace collapsed to one line, cut at 80 characters with `…`; `Not written yet` when empty |
 | Microsoft connection | any of `onBackendModeChanged`, `connectionStatus`, `hasScope`, `onSignIn` is wired | `MCP` or `This device`, then (MCP only) `Deployed` / `Local` / `Custom`, then `Checking…` / `Not signed in` / `Signed in as <label>` / `Signed in`, joined by ` · ` |
-| Models | `onSlotTargetChanged` wired | `[<local server summary> · ]Fast <model> @ <host:port> · Prose <model> @ <host:port> · Embeddings <host:port>` — the prefix is present only when the host wires the Local server card (`localServerSummary`), so a screen without one reads exactly as it always did |
+| Models | `onSlotTargetChanged` wired | `[<local server summary> · ]Fast <model> @ <host:port> · Prose <model> @ <host:port> · Embeddings <host:port>[ · N more targets]` — the prefix is present only when the host wires the Local server card (`localServerSummary`), and the suffix only when the user has ADDED targets (`1 more target` at one, the two built-ins never counted), so a screen with neither reads exactly as it always did |
 | Needs You | always | the threshold wording, plus ` · custom rules` or ` · default rules` when `onNeedsYouRulesSaved` is wired, plus ` · judging N message(s)` while `needsYouRejudging` (the whole needs-you queue, from `needsYouPendingProvider`) is above zero — "judging", not "re-judging", because the count cannot tell a Save's rows from a sync's |
 | Suggested replies | `onDraftPolicyChanged` wired (both scopes) | `For messages that need you` / `For every reply-worthy message` / `Only when asked` |
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
 | Activity log | `onShowActivityLogChanged` wired | `Shown in the sidebar` / `Hidden` |
 | Storylines | `onStorylineNewestFirstChanged` wired | `Newest first` / `Oldest first` |
 | Context directories | when wired (both scopes) | `No directories yet` / `N directories · M files` |
+| Processing | any of `onProcessingChanged`, `onClearAiResults`, `onForgetAndResync` is wired (both scopes) | `On` / `Off` |
 | Sync & data | `onRefreshNow` wired | `Not synced yet`; `Mail synced <rel> · Teams <rel>`; a side that never ran says `not synced yet` in words (`Mail synced 4m ago · Teams not synced yet`, `Mail not synced yet · Teams synced 2h ago`) |
 | About | `appVersion` or `databasePath` is known | `Bond <version>` / `Version unknown` |
 
@@ -88,8 +89,8 @@ body has the same shape in `settings_models_body.dart`.
 optional row in the old dialog followed, and what lets the permissions tests
 wire `hasScope` alone. Under `SettingsScope.ai` four of them are absent for a
 second reason: the AI pane keeps About me, Models, Needs You, Suggested
-replies, Activity log, Storylines and Context directories, in this same order,
-and drops the rest.
+replies, Activity log, Storylines, Context directories and Processing, in this
+same order, and drops the rest.
 
 **These strings are pinned by tests** (`settings_screen_test.dart`,
 `settings_connection_test.dart`, `settings_models_test.dart`,
@@ -216,19 +217,153 @@ outlives the pane — a sign-in still out in the browser, a sign-out from the ra
 — and a dead host must answer with nothing rather than with "ref after
 dispose".
 
+**The Models section's own wires**, added 2026-09-19 with routing-as-data. The
+host reads them off the prefs so the picker's items and its selection come from
+one resolver rather than two guesses:
+
+- `targets: prefs.allTargets` and `stageTargetIds: {for (final stage in
+  pipelineStages) stage.id: prefs.targetIdForStage(stage.id)}`, with
+  `cloudDraftsConsent: prefs.cloudDraftsConsent`.
+- `onTargetSaved` awaits `notifier.upsertTarget(spec, bearer: bearer)` and THEN,
+  only when one of the three presets is set, `notifier.applyPreset(...)` — that
+  order because `applyPreset` refuses a target id it cannot find, and until the
+  upsert lands a new target is not in the list.
+- `onTargetRemoved: notifier.removeTarget`, which also deletes the keychain entry
+  and clears every stage that pointed at it, in one write.
+- `onStageTargetChanged` calls `clearStageTarget` for a null target id and
+  `setStageTarget` otherwise; `onCloudDraftsConsent` is
+  `notifier.setCloudDraftsConsent(true)`.
+- `proseParallel` and `proseParallelTargetName` come from
+  `prefs.specForStage('draft_reply')`, and `onProseParallelChanged` writes
+  `setProseParallel` for a built-in target and `upsertTarget(spec.copyWith(
+  parallel: width))` for any other. See **Drafts in flight** below.
+
+`pipelineStages` is imported directly in `inbox_screen.dart`: `prefs_provider.dart`
+re-exports `ModelSlot`, `LlmTarget`, `LlmTargetSpec` and `LlmWire` but not the
+stage table, and the host needs it to ask where every stage currently points.
+
 ## Models
 
 Which model each step of the pipeline uses, and the two slots the user may
 move. The body lives in its own file — `app/lib/widgets/settings_models_body.dart`
 — because `settings_screen.dart` was already thirteen hundred lines.
 
-**The stage table is AUTHORED**, not derived. The stage → slot mapping is decided
-in `app_providers.dart` when the clients are constructed, and there is no
-per-call router anything can interrogate at runtime, so `pipelineStages` in
-`app/lib/services/llm/model_slots.dart` is the app telling the user what its own
-wiring is. `model_slots_test.dart` is what keeps that table honest against the
-handler list. Fourteen rows: eight on the fast slot, five on prose, one on
-embeddings.
+**The stage table is AUTHORED**, not derived, and since Round E each row has a
+**picker**. `pipelineStages` in `app/lib/services/llm/model_slots.dart` is the
+app telling the user what its own wiring is, and `model_slots_test.dart` is what
+keeps that table honest against the handler list. Sixteen rows: eight on the
+fast slot, seven on prose, one on embeddings. What changed is the meaning of the
+`slot` column — it is now each stage's **default target**, not its wiring. Where
+a stage actually goes is data in `stage_targets`, resolved per call through
+`stageLlmClientProvider`, and re-pointing one costs no code at all
+(`docs/pipeline/10-model-routing.md`).
+
+Each row's right-hand cell is a `DropdownButton<String>` keyed
+`SettingsModelsBody.stagePickerKey(stageId)` over every target, labelled with the
+target's name. An **optional** stage — `draft_improve` today — gets a first item
+`None` whose value is the empty string, and picking it reports null, which is
+what "the Improve button is not there" looks like in the data. `embeddings` keeps
+its chip and model name and gets no picker for the reason it gets no editor:
+every stored vector carries a corpus tag, so there is nothing to choose between.
+A stored id that names a target which has since been removed falls back to the
+stage's own default rather than throwing — a `DropdownButton` asserts on a value
+that is not among its items, and a settings screen may not crash on stale data.
+A host that wires no `onStageTargetChanged` gets the chips the table always had.
+
+**The golden notes.** Under a picker, where the ledger has measured that stage,
+sits one caption from `stage_golden_notes.dart` — `Golden set: verdict 92 on the
+local 4B, 93 on the 27B` and six more. Numbers and model sizes only: this is a
+public repo and the golden set is real mail, so the table is pinned by a test
+that every key is a `pipelineStages` id and that no value contains `@`, `http`,
+`.com` or a newline. A stage the ledger never measured renders no line at all,
+which is the honest state rather than a blank one.
+
+**Targets.** Below the two slot editors, under the heading **Targets**, is
+`SettingsTargetsBody` (`app/lib/widgets/settings_targets_body.dart`) — every
+server a stage may be pointed at, `AppPrefs.allTargets`, built-ins first. One row
+per target, keyed `llm-target-row-<id>`: the name, `hostPort(url)`, the model, a
+chip for the wire (`OpenAI` / `Converse`), a chip saying `Bearer set` or `No
+bearer`, and `Parallel N` when the width is not one. Beside them **Check server**
+(`llm-target-check-<id>`, the same probe closure the slot editors use, with a
+`ProbeStatus` under the row), and for a user's own target **Edit**
+(`llm-target-edit-<id>`) and **Remove** (`llm-target-remove-<id>`). Remove is the
+Processing section's two-step: the first press swaps the button for **Confirm
+remove** beside **Keep**, and the row's buttons go inert while the write is out.
+Under the rows, **Add target** (`llm-target-add`).
+
+The two built-ins have no Edit and no Remove. They are derived from the four slot
+prefs rather than stored, so their row carries the caption `Edited above, under
+Fast and Prose` and the two `ModelSlotEditor`s further up the section are where
+they change. `AppPrefsNotifier.removeTarget` refuses a built-in id on its own
+account as well, so the missing button is a courtesy rather than the protection.
+
+**Add and Edit are PANES**, not dialogs — the house rule. `SettingsScreen` holds
+which sub-pane is open as state and swaps its own child for a `PaneSurface`
+titled **Add target** or **Edit target**, so the sections and their expansion
+state are still there when the back arrow closes it. The body is
+`LlmTargetEditor` (`app/lib/widgets/settings_target_editor.dart`), prop-only like
+everything else here, with controls keyed `llm-target-name`, `-url`, `-model`,
+`-wire`, `-bearer`, `-parallel`, `-streams`, `-check`, `-save`, `-cancel`. Save
+waits for a name, a URL and a model, and for a URL that parses with a host;
+until then it is disabled with the reason as a caption under it. A probe never
+blocks a Save, on the slot editors' rule. A new target's id is `t-` and eight hex
+characters, never derived from the name: the stage map and the keychain entry are
+keyed on that string, and two targets a person happened to call the same thing
+would otherwise share a token.
+
+**The bearer is a secret and is treated as one.** The field is obscured. On an
+edit it opens EMPTY with the hint `Stored. Type to replace`, because a token that
+has reached the keychain is never read back onto a screen — which is why
+"unchanged" has to be a state the empty field can be in. The three outcomes:
+typing a token sends it with `hasBearer` true; leaving the field empty sends
+`bearer: null` with `hasBearer` true, which keeps the stored one; **Remove
+bearer** (`llm-target-bearer-clear`) sends `bearer: null` with `hasBearer` false,
+which clears it. The value reaches the host once and appears in no key, no
+summary, no log and no row — the list says only `Bearer set` or `No bearer`.
+
+**The three presets**, on the ADD pane only, under **Use this target for**:
+*Prose stages* (`llm-target-preset-prose`, `proseStageIds` — storyline naming,
+refresh, recap and grouping, the reply decision and drafts), *Storyline confirm*
+(`llm-target-preset-confirm`, `storyline_membership`) and *All bulk stages*
+(`llm-target-preset-bulk`, the eight fast-slot rows). The first two are
+**pre-checked for every new target** and the user unticks. That is deliberate and
+it is not a guess about the host: the GPU box arrives over an ssh tunnel at
+`localhost:18100`, so "not loopback" would miss the one machine these presets
+exist for, and a Bedrock endpoint proxied onto loopback would read as local.
+Bulk is not pre-checked, because moving eight stages onto a paid target is not a
+default anybody should arrive at by pressing Save. They are absent on an EDIT: a
+preset is a write rather than a property of the target, so a checkbox showing the
+current grouping would need a fourth state. The host applies them with
+`AppPrefsNotifier.applyPreset` AFTER the upsert, because `applyPreset` refuses a
+target id it cannot find.
+
+**Cloud drafts consent.** Picking a **third-party** target for `draft_reply` or
+`draft_improve` while `cloud_drafts_consent` is false writes NOTHING. Instead the
+screen opens a third pane, `PaneSurface` titled **Cloud drafts** over
+`CloudDraftsConsentPane` (`app/lib/screens/consent_screen.dart`), whose back
+arrow is the same answer as **Not now**. Third party means the `converse` wire or
+a host under `amazonaws.com`, `anthropic.com`, `openai.com` or `deepseek.com`
+(`isThirdPartyHost`); loopback is not a signal in either direction. The flag
+is one flag, so a yes covers `draft_reply` and `draft_improve` alike, and the
+pane says so in its second line. No other
+stage ever asks — a triage or a storyline-name prompt carries a subject line and
+a summary, and a draft prompt carries the message, the tail of its thread and
+excerpts from the user's own directories.
+
+The pane says what goes and what never goes, shows the two measured numbers in a
+table (`Local 27B | 6 of 25 drafts passed`, `Opus 5 | 17 of 25 drafts passed`,
+measured on 25 replies from the golden set, 2026-09-17) and names the daily cap.
+The cap it names is the one in force — `cloud_drafts_daily_cap`, the field
+under Processing — not a number compiled into the pane, so the promise the
+person reads is the promise the ledger keeps.
+**I understand, continue** (`consent-continue`) records the consent FIRST and
+writes the stage after it — that order is the protection, because
+`AppPrefs.specForStage` sends a third-party draft target back to the local one
+while the flag is false, so a stage written first would resolve locally until
+something else rebuilt it. **Not now** (`consent-not-now`) and the back arrow
+write nothing. The prefs enforce the same rule independently of this screen, so a
+`stage_targets` restored from a backup or edited by hand cannot route a draft off
+the machine on its own.
 
 **Two editors, one per switchable slot.** `ModelSlotEditor`
 (`app/lib/widgets/model_slot_editor.dart`) is prop-only: it takes the effective
@@ -252,15 +387,22 @@ change still moves it. **A probe never blocks a Save**: somebody about to start
 a server has to be able to point the app at it first.
 
 **Drafts in flight** — a `SegmentedButton<int>` of 1 / 2 / 4 / 8 directly under
-the prose editor, captioned "One per slot the prose server was started with
-(SLOTS in local.mk, --max-num-seqs on vLLM). Extra requests queue at the server
-rather than fail." It writes `AppPrefs.proseParallel` (`prose_parallel`, 1–8,
-default 1), which `DraftHandler` reads through a closure at every launch
-decision — so the change moves the next draft rather than the next launch of
-the app. It is here rather than in a section of its own because it is a fact
-about the prose SERVER, and it does not touch the collapsed summary, which
-names where the three slots point and nothing else. Optional, like every other
-control here: a host that wires no `onProseParallelChanged` gets no segments.
+the prose editor, captioned "For &lt;name&gt;. One per slot the server was started
+with (SLOTS in local.mk, --max-num-seqs on vLLM). Extra requests queue at the
+server rather than fail." Since Round E the width is the **draft target's**,
+not the prose slot's: the host passes the `draft_reply` stage's resolved
+`parallel` and its name, because a GPU-served box has slots this Mac does not
+and a caption still saying "the prose server" would be describing a machine the
+number no longer governs. Where the number is WRITTEN forks on the same
+resolution: for the built-in `Local prose` target it is `AppPrefs.proseParallel`
+(`prose_parallel`, 1–8, default 1) exactly as before, and for a user's target it
+is that spec's `parallel` through `upsertTarget`. `DraftHandler` reads it through
+a closure at every launch decision either way, so the change moves the next draft
+rather than the next launch of the app. It is here rather than in a section of
+its own because it is a fact about the SERVER, and it does not touch the
+collapsed summary, which names where the three slots point and how many targets
+were added. Optional, like every other control here: a host that wires no
+`onProseParallelChanged` gets no segments.
 Drafts only — a recap and a refresh both write the storyline they are about and
 stay at one (`docs/pipeline/10-model-routing.md`). Measured 2026-09-17: a second
 local slot on this Mac's 27B did not pay (width 2 slower end to end than width
@@ -414,10 +556,116 @@ decision — pressing the button is that decision — so it arrives about five
 seconds sooner. The cap is soft: extraction drains three wide, so twelve is the
 real ceiling rather than ten.
 
-The mechanism, the two pre-gates and the activity notes are in
-[pipeline/07-replies.md](pipeline/07-replies.md), "When a draft is written".
-The control is `SettingsSegments<DraftPolicy>`, the same widget Notifications
-and Models › Drafts in flight use.
+Under the segments is one switch, **Improve drafts for messages that need you
+and are urgent** (`settings-cloud-standing`, stored `cloud_drafts_standing`,
+default off). It is the standing rule: after a local draft is written for a
+message the needs-you pass judged the owner is needed on, with `urgency`
+`urgent` or `high`, the same prompt goes again to whichever target the
+**Improve a draft** stage points at, and that answer replaces the draft. It
+needs such a target to be turned on at all — without one the switch is inert
+and the caption reads *"Pick a target for Improve a draft under Models
+first."*; with one it names it: *"After the local draft is written, the same
+prompt goes to `<name>` and its answer replaces the draft. Counts toward the
+daily cap under Processing."*
+
+The mechanism, the two pre-gates, the Improve button and the activity notes
+are in [pipeline/07-replies.md](pipeline/07-replies.md), "When a draft is
+written" and "Improve a draft". The policy control is
+`SettingsSegments<DraftPolicy>`, the same widget Notifications and Models ›
+Drafts in flight use.
+
+## Processing
+
+Whether this session runs model work at all, and the two ways to throw away
+what it has already produced. In both scopes, because all three are questions
+about the model rather than about the app.
+
+**AI processing** is the same switch as the one at the top of the sidebar,
+drawn here as a `Switch` keyed `settings-processing-toggle` beside its name and
+the word `On` or `Off`. It is session state and never persisted — every launch
+starts off — and flipping it here moves the sidebar behind the pane, so the
+host hears about it the instant it moves rather than on the way out. Mail and
+Teams keep syncing while it is off; only the models stand down. See
+[pipeline/10-model-routing.md](pipeline/10-model-routing.md).
+
+Under it are two resets, each an inline two-step in the shape **Sign out and
+clear local data** and **Clear attachment cache** already use: the first tap
+replaces the button with a red **Confirm: this cannot be undone** beside a
+**Keep**, and the second click therefore lands on a different button, in a
+different place, that did not exist a moment ago. A failure renders as an
+`InlineAlert` with the pair still up; **Keep** disarms and drops the failure
+with it.
+
+| Action | Keys | What goes | What stays |
+|---|---|---|---|
+| **Clear AI results** | `settings-clear-ai-results{,-confirm,-keep}` | every triage verdict, summary, storyline, draft, digest and embedding — the sixteen `MessageStore.derivedTables`, the verdict columns on `messages` and `conversations`, and the stage markers on `attachments` and the library; the activity log is one of the sixteen, so today's **Cloud drafts** count starts again at zero, which the caption above the buttons says | mail, Teams messages, attachments, registered directories, the sign-in and every preference |
+| **Forget everything and re-sync** | `settings-forget-resync{,-confirm,-keep}` | everything above **and** the mailbox itself — `MessageStore.wipeAll(keepIdentity: true)`, cursors and bootstrap floors included | the sign-in, the about-me text, the Needs You rules, the sender rules, the registered directories and every setting |
+
+Consent, once given, is not withdrawn by any single control: `cloud_drafts_consent`
+is a machine setting that both resets keep. To stop drafts leaving the machine,
+point `draft_reply` and `draft_improve` back at a local target under Models, or
+remove the third-party target, which clears both entries; the standing switch
+under Suggested replies stops the automatic ones alone. A one-button revoke is
+Round F's.
+
+Above the two resets, once the host has a count, is the cloud-draft ledger:
+one line **Cloud drafts today: N of cap** (`settings-cloud-ledger`) and a
+compact numeric **Daily cap** field beside it (`settings-cloud-cap`, stored
+`cloud_drafts_daily_cap`, default 50, clamped 1..1000, committed on Enter and
+on losing focus, an unreadable entry ignored). N is
+`MessageStore.cloudDraftsSince(local midnight)` — the sum of the `cloud`
+counts on today's `draft` and `draft_improve` activity rows, re-read on every
+recorded event — so it covers all four doors a draft can leave by: the
+Improve button, the standing rule above, a prefetched draft on a draft stage
+pointed at a third-party target, and a draft a person presses for on such a
+stage, which the composer refuses before anything is queued. Nothing more goes
+once the count reaches the cap, and each of the four refuses with the same
+sentence. The cap in force is also the
+number the consent pane quotes before the first draft ever leaves.
+
+**Both are refused while processing is on.** The buttons are inert and the
+caption under them says `Turn processing off first`; the host refuses again for
+itself, because a reset races every drain it does not stop. With the switch
+off, each handler quiesces the triage queue and all three lanes — which is
+"finish the item at the server, then hand the claim back", not merely "stop" —
+runs the store's reset, calls `resetInterruptedWork`, and invalidates the
+fifteen providers holding rows in memory.
+
+Neither reset queues the mailbox. The next sync's own backlog calls are what
+refill the pipeline, one `backlogEnqueueCap` slice a poll, which is why the
+first button's caption says the mailbox is re-queued a slice at a time — see
+[pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md).
+
+**What the owner decided by hand survives a clear.** A message they restored
+keeps its `gate_override`, and one they ignored keeps `gate_reason = 'user'`
+and stays out; both are the owner's own hand on the gates, and nothing
+recomputes either on a later triage claim. The gate verdicts written at ingest
+survive too (`outbound`, `backlog`, and Teams' `auto_generated` and
+`teams_source`); every other gate reason is cleared and re-derived on the next
+claim.
+
+**Everything comes back on its own**, each by the path that would have
+written it the first time. Mail, chats, storylines, drafts and embeddings ride
+the sync's backlog calls; the library rides the reconcile, which is requeued
+per directory on every sync. Attachments are the one case the clear has to
+queue for itself, in the same transaction: `attachment_text` is enqueued at
+ingest, by a detail fetch and by Restore, and a message already stored with a
+body reaches none of the three, so the clear writes one `attachment_text` work
+row per attachment left `pending` and the digest follows the text pass. A
+refusal is not re-queued, because "too large" and "not text" are verdicts
+about the file rather than about the model that read it.
+
+**A marker that outlives its rows is the trap** the clear has to avoid, and
+three of them are handled inside the same transaction. `message_progress` is
+emptied and rebuilt from `messages` in the same breath, because every stage
+writes that table with an UPDATE and only the ingest ever inserts — left
+empty, the home feed would stay empty until the mailbox was fetched again.
+`attachments.text_status` and `digest_status` go back to `pending` wherever
+they said `done`, or the handlers would skip files whose words have just been
+deleted; a refusal stays refused, because that is a verdict about the file
+rather than about the model. And `context_files` loses `size`, `mtime` and
+`sha256` along with its digest columns: they are the reconcile's cheap diff,
+and a file whose stat still matched would never be opened again.
 
 ## Sync & data
 
@@ -426,13 +674,19 @@ it is the question they raise: somebody reading when the last pull ran is asking
 how much of their mail is in here. One `LookbackField`
 (`app/lib/widgets/settings_lookback_field.dart`) per connector — `Mail` and
 `Teams`, keyed `settings-mail-lookback` and `settings-teams-lookback` — each a
-dropdown of day presets (**7 / 14 / 30 / 60 / 90**) plus **Custom…**, which
+dropdown of day presets (**1 / 7 / 14 / 30 / 60 / 90**) plus **Custom…**, which
 reveals an inline `YYYY-MM-DD` field prefilled with the day the current window
 reaches. **Not a `showDatePicker`**: that is a dialog, and `no_dialogs_test.dart`
 now fails on it too.
 
+Both sides default to **one day**, which is the value that applies where
+nothing is stored: a first sync on a new machine is a morning's mail, and
+somebody who wants history raises it here. A mailbox that already stored a
+choice keeps it.
+
 Under the control, in every mode, is the line the setting exists for:
-`Last 14 days · since Aug 22, 2026`. A day count is a span; the thing a person
+`Last 14 days · since Aug 22, 2026`, or `Last 1 day · since …` at the default.
+A day count is a span; the thing a person
 asking for "three months" actually wants to know is which morning the mailbox
 starts on. Both halves come from the same arithmetic the sync uses — UTC
 midnight minus the count — so the day named here is the day the window reaches.
@@ -454,6 +708,13 @@ the lookback is how much history to reach for and never a licence to delete.
 A deep window (90+ days) therefore means a long first drain and more AI work
 behind it, paced by the backlog caps rather than truncated by them — see
 [pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md).
+
+**Syncing is not processing.** Mail and Teams keep pulling while the **AI
+processing** switch at the top of the sidebar is off — the inbox stays current
+and the models stay idle — so a window widened during an off session is
+fetched, stored and left waiting for the switch. The rail's caption says how
+many are waiting. See
+[pipeline/10-model-routing.md](pipeline/10-model-routing.md).
 
 **The collapsed summary deliberately says nothing about it.** That line answers
 "is what I am looking at current?", which is a question about the stamps; adding

@@ -104,7 +104,7 @@ reads it.
 |---|---|
 | Task | `ReplyDecisionTask` — `app/lib/services/llm/reply_decision_task.dart` |
 | Schema | `reply_decision` |
-| Slot | **prose / 27B** |
+| Slot | **prose / 27B** by default (`stageLlmClientProvider('reply_decision')`, a client of its own since 2026-09-19 so the decision and the draft can point at different targets; re-pointable in Settings → Models, see [10-model-routing.md](10-model-routing.md)) |
 | Params | temperature 0, maxTokens 256 |
 
 The 27B reads the actual conversation and answers exactly one question: does
@@ -122,7 +122,7 @@ explains why it asks only one question. A "no" closes the draft stage
 |---|---|
 | Task | `DraftTask` — `app/lib/services/llm/draft_task.dart` |
 | Schema | `draft_reply` |
-| Slot | **prose / 27B** |
+| Slot | **prose / 27B** by default (`stageLlmClientProvider('draft_reply')`; re-pointable in Settings → Models; a third-party target here asks for consent once, see [10-model-routing.md](10-model-routing.md)) |
 | Params | temperature 0, maxTokens 768 (`DraftHandler.draftMaxTokens`) |
 
 Writes a first-person reply on the owner's behalf: an evidence sentence, one
@@ -212,6 +212,81 @@ answer is the same answer (see `docs/model-bakeoff.md`).
 **The prefetched drafts stream too**, and nobody is watching them. That is not
 waste: the publish is a broadcast onto a bus with no subscriber for that
 conversation, which costs a parse of text the call was already receiving.
+
+### Improve a draft (2026-09-20)
+
+| | |
+|---|---|
+| Task | `DraftTask` again — no second prompt exists (`app/lib/services/llm/draft_task.dart`) |
+| Schema | `draft_reply` — so an improve call's `LlmCallRecord` carries that label |
+| Slot | **prose**, and **no default target** (`stageLlmClientProvider('draft_improve')`; the one optional row in `pipelineStages`; a third-party target asks for consent once) |
+| Params | temperature 0, maxTokens 768, never streamed |
+
+The best draft the ledger has measured is not the one the local 27B writes. On
+the golden set the 27B passes 6 of 25 replies under the invention rules and
+Opus 5 passes 17 of 25 (Round B, 2026-09-17); a second Opus 5 pass through
+this very wire on 2026-09-20, with prompt token counts identical to the first,
+judged 15 of 25, so the honest range is 15 to 17 and the screen quotes the
+ledger's row of record. Round E makes that reachable
+from the composer without making it the default: **Improve with `<name>`**
+sends the draft that was just written back through the same prompt on a target
+the owner picked, and replaces it.
+
+**The stage.** `draft_improve` is a routable stage like the other fourteen
+(`pipelineStages`, `slot: prose`, label "Improve a draft"), with one
+difference: it is the only `PipelineStageInfo.optional` row, so its default is
+**no target at all**. A build nobody has configured has no Improve button. A
+third-party target on it needs the one-time cloud-drafts consent before
+`AppPrefs.specForStage('draft_improve')` will resolve to it — the same rule
+`draft_reply` gets, and the resolver is where it is enforced (see
+[10-model-routing.md](10-model-routing.md)).
+
+**The button.** The composer draws it beside Draft reply / Regenerate,
+labelled from the target's own name and only when there is a draft to improve.
+It calls `DraftHandler.improve(source, messageId)`, which gathers exactly what
+the draft gathered — the same thread window, the same retrieval, the same
+`DraftTask` bytes — and sends it to the improve target at temperature 0 with
+the same 768-token budget. **It never streams**, whatever the target says it
+can do: the call is one rewrite of words already on screen, and a preview of
+the replacement would be two drafts at once. One caveat the rebuilt prompt
+cannot carry: the DOCUMENTS a person pinned when they first pressed Draft
+reply rode the work row's payload and are gone by the time the row is stored,
+so an improve retrieves documents the way a prefetch does. The directory files
+come back, because the stored provenance names them.
+
+**What it writes.** The same `drafts` row, in place: body, evidence, options,
+status `suggested`, and `context_json` carrying `improved_by: <target id>`
+beside the sources (`DraftProvenance.improvedBy`). The composer's caption
+appends "Improved with `<name>`" from that id. **Any failure keeps the local
+draft** and shows one line: an unrouted stage, a deleted message, no draft
+yet, an empty answer, a refused call, the cap. Improve records its own
+`draft_improve` activity row — `ok`, `error` or `skipped` with a reason —
+carrying the target id and, for a third-party one, `cloud: 1`.
+
+**The standing rule.** `cloud_drafts_standing` (default off, Settings →
+Suggested replies) improves a draft with nobody pressing anything, for
+messages where `needs_you_verdict = 1` and `urgency` is `urgent` or `high` —
+the same two words `ExtractHandler.asksForAReply` reads. It runs **after** the
+local draft is stored, inside the same activity row, which is the whole safety
+of it: whatever the second call does, an answer is already in the box. The row
+carries `improved` and `improved_chars` on success, `improve_error` on a
+failure, and `improve: cloud_cap` when the day is spent. An asked-for draft is
+never improved this way — a person pressing Draft reply gets the button, not a
+rule.
+
+**The cap.** `cloud_drafts_daily_cap` (default 50, clamped 1..1000, Settings →
+Processing) is how many prompts may leave for a third-party target in a day.
+"A day" is the person's local day; the ledger is
+`MessageStore.cloudDraftsSince(iso)`, which sums the `cloud` counts on today's
+`draft` and `draft_improve` activity rows — a count and not a row tally,
+because one prefetch can send two. The count is written BEFORE the call, so a
+prompt that left and then failed still spends its share. It stops four things
+with the same sentence, *"Cloud drafts are at today's cap of N. Raise it under
+Settings, Processing."*: the Improve button, the standing rule, a prefetched
+draft whose `draft_reply` target is third-party, and an asked-for draft on such
+a target — that last one refused by `DraftNotifier.generate` before anything
+is deleted or queued, so nothing is destroyed to discover the cap. A target on
+this machine is never counted and never capped.
 
 ### The invention rules (v3, 2026-09-16; v4, 2026-09-17)
 

@@ -144,7 +144,7 @@ void main() {
     // Taken BEFORE the write: the assertion below is that this exact instance
     // follows the pref, because everything downstream watches it and a rebuild
     // mid-drain would abort work in flight.
-    final before = container.read(fastLlmClientProvider);
+    final before = container.read(stageLlmClientProvider('triage'));
 
     await openSection(tester, 'Models');
 
@@ -166,7 +166,7 @@ void main() {
     );
     expect(await store.getPref(fastLlmModelKey), 'qwen3-4b');
 
-    final after = container.read(fastLlmClientProvider);
+    final after = container.read(stageLlmClientProvider('triage'));
     expect(identical(before, after), isTrue);
     expect(after.baseUrl, 'http://127.0.0.1:1/v1/chat/completions');
     expect(after.model, 'qwen3-4b');
@@ -196,8 +196,9 @@ void main() {
     // is what "follow the build" is stored as.
     expect(await store.getPref(fastLlmUrlKey), '');
     expect(await store.getPref(fastLlmModelKey), '');
-    expect(container.read(fastLlmClientProvider).baseUrl, LlmClient.fastBaseUrl);
-    expect(container.read(fastLlmClientProvider).model, fastModelDefault);
+    final triage = container.read(stageLlmClientProvider('triage'));
+    expect(triage.baseUrl, LlmClient.fastBaseUrl);
+    expect(triage.model, fastModelDefault);
   });
 
   testWidgets('About shows what the two providers resolved', (tester) async {

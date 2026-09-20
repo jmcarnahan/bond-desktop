@@ -1,6 +1,9 @@
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/services/conversation_state.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
+import 'package:bond_inbox/services/storyline_clustering.dart';
 import 'package:bond_inbox/services/storyline_lint.dart';
+import 'package:bond_inbox/services/storyline_service.dart';
 
 import 'golden_set.dart';
 
@@ -232,6 +235,13 @@ Future<SweepMembership> readSweepMembership(MessageStore store) async {
 /// between are the range a coherence floor could plausibly be set in. Counted
 /// over every pair INSIDE a cluster the sweep formed, which is the population
 /// the floor would judge.
+///
+/// On the embeddinggemma scale. The Qwen vector shipped in Round E runs its
+/// gates at 0.48 / 0.43, under the bottom edge, so on that scale this
+/// histogram reads close to one bucket and `separation.points` at 0.65 is
+/// off-scale; the scale-free columns (recall-70 and cross-5) are the read.
+/// Rescaling the edges is a Round F harness item (plan gotcha 64, item 10);
+/// kept as is so the Round D rows stay comparable.
 const List<double> cosineBinEdges = [0.50, 0.55, 0.60, 0.65];
 
 /// The bins' names, for a printed row. Enums, not data.
@@ -425,7 +435,9 @@ class ClusterPurity {
       };
 
   /// Counts and ratios, for the printed table.
-  String line() => '$clusters clusters, mean ${pct(mean)} over $withCarrier, '
+  String line() =>
+      '$clusters ${clusters == 1 ? 'cluster' : 'clusters'}, '
+      'mean ${pct(mean)} over $withCarrier, '
       '>=70% $pureAt70, 100% $pureAt100';
 }
 
@@ -512,6 +524,502 @@ Map<String, ClusterPurity> clusterPurityByOutcome(
   );
 }
 
+/// The commonest English function words, dropped before two subjects are
+/// compared.
+///
+/// Thirty of them, and the list is a CONST rather than a stemmer or a
+/// frequency cut over the corpus: the whole point of the lexical lines is to
+/// be a ruler the vector can be held against, and a ruler whose marks move
+/// with the mailbox measures nothing. `re`, `fw` and `fwd` are in it as a belt
+/// to `stripReFw`'s braces — a subject that carries one mid-line, which a
+/// forwarded forward does, still loses it here.
+const List<String> subjectStopwords = [
+  'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'for', 'on', //
+  'at', 'by', 'with', 'from', 'is', 'are', 'was', 'be', 'as', 're', //
+  'fw', 'fwd', 'this', 'that', 'it', 'your', 'our', 'my', 'you', 'we', //
+];
+
+/// One subject as a bag of words: `Re: Budget review (Q3)` → `{budget,
+/// review, q3}`.
+///
+/// Lower-cased, split on anything that is not a word character, one-character
+/// tokens and [subjectStopwords] dropped. A set and not a list, because what
+/// the overlap asks is which words two subjects have in common and not how
+/// often either says one.
+Set<String> subjectTokens(String? subject) {
+  final stripped = stripReFw(subject).toLowerCase();
+  return {
+    for (final token in stripped.split(RegExp(r'[^a-z0-9]+')))
+      if (token.length >= 2 && !subjectStopwords.contains(token)) token,
+  };
+}
+
+/// The bins a subject overlap is read in — three edges, four buckets.
+///
+/// `0` is its own bucket rather than the bottom of a range, because two
+/// subjects with NO word in common is the interesting case: it is the pool the
+/// vector has to separate on meaning alone.
+const List<String> overlapBinLabels = ['0', '0-0.25', '0.25-0.5', '>=0.5'];
+
+/// [values] counted into [overlapBinLabels]' four buckets.
+List<int> overlapBins(Iterable<double> values) {
+  final bins = List<int>.filled(overlapBinLabels.length, 0);
+  for (final value in values) {
+    if (value <= 0) {
+      bins[0]++;
+    } else if (value < 0.25) {
+      bins[1]++;
+    } else if (value < 0.5) {
+      bins[2]++;
+    } else {
+      bins[3]++;
+    }
+  }
+  return bins;
+}
+
+/// Every pool pair's subject overlap, split the way [pairCosinesOf] splits the
+/// cosines.
+///
+/// Jaccard over [subjectTokens]: the shared words over the words either
+/// subject uses. The question it answers is how much of what the vector does
+/// a `LIKE` over the subject line would have done — a cheap rule that
+/// separated the efforts as well as the embedding would make the embedding the
+/// wrong thing to spend a round on.
+///
+/// Two empty subjects score 0 rather than 1. An empty union is not agreement.
+({List<double> sameEffort, List<double> crossEffort, List<double> withNone})
+    pairSubjectOverlapOf({
+  required Map<String, String> subjectByThread,
+  required Map<String, String> goldByThread,
+}) {
+  final keys = subjectByThread.keys.toList()..sort();
+  final tokens = {
+    for (final key in keys) key: subjectTokens(subjectByThread[key]),
+  };
+  return _pairsBy(
+    keys: keys,
+    goldByThread: goldByThread,
+    value: (a, b) {
+      final left = tokens[a]!;
+      final right = tokens[b]!;
+      if (left.isEmpty && right.isEmpty) return 0;
+      final shared = left.intersection(right).length;
+      final union = left.union(right).length;
+      return union == 0 ? 0 : shared / union;
+    },
+  );
+}
+
+/// The bins a shared-people count is read in.
+const List<String> sharedPeopleBinLabels = ['0', '1', '2+'];
+
+/// [counts] counted into [sharedPeopleBinLabels]' three buckets.
+List<int> sharedPeopleBins(Iterable<double> counts) {
+  final bins = List<int>.filled(sharedPeopleBinLabels.length, 0);
+  for (final count in counts) {
+    bins[count <= 0 ? 0 : (count < 2 ? 1 : 2)]++;
+  }
+  return bins;
+}
+
+/// How many non-owner people every pool pair shares, split the way
+/// [pairCosinesOf] splits the cosines.
+///
+/// Displays, lower-cased, the owner's own removed — the owner is on every
+/// thread in their own mailbox, so counting them would put every pair in the
+/// same bucket and say nothing. The same "two shared people" the assign
+/// shortlist's overlap rule counts, read over the whole pool.
+({List<double> sameEffort, List<double> crossEffort, List<double> withNone})
+    pairSharedPeopleOf({
+  required Map<String, List<String>> participantsByThread,
+  required Map<String, String> goldByThread,
+  required Set<String> ownerDisplays,
+}) {
+  final keys = participantsByThread.keys.toList()..sort();
+  final owner = {
+    for (final display in ownerDisplays)
+      if (display.trim().isNotEmpty) display.trim().toLowerCase(),
+  };
+  final people = {
+    for (final key in keys)
+      key: {
+        for (final display in participantsByThread[key] ?? const <String>[])
+          if (display.trim().isNotEmpty &&
+              !owner.contains(display.trim().toLowerCase()))
+            display.trim().toLowerCase(),
+      },
+  };
+  return _pairsBy(
+    keys: keys,
+    goldByThread: goldByThread,
+    value: (a, b) => people[a]!.intersection(people[b]!).length.toDouble(),
+  );
+}
+
+/// The three populations [pairCosinesOf] splits into, over any per-pair
+/// number. One walk, one rule for what `none` means, so the three lexical and
+/// geometric lines can never disagree about which pairs they counted.
+({List<double> sameEffort, List<double> crossEffort, List<double> withNone})
+    _pairsBy({
+  required List<String> keys,
+  required Map<String, String> goldByThread,
+  required double Function(String a, String b) value,
+}) {
+  final sameEffort = <double>[];
+  final crossEffort = <double>[];
+  final withNone = <double>[];
+  String? slugOf(String key) {
+    final slug = goldByThread[key];
+    if (slug == null || slug.isEmpty || slug == noneId) return null;
+    return slug;
+  }
+
+  for (var i = 0; i < keys.length; i++) {
+    for (var j = i + 1; j < keys.length; j++) {
+      final measured = value(keys[i], keys[j]);
+      final a = slugOf(keys[i]);
+      final b = slugOf(keys[j]);
+      if (a == null || b == null) {
+        withNone.add(measured);
+      } else if (a == b) {
+        sameEffort.add(measured);
+      } else {
+        crossEffort.add(measured);
+      }
+    }
+  }
+  return (
+    sameEffort: sameEffort,
+    crossEffort: crossEffort,
+    withNone: withNone,
+  );
+}
+
+/// How far apart the two populations lie — the one number a candidate vector
+/// is chosen on.
+///
+/// [points] is the same-effort share at or above [at] minus the cross-effort
+/// share, in whole percentage points. Round D's shipped vector scores 25 (74
+/// against 49), which is why a link at the shipped threshold is a same-effort
+/// pair about five percent of the time.
+///
+/// [recall70Cosine] is the highest cosine a threshold could be set at while
+/// still linking at least 70% of the same-effort pairs, and
+/// [recall70CrossPct] is the share of CROSS-effort pairs that clears the same
+/// bar. Highest and not lowest: every cosine below it links seven in ten too,
+/// so the lowest would always be the smallest number in the list and the cross
+/// share beside it would always read 100%. What a reader wants is how high the
+/// bar can go before recall breaks.
+///
+/// [cross5Cosine] is the mirror, and the PRECISION number: the lowest cosine
+/// at which no more than one cross-effort pair in twenty still links.
+/// [cross5SameRecallPct] is the share of same-effort pairs that survives it
+/// and [cross5CrossPct] the share of cross-effort pairs that does. Lowest
+/// here, for the same reason recall's is highest: every cosine above it admits
+/// fewer cross pairs, so the interesting one is the loosest bar that still
+/// holds the line.
+///
+/// [cross5CrossPct] is on the record rather than assumed to be 5, because it
+/// is not always 5: a cross list too short or too flat for any of its values
+/// to carry one pair in twenty has no such cosine, the top of the list is
+/// returned instead, and this share above 5% is the only thing that says the
+/// rung is a fallback rather than the precision point.
+///
+/// Both exist because the cosine SCALE moves with the model and the prefix —
+/// measured 2026-09-19, recall-70 ran from 0.31 to 0.72 across the candidates
+/// — so [points], which is read at a fixed 0.65, compares two configurations
+/// of ONE model and nothing else. The two cosines and the two shares beside
+/// them are scale-free, and they are what a candidate is chosen on.
+///
+/// An empty same-effort list yields zeros rather than a ratio over nothing:
+/// there is no recall to report when nothing could be recalled. An empty cross
+/// list means nothing has to be kept out, so [cross5Cosine] is the highest
+/// same-effort value, which links one pair.
+({
+  int points,
+  double recall70Cosine,
+  int recall70CrossPct,
+  double cross5Cosine,
+  int cross5SameRecallPct,
+  int cross5CrossPct,
+}) separationOf({
+  required List<double> sameEffort,
+  required List<double> crossEffort,
+  double at = 0.65,
+}) {
+  int sharePct(List<double> values, double bar) => values.isEmpty
+      ? 0
+      : (values.where((v) => v >= bar).length * 100 / values.length).round();
+
+  final points = sharePct(sameEffort, at) - sharePct(crossEffort, at);
+  if (sameEffort.isEmpty) {
+    return (
+      points: points,
+      recall70Cosine: 0,
+      recall70CrossPct: 0,
+      cross5Cosine: 0,
+      cross5SameRecallPct: 0,
+      cross5CrossPct: 0,
+    );
+  }
+
+  // Ascending, then the LAST value whose "at or above me" share still clears
+  // seven in ten. Walking the values rather than interpolating a percentile
+  // keeps the answer a cosine the data actually contains, which is what makes
+  // the share beside it a real count rather than an estimate.
+  final sortedSame = [...sameEffort]..sort();
+  var recall70 = sortedSame.first;
+  var firstOfValue = 0;
+  for (var i = 0; i < sortedSame.length; i++) {
+    if (i > 0 && sortedSame[i] != sortedSame[i - 1]) firstOfValue = i;
+    final atOrAbove = sortedSame.length - firstOfValue;
+    if (atOrAbove * 100 >= sortedSame.length * 70) recall70 = sortedSame[i];
+  }
+
+  // The same walk over the cross list, taking the FIRST value whose share has
+  // fallen to one in twenty. A list where even the largest value is held by
+  // more than 5% of the pairs has no such cosine — it takes fewer than twenty
+  // distinct values to manage that — and the largest is returned, with the
+  // share beside it saying so.
+  final sortedCross = [...crossEffort]..sort();
+  var cross5 = sortedSame.last;
+  if (sortedCross.isNotEmpty) {
+    cross5 = sortedCross.last;
+    firstOfValue = 0;
+    for (var i = 0; i < sortedCross.length; i++) {
+      if (i > 0 && sortedCross[i] != sortedCross[i - 1]) firstOfValue = i;
+      final atOrAbove = sortedCross.length - firstOfValue;
+      if (atOrAbove * 100 <= sortedCross.length * 5) {
+        cross5 = sortedCross[i];
+        break;
+      }
+    }
+  }
+
+  return (
+    points: points,
+    recall70Cosine: recall70,
+    recall70CrossPct: sharePct(crossEffort, recall70),
+    cross5Cosine: cross5,
+    cross5SameRecallPct: sharePct(sameEffort, cross5),
+    cross5CrossPct: sharePct(crossEffort, cross5),
+  );
+}
+
+/// How many pool pairs sit INSIDE one would-form cluster, split by whether the
+/// two threads share a gold effort.
+///
+/// The precision-and-recall reading of a whole ladder rung in three numbers:
+/// [same] is what the rung gathered, [cross] is what it mixed in, and [none]
+/// is what it swept up that gold files nowhere. Read against the pool's own
+/// totals, which is what makes a rung on one model comparable to a rung on
+/// another however differently their cosines are scaled.
+///
+/// The clusters a rung produces are disjoint, so no pair is counted twice.
+({int same, int cross, int none}) pairsInsideClusters(
+  Iterable<JudgedCluster> clusters,
+  Map<String, String> goldByThread,
+) {
+  var same = 0;
+  var cross = 0;
+  var none = 0;
+  String? slugOf(String key) {
+    final slug = goldByThread[key];
+    if (slug == null || slug.isEmpty || slug == noneId) return null;
+    return slug;
+  }
+
+  for (final cluster in clusters) {
+    final threads = cluster.threads;
+    for (var i = 0; i < threads.length; i++) {
+      for (var j = i + 1; j < threads.length; j++) {
+        final a = slugOf(threads[i]);
+        final b = slugOf(threads[j]);
+        if (a == null || b == null) {
+          none++;
+        } else if (a == b) {
+          same++;
+        } else {
+          cross++;
+        }
+      }
+    }
+  }
+  return (same: same, cross: cross, none: none);
+}
+
+/// One rung of the would-form ladder, printed. Counts and a cosine, nothing
+/// else: [ClusterPurity.line] carries no key and no slug.
+String wouldFormLine({
+  required String label,
+  required double threshold,
+  required ClusterPurity purity,
+  required ({int same, int cross, int none}) inside,
+  required int sameTotal,
+}) =>
+    '  would-form at $label ${threshold.toStringAsFixed(2)}: ${purity.line()}'
+    ' · same-effort pairs inside ${inside.same} of $sameTotal'
+    ' · cross-effort pairs inside ${inside.cross}';
+
+/// One rung, for a result file.
+Map<String, Object?> wouldFormJson({
+  required double threshold,
+  required ClusterPurity purity,
+  required ({int same, int cross, int none}) inside,
+}) =>
+    {
+      'threshold': threshold,
+      'purity': purity.toJson(),
+      'inside_same': inside.same,
+      'inside_cross': inside.cross,
+      'inside_none': inside.none,
+    };
+
+/// The clusters a sweep WOULD form over a pool, without asking a model
+/// anything.
+///
+/// `make golden-vector`'s first line, and the one piece of that stage with a
+/// decision in it, so it lives here where `golden_sweep_test.dart` can pin it
+/// offline rather than inside a bench nothing runs on the gate.
+///
+/// The fidelity rule: `sweep()` folds the FRAGMENTS first and clusters the
+/// representatives, never the siblings, because a sibling is not a candidate
+/// in its own right — it rides its representative's verdict. Round D found the
+/// one or two folded rows on the golden pool changing the sweep's whole
+/// outcome, so a reading that clustered them would be a reading of a pool the
+/// app never clusters. [folded] is how many rows the fold took out, which is
+/// how a run says whether the rule bit at all.
+///
+/// The SERIES pre-pass is not applied. It is private to the service and is
+/// deliberately not widened for a bench; on the golden pool it has never
+/// seeded or excluded anything, and [folded] beside the cluster line is what
+/// makes a pool where that stopped being true visible.
+///
+/// [threshold] is the link cosine this rung asks about. The coherence floor
+/// and the split ceiling move with it, one step under and four steps over, so
+/// the ladder asks one question of every candidate rather than asking a
+/// model whose cosines sit low whether it clears a bar set for another model.
+///
+/// [rows], [vectors] and [keys] are one pool in one order, index for index.
+({List<JudgedCluster> clusters, int representatives, int folded})
+    wouldFormClustersOf({
+  required List<Map<String, Object?>> rows,
+  required List<List<double>> vectors,
+  required List<String> keys,
+  required double threshold,
+}) {
+  final fragments = StorylineService.fragmentsOf(rows);
+  final folded = fragments.siblings.values
+      .fold<int>(0, (sum, group) => sum + group.length);
+  // The indexes `clusterBySimilarity` returns are into THIS list, so they are
+  // mapped back through it before anything reads a thread key — the same hop
+  // `sweep()` makes through its own `poolIndexes`.
+  final poolIndexes = fragments.representatives;
+
+  final table = PairSimilarities(poolIndexes.length);
+  for (var i = 0; i < poolIndexes.length; i++) {
+    for (var j = i + 1; j < poolIndexes.length; j++) {
+      table.set(
+        i,
+        j,
+        cosine(vectors[poolIndexes[i]], vectors[poolIndexes[j]]),
+      );
+    }
+  }
+  final clusters = clusterBySimilarity(
+    poolIndexes.length,
+    table.get,
+    threshold: threshold,
+    minSize: StorylineTuning.proposeMinClusterSize,
+    maxSize: StorylineTuning.maxClusterSize,
+    // The coherence floor and the split ceiling ride WITH the threshold rather
+    // than staying at the app's numbers, because the whole point of a rung
+    // other than the shipped one is that the candidate model's cosines do not
+    // live where the shipped one's do. The gaps are the app's: the floor sits
+    // one step under the link and the ceiling four steps over it.
+    floor: threshold - StorylineTuning.clusterSplitStep,
+    step: StorylineTuning.clusterSplitStep,
+    ceiling: threshold + 4 * StorylineTuning.clusterSplitStep,
+  );
+
+  return (
+    clusters: [
+      for (final cluster in clusters)
+        (
+          threads: [for (final index in cluster) keys[poolIndexes[index]]],
+          outcome: 'would_form',
+        ),
+    ],
+    representatives: poolIndexes.length,
+    folded: folded,
+  );
+}
+
+/// `<label> <count>` for every bucket, double-spaced. Top-level because both
+/// stages of the sweep print the same rows and a second copy of the formatting
+/// is a second thing to drift.
+String binsLine(List<String> labels, List<int> counts) => [
+      for (var i = 0; i < labels.length; i++) '${labels[i]} ${counts[i]}',
+    ].join('  ');
+
+/// The same counts keyed by their bucket's name, for a result file.
+Map<String, int> labelledBins(List<String> labels, List<int> counts) => {
+      for (var i = 0; i < labels.length; i++) labels[i]: counts[i],
+    };
+
+/// The subject-overlap row, the three populations side by side.
+String subjectOverlapLine({
+  required List<int> sameEffort,
+  required List<int> crossEffort,
+  required List<int> withNone,
+}) =>
+    '  pool pairs by subject overlap  same  '
+    '${binsLine(overlapBinLabels, sameEffort)}'
+    '   cross  ${binsLine(overlapBinLabels, crossEffort)}'
+    '   none  ${binsLine(overlapBinLabels, withNone)}';
+
+/// The shared-people row, the three populations side by side.
+String sharedPeopleLine({
+  required List<int> sameEffort,
+  required List<int> crossEffort,
+  required List<int> withNone,
+}) =>
+    '  pool pairs by shared people  same  '
+    '${binsLine(sharedPeopleBinLabels, sameEffort)}'
+    '   cross  ${binsLine(sharedPeopleBinLabels, crossEffort)}'
+    '   none  ${binsLine(sharedPeopleBinLabels, withNone)}';
+
+/// What [separationOf] returns, named once so the printers and the callers
+/// cannot drift over a field.
+typedef Separation = ({
+  int points,
+  double recall70Cosine,
+  int recall70CrossPct,
+  double cross5Cosine,
+  int cross5SameRecallPct,
+  int cross5CrossPct,
+});
+
+/// The separation row. Two decimals on the cosines, whole percents elsewhere.
+String separationLine(Separation separation) =>
+    'separation: ${separation.points} points at 0.65 · '
+    'recall-70 cosine ${separation.recall70Cosine.toStringAsFixed(2)} · '
+    'cross ${separation.recall70CrossPct}% · '
+    'cross-5 cosine ${separation.cross5Cosine.toStringAsFixed(2)} · '
+    'cross ${separation.cross5CrossPct}% · '
+    'same ${separation.cross5SameRecallPct}%';
+
+/// [separationLine]'s numbers, for a result file.
+Map<String, Object?> separationJson(Separation separation) => {
+      'points': separation.points,
+      'recall_70_cosine': separation.recall70Cosine,
+      'recall_70_cross_pct': separation.recall70CrossPct,
+      'cross_5_cosine': separation.cross5Cosine,
+      'cross_5_cross_pct': separation.cross5CrossPct,
+      'cross_5_same_recall_pct': separation.cross5SameRecallPct,
+    };
+
 /// A share as a whole percent. Top-level because the cluster purity lines and
 /// the tally's own both print one.
 String pct(double share) => '${(share * 100).round()}%';
@@ -592,6 +1100,27 @@ class SweepTally {
   /// Model calls per task label — `storyline_name`, `storyline_membership`.
   final Map<String, int> callsByKind;
 
+  /// Grouping calls the sweep made, summed off its own activity rows.
+  ///
+  /// Zero on a tree running `GroupingMode.cosine`, which is what ships: the
+  /// sweep writes all four of these keys in either mode so that a row from
+  /// the two trees is the same row with different numbers in it. The four
+  /// default to 0 here for the same reason a missing key reads 0 — a ledger
+  /// row taken before these existed is a cosine row, and that is what a
+  /// cosine row says.
+  final int groupingCalls;
+
+  /// Threads a grouping call placed in a group big enough to propose.
+  final int grouped;
+
+  /// Grouping calls that left their piece ungrouped: the call threw, or it
+  /// named no group at all.
+  final int groupingFailed;
+
+  /// Pieces dropped before any call — too few threads after a split, or still
+  /// too wide to show in one call at the top of the ladder.
+  final int groupingUnfit;
+
   /// Model calls made in each sweep pass, in pass order.
   final List<int> callsPerPass;
 
@@ -626,6 +1155,26 @@ class SweepTally {
   /// Pool pairs at least one side of which gold files nowhere, by bin.
   final List<int> withNoneBins;
 
+  /// The same three populations by SUBJECT overlap, in [overlapBinLabels]'
+  /// four buckets. The lexical ruler the cosine line is read against: a pool
+  /// whose same-effort pairs already share subject words is one a much cheaper
+  /// rule could have grouped.
+  final List<int> sameSubjectBins;
+  final List<int> crossSubjectBins;
+  final List<int> withNoneSubjectBins;
+
+  /// The same three populations by shared non-owner people, in
+  /// [sharedPeopleBinLabels]' three buckets.
+  final List<int> samePeopleBins;
+  final List<int> crossPeopleBins;
+  final List<int> withNonePeopleBins;
+
+  /// What [separationOf] read off the cosine lists: the points between the two
+  /// populations at the shipped threshold, what a 70%-recall threshold would
+  /// cost in cross-effort pairs, and what a 5%-cross threshold would cost in
+  /// same-effort ones.
+  final Separation separation;
+
   const SweepTally({
     required this.formed,
     required this.tombstoned,
@@ -644,6 +1193,10 @@ class SweepTally {
     required this.unmapped,
     required this.filedNowhere,
     required this.callsByKind,
+    this.groupingCalls = 0,
+    this.grouped = 0,
+    this.groupingFailed = 0,
+    this.groupingUnfit = 0,
     required this.callsPerPass,
     required this.wallPerPassMs,
     required this.cosineBins,
@@ -652,6 +1205,13 @@ class SweepTally {
     required this.sameEffortBins,
     required this.crossEffortBins,
     required this.withNoneBins,
+    required this.sameSubjectBins,
+    required this.crossSubjectBins,
+    required this.withNoneSubjectBins,
+    required this.samePeopleBins,
+    required this.crossPeopleBins,
+    required this.withNonePeopleBins,
+    required this.separation,
   });
 
   /// The mean of [purityByStoryline] over the storylines that HAVE one.
@@ -713,6 +1273,10 @@ class SweepTally {
         'unmapped': unmapped,
         'filed_nowhere': filedNowhere,
         'calls_by_kind': callsByKind,
+        'grouping_calls': groupingCalls,
+        'grouped': grouped,
+        'grouping_failed': groupingFailed,
+        'grouping_unfit': groupingUnfit,
         'calls_per_pass': callsPerPass,
         'wall_per_pass_ms': wallPerPassMs,
         'cosine_bins': {
@@ -729,12 +1293,21 @@ class SweepTally {
           'cross_effort': _binsJson(crossEffortBins),
           'with_none': _binsJson(withNoneBins),
         },
+        'subject_overlap_bins': {
+          'same_effort': labelledBins(overlapBinLabels, sameSubjectBins),
+          'cross_effort': labelledBins(overlapBinLabels, crossSubjectBins),
+          'with_none': labelledBins(overlapBinLabels, withNoneSubjectBins),
+        },
+        'shared_people_bins': {
+          'same_effort': labelledBins(sharedPeopleBinLabels, samePeopleBins),
+          'cross_effort': labelledBins(sharedPeopleBinLabels, crossPeopleBins),
+          'with_none': labelledBins(sharedPeopleBinLabels, withNonePeopleBins),
+        },
+        'separation': separationJson(separation),
       };
 
-  static Map<String, int> _binsJson(List<int> bins) => {
-        for (var i = 0; i < cosineBinLabels.length; i++)
-          cosineBinLabels[i]: bins[i],
-      };
+  static Map<String, int> _binsJson(List<int> bins) =>
+      labelledBins(cosineBinLabels, bins);
 
   /// Counts, ratios and enums. No slug and no storyline title: the per-slug
   /// maps above stay in [toJson], which lands in the git-ignored result file.
@@ -749,10 +1322,7 @@ class SweepTally {
     final lint = [
       for (final entry in lintCounts.entries) '${entry.key} ${entry.value}',
     ].join('  ');
-    String binsOf(List<int> counts) => [
-          for (var i = 0; i < cosineBinLabels.length; i++)
-            '${cosineBinLabels[i]} ${counts[i]}',
-        ].join('  ');
+    String binsOf(List<int> counts) => binsLine(cosineBinLabels, counts);
     // A word the run never saw prints a zero rather than vanishing: a reader
     // comparing two ledger rows has to see the same five columns on both.
     int clustersAt(String outcome) => clusterPurity[outcome]?.clusters ?? 0;
@@ -772,7 +1342,9 @@ class SweepTally {
         '  items  correct positives $correctPositives  unmapped $unmapped'
         '  filed nowhere $filedNowhere  forbidden hits $forbiddenHits '
         'over ${forbiddenByAnti.length} buckets\n'
-        '  calls  $calls   per pass ${callsPerPass.join(', ')}\n'
+        '  calls  $calls   per pass ${callsPerPass.join(', ')}'
+        '   grouping calls $groupingCalls  grouped $grouped'
+        '  failed $groupingFailed  unfit $groupingUnfit\n'
         '  wall per pass ms ${wallPerPassMs.join(', ')}\n'
         '  in-cluster cosines  $bins\n'
         '  clusters judged $clustersJudged'
@@ -786,6 +1358,17 @@ class SweepTally {
         '  pool pairs by cosine  same effort  ${binsOf(sameEffortBins)}'
         '   cross effort  ${binsOf(crossEffortBins)}'
         '   with none  ${binsOf(withNoneBins)}\n'
+        '${subjectOverlapLine(
+          sameEffort: sameSubjectBins,
+          crossEffort: crossSubjectBins,
+          withNone: withNoneSubjectBins,
+        )}\n'
+        '${sharedPeopleLine(
+          sameEffort: samePeopleBins,
+          crossEffort: crossPeopleBins,
+          withNone: withNonePeopleBins,
+        )}\n'
+        '  ${separationLine(separation)}\n'
         '  charter lint over live storylines (should be 0)  $lint';
   }
 

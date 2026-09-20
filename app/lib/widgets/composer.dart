@@ -90,6 +90,24 @@ class Composer extends StatefulWidget {
   /// host with no model wired.
   final VoidCallback? onGenerate;
 
+  /// What the Improve button says, or null to hide it entirely.
+  ///
+  /// The HOST builds the words from the target's own name — "Improve with
+  /// Claude" — because the name is the person's, typed when they added the
+  /// target, and this widget reaches for no preferences. Null is what a stage
+  /// pointed nowhere looks like here, and it is the normal state: a build
+  /// with nothing routed shows no button at all rather than a disabled one
+  /// explaining a setting the reader has never heard of.
+  final String? improveLabel;
+
+  /// Rewrites the draft in the box on that target. Only ever called from the
+  /// Improve button.
+  final VoidCallback? onImprove;
+
+  /// True while that rewrite is in flight: the Improve button becomes a
+  /// spinner and the draft already in the box stays readable.
+  final bool improving;
+
   /// The ✕ was pressed: this empties the box. What that means for the STORED
   /// draft is the host's decision, not this widget's — today it means nothing,
   /// and the suggestion stays on its card in the transcript.
@@ -119,6 +137,16 @@ class Composer extends StatefulWidget {
   /// box and a box addressed to somebody.
   final String hint;
 
+  /// The app's processing switch is off, so nothing would write this draft.
+  ///
+  /// [onGenerate] stays wired and the button stays visible, disabled with the
+  /// reason in its tooltip: the button is how a reader learns the switch is
+  /// down, and a control that vanished would read as a build without drafting
+  /// at all. It has to be here rather than left to the host, because asking
+  /// while off is not a no-op — the host writes the work row, the drain that
+  /// would claim it returns at once, and the spinner clears with no draft.
+  final bool processingOff;
+
   /// The HOST's focus node, never one of ours. This widget is rebuilt with a
   /// new key on every send epoch and on every change of thread, so a node owned
   /// here would be thrown away exactly when the cursor is meant to survive —
@@ -137,11 +165,15 @@ class Composer extends StatefulWidget {
     this.capability = SendCapability.copyOnly,
     required this.onSend,
     this.onGenerate,
+    this.improveLabel,
+    this.onImprove,
+    this.improving = false,
     this.onDismiss,
     this.focusOnMount = false,
     this.onEdited,
     this.sending = false,
     this.hint = 'Write a reply…',
+    this.processingOff = false,
     this.focusNode,
   });
 
@@ -154,6 +186,12 @@ class Composer extends StatefulWidget {
 
   /// The live preview above the box, while a draft is being written.
   static const Key streamingPreviewKey = Key('composer-streaming-preview');
+
+  /// The Improve button, and the spinner that replaces it while the target is
+  /// writing. Keyed because "Improve with …" is half the target's own name,
+  /// which a test cannot know.
+  static const Key improveKey = Key('composer-improve');
+  static const Key improvingKey = Key('composer-improving');
 
   /// The key of the chip that opens one file, by its `context_files.id`.
   static ValueKey<String> provenanceChipKeyFor(int fileId) =>
@@ -419,6 +457,10 @@ class _ComposerState extends State<Composer> {
         return Row(
           children: [
             if (widget.onGenerate != null) _generateButton(text.isNotEmpty),
+            // Only beside a draft that exists: there is nothing to improve
+            // until the local model has written something.
+            if (widget.improveLabel != null && text.isNotEmpty)
+              _improveButton(),
             const Spacer(),
             _sendButton(text.isNotEmpty, value.text),
           ],
@@ -438,11 +480,48 @@ class _ComposerState extends State<Composer> {
         ),
       );
     }
-    return TextButton.icon(
-      onPressed: widget.onGenerate,
+    final button = TextButton.icon(
+      onPressed: widget.processingOff ? null : widget.onGenerate,
       icon: Icon(hasDraft ? Icons.refresh : Icons.auto_awesome, size: 16),
       label: Text(hasDraft ? 'Regenerate' : 'Draft reply'),
     );
+    // Only while off. A tooltip on the working button would be a label saying
+    // what the label already says.
+    if (!widget.processingOff) return button;
+    return Tooltip(message: 'Processing is off', child: button);
+  }
+
+  /// The same prompt on another target, replacing what is in the box.
+  ///
+  /// Disabled while the switch is off, for a reason of its own rather than
+  /// [_generateButton]'s: Improve dials the handler directly and never a
+  /// drain, so it WOULD run, and a person who turned processing off does not
+  /// expect a paid call to another machine. Also disabled while a draft is
+  /// being written: the two would be writing the same row.
+  Widget _improveButton() {
+    if (widget.improving) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(horizontal: BondSpacing.s12),
+        child: SizedBox(
+          key: Composer.improvingKey,
+          width: 16,
+          height: 16,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    final button = TextButton.icon(
+      key: Composer.improveKey,
+      onPressed: (widget.processingOff || widget.generating)
+          ? null
+          : widget.onImprove,
+      icon: const Icon(Icons.auto_fix_high, size: 16),
+      label: Text(widget.improveLabel!),
+    );
+    // Only while off, on the generate button's rule: a tooltip on a button
+    // disabled for the obvious reason beside it would be noise.
+    if (!widget.processingOff) return button;
+    return Tooltip(message: 'Processing is off', child: button);
   }
 
   /// Disabled on an empty field, and while a send is already in flight. Both

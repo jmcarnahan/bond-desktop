@@ -15,7 +15,7 @@ import 'fixtures/test_manifest.dart';
 /// closed failure vocabulary comes out as a sentence with a next step in it.
 void main() {
   final manifest = testManifest(sizes: {
-    routerEmbedId: 333590944,
+    routerEmbedId: 639150592,
     routerBulkId: 4280403520,
     routerProseId: 18973870432,
   });

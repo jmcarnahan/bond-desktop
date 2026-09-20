@@ -35,14 +35,17 @@ import '../providers/recipient_search_provider.dart';
 import '../providers/setup_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../providers/why_provider.dart';
+import '../services/ai_workers.dart' show pumpTriageThenWorkersQuietly;
 import '../services/attachments/attachment_bytes.dart';
 import '../services/attachments/file_dialogs.dart';
 import '../services/attachments/xlsx_reader.dart';
 import '../services/backend/backend_types.dart';
 import '../services/llm/draft_task.dart' show DraftOption;
 import '../services/llm/model_probe.dart';
-// [ModelSlot] arrives with `prefs_provider.dart`, which re-exports it — a
-// second import of `model_slots.dart` for the same declaration is redundant.
+// [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
+// re-exports them; `pipelineStages` is not re-exported, and the settings host
+// needs it to ask where every stage currently points.
+import '../services/llm/model_slots.dart' show pipelineStages;
 import '../services/llm/needs_you_task.dart'
     show needsYouDefaultRules, needsYouOutputContract, needsYouRulesCap;
 import '../services/profile_photos.dart' show photoKeyFor;
@@ -1743,6 +1746,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
+          _processingToggle(),
+          const SizedBox(height: BondSpacing.s8),
           Row(
             children: [
               Expanded(
@@ -1779,6 +1784,59 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           const SizedBox(height: BondSpacing.s8),
           _sourceFilterBar(),
           _triageProgress(),
+        ],
+      ),
+    );
+  }
+
+  /// Whether this session runs model work at all — the first thing in the
+  /// column, above the section label.
+  ///
+  /// Here rather than on the icon rail because the rail is 56 px of 44 px
+  /// stops: a labelled switch does not fit, and an eighth unlabelled glyph
+  /// would read as a place to go rather than a thing to turn off. This header
+  /// draws on every section, sits above the scroll, and already holds
+  /// [_triageProgress] — which is the caption that stops moving when the
+  /// switch goes off, so the question and its answer are one block.
+  Widget _processingToggle() {
+    final on = ref.watch(processingProvider);
+    // One node, not three: a switch, its name and its state read as a single
+    // control to a screen reader, and split across three siblings they arrive
+    // as an unlabelled toggle followed by two loose words.
+    return MergeSemantics(
+      child: Row(
+        children: [
+          // The compact Material switch: this is a rail control beside a
+          // caption, not a settings row.
+          Transform.scale(
+            scale: 0.8,
+            alignment: Alignment.centerLeft,
+            child: Switch(
+              key: const ValueKey('processing-toggle'),
+              value: on,
+              onChanged: (value) => unawaited(_setProcessing(value)),
+            ),
+          ),
+          const SizedBox(width: BondSpacing.s8),
+          Expanded(
+            child: Text(
+              'AI processing',
+              style: BondType.caption.copyWith(
+                color: BondColors.onDarkSecondary,
+                fontWeight: FontWeight.w600,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          // The word as well as the switch. A switch alone says which way it
+          // is thrown only to somebody who already knows which way is on.
+          Text(
+            on ? 'On' : 'Off',
+            style: BondType.caption.copyWith(
+              color: on ? BondColors.railAccent : BondColors.onDarkMuted,
+            ),
+          ),
         ],
       ),
     );
@@ -1958,6 +2016,204 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // drain this only sets the re-pump flag, and the future it returns is that
     // drain's.
     unawaited(worker.pump());
+  }
+
+  /// Turns model work on or off for this session, and makes the four drains
+  /// follow.
+  ///
+  /// [_setManagedServer]'s shape, and this host is the one place that can do
+  /// it for the same reason: the notifier holds a flag and knows nothing about
+  /// the queues, and the queues read the flag but are never told when it
+  /// moves. ON pumps triage and then the lanes, in that order and unawaited —
+  /// a drain is minutes of model time and a switch must not hang on it. OFF
+  /// calls `stop()` on all four, which is "finish the item in flight, then end
+  /// the drain": without it a fast drain that had already started would keep
+  /// dialling the model for as long as its backlog lasted.
+  ///
+  /// The activity row goes in either way, before the pumps, so the panel shows
+  /// who asked for the work that follows it.
+  Future<void> _setProcessing(bool on) async {
+    ref.read(processingProvider.notifier).set(on);
+    await ref
+        .read(activityLogProvider)
+        .record('processing', status: on ? 'on' : 'off');
+    if (!mounted) return;
+    if (on) {
+      // Quietly, because this is a button and nothing awaits what it starts:
+      // a triage drain parked on a dead server would otherwise throw into
+      // whatever zone the tap happened to be in, and cost the lanes their
+      // pump on the way past.
+      unawaited(pumpTriageThenWorkersQuietly(
+        triage: () => ref.read(triageQueueProvider).pump(),
+        workers: () => ref.read(aiWorkersProvider).pumpAll(),
+      ));
+      return;
+    }
+    // The queue, then the three lanes as one — see [AiWorkers.stopAll] for why
+    // triage is named separately.
+    ref.read(triageQueueProvider).stop();
+    ref.read(aiWorkersProvider).stopAll();
+  }
+
+  /// Settings' **Clear AI results**: every verdict, summary, storyline, draft
+  /// and vector goes, and the mail it was written about stays.
+  Future<void> _clearAiResults() {
+    // The message store owns five indexes and rebuilds them itself; the two
+    // over `context_chunks` belong to the context store, and that one is
+    // reachable from here and not from there — the same split [_signOut]
+    // works to when it unlinks directories beside the wipe. Read before the
+    // first await, on [_resetPipeline]'s rule.
+    final context = ref.read(contextStoreProvider);
+    return _resetPipeline((store) async {
+      await store.clearDerived();
+      await context.rebuildIndexes();
+    });
+  }
+
+  /// Settings' **Forget everything and re-sync**: the mailbox goes too, and
+  /// the person stays.
+  ///
+  /// Deliberately NOT [_signOut] with a wipe: the session, the two texts, the
+  /// sender rules and every setting survive, and so do the registered
+  /// directories and their links. A sign-out unlinks those because the next
+  /// account's threads are different threads; here the same account re-syncs
+  /// the same conversation keys, so a link the user made still names what
+  /// they meant.
+  Future<void> _forgetAndResync() async {
+    final store = ref.read(messageStoreProvider);
+    await _resetPipeline((s) => s.wipeAll(keepIdentity: true));
+    // A second time, after the invalidates, and this is the call that matters
+    // — see [MessageStore.clearSyncCursors]. A mail pass that was already at
+    // Graph when the button went down writes its delta cursor back through
+    // `setDeltaLink` when it lands, long after the wipe deleted the row, and
+    // a resumed cursor over an empty mailbox is the re-sync quietly not
+    // happening.
+    await store.clearSyncCursors();
+  }
+
+  /// What both resets do around the one statement that differs.
+  ///
+  /// The order is the method, and every step of it is a race this would
+  /// otherwise lose:
+  ///
+  /// - Refused outright while processing is on. The buttons are already inert
+  ///   (`SettingsScreen.processingOn`), and this is the same rule read where
+  ///   it can be enforced rather than merely drawn.
+  /// - Every drain is QUIESCED, not stopped: `stop()` ends the loop and
+  ///   leaves the item at the server holding a claim, and a claim outliving
+  ///   the row it points at is a worker writing a result into a table that
+  ///   was emptied under it. `quiesce` waits for that item and hands the
+  ///   claim back.
+  /// - `resetInterruptedWork` afterwards, for the claim that was taken in the
+  ///   microsecond before the quiesce and released into a table that no
+  ///   longer holds the row.
+  /// - Then the invalidates, which are the only thing that drops what the
+  ///   providers are still holding: [_signOut]'s five are not enough here,
+  ///   because nobody is leaving the screen — `StorylinesNotifier` alone
+  ///   keeps an audit flag and live backstop timers that would fire against
+  ///   deleted rows.
+  ///
+  /// Mail and Teams sync keep running throughout. A message that lands a
+  /// millisecond after the delete is simply `pending`, which is where the
+  /// next drain wants it anyway.
+  ///
+  /// Everything below the switch check is read BEFORE the first await, on
+  /// [_saveNeedsYouRules]'s rule: this runs off a button press, a reset takes
+  /// as long as the item at the server does, and a Settings pane closed in
+  /// the middle of it must still get the delete it asked for. Only the
+  /// invalidates need a live host, and they check for one.
+  ///
+  /// The three lanes are named rather than asked of `AiWorkers`, which offers
+  /// `pumpAll` and `stopAll` but no `quiesceAll`; that file is another
+  /// agent's this phase.
+  ///
+  /// The pulls are waited out rather than stopped, because nothing can stop
+  /// them: a `sync_mail` request is at Graph and will land when it lands, and
+  /// what it writes on the way back — messages, a delta cursor — is written
+  /// against a mailbox this method may have deleted underneath it. The wait
+  /// is [_mailPulling] and [_teamsPulling], which every pull this screen
+  /// starts raises, polled a quarter-second at a time and given up on after
+  /// [_quietTimeout]. **The window it does not close** is a pull started
+  /// somewhere other than this screen, and a pull that outlasts the timeout:
+  /// for the mail rows that is harmless, since a message landing a moment
+  /// after the delete is simply `pending`, and for the cursor it is why
+  /// [_forgetAndResync] clears the cursors a second time on the way out.
+  ///
+  /// Throws rather than returning quietly when processing is on. The buttons
+  /// are already inert, so this is unreachable from the UI, and a caller that
+  /// got here anyway must see the refusal in the section's alert rather than
+  /// a silent success over a mailbox nothing touched.
+  Future<void> _resetPipeline(
+    Future<void> Function(MessageStore store) apply,
+  ) async {
+    if (ref.read(processingProvider)) {
+      throw StateError('Turn processing off first');
+    }
+    final triage = ref.read(triageQueueProvider);
+    final workers = ref.read(aiWorkersProvider);
+    final store = ref.read(messageStoreProvider);
+
+    await _waitForPullsToSettle();
+    await triage.quiesce();
+    for (final lane in [workers.fast, workers.storyline, workers.draft]) {
+      await lane.quiesce();
+    }
+    await apply(store);
+    await store.resetInterruptedWork();
+    if (!mounted) return;
+    // The five [_signOut] drops, and the ten more a reset needs because the
+    // screen stays open over them.
+    for (final provider in <ProviderOrFamily>[
+      conversationsProvider,
+      storylinesProvider,
+      threadProvider,
+      draftProvider,
+      storylineTimelineProvider,
+      storylineMembersProvider,
+      storylineThreadIdsProvider,
+      storylineBlockedThreadsProvider,
+      storylineBlocksProvider,
+      activitySnapshotProvider,
+      // Reads the same table `activitySnapshotProvider` does and re-reads on
+      // the same tick, which a bare DELETE never fires: without this the
+      // Settings line keeps the pre-clear count until the next recorded event.
+      cloudDraftsTodayProvider,
+      syncStampsProvider,
+      needsYouPendingProvider,
+      contextDirectoriesProvider,
+      homeMetricsProvider,
+      pipelinePulseProvider,
+    ]) {
+      ref.invalidate(provider);
+    }
+    // The thumbnails are a memory cache keyed by attachment, and a reset
+    // takes the rows they were drawn for. Not [_clearOverlays], deliberately:
+    // it would take the Settings pane the user is standing in off the screen
+    // as their own reset landed, and the panes it closes re-read through the
+    // providers above anyway.
+    _forgetThumbnails();
+  }
+
+  /// How long a reset waits for a pull to land before going ahead anyway.
+  ///
+  /// Long enough for an ordinary page, short enough that a button is never
+  /// stuck: a connector that has been out for thirty seconds is one the reset
+  /// cannot usefully keep waiting for, and the second cursor clear in
+  /// [_forgetAndResync] is what covers the pass that lands after it.
+  static const Duration _quietTimeout = Duration(seconds: 30);
+
+  /// Waits until neither connector has a pull out, or until [_quietTimeout].
+  ///
+  /// A poll rather than a future to await, because the two flags are what the
+  /// screen has: every pull it starts raises one and lowers it in a `finally`
+  /// (see [_notePulling]), and there is no completer behind them to hang on.
+  /// A quarter second is far below the length of a Graph page and far above
+  /// the cost of reading two booleans.
+  Future<void> _waitForPullsToSettle() async {
+    final until = DateTime.now().add(_quietTimeout);
+    while ((_mailPulling || _teamsPulling) && DateTime.now().isBefore(until)) {
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
   }
 
   /// Turns the managed server on or off, and makes the process follow.
@@ -2240,9 +2496,67 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ModelSlot.embed => Future<void>.value(),
           }),
       onSlotReset: (slot) => unawaited(notifier.clearSlotTarget(slot)),
-      proseParallel: prefs.proseParallel,
-      onProseParallelChanged: (width) =>
-          unawaited(notifier.setProseParallel(width)),
+      // Every server a stage may be pointed at, and where each stage points
+      // now. Built by the prefs so the picker's items and its selection come
+      // from one resolver rather than from two guesses.
+      targets: prefs.allTargets,
+      stageTargetIds: {
+        for (final stage in pipelineStages)
+          stage.id: prefs.targetIdForStage(stage.id),
+      },
+      cloudDraftsConsent: prefs.cloudDraftsConsent,
+      // The spec first and the presets after it, in that order: `applyPreset`
+      // refuses a target id it cannot find, and until the upsert lands this
+      // one is not in the list.
+      onTargetSaved: (
+        spec, {
+        String? bearer,
+        bool prose = false,
+        bool confirm = false,
+        bool bulk = false,
+      }) async {
+        await notifier.upsertTarget(spec, bearer: bearer);
+        if (!prose && !confirm && !bulk) return;
+        await notifier.applyPreset(
+          targetId: spec.id,
+          prose: prose,
+          confirm: confirm,
+          bulk: bulk,
+        );
+      },
+      onTargetRemoved: notifier.removeTarget,
+      onStageTargetChanged: (stageId, targetId) => unawaited(
+        targetId == null
+            ? notifier.clearStageTarget(stageId)
+            : notifier.setStageTarget(stageId, targetId),
+      ),
+      onCloudDraftsConsent: () => notifier.setCloudDraftsConsent(true),
+      cloudDraftsStanding: prefs.cloudDraftsStanding,
+      onCloudDraftsStandingChanged: (on) =>
+          unawaited(notifier.setCloudDraftsStanding(on)),
+      improveTargetName: prefs.specForStage('draft_improve')?.name,
+      // Watched for the reason the sync stamps are: the count re-reads on
+      // every recorded event, so a draft that leaves behind an open Settings
+      // moves the line without the reader touching anything.
+      cloudDraftsToday: ref.watch(cloudDraftsTodayProvider).valueOrNull,
+      cloudDraftsDailyCap: prefs.cloudDraftsDailyCap,
+      onCloudDraftsDailyCapChanged: (value) =>
+          unawaited(notifier.setCloudDraftsDailyCap(value)),
+      // The width is the DRAFT TARGET's since Round E, not the prose slot's: a
+      // GPU box has slots this Mac does not. The old pref is still what the
+      // built-in prose target's width is stored in, which is why the write
+      // below forks on `isBuiltIn` rather than always writing the spec.
+      proseParallel:
+          prefs.specForStage('draft_reply')?.parallel ?? prefs.proseParallel,
+      proseParallelTargetName: prefs.specForStage('draft_reply')?.name,
+      onProseParallelChanged: (width) {
+        final spec = prefs.specForStage('draft_reply');
+        unawaited(
+          spec == null || spec.isBuiltIn
+              ? notifier.setProseParallel(width)
+              : notifier.upsertTarget(spec.copyWith(parallel: width)),
+        );
+      },
       localServerSummary: SettingsLocalServerBody.summary(
         serverState,
         managed: prefs.managedServer,
@@ -2287,6 +2601,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           unawaited(notifier.setMailLookbackDays(days)),
       onTeamsLookbackChanged: (days) =>
           unawaited(notifier.setTeamsLookbackDays(days)),
+      // The sidebar switch, mirrored: `watch` because the two resets below
+      // are inert while it is on, and a section that learned about the flip
+      // on its next rebuild would offer a button that refuses itself.
+      processingOn: ref.watch(processingProvider),
+      onProcessingChanged: (on) => unawaited(_setProcessing(on)),
+      onClearAiResults: _clearAiResults,
+      onForgetAndResync: _forgetAndResync,
       // The rail's Sign out, the whole wipe — deliberately NOT
       // [onSignOutOfServer] above, which leaves one server's session and
       // keeps the mail on this device.
@@ -2543,7 +2864,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// there is none. Deliberately a quiet caption: triage is a background
   /// annotator, not something the user waits on, and the first sync of a real
   /// mailbox leaves it counting down for the better part of an hour.
+  ///
+  /// While processing is off the same count is still worth saying, and the
+  /// sentence changes rather than the number: a counter that had simply
+  /// stopped moving would read as a stall rather than as a switch somebody
+  /// threw. Nothing at all when there is nothing waiting — an off session with
+  /// an empty queue has no news.
   Widget _triageProgress() {
+    final on = ref.watch(processingProvider);
     return StreamBuilder<TriageProgress>(
       stream: ref.watch(triageQueueProvider).progress,
       builder: (context, snapshot) {
@@ -2552,7 +2880,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         return Padding(
           padding: const EdgeInsets.only(bottom: BondSpacing.s8),
           child: Text(
-            'Triaging $remaining remaining…',
+            on
+                ? 'Triaging $remaining remaining…'
+                : 'Processing is off · $remaining waiting',
             style: BondType.caption.copyWith(color: BondColors.onDarkMuted),
           ),
         );
@@ -2783,11 +3113,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // and the row's next re-read is what reports whether anything moved.
       // The one thing a re-read cannot say is that nothing was owed, because
       // the row looks the same afterwards — so that answer is spoken.
+      // While the switch is off the requeue still lands and nothing drains it,
+      // so the row sits exactly as it did and the press reads as ignored. The
+      // work is kept — turning processing on runs it — and the toast is the
+      // only place that can say which of the two just happened.
       onRetry: (source, id) => unawaited(() async {
         final stages =
             await ref.read(pipelineRepairServiceProvider).retryOwed(source, id);
-        if (!mounted || stages.isNotEmpty) return;
-        _toast('Nothing to retry — every stage has finished.');
+        if (!mounted) return;
+        if (stages.isEmpty) {
+          _toast('Nothing to retry — every stage has finished.');
+        } else if (!ref.read(processingProvider)) {
+          _toast('Queued until processing is on.');
+        }
       }()),
       // Two doors on every row — the stage bar and the Result cell — because
       // those are the two places a reader looks when the sentence is not the
@@ -4580,6 +4918,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // column, and decoding it twice per build would be two chances to disagree
     // about what the draft read.
     final provenance = DraftProvenance.decode(draft.contextJson);
+    // Watched, like the switch below: pointing the Improve stage somewhere
+    // else — or clearing it — has to move the button on the next frame.
+    final prefs = ref.watch(appPrefsProvider);
+    final improveSpec = prefs.specForStage('draft_improve');
+    // The caption, plus the sentence only a rewritten draft has. Appended
+    // rather than folded into `caption()`, because the provenance sentence is
+    // about what the model READ and this is about which model wrote it.
+    final caption = provenance?.caption() ?? _provenance;
+    final improvedBy = provenance?.improvedBy;
 
     final composer = Composer(
       // Keyed on the conversation so switching threads builds a fresh field
@@ -4606,7 +4953,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // What the model actually read, when the handler wrote it down. The
       // decode is tolerant and the `??` covers every way it can say nothing,
       // so a malformed column costs the specific line and not the caption.
-      provenance: provenance?.caption() ?? _provenance,
+      provenance: improvedBy == null
+          ? caption
+          : '$caption. Improved with '
+              '${prefs.specById(improvedBy)?.name ?? 'another target'}',
       // Only the files with an id behind them. A draft written before the id
       // was stored names its files in the caption and opens none of them,
       // which is the right answer rather than a chip that goes nowhere.
@@ -4647,12 +4997,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         _stageQuietly(target);
         notifier.generate();
       },
+      // Hidden until the stage is routed, which is decision 10's default:
+      // nothing leaves this machine because a button was there to press.
+      improveLabel:
+          improveSpec == null ? null : 'Improve with ${improveSpec.name}',
+      // Staged first, for the reason Draft reply is: the rewritten row lands
+      // in the box the reader is looking at.
+      onImprove: () {
+        _stageQuietly(target);
+        unawaited(notifier.improve());
+      },
+      improving: draft.improving,
       // The ✕ empties the BOX and nothing else. The suggestion is not thrown
       // away by closing the thing it was copied into — deleting one is still
       // the card's own ×, with its two-step confirm.
       onDismiss: () => _unstage(target),
       onEdited: notifier.markEdited,
       hint: hint,
+      // Watched, not read: the button has to come back the moment the switch
+      // at the top of the rail does.
+      processingOff: !ref.watch(processingProvider),
       focusNode: focusNode,
     );
 
@@ -4925,6 +5289,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onRestore: (source, id) {
           ref.read(archiveProvider.notifier).noteRestored(source, id);
           unawaited(ref.read(restoreServiceProvider).restore(source, id));
+          // The row leaves this pane either way, and while the switch is off
+          // nothing behind it moves — the message is restored and its stages
+          // are queued, which is a different thing from restored and read.
+          // Said only while off: with processing on, the pane shedding the row
+          // is the whole answer.
+          if (!ref.read(processingProvider)) {
+            _toast('Queued until processing is on.');
+          }
         },
         // The same door the home feed opens: a dropped row is exactly the one
         // somebody wants the reason for.

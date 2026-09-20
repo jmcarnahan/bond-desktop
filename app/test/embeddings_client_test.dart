@@ -50,11 +50,13 @@ void main() {
 
       expect(
         stub.bodies.single['input'],
-        'task: clustering | query: Launch date | Sarah Chen',
+        '${EmbeddingsClient.clusteringPrefix}Launch date | Sarah Chen',
       );
       // Everything this app embeds is embedded to be clustered. A corpus half
       // written under one prefix is a corpus whose distances mean nothing.
-      expect(EmbeddingsClient.clusteringPrefix, 'task: clustering | query: ');
+      // The prefix's own text is pinned in embeddings_prefix_test.dart; here
+      // only that it is non-empty and leads the input matters.
+      expect(EmbeddingsClient.clusteringPrefix, isNotEmpty);
       expect(stub.bodies.single['model'], 'embed');
     });
 

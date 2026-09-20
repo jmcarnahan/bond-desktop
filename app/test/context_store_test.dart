@@ -843,7 +843,7 @@ void main() {
       await store.setChunkEmbedding(
         ids.first,
         embedding: encodeEmbedding(axes({3: 1.0})),
-        dims: 768,
+        dims: embedDims,
         embedModel: tag,
       );
 
@@ -931,7 +931,7 @@ void main() {
       await store.setChunkEmbedding(
         ids.single,
         embedding: encodeEmbedding(axes(vector)),
-        dims: 768,
+        dims: embedDims,
         embedModel: tag,
       );
     }

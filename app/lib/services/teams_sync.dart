@@ -73,14 +73,14 @@ class TeamsSync {
   static const String folder = 'chats';
 
   /// How far back a chat list reaches when nobody has said otherwise. The same
-  /// week the mail drain defaults to, and for the same reason: enough context to
-  /// see what is live without dragging in a year of archive.
+  /// day the mail drain defaults to, and for the same reason: a first fetch is
+  /// what is live, not what is archived.
   ///
   /// A DEFAULT, not a limit. The user's Teams lookback overrides it through the
   /// resolver this class is built with, and this constant is what a caller that
   /// wired no resolver — every test that does not care, every caller from
-  /// before the setting existed — falls back to.
-  static const int syncFloorDays = 7;
+  /// before the setting existed — falls back to. A stored choice is untouched.
+  static const int syncFloorDays = 1;
 
   /// How many chat messages one refresh may queue for extraction. Lower than
   /// mail's cap: a chat message is a sentence, and a hundred of them is already

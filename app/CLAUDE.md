@@ -49,9 +49,17 @@ enforce the ones that are commands.
   never fires. Create temp dirs, servers and supervisors in `setUp`.
 - Fixture timestamps that a sync window or an age rule will judge are
   derived from `DateTime.now()` (`delta_paging_test.dart`'s `ago()` shape),
-  never written as absolute dates: the 14-day `syncFloorDays` window walks
+  never written as absolute dates: the one-day `syncFloorDays` window walks
   past a literal at midnight UTC and the test rots with no code change
-  (it happened twice on 2026-09-12).
+  (it happened twice on 2026-09-12). One day is a SHORT window — a fixture
+  two days old is outside it, and a fixture written as `Duration(days: 1)`
+  straddles the midnight-truncated floor; use hours for anything meant to be
+  inside.
+- Model work runs only while the session's processing switch is on
+  (`processingProvider`, off at every launch). `AiWorker` and `TriageQueue`
+  each take an `enabled` closure and read it on every launch decision, so a
+  test that builds either one WITHOUT that argument is unaffected. Turning it
+  off also calls `stop()` on all four drains.
 - `--plain-name` on a live `make` target is a SUBSTRING filter, so a new live
   test's name must not contain another target's word (`storyline`, `triage`,
   `reply`, `gates`, `sweep`) or it runs under that target too.
@@ -59,6 +67,22 @@ enforce the ones that are commands.
   title, charter, slug, participant or thread key. That is
   `SweepTally.table()`'s rule, and it holds because the golden storylines are
   named out of real mail.
+- `make golden-vector` is the sweep test under `SWEEP_STAGE=vector`: the same
+  body and the same seeding as `golden-sweep`, stopped after the embedding,
+  one embed server and no model call. A new live STAGE goes inside the
+  existing test body under a define, never as a second test name.
+- The gate runs ALONE. A concurrent `flutter test`, typically an agent
+  re-checking its own files, rebuilds
+  `build/native_assets/macos/libsqlite3.dylib` while the gate's isolates are
+  loading it, and a store test fails with `sqlite3_initialize`. A red gate
+  carrying only that error is re-run once `ps -axo pid,etime,comm | command
+  grep flutter_tester` shows nothing.
+- The keychain under `flutter test` throws `MissingPluginException` and
+  `SecureTokenStore` does not catch it: tests hand `AppPrefsNotifier` a
+  `MemoryTokenStore` or a `RefusingTokenStore` from
+  `test/fixtures/memory_token_store.dart`.
+- A `DropdownButton` whose value is not among its items asserts. A picker's
+  value falls back to the stored id, then the default, then null with a hint.
 
 ## Working rules
 
@@ -95,8 +119,9 @@ enforce the ones that are commands.
   `settings_screen_test.dart` and by the table in `docs/settings.md` — move
   all three together; a new segmented control is `SettingsSegments<T>`.
 - The clustering card is ONE recipe (`clusteringCardForConversationRow` in
-  `storyline_service.dart`) behind `StorylineTuning.participantsInClusteringCard`
-  and `EmbeddingsClient.modelTag`; a tag bump orphans every stored
+  `clustering_card.dart`, whose `ClusteringCardVariant` holds the five cards
+  and `shippedClusteringCard` names the one that ships) behind
+  `EmbeddingsClient.modelTag`; a tag bump orphans every stored
   conversation vector by construction, so it ships with a one-shot re-embed
   in `sync_service.dart` (Round A's pref idiom).
 - `_accepts` in `storyline_service.dart` is the one membership rule at all
@@ -109,3 +134,42 @@ enforce the ones that are commands.
 - A `StorylineTuning` number moves only with a `make golden-sweep` row on each
   side, and a diagnostic flip of one is a single shell command that puts the
   constant back before it exits.
+- Every `CREATE TABLE` in `schema.drift` sits in exactly one of
+  `MessageStore.derivedTables`, `syncedTables` or `keptTables`, and
+  `clear_derived_test` pins the classification. A new table is classified or
+  Clear AI results forgets it; `wipeAll` derives its own list from the same
+  three. The four vec0 tables are NOT in the lists: each index class resets
+  its own in `clearDerived`'s rebuild tail, and a fifth index must be added
+  there by hand.
+- Stages resolve their client through `stageLlmClientProvider(stageId)`, whose
+  resolver reads `ref.read(appPrefsProvider.notifier).targetForStage(stageId)`
+  at request time. Nothing in `lib/` watches `appPrefsProvider` for a target,
+  so a prefs write rebuilds no worker, and `llm_routing_test` pins all four
+  queues identical across a `setStageTarget`. A null `LlmTarget.wire` means
+  the client's own wire; `toTarget` stamps only Converse.
+- A bearer is a SECRET. It belongs in the keychain under
+  `llm_target_bearer:<id>`, in the notifier's cache, on the resolved
+  `LlmTarget.bearer` and in the `Authorization` header, and nowhere else:
+  never `app_prefs`, a `toString`, an `LlmCallRecord`, an exception message, a
+  log line, an activity row or a draft row.
+- Consent for a third-party target on `draft_reply` or `draft_improve` is
+  enforced in `AppPrefs.specForStage` and in `applyPreset`, never on the
+  screen alone.
+- Cloud drafts: every door reads `CloudDraftLedger.refusal()`, meaning
+  Improve, the standing rule, a prefetched draft on a third-party target and
+  an asked-for one before its row is touched. The handler notes `cloud: N` on
+  its own activity row BEFORE the call, and `cloudDraftsSince` sums it since
+  local midnight at the store's six-digit stamp precision. An error line names
+  the target and a category, never the endpoint, because
+  `LlmUnavailableException.message` spells the URL; activity notes carry
+  target ids, never a URL. `redactEndpoints` (`llm_client.dart`) is the one
+  choke point between an exception's sentence and a stored row: every
+  `LlmCallRecord.error` and both of the worker's failure writes pass through
+  it, so `llm_error` and a work row's `error` read `<endpoint>` where the
+  sentence had a URL. The exception itself keeps the full sentence for the
+  screen. `llm_error_redaction_test` pins the existing sites; a new place that
+  writes an exception's text into a row must go through it as well.
+- `draft_improve` is the one `PipelineStageInfo.optional` row: a routing
+  destination with no schema of its own, so it runs `DraftTask` and its call
+  record is labelled `draft_reply`. `model_slots_test` pins the exempt set
+  literally.

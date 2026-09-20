@@ -4,17 +4,17 @@
     {
       "id": "bond-embed",
       "role": "embed",
-      "displayName": "EmbeddingGemma 300M",
-      "repo": "ggml-org/embeddinggemma-300M-GGUF",
-      "file": "embeddinggemma-300M-Q8_0.gguf",
-      "revision": "0f741b5a6585bd53aeb15cd1372c56f2a0f65e12",
-      "sizeBytes": 333590944,
-      "sha256": "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63",
+      "displayName": "Qwen3 Embedding 0.6B",
+      "repo": "Qwen/Qwen3-Embedding-0.6B-GGUF",
+      "file": "Qwen3-Embedding-0.6B-Q8_0.gguf",
+      "revision": "370f27d7550e0def9b39c1f16d3fbaa13aa67728",
+      "sizeBytes": 639150592,
+      "sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
       "minRamBytes": 0,
-      "license": "Gemma Terms of Use",
-      "licenseUrl": "https://ai.google.dev/gemma/terms",
-      "notice": "Gemma is provided under and subject to the Gemma Terms of Use found at ai.google.dev/gemma/terms",
-      "serverArgs": { "embedding": "true", "pooling": "mean", "load-on-startup": "true" }
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF",
+      "notice": null,
+      "serverArgs": { "embedding": "true", "pooling": "last", "load-on-startup": "true" }
     },
     {
       "id": "bond-bulk",

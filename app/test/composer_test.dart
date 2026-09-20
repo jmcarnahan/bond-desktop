@@ -27,6 +27,10 @@ void main() {
     List<ProvenanceFile> provenanceFiles = const [],
     void Function(ProvenanceFile file)? onOpenProvenanceFile,
     String? streamingBody,
+    String? improveLabel,
+    VoidCallback? onImprove,
+    bool improving = false,
+    bool processingOff = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -43,6 +47,10 @@ void main() {
           capability: capability,
           onSend: onSend,
           onGenerate: onGenerate,
+          improveLabel: improveLabel,
+          onImprove: onImprove,
+          improving: improving,
+          processingOff: processingOff,
           onDismiss: onDismiss,
           onEdited: onEdited,
           hint: hint ?? 'Write a reply…',
@@ -500,6 +508,124 @@ void main() {
       expect(find.text('Regenerate'), findsNothing);
       final send = tester.widget<ElevatedButton>(find.byType(ElevatedButton));
       expect(send.onPressed, isNull);
+    });
+  });
+
+  group('Improve with a target', () {
+    testWidgets('is absent when the host names no target', (tester) async {
+      await pumpComposer(
+        tester,
+        suggestedBody: 'Friday works.',
+        onSend: (_) {},
+        onGenerate: () {},
+      );
+
+      expect(find.byKey(Composer.improveKey), findsNothing);
+    });
+
+    testWidgets('is absent on an empty box, even with a target', (tester) async {
+      // There is nothing to improve until the local model has written
+      // something.
+      await pumpComposer(
+        tester,
+        onSend: (_) {},
+        onGenerate: () {},
+        improveLabel: 'Improve with Claude',
+        onImprove: () {},
+      );
+
+      expect(find.byKey(Composer.improveKey), findsNothing);
+      expect(find.text('Draft reply'), findsOneWidget);
+    });
+
+    testWidgets('shows the host\'s words beside a draft', (tester) async {
+      await pumpComposer(
+        tester,
+        suggestedBody: 'Friday works.',
+        onSend: (_) {},
+        onGenerate: () {},
+        improveLabel: 'Improve with Claude',
+        onImprove: () {},
+      );
+
+      expect(find.byKey(Composer.improveKey), findsOneWidget);
+      expect(find.text('Improve with Claude'), findsOneWidget);
+      expect(find.text('Regenerate'), findsOneWidget);
+    });
+
+    testWidgets('fires its callback exactly once per press', (tester) async {
+      var presses = 0;
+      await pumpComposer(
+        tester,
+        suggestedBody: 'Friday works.',
+        onSend: (_) {},
+        onGenerate: () {},
+        improveLabel: 'Improve with Claude',
+        onImprove: () => presses++,
+      );
+
+      await tester.tap(find.byKey(Composer.improveKey));
+      await tester.pump();
+
+      expect(presses, 1);
+    });
+
+    testWidgets('is disabled with the reason while processing is off',
+        (tester) async {
+      await pumpComposer(
+        tester,
+        suggestedBody: 'Friday works.',
+        onSend: (_) {},
+        onGenerate: () {},
+        improveLabel: 'Improve with Claude',
+        onImprove: () {},
+        processingOff: true,
+      );
+
+      final button =
+          tester.widget<TextButton>(find.byKey(Composer.improveKey));
+      expect(button.onPressed, isNull);
+      expect(
+        find.ancestor(
+          of: find.byKey(Composer.improveKey),
+          matching: find.byType(Tooltip),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('is disabled while a draft is being written', (tester) async {
+      await pumpComposer(
+        tester,
+        suggestedBody: 'Friday works.',
+        onSend: (_) {},
+        onGenerate: () {},
+        generating: true,
+        improveLabel: 'Improve with Claude',
+        onImprove: () {},
+      );
+
+      final button =
+          tester.widget<TextButton>(find.byKey(Composer.improveKey));
+      expect(button.onPressed, isNull);
+    });
+
+    testWidgets('becomes a spinner while the target is writing',
+        (tester) async {
+      await pumpComposer(
+        tester,
+        suggestedBody: 'Friday works.',
+        onSend: (_) {},
+        onGenerate: () {},
+        improveLabel: 'Improve with Claude',
+        onImprove: () {},
+        improving: true,
+      );
+
+      expect(find.byKey(Composer.improvingKey), findsOneWidget);
+      expect(find.byKey(Composer.improveKey), findsNothing);
+      // The draft it is rewriting is still readable while it works.
+      expect(find.text('Friday works.'), findsOneWidget);
     });
   });
 }

@@ -35,9 +35,9 @@ flash-attn = on
 load-mode = mmap+mlock
 
 [bond-embed]
-model = /tmp/Bond Models/ggml-org_embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf
+model = /tmp/Bond Models/Qwen_Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
 embedding = true
-pooling = mean
+pooling = last
 load-on-startup = true
 
 [bond-bulk]

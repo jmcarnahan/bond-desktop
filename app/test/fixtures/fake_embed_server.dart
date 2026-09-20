@@ -1,16 +1,27 @@
 import 'dart:convert';
 
+import 'package:bond_inbox/data/vec_index.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
-/// A 768-wide vector with a few named axes set — everything else zero.
+/// The width every fixture vector is built at, which is the width the app's
+/// indexes are declared at.
+///
+/// Read off [MessageVectorIndex.dims] rather than written down, because a
+/// fixture at the wrong width is not a failing assertion: the vec0 tables skip
+/// a row whose stored `dims` is not theirs, so a stale literal here would turn
+/// every search test into a test of an empty index that still passed its
+/// "nothing matches" branch. It moved 768 → 1024 with the model on 2026-09-19.
+const int embedDims = MessageVectorIndex.dims;
+
+/// A full-width vector with a few named axes set — everything else zero.
 ///
 /// Distinct axes make the geometry arithmetic-free: two vectors' cosine
 /// distance is whatever the shared components say and nothing else, so a
 /// failing assertion is a failure of the search, never of the fixture's maths.
 List<double> axes(Map<int, double> components) {
-  final v = List.filled(768, 0.0);
+  final v = List.filled(embedDims, 0.0);
   components.forEach((axis, value) => v[axis] = value);
   return v;
 }
@@ -61,7 +72,10 @@ class FakeEmbedServer {
           return http.Response(
             jsonEncode({
               'data': [
-                {'embedding': vectorFor?.call(input) ?? List.filled(768, 0.1)}
+                {
+                  'embedding':
+                      vectorFor?.call(input) ?? List.filled(embedDims, 0.1)
+                }
               ]
             }),
             200,

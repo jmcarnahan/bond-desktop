@@ -48,7 +48,8 @@ class GoldenCards {
   /// An entry with neither is skipped rather than stored empty: the run prints
   /// how many items got a card from the file, and an entry that contributed
   /// nothing must not inflate that count. A non-string topic is dropped the
-  /// way `_topicsOf` in `lib/services/storyline_service.dart` drops one — a
+  /// way `topicsOfExtraction` in `lib/services/clustering_card.dart` drops one
+  /// — a
   /// card is text, and a number in the list would be text the app never sent.
   static GoldenCards fromRunJson(List<dynamic> entries) {
     final byId = <String, GoldenCard>{};

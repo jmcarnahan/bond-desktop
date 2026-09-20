@@ -34,16 +34,16 @@ ModelManifest realManifest() => ModelManifest.parse(
 Map<String, Object?> embedJson() => {
       'id': 'bond-embed',
       'role': 'embed',
-      'displayName': 'EmbeddingGemma 300M',
-      'repo': 'ggml-org/embeddinggemma-300M-GGUF',
-      'file': 'embeddinggemma-300M-Q8_0.gguf',
-      'revision': '0f741b5a6585bd53aeb15cd1372c56f2a0f65e12',
-      'sizeBytes': 333590944,
+      'displayName': 'Qwen3 Embedding 0.6B',
+      'repo': 'Qwen/Qwen3-Embedding-0.6B-GGUF',
+      'file': 'Qwen3-Embedding-0.6B-Q8_0.gguf',
+      'revision': '370f27d7550e0def9b39c1f16d3fbaa13aa67728',
+      'sizeBytes': 639150592,
       'sha256':
-          'b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63',
+          '06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439',
       'minRamBytes': 0,
-      'license': 'Gemma Terms of Use',
-      'licenseUrl': 'https://ai.google.dev/gemma/terms',
+      'license': 'Apache-2.0',
+      'licenseUrl': 'https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF',
       'notice': null,
       'serverArgs': {'embedding': 'true'},
     };
@@ -79,10 +79,10 @@ void main() {
     test('carries the measured sizes and digests', () {
       final manifest = realManifest();
 
-      expect(manifest.byId(routerEmbedId).sizeBytes, 333590944);
+      expect(manifest.byId(routerEmbedId).sizeBytes, 639150592);
       expect(
         manifest.byId(routerEmbedId).sha256,
-        'b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63',
+        '06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439',
       );
       expect(manifest.byId(routerBulkId).sizeBytes, 4280403520);
       expect(
@@ -94,7 +94,7 @@ void main() {
         manifest.byId(routerProseId).sha256,
         '31629f53165ab6a7dad8c9847dcfd1fdf55829dac1e6e748f4a68581b0033d34',
       );
-      expect(manifest.totalBytes, 333590944 + 4280403520 + 18973870432);
+      expect(manifest.totalBytes, 639150592 + 4280403520 + 18973870432);
     });
 
     test('every revision is a commit sha, never a branch', () {
@@ -119,9 +119,9 @@ void main() {
     test('resolveUri pins the commit, not main', () {
       expect(
         realManifest().byRole(ModelRole.embed).resolveUri.toString(),
-        'https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/'
-        '0f741b5a6585bd53aeb15cd1372c56f2a0f65e12/'
-        'embeddinggemma-300M-Q8_0.gguf',
+        'https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/'
+        '370f27d7550e0def9b39c1f16d3fbaa13aa67728/'
+        'Qwen3-Embedding-0.6B-Q8_0.gguf',
       );
     });
 
@@ -150,9 +150,9 @@ flash-attn = on
 load-mode = mmap+mlock
 
 [bond-embed]
-model = /tmp/Bond Models/ggml-org_embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf
+model = /tmp/Bond Models/Qwen_Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
 embedding = true
-pooling = mean
+pooling = last
 load-on-startup = true
 
 [bond-bulk]
@@ -169,14 +169,19 @@ load-on-startup = true
 ''');
     });
 
-    test('the embedding model carries its licence notice', () {
-      final embed = realManifest().byRole(ModelRole.embed);
-      expect(embed.license, 'Gemma Terms of Use');
-      expect(embed.licenseUrl, 'https://ai.google.dev/gemma/terms');
-      expect(embed.notice, contains('Gemma Terms of Use'));
-      // The permissive ones have nothing to show, and a screen must be able
-      // to tell that from an empty string.
-      expect(realManifest().byRole(ModelRole.bulk).notice, isNull);
+    test('every checkpoint names its licence, and none needs a notice', () {
+      // All three are Apache-2.0 since the embedding model left
+      // EmbeddingGemma on 2026-09-19; the Gemma Terms of Use went with it.
+      // `notice` stays a field rather than being dropped: it is what the
+      // first-run screen renders under a checkpoint whose licence has to be
+      // shown, and the next non-permissive model would want it back.
+      for (final model in realManifest().models) {
+        expect(model.license, 'Apache-2.0', reason: model.id);
+        expect(model.licenseUrl, startsWith('https://huggingface.co/'));
+        // Null and not an empty string: a screen must be able to skip the
+        // line entirely rather than render a blank one.
+        expect(model.notice, isNull, reason: model.id);
+      }
     });
 
     test('toJson round-trips to an equal manifest', () {

@@ -6,6 +6,7 @@ import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'ai_worker.dart';
 import 'attention.dart';
+import 'clustering_card.dart';
 import 'conversation_state.dart';
 import 'embed_handler.dart';
 import 'llm/embeddings_client.dart';
@@ -13,10 +14,18 @@ import 'llm/extract_task.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'pipeline_progress.dart';
-// `show`: the clustering card, which this file and `StorylineService._reembed`
-// both write. One recipe over one data source, so the two cannot drift apart
-// and the hash column means one thing.
-import 'storyline_service.dart' show clusteringCardForConversationRow;
+
+// The card builders moved to `clustering_card.dart` in Round E Phase 1, and
+// the row recipe came with them out of `storyline_service.dart` — which is
+// what ended the cycle between those two files, each of which used to import
+// the other for half of one recipe.
+//
+// The two BUILDERS are re-exported and the rest is not, on purpose. A dozen
+// tests and two fixtures describe the card's shape and have always reached for
+// it here, beside the hash they check it with; anything that wants the
+// VARIANT, the row recipe or the shipped constant is asking about the vector
+// and imports the module by name.
+export 'clustering_card.dart' show buildClusteringCard, buildConversationCard;
 
 /// Extracts structured facts from one message, then refreshes its thread's
 /// embedding if the thread now reads differently.
@@ -601,58 +610,6 @@ bool prefetchWorthy(Map<String, Object?> row) {
       row['urgency'] == 'urgent' ||
       row['urgency'] == 'high';
 }
-
-/// The text a conversation is embedded from.
-///
-/// Always four segments joined by ` | `, empty ones included: the shape is
-/// fixed so the same thread produces the same card twice, which is what makes
-/// [cardHash] a usable "has anything changed" test. Order runs from most to
-/// least stable — subject, who is on it, what it is about, what was last said
-/// — so a passing remark moves the vector less than a change of topic.
-String buildConversationCard({
-  required String? subject,
-  required List<String> participants,
-  required List<String> topics,
-  required String? summary,
-}) =>
-    [
-      subject?.trim() ?? '',
-      participants.join(', '),
-      topics.join(', '),
-      summary?.trim() ?? '',
-    ].join(' | ');
-
-/// The text a conversation is EMBEDDED from, which is [buildConversationCard]
-/// with one decision folded in: whether the people on the thread are part of
-/// the vector.
-///
-/// The one recipe for the clustering corpus, and the reason it exists apart
-/// from the card builder is that the card builder has other readers. The
-/// naming and membership PROMPTS read a card too, and they keep their people
-/// whatever this flag says — who is on a thread is the strongest thing a
-/// model can be told about it. The vector is the opposite case: in a mailbox
-/// where one team is on everything, the same names in every card pull every
-/// pair of threads together, and the sweep then proposes the team rather than
-/// the work. Round D Phase 1 measures both variants through `make
-/// golden-sweep` (`SWEEP_CARD=participants|topics`); `StorylineTuning
-/// .participantsInClusteringCard` is what the app passes.
-///
-/// Dropping the people leaves the segment EMPTY rather than removing it: the
-/// card is four ` | `-joined segments by contract, and a three-segment card
-/// would make [cardHash] disagree with itself about nothing.
-String buildClusteringCard({
-  required String? subject,
-  required List<String> participants,
-  required List<String> topics,
-  required String? summary,
-  required bool withParticipants,
-}) =>
-    buildConversationCard(
-      subject: subject,
-      participants: withParticipants ? participants : const [],
-      topics: topics,
-      summary: summary,
-    );
 
 /// How much of a message body reaches its embedding.
 ///

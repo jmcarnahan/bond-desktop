@@ -1,16 +1,19 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show FilteringTextInputFormatter;
 
 import '../providers/context_provider.dart' show ContextDirRow;
 import '../providers/prefs_provider.dart'
     show
+        AppPrefs,
         DraftPolicy,
         DraftPolicyLabel,
         NotifyStyle,
         backendModeMcp,
         defaultMcpServerUrl,
         mcpDeployedUrl;
+import '../screens/consent_screen.dart' show CloudDraftsConsentPane;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart';
 import '../theme/tokens.dart';
@@ -24,7 +27,29 @@ import 'settings_lookback_field.dart';
 import 'settings_models_body.dart';
 import 'settings_section.dart';
 import 'settings_segments.dart';
+import 'settings_target_editor.dart' show LlmTargetEditor;
 import 'time_format.dart' show relativeTime;
+
+/// Which sub-pane of Settings is on screen. Null is the sections themselves.
+///
+/// A sealed type rather than an enum and two nullable fields, so the pane's
+/// title, its body and the values it needs cannot disagree: there is no way to
+/// be on the consent pane without the target it is asking about.
+sealed class _Subpane {
+  const _Subpane();
+}
+
+/// Add when [initial] is null, edit otherwise.
+class _TargetEditorPane extends _Subpane {
+  final LlmTargetSpec? initial;
+  const _TargetEditorPane(this.initial);
+}
+
+class _ConsentPane extends _Subpane {
+  final String stageId;
+  final LlmTargetSpec target;
+  const _ConsentPane(this.stageId, this.target);
+}
 
 /// How much of Settings a host is asking for.
 ///
@@ -215,6 +240,72 @@ class SettingsScreen extends StatefulWidget {
   /// off the Models section and leaves the rest of it exactly as it was.
   final void Function(int width)? onProseParallelChanged;
 
+  /// Whose width **Drafts in flight** is about — the name of the target the
+  /// `draft_reply` stage resolves to. Null names the built-in prose target,
+  /// which is what a host with no stage map has.
+  final String? proseParallelTargetName;
+
+  /// Every server a stage may be pointed at, built-ins first —
+  /// `AppPrefs.allTargets`. Empty leaves the Models section rendering exactly
+  /// as it did before routing was data.
+  final List<LlmTargetSpec> targets;
+
+  /// Which target id each stage resolves to now, by stage id.
+  final Map<String, String?> stageTargetIds;
+
+  /// Whether the owner has read what a third-party draft target receives.
+  final bool cloudDraftsConsent;
+
+  /// Fired by the target editor's Save, with the typed bearer and the three
+  /// presets. **Null hides Add and Edit** and leaves the Targets list a
+  /// read-only report, the same discipline every optional control here
+  /// follows.
+  final Future<void> Function(
+    LlmTargetSpec spec, {
+    String? bearer,
+    bool prose,
+    bool confirm,
+    bool bulk,
+  })? onTargetSaved;
+
+  /// Fired by a row's confirmed Remove. Null takes Remove off the rows.
+  final Future<void> Function(String id)? onTargetRemoved;
+
+  /// Fired by a stage's picker. Null keeps the stage table's chips and offers
+  /// no pickers at all.
+  final void Function(String stageId, String? targetId)? onStageTargetChanged;
+
+  /// Fired by the consent pane's Continue, before the stage is written. Null
+  /// leaves the pane's Continue writing the stage alone, which is the shape a
+  /// host that stores no consent flag has.
+  final Future<void> Function()? onCloudDraftsConsent;
+
+  /// Whether a draft for an urgent message that needs the owner is improved
+  /// on the `draft_improve` target without anybody pressing anything.
+  final bool cloudDraftsStanding;
+
+  /// Fired by that switch. Null leaves it off the Suggested replies section
+  /// entirely, the same discipline every optional control here follows.
+  final ValueChanged<bool>? onCloudDraftsStandingChanged;
+
+  /// What the `draft_improve` stage's target is called, or null when the
+  /// stage points nowhere. The standing switch cannot be turned on without
+  /// one, and the caption says so.
+  final String? improveTargetName;
+
+  /// How many drafts have gone to a third-party target since local midnight.
+  /// Null leaves the ledger line off Processing, which is what a host that
+  /// has not read the count yet passes.
+  final int? cloudDraftsToday;
+
+  /// How many may go in a day. Shown beside the count and quoted by the
+  /// consent pane, so the person reading the promise sees the number in force.
+  final int cloudDraftsDailyCap;
+
+  /// Fired by the Daily cap field on commit. Null leaves the field off and the
+  /// line a read-only report.
+  final ValueChanged<int>? onCloudDraftsDailyCapChanged;
+
   /// Drawn at the top of the Models section — the host's Local server card.
   /// Null leaves the section exactly as it was before there was one.
   final Widget? modelsHeader;
@@ -264,6 +355,28 @@ class SettingsScreen extends StatefulWidget {
   /// next sync is what applies it, and a wider window re-drains history then.
   final void Function(int days)? onMailLookbackChanged;
   final void Function(int days)? onTeamsLookbackChanged;
+
+  /// Whether this session is running model work right now — the sidebar
+  /// switch, mirrored here.
+  ///
+  /// It is read twice by the Processing section: once by the switch it draws,
+  /// and once by the two reset buttons, which are inert while it is true. A
+  /// reset races every drain it does not stop, and the honest way to say so
+  /// is a disabled button with the reason under it.
+  final bool processingOn;
+
+  /// Fired the instant the mirror switch moves, for
+  /// [onShowActivityLogChanged]'s reason: what it changes is the sidebar
+  /// behind this pane and the queues behind that.
+  final ValueChanged<bool>? onProcessingChanged;
+
+  /// Deletes every verdict, summary, storyline, draft and vector and keeps
+  /// the mail. Null hides the block.
+  final Future<void> Function()? onClearAiResults;
+
+  /// Deletes the mailbox as well, and keeps the person: the sign-in, their
+  /// texts, their sender rules and every setting. Null hides the block.
+  final Future<void> Function()? onForgetAndResync;
 
   /// Signs out AND wipes this device's copy of the mailbox — the rail's Sign
   /// out, in other words, and deliberately not [onSignOutOfServer], which
@@ -400,6 +513,20 @@ class SettingsScreen extends StatefulWidget {
     this.onSlotReset,
     this.proseParallel = 1,
     this.onProseParallelChanged,
+    this.proseParallelTargetName,
+    this.targets = const [],
+    this.stageTargetIds = const {},
+    this.cloudDraftsConsent = false,
+    this.onTargetSaved,
+    this.onTargetRemoved,
+    this.onStageTargetChanged,
+    this.onCloudDraftsConsent,
+    this.cloudDraftsStanding = false,
+    this.onCloudDraftsStandingChanged,
+    this.improveTargetName,
+    this.cloudDraftsToday,
+    this.cloudDraftsDailyCap = AppPrefs.defaultCloudDraftsDailyCap,
+    this.onCloudDraftsDailyCapChanged,
     this.modelsHeader,
     this.localServerSummary,
     this.lastMailSyncIso,
@@ -408,10 +535,14 @@ class SettingsScreen extends StatefulWidget {
     this.lastReconcileIso,
     this.now = DateTime.now,
     this.onRefreshNow,
-    this.mailLookbackDays = 7,
-    this.teamsLookbackDays = 7,
+    this.mailLookbackDays = 1,
+    this.teamsLookbackDays = 1,
     this.onMailLookbackChanged,
     this.onTeamsLookbackChanged,
+    this.processingOn = false,
+    this.onProcessingChanged,
+    this.onClearAiResults,
+    this.onForgetAndResync,
     this.attachmentCacheBytes,
     this.onClearAttachmentCache,
     this.onSignOutAndClear,
@@ -446,6 +577,29 @@ class SettingsScreen extends StatefulWidget {
   static const Key clearCacheKeepKey =
       ValueKey('settings-clear-attachment-cache-keep');
 
+  /// The Processing section's controls, keyed for the reason the three above
+  /// are: 'Clear AI results' is also most of the caption beside it, and both
+  /// confirm buttons carry the same words on purpose.
+  static const Key processingToggleKey = ValueKey('settings-processing-toggle');
+  static const Key clearAiResultsKey = ValueKey('settings-clear-ai-results');
+  static const Key clearAiResultsConfirmKey =
+      ValueKey('settings-clear-ai-results-confirm');
+  static const Key clearAiResultsKeepKey =
+      ValueKey('settings-clear-ai-results-keep');
+  static const Key forgetResyncKey = ValueKey('settings-forget-resync');
+  static const Key forgetResyncConfirmKey =
+      ValueKey('settings-forget-resync-confirm');
+  static const Key forgetResyncKeepKey =
+      ValueKey('settings-forget-resync-keep');
+
+  /// The cloud-draft controls: the standing switch under Suggested replies,
+  /// and the ledger line and cap field under Processing. Keyed for the reason
+  /// the buttons above are — each one's label is also most of the caption
+  /// beside it.
+  static const Key cloudStandingKey = ValueKey('settings-cloud-standing');
+  static const Key cloudLedgerKey = ValueKey('settings-cloud-ledger');
+  static const Key cloudCapKey = ValueKey('settings-cloud-cap');
+
   /// Keyed for the same reason the buttons above are: 'Check for updates' is
   /// an ordinary phrase, and the caption beside it contains half of it.
   static const Key checkForUpdatesKey = ValueKey('settings-check-for-updates');
@@ -465,6 +619,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _showActivityLog = widget.showActivityLog;
   late NotifyStyle _notifyStyle = widget.notifyStyle;
   late DraftPolicy _draftPolicy = widget.draftPolicy;
+  late bool _cloudDraftsStanding = widget.cloudDraftsStanding;
   late bool _storylineNewestFirst = widget.storylineNewestFirst;
 
   /// Ten stops. Enough that the slider feels like it has an opinion, few enough
@@ -492,6 +647,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// Deliberately not persisted — see the [SettingsSection] doc.
   final Set<String> _open = <String>{};
 
+  /// Which sub-pane of Settings is on screen, or null for the sections.
+  ///
+  /// State on THIS object rather than a route, for two reasons. The house rule
+  /// is panes with a back arrow and no `Navigator` routes; and the sections'
+  /// expansion state lives here, so swapping only the child is what brings a
+  /// person back to the Models section still open at the row they left.
+  _Subpane? _subpane;
+
   /// Whether the wipe button has been armed — see [_signOutBlock]. Reset by
   /// 'Keep' and by the wipe completing, never by a rebuild: an armed button is
   /// a state the user put it in.
@@ -518,9 +681,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _clearingCache = false;
   String? _cacheClearError;
 
+  /// The same triple again, once per reset in the Processing section. Two
+  /// copies rather than one shared set: both buttons can be on screen at
+  /// once, and a failure under one of them must not arm or blame the other.
+  bool _confirmingAiClear = false;
+  bool _clearingAi = false;
+  String? _aiClearError;
+
+  bool _confirmingForget = false;
+  bool _forgetting = false;
+  String? _forgetError;
+
   late final TextEditingController _aboutMe = TextEditingController(
     text: widget.aboutMe,
   );
+
+  /// The Daily cap field, and the node that tells it when the reader has
+  /// looked away. Committed on Enter AND on losing focus, which is the
+  /// [LookbackField] contract: a half-typed number is not a cap, and the two
+  /// ways out of a field are submitting and leaving it.
+  late final TextEditingController _cloudCap = TextEditingController(
+    text: '${widget.cloudDraftsDailyCap}',
+  );
+  late final FocusNode _cloudCapFocus = FocusNode();
+
+  /// The last cap actually handed to the host. Enter both submits and drops
+  /// focus, so without this one keystroke would commit twice.
+  late int _cloudCapCommitted = widget.cloudDraftsDailyCap;
 
   /// The last about-me text actually handed to the host. Cancel restores it,
   /// Save replaces it, and it is what "dirty" is measured against — the same
@@ -544,6 +731,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // Save and Cancel are both enabled by what is in the field, so the buttons
     // have to hear every keystroke.
     _aboutMe.addListener(_onAboutMeChanged);
+    // The other way out of the cap field. A blur is not an event the field
+    // itself reports, so the node is what carries it.
+    _cloudCapFocus.addListener(_onCloudCapFocusChanged);
     // Started once, here, rather than in build: the section rebuilds on every
     // keystroke in the fields above it, and a future created in build would
     // walk the cache tree each time.
@@ -569,9 +759,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _onAboutMeChanged() => setState(() {});
 
+  void _onCloudCapFocusChanged() {
+    if (!_cloudCapFocus.hasFocus) _commitCloudCap();
+  }
+
+  /// Hands the typed cap to the host, or leaves it alone.
+  ///
+  /// A number that does not parse is IGNORED rather than corrected: the field
+  /// takes digits only, so the only way to get here with nothing readable is
+  /// an empty box, and emptying a box is not a request to change anything.
+  /// The notifier clamps, so a number outside the range is still a number
+  /// this can report.
+  void _commitCloudCap() {
+    final value = int.tryParse(_cloudCap.text.trim());
+    if (value == null || value == _cloudCapCommitted) return;
+    _cloudCapCommitted = value;
+    widget.onCloudDraftsDailyCapChanged?.call(value);
+  }
+
   @override
   void didUpdateWidget(SettingsScreen old) {
     super.didUpdateWidget(old);
+    // The host clamps: a typed 5000 comes back as 1000, and the field has to
+    // say what the ledger line beside it says. Only while the field still
+    // holds the number last handed over — a reader mid-way through typing a
+    // new one is not overwritten.
+    if (old.cloudDraftsDailyCap != widget.cloudDraftsDailyCap &&
+        int.tryParse(_cloudCap.text.trim()) == _cloudCapCommitted) {
+      _cloudCapCommitted = widget.cloudDraftsDailyCap;
+      _cloudCap.text = '${widget.cloudDraftsDailyCap}';
+    }
     // A wipe underneath us, not an edit of ours: a sign-in from inside this
     // screen that changes the identity clears the previous person's about-me.
     // An unsaved edit is the user's and is never overwritten; a clean field
@@ -592,12 +809,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // write here, that whole hazard is gone.
     _aboutMe.removeListener(_onAboutMeChanged);
     _aboutMe.dispose();
+    _cloudCapFocus.removeListener(_onCloudCapFocusChanged);
+    _cloudCapFocus.dispose();
+    _cloudCap.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final onHome = widget.onHome;
+    // A sub-pane REPLACES the sections rather than floating over them: the
+    // house rule is one pane at a time with a way back, and the sections stay
+    // in this State so closing the sub-pane restores them untouched.
+    if (_subpane case final subpane?) {
+      return PaneSurface(
+        title: switch (subpane) {
+          _TargetEditorPane(initial: null) => 'Add target',
+          _TargetEditorPane() => 'Edit target',
+          _ConsentPane() => 'Cloud drafts',
+        },
+        onBack: _closeSubpane,
+        onHome: onHome,
+        child: switch (subpane) {
+          _TargetEditorPane(:final initial) => LlmTargetEditor(
+              initial: initial,
+              probe: widget.probeServer,
+              onSave: _saveTarget,
+              onCancel: _closeSubpane,
+            ),
+          _ConsentPane(:final stageId, :final target) => CloudDraftsConsentPane(
+              targetName: target.name,
+              stageLabel: _stageLabel(stageId),
+              dailyCap: widget.cloudDraftsDailyCap,
+              onContinue: () => unawaited(_acceptCloudDrafts(stageId, target)),
+              // Back and Not now are the same answer, and neither writes.
+              onNotNow: _closeSubpane,
+            ),
+        },
+      );
+    }
     return PaneSurface(
       title: widget.scope == SettingsScope.ai ? 'AI' : 'Settings',
       // Both ways out commit a half-typed server URL and a typed lookback date
@@ -671,6 +921,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           SettingsModelsBody.summary(
             widget.slotTargets,
             server: widget.localServerSummary,
+            userTargets: _userTargetCount,
           ),
           _modelsBody(),
         ),
@@ -712,6 +963,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           onSelectExpandChanged: widget.onContextSelectExpandChanged,
           now: widget.now,
         ),
+      // Before Sync & data and in BOTH scopes, with no `!ai` guard: whether
+      // the models are running at all, and whether what they wrote is thrown
+      // away, are questions about the model — so the AI stop is exactly where
+      // someone would look for them. Its premise is any one of the three
+      // wires: a host that offers only the switch gets only the switch.
+      if (_processingWired)
+        _section('Processing', _processingSummary(), _processingBody()),
       if (!ai && widget.onRefreshNow != null)
         _section('Sync & data', _syncSummary(now), _syncBody(now)),
       if (!ai && (widget.appVersion != null || widget.databasePath != null))
@@ -834,7 +1092,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _modelsBody() => SettingsModelsBody(
     header: widget.modelsHeader,
-    targets: widget.slotTargets,
+    slotTargets: widget.slotTargets,
     isDefault: widget.slotIsDefault,
     compiledDefaults: widget.compiledDefaults,
     stages: widget.stages,
@@ -843,7 +1101,392 @@ class _SettingsScreenState extends State<SettingsScreen> {
     onReset: widget.onSlotReset ?? (_) {},
     proseParallel: widget.proseParallel,
     onProseParallelChanged: widget.onProseParallelChanged,
+    proseParallelTargetName:
+        widget.proseParallelTargetName ?? builtInProseName,
+    targets: widget.targets,
+    stageTargetIds: widget.stageTargetIds,
+    cloudDraftsConsent: widget.cloudDraftsConsent,
+    onStageTargetChanged: widget.onStageTargetChanged,
+    onAddTarget: widget.onTargetSaved == null
+        ? null
+        : () => setState(() => _subpane = const _TargetEditorPane(null)),
+    onEditTarget: widget.onTargetSaved == null
+        ? null
+        : (spec) => setState(() => _subpane = _TargetEditorPane(spec)),
+    onRemoveTarget: widget.onTargetRemoved,
+    onConsentNeeded: (stageId, target) =>
+        setState(() => _subpane = _ConsentPane(stageId, target)),
   );
+
+  /// How many servers the user ADDED. The collapsed summary counts those and
+  /// not the two built-ins, so a machine with neither reads exactly as it did
+  /// before routing was data.
+  int get _userTargetCount =>
+      widget.targets.where((spec) => !spec.isBuiltIn).length;
+
+  void _closeSubpane() => setState(() => _subpane = null);
+
+  /// The stage's own word, for the consent pane's first line. The id itself is
+  /// a schema name and is not what a person calls the thing.
+  String _stageLabel(String stageId) {
+    for (final stage in widget.stages) {
+      if (stage.id == stageId) return stage.label;
+    }
+    return stageId;
+  }
+
+  Future<void> _saveTarget(
+    LlmTargetSpec spec, {
+    String? bearer,
+    bool prose = false,
+    bool confirm = false,
+    bool bulk = false,
+  }) async {
+    await widget.onTargetSaved?.call(
+      spec,
+      bearer: bearer,
+      prose: prose,
+      confirm: confirm,
+      bulk: bulk,
+    );
+    if (!mounted) return;
+    _closeSubpane();
+  }
+
+  /// Continue: the consent is recorded FIRST and the stage written after it.
+  ///
+  /// That order is the whole protection. `AppPrefs.specForStage` sends a
+  /// third-party draft target back to the local one while the flag is false,
+  /// so a stage written before the flag would resolve locally until something
+  /// else happened to rebuild it.
+  Future<void> _acceptCloudDrafts(String stageId, LlmTargetSpec target) async {
+    await widget.onCloudDraftsConsent?.call();
+    widget.onStageTargetChanged?.call(stageId, target.id);
+    if (!mounted) return;
+    _closeSubpane();
+  }
+
+  // ── Processing ────────────────────────────────────────────────────────────
+
+  /// Whether the section has any wiring at all. Any ONE of the three is
+  /// enough — the same "absent wiring, absent control" discipline the rest of
+  /// the screen follows, read per control rather than per section.
+  bool get _processingWired =>
+      widget.onProcessingChanged != null ||
+      widget.onClearAiResults != null ||
+      widget.onForgetAndResync != null;
+
+  /// The state the section is about, which is the switch's. The two resets
+  /// have no state to report between presses.
+  String _processingSummary() => widget.processingOn ? 'On' : 'Off';
+
+  /// The mirror switch, then the two resets.
+  ///
+  /// The order is the argument: both resets are refused while processing is
+  /// on, so the control that turns it off has to be the thing above them
+  /// rather than a trip back to the sidebar.
+  Widget _processingBody() {
+    final onChanged = widget.onProcessingChanged;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (onChanged != null) ...[
+          // One node, not three: a switch, its name and its state read as a
+          // single control to a screen reader, and split across siblings they
+          // arrive as an unlabelled toggle followed by two loose words. The
+          // sidebar's copy of this switch says the same thing the same way.
+          MergeSemantics(
+            child: Row(
+              children: [
+                Switch(
+                  key: SettingsScreen.processingToggleKey,
+                  value: widget.processingOn,
+                  onChanged: onChanged,
+                ),
+                const SizedBox(width: BondSpacing.s8),
+                Expanded(
+                  child: Text(
+                    'AI processing',
+                    style: BondType.small.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                Text(
+                  widget.processingOn ? 'On' : 'Off',
+                  style: BondType.small,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: BondSpacing.s4),
+          Text(
+            'The same switch as the one at the top of the sidebar. Mail and '
+            'Teams keep syncing while it is off; only the models stand down.',
+            style: BondType.caption,
+          ),
+        ],
+        if (widget.cloudDraftsToday != null) ..._cloudLedgerBlock(),
+        if (widget.onClearAiResults != null) ..._clearAiResultsBlock(),
+        if (widget.onForgetAndResync != null) ..._forgetResyncBlock(),
+      ],
+    );
+  }
+
+  /// What has gone to somebody else's machine today, and the ceiling on it.
+  ///
+  /// In Processing rather than in Models because it is about what the app is
+  /// DOING, not about where a stage points — the same reason the switch above
+  /// it is here.
+  List<Widget> _cloudLedgerBlock() {
+    final onCap = widget.onCloudDraftsDailyCapChanged;
+    return [
+      const SizedBox(height: BondSpacing.s16),
+      Text(
+        'Cloud drafts today: ${widget.cloudDraftsToday} of '
+        '${widget.cloudDraftsDailyCap}',
+        key: SettingsScreen.cloudLedgerKey,
+        style: BondType.small,
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(
+        'Drafts sent to a third-party target, by the Improve button, the '
+        'standing rule, or a draft stage pointed at one. Nothing more goes '
+        'today once the cap is reached.',
+        style: BondType.caption,
+      ),
+      if (onCap != null) ...[
+        const SizedBox(height: BondSpacing.s8),
+        SizedBox(
+          width: 160,
+          child: TextField(
+            key: SettingsScreen.cloudCapKey,
+            controller: _cloudCap,
+            focusNode: _cloudCapFocus,
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            style: BondType.mono,
+            decoration: const InputDecoration(
+              isDense: true,
+              labelText: 'Daily cap',
+              border: OutlineInputBorder(),
+            ),
+            onSubmitted: (_) => _commitCloudCap(),
+          ),
+        ),
+      ],
+    ];
+  }
+
+  /// What both resets say when they are refused.
+  static const String _turnOffFirst = 'Turn processing off first';
+
+  /// Whether either reset is out. Both arm buttons read it, not just their
+  /// own: the two delete overlapping rows, and a second one armed while the
+  /// first is mid-transaction is a race the database would have to settle.
+  bool get _resetting => _clearingAi || _forgetting;
+
+  /// What both captions say about how long it takes, because the button
+  /// gives no other sign: the refold walks every conversation and five
+  /// indexes are rebuilt after it, with nothing to stream in between.
+  static const String _resetTakesTime =
+      'On a large mailbox this can take a minute or two, and the buttons stay '
+      'disabled until it finishes. Both also clear the activity log, and with '
+      "it today's cloud-draft count.";
+
+  /// The second click's words, on both buttons.
+  ///
+  /// Deliberately the same sentence twice: the two-step is the protection
+  /// here (the house rule forbids a dialog), and what the second button has
+  /// to say is not which reset this is — the caption above it said that — but
+  /// that there is no way back from it.
+  static const String _confirmLabel = 'Confirm: this cannot be undone';
+
+  /// Throwing away what the models wrote, in the two clicks
+  /// [_clearCacheBlock] takes and for its reason.
+  List<Widget> _clearAiResultsBlock() {
+    return [
+      const SizedBox(height: BondSpacing.s24),
+      const Divider(height: 1, color: BondColors.border),
+      const SizedBox(height: BondSpacing.s12),
+      Text(
+        'Clear AI results',
+        style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(
+        'Deletes every triage verdict, summary, storyline, draft and '
+        'embedding. Mail, Teams messages, attachments, directories and your '
+        'settings stay. The next syncs re-queue the mailbox a slice at a time '
+        'and processing redoes it under the models now configured. '
+        '$_resetTakesTime',
+        style: BondType.caption,
+      ),
+      const SizedBox(height: BondSpacing.s8),
+      if (!_confirmingAiClear)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton(
+            key: SettingsScreen.clearAiResultsKey,
+            onPressed: widget.processingOn || _resetting
+                ? null
+                : () => setState(() => _confirmingAiClear = true),
+            child: const Text('Clear AI results'),
+          ),
+        )
+      else
+        OverflowBar(
+          alignment: MainAxisAlignment.start,
+          spacing: BondSpacing.s8,
+          children: [
+            FilledButton(
+              key: SettingsScreen.clearAiResultsConfirmKey,
+              style: FilledButton.styleFrom(
+                backgroundColor: BondColors.error,
+                foregroundColor: BondColors.surface,
+              ),
+              onPressed: _clearingAi ? null : () => unawaited(_clearAi()),
+              child: const Text(_confirmLabel),
+            ),
+            TextButton(
+              key: SettingsScreen.clearAiResultsKeepKey,
+              // Standing down drops the last failure with it, for the reason
+              // the wipe's Keep gives.
+              onPressed: _clearingAi
+                  ? null
+                  : () => setState(() {
+                      _confirmingAiClear = false;
+                      _aiClearError = null;
+                    }),
+              child: const Text('Keep'),
+            ),
+          ],
+        ),
+      if (widget.processingOn && !_confirmingAiClear) ...[
+        const SizedBox(height: BondSpacing.s4),
+        Text(_turnOffFirst, style: BondType.caption),
+      ],
+      if (_aiClearError case final error?) ...[
+        const SizedBox(height: BondSpacing.s8),
+        InlineAlert(severity: InlineAlertSeverity.error, text: error),
+      ],
+    ];
+  }
+
+  /// The bigger of the two, and the same shape: the mailbox goes as well as
+  /// what the models made of it, and the person stays.
+  List<Widget> _forgetResyncBlock() {
+    return [
+      const SizedBox(height: BondSpacing.s24),
+      const Divider(height: 1, color: BondColors.border),
+      const SizedBox(height: BondSpacing.s12),
+      Text(
+        'Forget everything and re-sync',
+        style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(
+        'Deletes everything synced and everything the pipeline made. Your '
+        'sign-in, your name, your rules and your settings stay. The next sync '
+        'fetches the lookback window again. $_resetTakesTime',
+        style: BondType.caption,
+      ),
+      const SizedBox(height: BondSpacing.s8),
+      if (!_confirmingForget)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton(
+            key: SettingsScreen.forgetResyncKey,
+            onPressed: widget.processingOn || _resetting
+                ? null
+                : () => setState(() => _confirmingForget = true),
+            child: const Text('Forget everything and re-sync'),
+          ),
+        )
+      else
+        OverflowBar(
+          alignment: MainAxisAlignment.start,
+          spacing: BondSpacing.s8,
+          children: [
+            FilledButton(
+              key: SettingsScreen.forgetResyncConfirmKey,
+              style: FilledButton.styleFrom(
+                backgroundColor: BondColors.error,
+                foregroundColor: BondColors.surface,
+              ),
+              onPressed: _forgetting ? null : () => unawaited(_forget()),
+              child: const Text(_confirmLabel),
+            ),
+            TextButton(
+              key: SettingsScreen.forgetResyncKeepKey,
+              onPressed: _forgetting
+                  ? null
+                  : () => setState(() {
+                      _confirmingForget = false;
+                      _forgetError = null;
+                    }),
+              child: const Text('Keep'),
+            ),
+          ],
+        ),
+      if (widget.processingOn && !_confirmingForget) ...[
+        const SizedBox(height: BondSpacing.s4),
+        Text(_turnOffFirst, style: BondType.caption),
+      ],
+      if (_forgetError case final error?) ...[
+        const SizedBox(height: BondSpacing.s8),
+        InlineAlert(severity: InlineAlertSeverity.error, text: error),
+      ],
+    ];
+  }
+
+  /// Runs the host's clear and disarms on the way out.
+  ///
+  /// Nothing here may escape as an unhandled async error, for [_clearCache]'s
+  /// reason: it runs off a button press nobody awaits. A failure leaves the
+  /// pair ARMED and says what happened — the user is about to press it again.
+  Future<void> _clearAi() async {
+    setState(() {
+      _clearingAi = true;
+      _aiClearError = null;
+    });
+    try {
+      await widget.onClearAiResults!();
+      if (!mounted) return;
+      setState(() {
+        _clearingAi = false;
+        _confirmingAiClear = false;
+      });
+    } on Object {
+      if (!mounted) return;
+      setState(() {
+        _clearingAi = false;
+        _aiClearError = 'The AI results could not be cleared.';
+      });
+    }
+  }
+
+  /// [_clearAi]'s twin, and the same contract on failure.
+  Future<void> _forget() async {
+    setState(() {
+      _forgetting = true;
+      _forgetError = null;
+    });
+    try {
+      await widget.onForgetAndResync!();
+      if (!mounted) return;
+      setState(() {
+        _forgetting = false;
+        _confirmingForget = false;
+      });
+    } on Object {
+      if (!mounted) return;
+      setState(() {
+        _forgetting = false;
+        _forgetError = 'The mailbox could not be cleared.';
+      });
+    }
+  }
 
   // ── Sync & data ───────────────────────────────────────────────────────────
 
@@ -1399,6 +2042,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// choice governs, and one can land while this section is open.
   Widget _suggestedRepliesBody() {
     final onChanged = widget.onDraftPolicyChanged!;
+    final onStanding = widget.onCloudDraftsStandingChanged;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _draftPolicySegments(onChanged),
+        if (onStanding != null) ..._standingBlock(onStanding),
+      ],
+    );
+  }
+
+  /// Which messages get a reply before anyone asks.
+  Widget _draftPolicySegments(void Function(DraftPolicy value) onChanged) {
     return SettingsSegments<DraftPolicy>(
       // Off the enum, in its own declaration order: the labels belong to
       // `DraftPolicyLabel` beside the modes they name, and a second list here
@@ -1420,6 +2076,53 @@ class _SettingsScreenState extends State<SettingsScreen> {
           'like it wants a reply. When asked writes nothing until you press '
           'Draft reply, which works in every mode.',
     );
+  }
+
+  /// The standing rule: after a local draft is written for an urgent message
+  /// that needs the owner, the same prompt goes to the Improve target and its
+  /// answer replaces the draft.
+  ///
+  /// Inert without a target, because there is nowhere for it to send. The
+  /// caption is the whole explanation of which way it is inert.
+  List<Widget> _standingBlock(ValueChanged<bool> onStanding) {
+    final target = widget.improveTargetName;
+    return [
+      const SizedBox(height: BondSpacing.s16),
+      // One node, not two: the switch and its sentence read as a single
+      // control to a screen reader, exactly as the Processing mirror does.
+      MergeSemantics(
+        child: Row(
+          children: [
+            Switch(
+              key: SettingsScreen.cloudStandingKey,
+              value: _cloudDraftsStanding,
+              onChanged: target == null
+                  ? null
+                  : (on) {
+                      setState(() => _cloudDraftsStanding = on);
+                      onStanding(on);
+                    },
+            ),
+            const SizedBox(width: BondSpacing.s8),
+            Expanded(
+              child: Text(
+                'Improve drafts for messages that need you and are urgent',
+                style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+              ),
+            ),
+          ],
+        ),
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(
+        target == null
+            ? 'Pick a target for Improve a draft under Models first.'
+            : 'After the local draft is written, the same prompt goes to '
+                '$target and its answer replaces the draft. Counts toward the '
+                'daily cap under Processing.',
+        style: BondType.caption,
+      ),
+    ];
   }
 
   // ── Activity log ──────────────────────────────────────────────────────────

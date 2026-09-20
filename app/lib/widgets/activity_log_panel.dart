@@ -81,6 +81,7 @@ class ActivityLogPanel extends StatefulWidget {
     'triage': 'Triage',
     'extract': 'Extract',
     'draft': 'Draft',
+    'draft_improve': 'Improve a draft',
     'mark_read': 'Mark read',
     'compose': 'New message',
     'storyline': 'Storylines',
@@ -103,6 +104,7 @@ class ActivityLogPanel extends StatefulWidget {
     'embed_message': 'Embed message',
     'storyline_refresh': 'Storyline refresh',
     'storyline_recap': 'Storyline recap',
+    'processing': 'Processing',
   };
 
   /// The machine-readable reasons the pipeline records, in the words the user
@@ -382,6 +384,13 @@ class ActivityLogPanel extends StatefulWidget {
         return stages is List && stages.isNotEmpty
             ? 'Retried ${stages.join(', ')}'
             : 'Retried owed stages';
+      // The switch at the top of the rail. Its STATUS is the whole row — `on`
+      // or `off`, neither of which any of the status cases above claims — so
+      // the sentence is written here rather than left to the bare label.
+      case 'processing':
+        return e.status == 'on'
+            ? '$label turned on'
+            : '$label turned off';
       case 'storyline_recruit':
         final recruited = detail['recruited'];
         final considered = detail['considered'];

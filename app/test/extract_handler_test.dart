@@ -8,13 +8,12 @@ import 'package:bond_inbox/models/draft_policy.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
+import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
-import 'package:bond_inbox/services/storyline_service.dart'
-    show StorylineTuning, clusteringCardForConversationRow;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -76,9 +75,13 @@ class FakeEmbeddings {
           if (input.startsWith(EmbeddingsClient.clusteringPrefix)) input,
       ];
 
+  /// The document corpus is now told apart by the ABSENCE of the clustering
+  /// instruction, not by a prefix of its own: Qwen embeds a document bare, so
+  /// `EmbeddingsClient.documentPrefix` is the empty string and a `startsWith`
+  /// on it would match every call this class ever recorded.
   List<String> get documentInputs => [
         for (final input in inputs)
-          if (input.startsWith(EmbeddingsClient.documentPrefix)) input,
+          if (!input.startsWith(EmbeddingsClient.clusteringPrefix)) input,
       ];
 
   EmbeddingsClient get client => EmbeddingsClient(
@@ -807,11 +810,10 @@ void main() {
       expect(row['embed_model'], EmbeddingsClient.documentModelTag);
       expect(row['received_at'], '2026-08-29T10:00:00Z');
       expect(row['embedded_hash'], isNotNull);
-      // The message's OWN text, under the document prefix — not the thread's
-      // clustering card.
+      // The message's OWN text, bare — not the thread's clustering card, and
+      // with nothing at all in front of it.
       expect(
         embeddings.documentInputs.single,
-        '${EmbeddingsClient.documentPrefix}'
         'Launch date | From: Sarah <sarah@x.com> | '
         'Sarah needs the lock extended. | Can we still ship on Thursday?',
       );
@@ -1056,127 +1058,6 @@ void main() {
     });
   });
 
-  group('buildConversationCard', () {
-    test('is four segments, empty ones included', () {
-      expect(
-        buildConversationCard(
-          subject: 'Launch date',
-          participants: const ['Sarah', 'Tom'],
-          topics: const ['launch', 'homepage copy'],
-          summary: 'Shipping Thursday.',
-        ),
-        'Launch date | Sarah, Tom | launch, homepage copy | Shipping Thursday.',
-      );
-      // Fixed shape, so the same thread always produces the same card — which
-      // is what makes the hash a usable "has anything changed" test.
-      expect(
-        buildConversationCard(
-          subject: null,
-          participants: const [],
-          topics: const [],
-          summary: null,
-        ),
-        ' |  |  | ',
-      );
-    });
-  });
-
-  group('buildClusteringCard', () {
-    const subject = 'Launch date';
-    const participants = ['Sarah', 'Tom'];
-    const topics = ['launch', 'homepage copy'];
-    const summary = 'Shipping Thursday.';
-
-    test('with the people it is byte-identical to the prompt card', () {
-      // The two recipes agree while the flag says they should. What the flag
-      // decides is which of them the vector is taken over; the cards a model
-      // reads keep their people either way.
-      expect(
-        buildClusteringCard(
-          subject: subject,
-          participants: participants,
-          topics: topics,
-          summary: summary,
-          withParticipants: true,
-        ),
-        buildConversationCard(
-          subject: subject,
-          participants: participants,
-          topics: topics,
-          summary: summary,
-        ),
-      );
-    });
-
-    test('the app ships the card without them', () {
-      // False since Round D Phase 2, and pinned here because the flag and
-      // `EmbeddingsClient.modelTag` have to move together: a flip on its own
-      // would leave every stored vector describing a card this build no
-      // longer writes, with nothing saying so.
-      expect(StorylineTuning.participantsInClusteringCard, isFalse);
-
-      final card = buildClusteringCard(
-        subject: subject,
-        participants: participants,
-        topics: topics,
-        summary: summary,
-        withParticipants: StorylineTuning.participantsInClusteringCard,
-      );
-
-      final segments = card.split(' | ');
-      expect(segments, hasLength(4));
-      expect(segments[1], isEmpty);
-      expect(segments.first, subject);
-      expect(EmbeddingsClient.modelTag, 'embeddinggemma-300M/clustering-v2');
-    });
-
-    test('without them the people segment is empty, not absent', () {
-      final card = buildClusteringCard(
-        subject: subject,
-        participants: participants,
-        topics: topics,
-        summary: summary,
-        withParticipants: false,
-      );
-
-      expect(card, 'Launch date |  | launch, homepage copy | Shipping Thursday.');
-      // Four segments by contract either way: a three-segment card would make
-      // the hash disagree with itself about nothing.
-      expect(card.split(' | '), hasLength(4));
-      expect(
-        card,
-        isNot(buildClusteringCard(
-          subject: subject,
-          participants: participants,
-          topics: topics,
-          summary: summary,
-          withParticipants: true,
-        )),
-      );
-    });
-
-    test('nothing but the people changes between the two', () {
-      // The subject, the topics and the summary are the same text on both
-      // sides — this is a flag about the vector's people, not about the card.
-      final with_ = buildClusteringCard(
-        subject: subject,
-        participants: participants,
-        topics: topics,
-        summary: summary,
-        withParticipants: true,
-      ).split(' | ');
-      final without = buildClusteringCard(
-        subject: subject,
-        participants: participants,
-        topics: topics,
-        summary: summary,
-        withParticipants: false,
-      ).split(' | ');
-
-      expect([without[0], without[2], without[3]],
-          [with_[0], with_[2], with_[3]]);
-    });
-  });
 
   group('cardHash', () {
     test('is stable for the same text and differs for different text', () {

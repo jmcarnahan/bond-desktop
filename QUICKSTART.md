@@ -17,7 +17,7 @@ content anywhere at inference time:
 |---|---|---|---|
 | prose (names storylines, drafts replies) | 8080 | Qwen3.8-27B Q4_K_M | ~19 GB + 0.6 GB vision projector |
 | bulk (triage, extraction) | 8082 | Qwen3-4B-Instruct Q8_0 | ~4.3 GB |
-| embeddings (clustering) | 8081 | EmbeddingGemma-300M | ~0.6 GB |
+| embeddings (clustering, search) | 8081 | Qwen3-Embedding-0.6B Q8_0 | ~0.7 GB |
 
 You need:
 
