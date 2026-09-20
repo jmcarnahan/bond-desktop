@@ -923,16 +923,16 @@ void main() {
       // Hours for the two the backfill must REACH: the window it is bounded by
       // is `syncFloorDays`, now one day, so a fixture two days old would be
       // outside it and would pass the `ancient` assertion instead of its own.
-      await stored('historical', const [me], const Duration(hours: 2));
-      await stored('historical-group', const [me, 'ops@x.com'],
+      await stored('pre-existing', const [me], const Duration(hours: 2));
+      await stored('pre-existing-group', const [me, 'ops@x.com'],
           const Duration(hours: 2));
       await stored('ancient', const [me], const Duration(days: 40));
 
       queueInbox([graphMessage(id: 'fresh', to: const [me])]);
       await syncKnowing(() async => me).syncNow();
 
-      expect((await messageRow('historical'))['addressed_me'], 1);
-      expect((await messageRow('historical-group'))['addressed_me'], 0);
+      expect((await messageRow('pre-existing'))['addressed_me'], 1);
+      expect((await messageRow('pre-existing-group'))['addressed_me'], 0);
       expect((await messageRow('ancient'))['addressed_me'], 0,
           reason: 'the triage window bounds the catch-up, as it bounds '
               'everything else this sync reaches back for');
@@ -941,13 +941,13 @@ void main() {
       // Once means once: a flat row written after the pref is set stays flat.
       // Inside the window, so the pref is the only thing that can be keeping
       // it flat.
-      await stored('later', const [me], const Duration(hours: 2));
+      await stored('stored-after-pref', const [me], const Duration(hours: 2));
       graph.queue('inbox', [
         () => jsonOk(deltaBody(const [], deltaLink: deltaCursor('inbox', 'c2'))),
       ]);
       await syncKnowing(() async => me).syncNow();
 
-      expect((await messageRow('later'))['addressed_me'], 0);
+      expect((await messageRow('stored-after-pref'))['addressed_me'], 0);
     });
 
     test('mail triage v1 judged goes back for the v2 questions', () async {

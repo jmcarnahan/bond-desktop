@@ -641,9 +641,10 @@ void main() {
       expect(find.text('Suggested replies'), findsNothing);
     });
 
-    // One test per mode rather than a loop inside one: the screen's local
-    // selection is seeded from the prop ONCE, the way `_notifyStyle` is, so a
-    // second pumpWidget into the same tree would reuse the first State.
+    // One test per mode rather than a loop inside one: each case is a fresh
+    // screen reading a different stored value, which is what the summary line
+    // is about. A second pumpWidget into the same tree reuses the first State
+    // and follows the new prop, which is the resync case below.
     for (final (policy, summary) in const [
       (DraftPolicy.needsYou, 'For messages that need you'),
       (DraftPolicy.all, 'For every reply-worthy message'),
@@ -720,6 +721,53 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(written, [DraftPolicy.all, DraftPolicy.onDemand]);
+    });
+
+    testWidgets('follows the prop when the host changes the policy underneath',
+        (tester) async {
+      // A tier's defaults rewrite the draft policy without anyone touching
+      // this control. The segments are seeded from the prop once, so without
+      // the resync in `didUpdateWidget` they would keep showing the old mode.
+      final written = <DraftPolicy>[];
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        draftPolicy: DraftPolicy.needsYou,
+        onDraftPolicyChanged: written.add,
+      );
+      await expand(tester, 'Suggested replies');
+
+      expect(
+        tester
+            .widget<SegmentedButton<DraftPolicy>>(
+              find.byType(SegmentedButton<DraftPolicy>),
+            )
+            .selected,
+        {DraftPolicy.needsYou},
+      );
+
+      // The same tree, the same State, one prop changed.
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        draftPolicy: DraftPolicy.onDemand,
+        onDraftPolicyChanged: written.add,
+      );
+
+      expect(
+        tester
+            .widget<SegmentedButton<DraftPolicy>>(
+              find.byType(SegmentedButton<DraftPolicy>),
+            )
+            .selected,
+        {DraftPolicy.onDemand},
+      );
+      expect(find.text('Only when asked'), findsOneWidget);
+      // Adopting what the host already decided is not a new decision, so
+      // nothing is reported back.
+      expect(written, isEmpty);
     });
 
     // No `!ai` guard, deliberately: how much of the big model's time goes on

@@ -520,6 +520,32 @@ void main() {
       expect(find.text('llm_calls: 1'), findsOneWidget);
       expect(find.text('speed: 15 t/s'), findsOneWidget);
     });
+
+    testWidgets('a streamed draft spells out its time to first token',
+        (tester) async {
+      // The expanded body renders every detail key generically, so a key the
+      // recorder learns to write needs no panel change. This pins that.
+      await pump(
+        tester,
+        events: [
+          _event(
+            kind: 'draft',
+            detail: const {
+              'llm_calls': 1,
+              'llm_ms': 8400,
+              'completion_tokens': 220,
+              'first_token_ms': 273,
+            },
+          ),
+        ],
+      );
+
+      await tester.tap(find.text('Draft written'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('first_token_ms: 273'), findsOneWidget);
+      expect(find.text('llm_calls: 1'), findsOneWidget);
+    });
   });
 
   group('describe', () {

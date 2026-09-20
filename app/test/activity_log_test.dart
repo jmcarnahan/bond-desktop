@@ -19,6 +19,7 @@ LlmCallRecord call({
   String outcome = 'ok',
   int? promptTokens,
   int? completionTokens,
+  int? firstTokenMs,
   String? error,
   String? model,
   String? baseUrl,
@@ -29,6 +30,7 @@ LlmCallRecord call({
       outcome: outcome,
       promptTokens: promptTokens,
       completionTokens: completionTokens,
+      firstTokenMs: firstTokenMs,
       error: error,
       model: model,
       baseUrl: baseUrl,
@@ -379,6 +381,56 @@ void main() {
       final detail = detailOf(await only());
       expect(detail['llm_model'], 'qwen3-27b');
       expect(detail['llm_label'], 'storyline_name');
+    });
+
+    test('a streamed call records how long the box stayed empty', () async {
+      log.noteLlmCall(call(
+        label: 'draft_reply',
+        durationMs: 8400,
+        completionTokens: 220,
+        firstTokenMs: 273,
+      ));
+
+      await log.record('draft', entityId: 'm1');
+
+      final detail = detailOf(await only());
+      expect(detail['first_token_ms'], 273);
+      // Beside the tally, not instead of any of it.
+      expect(detail['llm_calls'], 1);
+      expect(detail['llm_ms'], 8400);
+    });
+
+    test('a plain call carries no first_token_ms key at all', () async {
+      // Only the draft path streams. An unconditional key would put a dash on
+      // every triage row in the panel, which is worse than nothing.
+      log.noteLlmCall(call(completionTokens: 5));
+
+      await log.record('triage', entityId: 'm1');
+
+      expect(detailOf(await only()).containsKey('first_token_ms'), isFalse);
+    });
+
+    test('the first streamed call is the one whose wait is kept', () async {
+      // First non-null wins: the first call is the one the reader felt, and a
+      // later call on the same row cannot shorten that wait.
+      log.noteLlmCall(call(label: 'draft_reply', firstTokenMs: 273));
+      log.noteLlmCall(call(label: 'draft_reply', firstTokenMs: 900));
+
+      await log.record('draft', entityId: 'm1');
+
+      expect(detailOf(await only())['first_token_ms'], 273);
+    });
+
+    test('a plain call before a streamed one still records the stream',
+        () async {
+      // The null of a plain call is not an answer, so it does not take the
+      // slot: the streamed call that follows it fills the key.
+      log.noteLlmCall(call(label: 'draft_reply'));
+      log.noteLlmCall(call(label: 'draft_reply', firstTokenMs: 411));
+
+      await log.record('draft', entityId: 'm1');
+
+      expect(detailOf(await only())['first_token_ms'], 411);
     });
   });
 }

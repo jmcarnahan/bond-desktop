@@ -205,6 +205,10 @@ class ActivityLog {
     slot.llmMs += call.durationMs;
     slot.promptTokens += call.promptTokens ?? 0;
     slot.completionTokens += call.completionTokens ?? 0;
+    // First non-null wins: the first call of a row is the one whose wait a
+    // reader actually felt, and a later call on the same row cannot make that
+    // wait shorter. Null on every plain call, so most rows never carry it.
+    slot.firstTokenMs ??= call.firstTokenMs;
     slot.llmLabel = call.label;
     // Last writer wins, exactly as [_PendingSlot.llmLabel] does — and for one
     // row it is the same answer, because a row's calls are one unit of work on
@@ -342,6 +346,7 @@ class _PendingSlot {
   int llmMs = 0;
   int promptTokens = 0;
   int completionTokens = 0;
+  int? firstTokenMs;
   String? llmLabel;
   String? llmModel;
   String? llmError;
@@ -364,6 +369,10 @@ class _PendingSlot {
       drained['llm_ms'] = llmMs;
       if (promptTokens > 0) drained['prompt_tokens'] = promptTokens;
       if (completionTokens > 0) drained['completion_tokens'] = completionTokens;
+      // Only when a call streamed. Written unconditionally it would print a
+      // dash on every triage row, since only the draft path streams.
+      final firstToken = firstTokenMs;
+      if (firstToken != null) drained['first_token_ms'] = firstToken;
       final label = llmLabel;
       if (label != null) drained['llm_label'] = label;
       final model = llmModel;
@@ -382,6 +391,7 @@ class _PendingSlot {
     llmMs = 0;
     promptTokens = 0;
     completionTokens = 0;
+    firstTokenMs = null;
     llmLabel = null;
     llmModel = null;
     llmError = null;

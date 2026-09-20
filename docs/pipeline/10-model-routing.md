@@ -146,11 +146,16 @@ and without interrupting work in flight.
 
 Every call records which model answered it: `LlmCallRecord` carries `model` and
 `baseUrl`, and the activity log folds the model into the row as `llm_model`
-(shown on the `t/s` cell's tooltip and in the expanded detail). The record's
-`outcome` is decided after the answer has been made usable: a constrained
-call whose content is not the JSON object it asked for is recorded as
-`format`, never as `ok` — the decode runs inside the same instrumented try as
-the request, so a model that overran its budget mid-object counts as a failed
+(shown on the `t/s` cell's tooltip and in the expanded detail). A streamed call
+also reports how long the box stayed empty: the log keeps the FIRST non-null
+`LlmCallRecord.firstTokenMs` a row saw and writes it into `detail_json` as
+`first_token_ms`, only when there was one. Only the draft path streams, so the
+key rides the draft rows and stays off every triage row rather than printing a
+dash on all of them. The record's `outcome` is decided after the answer has
+been made usable: a constrained call whose content is not the JSON object it
+asked for is recorded as `format`, never as `ok` — the decode runs inside the
+same instrumented try as the request, so a model that overran its budget mid-
+object counts as a failed
 call in every table built from these records.
 
 **Two wires, one client.** `LlmClient` can also carry a bearer token and speak

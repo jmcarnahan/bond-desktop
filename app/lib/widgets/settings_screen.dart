@@ -780,6 +780,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void didUpdateWidget(SettingsScreen old) {
     super.didUpdateWidget(old);
+    // Six controls seeded from props once, as field initializers. The host can
+    // change any of them underneath this screen — `applyPreset` refuses a
+    // third-party target and forces the standing rule back off, a tier's
+    // defaults rewrite the draft policy — and a control still showing the old
+    // answer would be reporting a setting that is no longer in force. No
+    // `setState`: the framework rebuilds after this runs.
+    if (old.threshold != widget.threshold) {
+      _threshold = widget.threshold.clamp(0.0, 1.0);
+    }
+    if (old.showActivityLog != widget.showActivityLog) {
+      _showActivityLog = widget.showActivityLog;
+    }
+    if (old.notifyStyle != widget.notifyStyle) {
+      _notifyStyle = widget.notifyStyle;
+    }
+    if (old.draftPolicy != widget.draftPolicy) {
+      _draftPolicy = widget.draftPolicy;
+    }
+    if (old.cloudDraftsStanding != widget.cloudDraftsStanding) {
+      _cloudDraftsStanding = widget.cloudDraftsStanding;
+    }
+    if (old.storylineNewestFirst != widget.storylineNewestFirst) {
+      _storylineNewestFirst = widget.storylineNewestFirst;
+    }
     // The host clamps: a typed 5000 comes back as 1000, and the field has to
     // say what the ledger line beside it says. Only while the field still
     // holds the number last handed over — a reader mid-way through typing a

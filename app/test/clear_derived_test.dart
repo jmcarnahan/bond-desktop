@@ -1185,5 +1185,88 @@ void main() {
       await queue.pump();
       expect(llm.calls, 2);
     });
+
+    test('two concurrent worker quiesces are one run, and both see it out',
+        () async {
+      for (final id in ['a', 'b', 'c']) {
+        await store.enqueueWork('extract', 'email', id);
+      }
+      final held = Completer<void>();
+      final handler = _Handler('extract', onRun: (_) => held.future);
+      final worker = AiWorker(store, handlers: [handler]);
+
+      final drain = worker.pump();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      // The reachable pair: the reset host quiescing, and a `dispose` fired by
+      // an invalidation inside the reset window. Two runs would race on the
+      // `finally`, and whichever finished first would drop the latch while the
+      // other was still handing claims back.
+      final first = worker.quiesce();
+      final second = worker.quiesce();
+      expect(first, same(second));
+
+      // Still one stop for both of them: a pump landing while either caller is
+      // outstanding claims nothing.
+      final late = worker.pump();
+      held.complete();
+      await first;
+      await second;
+      await drain;
+      await late;
+
+      expect(handler.seen, hasLength(1));
+      expect(await store.workCounts('extract'), {'done': 1, 'pending': 2});
+
+      // The memo is released with the run, so the next reset gets a real
+      // quiesce rather than a future that completed minutes ago.
+      final again = worker.quiesce();
+      expect(again, isNot(same(first)));
+      await again;
+
+      await worker.pump();
+      expect(handler.seen, hasLength(3));
+    });
+
+    test('two concurrent triage quiesces are one run, and both see it out',
+        () async {
+      await seedMessage('m1');
+      await seedMessage('m2', conversationKey: 'conv-2');
+      final held = Completer<void>();
+      var first = true;
+      final llm = _FakeLlm(hold: () {
+        if (!first) return Future<void>.value();
+        first = false;
+        return held.future;
+      });
+      final queue = TriageQueue(store, llm, concurrency: 1);
+      addTearDown(queue.dispose);
+
+      final drain = queue.pump();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final quiet = queue.quiesce();
+      final alsoQuiet = queue.quiesce();
+      expect(quiet, same(alsoQuiet));
+
+      final late = queue.pump();
+      held.complete();
+      await quiet;
+      await alsoQuiet;
+      await drain;
+      await late;
+
+      final statuses = [
+        for (final id in ['m1', 'm2']) (await messageRow(id))['triage_status'],
+      ];
+      expect(statuses.where((s) => s == 'triaged'), hasLength(1));
+      expect(statuses.where((s) => s == 'pending'), hasLength(1));
+      expect(llm.calls, 1);
+
+      final again = queue.quiesce();
+      expect(again, isNot(same(quiet)));
+      await again;
+
+      await queue.pump();
+      expect(llm.calls, 2);
+    });
   });
 }
