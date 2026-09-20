@@ -1291,7 +1291,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// indexes are rebuilt after it, with nothing to stream in between.
   static const String _resetTakesTime =
       'On a large mailbox this can take a minute or two, and the buttons stay '
-      'disabled until it finishes.';
+      'disabled until it finishes. Both also clear the activity log, and with '
+      "it today's cloud-draft count.";
 
   /// The second click's words, on both buttons.
   ///

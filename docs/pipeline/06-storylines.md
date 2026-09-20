@@ -1053,6 +1053,16 @@ same cosine band as its cross-effort pairs, 74% of them at or above 0.65
 against 49%. The vector, not the rule above it, is the ceiling on this
 mailbox.
 
+Round E moved that vector (the next two sections), and its last rows, taken on
+2026-09-20 on the final tree, file 45 of 98 with 5 correct positives and 4
+forbidden hits with everything local, and 50 of 98 with 9 and 5 when the box
+27B names the same clusters. The round's exit, 70 of 98 with correct
+positives, was NOT met. What the new rows say is that the wall has moved from
+the vector to the base rate: this pool holds 1,346 cross-effort pairs against
+85 same-effort ones, so a pairwise threshold that admits even a modest share
+of the cross population drowns what it catches, and the namer on a stronger
+model is the lever the rows leave.
+
 **Reading the vector on its own.** `make golden-vector` is the same test body
 and the same seeding, stopped the moment the mailbox is embedded. It needs one
 server, the embedding one, and takes about a minute, because nothing in it
@@ -1170,12 +1180,13 @@ grouping pass and put back.
 
 | Row | storyline.id | Correct positives | Forbidden | Formed | Sweep wall |
 |-----|--------------|-------------------|-----------|--------|------------|
-| cosine, Qwen vector (the shipped configuration) | 50 | 9 | 5 | 2 formed, 3 declined | 113 s |
+| cosine, Qwen vector, the box 27B-FP8 namer | 50 | 9 | 5 | 2 formed, 3 declined | 113 s |
+| cosine, Qwen vector, the local 27B Q4_K_M namer (the row of record, 2026-09-19, reproduced 2026-09-20) | 45 | 5 | 4 | 2 formed, 3 declined | 159 s |
 | model grouping, box 27B-FP8, pass 1 | 50 | 0 | 0 | 0 | 6.9 s |
 | model grouping, box 27B-FP8, pass 2 (prompt aligned to the rules above) | 50 | 0 | 0 | 0 | 6.9 s |
 | model grouping, local 27B Q4_K_M + MTP | 50 | 0 | 0 | 0 | 54.9 s |
 
-The cosine row spent 80 confirms and 5 naming calls. All three grouping rows
+The box cosine row spent 80 confirms and 5 naming calls, the local one 76 and 5. All three grouping rows
 are the same counts: 6 grouping calls, 0 threads grouped, 4 calls naming no
 group, 6 unfit pieces, 0 wire failures, and a `storyline.id` of 50 of 98,
 which is the abstention score a sweep that files nothing gets. The runs took

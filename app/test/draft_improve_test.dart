@@ -638,24 +638,36 @@ void main() {
       );
     });
 
-    test('a routed stage with no client is a wiring bug here too', () async {
+    test(
+        'a routed stage with no client drops the standing rule for this item, '
+        'notes it, and still writes the local draft', () async {
       await seedInbound(needsYou: true, urgency: 'high');
+      final log = _Recorder();
+      final llm = FakeLlm([decision(), answer()]);
       final handler = DraftHandler(
         store,
-        FakeLlm([decision(), answer()]),
-        activityLog: _Recorder(),
+        llm,
+        activityLog: log,
         routes: routes(improve: boxTarget, standing: true),
       );
 
-      await expectLater(
-        handler.run({
-          'task_kind': 'draft',
-          'source': 'email',
-          'entity_id': 'm1',
-          'payload_json': DraftRequest().encode(),
-        }),
-        throwsA(isA<StateError>()),
-      );
+      // No throw: a throw here would be a failure row the worker retries and
+      // a progress row left running, for a misconfiguration one word on the
+      // activity row can show. The local draft owes nothing to the improve
+      // wiring, so it is written exactly as it would be with the rule off.
+      await handler.run({
+        'task_kind': 'draft',
+        'source': 'email',
+        'entity_id': 'm1',
+        'payload_json': DraftRequest().encode(),
+      });
+
+      expect(llm.calls, 2);
+      expect(log.notes['improve'], 'unwired');
+      expect(log.notes.containsKey('improved'), isFalse);
+      final draft = await store.getDraftForMessage('email', 'm1');
+      expect(draft, isNotNull);
+      expect(draft!['body'], answer()['reply_body']);
     });
   });
 
@@ -713,6 +725,34 @@ void main() {
       expect(llm.calls, 1);
       expect(log.notes['cloud'], 1);
       expect(await store.getDraftForMessage('email', 'm1'), isNotNull);
+    });
+
+    test('with nothing counting it is skipped as unwired, not dialled and '
+        'not retried', () async {
+      await seedInbound();
+      final log = _Recorder();
+      final llm = FakeLlm([answer()]);
+      final handler = DraftHandler(
+        store,
+        llm,
+        decisionClient: FakeLlm([decision()]),
+        activityLog: log,
+        // A third-party draft target and NO ledger: the wiring bug fails
+        // closed as a skip, so the item is done rather than parked.
+        routes: routes(draft: cloudTarget),
+      );
+
+      await handler.run({
+        'task_kind': 'draft',
+        'source': 'email',
+        'entity_id': 'm1',
+        'payload_json': DraftRequest().encode(),
+      });
+
+      expect(llm.calls, 0);
+      expect(log.notes['reason'], 'unwired');
+      expect(log.notes.containsKey('cloud'), isFalse);
+      expect(await store.getDraftForMessage('email', 'm1'), isNull);
     });
   });
 

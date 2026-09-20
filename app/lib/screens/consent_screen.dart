@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../providers/prefs_provider.dart' show AppPrefs;
 import '../theme/tokens.dart';
 
 /// What leaves this machine when a draft is written somewhere else, asked once
@@ -33,7 +34,7 @@ class CloudDraftsConsentPane extends StatelessWidget {
     super.key,
     required this.targetName,
     required this.stageLabel,
-    this.dailyCap = 50,
+    this.dailyCap = AppPrefs.defaultCloudDraftsDailyCap,
     required this.onContinue,
     required this.onNotNow,
   });
@@ -53,6 +54,15 @@ class CloudDraftsConsentPane extends StatelessWidget {
           const SizedBox(height: BondSpacing.s8),
           Text(
             'This target would answer the $stageLabel stage.',
+            style: BondType.small,
+          ),
+          const SizedBox(height: BondSpacing.s4),
+          // The flag is one flag: it covers both draft stages, and no other
+          // stage ever asks. Said here so the scope of a yes is the scope the
+          // person read.
+          Text(
+            'Allowing it covers Draft reply and Improve a draft alike. No other '
+            'stage sends drafts anywhere.',
             style: BondType.small,
           ),
           const SizedBox(height: BondSpacing.s16),

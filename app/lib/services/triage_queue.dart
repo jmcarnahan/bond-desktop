@@ -276,22 +276,33 @@ class TriageQueue {
   /// way — what it says is the user's answer, not a reset's.
   Future<void> quiesce() async {
     _stopped = true;
-    // A LOOP, not one wait: a claim that was already at the store when
-    // [_stopped] flipped lands in [_inFlight] after the first snapshot was
-    // taken. Waiting on the stale snapshot and then releasing would flip a
-    // message that is STILL RUNNING back to `pending`, where a second queue
-    // could claim it and spend a second model call on the same mail.
-    while (_inFlight.isNotEmpty) {
-      await Future.wait(_inFlight.toList()).catchError((_) => const <void>[]);
+    _quiescing = true;
+    try {
+      // A LOOP, not one wait: a claim that was already at the store when
+      // [_stopped] flipped lands in [_inFlight] after the first snapshot was
+      // taken. Waiting on the stale snapshot and then releasing would flip a
+      // message that is STILL RUNNING back to `pending`, where a second queue
+      // could claim it and spend a second model call on the same mail.
+      while (_inFlight.isNotEmpty) {
+        await Future.wait(_inFlight.toList())
+            .catchError((_) => const <void>[]);
+      }
+      for (final claim in _claimed.toList()) {
+        final parts = claim.split('|');
+        // Guarded on `processing` in the statement itself, so a claim
+        // released here cannot reopen a message that finished while this was
+        // deciding.
+        await _store.releaseTriageClaim(parts.first, parts.skip(1).join('|'));
+      }
+      _claimed.clear();
+    } finally {
+      _quiescing = false;
     }
-    for (final claim in _claimed.toList()) {
-      final parts = claim.split('|');
-      // Guarded on `processing` in the statement itself, so a claim released
-      // here cannot reopen a message that finished while this was deciding.
-      await _store.releaseTriageClaim(parts.first, parts.skip(1).join('|'));
-    }
-    _claimed.clear();
   }
+
+  /// Raised for the whole of [quiesce] and read by [pump] as "off", so a
+  /// pump landing mid-wait cannot lift [_stopped] and restart the drain.
+  bool _quiescing = false;
 
   /// [quiesce], and then the stream goes too — this queue is done.
   ///
@@ -321,7 +332,10 @@ class TriageQueue {
   /// The stop flag is raised on the way out rather than merely returned on,
   /// because a drain already running has to learn about the switch too.
   Future<void> pump() async {
-    if (_off) {
+    // A quiesce in progress counts as off — `AiWorker.pump`, same reason: a
+    // pump landing mid-wait would clear [_stopped] and let the drain claim
+    // again under `_claimed.clear()`.
+    if (_off || _quiescing) {
       _stopped = true;
       await _emit();
       return;

@@ -67,7 +67,7 @@ server, about a minute, and no model decides anything in it.
 **The model is Qwen3-Embedding-0.6B, since Round E Phase 2 on 2026-09-19.**
 Round D ended by proving the storyline filing was stuck on the clustering
 VECTOR rather than on any rule above it, so Round E built `make golden-vector`
-and measured twenty-four configurations: four models, five cards, five
+and measured twenty-four configurations: five models, five cards, five
 prefixes. Qwen3-Embedding-0.6B (GGUF `Q8_0`, `--pooling last`, 1,024 wide)
 under the instruction prefix
 
@@ -141,7 +141,8 @@ change made on the model's documented contract and not on a measurement.
 **And there is no one-shot behind it.** The three search corpora key their
 worklists on `embedding IS NULL`, never on the tag: `enqueueEmbedBacklog`
 excludes any message that already has an `embed_message` work row,
-`chunksNeedingEmbedding` asks for unembedded passages, and
+`ContextStore.unembeddedChunks` and `unembeddedChunksForDir` ask for
+passages with a null `embedding`, and
 `skillsNeedingDescEmbedding` asks for a null `desc_embedding`. So every
 message vector, attachment passage and directory passage written before
 2026-09-19 is now **invisible to vector search**, and stays invisible until
@@ -155,7 +156,11 @@ the index's; and `desc_embedding`, which carries no tag at all, is compared
 through `cosine()`, which answers 0 for mismatched lengths rather than a
 number. The KEYWORD half of search is untouched and still finds every one of
 those rows. Building a tag-keyed backfill for the three corpora was left out
-of Round E deliberately; it is the obvious follow-up if the gap is felt.
+of Round E deliberately and is OWED to Round F: a walk in the shape of
+`retireEmbedTag` over the message, attachment and directory corpora, listed in
+the roadmap's §10 among the Round E candidates. Until it lands, an upgrading
+install's search covers what was embedded after the upgrade plus whatever a
+Clear AI results re-embeds.
 
 **The recovery ships in the same branch, and it is one button.** Settings,
 Processing, **Clear AI results** empties every derived table, and that list

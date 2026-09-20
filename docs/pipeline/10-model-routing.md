@@ -52,7 +52,7 @@ GroupingMode.model`, which is not what ships — it has a stage row, a client
 and a default so that pointing it somewhere is a setting rather than a code
 change the day it does (see [06-storylines.md](06-storylines.md#grouping)).
 `draft_improve` is the one OPTIONAL stage: it has no target until the user
-picks one, it runs `DraftReplyTask` rather than a task of its own, and its
+picks one, it runs `DraftTask` rather than a task of its own, and its
 button is hidden until then.
 
 Changing a stage's DEFAULT is one row in `pipelineStages`

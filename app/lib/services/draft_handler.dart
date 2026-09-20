@@ -301,7 +301,15 @@ class DraftHandler extends WorkHandler {
     if (cloudDraft && _routes.ledger == null) {
       // Fail CLOSED: a third-party draft target with nothing counting it is a
       // wiring bug, and the one thing it must not become is an uncapped call.
-      throw StateError('a third-party draft target without a ledger');
+      // A SKIP rather than a throw, because a throw here is a failure row the
+      // worker retries and a progress row left `running` — a poison item for
+      // a misconfiguration the activity panel can show in one word.
+      return _skip(
+        source,
+        id,
+        'unwired',
+        why: 'a third-party draft target without a ledger',
+      );
     }
     if (cloudDraft && !request.asked) {
       // The cap stops a PREFETCH — work nobody is waiting on — before it
@@ -312,12 +320,17 @@ class DraftHandler extends WorkHandler {
     }
     // The standing rule's wiring, checked BEFORE the draft call it would
     // follow: a bug found after the local draft is stored would mark the item
-    // for retry and pay for that draft again on every attempt.
-    final standing =
-        !request.asked && _routes.standing() && _urgentNeedsYou(row);
+    // for retry and pay for that draft again on every attempt. An unwired
+    // improve target drops the STANDING RULE for this item, noted on the row,
+    // and the local draft is still written: the local draft owes nothing to
+    // the improve wiring.
+    var standing = !request.asked && _routes.standing() && _urgentNeedsYou(row);
     if (standing) {
       final improveTarget = _routes.improveTarget();
-      if (improveTarget != null) _assertWired(improveTarget);
+      if (improveTarget != null && !_wired(improveTarget)) {
+        standing = false;
+        _log.note({'improve': 'unwired'});
+      }
     }
     // Counted BEFORE the call, so a prompt that left and then failed still
     // counts against the day. The target's ID and never its URL.
@@ -654,6 +667,11 @@ class DraftHandler extends WorkHandler {
       throw StateError('a third-party improve target without a ledger');
     }
   }
+
+  /// [_assertWired] as a question, for the drain: a routed improve target
+  /// with a client, and a ledger when the target is somebody else's machine.
+  bool _wired(LlmTargetSpec target) =>
+      _improveClient != null && (!target.isThirdParty || _routes.ledger != null);
 
   /// Whether this message is one the standing rule is about: the owner is
   /// actually needed, and soon. The two urgency words are the ones

@@ -426,7 +426,7 @@ class PipelineStageInfo {
   ///
   /// An optional stage's feature is hidden until then, and it runs another
   /// stage's task rather than one of its own — `draft_improve` sends
-  /// `DraftReplyTask` — so `model_slots_test` exempts it from the check that
+  /// `DraftTask` — so `model_slots_test` exempts it from the check that
   /// every row has a task behind it.
   final bool optional;
 

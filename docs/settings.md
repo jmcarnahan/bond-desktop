@@ -343,7 +343,9 @@ screen opens a third pane, `PaneSurface` titled **Cloud drafts** over
 `CloudDraftsConsentPane` (`app/lib/screens/consent_screen.dart`), whose back
 arrow is the same answer as **Not now**. Third party means the `converse` wire or
 a host under `amazonaws.com`, `anthropic.com`, `openai.com` or `deepseek.com`
-(`isThirdPartyHost`); loopback is not a signal in either direction. No other
+(`isThirdPartyHost`); loopback is not a signal in either direction. The flag
+is one flag, so a yes covers `draft_reply` and `draft_improve` alike, and the
+pane says so in its second line. No other
 stage ever asks — a triage or a storyline-name prompt carries a subject line and
 a summary, and a draft prompt carries the message, the tail of its thread and
 excerpts from the user's own directories.
@@ -596,7 +598,7 @@ with it.
 
 | Action | Keys | What goes | What stays |
 |---|---|---|---|
-| **Clear AI results** | `settings-clear-ai-results{,-confirm,-keep}` | every triage verdict, summary, storyline, draft, digest and embedding — the sixteen `MessageStore.derivedTables`, the verdict columns on `messages` and `conversations`, and the stage markers on `attachments` and the library | mail, Teams messages, attachments, registered directories, the sign-in and every preference |
+| **Clear AI results** | `settings-clear-ai-results{,-confirm,-keep}` | every triage verdict, summary, storyline, draft, digest and embedding — the sixteen `MessageStore.derivedTables`, the verdict columns on `messages` and `conversations`, and the stage markers on `attachments` and the library; the activity log is one of the sixteen, so today's **Cloud drafts** count starts again at zero, which the caption above the buttons says | mail, Teams messages, attachments, registered directories, the sign-in and every preference |
 | **Forget everything and re-sync** | `settings-forget-resync{,-confirm,-keep}` | everything above **and** the mailbox itself — `MessageStore.wipeAll(keepIdentity: true)`, cursors and bootstrap floors included | the sign-in, the about-me text, the Needs You rules, the sender rules, the registered directories and every setting |
 
 Above the two resets, once the host has a count, is the cloud-draft ledger:

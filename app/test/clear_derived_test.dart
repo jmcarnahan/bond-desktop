@@ -1069,5 +1069,68 @@ void main() {
         expect((await messageRow(id))['triage_status'], 'triaged');
       }
     });
+
+    test('a worker pump landing mid-quiesce does not lift the stop and resume',
+        () async {
+      for (final id in ['a', 'b', 'c']) {
+        await store.enqueueWork('extract', 'email', id);
+      }
+      final held = Completer<void>();
+      final handler = _Handler('extract', onRun: (_) => held.future);
+      final worker = AiWorker(store, handlers: [handler]);
+
+      final drain = worker.pump();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final quiet = worker.quiesce();
+      // The race: a sync's pump (or an ON) while quiesce waits on the item in
+      // flight. Before the latch it cleared `_stopped` and the drain went on
+      // claiming under `_claimed.clear()`.
+      final late = worker.pump();
+      held.complete();
+      await quiet;
+      await drain;
+      await late;
+
+      expect(handler.seen, hasLength(1));
+      expect(await store.workCounts('extract'), {'done': 1, 'pending': 2});
+
+      // And the worker is still reusable once quiesce has returned.
+      await worker.pump();
+      expect(handler.seen, hasLength(3));
+    });
+
+    test('a triage pump landing mid-quiesce does not lift the stop and resume',
+        () async {
+      await seedMessage('m1');
+      await seedMessage('m2', conversationKey: 'conv-2');
+      final held = Completer<void>();
+      var first = true;
+      final llm = _FakeLlm(hold: () {
+        if (!first) return Future<void>.value();
+        first = false;
+        return held.future;
+      });
+      final queue = TriageQueue(store, llm, concurrency: 1);
+      addTearDown(queue.dispose);
+
+      final drain = queue.pump();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final quiet = queue.quiesce();
+      final late = queue.pump();
+      held.complete();
+      await quiet;
+      await drain;
+      await late;
+
+      final statuses = [
+        for (final id in ['m1', 'm2']) (await messageRow(id))['triage_status'],
+      ];
+      expect(statuses.where((s) => s == 'triaged'), hasLength(1));
+      expect(statuses.where((s) => s == 'pending'), hasLength(1));
+      expect(llm.calls, 1);
+
+      await queue.pump();
+      expect(llm.calls, 2);
+    });
   });
 }

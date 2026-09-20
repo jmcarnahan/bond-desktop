@@ -2081,7 +2081,9 @@ Future<void> _readTheVectorAlone({
         'prefix ${report.prefixLength}',
     startedAt: startedAt,
     extra: {
-      'cards_from': GoldenDefines.runPath,
+      // Basenames, not paths: the result JSON already redacts the embed host,
+      // and a home directory in it would undo that.
+      'cards_from': GoldenDefines.runPath.split('/').last,
       'vector': {
         'card': variant.wireName,
         'prefix_length': report.prefixLength,
@@ -2125,7 +2127,7 @@ Future<void> _readTheVectorAlone({
         'seed': report.toJson(),
       },
       'golden': {
-        'path': GoldenDefines.setPath,
+        'path': GoldenDefines.setPath.split('/').last,
         'generated': set.generated,
         'items': set.items.length,
       },

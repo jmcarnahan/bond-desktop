@@ -224,12 +224,15 @@ conversation, which costs a parse of text the call was already receiving.
 
 The best draft the ledger has measured is not the one the local 27B writes. On
 the golden set the 27B passes 6 of 25 replies under the invention rules and
-Opus 5 passes 17 of 25 (Round B, 2026-09-17). Round E makes that reachable
+Opus 5 passes 17 of 25 (Round B, 2026-09-17); a second Opus 5 pass through
+this very wire on 2026-09-20, with prompt token counts identical to the first,
+judged 15 of 25, so the honest range is 15 to 17 and the screen quotes the
+ledger's row of record. Round E makes that reachable
 from the composer without making it the default: **Improve with `<name>`**
 sends the draft that was just written back through the same prompt on a target
 the owner picked, and replaces it.
 
-**The stage.** `draft_improve` is a routable stage like the other thirteen
+**The stage.** `draft_improve` is a routable stage like the other fourteen
 (`pipelineStages`, `slot: prose`, label "Improve a draft"), with one
 difference: it is the only `PipelineStageInfo.optional` row, so its default is
 **no target at all**. A build nobody has configured has no Improve button. A

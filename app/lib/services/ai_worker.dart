@@ -326,20 +326,32 @@ class AiWorker {
   /// would be answering a question they did not ask.
   Future<void> quiesce() async {
     _stopped = true;
-    // A LOOP, not one wait — see `TriageQueue.quiesce`: a claim already at
-    // the store when [_stopped] flipped joins [_inFlight] after the first
-    // snapshot, and releasing under a still-running item would hand it to a
-    // second worker.
-    while (_inFlight.isNotEmpty) {
-      await Future.wait(_inFlight.toList()).catchError((_) => const <void>[]);
+    _quiescing = true;
+    try {
+      // A LOOP, not one wait — see `TriageQueue.quiesce`: a claim already at
+      // the store when [_stopped] flipped joins [_inFlight] after the first
+      // snapshot, and releasing under a still-running item would hand it to a
+      // second worker.
+      while (_inFlight.isNotEmpty) {
+        await Future.wait(_inFlight.toList())
+            .catchError((_) => const <void>[]);
+      }
+      for (final (kind, source, id) in _claimed.toList()) {
+        // Guarded on `processing` in the statement itself, so a claim
+        // released here cannot reopen an item that finished while this was
+        // deciding.
+        await _store.releaseWorkClaim(kind, source, id);
+      }
+      _claimed.clear();
+    } finally {
+      _quiescing = false;
     }
-    for (final (kind, source, id) in _claimed.toList()) {
-      // Guarded on `processing` in the statement itself, so a claim released
-      // here cannot reopen an item that finished while this was deciding.
-      await _store.releaseWorkClaim(kind, source, id);
-    }
-    _claimed.clear();
   }
+
+  /// Raised for the whole of [quiesce], and read by [pump] as "off": a pump
+  /// that lands during the wait must not lift [_stopped] and resume the
+  /// drain this method is waiting out.
+  bool _quiescing = false;
 
   /// [quiesce], and then the stream goes too — this worker is done.
   ///
@@ -377,7 +389,11 @@ class AiWorker {
   /// reads it. A completed future and never null: callers both `await` this
   /// and `unawaited(…)` it.
   Future<void> pump() {
-    if (_off) {
+    // A quiesce in progress counts as off: the latch it set must survive
+    // until its claims are handed back, or a pump landing mid-wait would
+    // clear [_stopped], resume the drain, and let `_claimed.clear()` run
+    // under a live claim.
+    if (_off || _quiescing) {
       _stopped = true;
       return _draining ?? Future<void>.value();
     }

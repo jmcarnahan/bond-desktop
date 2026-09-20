@@ -42,6 +42,13 @@ void main() {
       find.text('This target would answer the Draft generation stage.'),
       findsOneWidget,
     );
+    // One flag covers both draft stages, and the pane says so: the scope of
+    // a yes is the scope the person read.
+    expect(
+      find.text('Allowing it covers Draft reply and Improve a draft alike. '
+          'No other stage sends drafts anywhere.'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('it says what goes and what never goes', (tester) async {

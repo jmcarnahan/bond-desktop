@@ -63,9 +63,12 @@ class LiveBench {
   /// path, which is the only string it prints that is not a count.
   void printPaths({String? runPath, String? resultPath}) {
     final lines = [
-      if (runPath == null)
+      // A stage that writes no RUN file by design (the vector stage has
+      // nothing to score) still wrote its result; the warning is for the case
+      // where nothing at all landed.
+      if (runPath == null && resultPath == null)
         'BENCH_OUT not set — no run file written'
-      else
+      else if (runPath != null)
         'wrote $runPath',
       if (resultPath != null) 'wrote $resultPath',
       if (runPath != null) 'next: make golden-score R=$runPath',
