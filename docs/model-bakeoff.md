@@ -1103,6 +1103,11 @@ seeds the GOLD gate verdict.
 | 2026-09-19 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `…-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260919-223525.json` | 45/98 (46%) | 5 | 78% over the 2 formed, 75% over the 3 declined | not read | 62% | 2 / 3 declined / not read | 5 / 76 | 159 s (sweep 76.5 s) | **The row of record for the shipped tree**: Qwen3-Embedding-0.6B, the instruction prefix, `clustering-v3`, the five rescaled gates, everything local. Second of two passes and the keeper; the first, `…-223246.json`, was identical on every count the sweep files at 251 s with a sweep wall of 90.8 s. The formed clusters are the SAME two as the box row above; what differs is the namer, so the eighteen-point gap between 50/98 with 9 positives there and 45/98 with 5 here is the naming model and nothing about the vector |
 | 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `…-llamacpp-qwen3-8-27b-gguf-q4-k-m-sweep-20260920-015446.json` | 45/98 (46%) | 5 | 78% over the 2 formed, 75% over the 3 declined | 8% over 13 efforts | 62% | 2 / 3 / 0 refused | 5 / 76 | 167 s (sweep 80.3 s) | Round E Phase 5: the reproduction on the final tree, second of two passes, identical to the Round E row of record on every count the sweep files; the first pass `…-015159.json` identical too at 272 s with verify. Keep-only 38 of 85; forbidden hits 4 over 1 bucket; incoherent 3; the filed storylines 48% pure over 2 of 2; outliers dropped 2, fragments 0, rows folded 2; items unmapped 21 / filed nowhere 66; pool pairs at or above 0.65 same 10 of 85 against cross 0 of 1,346; recall-70 cosine 0.43 at 15% cross. `make golden-vector` on the same tree reproduced the shipped vector line exactly, `golden-vector-embed-local-topics-prefix-86-20260920-015454.json` |
 | 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | vllm-g6e/Qwen3.8-27B-FP8 | topics | `…-vllm-qwen3-8-27b-fp8-box-sweep-20260920-020641.json` | 50/98 (51%) | 9 | 78% over the 2 formed, 75% over the 3 declined | not read | 56% | 2 / 3 declined / not read | 5 / 80 | 126 s (sweep 33.1 s) | Round E Phase 5: the final tree with the box namer, one pass, `BENCH_VERIFY=0`; identical to the shoot-out's Qwen row on every count the sweep files, so the final tree reproduces both of the round's rows; forbidden hits 5; against the local keeper on the same clusters, four more correct positives and one more forbidden hit, the namer being the only difference |
+| 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | bedrock/claude-opus-5 | topics | `golden-run-…-bedrock-claude-opus-5-namer-sweep-20260920-060334.json` | 53/98 (54%), keep-only 44/85 | 8 | 68% over the 3 formed, 86% over the 5 declined | not taken | 61% | 3 / 5 / 4 | 8 / 70 | 40.3 s + 27.2 s over two sweep passes | Round F Phase 1, the namer read: the Bedrock Opus 5 namer through the app's own Converse wire, `PROSE_WIRE=converse`, with the confirm on the local 4B and the embedding local. Pass 1 of two completed passes; forbidden hits 2; incoherent 1; outliers dropped 3; rows folded 3; cards from `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json` |
+| 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | bedrock/claude-opus-5 | topics | `…-bedrock-claude-opus-5-namer-sweep-20260920-072505.json` | 55/98 (56%), keep-only 45/85 | 9 | 57% over the 2 formed, 83% over the 4 declined | not taken | not taken | 2 / 4 / not taken | 6 / 66 | not taken | Round F Phase 1: the second COMPLETED Opus pass; forbidden hits 3; 3 sweep passes. The intervening pass was lost at 42 s when a naming answer stopped on `max_tokens` under Converse and the sweep bench failed the test |
+| 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | bedrock/claude-sonnet-5 | topics | `…-bedrock-claude-sonnet-5-namer-sweep-20260920-060604.json` | 57/98 (58%), keep-only 46/85 | 10 | 89% over the 1 formed, 73% over the 4 declined | 6% over 13 gold efforts | 100% | 1 / 4 / 1 | 5 / 60 | 36.7 s | Round F Phase 1: pass 1 of the Bedrock Sonnet 5 namer, same wire and same cards; forbidden hits 3; incoherent 3; one storyline formed, so the largest holds every filed thread |
+| 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | bedrock/claude-sonnet-5 | topics | `…-bedrock-claude-sonnet-5-namer-sweep-20260920-072730.json` | 54/98 (55%), keep-only 43/85 | 12 | 69% over the 5 formed, 58% over the 4 declined | not taken | not taken | 5 / 4 / not taken | 9 / 84 | not taken | Round F Phase 1: pass 2 of the Sonnet namer; forbidden hits 8 over 2 buckets, two of the five formed storylines being wrong buckets; 4 sweep passes; the pass that misses the pre-registered reading |
+| 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | vllm-g6e/Qwen3.8-27B-FP8+MTP | topics | `…-vllm-g6e-qwen3-8-27b-fp8-mtp-sweep-20260920-060802.json` | 50/98 (51%), keep-only 41/85 | 9 | 78% over the 2 formed, 75% over the 3 declined | not taken | not taken | 2 / 3 / not taken | 5 / not taken | 31.4 s | Round F Phase 1: the box namer on `main @ e9fee6f`, identical to the Round E box row above on every count the sweep files; forbidden hits 5 |
 
 **What the two sweep rows say (2026-09-18).** Both cards were run three
 times, twice before the phase's review and once after its fixes, and every
@@ -2536,6 +2541,11 @@ sizes and the box rows rather than measured on such a machine, and the
 installer manifest per tier is Round F's. The five simplifications this round
 wrote down rather than built are in the roadmap's §10.
 
+*Pointer, Round F Phase 1 (2026-09-20).* The sentence above that bulk stays local
+because the box's 4B answers about 70 triage booleans was a sized estimate. The
+Round F block below carries the measured row: the box 4B-FP8 at 88 / 88 / 66 / 71
+against the local 4B's 88 / 88 / 71 / 72, at 21.3 msgs/min against 8.9.
+
 **Memory, round 0 (2026-09-16).** With MTP on and both chat servers at 16K
 context, the three servers' resident sizes are 22.0GB (27B + MTP sidecar),
 4.1GB (4B, 4 slots) and 0.3GB (embed) — 26.4GB, inside the speed design's
@@ -2543,6 +2553,160 @@ context, the three servers' resident sizes are 22.0GB (27B + MTP sidecar),
 (35GB wired, 15GB compressor with Docker quit, against 31GB wired with Docker
 running before the change) because other processes fill what the servers
 release; the number to hold the servers to is their own footprint.
+
+**Round F (2026-09-20), Phase 1 — the box rows and the namer read.** These rows
+were taken on `main @ e9fee6f` on 2026-09-20 between 06:00 and about 08:00 UTC,
+before any Round F code. The box is `bench27b`, a g6e.xlarge running vLLM with
+the 27B-FP8 and its MTP head on one endpoint and the 4B-FP8 on another, reached
+over ssh tunnels. Every confirm ran on the local 4B Q8_0 and every vector on the
+local Qwen3-Embedding-0.6B. The sweep rows take their cards from
+`golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-000817.json` and
+the storyline rows from
+`golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json`, the
+two pins that do not move. One live target at a time, the app closed, no tests
+running. The box terminates at 20:36 UTC the same day and no later phase repeats
+a box row. Round F changes no prompt, no gate, no tuning number, no card and no
+vector, so these are rows OF the final tree by construction, and Phase 5's local
+rows are the proof that the construction holds. In the tables below a cell
+reading `not taken` is a number the command measures that this read did not
+record; a dash is a column the command does not measure at all.
+
+**The namer read, `make golden-sweep`.** Confirm on the local 4B, embedding
+local, the Qwen vector and cosine clustering throughout; only the naming model
+moves.
+
+| date | confirm label | name label | card | run file | storyline.id | correct positives | purity | coverage | largest share | formed / tombstoned / lint | calls name / confirm | wall | note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | bedrock/claude-opus-5 | topics | `golden-run-…-bedrock-claude-opus-5-namer-sweep-20260920-060334.json` | 53/98 (54%), keep-only 44/85 | 8 | 68% over the 3 formed, 86% over the 5 declined | not taken | 61% | 3 / 5 / 4 | 8 / 70 | 40.3 s + 27.2 s over two sweep passes | pass 1 of the Bedrock Opus 5 namer through the app's own Converse wire, `PROSE_WIRE=converse`; forbidden hits 2; incoherent 1; outliers dropped 3; rows folded 3 |
+| 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | bedrock/claude-opus-5 | topics | `…-bedrock-claude-opus-5-namer-sweep-20260920-072505.json` | 55/98 (56%), keep-only 45/85 | 9 | 57% over the 2 formed, 83% over the 4 declined | not taken | not taken | 2 / 4 / not taken | 6 / 66 | not taken | the second COMPLETED Opus pass; forbidden hits 3; 3 sweep passes. The intervening pass was lost at 42 s when a naming answer stopped on `max_tokens` under Converse and the sweep bench failed the test; a lost pass is re-run, never patched |
+| 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | bedrock/claude-sonnet-5 | topics | `…-bedrock-claude-sonnet-5-namer-sweep-20260920-060604.json` | 57/98 (58%), keep-only 46/85 | 10 | 89% over the 1 formed, 73% over the 4 declined | 6% over 13 gold efforts | 100% | 1 / 4 / 1 | 5 / 60 | 36.7 s | pass 1 of the Bedrock Sonnet 5 namer, same wire; forbidden hits 3; incoherent 3; one storyline formed, so the largest holds every filed thread |
+| 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | bedrock/claude-sonnet-5 | topics | `…-bedrock-claude-sonnet-5-namer-sweep-20260920-072730.json` | 54/98 (55%), keep-only 43/85 | 12 | 69% over the 5 formed, 58% over the 4 declined | not taken | not taken | 5 / 4 / not taken | 9 / 84 | not taken | pass 2 of the Sonnet namer; forbidden hits 8 over 2 buckets, two of the five formed storylines being wrong buckets; 4 sweep passes; the pass that misses the pre-registered reading |
+| 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | vllm-g6e/Qwen3.8-27B-FP8+MTP | topics | `…-vllm-g6e-qwen3-8-27b-fp8-mtp-sweep-20260920-060802.json` | 50/98 (51%), keep-only 41/85 | 9 | 78% over the 2 formed, 75% over the 3 declined | not taken | not taken | 2 / 3 / not taken | 5 / not taken | 31.4 s | the box namer, identical to the Round E box row on every count the sweep files; forbidden hits 5 |
+| 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | topics | `…-q4-k-m-sweep-20260920-015446.json` | 45/98 (46%), keep-only 38/85 | 5 | 78% over the 2 formed, 75% over the 3 declined | not taken | not taken | 2 / 3 / not taken | 5 / not taken | 80.3 s | THE LOCAL ROW OF RECORD, the Round E final tree with everything local; forbidden hits 4 |
+
+**`make golden` on the box 4B-FP8**, the first triage row that model has had.
+Read against the local bulk row of record.
+
+| date | slot | label | ctx | run file | keep-only: category / urgency / needs_action / reply_expected / needs_you / intent / importance / project / topics / people | rubric | p50 ms | gen t/s | msgs/min | $/1K msgs | note |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-09-20 | bulk | vllm-g6e/Qwen3-4B-Instruct-2507-FP8 | tail3 | `golden-run-vllm-g6e-qwen3-4b-instruct-2507-fp8-20260920-061256.json` | 88% / 88% / 64% / 71% / 91% / 74% / 43% / 55% / 22% / 83% | not judged | 1283 / 605 / 959 (triage / needs_you / extraction) | 110.9 triage | 21.4 | not taken | pass 1, K=1; deadline 88%, orgs 93%; wall 280 s |
+| 2026-09-20 | bulk | vllm-g6e/Qwen3-4B-Instruct-2507-FP8 | tail3 | `…-20260920-061744.json` | 88% / 88% / 66% / 71% / 91% / 74% / 43% / 55% / 22% / 83% | not judged | 1309 / 607 / 955 (triage / needs_you / extraction) | 110.9 triage | 21.3 | not taken | second of two passes and the keeper; deadline 88%, orgs 93%; wall 282 s. The summary rubric was not judged: bulk stays local, and this row exists to put a number beside that sentence in the tier tables |
+| 2026-09-16 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260916-194031.json` | 88% / 88% / 71% / 72% / 92% / 75% / 39% / 66% / 26% / 87% | label 86% · action items 60% · summary 63% · needs-you evidence 28% · extract evidence 25% | 7563 / 3569 / 5891 (triage / needs_you / extraction) | 16.2 | 12.5 at K=4, 8.9 at K=1 | $0.00 | THE LOCAL ROW OF RECORD, round B phase 1 |
+
+**`make golden-prose` on the box 27B-FP8 with MTP.**
+
+| date | slot | label | ctx | run file | keep-only: category / urgency / needs_action / reply_expected / needs_you / intent / importance / project / topics / people | rubric | p50 ms | gen t/s | msgs/min | $/1K msgs | note |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-09-20 | prose | vllm-g6e/Qwen3.8-27B-FP8+MTP | tail (fixed) | `golden-run-vllm-g6e-qwen3-8-27b-fp8-mtp-20260920-062149.json` | — / — / — / 83% / — / — / — / — / — / — | not judged; byte-identical to pass 2 | not taken | not taken | 21.2 | not taken | pass 1; 63 of 76 on the reply decision; wall 245 s |
+| 2026-09-20 | prose | vllm-g6e/Qwen3.8-27B-FP8+MTP | tail (fixed) | `…-20260920-062529.json` | — / — / — / 83% / — / — / — / — / — / — | draft 24% | 1374 / 3767 (reply_decision / draft_reply) | 29.4 decision · 42.8 draft | 21.2 | not taken | second of two passes and the keeper; 63 of 76 on the decision; 6 of 25 drafts pass; causes of failing invented 11 · forbidden 8 · missing 8 of the 19; p95 1,740 / 7,331 ms; 0 failures and 0 reasoning leaks; judged from 3 Opus packets with 0 rubric keys unmatched; the two passes are byte-identical on all 25 drafts, and 16 of the 25 differ from the 2026-09-17 row on a different server session, which is why this row was judged rather than carried over; wall 220 s |
+| 2026-09-17 | prose | vllm-g6e/Qwen3.8-27B-FP8+MTP | tail (fixed) | `golden-run-vllm-g6e-qwen3-8-27b-fp8-mtp-20260917-064431.json` | — / — / — / 83% / — / — / — / — / — / — | draft 28% | 1313 / 3711 (reply_decision / draft_reply) | not taken | not taken | not taken | THE ROW THIS IS READ AGAINST, the GPU spike; 7 of 25 drafts, invented 10 of 18; 6 against 7 is inside the judge's band of three |
+
+**`make golden-storyline`, the confirm task, on the box.** 453 calls a pass,
+cards from the 2026-09-14 4B tail3 run.
+
+| date | bulk label | cards from | run file | storyline.id | gold-accept must / should | forbidden-accept | extra-accept | derived none on gold-none | low-yes | p50 ms | calls/min | msgs/min | $/1K msgs | note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-09-20 | vllm-g6e/Qwen3.8-27B-FP8-as-bulk | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-vllm-g6e-qwen3-8-27b-fp8-as-bulk-storyline-20260920-063911.json` | 84/98 (86%) | 40/48 (83%) / 7/15 (47%) | 7/88 (8%) | 2/300 | 32/35 | 0 | 1757 | 33.9 | 7.5 | not taken | pass 1; keep-only 73/85; ties 4; wall 822 s; the breakdown and low-yes are read from this pass's own timing JSON and equal the keeper's |
+| 2026-09-20 | vllm-g6e/Qwen3.8-27B-FP8-as-bulk | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `…-20260920-065238.json` | 84/98 (86%) | 40/48 (83%) / 7/15 (47%) | 7/88 (8%) | 2/300 | 32/35 | 0 | 1758 | 33.9 | 7.5 | not taken | second of two passes and the keeper; keep-only 73/85; ties 4; derived gold 46 / none 48 / other 6; 406,038 prompt tokens; wall 807 s. |
+| 2026-09-18 | vllm-g6e/Qwen3.8-27B-FP8-as-bulk | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-vllm-g6e-qwen3-8-27b-fp8-as-bulk-storyline-20260918-224336.json` | 83/98 (85%) | 40/48 / 7/15 | 8/88 (9%) | not taken | 33/35 | not taken | not taken | 33.3 | not taken | not taken | THE ROUND D ROW this box 27B read is compared against |
+| 2026-09-20 | vllm-g6e/Qwen3-4B-Instruct-2507-FP8 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-vllm-g6e-qwen3-4b-instruct-2507-fp8-storyline-20260920-065648.json` | 78/98 (80%) | 46/48 / 10/15 | 21/88 (24%) | 16/300 | 25/35 | not taken | 522 | 114.6 | 25.3 | not taken | pass 1; keep-only 67/85; ties 17; wall 250 s |
+| 2026-09-20 | vllm-g6e/Qwen3-4B-Instruct-2507-FP8 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `…-20260920-070052.json` | 78/98 (80%) | 46/48 (96%) / 10/15 (67%) | 21/88 (24%) | 17/300 | 25/35 | 0 | 522 | 113.5 | 25.1 | not taken | second of two passes and the keeper; keep-only 67/85; ties 17; derived gold 49 / none 31 / other 20; wall 244 s |
+| 2026-09-19 | vllm-g6e/Qwen3-4B-Instruct-2507-FP8 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `golden-run-vllm-g6e-qwen3-4b-instruct-2507-fp8-storyline-20260919-020723.json` | 80/98 (82%) | 46/48 / 9/15 | 19/88 (22%) | not taken | 27/35 | not taken | not taken | 116.4 | not taken | not taken | THE ROUND D AND E ROW this box 4B read is compared against |
+| 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260914-174707.json` | `…-q8-0-gguf-storyline-20260920-020425.json` | 84/98 (86%) | 45/48 / 10/15 | 15/88 (17%) | not taken | 30/35 | not taken | 1214 | 49.1 | 10.8 | not taken | THE LOCAL ROW OF RECORD; keep-only 74/85; wall 554 s |
+
+**`make bench-prose` on the box 27B-FP8 with MTP**, fictional corpus.
+
+| date | label | result json | gen t/s | p50 ms | accuracy | drain msgs/min K=1/3/6 | verdict |
+|---|---|---|---|---|---|---|---|
+| 2026-09-20 | vllm-g6e/Qwen3.8-27B-FP8-mtp | `prose-vllm-g6e-qwen3-8-27b-fp8-mtp-20260920-070214.json` | 43.8 draft (wall) | 4923 (draft) · 3325 (name) · 4216 (recap) | prose read by hand | — | pass 1; 0 failures; p95 6,143 / 3,446 / 4,795; 82 s with verify |
+| 2026-09-20 | vllm-g6e/Qwen3.8-27B-FP8-mtp | `…-20260920-070315.json` | 43.6 draft (wall) | 4923 (draft, ttft 680) · 3360 (name) · 4257 (recap) | prose read by hand | — | second of two passes and the keeper; 0 failures; p95 6,085 / 3,445 / 4,796; 61 s |
+| 2026-09-17 | vllm-g6e/Qwen3.8-27B-FP8+MTP | `prose-vllm-g6e-qwen3-8-27b-fp8-mtp-20260917-064055.json` | 46.5 (wall) | 5730 (draft) · 2363 (name) · 3627 (recap) | prose read by hand | — | THE BOX ROW this is read against; same server, a different day |
+| 2026-09-18 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260918-050050.json` | 14.2 | 17612 (draft, ttft 2957) · 8342 (name) · 11531 (recap) | prose read by hand | — | THE LOCAL ROW OF RECORD, Round C phase 4 |
+
+**`make bench-pipeline` on the box**, 3 copies of the fixture corpus for 48
+ungated messages, policy `all`, the late-arrival leg on.
+
+| date | shape | width | copies | fast wall s | drafts wall s | fast msgs/min | late arrival s | result json | notes |
+|---|---|---|---|---|---|---|---|---|---|
+| 2026-09-20 | lanes | 4 | 3 | 60.5 | 140.7 | 47.6 | 32.8 | `pipeline-vllm-g6e-qwen3-4b-instruct-2507-fp8-20260920-070611.json` | BOTH slots on the box, bulk 4B-FP8 and prose 27B-FP8 with MTP; 37 drafts; pass 1; run wall 176 s with verify |
+| 2026-09-20 | lanes | 4 | 3 | 60.0 | 139.6 | 48.0 | 32.1 | `…-20260920-070835.json` | both slots on the box; 37 drafts; pass 2 (kept); run wall 145 s |
+| 2026-09-17 | lanes | 4 | 3 | 60.3 | 139.4 | 47.7 | 33.2 | `pipeline-vllm-g6e-qwen3-4b-instruct-2507-fp8-20260917-215052.json` | THE ROUND C BOX ROW this pair is read against; 37 drafts; pass 2 (kept) |
+| 2026-09-20 | lanes | 1 | 3 | 195.1 | 346.1 | 14.8 | 78.0 | `pipeline-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260920-071459.json` | box prose with MTP, bulk on the local 4B Q8_0; 37 drafts; pass 1; run wall 383 s |
+| 2026-09-20 | lanes | 1 | 3 | 212.1 | 391.8 | 13.6 | 50.1 | `…-20260920-072138.json` | box prose, local bulk; 37 drafts; pass 2 (kept); run wall 399 s |
+| 2026-09-17 | lanes | 1 | 3 | 225.0 | 384.3 | 12.8 | 75.0 | `pipeline-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260917-184637.json` | THE ROUND C BOX ROW this pair is read against; box prose with MTP, local bulk; pass 2 (kept) |
+| 2026-09-18 | lanes | 1 | 3 | 210.5 | 865.4 | 13.7 | 95.7 | `pipeline-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260918-045009.json` | THE ALL-LOCAL ROW OF RECORD, Round C phase 4; local 4B bulk and local 27B with MTP on prose; pass 2 (kept) |
+
+**`make drain` on the box 4B-FP8** at K=1, 3 and 6, fictional corpus.
+
+| date | label | result json | gen t/s | p50 ms | accuracy | drain msgs/min K=1/3/6 | verdict |
+|---|---|---|---|---|---|---|---|
+| 2026-09-20 | vllm-g6e/Qwen3-4B-Instruct-2507-FP8 | `drain-vllm-g6e-qwen3-4b-instruct-2507-fp8-k-1-20260920-072223.json` | 113.0 at K=1 · 109.5 at K=3 · 105.1 at K=6 | not taken | — | 41.7 / 111.2 / 197.8 | pass 1; K=1 23.0 s, K=3 8.6 s, K=6 4.9 s; 2.67× at K=3 and 4.74× at K=6 over K=1 |
+| 2026-09-20 | vllm-g6e/Qwen3-4B-Instruct-2507-FP8 | `…-k-1-20260920-072305.json` | 113.9 at K=1 · 110.1 at K=3 · 102.6 at K=6 | not taken | — | 41.3 / 109.7 / 196.5 | second of two passes and the keeper; K=1 23.2 s, K=3 8.8 s, K=6 4.9 s; 2.66× and 4.76×. vLLM serves the slots, so `BENCH_K=1,3,6` runs as is with no restart; the result file carries the K=1 leg and the per-K lines are the log's summary, counts only |
+| 2026-09-18 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF, ctx 16K, 4 slots | `drain-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-k-1-20260918-045214.json` | not taken | not taken | — | 19.2 / 33.8 / not run since 2026-09-04, 56.9 on 32K and 6 slots | THE LOCAL ROW OF RECORD, Round C; 1.76× at K=3 |
+
+**What the Phase 1 rows say.**
+
+*The namer.* Naming on a stronger model is the measured lever the Round E rows
+predicted. Sonnet 5 and Opus 5 both file more of the mailbox than the local 27B, with
+more correct positives and no more forbidden hits on their first passes; the
+table above carries the numbers, and the second passes below it show how much
+a cloud pass moves. The pre-registered reading, written before the second passes ran,
+asks for `storyline.id` above 50, forbidden hits at or below 3 and correct
+positives at or above 8, held on two passes. **Opus 5 MEETS it on both of its
+completed passes**, 53 with 8 and 2 and then 55 with 9 and 3; its lost pass was
+lost to a `max_tokens` stop and not to a score. **Sonnet 5 meets it on pass one
+and MISSES it on pass two**, where 12 correct positives come with 8 forbidden
+hits over two buckets, so Sonnet is the higher-variance namer: more positives
+when it is right, more forbidden hits when it is not. Converse carries no
+temperature, so a cloud namer is not deterministic across passes, which is what
+the two passes show; the local and the box namers reproduce to the count. Every
+cloud pass sits above the abstention floor of 50 and above the local row of
+record on positives, and the roadmap's exit of 70 of 98 with positives stays
+unmet. What ships from this is a documented setting and a recommendation, not a
+default, because naming sends thread cards off the machine: the subject, the
+display names of the participants and the triage summary of every thread in a
+cluster, and no topics, which is what the naming card carries. Item 7 of the roadmap's §8
+is the owner's decision. The first thing a cloud-namer default would need fixed
+is the `max_tokens` stop: a Converse namer can run out of tokens mid answer,
+`LlmClient._readConverse` raises, and the sweep bench loses the whole pass after
+the seeding. The fix is a `maxTokens` read off the target, or the budget raised
+with a `make golden-sweep` row on each side.
+
+*The box 4B on triage.* Its first row is identical to the local 4B on category
+and urgency, sits 5 to 7 points under it on needs_action at the edge of the
+four-point floor, sits inside it on reply_expected, and runs at 2.4 times the
+local K=1 throughput. The tier tables' sentence that bulk stays local now has a
+number beside it, and the number says the box 4B is a throughput option at a
+small accuracy cost rather than a free win.
+
+*The box 27B on confirm.* It files 84 of 98 with forbidden accepts at 8%,
+against the local 4B's 84 of 98 at 17%: the same score with half the wrong
+accepts. The box 4B files 78 of 98 at 24%, two points under its own 2026-09-19
+row and inside the same band, so the confirm model is where the box's 27B pays
+and its 4B does not.
+
+*Prose on the box.* The reply decision holds at 83% and 6 of 25 drafts pass the
+rubric, against the 2026-09-17 box row's 7 of 25, which is inside the band of
+three. Both passes wrote byte-identical drafts, and 16 of the 25 differ from the
+2026-09-17 row because the server session differs, so the row was judged rather
+than carried over. On `bench-prose` the names and the recaps are about a second
+slower than the 2026-09-17 box row and the drafts about 0.8 s faster: the same
+server on a different day, so that is the box's own variance and nothing in the
+code. Against the local row of record the box is 2.5 times faster on names, 2.7
+on recaps and 3.6 on drafts.
+
+*The pipeline and the drain.* Both slots on the box reproduce the Round C box
+row to the second on all four numbers, so nothing on the tree and nothing on the
+box moved between the two reads. With box prose and local bulk the fast wall is
+the local 4B's own and the drafts wall is 392 s against the all-local row of
+record's 865 s, with the late arrival at 50 s against 96 s. The late leg lands
+wherever the fast lane is in its batch, so it swings between passes, 78 s and
+then 50 s here, and it is read as a range rather than a point. The drain moves
+the same way: the box 4B drains 2.2 times the local rate at K=1 and 3.2 times at
+K=3, and keeps scaling to K=6 where the local server needs a six-slot restart.
+Every timing row here is read against a row taken on the same servers and the
+same shape, because a same-day comparison is the only honest one for a bench
+whose numbers move with what else the machine is doing.
 
 ## Recommendations
 

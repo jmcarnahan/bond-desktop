@@ -337,6 +337,37 @@ current grouping would need a fourth state. The host applies them with
 `AppPrefsNotifier.applyPreset` AFTER the upsert, because `applyPreset` refuses a
 target id it cannot find.
 
+**What *Prose stages* does on a Bedrock target, and what it sends.** Ticking it
+moves the six prose stages onto that model: storyline naming, storyline
+refresh, the storyline recap, the grouping stage, the reply decision and Draft
+reply, except that `applyPreset` holds `draft_reply` back on a third-party
+target while `cloud_drafts_consent` is false, so drafts keep being written
+locally until the consent pane has been answered, and the preset is not a way
+around it. Improve a draft is in no preset. What leaves the machine for a naming call is the thread cards of
+one cluster: each thread's subject, the display names of its participants and
+its triage summary; the naming card carries no topics. No message body,
+no attachment and no directory excerpt is in that prompt, which is why naming
+sits behind the prose preset rather than behind the drafts consent. This is the
+one place a cloud model measurably changes the filing, and the numbers, taken on
+the golden set on 2026-09-20 with the confirm and the embedding local in every
+row, are these:
+
+| namer | storyline.id | correct positives | forbidden hits |
+|---|---|---|---|
+| local 27B Q4_K_M with MTP | 45/98 | 5 | 4 |
+| the GPU box 27B-FP8 with MTP | 50/98 | 9 | 5 |
+| Bedrock Sonnet 5, pass 1 | 57/98 | 10 | 3 |
+| Bedrock Opus 5, pass 1 | 53/98 | 8 | 2 |
+
+A cloud pass is one of two reads and the two differ, because Converse carries no
+temperature: Opus 5's second pass filed 55 of 98 with 9 correct positives and 3
+forbidden hits, and Sonnet 5's second pass 54 of 98 with 12 and 8. The local and
+the box namers reproduce to the count.
+
+Nothing in the app picks a cloud namer for anybody. The measurement is a reason
+to offer the setting, not a default, and `docs/model-bakeoff.md` carries the
+second passes and the reading.
+
 **Cloud drafts consent.** Picking a **third-party** target for `draft_reply` or
 `draft_improve` while `cloud_drafts_consent` is false writes NOTHING. Instead the
 screen opens a third pane, `PaneSurface` titled **Cloud drafts** over

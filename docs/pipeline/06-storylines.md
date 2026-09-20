@@ -1063,6 +1063,35 @@ the vector to the base rate: this pool holds 1,346 cross-effort pairs against
 of the cross population drowns what it catches, and the namer on a stronger
 model is the lever the rows leave.
 
+Round F pulled that lever on 2026-09-20 and measured it. The namer is a routable
+stage like any other, so the same sweep was run four times with nothing changed
+but the model that names a cluster: the confirm stayed on the local 4B, the
+embedding stayed local, and the cards were the same pinned run. A stronger namer
+files more of the mailbox and more of it correctly; how many storylines it forms
+and how pure they are move from pass to pass, as the second passes show.
+
+| namer | storyline.id | correct positives | forbidden hits | formed / declined |
+|---|---|---|---|---|
+| local 27B Q4_K_M with MTP | 45/98 | 5 | 4 | 2 / 3 |
+| the box 27B-FP8 with MTP | 50/98 | 9 | 5 | 2 / 3 |
+| Bedrock Opus 5 | 53/98 | 8 | 2 | 3 / 5 |
+| Bedrock Sonnet 5 | 57/98 | 10 | 3 | 1 / 4 |
+| a sweep that files nothing, the abstention floor | 50/98 | 0 | 0 | 0 / 0 |
+
+Each cloud namer was read twice and both second passes are in
+`docs/model-bakeoff.md`. Converse carries no temperature, so a cloud namer is not
+deterministic across passes: Opus holds the reading on both of its completed
+passes, and Sonnet's second pass files fewer with more forbidden hits. The local
+and the box namers reproduce to the count. Pointing the stage at a cloud model is
+something a person does today rather than something the app decides: Settings,
+then Models, then a Bedrock target with **Prose stages** ticked, which moves
+naming, refresh, recap, grouping and the reply decision onto it, and Draft reply
+once the consent pane has been answered. Nothing is
+shipped as a default, because a naming call sends thread cards off the machine.
+The roadmap's exit of 70 of 98 with correct positives is still not met, and the
+base rate is why: this pool holds 1,346 cross-effort pairs against 85 same-effort
+ones, unchanged by anything above the vector, and that ratio is the wall.
+
 **Reading the vector on its own.** `make golden-vector` is the same test body
 and the same seeding, stopped the moment the mailbox is embedded. It needs one
 server, the embedding one, and takes about a minute, because nothing in it
