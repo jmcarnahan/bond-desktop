@@ -60,7 +60,7 @@ void main() {
         continue;
       }
       // An OPTIONAL stage runs another stage's task — `draft_improve` sends
-      // `DraftReplyTask` — so it is a routing destination without a schema of
+      // `DraftTask` — so it is a routing destination without a schema of
       // its own, and the second exception this containment allows.
       if (stage.optional) continue;
       expect(names, contains(stage.id), reason: stage.id);

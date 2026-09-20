@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart' show LlmTargetSpec, LlmWire;
 import '../theme/tokens.dart';
+import 'inline_alert.dart';
 import 'model_slot_editor.dart' show ProbeStatus;
 import 'settings_models_body.dart' show SettingsModelsBody;
 import 'settings_segments.dart';
@@ -65,6 +66,11 @@ class LlmTargetEditor extends StatefulWidget {
   static const Key streamsKey = ValueKey('llm-target-streams');
   static const Key checkKey = ValueKey('llm-target-check');
   static const Key saveKey = ValueKey('llm-target-save');
+  static const Key saveErrorKey = ValueKey('llm-target-save-error');
+
+  /// The one sentence a Save that threw leaves under the buttons.
+  static const String saveFailedText =
+      'Could not save this target. Check the settings store and try again.';
   static const Key cancelKey = ValueKey('llm-target-cancel');
   static const Key presetProseKey = ValueKey('llm-target-preset-prose');
   static const Key presetConfirmKey = ValueKey('llm-target-preset-confirm');
@@ -156,6 +162,12 @@ class _LlmTargetEditorState extends State<LlmTargetEditor> {
   /// keychain and the database, and a second press would be a race over the
   /// same rows.
   bool _saving = false;
+
+  /// The last Save that threw, as one sentence under the buttons; cleared by
+  /// the next press. Every other writing control on this screen shows its
+  /// failure inline, and a Save that vanished into the zone showed nothing.
+  String? _saveError;
+
 
   bool get _isAdd => widget.initial == null;
 
@@ -320,6 +332,14 @@ class _LlmTargetEditorState extends State<LlmTargetEditor> {
           const SizedBox(height: BondSpacing.s16),
           if (blocker != null) ...[
             Text(blocker, style: BondType.caption),
+            const SizedBox(height: BondSpacing.s8),
+          ],
+          if (_saveError != null) ...[
+            InlineAlert(
+              key: LlmTargetEditor.saveErrorKey,
+              severity: InlineAlertSeverity.error,
+              text: _saveError!,
+            ),
             const SizedBox(height: BondSpacing.s8),
           ],
           OverflowBar(
@@ -539,7 +559,10 @@ class _LlmTargetEditorState extends State<LlmTargetEditor> {
           : widget.initial?.parallel ?? _parallel,
       streams: _streams,
     );
-    setState(() => _saving = true);
+    setState(() {
+      _saving = true;
+      _saveError = null;
+    });
     try {
       await widget.onSave(
         spec,
@@ -548,6 +571,12 @@ class _LlmTargetEditorState extends State<LlmTargetEditor> {
         confirm: _isAdd && _presetConfirm,
         bulk: _isAdd && _presetBulk,
       );
+    } on Object {
+      // The pane stays open with the typed values intact and one sentence
+      // under the buttons; nothing about the failure is worth more words.
+      if (mounted) {
+        setState(() => _saveError = LlmTargetEditor.saveFailedText);
+      }
     } finally {
       // The pane is usually closed by now — the host closes it on a Save —
       // which is exactly why the guard is here.

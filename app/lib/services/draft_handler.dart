@@ -315,7 +315,15 @@ class DraftHandler extends WorkHandler {
       // The cap stops a PREFETCH — work nobody is waiting on — before it
       // spends anything. A draft a person pressed for is refused earlier, by
       // the provider, so it never reaches this queue at all.
-      final refusal = await _routes.ledger!.refusal();
+      final String? refusal;
+      try {
+        refusal = await _routes.ledger!.refusal();
+      } catch (_) {
+        // A ledger that cannot be read is a prefetch that does not leave: a
+        // skip, not a failure row the worker would retry. The notifier makes
+        // the same call for an asked-for draft and turns it into a sentence.
+        return _skip(source, id, 'ledger_error');
+      }
       if (refusal != null) return _skip(source, id, 'cloud_cap');
     }
     // The standing rule's wiring, checked BEFORE the draft call it would
@@ -593,24 +601,31 @@ class DraftHandler extends WorkHandler {
   }) async {
     final target = _routes.improveTarget();
     if (target == null) return;
-    // Already asserted by [run] before the draft call; kept so a direct
-    // caller cannot reach a null client either.
-    _assertWired(target);
-
-    if (target.isThirdParty) {
-      final refusal = await _routes.ledger!.refusal();
-      if (refusal != null) {
-        _log.note({'improve': 'cloud_cap'});
-        return;
-      }
-      // Both of them: a prefetch on a third-party draft target that also
-      // improves has sent the prompt twice, and the day's count has to say so.
-      _log.note({'cloud': cloudCount + 1, 'improve_target': target.id});
-    } else {
-      _log.note({'improve_target': target.id});
-    }
-
+    // Everything below sits INSIDE the try, the wiring re-check and the ledger
+    // read included: this runs after the local draft is stored, and anything
+    // that escaped here would reach the worker as a failure row over a draft
+    // that was already written. The catch already knows how to say
+    // `improve_error`.
     try {
+      // Already asserted by [run] before the draft call on the target it read
+      // THEN; re-checked on the one read now, so a stage re-pointed in between
+      // cannot reach a null client or an uncounted third party.
+      _assertWired(target);
+
+      if (target.isThirdParty) {
+        final refusal = await _routes.ledger!.refusal();
+        if (refusal != null) {
+          _log.note({'improve': 'cloud_cap'});
+          return;
+        }
+        // Both of them: a prefetch on a third-party draft target that also
+        // improves has sent the prompt twice, and the day's count has to say
+        // so.
+        _log.note({'cloud': cloudCount + 1, 'improve_target': target.id});
+      } else {
+        _log.note({'improve_target': target.id});
+      }
+
       final result = await runTask(
         _improveClient!,
         const DraftTask(),

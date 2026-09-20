@@ -625,8 +625,9 @@ class SyncService implements MailSync {
   ///
   /// The body every retired tag shares (see [retiredClusteringTags]). Null and
   /// zero are different answers on purpose: zero is "this one-shot ran and the
-  /// tag is gone", which closes the pref on the same pass, and null is "there
-  /// was nothing to run", which is what lets the caller walk to the next tag.
+  /// tag is gone", which closes the pref on the same pass, and null is "this
+  /// one-shot had already closed". BOTH let the caller walk on to the next tag
+  /// (the call site says the same); only a full slice stops the walk.
   ///
   /// A full slice leaves the pref unset, so the next sync walks the next one;
   /// only a pass that came back short closes the one-shot. That terminates

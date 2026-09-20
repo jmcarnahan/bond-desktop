@@ -693,14 +693,16 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
         if (spec.hasBearer) spec.id,
     ];
     if (wanted.isEmpty) return;
-    try {
-      for (final id in wanted) {
+    for (final id in wanted) {
+      // The try sits INSIDE the loop: one key the keychain refuses costs that
+      // one target its header, not every target after it in the list.
+      try {
         final value = await tokens.read('$llmTargetBearerKeyPrefix$id');
         if (value != null && value.isNotEmpty) _bearers[id] = value;
+      } catch (_) {
+        // Deliberately silent and deliberately broad: see the doc above. The
+        // exception carries a key name and nothing else worth a log line.
       }
-    } catch (_) {
-      // Deliberately silent and deliberately broad: see the doc above. The
-      // exception carries a key name and nothing else worth a log line.
     }
   }
 

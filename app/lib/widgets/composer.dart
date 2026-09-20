@@ -493,8 +493,11 @@ class _ComposerState extends State<Composer> {
 
   /// The same prompt on another target, replacing what is in the box.
   ///
-  /// Disabled while the switch is off, for [_generateButton]'s reason, and
-  /// while a draft is being written: the two would be writing the same row.
+  /// Disabled while the switch is off, for a reason of its own rather than
+  /// [_generateButton]'s: Improve dials the handler directly and never a
+  /// drain, so it WOULD run, and a person who turned processing off does not
+  /// expect a paid call to another machine. Also disabled while a draft is
+  /// being written: the two would be writing the same row.
   Widget _improveButton() {
     if (widget.improving) {
       return const Padding(

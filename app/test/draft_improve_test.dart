@@ -639,6 +639,44 @@ void main() {
     });
 
     test(
+        'a target re-pointed between the pre-check and the standing rule is an '
+        'improve_error on the row, never a failure of the draft', () async {
+      await seedInbound(needsYou: true, urgency: 'high');
+      final log = _Recorder();
+      final llm = FakeLlm([decision(), answer()]);
+      var reads = 0;
+      final handler = DraftHandler(
+        store,
+        llm,
+        improveClient: FakeLlm([answer()]),
+        activityLog: log,
+        routes: DraftRoutes(
+          draftTarget: () => null,
+          // The first read, in run()'s pre-check, sees a wired local target;
+          // the second, in the standing rule after the draft is stored, sees
+          // a third-party one with no ledger behind it.
+          improveTarget: () => reads++ == 0 ? boxTarget : cloudTarget,
+          standing: () => true,
+          ledger: null,
+        ),
+      );
+
+      await handler.run({
+        'task_kind': 'draft',
+        'source': 'email',
+        'entity_id': 'm1',
+        'payload_json': DraftRequest().encode(),
+      });
+
+      expect(llm.calls, 2);
+      expect(log.notes['improve_error'], 'other');
+      expect(log.notes.containsKey('improved'), isFalse);
+      final draft = await store.getDraftForMessage('email', 'm1');
+      expect(draft, isNotNull);
+      expect(draft!['body'], answer()['reply_body']);
+    });
+
+    test(
         'a routed stage with no client drops the standing rule for this item, '
         'notes it, and still writes the local draft', () async {
       await seedInbound(needsYou: true, urgency: 'high');
@@ -725,6 +763,37 @@ void main() {
       expect(llm.calls, 1);
       expect(log.notes['cloud'], 1);
       expect(await store.getDraftForMessage('email', 'm1'), isNotNull);
+    });
+
+    test('a ledger that cannot be read skips the prefetch, not the item into '
+        'a retry', () async {
+      await seedInbound();
+      final log = _Recorder();
+      final llm = FakeLlm([answer()]);
+      final handler = DraftHandler(
+        store,
+        llm,
+        decisionClient: FakeLlm([decision()]),
+        activityLog: log,
+        routes: routes(
+          draft: cloudTarget,
+          // `refusal()` reads the cap first, so a cap that throws is a ledger
+          // that throws.
+          ledger: CloudDraftLedger(store, cap: () => throw StateError('db')),
+        ),
+      );
+
+      await handler.run({
+        'task_kind': 'draft',
+        'source': 'email',
+        'entity_id': 'm1',
+        'payload_json': DraftRequest().encode(),
+      });
+
+      expect(llm.calls, 0);
+      expect(log.notes['reason'], 'ledger_error');
+      expect(log.notes.containsKey('cloud'), isFalse);
+      expect(await store.getDraftForMessage('email', 'm1'), isNull);
     });
 
     test('with nothing counting it is skipped as unwired, not dialled and '

@@ -43,6 +43,8 @@ void main() {
     WidgetTester tester, {
     LlmTargetSpec? initial,
     Future<ModelProbeResult> Function(String url)? probe,
+    // A Save that throws, for the failure test; the default records.
+    Object? saveThrows,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 1400));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -52,6 +54,7 @@ void main() {
           initial: initial,
           probe: probe,
           onSave: (spec, {bearer, prose = false, confirm = false, bulk = false}) async {
+            if (saveThrows != null) throw saveThrows;
             saved.add((
               spec: spec,
               bearer: bearer,
@@ -125,6 +128,24 @@ void main() {
       LlmTargetEditor.urlKey,
       'http://localhost:18100/v1/chat/completions',
     );
+    expect(saveEnabled(tester), isTrue);
+  });
+
+  testWidgets('a Save that throws stays on the pane with one sentence, and '
+      'nothing escapes the zone', (tester) async {
+    await open(tester, saveThrows: StateError('the settings store is gone'));
+    await fillIn(tester);
+
+    await press(tester, find.byKey(LlmTargetEditor.saveKey));
+
+    // Every other writing control on this screen fails inline; a Save that
+    // vanished into the zone left the pane open and said nothing.
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(LlmTargetEditor.saveErrorKey), findsOneWidget);
+    expect(find.text(LlmTargetEditor.saveFailedText), findsOneWidget);
+    expect(saved, isEmpty);
+    // The typed values are intact and Save is offered again.
+    expect(find.text('Studio box'), findsOneWidget);
     expect(saveEnabled(tester), isTrue);
   });
 

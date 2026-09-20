@@ -6,6 +6,7 @@ import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart' show LlmTargetSpec, LlmWire;
 import '../theme/tokens.dart';
 import 'chips.dart';
+import 'inline_alert.dart';
 import 'model_slot_editor.dart' show ProbeStatus;
 import 'settings_models_body.dart' show SettingsModelsBody;
 
@@ -59,6 +60,12 @@ class SettingsTargetsBody extends StatefulWidget {
   static Key removeKey(String id) => ValueKey('llm-target-remove-$id');
   static Key removeConfirmKey(String id) =>
       ValueKey('llm-target-remove-confirm-$id');
+  static Key removeErrorKey(String id) =>
+      ValueKey('llm-target-remove-error-$id');
+
+  /// The one sentence a Remove that threw leaves under its row.
+  static const String removeFailedText =
+      'Could not remove this target. Check the settings store and try again.';
   static Key removeKeepKey(String id) => ValueKey('llm-target-remove-keep-$id');
   static const Key addKey = ValueKey('llm-target-add');
 
@@ -85,6 +92,9 @@ class _SettingsTargetsBodyState extends State<SettingsTargetsBody> {
   /// a rebuild.
   String? _confirmingId;
   String? _removingId;
+
+  /// The row whose last Remove threw; cleared by the next Remove press.
+  String? _removeErrorId;
 
   @override
   Widget build(BuildContext context) {
@@ -157,6 +167,12 @@ class _SettingsTargetsBodyState extends State<SettingsTargetsBody> {
             ],
           ),
           ProbeStatus(probing: _probingId == spec.id, result: _probes[spec.id]),
+          if (_removeErrorId == spec.id)
+            InlineAlert(
+              key: SettingsTargetsBody.removeErrorKey(spec.id),
+              severity: InlineAlertSeverity.error,
+              text: SettingsTargetsBody.removeFailedText,
+            ),
         ],
       ),
     );
@@ -207,9 +223,17 @@ class _SettingsTargetsBodyState extends State<SettingsTargetsBody> {
     LlmTargetSpec spec,
     Future<void> Function(String id) onRemove,
   ) async {
-    setState(() => _removingId = spec.id);
+    setState(() {
+      _removingId = spec.id;
+      _removeErrorId = null;
+    });
     try {
       await onRemove(spec.id);
+    } on Object {
+      // The row stays, armed state dropped, with one sentence under it: the
+      // Check server beside it already fails this way and a Remove that threw
+      // into the zone showed nothing at all.
+      if (mounted) setState(() => _removeErrorId = spec.id);
     } finally {
       // The row is usually gone by now — the host rebuilt the list without it
       // — so the guard is what keeps a settings screen from setting state on a

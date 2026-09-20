@@ -162,7 +162,9 @@ enforce the ones that are commands.
   local midnight at the store's six-digit stamp precision. An error line names
   the target and a category, never the endpoint, because
   `LlmUnavailableException.message` spells the URL; activity notes carry
-  target ids, never a URL.
+  target ids, never a URL. The one exception still standing is `llm_error`,
+  which `ActivityLog.noteLlmCall` copies verbatim from `LlmCallRecord.error`
+  (pre-existing; booked for Round F beside the worker's `'$error'` rows).
 - `draft_improve` is the one `PipelineStageInfo.optional` row: a routing
   destination with no schema of its own, so it runs `DraftTask` and its call
   record is labelled `draft_reply`. `model_slots_test` pins the exempt set

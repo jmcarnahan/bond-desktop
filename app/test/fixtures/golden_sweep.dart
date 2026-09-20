@@ -235,6 +235,13 @@ Future<SweepMembership> readSweepMembership(MessageStore store) async {
 /// between are the range a coherence floor could plausibly be set in. Counted
 /// over every pair INSIDE a cluster the sweep formed, which is the population
 /// the floor would judge.
+///
+/// On the embeddinggemma scale. The Qwen vector shipped in Round E runs its
+/// gates at 0.48 / 0.43, under the bottom edge, so on that scale this
+/// histogram reads close to one bucket and `separation.points` at 0.65 is
+/// off-scale; the scale-free columns (recall-70 and cross-5) are the read.
+/// Rescaling the edges is a Round F harness item (plan gotcha 64, item 10);
+/// kept as is so the Round D rows stay comparable.
 const List<double> cosineBinEdges = [0.50, 0.55, 0.60, 0.65];
 
 /// The bins' names, for a printed row. Enums, not data.

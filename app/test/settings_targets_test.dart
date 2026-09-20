@@ -137,6 +137,26 @@ void main() {
     expect(edited, [_box.id]);
   });
 
+  testWidgets('a Remove that throws keeps the row with one sentence under it',
+      (tester) async {
+    await open(tester, onRemove: (_) async => throw StateError('store'));
+
+    await press(tester, find.byKey(SettingsTargetsBody.removeKey(_box.id)));
+    await press(
+      tester,
+      find.byKey(SettingsTargetsBody.removeConfirmKey(_box.id)),
+    );
+
+    expect(tester.takeException(), isNull);
+    expect(
+      find.byKey(SettingsTargetsBody.removeErrorKey(_box.id)),
+      findsOneWidget,
+    );
+    expect(find.text(SettingsTargetsBody.removeFailedText), findsOneWidget);
+    // Stood down, not stuck armed: Remove is offered again.
+    expect(find.byKey(SettingsTargetsBody.removeKey(_box.id)), findsOneWidget);
+  });
+
   testWidgets('Remove takes two clicks and Keep stands it down',
       (tester) async {
     final removed = <String>[];

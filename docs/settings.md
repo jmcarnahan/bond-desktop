@@ -601,6 +601,13 @@ with it.
 | **Clear AI results** | `settings-clear-ai-results{,-confirm,-keep}` | every triage verdict, summary, storyline, draft, digest and embedding — the sixteen `MessageStore.derivedTables`, the verdict columns on `messages` and `conversations`, and the stage markers on `attachments` and the library; the activity log is one of the sixteen, so today's **Cloud drafts** count starts again at zero, which the caption above the buttons says | mail, Teams messages, attachments, registered directories, the sign-in and every preference |
 | **Forget everything and re-sync** | `settings-forget-resync{,-confirm,-keep}` | everything above **and** the mailbox itself — `MessageStore.wipeAll(keepIdentity: true)`, cursors and bootstrap floors included | the sign-in, the about-me text, the Needs You rules, the sender rules, the registered directories and every setting |
 
+Consent, once given, is not withdrawn by any single control: `cloud_drafts_consent`
+is a machine setting that both resets keep. To stop drafts leaving the machine,
+point `draft_reply` and `draft_improve` back at a local target under Models, or
+remove the third-party target, which clears both entries; the standing switch
+under Suggested replies stops the automatic ones alone. A one-button revoke is
+Round F's.
+
 Above the two resets, once the host has a count, is the cloud-draft ledger:
 one line **Cloud drafts today: N of cap** (`settings-cloud-ledger`) and a
 compact numeric **Daily cap** field beside it (`settings-cloud-cap`, stored

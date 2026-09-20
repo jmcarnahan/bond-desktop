@@ -2174,6 +2174,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       storylineBlockedThreadsProvider,
       storylineBlocksProvider,
       activitySnapshotProvider,
+      // Reads the same table `activitySnapshotProvider` does and re-reads on
+      // the same tick, which a bare DELETE never fires: without this the
+      // Settings line keeps the pre-clear count until the next recorded event.
+      cloudDraftsTodayProvider,
       syncStampsProvider,
       needsYouPendingProvider,
       contextDirectoriesProvider,
