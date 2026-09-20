@@ -1097,6 +1097,16 @@ The roadmap's exit of 70 of 98 with correct positives is still not met, and the
 base rate is why: this pool holds 1,346 cross-effort pairs against 85 same-effort
 ones, unchanged by anything above the vector, and that ratio is the wall.
 
+On 2026-09-20 the final Round F tree reproduced both local rows of record, on
+two passes each, with nothing in the round touching a prompt, a gate, a tuning
+number, a card or the vector. The sweep filed 45 of 98 with 5 correct
+positives and 4 forbidden hits, forming 2 clusters at 78% purity and declining 3
+at 75%, identical on every count the sweep files. The confirm filed 84 of
+98 with 15 of 88 forbidden accepts, also identical. The vector line was
+identical as well. So the exit of 70 with correct positives stays unmet on the
+tree that ships. The one lever this round measured is the namer in the table
+above, and the base rate is still the wall.
+
 **Reading the vector on its own.** `make golden-vector` is the same test body
 and the same seeding, stopped the moment the mailbox is embedded. It needs one
 server, the embedding one, and takes about a minute, because nothing in it
