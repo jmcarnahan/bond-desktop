@@ -2920,10 +2920,20 @@ RETURNING *
   /// touch. Nor are `mail_last_reconcile` and the `activity_last_sync_*`
   /// stamps: they describe the sync, and the sync has not been undone.
   ///
-  /// The last two are the re-embed one-shots, whose keys live beside their
-  /// tags in `sync_service.dart` (`retiredClusteringTags`). Named again here
-  /// because this layer imports nothing above itself, and pinned there by
-  /// `clear_derived_test.dart` so a third retired tag cannot be missed.
+  /// The last six are the re-embed one-shots, whose keys live beside their
+  /// tags in `sync_service.dart` (`retiredClusteringTags` for the clustering
+  /// pair, `searchEmbedBackfillPrefs` for the four search corpora). Named
+  /// again here because this layer imports nothing above itself, and pinned
+  /// there by `clear_derived_test.dart` so a retired tag cannot be missed.
+  ///
+  /// The four search keys matter here more than any of the others, because
+  /// the clear is what makes them owed: it empties `message_vectors`,
+  /// `attachment_chunks` and `context_chunks` and nulls every
+  /// `desc_embedding`, so a key left set would tell the next sync that the
+  /// catch-up had already run over a corpus this reset has just emptied — and
+  /// the corpus would refill under the current tag anyway, which is the one
+  /// case where the marker is both wrong and harmless. It is dropped because
+  /// the pref describes rows, and the rows are gone.
   static const List<String> derivedOneShotPrefs = [
     'needs_you_model_revive',
     'needs_you_flag_backfill',
@@ -2931,6 +2941,10 @@ RETURNING *
     'gated_conversation_repair',
     'clustering_card_v2',
     'clustering_card_v3',
+    'search_embed_v2_messages',
+    'search_embed_v2_attachments',
+    'search_embed_v2_passages',
+    'search_embed_v2_descriptions',
   ];
 
   /// What [wipeAll] deletes from, derived rather than hand-copied so a table
@@ -3192,7 +3206,7 @@ FROM messages
   /// how far back THIS mailbox was drained and would otherwise tell the next
   /// bootstrap that its window had already been covered.
   ///
-  /// And every marker in [derivedOneShotPrefs] — six of them — each saying a
+  /// And every marker in [derivedOneShotPrefs] — ten of them — each saying a
   /// catch-up has already run over rows this method is deleting: left behind,
   /// they would tell the next first sync that its mailbox had been reconciled,
   /// its verdicts backfilled and its vectors re-embedded when nothing had read
@@ -7722,6 +7736,62 @@ LIMIT ?
     );
   }
 
+  /// One slice of the messages whose search vector was written under a tag
+  /// this build no longer reads, newest first.
+  ///
+  /// [conversationKeysWithEmbedModel]'s twin over the SEARCH corpus, and the
+  /// one read that can still see these rows: every other read of
+  /// `message_vectors` filters on the current [embedModel], so a vector under
+  /// an older tag is invisible rather than comparable — which is what makes
+  /// it quiet, and also what makes a walk that can find it necessary. Asked
+  /// the other way round from its twin, by the tag that is CURRENT rather
+  /// than by one that is retired: the search corpora carry no list of retired
+  /// tags, and "anything that is not the tag we read" covers a row written
+  /// before there were tags at all as well as every past model.
+  ///
+  /// The join and the gate clause are load-bearing rather than tidy, for the
+  /// twin's reason. `EmbedHandler` skips a message that is gone and a message
+  /// the gate threw out, marking the item done without touching the vector,
+  /// so such a row would come back in every slice for the life of the
+  /// database and hold the one-shot open. Left out of the slice, its old-tag
+  /// row simply stays where it is, invisible to every search by construction.
+  /// The clause is the handler's own, `teams_source` tolerance included.
+  ///
+  /// Newest first for [enqueueEmbedBacklog]'s reason: the drain claims
+  /// `created_at DESC`, and the mail a person is most likely to search for is
+  /// the mail that just arrived.
+  Future<List<({String source, String sourceMessageId})>>
+      messageVectorKeysWithStaleTag(
+    String embedModel, {
+    required int cap,
+  }) async {
+    final result = await db
+        .customSelect(
+          'SELECT v.source AS source, '
+          '  v.source_message_id AS source_message_id '
+          'FROM message_vectors v '
+          'JOIN messages m ON m.source = v.source '
+          '  AND m.source_message_id = v.source_message_id '
+          // `IS NOT` rather than `!=` so a row written before the column
+          // carried a tag is in the slice too. The column is NOT NULL today
+          // and the two read the same; the day a migration adds a row without
+          // one, `!=` would answer NULL and skip it silently.
+          'WHERE v.embed_model IS NOT ? '
+          "  AND (m.triage_status != 'skipped' "
+          "    OR m.gate_reason = 'teams_source') "
+          'ORDER BY v.received_at DESC, v.source_message_id ASC LIMIT ?',
+          variables: _args([embedModel, cap]),
+        )
+        .get();
+    return [
+      for (final row in result)
+        (
+          source: row.data['source'] as String? ?? '',
+          sourceMessageId: row.data['source_message_id'] as String? ?? '',
+        ),
+    ];
+  }
+
   /// The feed rows nearest [queryEmbedding], closest first.
   ///
   /// Returns NULL when the index is unavailable, and that is a third answer
@@ -8973,6 +9043,115 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
           text: row.data['chunk_text'] as String? ?? '',
         ),
     ];
+  }
+
+  /// One slice of the attachments whose passages were embedded under a tag
+  /// this build no longer reads, as the keys the work queue is addressed by.
+  ///
+  /// [messageVectorKeysWithStaleTag]'s shape over the document corpus, with
+  /// the grain moved: the worklist the handler resumes from
+  /// ([unembeddedChunks]) is per ATTACHMENT, so the slice counts attachments
+  /// and not passages, and the cap paces the same thing the requeue does.
+  ///
+  /// `embedding IS NOT NULL` is what makes this terminate. The walk behind it
+  /// nulls the vectors it takes, so every attachment in one slice is out of
+  /// the next one whatever the handler then makes of it. A row this query
+  /// REFUSES is out of every slice instead, which terminates just as well:
+  /// the eligible set empties, the query comes back short, and the one-shot
+  /// closes over rows it deliberately never took.
+  ///
+  /// Two refusals, and both of them are the requeue's doing rather than the
+  /// nulling's.
+  ///
+  /// The JOIN carries `attachmentTextPolicy`'s own gate clause, character for
+  /// character — outbound, or not skipped, or a chat. That policy is applied
+  /// BEFORE the handler's resume branch, so a document whose message has since
+  /// been gated, the owner's own Ignore included, would be written down to
+  /// `skipped` with its digest, having already lost the vectors this walk
+  /// nulled: a fully read document turned into a refused one by a pass that
+  /// meant to re-embed it. None of the policy's OTHER refusals are mirrored
+  /// here and none need to be — a row in `attachment_chunks` is a document
+  /// that was read once, so the kind, the size and the inline flag already
+  /// passed. Only the gate can have changed its mind since.
+  ///
+  /// A `processing` work row is refused for a plainer reason: [requeueWork]
+  /// leaves a claimed item alone, so the requeue would be swallowed and the
+  /// passages this walk nulled would wait for something else to ask for the
+  /// document. Left whole, they stay invisible under the old tag, which is
+  /// exactly where the backfill found them. The row is back in the eligible
+  /// set the moment the handler lets go of it, and the only case it is not
+  /// re-taken in is a one-shot that closed on the same pass — a document
+  /// claimed at that moment on a mailbox with nothing else stale, which
+  /// Restore and **Clear AI results** both recover.
+  Future<List<({String source, String messageId, String attachmentId})>>
+      attachmentsWithStaleChunkTag(
+    String embedModel, {
+    required int cap,
+  }) async {
+    final result = await db
+        .customSelect(
+          'SELECT DISTINCT c.source AS source, '
+          '  c.source_message_id AS source_message_id, '
+          '  c.attachment_id AS attachment_id '
+          'FROM attachment_chunks c '
+          'JOIN messages m ON m.source = c.source '
+          '  AND m.source_message_id = c.source_message_id '
+          // `IS NOT` and not `!=`: this column IS nullable, and a passage
+          // embedded before the tag existed is exactly what this looks for.
+          'WHERE c.embed_model IS NOT ? AND c.embedding IS NOT NULL '
+          "  AND (m.triage_status != 'skipped' "
+          "    OR m.direction = 'outbound' "
+          "    OR m.gate_reason = 'teams_source') "
+          // The entity id is `attachmentEntityId`'s, composed in SQL for the
+          // reason `clearDerived` composes it there: this is one predicate
+          // over every row rather than a walk. The separator is pinned to
+          // that function by `embed_backfill_test.dart`.
+          '  AND NOT EXISTS (SELECT 1 FROM work_items w '
+          "    WHERE w.task_kind = 'attachment_text' AND w.source = c.source "
+          "      AND w.entity_id = c.source_message_id || '|' "
+          '        || c.attachment_id '
+          "      AND w.status = 'processing') "
+          'ORDER BY c.source, c.source_message_id, c.attachment_id LIMIT ?',
+          variables: _args([embedModel, cap]),
+        )
+        .get();
+    return [
+      for (final row in result)
+        (
+          source: row.data['source'] as String? ?? '',
+          messageId: row.data['source_message_id'] as String? ?? '',
+          attachmentId: row.data['attachment_id'] as String? ?? '',
+        ),
+    ];
+  }
+
+  /// Throws away one attachment's stale passage vectors, and answers how many
+  /// it nulled.
+  ///
+  /// The other half of [attachmentsWithStaleChunkTag]. `indexed_at` goes with
+  /// the blob because the pair is what [unembeddedChunks] and the index
+  /// backfill read: a row with no vector and a stamp saying it was filed is a
+  /// passage nothing will re-embed and nothing will re-file. The vec0 row
+  /// itself is left alone — [setChunkEmbedding] deletes and re-inserts it on
+  /// the way past, and until then the hydration's own `embed_model` filter is
+  /// what keeps the stale neighbour out of an answer.
+  ///
+  /// Scoped to the stale tag rather than to the whole attachment: a document
+  /// half re-embedded by an earlier pass must not lose the half that is
+  /// already current, which would be this walk paying for the same passages
+  /// twice.
+  Future<int> clearStaleChunkEmbeddings(
+    String source,
+    String messageId,
+    String attachmentId, {
+    required String embedModel,
+  }) async {
+    return db.customUpdate(
+      'UPDATE attachment_chunks SET embedding = NULL, indexed_at = NULL '
+      'WHERE source = ? AND source_message_id = ? AND attachment_id = ? '
+      '  AND embed_model IS NOT ? AND embedding IS NOT NULL',
+      variables: _args([source, messageId, attachmentId, embedModel]),
+    );
   }
 
   /// Files every embedded passage the index has not seen. Returns how many

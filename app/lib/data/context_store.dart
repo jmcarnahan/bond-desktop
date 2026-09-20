@@ -1030,6 +1030,65 @@ class ContextStore {
     );
   }
 
+  /// Throws away one slice of the passage vectors written under a tag this
+  /// build no longer reads, and answers how many it nulled.
+  ///
+  /// The directory half of the search-corpus backfill, and the cheapest of
+  /// the four: no requeue goes with it, because every sync already requeues
+  /// `context_reconcile` for every REGISTERED directory and the handler's own
+  /// worklist is [unembeddedChunksForDir] — directory-wide, precisely so a
+  /// pass that parked part-way through the passages is finished by the next
+  /// one. A passage this nulls is on that worklist by the same rule.
+  ///
+  /// One statement over the whole table rather than a walk per directory: the
+  /// slice is a pace and not a scope, and a mailbox with three registered
+  /// projects should drain them in the order the rows sit in rather than
+  /// finishing the first before the second starts.
+  ///
+  /// `indexed_at` goes with the blob for [setChunkEmbedding]'s reason, and
+  /// `embedding IS NOT NULL` is what terminates the one-shot: a row this pass
+  /// takes is out of the next slice whether or not anything re-embeds it.
+  /// `IS NOT ?` and not `!=` because the column is nullable, and a passage
+  /// embedded before the tag existed is exactly what this is for.
+  Future<int> clearStaleChunkEmbeddings(
+    String embedModel, {
+    required int cap,
+  }) async {
+    return db.customUpdate(
+      'UPDATE context_chunks SET embedding = NULL, indexed_at = NULL '
+      'WHERE id IN (SELECT id FROM context_chunks '
+      '  WHERE embed_model IS NOT ? AND embedding IS NOT NULL '
+      '  ORDER BY id LIMIT ?)',
+      variables: _args([embedModel, cap]),
+    );
+  }
+
+  /// Throws away every skill description vector, and answers how many it
+  /// nulled.
+  ///
+  /// The fourth search corpus, and the one with no tag column to key on:
+  /// `desc_embedding` is compared through `cosine()`, which answers 0 on a
+  /// width mismatch, so a description embedded under an older model is quiet
+  /// rather than wrong and nothing in the row says which model wrote it.
+  ///
+  /// So this is unconditional, uncapped and gated by a preference instead of
+  /// by a tag, and all three are affordable for the same reason: descriptions
+  /// are TENS of rows, not thousands. One frontmatter line per skill, one
+  /// embedding call each, and [skillsNeedingDescEmbedding] is directory-wide
+  /// and runs on every reconcile, so the pass that refills them is already
+  /// scheduled. `clearDerived` runs this same statement as part of its reset.
+  ///
+  /// Adding a `desc_embed_model` column would be more correct and would buy
+  /// nothing the preference does not: the whole corpus is re-embedded in one
+  /// pass either way, and the column would cost a schema version, a guarded
+  /// migration step and four generated files.
+  Future<int> clearDescriptionEmbeddings() async {
+    return db.customUpdate(
+      'UPDATE context_files SET desc_embedding = NULL '
+      'WHERE desc_embedding IS NOT NULL',
+    );
+  }
+
   /// Files every embedded passage the vector index has not seen. Returns how
   /// many were attempted.
   Future<int> indexPendingChunks() => _chunkIndex.backfill();

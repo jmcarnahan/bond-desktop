@@ -13,10 +13,13 @@ import 'package:bond_inbox/data/vec_index.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/attachments/attachment_policy.dart'
     show attachmentEntityId;
+import 'package:bond_inbox/services/cloud_drafts.dart' show DraftRoutes;
+import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/model_slots.dart' show LlmTargetSpec;
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
@@ -102,6 +105,49 @@ class _FakeLlm extends LlmClient {
     };
   }
 }
+
+/// An [LlmClient] that answers one draft and can be held open at the server.
+///
+/// [_FakeLlm]'s twin for the prose schema: `improve` sends a [DraftTask], so
+/// a verdict-shaped answer would be thrown away before the row was written
+/// and the ordering this file is about would never be reached.
+class _FakeDraftLlm extends LlmClient {
+  _FakeDraftLlm({this.hold})
+      : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
+
+  final Future<void> Function()? hold;
+
+  int calls = 0;
+
+  @override
+  Future<Map<String, dynamic>> completeJson({
+    required String system,
+    required String user,
+    required Map<String, dynamic> schema,
+    String schemaName = 'result',
+    int maxTokens = 512,
+    double temperature = 0.2,
+    bool think = false,
+  }) async {
+    calls++;
+    await hold?.call();
+    await Future<void>.delayed(const Duration(milliseconds: 1));
+    return {
+      'evidence': 'Sarah is waiting on the invoice.',
+      'reply_body': 'The improved answer, from somewhere else.',
+      'options': const <Map<String, String>>[],
+    };
+  }
+}
+
+/// A target on this machine, so no consent and no ledger are in the way of
+/// the ordering under test.
+const LlmTargetSpec _improveTarget = LlmTargetSpec(
+  id: 't-box',
+  name: 'Box 27B',
+  url: 'http://localhost:18100/v1/chat/completions',
+  model: 'qwen3.8',
+);
 
 // ── the scripted Graph, for the test that runs a whole sync ─────────
 //
@@ -428,6 +474,29 @@ void main() {
               'next sync the re-embed had already run',
         );
       }
+    });
+
+    test('name every search-corpus one-shot, and account for all ten', () {
+      // The same rule over the four search corpora, and it bites harder here:
+      // the clear EMPTIES `message_vectors`, `attachment_chunks` and
+      // `context_chunks` and nulls every `desc_embedding`, so a key left set
+      // would describe a catch-up over rows that no longer exist.
+      for (final key in searchEmbedBackfillPrefs) {
+        expect(
+          MessageStore.derivedOneShotPrefs,
+          contains(key),
+          reason: '$key survives a clear and would strand its corpus',
+        );
+      }
+      // The count, so a key added to the store's list without a walk behind it
+      // shows up here rather than in a mailbox. Six from before the search
+      // corpora, four with them. The behaviour of each search walk is pinned
+      // in `embed_backfill_test.dart`.
+      expect(MessageStore.derivedOneShotPrefs, hasLength(10));
+      expect(
+        MessageStore.derivedOneShotPrefs.toSet(),
+        hasLength(MessageStore.derivedOneShotPrefs.length),
+      );
     });
   });
 
@@ -1267,6 +1336,104 @@ void main() {
 
       await queue.pump();
       expect(llm.calls, 2);
+    });
+
+    /// The improve pair: `DraftHandler.improve` is a button press and not
+    /// queue work, so nothing the three lanes quiesce knows about it.
+    ///
+    /// One handler over a held client, one stored draft, and the two orders.
+    /// With the wait the table is empty afterwards and stays empty; without
+    /// it the answer lands in a table that was emptied a moment earlier,
+    /// which is the row this pair exists to keep out.
+    Future<(DraftHandler, Completer<void>)> improving() async {
+      await seedMessage('m1');
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'The local model wrote this one.',
+        evidence: 'The local evidence sentence.',
+      );
+      final held = Completer<void>();
+      final handler = DraftHandler(
+        store,
+        _FakeDraftLlm(),
+        improveClient: _FakeDraftLlm(hold: () => held.future),
+        routes: DraftRoutes(
+          draftTarget: () => null,
+          improveTarget: () => _improveTarget,
+          standing: () => false,
+        ),
+      );
+      return (handler, held);
+    }
+
+    test('a clear after a quiesce leaves no improved draft behind', () async {
+      final (handler, held) = await improving();
+      expect(await rows('drafts'), 1);
+
+      final improve = handler.improve('email', 'm1');
+      // Long enough for the call to be at the server.
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final quiet = handler.quiesce();
+      held.complete();
+      await quiet;
+      await store.clearDerived();
+
+      // The answer that was already paid for was written BEFORE the delete,
+      // so the delete took it with everything else.
+      expect(await improve, isNull);
+      expect(await rows('drafts'), 0);
+    });
+
+    test('and a clear without one leaves exactly the row this closes',
+        () async {
+      final (handler, held) = await improving();
+
+      final improve = handler.improve('email', 'm1');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      // The reset as it was: the three lanes quiesced, this call not waited
+      // for at all.
+      await store.clearDerived();
+      expect(await rows('drafts'), 0);
+
+      held.complete();
+      await improve;
+
+      // One draft in a table the person just emptied, written by a model call
+      // they turned the switch off to stop.
+      expect(await rows('drafts'), 1);
+    });
+
+    test('a draft quiesce with nothing in flight completes at once', () async {
+      final (handler, held) = await improving();
+      held.complete();
+
+      await handler.quiesce().timeout(const Duration(seconds: 1));
+      expect(await rows('drafts'), 1);
+    });
+
+    test('two concurrent draft quiesces are one run', () async {
+      final (handler, held) = await improving();
+      final improve = handler.improve('email', 'm1');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final first = handler.quiesce();
+      final second = handler.quiesce();
+      expect(first, same(second));
+
+      held.complete();
+      await first;
+      await second;
+      await improve;
+
+      // The memo is released with the run, so the next reset gets a real
+      // wait rather than a future that completed minutes ago.
+      final again = handler.quiesce();
+      expect(again, isNot(same(first)));
+      await again;
     });
   });
 }
