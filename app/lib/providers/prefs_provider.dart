@@ -1286,6 +1286,51 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _writeStageTargets(map);
   }
 
+  /// Writes what this Mac can actually run: the tier's stage picks and its
+  /// draft policy, in one press or at the end of the wizard.
+  ///
+  /// The stages a tier governs are the ones ANY tier names, so moving between
+  /// tiers is symmetric: [MachineTier.inbox] points the six prose-slot stages
+  /// at the built-in fast target, and [MachineTier.full] puts those same six
+  /// back on their own default, which by [setStageTarget]'s rule REMOVES the
+  /// entry rather than storing it. A fresh install on a big Mac therefore
+  /// keeps an empty `stage_targets`, which is the invariant
+  /// `10-model-routing.md` states and `llm_targets_test` pins.
+  ///
+  /// It overwrites a pick the owner made on one of those six: the button's
+  /// caption says which stages it rewrites, and nothing is destroyed because
+  /// any stage can be re-picked from the same section. The bulk stages, the
+  /// confirm stage, `draft_improve`, the targets themselves, the consent and
+  /// the bearers are all untouched. Calling it twice changes nothing.
+  Future<void> applyTierDefaults(MachineTier tier) async {
+    final wanted = tierStageDefaults(tier);
+    final governed = <String>{
+      for (final other in MachineTier.values) ...tierStageDefaults(other).keys,
+    };
+    final map = {...state.stageTargets};
+    for (final stageId in governed) {
+      final slot = stageSlot(stageId);
+      if (slot == ModelSlot.embed) continue;
+      final fallback = defaultTargetIdFor(slot);
+      final targetId = wanted[stageId] ?? fallback;
+      // No `stageIsOptional` guard, unlike [setStageTarget] and [applyPreset]:
+      // an optional stage's entry IS the feature being turned on, and a tier
+      // that named one would be turning it on for a machine's size rather than
+      // because somebody asked. No tier names one, `llm_targets_test` pins
+      // that, and removing on the default is the right read either way.
+      if (targetId == fallback) {
+        map.remove(stageId);
+      } else {
+        map[stageId] = targetId;
+      }
+    }
+    if (!_sameMap(map, state.stageTargets)) {
+      state = state.copyWith(stageTargets: map);
+      await _writeStageTargets(map);
+    }
+    await setDraftPolicy(tierDraftPolicy(tier));
+  }
+
   /// Records that the owner has read what a third-party draft target
   /// receives. Until it is true, [AppPrefs.specForStage] sends `draft_reply`
   /// back to the local prose target and leaves `draft_improve` unrouted.

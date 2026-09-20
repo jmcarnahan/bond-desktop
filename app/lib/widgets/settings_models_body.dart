@@ -7,12 +7,15 @@ import '../services/llm/model_slots.dart'
     show
         LlmTarget,
         LlmTargetSpec,
+        MachineTier,
         ModelSlot,
         PipelineStageInfo,
         builtInProseName,
         defaultTargetIdFor,
         slotDefaults;
+import '../services/system/system_info.dart' show HardwareInfo;
 import '../theme/tokens.dart';
+import 'attachment_format.dart' show formatBytes;
 import 'chips.dart';
 import 'model_slot_editor.dart';
 import 'settings_segments.dart';
@@ -104,6 +107,22 @@ class SettingsModelsBody extends StatefulWidget {
   /// `draft_reply` stage resolves to.
   final String proseParallelTargetName;
 
+  /// What this Mac is, for the fact line above the Targets list. Null while
+  /// the host is still asking, which is one frame on a real machine and
+  /// forever in a test that does not wire it.
+  final HardwareInfo? hardware;
+
+  /// Which tier this Mac is in. Null means the same "still asking", and it is
+  /// what disables the button: the defaults it would write are the tier's, so
+  /// there is nothing to press until the tier is known.
+  final MachineTier? machineTier;
+
+  /// Writes the tier's stage picks and its draft policy. **Null takes the
+  /// fact line and the button off the section altogether**, the discipline
+  /// every optional control here follows: a host that cannot store the change
+  /// must not offer the control that makes one.
+  final Future<void> Function()? onApplyTierDefaults;
+
   const SettingsModelsBody({
     super.key,
     this.header,
@@ -125,6 +144,9 @@ class SettingsModelsBody extends StatefulWidget {
     this.onRemoveTarget,
     this.onConsentNeeded,
     this.proseParallelTargetName = builtInProseName,
+    this.hardware,
+    this.machineTier,
+    this.onApplyTierDefaults,
   });
 
   /// The collapsed summary — where the three slots point, in one line.
@@ -157,6 +179,11 @@ class SettingsModelsBody extends StatefulWidget {
         ? '$line · 1 more target'
         : '$line · $userTargets more targets';
   }
+
+  /// The key on **Use this Mac's defaults**. Keyed rather than found by label
+  /// for the reason every control here is: the section carries several
+  /// buttons and a test that tapped by words would tap whichever came first.
+  static const Key tierDefaultsKey = ValueKey('settings-tier-defaults');
 
   /// The key on one stage's target picker. Every picker carries the same
   /// words, so a test that tapped by label would be tapping whichever came
@@ -292,6 +319,10 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
           const SizedBox(height: BondSpacing.s16),
           ..._draftsInFlight(onChanged),
         ],
+        if (widget.onApplyTierDefaults case final apply?) ...[
+          const SizedBox(height: BondSpacing.s24),
+          ..._thisMac(apply),
+        ],
         if (widget.onAddTarget != null) ...[
           const SizedBox(height: BondSpacing.s24),
           Text(
@@ -363,6 +394,82 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
       ),
     ];
   }
+
+  /// What this Mac is, and one press that points the pipeline at what it can
+  /// actually run.
+  ///
+  /// Above the Targets list and below the two slot editors, because it is
+  /// about the machine rather than about a server somebody added: the tier is
+  /// read from this Mac's memory every time it is asked for and stored
+  /// nowhere, so a models folder carried to another Mac gets that Mac's
+  /// answer. The caption names the stages the press rewrites, and it is not a
+  /// two-step: nothing is destroyed, and any stage can be re-picked in the
+  /// table above.
+  List<Widget> _thisMac(Future<void> Function() apply) {
+    final hardware = widget.hardware;
+    final tier = widget.machineTier;
+
+    // Zero bytes is `HardwareInfo.unknown`'s memory, and the channel ANSWERS
+    // with it rather than failing: a `MissingPluginException` and a
+    // `PlatformException` both degrade to it. So a machine whose memory could
+    // not be read reaches here with a resolved tier, `full` by the never-refuse
+    // rule, and it must not be offered a button that would write defaults
+    // chosen from a number nobody has. It gets the fact and nothing to press.
+    final unreadable = hardware != null && hardware.memoryBytes <= 0;
+    if (unreadable) {
+      return [
+        Text(
+          'This Mac: memory could not be read',
+          style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: BondSpacing.s4),
+        Text(
+          'Point each step at a target by hand in the table above.',
+          style: BondType.caption,
+        ),
+      ];
+    }
+
+    return [
+      if (hardware != null && tier != null)
+        Text(
+          'This Mac: ${hardware.chip}, ${formatBytes(hardware.memoryBytes)}, '
+          '${_tierWord(tier)}',
+          style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+        ),
+      const SizedBox(height: BondSpacing.s8),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: OutlinedButton(
+          key: SettingsModelsBody.tierDefaultsKey,
+          onPressed: tier == null ? null : () => unawaited(apply()),
+          child: const Text("Use this Mac's defaults"),
+        ),
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(_tierCaption(tier), style: BondType.caption),
+    ];
+  }
+
+  String _tierWord(MachineTier tier) => switch (tier) {
+        MachineTier.full => 'runs all three models',
+        MachineTier.inbox => 'runs the inbox models',
+      };
+
+  /// What a press rewrites, in the words the controls it moves actually carry:
+  /// the draft policy's own label from `DraftPolicyLabel`, and the built-in
+  /// targets' own names. Each caption NAMES the six stages rather than
+  /// pointing at them, because only one of the two is ever on screen and
+  /// "those six" on a big Mac would refer to a sentence nobody can see.
+  String _tierCaption(MachineTier? tier) => switch (tier) {
+        null => 'Reading this Mac…',
+        MachineTier.inbox =>
+          'Points naming, refresh, recap, grouping, the reply decision and '
+              'drafts at Local fast and sets drafts to Only when asked.',
+        MachineTier.full =>
+          'Clears the six prose stage picks back to Local prose and sets '
+              'drafts to For messages that need you.',
+      };
 
   /// One authored row: what the stage is, what it does, and which target
   /// answers it.

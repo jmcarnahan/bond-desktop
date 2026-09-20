@@ -1,6 +1,7 @@
 import 'package:bond_inbox/screens/consent_screen.dart';
 import 'package:bond_inbox/services/llm/model_probe.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
+import 'package:bond_inbox/services/system/system_info.dart' show HardwareInfo;
 import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/model_slot_editor.dart';
 import 'package:bond_inbox/widgets/settings_models_body.dart';
@@ -54,6 +55,10 @@ void main() {
     void Function(String stageId, String? targetId)? onStageTargetChanged,
     Future<void> Function()? onCloudDraftsConsent,
     bool wireTargets = false,
+    HardwareInfo? hardware,
+    MachineTier? machineTier,
+    Future<void> Function()? onApplyTierDefaults,
+    bool wireTier = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -92,6 +97,10 @@ void main() {
           onStageTargetChanged:
               wireTargets ? (onStageTargetChanged ?? (_, _) {}) : null,
           onCloudDraftsConsent: onCloudDraftsConsent,
+          hardware: hardware,
+          machineTier: machineTier,
+          onApplyTierDefaults:
+              wireTier ? (onApplyTierDefaults ?? () async {}) : null,
           modelsHeader: modelsHeader,
           localServerSummary: localServerSummary,
         ),
@@ -595,6 +604,234 @@ void main() {
 
       expect(order, isEmpty);
       expect(find.text('Which model each step uses'), findsOneWidget);
+    });
+  });
+
+  /// The fact line and **Use this Mac's defaults**: what the machine is, and
+  /// one press that points the pipeline at what it can actually run.
+  group('this Mac and its defaults', () {
+    const big = HardwareInfo(
+      chip: 'Apple M2 Max',
+      memoryBytes: 64 * 1024 * 1024 * 1024,
+      appleSilicon: true,
+      rosetta: false,
+      osVersion: '15.6',
+    );
+    const small = HardwareInfo(
+      chip: 'Apple M2',
+      memoryBytes: 16 * 1024 * 1024 * 1024,
+      appleSilicon: true,
+      rosetta: false,
+      osVersion: '15.6',
+    );
+    const inboxCaption =
+        'Points naming, refresh, recap, grouping, the reply decision and '
+        'drafts at Local fast and sets drafts to Only when asked.';
+    const fullCaption =
+        'Clears the six prose stage picks back to Local prose and sets drafts '
+        'to For messages that need you.';
+
+    const box = LlmTargetSpec(
+      id: 't-1a2b3c4d',
+      name: 'Studio box',
+      url: 'http://localhost:18100/v1/chat/completions',
+      model: 'qwen3-27b-fp8',
+    );
+    const builtIns = [
+      LlmTargetSpec(
+        id: builtInFastId,
+        name: builtInFastName,
+        url: 'http://localhost:8082/v1/chat/completions',
+        model: 'qwen3.8',
+      ),
+      LlmTargetSpec(
+        id: builtInProseId,
+        name: builtInProseName,
+        url: 'http://localhost:8080/v1/chat/completions',
+        model: 'qwen3.8',
+      ),
+      box,
+    ];
+
+    OutlinedButton button(WidgetTester tester) =>
+        tester.widget<OutlinedButton>(
+          find.byKey(SettingsModelsBody.tierDefaultsKey),
+        );
+
+    testWidgets('a big Mac reads as all three models, with the full caption',
+        (tester) async {
+      await open(
+        tester,
+        wireTier: true,
+        hardware: big,
+        machineTier: MachineTier.full,
+      );
+      await expand(tester, 'Models');
+
+      expect(
+        find.text('This Mac: Apple M2 Max, 64.0 GB, runs all three models'),
+        findsOneWidget,
+      );
+      expect(find.text(fullCaption), findsOneWidget);
+      expect(button(tester).onPressed, isNotNull);
+    });
+
+    testWidgets('a 16 GB Mac reads as the inbox models, with its own caption',
+        (tester) async {
+      await open(
+        tester,
+        wireTier: true,
+        hardware: small,
+        machineTier: MachineTier.inbox,
+      );
+      await expand(tester, 'Models');
+
+      expect(
+        find.text('This Mac: Apple M2, 16.0 GB, runs the inbox models'),
+        findsOneWidget,
+      );
+      expect(find.text(inboxCaption), findsOneWidget);
+    });
+
+    testWidgets('the button waits, disabled, while the tier is unknown',
+        (tester) async {
+      await open(tester, wireTier: true);
+      await expand(tester, 'Models');
+
+      // Disabled rather than absent: the button is a fact about this machine
+      // and it must not appear a frame late under the reader's cursor.
+      expect(button(tester).onPressed, isNull);
+      expect(find.text('Reading this Mac…'), findsOneWidget);
+      expect(find.textContaining('This Mac:'), findsNothing);
+    });
+
+    testWidgets('a Mac whose memory did not read gets the fact and no button',
+        (tester) async {
+      // `ChannelSystemInfo.hardware()` ANSWERS `HardwareInfo.unknown` when the
+      // channel is missing or throws, so this state resolves like any other
+      // and the tier comes back `full` by the never-refuse rule. Writing the
+      // full tier's defaults off a number nobody read is exactly what must not
+      // be offered.
+      await open(
+        tester,
+        wireTier: true,
+        hardware: HardwareInfo.unknown,
+        machineTier: MachineTier.full,
+      );
+      await expand(tester, 'Models');
+
+      expect(find.text('This Mac: memory could not be read'), findsOneWidget);
+      expect(find.byKey(SettingsModelsBody.tierDefaultsKey), findsNothing);
+      expect(find.text(fullCaption), findsNothing);
+      // Never the placeholder chip and never a bare zero.
+      expect(find.textContaining('unknown,'), findsNothing);
+      expect(find.textContaining('0 B'), findsNothing);
+    });
+
+    testWidgets('a host that cannot write it does not offer it',
+        (tester) async {
+      await open(tester, hardware: big, machineTier: MachineTier.full);
+      await expand(tester, 'Models');
+
+      expect(find.byKey(SettingsModelsBody.tierDefaultsKey), findsNothing);
+      expect(find.textContaining('This Mac:'), findsNothing);
+      expect(find.text(fullCaption), findsNothing);
+    });
+
+    testWidgets('one press, one call', (tester) async {
+      var calls = 0;
+      await open(
+        tester,
+        wireTier: true,
+        hardware: small,
+        machineTier: MachineTier.inbox,
+        onApplyTierDefaults: () async => calls++,
+      );
+      await expand(tester, 'Models');
+
+      final finder = find.byKey(SettingsModelsBody.tierDefaultsKey);
+      await tester.ensureVisible(finder);
+      await tester.pumpAndSettle();
+      await tester.tap(finder);
+      await tester.pumpAndSettle();
+
+      expect(calls, 1);
+    });
+
+    /// The body directly rather than through the screen: what is under test
+    /// is that the pickers re-render off the host's new map, so the host has
+    /// to be one that CHANGES its map, and the screen's forty props are not
+    /// what this is about.
+    testWidgets('the pickers show the new picks without a reopen',
+        (tester) async {
+      var ids = <String, String?>{
+        for (final stage in pipelineStages)
+          stage.id: stage.slot == ModelSlot.embed
+              ? null
+              : defaultTargetIdFor(stage.slot),
+        // Two stages OUTSIDE the six, seeded to something the press could
+        // visibly undo. Left on their own default they would read
+        // `local-fast` before and after, and "nothing else moves" would be a
+        // sentence no failure could reach.
+        'triage': box.id,
+        'storyline_membership': box.id,
+      };
+
+      await tester.binding.setSurfaceSize(const Size(900, 1400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: StatefulBuilder(
+            builder: (context, setLocalState) => SingleChildScrollView(
+              child: SettingsModelsBody(
+                slotTargets: slotDefaults,
+                isDefault: const {
+                  ModelSlot.fast: true,
+                  ModelSlot.prose: true,
+                  ModelSlot.embed: true,
+                },
+                compiledDefaults: slotDefaults,
+                stages: pipelineStages,
+                onSave: (_, {required url, required model}) {},
+                onReset: (_) {},
+                targets: builtIns,
+                stageTargetIds: ids,
+                onStageTargetChanged: (_, _) {},
+                hardware: small,
+                machineTier: MachineTier.inbox,
+                // What the real host does through the prefs notifier: the
+                // tier's entries over the map it already had.
+                onApplyTierDefaults: () async => setLocalState(() {
+                  ids = {...ids, ...tierStageDefaults(MachineTier.inbox)};
+                }),
+              ),
+            ),
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      String picked(String stageId) => tester
+          .widget<DropdownButton<String>>(
+            find.byKey(SettingsModelsBody.stagePickerKey(stageId)),
+          )
+          .value!;
+
+      expect(picked('storyline_name'), builtInProseId);
+
+      final finder = find.byKey(SettingsModelsBody.tierDefaultsKey);
+      await tester.ensureVisible(finder);
+      await tester.pumpAndSettle();
+      await tester.tap(finder);
+      await tester.pumpAndSettle();
+
+      expect(picked('storyline_name'), builtInFastId);
+      expect(picked('draft_reply'), builtInFastId);
+      // Not one of the six: the caption names what it rewrites and nothing
+      // outside that moves. Both were seeded onto the box above, so either one
+      // being reset to a built-in would fail here.
+      expect(picked('triage'), box.id);
+      expect(picked('storyline_membership'), box.id);
     });
   });
 

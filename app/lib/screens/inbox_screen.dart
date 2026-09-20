@@ -2525,6 +2525,30 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         );
       },
       onTargetRemoved: notifier.removeTarget,
+      // Both watched, both null only until the channel answers. Neither stays
+      // null: `ChannelSystemInfo.hardware()` catches a missing plugin and a
+      // platform error alike and answers `HardwareInfo.unknown`, so in a
+      // widget test these resolve to zero bytes rather than never resolving —
+      // which is the case the section renders as "memory could not be read",
+      // with nothing to press. One future behind both, so they cannot settle a
+      // frame apart. The tier is derived from this Mac's memory on every read
+      // and stored nowhere, so a models folder carried to another Mac gets
+      // that Mac's answer.
+      hardware: ref.watch(hardwareInfoProvider).valueOrNull,
+      machineTier: ref.watch(machineTierProvider).valueOrNull,
+      // Always wired, and disabled on the section while the tier is unknown
+      // rather than taken off it: the button is a fact about this machine and
+      // it should not appear a frame late. The tier is READ at the press, not
+      // closed over, so a press cannot write last frame's answer. The section
+      // re-renders off `prefs` above, so the pickers show the new picks the
+      // moment this returns — the same confirmation a slot Save gets, and the
+      // section has no snackbar for either.
+      onApplyTierDefaults: () async {
+        if (!mounted) return;
+        final tier = await ref.read(machineTierProvider.future);
+        if (!mounted) return;
+        await notifier.applyTierDefaults(tier);
+      },
       onStageTargetChanged: (stageId, targetId) => unawaited(
         targetId == null
             ? notifier.clearStageTarget(stageId)

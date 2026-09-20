@@ -16,6 +16,7 @@ import '../providers/prefs_provider.dart'
 import '../screens/consent_screen.dart' show CloudDraftsConsentPane;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart';
+import '../services/system/system_info.dart' show HardwareInfo;
 import '../theme/tokens.dart';
 import 'attachment_format.dart' show formatBytes;
 import 'inline_alert.dart';
@@ -271,6 +272,19 @@ class SettingsScreen extends StatefulWidget {
   /// Fired by a row's confirmed Remove. Null takes Remove off the rows.
   final Future<void> Function(String id)? onTargetRemoved;
 
+  /// What this Mac is, for the Models section's fact line. Null while the
+  /// host is still reading it.
+  final HardwareInfo? hardware;
+
+  /// Which tier this Mac is in. Null while the host is still reading it, and
+  /// what leaves **Use this Mac's defaults** disabled until it arrives.
+  final MachineTier? machineTier;
+
+  /// Fired by that button: the host writes the tier's stage picks and its
+  /// draft policy. **Null takes the fact line and the button off the Models
+  /// section**, the same discipline every optional control here follows.
+  final Future<void> Function()? onApplyTierDefaults;
+
   /// Fired by a stage's picker. Null keeps the stage table's chips and offers
   /// no pickers at all.
   final void Function(String stageId, String? targetId)? onStageTargetChanged;
@@ -519,6 +533,9 @@ class SettingsScreen extends StatefulWidget {
     this.cloudDraftsConsent = false,
     this.onTargetSaved,
     this.onTargetRemoved,
+    this.hardware,
+    this.machineTier,
+    this.onApplyTierDefaults,
     this.onStageTargetChanged,
     this.onCloudDraftsConsent,
     this.cloudDraftsStanding = false,
@@ -1138,6 +1155,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ? null
         : (spec) => setState(() => _subpane = _TargetEditorPane(spec)),
     onRemoveTarget: widget.onTargetRemoved,
+    hardware: widget.hardware,
+    machineTier: widget.machineTier,
+    onApplyTierDefaults: widget.onApplyTierDefaults,
     onConsentNeeded: (stageId, target) =>
         setState(() => _subpane = _ConsentPane(stageId, target)),
   );

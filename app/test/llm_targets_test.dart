@@ -530,6 +530,155 @@ void main() {
     });
   });
 
+  group('the tier defaults', () {
+    test('the full tier writes nothing and keeps the shipped policy', () async {
+      final prefs = await notifier();
+
+      await prefs.applyTierDefaults(MachineTier.full);
+
+      // The whole point of the full tier: a fresh install on a big Mac is
+      // byte-identical to the app before any of this existed.
+      expect(prefs.state.stageTargets, isEmpty);
+      expect(await store.getPref(stageTargetsKey), anyOf(isNull, '{}'));
+      expect(prefs.state.draftPolicy, DraftPolicy.needsYou);
+    });
+
+    test('the inbox tier writes the six prose stages and drafts on demand',
+        () async {
+      final prefs = await notifier();
+
+      await prefs.applyTierDefaults(MachineTier.inbox);
+
+      expect(prefs.state.stageTargets.keys.toSet(), proseStageIds.toSet());
+      for (final id in prefs.state.stageTargets.values) {
+        expect(id, builtInFastId);
+      }
+      expect(prefs.state.stageTargets.containsKey('draft_improve'), isFalse);
+      expect(prefs.state.specForStage('draft_reply')!.id, builtInFastId);
+      expect(prefs.state.draftPolicy, DraftPolicy.onDemand);
+    });
+
+    test('a second call changes neither the state nor the stored JSON',
+        () async {
+      final prefs = await notifier();
+
+      await prefs.applyTierDefaults(MachineTier.inbox);
+      final firstMap = {...prefs.state.stageTargets};
+      final firstJson = await store.getPref(stageTargetsKey);
+      final firstPolicy = await store.getPref(draftPolicyKey);
+
+      await prefs.applyTierDefaults(MachineTier.inbox);
+
+      expect(prefs.state.stageTargets, firstMap);
+      expect(await store.getPref(stageTargetsKey), firstJson);
+      expect(await store.getPref(draftPolicyKey), firstPolicy);
+    });
+
+    test('it overwrites a prose-slot pick and leaves a bulk one alone',
+        () async {
+      final prefs = await notifier();
+      await prefs.upsertTarget(box);
+      await prefs.setStageTarget('storyline_name', 'gpu-1');
+      await prefs.setStageTarget('triage', 'gpu-1');
+
+      await prefs.applyTierDefaults(MachineTier.inbox);
+
+      // The caption on the button names the six stages it rewrites; nothing
+      // outside them moves, and nothing is destroyed either way.
+      expect(prefs.state.stageTargets['storyline_name'], builtInFastId);
+      expect(prefs.state.stageTargets['triage'], 'gpu-1');
+    });
+
+    test('the full tier clears what the inbox tier wrote', () async {
+      final prefs = await notifier();
+
+      await prefs.applyTierDefaults(MachineTier.inbox);
+      expect(prefs.state.stageTargets, isNotEmpty);
+
+      await prefs.applyTierDefaults(MachineTier.full);
+
+      expect(prefs.state.stageTargets, isEmpty);
+      expect(await store.getPref(stageTargetsKey), '{}');
+      expect(prefs.state.draftPolicy, DraftPolicy.needsYou);
+    });
+
+    test('no tier names an optional stage', () async {
+      // What lets `applyTierDefaults` drop the `stageIsOptional` guard its two
+      // siblings carry: an optional stage's entry IS its feature being turned
+      // on, and no machine's size may turn one on.
+      for (final tier in MachineTier.values) {
+        for (final stageId in tierStageDefaults(tier).keys) {
+          expect(stageIsOptional(stageId), isFalse, reason: stageId);
+          expect(stageSlot(stageId), isNot(ModelSlot.embed), reason: stageId);
+        }
+      }
+    });
+
+    test('the full tier clears the six and nothing else', () async {
+      final prefs = await notifier();
+      await prefs.upsertTarget(box);
+      // One of each kind the tier must not touch: the optional stage, a bulk
+      // stage and the confirm stage, all pointed somewhere by hand.
+      await prefs.setStageTarget('draft_improve', 'gpu-1');
+      await prefs.setStageTarget('triage', 'gpu-1');
+      await prefs.setStageTarget('storyline_membership', 'gpu-1');
+      await prefs.setStageTarget('storyline_recap', 'gpu-1');
+
+      await prefs.applyTierDefaults(MachineTier.full);
+
+      expect(prefs.state.stageTargets, {
+        'draft_improve': 'gpu-1',
+        'triage': 'gpu-1',
+        'storyline_membership': 'gpu-1',
+      });
+      // The optional stage's feature is still ON, which is the thing a stray
+      // clear would silently switch off.
+      expect(prefs.state.specForStage('draft_improve')!.id, 'gpu-1');
+    });
+
+    test('the inbox tier leaves the same three alone', () async {
+      final prefs = await notifier();
+      await prefs.upsertTarget(box);
+      await prefs.setStageTarget('draft_improve', 'gpu-1');
+      await prefs.setStageTarget('triage', 'gpu-1');
+      await prefs.setStageTarget('storyline_membership', 'gpu-1');
+
+      await prefs.applyTierDefaults(MachineTier.inbox);
+
+      expect(prefs.state.stageTargets['draft_improve'], 'gpu-1');
+      expect(prefs.state.stageTargets['triage'], 'gpu-1');
+      expect(prefs.state.stageTargets['storyline_membership'], 'gpu-1');
+      expect(prefs.state.stageTargets['storyline_recap'], builtInFastId);
+    });
+
+    test('a cold re-read sees the same map and the same policy', () async {
+      final prefs = await notifier();
+      await prefs.applyTierDefaults(MachineTier.inbox);
+
+      final fresh = await AppPrefsNotifier.read(store);
+
+      expect(fresh.stageTargets, prefs.state.stageTargets);
+      expect(fresh.draftPolicy, DraftPolicy.onDemand);
+    });
+
+    test('it touches no target, no consent and no keychain', () async {
+      final tokens = MemoryTokenStore();
+      final prefs = await notifier(tokens);
+      await prefs.upsertTarget(bedrock, bearer: 'sk-not-a-real-key');
+      await prefs.setCloudDraftsConsent(true);
+      final before = {...tokens.values};
+
+      await prefs.applyTierDefaults(MachineTier.inbox);
+      await prefs.applyTierDefaults(MachineTier.full);
+
+      expect(prefs.state.targets.single.id, bedrock.id);
+      expect(prefs.state.targets.single.hasBearer, isTrue);
+      expect(prefs.state.cloudDraftsConsent, isTrue);
+      expect(tokens.values, before);
+      expect(await prefValues(), isNot(contains('sk-not-a-real-key')));
+    });
+  });
+
   group('the consent rule', () {
     test('a Converse target on a draft needs it', () async {
       final prefs = await notifier();
