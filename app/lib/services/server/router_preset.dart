@@ -44,10 +44,16 @@ class RouterModelSpec {
 /// models, and gets replaced rather than reused.
 ///
 /// The SECTIONS come from `ModelManifest.toPreset` — the committed
-/// `assets/models/manifest.json` is the only place the three checkpoints are
-/// named. This class knows how to write an INI and nothing about which models
-/// belong in one, which is what lets a model bump be a JSON edit; the
-/// dependency runs manifest → preset and never the other way.
+/// `assets/models/manifest.json` is the only place the checkpoints are named.
+/// This class knows how to write an INI and nothing about which models belong
+/// in one, which is what lets a model bump be a JSON edit; the dependency runs
+/// manifest → preset and never the other way.
+///
+/// It is also what keeps a tier out of here. The caller resolves the manifest
+/// for the machine first, so a Mac with no writing model hands over two specs
+/// and gets an INI with two sections — no `[bond-prose]`, and a hash that
+/// differs from the three-model one, which is what stops a server started
+/// under one tier being adopted by a launch that wants the other.
 @immutable
 class RouterPreset {
   /// Where the GGUF files live — the folder the downloader fills.

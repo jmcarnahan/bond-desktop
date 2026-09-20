@@ -278,6 +278,39 @@ that every key is a `pipelineStages` id and that no value contains `@`, `http`,
 `.com` or a newline. A stage the ledger never measured renders no line at all,
 which is the honest state rather than a blank one.
 
+**This Mac, and its defaults.** Above the Targets list and below the two slot
+editors sit one fact line and one button. The line reads `This Mac:` followed by
+the chip, the memory and what the machine runs: `runs all three models` at 40
+GiB of memory or more, `runs the inbox models` below that. The button is **Use
+this Mac's defaults**, keyed `settings-tier-defaults`, and the caption under it
+names exactly what a press rewrites. On a small Mac that is naming, refresh,
+recap, grouping, the reply decision and drafts, all moved to `Local fast`, with
+suggested replies moved to Only when asked. On a big Mac it is those same six
+stage picks cleared back to `Local prose`, with suggested replies back to For
+messages that need you. Both captions use the words the controls they move
+actually carry, so the mode named here is the mode shown under Suggested
+replies. Nothing else moves: the eight bulk stages, storyline confirm among
+them, Improve a draft, the targets themselves, the cloud-drafts consent and
+every bearer are untouched, and a second press changes nothing.
+
+A Mac whose memory could not be read gets neither. The system channel usually
+answers `unknown` rather than failing, and when it throws anything else or
+goes quiet past the two-second probe timeout the hardware read is a rejection
+while the tier, read off the same future, still resolves to the full tier by
+the never-refuse rule. Either way the machine is unreadable, and writing
+defaults chosen from a number nobody read is not something to offer: the line reads `This Mac: memory could not be read` and
+there is no button, with a caption pointing at the stage table above.
+
+It is not a two-step, unlike Remove and Clear AI results, because nothing is
+destroyed. The six picks it overwrites are six rows a person can see in the
+table above, and any of them can be re-picked on the spot. While the app is
+still reading the machine the button is disabled and its caption reads `Reading
+this Mac…`; a host that cannot write the change offers neither the line nor the
+button. The tier is read from this Mac's memory each time it is asked for and
+stored nowhere, so a models folder carried to another Mac gets that Mac's
+answer. The wizard writes the same defaults once at Finish, through the same
+`AppPrefsNotifier.applyTierDefaults`.
+
 **Targets.** Below the two slot editors, under the heading **Targets**, is
 `SettingsTargetsBody` (`app/lib/widgets/settings_targets_body.dart`) — every
 server a stage may be pointed at, `AppPrefs.allTargets`, built-ins first. One row
@@ -336,6 +369,37 @@ preset is a write rather than a property of the target, so a checkbox showing th
 current grouping would need a fourth state. The host applies them with
 `AppPrefsNotifier.applyPreset` AFTER the upsert, because `applyPreset` refuses a
 target id it cannot find.
+
+**What *Prose stages* does on a Bedrock target, and what it sends.** Ticking it
+moves the six prose stages onto that model: storyline naming, storyline
+refresh, the storyline recap, the grouping stage, the reply decision and Draft
+reply, except that `applyPreset` holds `draft_reply` back on a third-party
+target while `cloud_drafts_consent` is false, so drafts keep being written
+locally until the consent pane has been answered, and the preset is not a way
+around it. Improve a draft is in no preset. What leaves the machine for a naming call is the thread cards of
+one cluster: each thread's subject, the display names of its participants and
+its triage summary; the naming card carries no topics. No message body,
+no attachment and no directory excerpt is in that prompt, which is why naming
+sits behind the prose preset rather than behind the drafts consent. This is the
+one place a cloud model measurably changes the filing, and the numbers, taken on
+the golden set on 2026-09-20 with the confirm and the embedding local in every
+row, are these:
+
+| namer | storyline.id | correct positives | forbidden hits |
+|---|---|---|---|
+| local 27B Q4_K_M with MTP | 45/98 | 5 | 4 |
+| the GPU box 27B-FP8 with MTP | 50/98 | 9 | 5 |
+| Bedrock Sonnet 5, pass 1 | 57/98 | 10 | 3 |
+| Bedrock Opus 5, pass 1 | 53/98 | 8 | 2 |
+
+A cloud pass is one of two reads and the two differ, because Converse carries no
+temperature: Opus 5's second pass filed 55 of 98 with 9 correct positives and 3
+forbidden hits, and Sonnet 5's second pass 54 of 98 with 12 and 8. The local and
+the box namers reproduce to the count.
+
+Nothing in the app picks a cloud namer for anybody. The measurement is a reason
+to offer the setting, not a default, and `docs/model-bakeoff.md` carries the
+second passes and the reading.
 
 **Cloud drafts consent.** Picking a **third-party** target for `draft_reply` or
 `draft_improve` while `cloud_drafts_consent` is false writes NOTHING. Instead the
@@ -588,25 +652,45 @@ host hears about it the instant it moves rather than on the way out. Mail and
 Teams keep syncing while it is off; only the models stand down. See
 [pipeline/10-model-routing.md](pipeline/10-model-routing.md).
 
-Under it are two resets, each an inline two-step in the shape **Sign out and
-clear local data** and **Clear attachment cache** already use: the first tap
-replaces the button with a red **Confirm: this cannot be undone** beside a
-**Keep**, and the second click therefore lands on a different button, in a
+Under it are three controls, a revoke and two resets, each an inline two-step
+in the shape **Sign out and clear local data** and **Clear attachment cache**
+already use: the first tap replaces the button with a red **Confirm: this
+cannot be undone** beside a **Keep**, and the second click therefore lands on
+a different button, in a
 different place, that did not exist a moment ago. A failure renders as an
 `InlineAlert` with the pair still up; **Keep** disarms and drops the failure
 with it.
 
 | Action | Keys | What goes | What stays |
 |---|---|---|---|
+| **Stop sending drafts anywhere** | `settings-stop-cloud-drafts{,-confirm,-keep}` | the `draft_reply` and `draft_improve` stage entries and `cloud_drafts_consent`, so Draft reply resolves to `Local prose` again, `draft_improve` resolves to nothing at all and the Improve a draft button goes with it, and the consent is withdrawn | every row, every target, every keychain bearer and every other stage entry |
 | **Clear AI results** | `settings-clear-ai-results{,-confirm,-keep}` | every triage verdict, summary, storyline, draft, digest and embedding — the sixteen `MessageStore.derivedTables`, the verdict columns on `messages` and `conversations`, and the stage markers on `attachments` and the library; the activity log is one of the sixteen, so today's **Cloud drafts** count starts again at zero, which the caption above the buttons says | mail, Teams messages, attachments, registered directories, the sign-in and every preference |
 | **Forget everything and re-sync** | `settings-forget-resync{,-confirm,-keep}` | everything above **and** the mailbox itself — `MessageStore.wipeAll(keepIdentity: true)`, cursors and bootstrap floors included | the sign-in, the about-me text, the Needs You rules, the sender rules, the registered directories and every setting |
 
-Consent, once given, is not withdrawn by any single control: `cloud_drafts_consent`
-is a machine setting that both resets keep. To stop drafts leaving the machine,
-point `draft_reply` and `draft_improve` back at a local target under Models, or
-remove the third-party target, which clears both entries; the standing switch
-under Suggested replies stops the automatic ones alone. A one-button revoke is
-Round F's.
+**Stop sending drafts anywhere** is the one-button revoke, in the same
+two-step and above the two resets. It makes three preference writes in one
+order that matters: `clearStageTarget('draft_reply')`, then
+`clearStageTarget('draft_improve')`, then `setCloudDraftsConsent(false)`. The
+stages go first and the flag last, which is the grant's order reversed, and
+for the grant's reason: `AppPrefs.specForStage` sends a third-party draft
+target back to the local one while the flag is false, so clearing the stages
+first means they are already local by the moment consent goes. Consent first
+would leave two stage entries pointing off this machine with nothing but the
+resolver between them and a draft.
+
+The `draft_reply` stage falls back to the local prose target and
+`draft_improve` resolves to nothing at all, which is that stage's own rule, so
+the Improve button goes rather than quietly running on this machine. It is
+**not** refused while processing is on, unlike the two resets it sits above:
+it writes preferences and touches no rows, so there is no drain it could race,
+and somebody who has just realised their drafts are leaving the machine should
+not have to find a switch first. Nothing else goes with it: the third-party
+target stays in the list, its keychain bearer stays in the keychain, and any
+other stage pointed at it keeps pointing at it. Granting
+again is the consent pane, one screen, so the second button says
+`Confirm: this cannot be undone` for the reason both resets do rather than
+because this one cannot be redone. The standing switch under Suggested replies
+stops the automatic improves alone and leaves the rest.
 
 Above the two resets, once the host has a count, is the cloud-draft ledger:
 one line **Cloud drafts today: N of cap** (`settings-cloud-ledger`) and a
@@ -623,13 +707,16 @@ once the count reaches the cap, and each of the four refuses with the same
 sentence. The cap in force is also the
 number the consent pane quotes before the first draft ever leaves.
 
-**Both are refused while processing is on.** The buttons are inert and the
-caption under them says `Turn processing off first`; the host refuses again for
-itself, because a reset races every drain it does not stop. With the switch
-off, each handler quiesces the triage queue and all three lanes — which is
-"finish the item at the server, then hand the claim back", not merely "stop" —
-runs the store's reset, calls `resetInterruptedWork`, and invalidates the
-fifteen providers holding rows in memory.
+**Both resets are refused while processing is on.** Their buttons are inert
+and the caption under them says `Turn processing off first`; the host refuses
+again for itself, because a reset races every drain it does not stop. With the
+switch off, each handler quiesces the triage queue, all three lanes and the
+draft handler — which is "finish the item at the server, then hand the claim
+back", not merely "stop" — runs the store's reset, calls
+`resetInterruptedWork`, and invalidates the sixteen providers holding rows in
+memory. The draft handler is the fourth because `DraftHandler.improve` is a
+button press rather than queue work, so the draft lane's own quiesce knows
+nothing about it.
 
 Neither reset queues the mailbox. The next sync's own backlog calls are what
 refill the pipeline, one `backlogEnqueueCap` slice a poll, which is why the
@@ -949,13 +1036,13 @@ One `PaneSurface`, whose title is the step's and whose trailing slot reads
 | # | Title | Primary button | What it does |
 |---|---|---|---|
 | 1 | Welcome to Bond | `Get started` | What Bond is; the container-migration line when there was one |
-| 2 | Your Mac | `Continue` | Chip, memory, macOS. Intel or Rosetta renders **no** button at all; too little memory for the prose model is a warning that still continues |
-| 3 | Models | `Continue` | The manifest's three rows — name, role sentence, size, licence button, and any `notice` verbatim — and the total |
+| 2 | Your Mac | `Continue` | Chip, memory, macOS, and which models this Mac takes. Intel or Rosetta renders **no** button at all. At 40 GiB and up, one line saying it runs all three; below it, an alert naming the memory, saying the writing model is not downloaded here and that the writing stages run on the inbox model until a target is added under Settings, Models. Under 16 GiB the same alert gains one sentence about slower triage. All of it is a warning that still continues |
+| 3 | Models | `Continue` | The RESOLVED manifest's rows — name, role sentence, size, licence button, and any `notice` verbatim — and the total. Three rows and 22.3 GB on a full Mac, two rows and 4.6 GB on an inbox one, and the first sentence says which |
 | 4 | Storage | `Continue` | The effective folder, **Change folder…**, and `checkDisk`. Dead until the preflight answers and passes; free space that could not be asked counts as passing, a folder that cannot be WRITTEN does not — `Bond can't write to this folder. Choose another one.` |
-| 5 | Download | `Continue` | Three bars, smallest first. Enabled only when EVERY file is done — see below |
+| 5 | Download | `Continue` | One bar per file this Mac's tier wants, smallest first. Enabled only when EVERY file is done — see below |
 | 6 | Sign in | `Continue` | `SignInBody(showTitle: false)` when signed out (signing in advances, and there is no Continue); `You're signed in.` and a Continue when already signed in |
 | 7 | Notifications | `Continue` | The press IS the ask. Exactly one button, and the word `Allow` appears nowhere — macOS is about to put its own Allow up |
-| 8 | All set | `Finish` | Folder, port, account, notifications, then `managedServer = true` and `setup = 'done'`, and only then the server |
+| 8 | All set | `Finish` | Folder, port, account, notifications, then this Mac's tier defaults, `managedServer = true` and `setup = 'done'`, and only then the server |
 
 **`'done'` is written by Finish and by `returnToInbox`, and by nothing else.**
 The second writer never INVENTS the word: it only puts back a value

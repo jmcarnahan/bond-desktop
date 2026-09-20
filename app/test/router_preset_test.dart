@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:bond_inbox/services/server/router_preset.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -42,16 +43,40 @@ load-on-startup = true
 
 [bond-bulk]
 model = /tmp/Bond Models/ggml-org_Qwen3-4B-Instruct-2507-Q8_0-GGUF/qwen3-4b-instruct-2507-q8_0.gguf
-c = 32768
+c = 16384
 parallel = 4
 load-on-startup = true
 
 [bond-prose]
 model = /tmp/Bond Models/ggml-org_Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf
-c = 32768
+c = 16384
 parallel = 1
 load-on-startup = true
 ''');
+    });
+
+    test('an inbox Mac gets a preset with no writing model in it', () {
+      final manifest = ModelManifest.parse(
+        File('assets/models/manifest.json').readAsStringSync(),
+      );
+
+      final inbox =
+          manifest.forTier(MachineTier.inbox).toPreset('/tmp/Bond Models');
+
+      // No `[bond-prose]` section at all. The supervisor starts every model
+      // the preset names and refuses while any of their files is missing, so
+      // a section for a checkpoint this tier never downloads would be a
+      // server that cannot start on a machine that is set up correctly.
+      expect(inbox.modelIds, ['bond-embed', 'bond-bulk']);
+      expect(inbox.toIni(), isNot(contains('[bond-prose]')));
+      expect(inbox.toIni(), contains('parallel = 2'));
+
+      // And the hash differs, which is what stops a server started under one
+      // tier from being adopted by a launch that wants the other.
+      final full =
+          manifest.forTier(MachineTier.full).toPreset('/tmp/Bond Models');
+      expect(inbox.hash, isNot(full.hash));
+      expect(full.hash, manifest.toPreset('/tmp/Bond Models').hash);
     });
 
     test('modelIds are the router ids, in file order', () {
@@ -59,6 +84,14 @@ load-on-startup = true
         testPreset('/tmp/models').modelIds,
         ['bond-embed', 'bond-bulk', 'bond-prose'],
       );
+    });
+
+    test('a resolved manifest writes one section per model it kept', () {
+      final inbox =
+          testManifest().forTier(MachineTier.inbox).toPreset('/tmp/models');
+
+      expect(inbox.modelIds, ['bond-embed', 'bond-bulk']);
+      expect(inbox.missingFiles(), hasLength(2));
     });
 
     test('modelPath flattens the repo slash to an underscore', () {

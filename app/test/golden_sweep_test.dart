@@ -291,6 +291,54 @@ void main() {
     test('no pairs is five zeroes', () {
       expect(cosineBins(const []), [0, 0, 0, 0, 0]);
     });
+
+    test('the same eight values read differently on the Qwen edges', () {
+      // One list, two scales, and the second is the point: on the default
+      // edges six of these eight are under the bottom edge and the histogram
+      // says almost nothing, while the Qwen edges spread the same six across
+      // four buckets. That is the whole reason Round F added a second row
+      // rather than moving the first.
+      const values = [0.10, 0.36, 0.38, 0.43, 0.44, 0.48, 0.52, 0.66];
+
+      expect(cosineBins(values), [6, 1, 0, 0, 1]);
+      expect(
+        cosineBins(values, edges: cosineBinEdgesQwen),
+        [1, 2, 2, 1, 2],
+      );
+    });
+
+    test('the Qwen edges bracket all four shipped gates', () {
+      // The reason those four numbers and not four others: every gate the
+      // clustering and the assign run on has a bucket boundary above it, so a
+      // reader can count the pairs a gate would refuse.
+      int binOf(double gate) =>
+          cosineBins([gate], edges: cosineBinEdgesQwen).indexOf(1);
+
+      expect(binOf(StorylineTuning.assignCosineGateWithOverlap), 1);
+      expect(binOf(StorylineTuning.clusterCoherenceFloor), 2);
+      expect(binOf(StorylineTuning.assignCosineGate), 2);
+      expect(binOf(StorylineTuning.clusterLinkThreshold), 3);
+      // And the old edges cannot: all four land in one bucket there.
+      expect(
+        {
+          for (final gate in [
+            StorylineTuning.assignCosineGateWithOverlap,
+            StorylineTuning.clusterCoherenceFloor,
+            StorylineTuning.assignCosineGate,
+            StorylineTuning.clusterLinkThreshold,
+          ])
+            cosineBins([gate]).indexOf(1),
+        },
+        {0},
+      );
+    });
+
+    test('the labels name the buckets their edges cut', () {
+      expect(cosineBinLabels, hasLength(cosineBinEdges.length + 1));
+      expect(cosineBinLabelsQwen, hasLength(cosineBinEdgesQwen.length + 1));
+      expect(cosineBinLabelsQwen.first, '<0.35');
+      expect(cosineBinLabelsQwen.last, '>=0.50');
+    });
   });
 
   group('the charter lint, counted', () {
@@ -936,6 +984,10 @@ void main() {
           callsPerPass: const [7, 4],
           wallPerPassMs: const [1200, 900],
           cosineBins: const [0, 1, 2, 3, 4],
+          // Deliberately not the same five numbers as the line above: the two
+          // scales count the same pairs into different buckets, and a fixture
+          // that repeated itself could not tell the two rows apart.
+          cosineBinsQwen: const [4, 3, 2, 1, 0],
           lintCounts: const {
             'clean': 2,
             'placeholder': 0,
@@ -946,6 +998,9 @@ void main() {
           sameEffortBins: const [0, 0, 0, 0, 0],
           crossEffortBins: const [0, 0, 0, 0, 0],
           withNoneBins: const [0, 0, 0, 0, 0],
+          sameEffortBinsQwen: const [0, 0, 0, 0, 0],
+          crossEffortBinsQwen: const [0, 0, 0, 0, 0],
+          withNoneBinsQwen: const [0, 0, 0, 0, 0],
           sameSubjectBins: const [1, 0, 0, 2],
           crossSubjectBins: const [5, 1, 0, 0],
           withNoneSubjectBins: const [3, 0, 0, 0],
@@ -1077,11 +1132,15 @@ void main() {
         callsPerPass: const [],
         wallPerPassMs: const [],
         cosineBins: const [0, 0, 0, 0, 0],
+        cosineBinsQwen: const [0, 0, 0, 0, 0],
         lintCounts: const {},
         clusterPurity: const {},
         sameEffortBins: const [0, 0, 0, 0, 0],
         crossEffortBins: const [0, 0, 0, 0, 0],
         withNoneBins: const [0, 0, 0, 0, 0],
+        sameEffortBinsQwen: const [0, 0, 0, 0, 0],
+        crossEffortBinsQwen: const [0, 0, 0, 0, 0],
+        withNoneBinsQwen: const [0, 0, 0, 0, 0],
         sameSubjectBins: const [0, 0, 0, 0],
         crossSubjectBins: const [0, 0, 0, 0],
         withNoneSubjectBins: const [0, 0, 0, 0],
@@ -1126,11 +1185,19 @@ void main() {
         callsPerPass: const [],
         wallPerPassMs: const [],
         cosineBins: const [0, 0, 0, 0, 0],
+        cosineBinsQwen: const [0, 0, 0, 0, 0],
         lintCounts: const {},
         clusterPurity: judgedClusters,
         sameEffortBins: const [0, 0, 1, 0, 0],
         crossEffortBins: const [2, 0, 0, 0, 0],
         withNoneBins: const [0, 0, 0, 3, 0],
+        // The same three pairs one scale down: a pair at 0.57 is `>=0.50` on
+        // the Qwen edges, and the two cross pairs under 0.50 fall wherever
+        // they fall. Written by hand, because the point of the second row is
+        // that it is not a copy of the first.
+        sameEffortBinsQwen: const [0, 0, 0, 0, 1],
+        crossEffortBinsQwen: const [0, 1, 1, 0, 0],
+        withNoneBinsQwen: const [0, 0, 0, 0, 3],
         sameSubjectBins: const [0, 0, 1, 0],
         crossSubjectBins: const [2, 0, 0, 0],
         withNoneSubjectBins: const [3, 0, 0, 0],
@@ -1175,6 +1242,31 @@ void main() {
           '0.55-0.60': 0,
           '0.60-0.65': 3,
           '>=0.65': 0,
+        },
+        // Beside the first three, never instead of them: a result file written
+        // before Round F carries only the old scale, and a reader must not
+        // have to know which week a row was taken in to know what a bucket
+        // means.
+        'same_effort_qwen': {
+          '<0.35': 0,
+          '0.35-0.40': 0,
+          '0.40-0.45': 0,
+          '0.45-0.50': 0,
+          '>=0.50': 1,
+        },
+        'cross_effort_qwen': {
+          '<0.35': 0,
+          '0.35-0.40': 1,
+          '0.40-0.45': 1,
+          '0.45-0.50': 0,
+          '>=0.50': 0,
+        },
+        'with_none_qwen': {
+          '<0.35': 0,
+          '0.35-0.40': 0,
+          '0.40-0.45': 0,
+          '0.45-0.50': 0,
+          '>=0.50': 3,
         },
       });
     });
@@ -1258,10 +1350,19 @@ void main() {
       );
       expect(printed, contains('purity before naming  formed: none'));
       expect(printed, contains('declined: none'));
+      // Two scales, one under the other, each saying which it is: the pair
+      // line is read against the shipped gates and against the Round D rows,
+      // and a column that did not name its edges could be read as either.
       expect(
         printed,
-        contains('pool pairs by cosine  same effort  <0.50 0'),
+        contains('pool pairs by cosine (0.50..0.65)  same effort  <0.50 0'),
       );
+      expect(
+        printed,
+        contains('pool pairs by cosine (0.35..0.50)  same effort  <0.35 0'),
+      );
+      expect(printed, contains('in-cluster cosines (0.50..0.65)  <0.50 0'));
+      expect(printed, contains('in-cluster cosines (0.35..0.50)  <0.35 4'));
 
       // The same three lines with clusters in them, which is where a thread
       // key would leak if one ever reached the printed side.

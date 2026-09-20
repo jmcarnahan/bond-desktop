@@ -29,6 +29,31 @@ the client or anything watching it (see **Runtime overrides** below).
 | `draft_improve` | none until picked | nothing — the button is hidden |
 | `embeddings` | not routed | `make embed` |
 
+**A small Mac starts from a different map.** The table above is the FULL tier,
+which is a machine with 40 GiB of memory or more, and also a machine whose
+memory could not be read at all: `machineTierFor` answers `full` for zero bytes,
+the never-refuse rule `HardwareInfo.unknown` states, so nothing is withheld over
+a fact the app failed to read. Below the threshold the machine is the INBOX
+tier: the writing model is neither downloaded nor started, and six of the seven
+prose-slot rows above, every one but `draft_improve`, start on `Local fast`
+instead, meaning `storyline_group`, `storyline_name`, `storyline_refresh`,
+`storyline_recap`, `reply_decision` and `draft_reply`. `draft_improve` is the
+seventh and no tier writes it, for the reason no preset writes it either: it is
+the one stage a person picks explicitly, and a tier that turned it on would be
+consent by accident. `AppPrefsNotifier.applyTierDefaults` is the one writer of
+that map, called by the setup wizard at Finish and again whenever somebody
+presses **Use this Mac's defaults** under Settings, Models. It writes the way a
+preset does, so an entry equal to a stage's own default is removed rather than
+stored and a fresh install on a big Mac still holds an empty object.
+
+The map is only half of what `applyTierDefaults` writes. The other half is the
+draft policy: the `inbox` tier gets `DraftPolicy.onDemand`, because the inbox
+model's drafts are unmeasured and nobody should pay for one unasked, and the
+`full` tier gets `needsYou`, which is the shipped default. That is the setting
+under **Suggested replies**, so a press moves a control the reader can see. The
+tier itself is read from the machine's memory every time it is asked for and is
+stored nowhere.
+
 The two built-in targets are the two slots this app has always had, named:
 
 | Built-in | Compiled default | Served by |
@@ -146,11 +171,16 @@ and without interrupting work in flight.
 
 Every call records which model answered it: `LlmCallRecord` carries `model` and
 `baseUrl`, and the activity log folds the model into the row as `llm_model`
-(shown on the `t/s` cell's tooltip and in the expanded detail). The record's
-`outcome` is decided after the answer has been made usable: a constrained
-call whose content is not the JSON object it asked for is recorded as
-`format`, never as `ok` — the decode runs inside the same instrumented try as
-the request, so a model that overran its budget mid-object counts as a failed
+(shown on the `t/s` cell's tooltip and in the expanded detail). A streamed call
+also reports how long the box stayed empty: the log keeps the FIRST non-null
+`LlmCallRecord.firstTokenMs` a row saw and writes it into `detail_json` as
+`first_token_ms`, only when there was one. Only the draft path streams, so the
+key rides the draft rows and stays off every triage row rather than printing a
+dash on all of them. The record's `outcome` is decided after the answer has
+been made usable: a constrained call whose content is not the JSON object it
+asked for is recorded as `format`, never as `ok` — the decode runs inside the
+same instrumented try as the request, so a model that overran its budget mid-
+object counts as a failed
 call in every table built from these records.
 
 **Two wires, one client.** `LlmClient` can also carry a bearer token and speak
@@ -189,9 +219,9 @@ one plain POST.
 ## Managed mode: one router
 
 Everything above describes the app talking to servers somebody else started.
-It can also start its own — ONE llama-server in router mode, serving all three
-models — and that mode is off by default, so a build with nothing changed
-behaves exactly as this page has always described.
+It can also start its own — ONE llama-server in router mode, serving every
+model this Mac's tier wants — and that mode is off by default, so a build with
+nothing changed behaves exactly as this page has always described.
 
 - **The supervisor.** `ModelServerSupervisor`
   (`app/lib/services/server/model_server_supervisor.dart`), behind
@@ -279,12 +309,13 @@ behaves exactly as this page has always described.
 ### The manifest
 
 `app/assets/models/manifest.json` is the ONLY place the three checkpoints are
-named. Phase 2's Dart trio (`RouterPreset.defaultTrio`) is gone; the preset's
-sections are now `ModelManifest.toPreset(folder)`, and `RouterPreset` knows how
-to write an INI and nothing about which models belong in one. That is the whole
-point of the file: bumping a model must not be a code change, and the diff of
-one bump must be legible on its own — three fields in one JSON file (see
-`docs/distribution.md`, **Bumping a model**).
+named, and since Round F (2026-09-20) it is `version: 2` and names the machine
+tiers beside them. Phase 2's Dart trio (`RouterPreset.defaultTrio`) is gone; the
+preset's sections are now `ModelManifest.toPreset(folder)`, and `RouterPreset`
+knows how to write an INI and nothing about which models belong in one. That
+is the whole point of the file: bumping a model must not be a code change, and
+the diff of one bump must be legible on its own — three fields in one JSON
+file (see `docs/distribution.md`, **Bumping a model**).
 
 One entry per model, in FILE ORDER, which is also the order the INI's sections
 take and the order the router loads them in: smallest first, so the embedding
@@ -298,9 +329,44 @@ twenty-seven-billion-parameter prose model is still being mapped.
 | `repo`, `file` | The Hugging Face repo and the artefact in it. Kept apart because the resolve URL wants both halves and so does the on-disk layout (`<repo with '/' → '_'>/<file>`, the same rule as `RouterPreset.modelPath`). |
 | `revision` | A 40-character COMMIT SHA, never `main`. A branch is a moving target: the file behind `main` can be replaced upstream, and a download resolved through it would fetch bytes that no longer match `sha256` — a checksum failure the user cannot act on and this app would have caused. |
 | `sizeBytes`, `sha256` | The measured size and the LFS oid. Both are checked against the hub's `X-Linked-Size` / `X-Linked-ETag` on the redirect, so a manifest that is wrong about a file is caught before eighteen gigabytes are spent. |
-| `minRamBytes` | What the machine must have. 0 when it always fits. |
+| `minRamBytes` | What the machine must have. 0 when it always fits. Nothing refuses on it: which checkpoints a Mac takes is the tier's answer, and this is the number the wizard quotes when it says why the writing model is not among them. |
 | `license`, `licenseUrl`, `notice` | What the first-run screen shows. `notice` is null for the permissive ones, so a screen can skip the line entirely rather than render an empty string. |
 | `serverArgs` | llama-server's long flags with the leading dashes stripped — the spelling the preset INI wants. Values are strings; the INI writer prints them verbatim. |
+| `tiers` | The machine ladder, one entry per tier: `id` (a `MachineTier` name), `minRamBytes`, the `models` that tier downloads and starts, and optional `serverArgs` overrides per id, merged onto the entry's own. |
+
+**The tiers, and what a resolved manifest is.** Two rungs, chosen from
+`hw.memsize` alone and stored nowhere:
+
+| tier | starts at | models | what differs |
+|---|---|---|---|
+| `full` | 40 GiB | the embedding model, the inbox model, the writing model | nothing; this is the manifest as written |
+| `inbox` | 0 | the embedding model, the inbox model | the writing model is neither downloaded nor started, and the inbox model runs at `c = 16384` over `parallel = 2` |
+
+`ModelManifest.forTier(MachineTier)` returns a RESOLVED manifest: the same
+class, holding only that tier's entries with its overrides merged in. The
+wizard's device step, its models rows and total, the disk preflight, the
+download run, the ledger check and the preset the supervisor writes all read
+the resolved view, so a Mac under the floor downloads 4.6 GB rather than 22.3,
+starts two servers rather than three, and is never sent back through the wizard
+for a file its tier never wanted. A resolved view may have no prose model, which
+is what `byRoleOrNull` is for; `byRole` still throws, and the master list still
+carries exactly one model per role.
+
+The parser refuses a ladder it cannot trust: a tier id that is not a
+`MachineTier` name, a rung named twice, a rung missing, a model id the manifest
+does not ship, a tier without the embedding or the inbox model, a ladder that
+does not start at zero, and a `full` tier whose `minRamBytes` is not the
+`fullTierMinBytes` this build was compiled with. The last one is what keeps the
+JSON and `model_slots.dart` from drifting apart about where the writing model
+begins.
+
+The 40 GiB floor is a size, not a measurement: the three servers hold about
+26.4 GB resident together at 16K context, which leaves a 36 GB Mac no room for
+the app and the system. The `inbox` tier's `parallel = 2` is sized the same
+way, so the inbox model's KV cache stays under 3 GB on a 16 GB Mac. Both are
+sized rather than measured, and `docs/model-bakeoff.md` says which rows are
+which. Below 16 GiB there is no third tier: the wizard adds one sentence saying
+triage will be slower than any row in the ledger.
 
 JSON has no comments, so the three flags that are not preferences are recorded
 here instead:
@@ -317,6 +383,22 @@ here instead:
   hammers: triage, needs-you, extraction and the digests all queue against it.
 - **`parallel = 1`** on the prose model because it is the memory ceiling on
   this machine, and a second concurrent context would double its KV cache.
+- **`c = 16384`** on both chat models since Round F, which is what every ledger
+  row since round 0 (2026-09-16) was measured at: 16K for the prose slot at one
+  slot, 4K a slot for the bulk one at four. The Makefile's `CTX_SIZE` default is
+  the same number, and `app/test/manifest_makefile_parity_test.dart` is what
+  says the two cannot drift.
+- **No `spec-type`, deliberately.** `make model` launches the prose model with
+  `--spec-type draft-mtp`, its own MTP head, which is worth about 4 tok/s of
+  decode on the maintainer's machine — and the preset INI could carry the flag
+  verbatim, since the bundled llama-server (b10896, reporting 0.4.0-dev) still
+  spells it that way. What it cannot carry is the sidecar: `draft-mtp` needs the
+  `mtp-…` GGUF, and llama-server resolves that from the repo an `-hf` download
+  came from. The managed preset names a local PATH, and the manifest ships
+  three files with no sidecar among them, so the flag would find no draft model
+  and the launch would be the one thing a first run cannot survive. The managed
+  server therefore runs the prose model plain until the manifest ships the
+  sidecar as a fourth file and the preset names it.
 
 ### The downloader
 
@@ -328,7 +410,8 @@ Phase 4 draws the wizard on top of it.
   server, so four concurrent transfers only make every one of them finish
   later; smallest first means the two small models land early and the wizard's
   bars show real progress within minutes. It does NOT open the inbox early:
-  the wizard's Continue and the server both wait for all three, because the
+  the wizard's Continue and the server both wait for every file THIS MACHINE's
+  tier asked for — three on a full Mac, two on an inbox one — because the
   preset names every file and `_launch` refuses to start with one missing
   (`ModelManifest.usableIds` is informational). And a digest that MOVED is
   noticed at the next launch — `DownloadLedger.matches` fails, the gate shows

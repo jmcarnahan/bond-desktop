@@ -20,8 +20,13 @@
 # Free locally; sibling stacks use 8000-8002, 18000-18005, 3001.
 MODEL_PORT   ?= 8080
 MODEL_HF     ?= ggml-org/Qwen3.8-27B-GGUF:Q4_K_M
-# ~2GB KV cache; raise later for long agent trajectories.
-CTX_SIZE     ?= 32768
+# 16K per chat server, the context EVERY ledger row since round 0 (2026-09-16)
+# was measured at, and what this app's prompts need: llama.cpp splits -c across
+# --parallel slots, so this is 16K for the prose slot at SLOTS = 1 and 4K a slot
+# for the bulk one at FAST_SLOTS = 4. It was a local.mk line on the maintainer's
+# machine until Round F adopted it here, so a fresh clone now reproduces the
+# ledger rows without writing one. Raise it for long agent trajectories.
+CTX_SIZE     ?= 16384
 
 # The context the PROSE server is launched with, when it wants a different
 # total from CTX_SIZE. llama.cpp splits -c across --parallel slots, so
@@ -48,9 +53,16 @@ SLOTS        ?= 1
 # 44% faster, and the draft leg under memory pressure without
 # reproducing the gain — draft acceptance 66–77% either way. ngram speculation
 # measured nothing on JSON prose and a separate draft model (`DRAFT_HF`) a
-# net loss. SPEC_TYPE stays empty by default because only models that ship an
-# MTP sidecar can use it: adopt it in local.mk — config, not code.
-# Set one or the other, not both — the combination is untried.
+# net loss. SPEC_TYPE is `draft-mtp` BY DEFAULT since Round F (2026-09-20): it
+# is the configuration every ledger row since round 0 was measured with, and on
+# this machine it lifts the 27B's decode from 10.4 to 14.2 tok/s. Only a model
+# that ships an MTP sidecar can use it — MODEL_HF's Qwen3.8-27B does, and
+# llama-server resolves the sidecar from the same repo as the -hf download, so
+# a MODEL_HF pointed at a model without one wants `SPEC_TYPE =` (empty) in
+# local.mk. The app's own managed server does NOT get this flag: its preset
+# names a local path rather than a repo, so there is no sidecar for it to
+# resolve (docs/pipeline/10-model-routing.md, "The manifest").
+# Set DRAFT_HF or SPEC_TYPE, not both — the combination is untried.
 #   make model DRAFT_HF=ggml-org/Qwen3.5-0.8B-GGUF   → draft-model speculation
 #                                                      (measured a net loss)
 #   make model SPEC_TYPE=ngram-simple                → ngram, no second model
@@ -58,10 +70,14 @@ SLOTS        ?= 1
 #                                                      (the one that paid)
 # A draft whose tokenizer does not match the target fails at startup — that
 # failure IS the compatibility check, so trying a candidate is safe.
-# llama.cpp 0.4.0 renamed the `--spec-type` vocabulary; after a Homebrew
-# upgrade check `llama-server --help` before relying on this value.
+# llama.cpp 0.4.0 renamed the `--spec-type` vocabulary. `draft-mtp` survived it:
+# checked on 2026-09-20 against both the Homebrew 0.3.0 build (b10621) and the
+# bundled sidecar this app ships (b10896, which reports 0.4.0-dev), and both
+# still list it. After a Homebrew upgrade check `llama-server --help` again
+# before relying on this value — it is a non-empty default now, so a rename
+# would break `make model` rather than being ignored.
 DRAFT_HF     ?=
-SPEC_TYPE    ?=
+SPEC_TYPE    ?= draft-mtp
 
 # Tokens drafted per step when DRAFT_HF is set (build default: 3). Untuned;
 # this file passes it only alongside DRAFT_HF, and the MTP head above is the
@@ -175,7 +191,7 @@ help:
 	@printf "  make ab           → 27B vs fast model, side by side (needs both up)\n"
 	@printf "  make ab-membership → membership eval, 27B vs fast model (needs both up)\n"
 	@printf "  make drain        → drain concurrency race, BENCH_K rounds (needs make fast up)\n"
-	@printf "  make bench-pipeline → the backlog end to end, PIPE_SHAPE=single|lanes (needs fast + model up)\n"
+	@printf "  make bench-pipeline → the backlog end to end, PIPE_SHAPE=single|lanes, PIPE_POLICY=all|needsYou|onDemand (needs fast + model up)\n"
 	@printf "  make bench-compare A=<a.json> B=<b.json> → diff two bench results\n"
 	@printf "  make golden        → the golden set through triage/needs-you/extraction on the bulk slot (GOLDEN_CTX=none|tail3|compressed|digest, GOLDEN_EXTRACT_CTX=none|tail3|digest, GOLDEN_K=…)\n"
 	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
@@ -200,7 +216,8 @@ help:
 	@printf "Each run writes JSON to $(BENCH_OUT); PROSE_* points the other slot.\n"
 	@printf "BENCH_VERIFY=0 skips the contract check; BENCH_K=1,3,6 picks the drain\n"
 	@printf "rounds (start the server with FAST_SLOTS >= max(K)).\n"
-	@printf "PIPE_COPIES/PIPE_WIDTH/PIPE_SHAPE/PIPE_LATE tune the pipeline bench;\n"
+	@printf "PIPE_COPIES/PIPE_WIDTH/PIPE_SHAPE/PIPE_LATE/PIPE_POLICY tune the pipeline\n"
+	@printf "bench, and PIPE_POLICY=all is the worst case every ledger row was taken at;\n"
 	@printf "MODEL_CTX widens the prose server's total context for SLOTS > 1.\n\n"
 	@printf "First run downloads ~19GB of weights before the port binds —\n"
 	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n\n"
@@ -656,6 +673,12 @@ PIPE_SHAPE   ?= lanes
 # the first draft call starts, timed from upsert to its extraction being done.
 # 0 skips it.
 PIPE_LATE    ?= 1
+# needsYou | all | onDemand — AppPrefs.draftPolicy, which decides how many of
+# the backlog's messages get a draft prefetched. The app ships `needsYou`; the
+# bench has always run `all`, the worst case, by passing no policy at all. The
+# default stays `all` so every row in the ledger keeps the meaning it was
+# written with, and `needsYou` is how the shipped default is measured.
+PIPE_POLICY  ?= all
 
 # ── the bakeoff: Bedrock as a target ────────────────────────────────────
 # Two wires. Most Bedrock models speak the OpenAI shape at
@@ -752,6 +775,7 @@ BENCH_DEFINES := \
   --dart-define=PIPE_WIDTH='$(PIPE_WIDTH)' \
   --dart-define=PIPE_SHAPE='$(PIPE_SHAPE)' \
   --dart-define=PIPE_LATE=$(if $(filter-out 0,$(PIPE_LATE)),true,false) \
+  --dart-define=PIPE_POLICY='$(PIPE_POLICY)' \
   --dart-define=GOLDEN_SET='$(GOLDEN)' \
   --dart-define=GOLDEN_REGISTRY='$(GOLDEN_REGISTRY)' \
   --dart-define=GOLDEN_OWNER_NAME='$(GOLDEN_OWNER_NAME)' \

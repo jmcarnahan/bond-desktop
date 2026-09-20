@@ -9,13 +9,19 @@ import 'setup_controls.dart';
 /// licence.
 ///
 /// PROP-ONLY, and it renders the manifest rather than a list of its own —
-/// `assets/models/manifest.json` is the only place the three checkpoints are
-/// named, and a screen with its own copy would be the second.
+/// `assets/models/manifest.json` is the only place the checkpoints are named,
+/// and a screen with its own copy would be the second.
+///
+/// [manifest] is the RESOLVED one: what THIS Mac downloads, which on the
+/// inbox tier is two models rather than three. The count is in the first
+/// sentence, so a person on a small Mac is told what is coming before the
+/// rows say it and before the total is a number they have to compare.
 ///
 /// The rows are in MANIFEST order (embed, bulk, prose) rather than by size,
 /// because this screen is about what each model does and that order is the
 /// pipeline's. The download step is the one that sorts by size.
 class SetupModelsBody extends StatelessWidget {
+  /// The manifest this Mac's tier resolved to, not the master list.
   final ModelManifest manifest;
 
   /// Opens a licence in the browser. Null hides every licence button — the
@@ -33,6 +39,25 @@ class SetupModelsBody extends StatelessWidget {
   });
 
   static Key licenseKey(String id) => ValueKey('setup-license-$id');
+
+  /// Small counts read as words in a sentence. Two and three are the only
+  /// ones any tier produces; anything else falls back to the digits rather
+  /// than inventing a vocabulary this screen does not need.
+  static String countWord(int count) => switch (count) {
+        1 => 'one',
+        2 => 'two',
+        3 => 'three',
+        _ => '$count',
+      };
+
+  /// The opening sentence, which has to agree with itself about number: no
+  /// tier ships one model today, and a sentence reading "one models" would be
+  /// the first thing a person saw.
+  static String downloadsSentence(int count) => count == 1
+      ? 'Bond downloads one model from Hugging Face. It runs on this Mac and '
+          'never sends your mail anywhere.'
+      : 'Bond downloads ${countWord(count)} models from Hugging Face. They '
+          'run on this Mac and never send your mail anywhere.';
 
   /// What each role is FOR, in the user's terms. Held here rather than in the
   /// manifest because it is copy about this app's pipeline, not a fact about
@@ -52,8 +77,7 @@ class SetupModelsBody extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Text(
-          'Bond downloads three models from Hugging Face. They run on this '
-          'Mac and never send your mail anywhere.',
+          downloadsSentence(manifest.models.length),
           style: BondType.body.copyWith(color: BondColors.inkSecondary),
         ),
         const SizedBox(height: BondSpacing.s16),

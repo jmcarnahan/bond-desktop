@@ -9,12 +9,14 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/notification_provider.dart';
 import 'package:bond_inbox/providers/setup_provider.dart';
 import 'package:bond_inbox/screens/setup/setup_gate.dart';
+import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/models/download_state.dart';
 import 'package:bond_inbox/services/models/model_downloader.dart';
 import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:bond_inbox/services/notify/desktop_notification_service.dart';
 import 'package:bond_inbox/services/notify/settled_event.dart';
 import 'package:bond_inbox/services/server/model_server_supervisor.dart';
+import 'package:bond_inbox/services/system/system_info.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -26,6 +28,18 @@ import 'fixtures/fake_process_runner.dart';
 import 'fixtures/fake_system_info.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/test_manifest.dart';
+
+/// A platform that refuses to describe the machine.
+class _RefusingSystemInfo extends FakeSystemInfo {
+  @override
+  Future<HardwareInfo> hardware() async => throw StateError('no channel');
+}
+
+/// A platform that never answers at all — the hang, rather than the throw.
+class _SilentSystemInfo extends FakeSystemInfo {
+  @override
+  Future<HardwareInfo> hardware() => Completer<HardwareInfo>().future;
+}
 
 /// A store whose reads fail — the unreadable-database case the gate has to
 /// survive.
@@ -61,8 +75,11 @@ void main() {
   /// A ledger saying the whole manifest is here, at the digests this build
   /// names — what a machine the gate is allowed to let through really has.
   /// [bump] moves one model's sha, which is the manifest-bump case.
-  Future<void> seedLedger({bool bump = false}) async {
-    final manifest = testManifest();
+  Future<void> seedLedger({
+    bool bump = false,
+    MachineTier tier = MachineTier.full,
+  }) async {
+    final manifest = testManifest().forTier(tier);
     var ledger = DownloadLedger.empty;
     for (final model in manifest.models) {
       ledger = ledger.record(FileDownloadState(
@@ -77,7 +94,11 @@ void main() {
     await store.recordDownload(ledger);
   }
 
-  Future<void> makeContainer({SetupStore? overStore}) async {
+  Future<void> makeContainer({
+    SetupStore? overStore,
+    int memoryBytes = 0,
+    SystemInfo? system,
+  }) async {
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
       appPathsProvider.overrideWithValue(AppPaths(support)),
@@ -95,7 +116,17 @@ void main() {
         sleep: (_) async {},
         maxAttempts: 1,
       )),
-      systemInfoProvider.overrideWithValue(FakeSystemInfo()),
+      systemInfoProvider.overrideWithValue(
+        system ??
+            (FakeSystemInfo()
+              ..hardwareInfo = HardwareInfo(
+                chip: 'Apple M2',
+                memoryBytes: memoryBytes,
+                appleSilicon: true,
+                rosetta: false,
+                osVersion: '15.6',
+              )),
+      ),
       modelServerSupervisorProvider.overrideWithValue(supervisor),
       authSessionProvider.overrideWithValue(FakeAuthSession()),
       desktopNotifierProvider.overrideWithValue(notifier),
@@ -188,6 +219,143 @@ void main() {
 
     expect(find.text('Welcome to Bond'), findsOneWidget);
     expect(find.text('the app'), findsNothing);
+  });
+
+  test('a platform that refuses still answers a tier, and it is the full one',
+      () async {
+    // The tier is awaited where the SERVER is launched, on a path with no
+    // `try` above it: a rejected future there would take the launch down and
+    // emit no `ServerFailed` at all. Nothing is refused for a fact the app
+    // could not read, and that has to hold for a throw as well as for a zero.
+    final container = ProviderContainer(overrides: [
+      systemInfoProvider.overrideWithValue(_RefusingSystemInfo()),
+    ]);
+    addTearDown(container.dispose);
+
+    expect(await container.read(machineTierProvider.future), MachineTier.full);
+  });
+
+  testWidgets('a channel that goes quiet answers the full tier at the timeout',
+      (tester) async {
+    // The hang rather than the throw, one level below the gate. The SERVER
+    // launch awaits this provider with no `try` above it and emits nothing
+    // until `buildPreset()` returns, so an unbounded wait here is no server,
+    // no `ServerFailed` and nothing on screen. The timeout lives inside the
+    // provider's own `try`, so the wait ends the way a refusal does.
+    final container = ProviderContainer(overrides: [
+      hardwareInfoProvider
+          .overrideWith((ref) => Completer<HardwareInfo>().future),
+    ]);
+    addTearDown(container.dispose);
+
+    MachineTier? tier;
+    unawaited(
+      container.read(machineTierProvider.future).then((value) => tier = value),
+    );
+
+    await tester.pump(hardwareProbeTimeout + const Duration(seconds: 1));
+    await tester.pump();
+
+    expect(tier, MachineTier.full);
+  });
+
+  testWidgets('a channel that answers after the timeout re-derives the tier',
+      (tester) async {
+    // The timeout answers off a read that has not landed, so the answer has to
+    // be revisable: a machine left pinned at `full` by a slow channel would be
+    // offered the full tier's stage picks under a fact line reading 16 GB, off
+    // the same hardware future. Watching the `AsyncValue` and not only the
+    // future is what rebuilds this provider when the read finally lands.
+    final answers = Completer<HardwareInfo>();
+    final container = ProviderContainer(overrides: [
+      hardwareInfoProvider.overrideWith((ref) => answers.future),
+    ]);
+    addTearDown(container.dispose);
+
+    MachineTier? atTimeout;
+    unawaited(
+      container
+          .read(machineTierProvider.future)
+          .then((value) => atTimeout = value),
+    );
+
+    await tester.pump(const Duration(milliseconds: 2500));
+    expect(atTimeout, MachineTier.full, reason: 'nothing has answered yet');
+
+    answers.complete(const HardwareInfo(
+      chip: 'Apple M2',
+      memoryBytes: 17179869184,
+      appleSilicon: true,
+      rosetta: false,
+      osVersion: '15.6',
+    ));
+    await tester.pump();
+    await tester.pump();
+
+    MachineTier? afterTheAnswer;
+    unawaited(
+      container
+          .read(machineTierProvider.future)
+          .then((value) => afterTheAnswer = value),
+    );
+    await tester.pump();
+
+    expect(afterTheAnswer, MachineTier.inbox);
+
+    // `invalidateSelf` files a zero-duration timer on Riverpod's own refresh
+    // scheduler, and the read above rebuilt before it ran. Draining it keeps
+    // the binding's "no pending timers" invariant, which is a test fact and
+    // not a fact about the provider.
+    await tester.pump(const Duration(milliseconds: 1));
+  });
+
+  testWidgets('a platform that never answers does not hold the launch',
+      (tester) async {
+    // The hang rather than the throw. The gate awaits the tier before it can
+    // decide, so a channel that goes quiet would leave the app on a spinner
+    // for ever; past the timeout it carries on as an unknown machine, which is
+    // the full tier — and this machine IS set up, so it goes through.
+    await store.set(SetupStore.setupKey, SetupStep.done.name);
+    await seedLedger();
+    await makeContainer(system: _SilentSystemInfo());
+
+    await mount(tester);
+    expect(find.text('the app'), findsNothing,
+        reason: 'the gate is still waiting on the machine');
+
+    await tester.pump(hardwareProbeTimeout + const Duration(seconds: 1));
+    await tester.pump();
+
+    expect(find.text('the app'), findsOneWidget);
+  });
+
+  testWidgets('an inbox Mac goes through on the two files its tier wants',
+      (tester) async {
+    // The ledger holds the embedding and inbox models and nothing else,
+    // because that is all this machine was ever asked to download. A gate
+    // comparing it against the master list would send a finished setup back
+    // through the wizard for a writing model it is never going to start.
+    await store.set(SetupStore.setupKey, SetupStep.done.name);
+    await seedLedger(tier: MachineTier.inbox);
+    await makeContainer(memoryBytes: 17179869184);
+
+    await mount(tester);
+
+    expect(find.text('the app'), findsOneWidget);
+  });
+
+  testWidgets('the same two files on a full Mac reopen the wizard',
+      (tester) async {
+    // The other half of the pin: the tier is read off the machine, not off
+    // the folder, so the same ledger carried to a 64 GB Mac is incomplete.
+    await store.set(SetupStore.setupKey, SetupStep.done.name);
+    await seedLedger(tier: MachineTier.inbox);
+    await makeContainer(memoryBytes: 68719476736);
+
+    await mount(tester);
+
+    expect(find.text('the app'), findsNothing);
+    expect(find.text('Download'), findsOneWidget);
   });
 
   testWidgets('a manifest bump reopens the wizard on the download step',

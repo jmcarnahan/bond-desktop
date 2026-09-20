@@ -67,7 +67,14 @@ class ModelServerSupervisor {
   /// The preset to serve, asked freshly each start for the same reason and
   /// one more: it is what an adopted server's recorded hash is compared
   /// against.
-  final RouterPreset Function() buildPreset;
+  ///
+  /// It may answer asynchronously, because what belongs in the preset depends
+  /// on the MACHINE: the manifest is resolved for this Mac's tier, and that
+  /// tier is read through a future. A synchronous caller that guessed while
+  /// the answer was still in flight would write a preset naming a writing
+  /// model a small Mac never downloaded, and the launch would refuse on a
+  /// missing file. Both call sites await it.
+  final FutureOr<RouterPreset> Function() buildPreset;
 
   final int Function() routerPort;
 
@@ -309,7 +316,7 @@ class ModelServerSupervisor {
       return;
     }
 
-    final preset = buildPreset();
+    final preset = await buildPreset();
     _preset = preset;
     if (preflight) {
       final missing = preset.missingFiles();
@@ -730,7 +737,7 @@ class ModelServerSupervisor {
     final sameBinary = recordedBinary != null &&
         currentBinary != null &&
         _samePath(recordedBinary, currentBinary);
-    final preset = buildPreset();
+    final preset = await buildPreset();
     if (recordedHash == preset.hash && sameBinary && port == routerPort()) {
       final listing = await _models(port);
       if (listing != null && preset.modelIds.every(listing.containsKey)) {

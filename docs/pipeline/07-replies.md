@@ -207,7 +207,12 @@ design is a GPU or cloud target — about 0.65 s on the L40S box measured on
 (measured 2026-09-17: the same prompt at 17.2 tok/s plain and 17.4 streamed on
 the server clock); `make bench-prose` carries a `ttft p50` column so both
 numbers are on the same row, and `make bench-verify` checks that a streamed
-answer is the same answer (see `docs/model-bakeoff.md`).
+answer is the same answer (see `docs/model-bakeoff.md`). The app keeps the same
+number per row: the activity log writes the first non-null `firstTokenMs` it
+saw as `first_token_ms` in `detail_json`, so the expanded detail of a `draft`
+row in the activity panel says how long that draft's first words took when that
+draft streamed (the bus on, the setting on, an OpenAI wire; a Converse draft
+carries no key), on the reader's own machine rather than on a bench.
 
 **The prefetched drafts stream too**, and nobody is watching them. That is not
 waste: the publish is a broadcast onto a bus with no subscriber for that
@@ -262,6 +267,14 @@ draft** and shows one line: an unrouted stage, a deleted message, no draft
 yet, an empty answer, a refused call, the cap. Improve records its own
 `draft_improve` activity row — `ok`, `error` or `skipped` with a reason —
 carrying the target id and, for a third-party one, `cloud: 1`.
+
+**A reset waits for an improve in flight.** Because the button calls the
+handler straight, an improve is not queue work and the draft lane's `quiesce`
+knows nothing about it, so `DraftHandler` keeps its own set of the calls that
+have not landed and its own `quiesce()` over them. Both resets under Settings,
+Processing await it after the triage queue and the three lanes and before the
+delete. Without that wait, an answer landing a moment later would write a
+`drafts` row into the table the reset had just emptied.
 
 **The standing rule.** `cloud_drafts_standing` (default off, Settings →
 Suggested replies) improves a draft with nobody pressing anything, for

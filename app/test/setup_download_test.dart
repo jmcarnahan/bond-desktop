@@ -41,6 +41,7 @@ void main() {
 
   Future<void> open(
     WidgetTester tester, {
+    MachineTier tier = MachineTier.full,
     Map<String, DownloadProgress> progress = const {},
     bool running = false,
     bool paused = false,
@@ -57,7 +58,7 @@ void main() {
       home: Scaffold(
         body: SingleChildScrollView(
           child: SetupDownloadBody(
-            files: manifest.bySize,
+            files: manifest.forTier(tier).bySize,
             progress: progress,
             running: running,
             paused: paused,
@@ -188,6 +189,18 @@ void main() {
     // Waiting, three times over — one per file, before any of them is looked
     // at.
     expect(find.text('Waiting'), findsNWidgets(3));
+  });
+
+  testWidgets('an inbox Mac gets a bar per file its tier wants, and no more',
+      (tester) async {
+    // The host hands down the RESOLVED manifest, so the writing model has no
+    // row here at all: a bar for a file nothing is fetching would never
+    // finish, and Continue waits for every bar on the screen.
+    await open(tester, tier: MachineTier.inbox);
+
+    expect(find.text('Waiting'), findsNWidgets(2));
+    expect(find.text('Test Prose'), findsNothing);
+    expect(canContinue(tester), isFalse);
   });
 
   testWidgets('a file that failed turns Start into Try again', (tester) async {

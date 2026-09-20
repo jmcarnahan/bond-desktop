@@ -1038,7 +1038,12 @@ settle gate can never bite there, and a scored row that was really a deferral
 would read as a measurement of a pass that never ran. The golden pool holds no
 series and no fragments of one thread, so `series`, `series_excluded`,
 `fragments` and `folded` are read from the unit tests and from the live rail
-rather than from this bench. Its `charter lint` line changed meaning with them.
+rather than from this bench. Since Round F the vector stage, `make
+golden-vector`, prints `series` and `series_excluded` beside `folded` as well,
+counted over the same pool rows its would-form clusters are built from and
+never applied to them: on a pool that held a series the two numbers would say
+how far those clusters stand from the ones a sweep would form. The sweep
+bench's `charter lint` line changed meaning with them.
 Before the lint was wired it was the whole reading, counted over every live
 storyline and applied to none. Now that a lint hit tombstones a cluster before
 its confirms, what that line counts is what SURVIVED and would still be
@@ -1062,6 +1067,45 @@ the vector to the base rate: this pool holds 1,346 cross-effort pairs against
 85 same-effort ones, so a pairwise threshold that admits even a modest share
 of the cross population drowns what it catches, and the namer on a stronger
 model is the lever the rows leave.
+
+Round F pulled that lever on 2026-09-20 and measured it. The namer is a routable
+stage like any other, so the same sweep was run four times with nothing changed
+but the model that names a cluster: the confirm stayed on the local 4B, the
+embedding stayed local, and the cards were the same pinned run. A stronger namer
+files more of the mailbox and more of it correctly; how many storylines it forms
+and how pure they are move from pass to pass, as the second passes show.
+
+| namer | storyline.id | correct positives | forbidden hits | formed / declined |
+|---|---|---|---|---|
+| local 27B Q4_K_M with MTP | 45/98 | 5 | 4 | 2 / 3 |
+| the box 27B-FP8 with MTP | 50/98 | 9 | 5 | 2 / 3 |
+| Bedrock Opus 5 | 53/98 | 8 | 2 | 3 / 5 |
+| Bedrock Sonnet 5 | 57/98 | 10 | 3 | 1 / 4 |
+| a sweep that files nothing, the abstention floor | 50/98 | 0 | 0 | 0 / 0 |
+
+Each cloud namer was read twice and both second passes are in
+`docs/model-bakeoff.md`. Converse carries no temperature, so a cloud namer is not
+deterministic across passes: Opus holds the reading on both of its completed
+passes, and Sonnet's second pass files fewer with more forbidden hits. The local
+and the box namers reproduce to the count. Pointing the stage at a cloud model is
+something a person does today rather than something the app decides: Settings,
+then Models, then a Bedrock target with **Prose stages** ticked, which moves
+naming, refresh, recap, grouping and the reply decision onto it, and Draft reply
+once the consent pane has been answered. Nothing is
+shipped as a default, because a naming call sends thread cards off the machine.
+The roadmap's exit of 70 of 98 with correct positives is still not met, and the
+base rate is why: this pool holds 1,346 cross-effort pairs against 85 same-effort
+ones, unchanged by anything above the vector, and that ratio is the wall.
+
+On 2026-09-20 the final Round F tree reproduced both local rows of record, on
+two passes each, with nothing in the round touching a prompt, a gate, a tuning
+number, a card or the vector. The sweep filed 45 of 98 with 5 correct
+positives and 4 forbidden hits, forming 2 clusters at 78% purity and declining 3
+at 75%, identical on every count the sweep files. The confirm filed 84 of
+98 with 15 of 88 forbidden accepts, also identical. The vector line was
+identical as well. So the exit of 70 with correct positives stays unmet on the
+tree that ships. The one lever this round measured is the namer in the table
+above, and the base rate is still the wall.
 
 **Reading the vector on its own.** `make golden-vector` is the same test body
 and the same seeding, stopped the moment the mailbox is embedded. It needs one

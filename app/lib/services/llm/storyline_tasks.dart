@@ -1067,18 +1067,27 @@ class GroupThreadsTask implements JsonTask<GroupResult> {
   @override
   String get schemaName => 'storyline_group';
 
-  /// The ceiling on both arrays in the schema, and it is the card budget
-  /// twice over: at most twelve cards are shown, so there can be at most
-  /// twelve threads in a group and at most twelve groups in an answer — a
-  /// thread is used once, so twelve groups would be twelve groups of one and
-  /// the validator would drop every one of them. A bound the answer cannot
-  /// legitimately reach is the point: it stops a server from running the
-  /// array open.
-  static const int maxGroups = _groupingCardsPerCall;
+  /// How many whole cards the prompt can show: twelve.
+  ///
+  /// The derivation is the truth, and the two ceilings below are read off it.
+  /// The service splits a neighbourhood down to this number and derives it the
+  /// same way, so the schema and the split cannot disagree. Three constants
+  /// and one number, because any one of the three can want to move alone: a
+  /// wider context window raises the card budget, and the two array bounds
+  /// following it is a consequence to state, not a coincidence to rely on.
+  static const int cardsPerCall = _groupingCardsPerCall;
 
-  /// How many whole cards of [cardCap] fit one call under [cardsCap]: twelve.
-  /// The service splits a neighbourhood to this number and derives it the
-  /// same way, so the schema and the split cannot disagree.
+  /// A group per card is the most an answer can legitimately name: a thread is
+  /// used at most once, so [cardsPerCall] groups would be that many groups of
+  /// one and the validator would drop every one of them. A bound the answer
+  /// cannot reach is the point — it stops a server running the array open.
+  static const int maxGroups = cardsPerCall;
+
+  /// A thread per card is the most one group can hold, the same rule from the
+  /// other side: every thread a group names is one of the cards shown.
+  static const int maxThreadsPerGroup = cardsPerCall;
+
+  /// How many whole cards of [cardCap] fit one call under [cardsCap].
   static const int _groupingCardsPerCall =
       (cardsCap + _separatorLength) ~/ (cardCap + _separatorLength);
 
@@ -1098,7 +1107,7 @@ class GroupThreadsTask implements JsonTask<GroupResult> {
               'properties': {
                 'threads': {
                   'type': 'array',
-                  'maxItems': maxGroups,
+                  'maxItems': maxThreadsPerGroup,
                   'items': {'type': 'integer'},
                   'description':
                       'the bracketed numbers of the threads in this group',

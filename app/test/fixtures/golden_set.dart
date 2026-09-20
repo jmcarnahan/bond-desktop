@@ -498,7 +498,11 @@ class GoldenSet {
 ///
 /// Throws rather than returning an empty set when the file is not there: the
 /// set is git-ignored and machine-local by design, so "no file" is the normal
-/// failure and it deserves a message that says what to set.
+/// failure and it deserves a message that says what to set. A file that IS
+/// there and is malformed gets the same courtesy through [decodeJsonOrFail],
+/// here rather than at the call sites: three of the four golden benches reach
+/// this loader through a shared helper that used to let a `FormatException`
+/// past without the path.
 Future<GoldenSet> loadGoldenSet(String path) async {
   final file = File(path);
   if (!await file.exists()) {
@@ -507,7 +511,10 @@ Future<GoldenSet> loadGoldenSet(String path) async {
       'point GOLDEN at it in local.mk, or pass --dart-define=GOLDEN_SET=…',
     );
   }
-  final decoded = jsonDecode(await file.readAsString());
+  final decoded = await decodeJsonOrFail(
+    path,
+    () async => jsonDecode(await file.readAsString()),
+  );
   if (decoded is! Map || decoded['items'] is! List) {
     throw StateError(
       'the file at $path is not a golden set — no `items` array in it',

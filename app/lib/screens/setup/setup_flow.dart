@@ -8,6 +8,7 @@ import '../../models/setup_step.dart';
 import '../../providers/app_providers.dart';
 import '../../providers/setup_provider.dart';
 import '../../services/attachments/file_dialogs.dart';
+import '../../services/llm/model_slots.dart';
 import '../../services/models/model_manifest.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/pane_surface.dart';
@@ -137,7 +138,10 @@ class _SetupFlowState extends ConsumerState<SetupFlow> {
   }
 
   Widget _body(SetupState state) {
-    final manifest = ref.read(modelManifestProvider);
+    // The RESOLVED manifest, from the controller: every step below describes
+    // or fetches what THIS Mac takes, and the master list is only what the
+    // controller resolves against.
+    final manifest = _controller.resolvedManifest;
     void next() => unawaited(_controller.next());
     switch (state.step) {
       case SetupStep.welcome:
@@ -151,13 +155,17 @@ class _SetupFlowState extends ConsumerState<SetupFlow> {
               : null,
         );
       case SetupStep.device:
-        final prose = manifest.byRole(ModelRole.prose);
+        // The MASTER list for this one name: the sentence on an inbox Mac is
+        // about the writing model this build ships and is not downloading
+        // here, so it is the one place the resolved view is the wrong list.
+        final prose = ref.read(modelManifestProvider).byRole(ModelRole.prose);
         return SetupDeviceBody(
           hardware: state.hardware,
           blocked: _controller.deviceBlocked,
           lowMemory: _controller.lowMemory,
+          underMeasuredFloor: _controller.underMeasuredFloor,
           proseName: prose.displayName,
-          proseMinRamBytes: prose.minRamBytes,
+          fullTierMinRamBytes: fullTierMinBytes,
           onContinue: next,
         );
       case SetupStep.models:

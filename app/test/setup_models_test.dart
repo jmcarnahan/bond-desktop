@@ -64,6 +64,37 @@ void main() {
     await open(tester);
 
     expect(find.text('Total download: 22.3 GB'), findsOneWidget);
+    expect(
+      find.text('Bond downloads three models from Hugging Face. They run on '
+          'this Mac and never send your mail anywhere.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('an inbox Mac is told two models, and totalled for two',
+      (tester) async {
+    // The RESOLVED manifest is what the host hands down, so this screen never
+    // shows a row for a checkpoint the download step is not going to fetch.
+    await open(tester, which: manifest.forTier(MachineTier.inbox));
+
+    expect(
+      find.text('Bond downloads two models from Hugging Face. They run on '
+          'this Mac and never send your mail anywhere.'),
+      findsOneWidget,
+    );
+    expect(find.text('Finds related messages'), findsOneWidget);
+    expect(find.text('Reads and sorts your mail'), findsOneWidget);
+    expect(find.text('Writes drafts and replies'), findsNothing);
+    expect(find.text('Total download: 4.6 GB'), findsOneWidget);
+    expect(find.text('17.7 GB'), findsNothing);
+  });
+
+  testWidgets('a full Mac is told three models, and totalled for three',
+      (tester) async {
+    await open(tester, which: manifest.forTier(MachineTier.full));
+
+    expect(find.text('Writes drafts and replies'), findsOneWidget);
+    expect(find.text('Total download: 22.3 GB'), findsOneWidget);
   });
 
   testWidgets('the licence opens through the host, and hides when unwired',

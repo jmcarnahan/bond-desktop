@@ -274,7 +274,22 @@ class TriageQueue {
   /// this same queue draining again. The `_stopped` it leaves behind is per
   /// drain, which [pump] clears. The processing switch is untouched either
   /// way — what it says is the user's answer, not a reset's.
-  Future<void> quiesce() async {
+  ///
+  /// Re-entrant by memoisation: two concurrent callers share ONE run. The
+  /// second is reachable through [dispose] — a provider invalidated during a
+  /// reset window disposes this queue while the reset host is already
+  /// quiescing it — and two runs would race on the `finally`, the first to
+  /// finish dropping [_quiescing] while the other is still releasing claims,
+  /// which is the exact window [_quiescing] exists to close.
+  Future<void> quiesce() =>
+      _quiesceRun ??= _quiesceOnce().whenComplete(() => _quiesceRun = null);
+
+  /// The run in progress, and null between runs. Held for the whole of
+  /// [_quiesceOnce] including its `finally`, so the latch and the claim
+  /// release belong to one caller no matter how many asked.
+  Future<void>? _quiesceRun;
+
+  Future<void> _quiesceOnce() async {
     _stopped = true;
     _quiescing = true;
     try {

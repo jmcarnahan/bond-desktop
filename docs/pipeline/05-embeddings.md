@@ -138,29 +138,98 @@ Instruct: Given a search query, retrieve the messages and documents that answer 
 There is no golden bench for search, so unlike the clustering side this is a
 change made on the model's documented contract and not on a measurement.
 
-**And there is no one-shot behind it.** The three search corpora key their
-worklists on `embedding IS NULL`, never on the tag: `enqueueEmbedBacklog`
-excludes any message that already has an `embed_message` work row,
-`ContextStore.unembeddedChunks` and `unembeddedChunksForDir` ask for
-passages with a null `embedding`, and
-`skillsNeedingDescEmbedding` asks for a null `desc_embedding`. So every
-message vector, attachment passage and directory passage written before
-2026-09-19 is now **invisible to vector search**, and stays invisible until
-something re-embeds it: a re-extraction of the message, a re-chunk of the
-document, or a directory file whose bytes move. Three things make that quiet
-rather than wrong, and all three were checked: every read filters on
-`documentModelTag`, so an old vector cannot be compared against a new one; the
-vec0 indexes are declared at `float[1024]` and drop and recreate themselves on
-the width change, and their backfills skip a row whose stored `dims` is not
-the index's; and `desc_embedding`, which carries no tag at all, is compared
-through `cosine()`, which answers 0 for mismatched lengths rather than a
-number. The KEYWORD half of search is untouched and still finds every one of
-those rows. Building a tag-keyed backfill for the three corpora was left out
-of Round E deliberately and is OWED to Round F: a walk in the shape of
-`retireEmbedTag` over the message, attachment and directory corpora, listed in
-the roadmap's §10 among the Round E candidates. Until it lands, an upgrading
-install's search covers what was embedded after the upgrade plus whatever a
-Clear AI results re-embeds.
+**The gap that left, and why it was quiet while it lasted.** The four search
+corpora key their worklists on `embedding IS NULL`, never on the tag:
+`enqueueEmbedBacklog` excludes any message that already has an `embed_message`
+work row, `MessageStore.unembeddedChunks`, `ContextStore.unembeddedChunks` and
+`unembeddedChunksForDir` ask for passages with a null `embedding`, and
+`skillsNeedingDescEmbedding` asks for a null `desc_embedding`. So every message
+vector, attachment passage and directory passage written before 2026-09-19 was
+**invisible to vector search** from the swap until Round F, and would have
+stayed invisible until something re-embedded it: a re-extraction of the
+message, a re-chunk of the document, or a directory file whose bytes move.
+Three things made that quiet rather than wrong, and all three were checked:
+every read filters on `documentModelTag`, so an old vector cannot be compared
+against a new one; the vec0 indexes are declared at `float[1024]` and drop and
+recreate themselves on the width change, and their backfills skip a row whose
+stored `dims` is not the index's; and `desc_embedding`, which carries no tag at
+all, is compared through `cosine()`, which answers 0 for mismatched lengths
+rather than a number. The KEYWORD half of search was untouched throughout and
+still finds every one of those rows.
+
+**And now there is a one-shot behind it, four of them.** Round F Phase 4 added
+the tag-keyed backfill the swap was owed. `SyncService._retireOnce` is
+`_retireEmbedTag`'s three lines of bookkeeping lifted out: it skips a walk
+whose pref is set, runs it, and closes the pref when the slice came back short
+of the cap. Four walks sit behind it in the sync pass, after the clustering
+walk and before the sweep is requeued.
+
+| corpus | what a slice does | cap | pref |
+|---|---|---|---|
+| messages | `requeueWork('embed_message')` per stale row | 200 | `search_embed_v2_messages` |
+| attachment passages | nulls the stale vectors, then `requeueWork('attachment_text')` per document | 200 | `search_embed_v2_attachments` |
+| directory passages | nulls the stale vectors, no requeue | 200 | `search_embed_v2_passages` |
+| descriptions | nulls every `desc_embedding` | none | `search_embed_v2_descriptions` |
+
+Four walks and not one list, because the corpora differ in the two things
+`retiredClusteringTags` holds constant. Each is refilled by a different
+handler, and each terminates for a different reason. They are independent for
+the same reason: every walk whose pref is still open runs on every pass, where
+the clustering walk takes one slice a sync and stops at the first tag that had
+rows. A mailbox with thousands of stale message vectors must not keep its
+documents and its directories out of search for as many syncs as the messages
+take.
+
+**Each walk carries its termination argument in its comment, and that is the
+risk this change is arranged around.** A one-shot closes only on a short pass,
+so a slice holding rows nothing will ever re-embed stays full for the life of
+the database and re-queues the same work on every sync. Messages terminate on
+the handler: the slice joins `messages` and applies `EmbedHandler`'s own gate
+clause, so a deleted message and a gated one, two of the three ways the item
+completes without touching the vector, are not in the slice at all, and
+everything that is in it is rewritten under the current tag on its way past.
+The third way cannot be excluded by a predicate. `MessageEmbedOutcome.rejected`
+is the server answering with something that is not a vector, which is what a
+wrong model name gives for every row, and the item is marked done with the old
+tag still on it. Two hundred of those and the slice is full on every sync and
+the pref never closes. That is the bound, and it is named here rather than
+defended against: the cost is one capped query and two hundred no-op requeues a
+sync, nothing is lost, and the backfill closes on the first pass after the
+server is right. Attachment and directory passages terminate on the walk
+itself: the slice asks for passages that have a vector and the first thing done
+to each is to throw that vector away, so a row cannot appear in two slices
+however the handler then judges it. The attachment slice also REFUSES two kinds
+of row rather than nulling them, and a refused row is out of every slice, so
+the eligible set still empties. One is a document whose message has since been
+gated, the owner's own Ignore included: `attachmentTextPolicy` runs before the
+handler's resume branch, so the requeue would write a fully read and digested
+document down to `skipped` having already lost its vectors. The other is a
+document whose `attachment_text` row is `processing`, because `requeueWork`
+leaves a claimed item alone and the requeue would be swallowed. Both keep their
+stale vectors, which is where the backfill found them. Descriptions terminate
+because there is no second slice: the statement is unconditional and uncapped,
+one pass takes the whole corpus, and the walk is run with `uncapped: true`, so
+the pref closes on the pass that ran the statement whatever count comes back.
+That count is a rowcount and not a slice size: it is the number of description
+vectors the pass nulled, and it is what `cleared_description_embeds` carries on
+the `sync_mail` detail whenever it is above zero. An uncapped statement that ran
+twice would null the vectors the reconcile had just paid for, every sync,
+forever.
+
+**No schema change, and two consequences of that.** Three corpora already carry
+`embed_model` and the fourth is served by its pref, so the walks cost no
+version bump, no migration step and no generated file. A `desc_embed_model`
+column would be more correct and would buy nothing, since the whole description
+corpus is re-embedded in one pass either way. The second consequence is that a
+stale row waits in place rather than being deleted: every read filters on
+`documentModelTag`, so it is invisible while it waits and correct the moment it
+is rewritten. The directory passages need no requeue because every sync already
+files a `context_reconcile` for every registered directory and that handler's
+worklist is directory-wide, and the two directory walks are skipped entirely on
+a build wired without a context store, which must not consume a one-shot the
+app is owed. All four keys are in `MessageStore.derivedOneShotPrefs`, so **Clear
+AI results** drops them and the next sync walks the corpora again.
+`embed_backfill_test.dart` is the pin.
 
 **The recovery ships in the same branch, and it is one button.** Settings,
 Processing, **Clear AI results** empties every derived table, and that list
@@ -173,7 +242,10 @@ are read again and the directory reconcile rewrites its passages, all under
 the new tag. So an existing install moves its whole search corpus to the new
 model in one step, paying the embedding calls a slice a sync rather than
 carrying a corpus it cannot see. It is still not a measurement: nothing on the
-search side of this swap was benched.
+search side of this swap was benched. Since Round F it is no longer the only
+way back: the four walks above move an upgrading install's corpus with nothing
+pressed, and the button stays the bigger hammer for someone who changed a model
+on purpose and wants every verdict in the mailbox re-decided with it.
 
 **Attachment markers and the card hash.** `embedMessageRow` strips
 `[[att:…]]` / `[[img:…]]` markers out of the body before building the card, and

@@ -173,3 +173,37 @@ enforce the ones that are commands.
   destination with no schema of its own, so it runs `DraftTask` and its call
   record is labelled `draft_reply`. `model_slots_test` pins the exempt set
   literally.
+- The machine tier is `MachineTier` in `model_slots.dart`, chosen from
+  `hw.memsize` by `machineTierFor` and never persisted, so a models folder
+  carried to another Mac is re-read on the Mac it is on. It is applied twice,
+  by the wizard at Finish and by **Use this Mac's defaults**, and unknown
+  memory resolves to `full` because unknown never refuses.
+- The manifest and the Makefile are two worlds joined by
+  `manifest_makefile_parity_test.dart`, so a change to any of them edits both
+  or fails the test: the three repos, the quant either from a `:quant` suffix
+  or from the repo name having to carry the manifest file's own quant token,
+  `CTX_SIZE`, `MODEL_CTX`, `SLOTS`, `FAST_SLOTS`, the embed `--pooling` word
+  and the prose spec type. One blind spot remains: the recipes launch the
+  servers from `MODEL_FLAGS` and `FAST_FLAGS`, so a literal written into those
+  in place of `$(CTX_SIZE)` drifts past every assertion the test makes.
+- A Converse namer can stop on `max_tokens` and lose a whole sweep pass after
+  the seeding, so a cloud namer row is read on two COMPLETED passes and a lost
+  pass is re-run, never patched.
+- A one-shot pref over a derived corpus belongs in
+  `MessageStore.derivedOneShotPrefs`, or Clear AI results leaves the pref set
+  over a table it just emptied. A walk closes its pref either by returning a
+  slice under `clusteringCardReembedCap` or by `uncapped: true`; a corpus that
+  can exceed the cap and is re-nulled unconditionally needs the flag.
+- `first_token_ms` is written into `detail_json` only when a call streamed, so
+  triage rows carry no key at all and the expanded detail prints no dash.
+- Every live test writes its result through `LiveBench.writeRun`, and the five
+  load-bearing words in the test names stay put: `triage`, `reply`,
+  `storyline`, `sweep`, `gates`. A name that loses its word runs nothing and
+  the target still goes green.
+- `PIPE_POLICY` defaults to `all` on `make bench-pipeline`, because every
+  historical pipeline row was taken at `all`. A `needsYou` row is read as the
+  difference from an `all` row taken the same day.
+- Re-measuring reads against the row of record within a day and a tree. Under
+  four points on a triage enum, under three drafts on the rubric, anything but
+  an identical count on the storyline benches, and a timing outside the
+  idle-machine band are all NOT findings.

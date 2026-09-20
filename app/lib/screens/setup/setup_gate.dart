@@ -6,6 +6,8 @@ import '../../models/setup_step.dart';
 import '../../providers/app_providers.dart';
 import '../../providers/setup_provider.dart';
 import '../../services/attachments/file_dialogs.dart';
+import '../../services/llm/model_slots.dart';
+import '../../services/system/system_info.dart';
 import 'setup_flow.dart';
 
 /// Chooses the first-run wizard or the rest of the app, from one stored word.
@@ -61,7 +63,7 @@ class SetupGate extends ConsumerStatefulWidget {
 class _SetupGateState extends ConsumerState<SetupGate> {
   late Future<bool> _done = _decide();
 
-  /// Set up, AND set up against the models this build ships.
+  /// Set up, AND set up against the models this build ships FOR THIS MAC.
   ///
   /// The stored word alone is not enough. A manifest bump that keeps the file
   /// names leaves a machine whose `setup` still says `done` and whose weights
@@ -69,16 +71,37 @@ class _SetupGateState extends ConsumerState<SetupGate> {
   /// those weights for ever, since nothing downstream compares digests. The
   /// ledger is the cheap way to notice: the wizard opens on its download step
   /// and fetches what has moved.
+  ///
+  /// The comparison is against the TIER's manifest, resolved from the memory
+  /// of the Mac this launch is on. A models folder carried to a smaller Mac
+  /// holds a writing model that machine will not start, and a gate demanding
+  /// it would send a finished setup back through the wizard for a file it is
+  /// never going to want.
   Future<bool> _decide() async {
     if (SetupGate.skipsSetup(SetupGate.skipDefine)) return true;
     try {
       final store = ref.read(setupStoreProvider);
       final stored = await store.get(SetupStore.setupKey);
       if (stored != SetupStep.done.name) return false;
-      // READ, never watched: this gate answers once, and a manifest provider
-      // it subscribed to would be a second way to rebuild it.
+      // READ and awaited ONCE, never watched: this gate answers once, and a
+      // manifest or a tier provider it subscribed to would be a second way to
+      // rebuild it.
+      //
+      // And it is the one await on this path that a platform could hold open.
+      // A channel that hangs would leave the launch on a spinner; one that
+      // throws would fall into the catch below and send a machine that IS set
+      // up back through the wizard. Both answer the same way instead: unknown
+      // memory, which is the full tier.
+      MachineTier tier;
+      try {
+        tier = await ref
+            .read(machineTierProvider.future)
+            .timeout(hardwareProbeTimeout);
+      } on Object {
+        tier = machineTierFor(HardwareInfo.unknown.memoryBytes);
+      }
       return (await store.downloadLedger())
-          .matches(ref.read(modelManifestProvider));
+          .matches(ref.read(modelManifestProvider).forTier(tier));
     } on Object {
       // A store read that throws is treated as "not set up", exactly as
       // `AuthGate` treats an unreadable keychain: the wizard is the

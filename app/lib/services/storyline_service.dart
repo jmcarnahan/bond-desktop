@@ -2090,7 +2090,7 @@ class StorylineService {
     // charter written about something else could admit every issue of the feed
     // one confirm at a time. The pre-pass has to see the raw rows to recognise
     // it.
-    final series = _seriesOf(rows);
+    final series = seriesOf(rows);
 
     // Then the fragments, over everything the pre-pass did not take out of the
     // pool. A reply-all that forked, a subject somebody re-sent, a meeting
@@ -2146,7 +2146,7 @@ class StorylineService {
                 room: room)
             : await _clusterCandidates(poolRows, poolVectors);
 
-    // Series first, in the order [_seriesOf] produced them, then the clusters
+    // Series first, in the order [seriesOf] produced them, then the clusters
     // largest first, ties by smallest member index — the order BOTH grouping
     // passes answer in, so the branch above does not change what `room` is
     // spent on. It is a pure function of the store's order either way, which
@@ -2399,7 +2399,7 @@ class StorylineService {
   /// fork carry the same subject down to the date in it, while the issues of a
   /// dated series carry different ones, and folding the digits here would read
   /// a weekly digest among the same people as one thread that had arrived three
-  /// times. An EMPTY key never groups, on [_seriesOf]'s rule — an unnamed thread
+  /// times. An EMPTY key never groups, on [seriesOf]'s rule — an unnamed thread
   /// has nothing in common with another unnamed thread. An empty PARTICIPANT
   /// set does group: two threads with one subject and nobody named on either
   /// are still the same thread as far as anything here can tell.
@@ -2492,7 +2492,14 @@ class StorylineService {
   /// the FIRST of its members in row order, which is the newest: the rest are
   /// neither seeded nor excluded, so they stay in the cosine pool and are
   /// there for a later pass.
-  static ({List<List<int>> seeded, Set<int> excluded}) _seriesOf(
+  ///
+  /// Public for that pin, on [fragmentsOf]'s precedent: a pre-pass that takes
+  /// rows out of the pool before any model is asked anything is worth asking
+  /// directly. `make golden-vector` reads it too, so the vector stage can say
+  /// how far its would-form clusters differ from the sweep's on a pool that
+  /// holds a series.
+  @visibleForTesting
+  static ({List<List<int>> seeded, Set<int> excluded}) seriesOf(
     List<Map<String, Object?>> rows,
   ) {
     // Insertion-ordered, and the rows are walked in order, so every group's
@@ -2691,10 +2698,12 @@ class StorylineService {
   }
 
   /// How many whole cards fit one grouping call: twelve. The task derives it
-  /// from its own two caps and puts the same number in its schema's
+  /// from its own two caps and reads the same number into its schema's two
   /// `maxItems`, so the split ladder and the grammar cannot disagree about
-  /// how many cards a call holds.
-  static const int _groupingCardsPerCall = GroupThreadsTask.maxGroups;
+  /// how many cards a call holds. The card budget is what this ladder wants,
+  /// which is why it reads `cardsPerCall` and not either of the two ceilings
+  /// derived from it.
+  static const int _groupingCardsPerCall = GroupThreadsTask.cardsPerCall;
 
   /// [members] as pieces the card budget can show in one call each, splitting
   /// up the same threshold ladder [clusterBySimilarity] settles a capped

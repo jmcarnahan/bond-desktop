@@ -70,6 +70,10 @@ void main() {
     int cloudDraftsDailyCap = 50,
     ValueChanged<int>? onCloudDraftsDailyCapChanged,
     bool models = false,
+    // A second pump into the SAME tree, to change a prop under a screen that
+    // is already up: the sections keep their own open state across it, so
+    // tapping the toggle again would close the one just opened.
+    bool alreadyOpen = false,
   }) async {
     routes = _RouteCounter();
     await tester.binding.setSurfaceSize(const Size(1000, 1600));
@@ -104,7 +108,7 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
-    if (section == null) return;
+    if (section == null || alreadyOpen) return;
     final toggle = find.byKey(SettingsSection.toggleKey(section));
     await tester.ensureVisible(toggle);
     await tester.pumpAndSettle();
@@ -208,6 +212,43 @@ void main() {
             .value,
         isTrue,
       );
+    });
+
+    testWidgets('follows the host when the rule is forced back off',
+        (tester) async {
+      // `AppPrefs.specForStage` and `applyPreset` can refuse a third-party
+      // target and put the standing rule back off with nobody touching this
+      // switch. It is seeded from the prop once, so without the resync in
+      // `didUpdateWidget` it would go on reading on over a rule that is off.
+      await open(
+        tester,
+        section: 'Suggested replies',
+        improveTargetName: 'Claude',
+        cloudDraftsStanding: true,
+      );
+
+      expect(
+        tester
+            .widget<Switch>(find.byKey(SettingsScreen.cloudStandingKey))
+            .value,
+        isTrue,
+      );
+
+      await open(
+        tester,
+        improveTargetName: 'Claude',
+        cloudDraftsStanding: false,
+        alreadyOpen: true,
+      );
+
+      expect(
+        tester
+            .widget<Switch>(find.byKey(SettingsScreen.cloudStandingKey))
+            .value,
+        isFalse,
+      );
+      // Adopting the host's own answer is not a flip, so nothing goes back.
+      expect(standingWrites, isEmpty);
     });
   });
 

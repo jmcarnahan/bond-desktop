@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart' show immutable;
 
+import '../../models/draft_policy.dart';
 import 'embeddings_client.dart';
 
 /// Which of the three local servers a piece of work goes to.
@@ -548,3 +549,70 @@ const List<PipelineStageInfo> pipelineStages = [
     slot: ModelSlot.embed,
   ),
 ];
+
+/// What this Mac can run, read off its memory alone.
+///
+/// Two tiers, because two things differ between the machines the ledger has
+/// numbers for: whether the writing model (the 27B, 19 GB on disk and 22 GB
+/// resident with its MTP head) is downloaded and started at all, and how the
+/// inbox model's context is split. Everything else — the embedding model, the
+/// 4B, the search corpora, sync — runs the same way on 16 GB as on 64 GB.
+/// A third tier for 8 GB machines is a measured row in `docs/model-bakeoff.md`
+/// and not shipped: one more checkpoint to pin and no machine to test it on.
+enum MachineTier {
+  /// The embedding model, the inbox model and the writing model, all local.
+  /// The 64 GB rows of the ledger are this tier.
+  full,
+
+  /// The embedding model and the inbox model only. The writing stages run on
+  /// the inbox model until a person adds a target under Settings, Models, and
+  /// drafts are on demand rather than prefetched.
+  inbox,
+}
+
+/// The memory at or above which the writing model is downloaded and started.
+///
+/// 40 GiB: a 48 GB Mac is in, a 36 GB Mac is out. The three servers hold
+/// about 26.4 GB resident together at 16K context (round 0's sizes, MTP on),
+/// which leaves a 36 GB machine no room for the app and the system, and
+/// leaves a 48 GB machine the same headroom the 64 GB rows had spare.
+const int fullTierMinBytes = 40 * 1024 * 1024 * 1024;
+
+/// The smallest memory the golden set was measured on. Below it the inbox
+/// tier still runs, and the wizard says triage will be slower than measured.
+const int measuredFloorBytes = 16 * 1024 * 1024 * 1024;
+
+/// The tier for a machine reporting [memoryBytes] of physical memory.
+///
+/// Unknown memory (zero or less, which is what `flutter test` and a build
+/// without the system channel answer) is [MachineTier.full]: nothing is
+/// refused for a fact the app could not read, the same rule
+/// `HardwareInfo.unknown` states.
+MachineTier machineTierFor(int memoryBytes) {
+  if (memoryBytes <= 0) return MachineTier.full;
+  return memoryBytes >= fullTierMinBytes ? MachineTier.full : MachineTier.inbox;
+}
+
+/// The stage → target entries a tier writes, keyed by stage id.
+///
+/// [MachineTier.full] writes nothing: the compiled defaults ARE that tier, so
+/// a fresh 64 GB install keeps an empty `stage_targets` and stays
+/// byte-identical to the two-slot app. [MachineTier.inbox] points every
+/// prose-slot stage at the built-in fast target, so nothing parks on a machine
+/// with no prose server; built from [proseStageIds] so it cannot drift from the
+/// stage table. `draft_improve` is optional and stays unset; the confirm and
+/// the bulk stages already default to the fast target.
+Map<String, String> tierStageDefaults(MachineTier tier) => switch (tier) {
+      MachineTier.full => const {},
+      MachineTier.inbox => {for (final id in proseStageIds) id: builtInFastId},
+    };
+
+/// The draft policy a tier writes.
+///
+/// The inbox tier drafts on demand: its writer is the 4B, whose drafts the
+/// golden set has not judged, and nobody should pay for them unasked. The full
+/// tier keeps the shipped default.
+DraftPolicy tierDraftPolicy(MachineTier tier) => switch (tier) {
+      MachineTier.full => DraftPolicy.needsYou,
+      MachineTier.inbox => DraftPolicy.onDemand,
+    };

@@ -6,11 +6,12 @@ import '../../widgets/attachment_format.dart' show formatBytes;
 import '../../widgets/inline_alert.dart';
 import 'setup_controls.dart';
 
-/// Step two: what this Mac is, and whether the models will run on it.
+/// Step two: what this Mac is, and which models it will run.
 ///
-/// PROP-ONLY. The two judgements — [blocked] and [lowMemory] — are made by
-/// the controller against the manifest rather than here, so the numbers that
-/// decide them live with the checkpoints they describe.
+/// PROP-ONLY. The three judgements — [blocked], [lowMemory] and
+/// [underMeasuredFloor] — are made by the controller against the machine's
+/// memory and the manifest rather than here, so the numbers that decide them
+/// live with the checkpoints they describe.
 ///
 /// The two verdicts are deliberately different in kind. An Intel Mac, or an
 /// x86_64 build under Rosetta, has no Metal backend under it and there is
@@ -19,19 +20,30 @@ import 'setup_controls.dart';
 /// the released app is arm64-only (`ARCHS = arm64`), so macOS refuses to open
 /// it on an Intel Mac and nobody ever reaches this screen there.
 ///
-/// Too little memory for the writing model is a warning and nothing more —
-/// triage, extraction and search all run on the two small models, and those
-/// fit anywhere.
+/// Too little memory for the writing model is a warning and nothing more.
+/// It is also a PROMISE about what happens next: the inbox tier does not
+/// download the writing model at all, so the sentence says which models this
+/// Mac takes and where the writing stages run instead. Triage, extraction and
+/// search all run on the two small models, and those fit anywhere.
 class SetupDeviceBody extends StatelessWidget {
   /// Null while the platform is still being asked.
   final HardwareInfo? hardware;
 
   final bool blocked;
+
+  /// This Mac is on the inbox tier: the embedding model and the inbox model,
+  /// no writing model.
   final bool lowMemory;
 
-  /// The writing model's name and appetite, for the low-memory sentence.
+  /// Below the smallest machine the golden set was measured on. One more
+  /// sentence, never a refusal.
+  final bool underMeasuredFloor;
+
+  /// The writing model's name, for the inbox sentence.
   final String proseName;
-  final int proseMinRamBytes;
+
+  /// The memory the writing model's tier starts at — `fullTierMinBytes`.
+  final int fullTierMinRamBytes;
 
   final VoidCallback onContinue;
 
@@ -40,8 +52,9 @@ class SetupDeviceBody extends StatelessWidget {
     required this.hardware,
     required this.blocked,
     required this.lowMemory,
+    required this.underMeasuredFloor,
     required this.proseName,
-    required this.proseMinRamBytes,
+    required this.fullTierMinRamBytes,
     required this.onContinue,
   });
 
@@ -70,6 +83,23 @@ class SetupDeviceBody extends StatelessWidget {
         ? formatBytes(info.memoryBytes)
         : 'unknown';
 
+    // What this Mac takes, in one paragraph. The floor is one more SENTENCE
+    // about the same machine rather than a second verdict about it, so it
+    // joins the alert instead of opening a second one.
+    final inboxText = StringBuffer(
+      'This Mac has $memory of memory. It runs the inbox models, the '
+      'embedding model and the 4B. The writing model ($proseName) is built '
+      'for ${formatBytes(fullTierMinRamBytes)} or more and is not downloaded '
+      'here; writing stages run on the inbox model until you add a target '
+      'under Settings, Models.',
+    );
+    if (underMeasuredFloor) {
+      inboxText.write(
+        ' The inbox models were measured on 16 GB and up; below that, expect '
+        'slower triage.',
+      );
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -95,14 +125,17 @@ class SetupDeviceBody extends StatelessWidget {
             ),
           ],
         ],
+        if (!blocked && !lowMemory) ...[
+          const SizedBox(height: BondSpacing.s16),
+          Text(
+            'This Mac runs all three models: the embedding model, the inbox '
+            'model and the writing model.',
+            style: BondType.caption,
+          ),
+        ],
         if (!blocked && lowMemory) ...[
           const SizedBox(height: BondSpacing.s16),
-          InlineAlert(
-            text: 'This Mac has $memory of memory. The writing model '
-                '($proseName) is built for ${formatBytes(proseMinRamBytes)} '
-                'or more and may run slowly here. The models the inbox itself '
-                'needs fit comfortably.',
-          ),
+          InlineAlert(text: inboxText.toString()),
         ],
         // No way forward on a machine that cannot run the models. A disabled
         // Continue would invite pressing it; an absent one says the sentence

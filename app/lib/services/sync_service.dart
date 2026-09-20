@@ -46,7 +46,7 @@ int clampLookbackDays(int days) => days.clamp(minLookbackDays, maxLookbackDays);
 /// newest this-many forever.
 const int backlogEnqueueCap = 150;
 
-/// How many threads a retired-tag one-shot re-embeds per sync.
+/// How many rows a retired-tag one-shot re-embeds per sync.
 ///
 /// [backlogEnqueueCap]'s shape and the gate repair's number: a pace, not a
 /// truncation. Each queued thread costs one embedding call on the storyline
@@ -54,7 +54,49 @@ const int backlogEnqueueCap = 150;
 /// them — queued all at once they would sit in front of every new message's
 /// filing for the rest of the drain. The pref closes only on a pass that comes
 /// back short, so the slices continue until the old tag is gone.
+///
+/// One number for five one-shots — the clustering corpus and the three capped
+/// search corpora — because they are one pace: the same embedding server
+/// answers all of them, so what the cap is really rationing is calls per sync
+/// against a local server that does a few hundred a minute. A second constant
+/// would be a chance for the pace to disagree with itself.
 const int clusteringCardReembedCap = 200;
+
+/// The one-shot behind each SEARCH corpus's move onto the current document
+/// tag, in the order the sync walks them: oldest corpus first.
+///
+/// Four keys rather than one, and four walks rather than one list in
+/// [retiredClusteringTags]'s shape, because the corpora differ in the two
+/// things that list holds constant. Each is refilled by a DIFFERENT handler
+/// (`embed_message`, `attachment_text`, `context_reconcile`, and the reconcile
+/// again for descriptions), and each terminates for a different reason, which
+/// is written at the walk. So they are also INDEPENDENT: the sync runs every
+/// one whose pref is still open on every pass, where the clustering walk stops
+/// at the first tag that had rows. One corpus with a deep backlog must not
+/// hold the other three closed, and the pace that matters is the embedding
+/// server's, which [clusteringCardReembedCap] already bounds per corpus.
+///
+/// `v2` in the spelling is the SECOND document tag, not a second attempt:
+/// `Qwen3-Embedding-0.6B/document` replaced `embeddinggemma-300M/document` on
+/// 2026-09-19 and these keys were written for that move. A third model is four
+/// new keys and four unchanged walks, on [retiredClusteringTags]'s rule that
+/// an install which already closed a key must never be made to walk it again.
+///
+/// Named again in `MessageStore.derivedOneShotPrefs` — which imports nothing
+/// above itself — and pinned against this list by `clear_derived_test.dart`,
+/// so a fifth corpus cannot be left set over rows a clear has just emptied.
+const String searchEmbedMessagesPref = 'search_embed_v2_messages';
+const String searchEmbedAttachmentsPref = 'search_embed_v2_attachments';
+const String searchEmbedPassagesPref = 'search_embed_v2_passages';
+const String searchEmbedDescriptionsPref = 'search_embed_v2_descriptions';
+
+/// The four above, for the store's coverage pin and for nothing else.
+const List<String> searchEmbedBackfillPrefs = [
+  searchEmbedMessagesPref,
+  searchEmbedAttachmentsPref,
+  searchEmbedPassagesPref,
+  searchEmbedDescriptionsPref,
+];
 
 /// Every clustering tag this build has retired, OLDEST FIRST, each beside the
 /// pref that closes its one-shot.
@@ -516,6 +558,164 @@ class SyncService implements MailSync {
         }
       }
 
+      // The SEARCH corpora, under the same model swap and the same idiom. The
+      // clustering walk above moves the vectors the sweep compares; these four
+      // move the vectors a person's search compares, and they were owed from
+      // the day the model changed: every read of all four filters on
+      // `documentModelTag`, so a row under the old tag is INVISIBLE rather
+      // than wrong, and it stays invisible until something re-embeds it. The
+      // three worklists that would have done so key on `embedding IS NULL` and
+      // never on the tag, so nothing ever did.
+      //
+      // Four walks and four prefs — see [searchEmbedBackfillPrefs] — each with
+      // its own TERMINATION ARGUMENT below, which is the whole risk here: a
+      // slice that cannot actually be re-embedded comes back on every sync for
+      // the life of the database.
+      //
+      // No schema change: three of the four corpora already carry an
+      // `embed_model` column, and the fourth is served by its pref.
+      int? requeuedMessageEmbeds;
+      int? requeuedAttachmentEmbeds;
+      int? clearedPassageEmbeds;
+      int? clearedDescriptionEmbeds;
+
+      // MESSAGES. The vehicle is the message's own embed handler, which
+      // already does the right thing when it gets there: `embedMessageRow`
+      // skips on hash AND tag, so a row under the old tag is re-embedded and
+      // rewritten under the new one rather than trusted.
+      //
+      // TERMINATION: every key in the slice is one that handler will act on.
+      // The query joins `messages` and applies the handler's own gate clause,
+      // so a message that was deleted or thrown out by a gate — two of the
+      // three ways the item completes without touching the vector — is not in
+      // the slice at all and cannot hold the one-shot open. A row it re-embeds
+      // leaves the stale set under the new tag, so each pass has fewer rows to
+      // answer with and a short pass arrives.
+      //
+      // The third way is the one this cannot exclude by a predicate:
+      // `MessageEmbedOutcome.rejected`, the server answering with something
+      // that is not a vector, which is what a wrong model name gives for every
+      // row. Two hundred of those and the slice is full on every sync, the
+      // pref never closes, and each pass re-queues the same two hundred items.
+      // That is the bound, and it is worth naming rather than defending
+      // against: the cost is one capped query and two hundred no-op requeues a
+      // sync, nothing is lost, and the whole thing closes on the first pass
+      // after the server is right. The same reading covers a park, which
+      // leaves the slice full and the pref unset because the catch-up really
+      // is still owed, and the requeue of a row that is already `pending` is a
+      // no-op.
+      requeuedMessageEmbeds = await _retireOnce(
+        searchEmbedMessagesPref,
+        () async {
+          final stale = await _store.messageVectorKeysWithStaleTag(
+            EmbeddingsClient.documentModelTag,
+            cap: clusteringCardReembedCap,
+          );
+          for (final message in stale) {
+            // No `refreshCreatedAt`: nobody asked for this. The rows keep the
+            // stamps they have and drain behind new mail.
+            await _store.requeueWork(
+              'embed_message',
+              message.source,
+              message.sourceMessageId,
+            );
+          }
+          return stale.length;
+        },
+      );
+
+      // ATTACHMENT PASSAGES. Nulling the vectors is not enough on its own:
+      // `unembeddedChunks` is per attachment and is only read on the resume
+      // branch of a CLAIMED `attachment_text` item, so the requeue is what
+      // brings the handler back to them. Both halves, per attachment, and the
+      // slice counts attachments because that is what the queue is keyed by.
+      //
+      // Which is why the slice REFUSES two kinds of row rather than nulling
+      // them: a document whose message has since been gated, which the
+      // handler's policy would write down to `skipped` before it ever reached
+      // the resume branch, and a document whose work row is `processing`,
+      // which would swallow the requeue. Both are argued at
+      // `MessageStore.attachmentsWithStaleChunkTag`. A refused row keeps its
+      // stale vectors, which is where the backfill found it.
+      //
+      // TERMINATION: the walk itself is what makes a row leave the set. The
+      // slice asks for passages with a vector, and the first thing done to
+      // each one is to throw that vector away, so an attachment cannot appear
+      // in two slices however the handler then judges it — a document whose
+      // message is gone, or whose re-read the policy now refuses for a reason
+      // the query cannot see, costs one slice and never returns. A refused row
+      // is out of every slice instead, so the eligible set empties either way
+      // and the corpus is bounded by what it holds today.
+      requeuedAttachmentEmbeds = await _retireOnce(
+        searchEmbedAttachmentsPref,
+        () async {
+          final stale = await _store.attachmentsWithStaleChunkTag(
+            EmbeddingsClient.documentModelTag,
+            cap: clusteringCardReembedCap,
+          );
+          for (final attachment in stale) {
+            await _store.clearStaleChunkEmbeddings(
+              attachment.source,
+              attachment.messageId,
+              attachment.attachmentId,
+              embedModel: EmbeddingsClient.documentModelTag,
+            );
+            await _store.requeueWork(
+              'attachment_text',
+              attachment.source,
+              attachmentEntityId(
+                attachment.messageId,
+                attachment.attachmentId,
+              ),
+            );
+          }
+          return stale.length;
+        },
+      );
+
+      // The two directory corpora, and only on a build that has directories.
+      // A null context store is every test that does not care and every caller
+      // from before the feature: it must not consume a one-shot the app is
+      // owed, which is the rule the gate repair above follows for its own.
+      final context = _context;
+      if (context != null) {
+        // CONTEXT PASSAGES. One statement and no requeue: the loop below
+        // requeues `context_reconcile` for every registered directory on every
+        // sync, and that handler's worklist is `unembeddedChunksForDir` —
+        // directory-wide, so a nulled passage is on it by the same rule that
+        // finishes a pass which parked part-way through.
+        //
+        // TERMINATION: the attachment walk's, exactly. The slice asks for
+        // passages that HAVE a vector and the statement removes it, so a row
+        // is in one slice and never in another; re-embedding writes the
+        // current tag, which keeps it out for good.
+        clearedPassageEmbeds = await _retireOnce(
+          searchEmbedPassagesPref,
+          () => context.clearStaleChunkEmbeddings(
+            EmbeddingsClient.documentModelTag,
+            cap: clusteringCardReembedCap,
+          ),
+        );
+
+        // DIRECTORY DESCRIPTIONS. The corpus with no tag column, so the pref
+        // is the whole gate: one unconditional NULL of every description
+        // vector, uncapped, which is the statement `clearDerived` already
+        // runs. Affordable because descriptions are tens of rows and
+        // `skillsNeedingDescEmbedding` is directory-wide.
+        //
+        // TERMINATION: there is no second slice, which is what `uncapped`
+        // says. The pref closes on the pass that ran the statement whatever it
+        // reports, so the statement is never reached again — and that is the
+        // only thing making an unconditional UPDATE safe here. Repeated, it
+        // would null the vectors the reconcile had just paid for, on every
+        // sync, forever.
+        clearedDescriptionEmbeds = await _retireOnce(
+          searchEmbedDescriptionsPref,
+          context.clearDescriptionEmbeddings,
+          uncapped: true,
+        );
+      }
+
       // The clustering pass over everything not in a storyline yet. The sync's
       // durable trigger for it: see [MessageStore.requeueSweep] for the row,
       // its label and the other two callers. Whether the pass then runs or
@@ -600,6 +800,18 @@ class SyncService implements MailSync {
           'refolded_threads': ?refoldedThreads,
           'repaired_gated_conversations': ?repairedGated,
           'requeued_clustering_reembeds': ?requeuedReembeds,
+          // The four search-corpus one-shots, counts only, and only on a pass
+          // that moved something: a zero here would read as a backfill that
+          // ran and found nothing, which is the state of every sync after the
+          // first. Absent is how a one-shot says it is closed.
+          if ((requeuedMessageEmbeds ?? 0) > 0)
+            'requeued_message_embeds': requeuedMessageEmbeds,
+          if ((requeuedAttachmentEmbeds ?? 0) > 0)
+            'requeued_attachment_embeds': requeuedAttachmentEmbeds,
+          if ((clearedPassageEmbeds ?? 0) > 0)
+            'cleared_passage_embeds': clearedPassageEmbeds,
+          if ((clearedDescriptionEmbeds ?? 0) > 0)
+            'cleared_description_embeds': clearedDescriptionEmbeds,
           if (contextDirs > 0) 'context_dirs': contextDirs,
           if (inboxResync || sentResync) 'resync': true,
         },
@@ -649,6 +861,44 @@ class SyncService implements MailSync {
     // The size of the slice this pass found, which is the same thing the gate
     // repair's count reports.
     return stale.length;
+  }
+
+  /// Runs one one-shot [walk] unless the pref behind [prefKey] says it has
+  /// already closed, and answers the size of the slice it took — or null when
+  /// it did not run.
+  ///
+  /// [_retireEmbedTag]'s three lines of bookkeeping, lifted out for the four
+  /// search-corpus walks so each of those is its own worklist and nothing
+  /// else. Same three answers and the same reading: null is "closed", zero is
+  /// "ran, and there was nothing", and a number is what it moved.
+  ///
+  /// The pref closes on a SHORT slice, never on a full one, and that is the
+  /// contract every walk is written against: a walk that comes back with a
+  /// full cap has left work behind by construction, so the one-shot stays
+  /// owed and the next sync takes the next slice.
+  ///
+  /// [uncapped] is for the one walk that has no slices to pace: its statement
+  /// takes the whole corpus in one pass, so the pref closes whatever it
+  /// reports and the count it returns is a count rather than a slice size. A
+  /// flag rather than a walk that reports zero to get the same effect, because
+  /// the pref would then be closed by a number the walk does not mean.
+  ///
+  /// What this cannot check is the thing that actually matters — that the rows
+  /// in a slice can be re-embedded at all. A slice of rows nothing will ever
+  /// move stays full for the life of the database and re-queues the same work
+  /// on every sync. That argument is made per walk, at the walk, because it is
+  /// different for each of the four.
+  Future<int?> _retireOnce(
+    String prefKey,
+    Future<int> Function() walk, {
+    bool uncapped = false,
+  }) async {
+    if (await _store.getPref(prefKey) != null) return null;
+    final found = await walk();
+    if (uncapped || found < clusteringCardReembedCap) {
+      await _store.setPref(prefKey, '1');
+    }
+    return found;
   }
 
   /// The signed-in address, or null when there is not one to be had.

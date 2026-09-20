@@ -62,14 +62,37 @@ Map<String, Object?> proseJson() => {
       'serverArgs': {'c': '32768'},
     };
 
-String manifestText(List<Map<String, Object?>> models, {int version = 1}) =>
-    jsonEncode({'version': version, 'models': models});
+Map<String, Object?> fullTierJson() => {
+      'id': 'full',
+      'minRamBytes': fullTierMinBytes,
+      'models': [routerEmbedId, routerBulkId, routerProseId],
+    };
+
+Map<String, Object?> inboxTierJson() => {
+      'id': 'inbox',
+      'minRamBytes': 0,
+      'models': [routerEmbedId, routerBulkId],
+      'serverArgs': {
+        routerBulkId: {'c': '16384', 'parallel': '2'},
+      },
+    };
+
+String manifestText(
+  List<Map<String, Object?>> models, {
+  int version = 2,
+  List<Map<String, Object?>>? tiers,
+}) =>
+    jsonEncode({
+      'version': version,
+      'models': models,
+      'tiers': tiers ?? [fullTierJson(), inboxTierJson()],
+    });
 
 void main() {
   group('the committed asset', () {
     test('parses, and names the three router ids in file order', () {
       final manifest = realManifest();
-      expect(manifest.version, 1);
+      expect(manifest.version, 2);
       expect(
         [for (final m in manifest.models) m.id],
         [routerEmbedId, routerBulkId, routerProseId],
@@ -137,7 +160,7 @@ void main() {
       expect(spec.id, routerBulkId);
       expect(spec.repo, 'ggml-org/Qwen3-4B-Instruct-2507-Q8_0-GGUF');
       expect(spec.args,
-          {'c': '32768', 'parallel': '4', 'load-on-startup': 'true'});
+          {'c': '16384', 'parallel': '4', 'load-on-startup': 'true'});
     });
 
     test('toPreset writes the INI Phase 2 wrote', () {
@@ -157,13 +180,13 @@ load-on-startup = true
 
 [bond-bulk]
 model = /tmp/Bond Models/ggml-org_Qwen3-4B-Instruct-2507-Q8_0-GGUF/qwen3-4b-instruct-2507-q8_0.gguf
-c = 32768
+c = 16384
 parallel = 4
 load-on-startup = true
 
 [bond-prose]
 model = /tmp/Bond Models/ggml-org_Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf
-c = 32768
+c = 16384
 parallel = 1
 load-on-startup = true
 ''');
@@ -208,6 +231,110 @@ load-on-startup = true
       expect(manifest.byId(routerProseId).role, ModelRole.prose);
       expect(manifest.byRole(ModelRole.bulk).id, routerBulkId);
       expect(() => manifest.byId('bond-nothing'), throwsStateError);
+    });
+  });
+
+  group('tiers', () {
+    test('the committed asset declares both rungs, at the compiled floors',
+        () {
+      final manifest = realManifest();
+
+      expect([for (final t in manifest.tiers) t.tier],
+          [MachineTier.full, MachineTier.inbox]);
+      expect(
+        {for (final t in manifest.tiers) t.tier: t.minRamBytes},
+        {MachineTier.full: fullTierMinBytes, MachineTier.inbox: 0},
+      );
+    });
+
+    test('the full tier resolves to the manifest itself', () {
+      final manifest = realManifest();
+      final full = manifest.forTier(MachineTier.full);
+
+      expect([for (final m in full.models) m.id],
+          [routerEmbedId, routerBulkId, routerProseId]);
+      expect(full.byRoleOrNull(ModelRole.prose)?.id, routerProseId);
+      expect(full.models, manifest.models);
+      expect(full.totalBytes, manifest.totalBytes);
+    });
+
+    test('the inbox tier drops the writing model and merges its args', () {
+      final inbox = realManifest().forTier(MachineTier.inbox);
+
+      expect([for (final m in inbox.models) m.id],
+          [routerEmbedId, routerBulkId]);
+      // Merged ONTO the entry's own arguments: `parallel` is halved, `c`
+      // restated and `load-on-startup` survives untouched.
+      expect(inbox.byId(routerBulkId).serverArgs,
+          {'c': '16384', 'parallel': '2', 'load-on-startup': 'true'});
+      // The embedding model is in every tier and is not overridden.
+      expect(inbox.byId(routerEmbedId).serverArgs,
+          realManifest().byId(routerEmbedId).serverArgs);
+    });
+
+    test('a resolved view without prose answers null, and throws on byRole',
+        () {
+      final inbox = realManifest().forTier(MachineTier.inbox);
+
+      expect(inbox.byRoleOrNull(ModelRole.prose), isNull);
+      expect(() => inbox.byRole(ModelRole.prose), throwsStateError);
+      // The two every tier carries are still there, by role and by id.
+      expect(inbox.byRole(ModelRole.embed).id, routerEmbedId);
+      expect(inbox.usableIds, {routerEmbedId, routerBulkId});
+    });
+
+    test('the download total and order follow the tier', () {
+      final manifest = realManifest();
+      final inbox = manifest.forTier(MachineTier.inbox);
+
+      expect(inbox.totalBytes, 639150592 + 4280403520);
+      expect(manifest.totalBytes, 639150592 + 4280403520 + 18973870432);
+      expect([for (final m in inbox.bySize) m.id],
+          [routerEmbedId, routerBulkId]);
+      expect(
+        [for (final m in manifest.forTier(MachineTier.full).bySize) m.id],
+        [routerEmbedId, routerBulkId, routerProseId],
+      );
+    });
+
+    test('two tiers that are equal hash the same', () {
+      // `==` and `hashCode` have to agree about ORDER, because the hash is
+      // over the id list in order. A set-wise `==` would call these two equal
+      // and hash them differently, and `ModelManifest.hashCode` inherits it.
+      const forwards = ManifestTier(
+        tier: MachineTier.inbox,
+        minRamBytes: 0,
+        models: [routerEmbedId, routerBulkId],
+      );
+      const backwards = ManifestTier(
+        tier: MachineTier.inbox,
+        minRamBytes: 0,
+        models: [routerBulkId, routerEmbedId],
+      );
+      const same = ManifestTier(
+        tier: MachineTier.inbox,
+        minRamBytes: 0,
+        models: [routerEmbedId, routerBulkId],
+      );
+
+      expect(forwards, same);
+      expect(forwards.hashCode, same.hashCode);
+      expect(forwards, isNot(backwards));
+      // The contract, stated the way it is broken: equal implies same hash.
+      for (final pair in [
+        [forwards, same],
+        [forwards, backwards],
+      ]) {
+        if (pair[0] == pair[1]) {
+          expect(pair[0].hashCode, pair[1].hashCode);
+        }
+      }
+    });
+
+    test('a manifest with no tiers resolves to itself', () {
+      // What a fixture of one model is, and what `manifestFor` builds.
+      const one = ModelManifest(version: 2, models: []);
+      expect(identical(one.forTier(MachineTier.inbox), one), isTrue);
     });
   });
 
@@ -308,7 +435,7 @@ load-on-startup = true
 
     refuses(
       'a version this build does not read',
-      manifestText([embedJson(), bulkJson(), proseJson()], version: 2),
+      manifestText([embedJson(), bulkJson(), proseJson()], version: 1),
       contains('version'),
     );
 
@@ -356,6 +483,109 @@ load-on-startup = true
         proseJson(),
       ]),
       contains('serverArgs.parallel'),
+    );
+
+    final models = [embedJson(), bulkJson(), proseJson()];
+
+    refuses(
+      'no tiers at all',
+      jsonEncode({'version': 2, 'models': models}),
+      contains('tiers'),
+    );
+
+    refuses(
+      'a tier naming a model this build does not ship',
+      manifestText(models, tiers: [
+        {
+          ...fullTierJson(),
+          'models': [routerEmbedId, routerBulkId, 'bond-writer'],
+        },
+        inboxTierJson(),
+      ]),
+      allOf(contains('full'), contains('bond-writer')),
+    );
+
+    refuses(
+      'a tier without the embedding model',
+      manifestText(models, tiers: [
+        fullTierJson(),
+        {
+          ...inboxTierJson(),
+          'models': [routerBulkId],
+          'serverArgs': <String, Object?>{},
+        },
+      ]),
+      allOf(contains('inbox'), contains(routerEmbedId)),
+    );
+
+    refuses(
+      'a tier without the inbox model',
+      manifestText(models, tiers: [
+        fullTierJson(),
+        {
+          ...inboxTierJson(),
+          'models': [routerEmbedId],
+          'serverArgs': <String, Object?>{},
+        },
+      ]),
+      allOf(contains('inbox'), contains(routerBulkId)),
+    );
+
+    refuses(
+      'the same tier twice',
+      manifestText(models,
+          tiers: [fullTierJson(), fullTierJson(), inboxTierJson()]),
+      contains('duplicate tier'),
+    );
+
+    refuses(
+      'a tier id that is not a machine tier',
+      manifestText(models, tiers: [
+        fullTierJson(),
+        {...inboxTierJson(), 'id': 'tiny'},
+      ]),
+      allOf(contains('tiny'), contains('machine tier')),
+    );
+
+    refuses(
+      'a ladder missing a rung this build knows',
+      manifestText(models, tiers: [fullTierJson()]),
+      contains('inbox'),
+    );
+
+    // The JSON and `fullTierMinBytes` cannot drift: the floor is compiled in,
+    // and a manifest that says another number is refused at parse time rather
+    // than putting a Mac on the wrong rung.
+    refuses(
+      'a full tier that starts somewhere else',
+      manifestText(models, tiers: [
+        {...fullTierJson(), 'minRamBytes': 34359738368},
+        inboxTierJson(),
+      ]),
+      allOf(contains('full'), contains('$fullTierMinBytes')),
+    );
+
+    refuses(
+      'a ladder that does not start at zero',
+      manifestText(models, tiers: [
+        fullTierJson(),
+        {...inboxTierJson(), 'minRamBytes': 8589934592},
+      ]),
+      allOf(contains('inbox'), contains('minRamBytes')),
+    );
+
+    refuses(
+      'a tier overriding args for a model it does not list',
+      manifestText(models, tiers: [
+        fullTierJson(),
+        {
+          ...inboxTierJson(),
+          'serverArgs': {
+            routerProseId: {'c': '4096'},
+          },
+        },
+      ]),
+      allOf(contains('inbox'), contains(routerProseId)),
     );
   });
 }

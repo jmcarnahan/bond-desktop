@@ -550,13 +550,30 @@ changes, and a diff a reviewer can read.
 3. Edit the entry: `repo`, `file`, `revision`, `sizeBytes`, `sha256`,
    `displayName`, and the licence fields if the licence changed. **Keep the
    three `id`s** (`bond-embed`, `bond-bulk`, `bond-prose`) — they are what the
-   router routes on, what the slots resolve to, and what the ledger is keyed
-   by. Keep the file order smallest first.
+   router routes on, what the slots resolve to, what the `tiers` array lists
+   and what the ledger is keyed by. Keep the file order smallest first.
 
-4. `cd app && flutter test test/model_manifest_test.dart`. It parses the real
-   asset, checks the digests and revisions, and pins the INI the preset writes.
-   Update the size and digest literals in that file in the same commit — they
-   are the second pair of eyes on a copy-paste.
+4. Leave the `tiers` array alone unless the SET changes. It names the rungs a
+   machine can be on, not the checkpoints: `full` takes all three ids, `inbox`
+   takes the embedding and inbox ids and overrides the inbox model's `c` and
+   `parallel`. A new id, or an id that stops being shipped, has to be added to
+   or removed from every tier that wants it — the parser refuses a tier naming
+   a model the manifest does not ship, a tier without the embedding or the
+   inbox model, and a `full` tier whose `minRamBytes` is not the
+   `fullTierMinBytes` the build was compiled with. Moving the floor itself is a
+   Dart change in `model_slots.dart` AND a manifest change, in one commit.
+
+5. `cd app && flutter test test/model_manifest_test.dart
+   test/manifest_makefile_parity_test.dart`. The first parses the real asset,
+   checks the digests and revisions, resolves both tiers and pins the INI the
+   preset writes; update the size and digest literals in it in the same commit,
+   because they are the second pair of eyes on a copy-paste. The second is what
+   stops the manifest and the Makefile drifting: `MODEL_HF`, `FAST_HF` and
+   `EMBED_HF` have to name the same repos and quants as the entries, and
+   `CTX_SIZE`, `SLOTS` and `FAST_SLOTS` the same numbers as the full tier's
+   `c` and `parallel`. A bump that moves only the app leaves `make model`
+   serving the previous checkpoint, silently, which is the failure the
+   Makefile's own comment above `EMBED_HF` describes.
 
 ### What an installed copy does with the bump
 

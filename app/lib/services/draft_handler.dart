@@ -470,7 +470,62 @@ class DraftHandler extends WorkHandler {
   /// are gone by the time the draft is stored, so an improve retrieves them
   /// the way a prefetch does. The directory files come back, because the
   /// stored provenance names them.
-  Future<String?> improve(String source, String messageId) async {
+  ///
+  /// The future is REGISTERED before it is returned, which is the whole of
+  /// what [quiesce] has to wait on: nobody else holds it. The UI fires this
+  /// unawaited and the notifier's own await ends at its reload, so a reset
+  /// that only quiesced the three lanes would delete the `drafts` table with
+  /// this call still at the server.
+  Future<String?> improve(String source, String messageId) {
+    final run = _improveInner(source, messageId);
+    _inFlight.add(run);
+    // The derived future is dropped rather than awaited: the caller holds
+    // `run` and answers for its error, and a second unhandled copy of it
+    // would be reported to the zone by a call nobody asked to make.
+    run.whenComplete(() => _inFlight.remove(run)).ignore();
+    return run;
+  }
+
+  /// The improve calls that have not landed, and the whole of what [quiesce]
+  /// waits on.
+  ///
+  /// Only [improve] registers here. Its sibling [_improveWritten] runs inside
+  /// [run] on the draft lane, so it is already covered by that worker's own
+  /// `quiesce` and registering it twice would say nothing new.
+  final Set<Future<void>> _inFlight = {};
+
+  /// Waits out the improve calls in flight, and nothing else.
+  ///
+  /// [AiWorker.quiesce]'s loop without its two halves that do not apply here:
+  /// there is no `_stopped`, because an improve is a button press and not a
+  /// drain to end, and no claim to give back, because [improve] never takes
+  /// one. What is left is the reason a reset calls it at all — an improve at
+  /// the server when the switch went off writes its draft row when the answer
+  /// lands, and a `clearDerived` that ran in between is a table emptied and
+  /// then written to.
+  ///
+  /// A LOOP and not one wait, for [AiWorker.quiesce]'s reason: a second
+  /// improve started while the first was being waited out joins [_inFlight]
+  /// after the snapshot was taken.
+  ///
+  /// Re-entrant by memoisation, the shape the worker and the triage queue
+  /// both carry: two concurrent callers share ONE run, and the memo is
+  /// released with it so the next reset gets a real wait.
+  Future<void> quiesce() =>
+      _quiesceRun ??= _quiesceOnce().whenComplete(() => _quiesceRun = null);
+
+  /// The run in progress, and null between runs.
+  Future<void>? _quiesceRun;
+
+  Future<void> _quiesceOnce() async {
+    while (_inFlight.isNotEmpty) {
+      await Future.wait(_inFlight.toList()).catchError((_) => const <void>[]);
+    }
+  }
+
+  /// [improve]'s body, split out only so the public method can register the
+  /// future it returns before anything is awaited.
+  Future<String?> _improveInner(String source, String messageId) async {
     // Read ONCE, here, so the guard and the span agree about the same target.
     final target = _routes.improveTarget();
     // A routed stage with no client, or a third-party one with no ledger, is

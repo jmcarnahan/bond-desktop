@@ -38,6 +38,7 @@ void main() {
     ValueChanged<bool>? onProcessingChanged,
     Future<void> Function()? onClearAiResults,
     Future<void> Function()? onForgetAndResync,
+    Future<void> Function()? onStopCloudDrafts,
   }) async {
     routes = _RouteCounter();
     await tester.binding.setSurfaceSize(const Size(900, 1200));
@@ -55,6 +56,9 @@ void main() {
           onProcessingChanged: onProcessingChanged ?? (_) {},
           onClearAiResults: onClearAiResults ?? () async {},
           onForgetAndResync: onForgetAndResync ?? () async {},
+          // Passed straight through, null and all: the revoke is the one
+          // control here whose absence is part of what this file pins.
+          onStopCloudDrafts: onStopCloudDrafts,
         ),
       ),
     ));
@@ -239,5 +243,113 @@ void main() {
     // The switch behind this pane is the thing it changes, so the host hears
     // about it the instant it moves rather than on the way out.
     expect(written, [true]);
+  });
+
+  group('Stop sending drafts anywhere', () {
+    testWidgets('is absent until the host wires it', (tester) async {
+      await open(tester);
+
+      expect(find.byKey(SettingsScreen.stopCloudDraftsKey), findsNothing);
+      expect(find.text('Stop sending drafts anywhere'), findsNothing);
+    });
+
+    testWidgets('takes the same two clicks the resets do', (tester) async {
+      var stopped = 0;
+      await open(tester, onStopCloudDrafts: () async => stopped++);
+
+      await tapKey(tester, SettingsScreen.stopCloudDraftsKey);
+
+      // The arm is gone and a different button stands where it was, which is
+      // the whole of the protection a modal would have given.
+      expect(stopped, 0);
+      expect(find.byKey(SettingsScreen.stopCloudDraftsKey), findsNothing);
+      expect(
+        find.byKey(SettingsScreen.stopCloudDraftsConfirmKey),
+        findsOneWidget,
+      );
+      expect(find.byKey(SettingsScreen.stopCloudDraftsKeepKey), findsOneWidget);
+
+      await tapKey(tester, SettingsScreen.stopCloudDraftsConfirmKey);
+
+      expect(stopped, 1);
+      // Disarmed on the way out, and no route was ever pushed.
+      expect(find.byKey(SettingsScreen.stopCloudDraftsKey), findsOneWidget);
+      expect(routes.pushes, 0);
+    });
+
+    testWidgets('Keep disarms without withdrawing anything', (tester) async {
+      var stopped = 0;
+      await open(tester, onStopCloudDrafts: () async => stopped++);
+
+      await tapKey(tester, SettingsScreen.stopCloudDraftsKey);
+      await tapKey(tester, SettingsScreen.stopCloudDraftsKeepKey);
+
+      expect(stopped, 0);
+      expect(find.byKey(SettingsScreen.stopCloudDraftsKey), findsOneWidget);
+      expect(
+        find.byKey(SettingsScreen.stopCloudDraftsConfirmKey),
+        findsNothing,
+      );
+    });
+
+    testWidgets('is live while processing is on, unlike the two resets',
+        (tester) async {
+      var stopped = 0;
+      await open(
+        tester,
+        processingOn: true,
+        onStopCloudDrafts: () async => stopped++,
+      );
+
+      // It writes three preferences and touches no rows, so there is no drain
+      // it could race. Somebody who has just realised their drafts are
+      // leaving the machine should not have to find a switch first.
+      expect(enabled(tester, SettingsScreen.stopCloudDraftsKey), isTrue);
+      expect(enabled(tester, SettingsScreen.clearAiResultsKey), isFalse);
+
+      await tapKey(tester, SettingsScreen.stopCloudDraftsKey);
+      await tapKey(tester, SettingsScreen.stopCloudDraftsConfirmKey);
+
+      expect(stopped, 1);
+    });
+
+    testWidgets('says what it does and what it costs', (tester) async {
+      await open(tester, onStopCloudDrafts: () async {});
+
+      // Clearing `draft_improve` does not point it at local: that stage has
+      // no fallback, so the button goes. The caption says so.
+      expect(
+        find.textContaining('Points Draft reply back at local, clears the '
+            'Improve a draft target'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Granting again is one screen'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a failure shows an alert and leaves the pair armed',
+        (tester) async {
+      await open(
+        tester,
+        onStopCloudDrafts: () async => throw StateError('the prefs said no'),
+      );
+
+      await tapKey(tester, SettingsScreen.stopCloudDraftsKey);
+      await tapKey(tester, SettingsScreen.stopCloudDraftsConfirmKey);
+
+      expect(find.byType(InlineAlert), findsOneWidget);
+      // Still armed: the user is about to press it again.
+      expect(
+        find.byKey(SettingsScreen.stopCloudDraftsConfirmKey),
+        findsOneWidget,
+      );
+      expect(routes.pushes, 0);
+
+      // And standing down drops the failure with it.
+      await tapKey(tester, SettingsScreen.stopCloudDraftsKeepKey);
+      expect(find.byType(InlineAlert), findsNothing);
+    });
   });
 }

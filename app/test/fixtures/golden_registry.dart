@@ -128,6 +128,7 @@ class GoldenRegistry {
 /// Throws rather than returning an empty registry, for `loadGoldenSet`'s
 /// reason: the registry is git-ignored and machine-local by design, so "no
 /// file" is the normal failure and it deserves a message that says what to set.
+/// A malformed file names itself too, through [decodeJsonOrFail].
 Future<GoldenRegistry> loadGoldenRegistry(String path) async {
   final file = File(path);
   if (!await file.exists()) {
@@ -137,7 +138,10 @@ Future<GoldenRegistry> loadGoldenRegistry(String path) async {
       '--dart-define=GOLDEN_REGISTRY=…',
     );
   }
-  final decoded = jsonDecode(await file.readAsString());
+  final decoded = await decodeJsonOrFail(
+    path,
+    () async => jsonDecode(await file.readAsString()),
+  );
   if (decoded is! Map || decoded['storylines'] is! List) {
     throw StateError(
       'the file at $path is not a storyline registry — no `storylines` array '

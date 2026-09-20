@@ -173,6 +173,18 @@ than stalling one. It runs before the sweep is requeued, so the sweep reads
 the cleaned pool, and reports `repaired_gated_conversations` on the
 `sync_mail` event. See [02-gates.md](02-gates.md).
 
+Four more one-shots beside them, added in Round F, carry the SEARCH corpora
+onto the current embedding tag: one slice a sync of stale message vectors
+re-queued for `embed_message`, of attachment passages nulled and re-queued for
+`attachment_text`, and of directory passages nulled for the reconcile that is
+already filed below, plus a single uncapped pass that nulls every skill
+description vector. Each has its own pref and each runs on every sync until its
+own pref closes, unlike the clustering walk above, which takes one slice a sync
+across all of its tags. They report `requeued_message_embeds`,
+`requeued_attachment_embeds`, `cleared_passage_embeds` and
+`cleared_description_embeds` on the `sync_mail` event, counts only and only on
+a pass that moved something. See [05-embeddings.md](05-embeddings.md).
+
 **Threading.** Everything downstream keys threads by `(source,
 conversationKey)` — a mail thread and a chat with colliding keys can never
 interleave (PR #9).

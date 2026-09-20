@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "models": [
     {
       "id": "bond-embed",
@@ -29,7 +29,7 @@
       "license": "Apache-2.0",
       "licenseUrl": "https://huggingface.co/ggml-org/Qwen3-4B-Instruct-2507-Q8_0-GGUF",
       "notice": null,
-      "serverArgs": { "c": "32768", "parallel": "4", "load-on-startup": "true" }
+      "serverArgs": { "c": "16384", "parallel": "4", "load-on-startup": "true" }
     },
     {
       "id": "bond-prose",
@@ -44,7 +44,20 @@
       "license": "Apache-2.0",
       "licenseUrl": "https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF",
       "notice": null,
-      "serverArgs": { "c": "32768", "parallel": "1", "load-on-startup": "true" }
+      "serverArgs": { "c": "16384", "parallel": "1", "load-on-startup": "true" }
+    }
+  ],
+  "tiers": [
+    {
+      "id": "full",
+      "minRamBytes": 42949672960,
+      "models": ["bond-embed", "bond-bulk", "bond-prose"]
+    },
+    {
+      "id": "inbox",
+      "minRamBytes": 0,
+      "models": ["bond-embed", "bond-bulk"],
+      "serverArgs": { "bond-bulk": { "c": "16384", "parallel": "2" } }
     }
   ]
 }

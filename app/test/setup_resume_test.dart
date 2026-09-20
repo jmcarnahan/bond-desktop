@@ -83,6 +83,7 @@ void main() {
       readPrefs: () => AppPrefs(modelsFolder: folder()),
       setManagedServer: (_) async {},
       setModelsFolder: (_) async {},
+      applyTierDefaults: (_) async {},
       auth: () => auth ?? FakeAuthSession(),
       notifier: FakeDesktopNotifier(),
       seedAuthorization: (_) {},

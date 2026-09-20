@@ -214,6 +214,88 @@ final contextStoreProvider =
 /// pattern; a test overrides it with `FakeSystemInfo` and touches no channel.
 final systemInfoProvider = Provider<SystemInfo>((ref) => const ChannelSystemInfo());
 
+/// This Mac's chip, memory and OS version, for the Settings fact line that
+/// says which tier the machine is in and why. A report, never a judgement:
+/// every decision made on this machine's size goes through
+/// [machineTierProvider], so there is one rule and one place it lives.
+final hardwareInfoProvider = FutureProvider<HardwareInfo>(
+  (ref) => ref.watch(systemInfoProvider).hardware(),
+);
+
+/// This Mac's tier, recomputed from its memory whenever it is asked for and
+/// stored nowhere: the models folder can move to another Mac, and the wizard,
+/// the gate and the server supervisor must each read the machine they are on.
+/// Unknown memory resolves to [MachineTier.full], the never-refuse rule.
+/// A read that FAILS answers [MachineTier.full] too, and that is the same rule
+/// as a zero rather than a second one. This future is awaited where the server
+/// is launched, on a path with no `try` above it and no way to report a
+/// [ServerFailed], so a rejected future would take the launch down over a fact
+/// the app could not read. Nothing is refused for that.
+/// A channel that never answers resolves [MachineTier.full] too, after
+/// [hardwareProbeTimeout], because `ModelServerSupervisor._launch` awaits
+/// `buildPreset()` before it emits anything: an unbounded wait there is no
+/// server, no `ServerFailed` and nothing on screen, which is worse than every
+/// answer this provider can give. That blind answer is REVISABLE: a channel
+/// that answers after the timeout re-derives the tier, so the Settings fact
+/// line and the button beside it cannot end up describing different machines.
+final machineTierProvider = FutureProvider<MachineTier>((ref) async {
+  // Set when the timeout answered for a read that had not landed yet. It is
+  // what makes that answer revisable, and it is false on every other path.
+  var answeredBlind = false;
+
+  // LISTEN rather than watch, and the difference is the whole design here.
+  // Watching the hardware STATE would invalidate this provider on the ordinary
+  // loading-to-data step, and every caller reads `.future` exactly ONCE —
+  // `setup_gate.dart`, `inbox_screen.dart` and the supervisor's preset. An
+  // invalidation mid-flight drops the future they are holding, and it is never
+  // completed: the gate then never decides and the launch never starts. So the
+  // rebuild is asked for by hand, in the one case where the tier and the
+  // machine can disagree: a channel that answered AFTER the timeout had
+  // already resolved [MachineTier.full] off nothing. Without it a 16 GiB Mac
+  // whose channel was slow would sit under a fact line reading 16 GB beside an
+  // enabled button writing the full tier's stage picks.
+  //
+  // Nothing fires on the fast path, where the value arrives before the timeout
+  // and `answeredBlind` is still false, and a channel that never answers never
+  // changes state, so it stays `full` — the never-refuse rule. A rejection is
+  // not a value either, and re-deriving one would only answer `full` again.
+  ref.listen<AsyncValue<HardwareInfo>>(hardwareInfoProvider, (_, next) {
+    if (answeredBlind && next.hasValue) ref.invalidateSelf();
+  });
+
+  // The timeout is a Timer of this provider's own, cancelled on dispose, and
+  // NOT `Future.timeout`: that helper's timer belongs to nobody, so a host
+  // whose hardware read never lands (every widget test that mounts Settings
+  // over a silent platform) tears its tree down with the timer still pending,
+  // which the test binding reports as a failure. Here the timer dies with the
+  // provider, and a hardware answer that lands first cancels it.
+  final answer = Completer<MachineTier>();
+  final timer = Timer(hardwareProbeTimeout, () {
+    if (answer.isCompleted) return;
+    answeredBlind = true;
+    debugPrint('tier: this Mac has not answered in $hardwareProbeTimeout, '
+        'assuming the full tier until it does');
+    answer.complete(machineTierFor(HardwareInfo.unknown.memoryBytes));
+  });
+  ref.onDispose(timer.cancel);
+
+  // Over [hardwareInfoProvider] rather than the channel again: one round trip
+  // and one future, so the fact line and the button are reading the same
+  // answer about the same machine. Watched synchronously, as a watch must be.
+  ref.watch(hardwareInfoProvider.future).then<void>((hardware) {
+    if (!answer.isCompleted) {
+      answer.complete(machineTierFor(hardware.memoryBytes));
+    }
+  }, onError: (Object e) {
+    debugPrint('tier: could not read this Mac, assuming the full tier: $e');
+    if (!answer.isCompleted) {
+      answer.complete(machineTierFor(HardwareInfo.unknown.memoryBytes));
+    }
+  }).whenComplete(timer.cancel);
+
+  return answer.future;
+});
+
 /// Every folder the app owns. `main()` OVERRIDES this with the located
 /// directory, exactly as it overrides [dbProvider], because
 /// `getApplicationSupportDirectory()` is async and a provider body cannot be.
@@ -268,8 +350,15 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
     runner: const SystemProcessRunner(),
     supportDir: paths.support,
     binaryPath: LlamaBinary.resolve,
-    buildPreset: () => ref
+    // The manifest RESOLVED for this Mac, so a machine under the full tier's
+    // floor starts the two models it downloaded rather than refusing on a
+    // writing model it never fetched. Asked freshly each start, like the
+    // folder and the port beside it, and awaited rather than guessed: the
+    // tier is a future and a preset written before it answered would name the
+    // wrong set.
+    buildPreset: () async => ref
         .read(modelManifestProvider)
+        .forTier(await ref.read(machineTierProvider.future))
         .toPreset(ref.read(appPrefsProvider).effectiveModelsFolder(paths)),
     routerPort: () => ref.read(appPrefsProvider).routerPort,
     managed: () => ref.read(appPrefsProvider).managedServer,

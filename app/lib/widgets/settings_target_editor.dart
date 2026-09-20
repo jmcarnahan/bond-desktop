@@ -7,6 +7,7 @@ import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart' show LlmTargetSpec, LlmWire;
 import '../theme/tokens.dart';
 import 'inline_alert.dart';
+import 'model_name_control.dart';
 import 'model_slot_editor.dart' show ProbeStatus;
 import 'settings_models_body.dart' show SettingsModelsBody;
 import 'settings_segments.dart';
@@ -212,11 +213,6 @@ class _LlmTargetEditorState extends State<LlmTargetEditor> {
     });
   }
 
-  List<String>? get _listed =>
-      _probe?.reachable == true && _probe!.modelIds.isNotEmpty
-          ? _probe!.modelIds
-          : null;
-
   /// Why Save is off, or null when it is on.
   ///
   /// A sentence rather than a red field: three things have to be true at once
@@ -274,7 +270,7 @@ class _LlmTargetEditorState extends State<LlmTargetEditor> {
             ProbeStatus(probing: _probing, result: _probe),
             const SizedBox(height: BondSpacing.s8),
           ],
-          ..._modelControl(),
+          _modelControl(),
           const SizedBox(height: BondSpacing.s16),
           Text(
             'Wire',
@@ -365,68 +361,16 @@ class _LlmTargetEditorState extends State<LlmTargetEditor> {
     );
   }
 
-  /// The model name: a picker over what the server listed, or a free field
-  /// when nothing has listed anything — the slot editor's rule, and for its
-  /// reason. A name the server does not serve is a fatal HTTP 400 on an MLX
-  /// runtime and is never retried.
-  List<Widget> _modelControl() {
-    final listed = _listed;
-    if (listed == null) {
-      return [
-        TextField(
-          key: LlmTargetEditor.modelKey,
-          controller: _model,
-          decoration: const InputDecoration(
-            labelText: 'Model name',
-            hintText: 'qwen3.8',
-          ),
-        ),
-        const SizedBox(height: BondSpacing.s4),
-        Text(
-          'Check the server to pick from what it serves; llama.cpp ignores '
-          'this name, MLX runtimes require it.',
-          style: BondType.caption,
-        ),
-      ];
-    }
-
-    final typed = _model.text;
-    final unlisted = typed.isNotEmpty && !listed.contains(typed);
-    return [
-      InputDecorator(
-        decoration: const InputDecoration(labelText: 'Model'),
-        child: DropdownButtonHideUnderline(
-          child: DropdownButton<String>(
-            key: LlmTargetEditor.modelPickerKey,
-            isExpanded: true,
-            value: typed.isEmpty ? null : typed,
-            hint: const Text('Pick a model'),
-            items: [
-              for (final id in listed)
-                DropdownMenuItem(value: id, child: Text(id)),
-              if (unlisted)
-                DropdownMenuItem(
-                  value: typed,
-                  child: Text('$typed (not listed)'),
-                ),
-            ],
-            onChanged: (value) {
-              if (value == null) return;
-              setState(() => _model.text = value);
-            },
-          ),
-        ),
-      ),
-      if (unlisted) ...[
-        const SizedBox(height: BondSpacing.s4),
-        Text(
-          'This server did not list that name. llama.cpp will ignore it; an '
-          'MLX runtime will refuse the request.',
-          style: BondType.caption,
-        ),
-      ],
-    ];
-  }
+  /// The model name: [ModelNameControl], with this editor's two keys — the
+  /// slot editor's control, and for its reason. A name the server does not
+  /// serve is a fatal HTTP 400 on an MLX runtime and is never retried.
+  Widget _modelControl() => ModelNameControl(
+        controller: _model,
+        probe: _probe,
+        fieldKey: LlmTargetEditor.modelKey,
+        pickerKey: LlmTargetEditor.modelPickerKey,
+        onPicked: () => setState(() {}),
+      );
 
   /// The token field, obscured, plus the one control that can take a stored
   /// token away.

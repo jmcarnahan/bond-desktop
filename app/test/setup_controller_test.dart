@@ -37,6 +37,13 @@ int _bytesUnder(String dir) {
   return total;
 }
 
+/// A platform that refuses to describe the machine — the throw the startup
+/// probe has to survive without costing the first frame.
+class _RefusingSystemInfo extends FakeSystemInfo {
+  @override
+  Future<HardwareInfo> hardware() async => throw StateError('no channel');
+}
+
 /// A store whose writes fail, for the one case that must not throw.
 class _UnwritableStore extends SetupStore {
   _UnwritableStore(super.db);
@@ -67,6 +74,7 @@ void main() {
   late bool managed;
   late List<bool> seeded;
   late List<String> foldersSet;
+  late List<MachineTier> tiersApplied;
 
   String folder() => p.join(root.path, 'models');
 
@@ -79,7 +87,6 @@ void main() {
     int embed = 2048,
     int bulk = 4096,
     int prose = 8192,
-    Map<String, int>? minRams,
   }) {
     final sizes = <String, int>{};
     final digests = <String, String>{};
@@ -96,7 +103,7 @@ void main() {
       sizes[entry.key] = data.length;
       digests[entry.key] = sha256Hex(data);
     }
-    return testManifest(sizes: sizes, sha256s: digests, minRams: minRams);
+    return testManifest(sizes: sizes, sha256s: digests);
   }
 
   ModelDownloader buildDownloader() {
@@ -134,6 +141,7 @@ void main() {
         foldersSet.add(path);
         prefs = prefs.copyWith(modelsFolder: path);
       },
+      applyTierDefaults: (tier) async => tiersApplied.add(tier),
       auth: () => auth,
       notifier: notifier,
       seedAuthorization: seeded.add,
@@ -158,10 +166,13 @@ void main() {
     }
   }
 
-  /// A ledger and three files that say the whole set is already here.
+  /// A ledger and the files that say THIS MACHINE's set is already here —
+  /// three on the full tier, two on the inbox one.
   Future<void> seedComplete() async {
     var ledger = DownloadLedger.empty;
-    for (final model in manifest.models) {
+    final wanted =
+        manifest.forTier(machineTierFor(system.hardwareInfo.memoryBytes));
+    for (final model in wanted.models) {
       final file = File(destOf(model));
       await file.parent.create(recursive: true);
       await file.writeAsBytes(hub.contents['${model.repo}/${model.file}']!);
@@ -188,6 +199,7 @@ void main() {
     managed = false;
     seeded = [];
     foldersSet = [];
+    tiersApplied = [];
     manifest = publish();
     prefs = AppPrefs(modelsFolder: folder());
     supervisor = ModelServerSupervisor(
@@ -196,7 +208,9 @@ void main() {
       // A binary that resolves, so a spawn that DID happen happened because
       // finish asked for it rather than because nothing was in the way.
       binaryPath: () => '/usr/bin/true',
-      buildPreset: () => manifest.toPreset(folder()),
+      buildPreset: () =>
+          manifest.forTier(machineTierFor(system.hardwareInfo.memoryBytes))
+              .toPreset(folder()),
       routerPort: () => 8080,
       managed: () => managed,
     );
@@ -290,7 +304,6 @@ void main() {
 
   test('too little memory for the prose model warns, unknown memory does not',
       () async {
-    manifest = publish(minRams: {routerProseId: 34359738368});
     system.hardwareInfo = const HardwareInfo(
       chip: 'Apple M2',
       memoryBytes: 17179869184,
@@ -304,12 +317,101 @@ void main() {
 
     expect(controller.deviceBlocked, isFalse);
     expect(controller.lowMemory, isTrue);
+    expect(controller.tier, MachineTier.inbox);
+    // 16 GiB is the floor itself, not below it.
+    expect(controller.underMeasuredFloor, isFalse);
 
     // `HardwareInfo.unknown` reports zero bytes. A size check against zero
     // must not read as "this Mac is too small".
     system.hardwareInfo = HardwareInfo.unknown;
     await controller.probeHardware();
     expect(controller.lowMemory, isFalse);
+    expect(controller.tier, MachineTier.full);
+    expect(controller.underMeasuredFloor, isFalse);
+  });
+
+  test('a platform that refuses to answer leaves the wizard on the full tier',
+      () async {
+    // `init` awaits the machine before it reads the ledger, so this await is
+    // on the path to the first frame. It neither throws nor waits: a channel
+    // that refuses is the same answer as one that reports nothing, which is
+    // `HardwareInfo.unknown` and therefore the full tier.
+    system = _RefusingSystemInfo();
+    final controller = build();
+
+    await controller.init();
+
+    expect(controller.state.loaded, isTrue);
+    expect(controller.state.step, SetupStep.welcome);
+    expect(controller.state.hardware, HardwareInfo.unknown);
+    expect(controller.tier, MachineTier.full);
+    expect(controller.deviceBlocked, isFalse);
+    expect(controller.lowMemory, isFalse);
+  });
+
+  test('the tier follows the memory, and the manifest follows the tier',
+      () async {
+    final controller = build();
+    await controller.init();
+
+    // Unknown memory is the full tier: nothing is refused for a fact the app
+    // could not read, and every model is offered.
+    expect(controller.tier, MachineTier.full);
+    expect(controller.resolvedManifest.models.length, 3);
+
+    system.hardwareInfo = const HardwareInfo(
+      chip: 'Apple M2',
+      memoryBytes: 8589934592,
+      appleSilicon: true,
+      rosetta: false,
+      osVersion: '15.6',
+    );
+    await controller.probeHardware();
+
+    expect(controller.tier, MachineTier.inbox);
+    expect(controller.underMeasuredFloor, isTrue);
+    expect(
+      [for (final m in controller.resolvedManifest.models) m.id],
+      [routerEmbedId, routerBulkId],
+    );
+    // The inbox tier's own arguments, merged onto the entry's.
+    expect(
+      controller.resolvedManifest.byId(routerBulkId).serverArgs['parallel'],
+      '2',
+    );
+  });
+
+  test('an inbox Mac is preflighted, downloaded and gated on two files',
+      () async {
+    system.free = 500 * 1024 * 1024 * 1024;
+    system.hardwareInfo = const HardwareInfo(
+      chip: 'Apple M2',
+      memoryBytes: 17179869184,
+      appleSilicon: true,
+      rosetta: false,
+      osVersion: '15.6',
+    );
+    await store.set(SetupStore.setupKey, SetupStep.storage.name);
+    final controller = build();
+    await controller.init();
+
+    // The writing model is not in the number the storage step quotes.
+    final inbox = manifest.forTier(MachineTier.inbox);
+    expect(controller.state.disk!.neededBytes, inbox.totalBytes);
+    expect(inbox.totalBytes, lessThan(manifest.totalBytes));
+
+    await controller.next();
+    await waitUntil(
+      () => !controller.state.downloadRunning,
+      reason: 'the inbox set to arrive',
+    );
+
+    // Two bars, two files on disk, and Continue granted without the third.
+    expect(controller.state.downloads.keys.toSet(),
+        {routerEmbedId, routerBulkId});
+    expect(controller.state.downloadsComplete, isTrue);
+    expect(File(destOf(manifest.byRole(ModelRole.prose))).existsSync(),
+        isFalse);
   });
 
   test('the storage step asks the volume about the models folder', () async {
@@ -587,6 +689,66 @@ void main() {
       reason: 'the bumped file to be fetched',
     );
     expect(controller.state.downloadsComplete, isTrue);
+  });
+
+  test('a stored done on an inbox Mac is not sent back for the third file',
+      () async {
+    // The machine is asked BEFORE the ledger is read. A resume that assumed
+    // the full tier would compare a two-file ledger against three checkpoints,
+    // decide the set was stale and open the download step for a writing model
+    // this Mac is never going to start.
+    system.hardwareInfo = const HardwareInfo(
+      chip: 'Apple M2',
+      memoryBytes: 17179869184,
+      appleSilicon: true,
+      rosetta: false,
+      osVersion: '15.6',
+    );
+    await seedComplete();
+    await store.set(SetupStore.setupKey, SetupStep.done.name);
+
+    final controller = build();
+    await controller.init();
+
+    expect(controller.state.hardware, isNotNull);
+    expect(controller.tier, MachineTier.inbox);
+    expect(controller.state.step, SetupStep.welcome);
+    expect(controller.state.downloadsComplete, isTrue);
+  });
+
+  test('Finish writes this machine tier defaults before the server starts',
+      () async {
+    system.hardwareInfo = const HardwareInfo(
+      chip: 'Apple M2',
+      memoryBytes: 17179869184,
+      appleSilicon: true,
+      rosetta: false,
+      osVersion: '15.6',
+    );
+    await seedComplete();
+    await store.set(SetupStore.setupKey, SetupStep.notifications.name);
+    final controller = build();
+    await controller.init();
+    await controller.next();
+
+    expect(await controller.finish(), isTrue);
+
+    // The tier this Mac is on, written once, and written before the managed
+    // preference that lets a worker resolve a target at all.
+    expect(tiersApplied, [MachineTier.inbox]);
+    expect(managed, isTrue);
+  });
+
+  test('Finish on a full Mac applies the full tier', () async {
+    await seedComplete();
+    await store.set(SetupStore.setupKey, SetupStep.notifications.name);
+    final controller = build();
+    await controller.init();
+    await controller.next();
+
+    expect(await controller.finish(), isTrue);
+
+    expect(tiersApplied, [MachineTier.full]);
   });
 
   test('the done step names who is signed in', () async {

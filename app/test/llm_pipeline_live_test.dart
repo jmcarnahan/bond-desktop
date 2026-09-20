@@ -6,6 +6,7 @@ library;
 import 'dart:async';
 
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/draft_policy.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/ai_workers.dart';
 import 'package:bond_inbox/services/drain_gate.dart';
@@ -93,6 +94,16 @@ const String pipeShape =
 /// Whether the late-arrival leg runs.
 const bool pipeLate = bool.fromEnvironment('PIPE_LATE', defaultValue: true);
 
+/// Which messages get a draft prefetched: a [DraftPolicy] name.
+///
+/// `all` and not the app's `needsYou`, because that is what every row in the
+/// ledger was taken at: before Round F this bench passed no policy closure to
+/// its [ExtractHandler] at all, and the handler answers a missing one with
+/// [DraftPolicy.all]. So the knob's default reproduces every historical row,
+/// and `needsYou` is how the shipped default is measured against them.
+const String pipePolicy =
+    String.fromEnvironment('PIPE_POLICY', defaultValue: 'all');
+
 /// The id the late arrival is seeded under. Fixed, so a run file can be read
 /// against the rows afterwards.
 const String lateArrivalId = 'late-arrival';
@@ -168,6 +179,17 @@ void main() {
         contains(pipeShape),
         reason: 'PIPE_SHAPE must be single or lanes',
       );
+      // Loudly, before a server is dialled: a misspelt policy that fell back
+      // to a default would spend forty minutes measuring the wrong shape and
+      // write a row saying it had measured the right one.
+      final DraftPolicy policy;
+      try {
+        policy = DraftPolicy.values.byName(pipePolicy);
+      } on ArgumentError {
+        fail('PIPE_POLICY must be one of '
+            '${DraftPolicy.values.map((p) => p.name).join(', ')} — '
+            'got "$pipePolicy"');
+      }
 
       final db = testDb();
       final store = MessageStore(db);
@@ -254,6 +276,9 @@ void main() {
         noEmbeddings,
         onDraftQueued:
             lanes ? () => unawaited(track('draft', draftWorker.pump())) : null,
+        // A closure, as the app passes one: the handler re-reads it per
+        // message, and one define holds it still for the whole pass.
+        draftPolicy: () => policy,
       );
 
       // The gate the triage drain and the fast work share — the app's
@@ -522,17 +547,31 @@ void main() {
       beat.cancel();
 
       final fastMsgsPerMin = ungated.length * 60000 / fastWallMs;
-      final draftCount = (await store.workCounts(
-            'draft',
-            sources: const ['email', 'teams', 'local'],
-          ))['done'] ??
-          0;
+      final draftCounts = await store.workCounts(
+        'draft',
+        sources: const ['email', 'teams', 'local'],
+      );
+      final draftCount = draftCounts['done'] ?? 0;
+      // What the policy turned down: the ungated messages that ended with no
+      // draft work row of any status. It is the number that makes a `needsYou`
+      // row legible against an `all` one: the same backlog, fewer prose calls.
+      final draftsQueued =
+          draftCounts.values.fold<int>(0, (sum, n) => sum + n);
+      // Against the UNGATED population, not the finished extractions: a
+      // gate-dropped message reaches `done` through an early return that never
+      // asks for a draft, and there are three of those per copy of the corpus.
+      // The late arrival is an ungated inbound copy outside `ungated`, and it
+      // queues a draft like any other when the leg runs, so it joins the
+      // population it is subtracted from.
+      final draftsGated =
+          ungated.length + (pipeLate ? 1 : 0) - draftsQueued;
 
       final lateTotal = lateMs['total_ms'] as int?;
 
       // ignore: avoid_print
       print(
         '\n=== pipeline: shape $pipeShape, width $pipeWidth, '
+        'policy ${policy.name}, '
         '$pipeCopies copies (${ungated.length} ungated messages) ===\n'
         '| metric | value |\n'
         '| --- | --- |\n'
@@ -540,6 +579,7 @@ void main() {
         '| drafts wall | ${_secs(draftsWallMs)}s |\n'
         '| fast msgs/min | ${fastMsgsPerMin.toStringAsFixed(1)} |\n'
         '| drafts written | $draftCount |\n'
+        '| drafts gated | $draftsGated |\n'
         '| late arrival | ${_secs(lateTotal)}s |\n'
         '\n${bulk.banner}\n\n${bulk.table()}\n'
         '\n${prose.banner}\n\n${prose.table()}\n',
@@ -553,12 +593,16 @@ void main() {
         extra: {
           'shape': pipeShape,
           'width': pipeWidth,
+          // A row taken before Round F carries no `policy` key, and every one
+          // of them was `all`: the handler's answer to no closure at all.
+          'policy': policy.name,
           'copies': pipeCopies,
           'messages': ungated.length,
           'fast_wall_ms': fastWallMs,
           'drafts_wall_ms': draftsWallMs,
           'fast_msgs_per_min': fastMsgsPerMin,
           'drafts_written': draftCount,
+          'drafts_gated': draftsGated,
           'late_arrival_ms': lateTotal,
           'late_arrival_stages': lateMs['stages'],
         },

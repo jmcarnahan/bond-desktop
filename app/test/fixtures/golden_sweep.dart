@@ -236,12 +236,11 @@ Future<SweepMembership> readSweepMembership(MessageStore store) async {
 /// over every pair INSIDE a cluster the sweep formed, which is the population
 /// the floor would judge.
 ///
-/// On the embeddinggemma scale. The Qwen vector shipped in Round E runs its
-/// gates at 0.48 / 0.43, under the bottom edge, so on that scale this
-/// histogram reads close to one bucket and `separation.points` at 0.65 is
-/// off-scale; the scale-free columns (recall-70 and cross-5) are the read.
-/// Rescaling the edges is a Round F harness item (plan gotcha 64, item 10);
-/// kept as is so the Round D rows stay comparable.
+/// On the embeddinggemma scale, and kept exactly where it was so that every
+/// Round D row stays comparable. The Qwen vector shipped in Round E runs all
+/// four of its gates below 0.50, so on this scale its histogram is one fat
+/// bottom bucket; [cosineBinEdgesQwen] is the same reading on the scale that
+/// vector lives at, printed beside this one rather than instead of it.
 const List<double> cosineBinEdges = [0.50, 0.55, 0.60, 0.65];
 
 /// The bins' names, for a printed row. Enums, not data.
@@ -253,13 +252,50 @@ const List<String> cosineBinLabels = [
   '>=0.65',
 ];
 
-/// [similarities] counted into [cosineBinLabels]' five buckets.
-List<int> cosineBins(Iterable<double> similarities) {
-  final bins = List<int>.filled(cosineBinLabels.length, 0);
+/// The same four edges, moved down to where the shipped gates actually sit.
+///
+/// Every gate the clustering and the assign run on is UNDER [cosineBinEdges]'
+/// bottom edge of 0.50: `assignCosineGateWithOverlap` 0.37,
+/// `clusterCoherenceFloor` 0.43, `assignCosineGate` 0.44 and
+/// `clusterLinkThreshold` 0.48, all four in `storyline_service.dart`. On the
+/// old edges every near-gate pair falls in the first bucket, so the chart
+/// cannot answer "how many pairs would the 0.43 floor reject". On these edges
+/// the overlap gate sits in `0.35-0.40`, the coherence floor and the assign
+/// gate in `0.40-0.45`, the link threshold in `0.45-0.50`, and everything at
+/// or above 0.50 is the tail.
+///
+/// A printed shape and a JSON key, never an assertion: a live bench states
+/// counts and the ledger reads them.
+const List<double> cosineBinEdgesQwen = [0.35, 0.40, 0.45, 0.50];
+
+/// [cosineBinEdgesQwen]' names. Labelled apart from [cosineBinLabels] because
+/// the two rows are printed one under the other and a reader must not have to
+/// guess which scale a column is on.
+const List<String> cosineBinLabelsQwen = [
+  '<0.35',
+  '0.35-0.40',
+  '0.40-0.45',
+  '0.45-0.50',
+  '>=0.50',
+];
+
+/// [similarities] counted into the five buckets [edges] cuts.
+///
+/// The edges are a PARAMETER rather than a second copy of this walk, because
+/// the scale moved with the embedding model and the reading did not: the same
+/// pairs are counted twice, once on each scale, and a second routine would be
+/// a second chance for the two to disagree. [edges] ascend and a value lands
+/// in the first bucket it is under, so the result always has one more entry
+/// than there are edges.
+List<int> cosineBins(
+  Iterable<double> similarities, {
+  List<double> edges = cosineBinEdges,
+}) {
+  final bins = List<int>.filled(edges.length + 1, 0);
   for (final value in similarities) {
-    var index = cosineBinEdges.length;
-    for (var i = 0; i < cosineBinEdges.length; i++) {
-      if (value < cosineBinEdges[i]) {
+    var index = edges.length;
+    for (var i = 0; i < edges.length; i++) {
+      if (value < edges[i]) {
         index = i;
         break;
       }
@@ -1130,6 +1166,12 @@ class SweepTally {
   /// Pairs inside the clusters the sweep formed, by cosine bin.
   final List<int> cosineBins;
 
+  /// The same pairs on [cosineBinEdgesQwen], the scale the shipped gates sit
+  /// on. Both are carried because a row is compared with the Round D rows
+  /// above it and read against the gates below it, and one set of edges
+  /// cannot do both.
+  final List<int> cosineBinsQwen;
+
   /// What the lint would still refuse among the LIVE storylines, by verdict.
   ///
   /// Before Phase 3 this was the lint's whole reading, counted and not
@@ -1154,6 +1196,11 @@ class SweepTally {
 
   /// Pool pairs at least one side of which gold files nowhere, by bin.
   final List<int> withNoneBins;
+
+  /// The same three pair populations on [cosineBinEdgesQwen].
+  final List<int> sameEffortBinsQwen;
+  final List<int> crossEffortBinsQwen;
+  final List<int> withNoneBinsQwen;
 
   /// The same three populations by SUBJECT overlap, in [overlapBinLabels]'
   /// four buckets. The lexical ruler the cosine line is read against: a pool
@@ -1200,11 +1247,15 @@ class SweepTally {
     required this.callsPerPass,
     required this.wallPerPassMs,
     required this.cosineBins,
+    required this.cosineBinsQwen,
     required this.lintCounts,
     required this.clusterPurity,
     required this.sameEffortBins,
     required this.crossEffortBins,
     required this.withNoneBins,
+    required this.sameEffortBinsQwen,
+    required this.crossEffortBinsQwen,
+    required this.withNoneBinsQwen,
     required this.sameSubjectBins,
     required this.crossSubjectBins,
     required this.withNoneSubjectBins,
@@ -1283,6 +1334,11 @@ class SweepTally {
           for (var i = 0; i < cosineBinLabels.length; i++)
             cosineBinLabels[i]: cosineBins[i],
         },
+        // The same pairs on the shipped gates' scale. A separate key rather
+        // than a replacement: every row written before Round F carries only
+        // the first, and a reader comparing two of them must not be handed
+        // two different meanings under one name.
+        'cosine_bins_qwen': labelledBins(cosineBinLabelsQwen, cosineBinsQwen),
         'lint': lintCounts,
         'clusters': {
           for (final entry in clusterPurity.entries)
@@ -1292,6 +1348,9 @@ class SweepTally {
           'same_effort': _binsJson(sameEffortBins),
           'cross_effort': _binsJson(crossEffortBins),
           'with_none': _binsJson(withNoneBins),
+          'same_effort_qwen': _binsJsonQwen(sameEffortBinsQwen),
+          'cross_effort_qwen': _binsJsonQwen(crossEffortBinsQwen),
+          'with_none_qwen': _binsJsonQwen(withNoneBinsQwen),
         },
         'subject_overlap_bins': {
           'same_effort': labelledBins(overlapBinLabels, sameSubjectBins),
@@ -1309,6 +1368,9 @@ class SweepTally {
   static Map<String, int> _binsJson(List<int> bins) =>
       labelledBins(cosineBinLabels, bins);
 
+  static Map<String, int> _binsJsonQwen(List<int> bins) =>
+      labelledBins(cosineBinLabelsQwen, bins);
+
   /// Counts, ratios and enums. No slug and no storyline title: the per-slug
   /// maps above stay in [toJson], which lands in the git-ignored result file.
   String table() {
@@ -1319,10 +1381,16 @@ class SweepTally {
       for (var i = 0; i < cosineBinLabels.length; i++)
         '${cosineBinLabels[i]} ${cosineBins[i]}',
     ].join('  ');
+    final binsQwen = [
+      for (var i = 0; i < cosineBinLabelsQwen.length; i++)
+        '${cosineBinLabelsQwen[i]} ${cosineBinsQwen[i]}',
+    ].join('  ');
     final lint = [
       for (final entry in lintCounts.entries) '${entry.key} ${entry.value}',
     ].join('  ');
     String binsOf(List<int> counts) => binsLine(cosineBinLabels, counts);
+    String binsOfQwen(List<int> counts) =>
+        binsLine(cosineBinLabelsQwen, counts);
     // A word the run never saw prints a zero rather than vanishing: a reader
     // comparing two ledger rows has to see the same five columns on both.
     int clustersAt(String outcome) => clusterPurity[outcome]?.clusters ?? 0;
@@ -1346,7 +1414,8 @@ class SweepTally {
         '   grouping calls $groupingCalls  grouped $grouped'
         '  failed $groupingFailed  unfit $groupingUnfit\n'
         '  wall per pass ms ${wallPerPassMs.join(', ')}\n'
-        '  in-cluster cosines  $bins\n'
+        '  in-cluster cosines (0.50..0.65)  $bins\n'
+        '  in-cluster cosines (0.35..0.50)  $binsQwen\n'
         '  clusters judged $clustersJudged'
         '  formed ${clustersAt('formed')}'
         '  incoherent ${clustersAt('incoherent')}'
@@ -1355,9 +1424,14 @@ class SweepTally {
         '  answered ${clustersAt('answered')}\n'
         '  purity before naming  formed: ${purityAt('formed')}\n'
         '                        declined: ${purityAt('declined')}\n'
-        '  pool pairs by cosine  same effort  ${binsOf(sameEffortBins)}'
+        '  pool pairs by cosine (0.50..0.65)  same effort  '
+        '${binsOf(sameEffortBins)}'
         '   cross effort  ${binsOf(crossEffortBins)}'
         '   with none  ${binsOf(withNoneBins)}\n'
+        '  pool pairs by cosine (0.35..0.50)  same effort  '
+        '${binsOfQwen(sameEffortBinsQwen)}'
+        '   cross effort  ${binsOfQwen(crossEffortBinsQwen)}'
+        '   with none  ${binsOfQwen(withNoneBinsQwen)}\n'
         '${subjectOverlapLine(
           sameEffort: sameSubjectBins,
           crossEffort: crossSubjectBins,
