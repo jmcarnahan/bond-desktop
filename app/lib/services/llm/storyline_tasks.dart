@@ -474,11 +474,22 @@ class NameStorylineTask implements JsonTask<NameResult> {
   /// that named it.
   ///
   /// Twelve cards of [cardCap] joined by eleven `\n---\n` separators is
-  /// 7,266 characters, so a 7,200 cap would cut the twelfth card mid-sentence
+  /// 7,255 characters, so a 7,200 cap would cut the twelfth card mid-sentence
   /// after the service went to the trouble of keeping every card whole. The
   /// service builds the set to fit, which makes this clamp a belt rather than
   /// the rule.
   static const int cardsCap = 7300;
+
+  /// The completion budget this task is run at, on
+  /// [StorylineRecapTask.maxTokens]'s precedent: a task that names no budget
+  /// lands on [runTask]'s generic 512, and on the Converse wire that 512
+  /// becomes `inferenceConfig.maxTokens`, so an answer that runs past it comes
+  /// back with `stopReason: max_tokens` and throws — which is how one whole
+  /// cloud naming pass was lost. A thousand and twenty-four is headroom rather
+  /// than a measurement: a grammar-constrained local answer that already
+  /// finished under 512 is byte-identical under a larger ceiling, so the two
+  /// local rows on each side of this number are expected to match exactly.
+  static const int maxTokens = 1024;
 
   /// What an unnameable storyline is called, and it means two different
   /// things on the two paths this task serves.
@@ -1036,7 +1047,25 @@ class GroupResult {
 /// for the base rate that made the question a model's rather than a
 /// threshold's.
 class GroupThreadsTask implements JsonTask<GroupResult> {
-  const GroupThreadsTask();
+  const GroupThreadsTask({this.cardsPerCall = defaultCardsPerCall});
+
+  /// How many whole cards one call shows when nobody says otherwise: twelve.
+  ///
+  /// Twelve because that is how far the cosine ladder splits a neighbourhood
+  /// down — it is the number every caller asked for before whole-pool
+  /// grouping existed, and the cosine path still asks for it. A caller that
+  /// reads the WHOLE pool rather than a neighbourhood passes its own number
+  /// instead (`StorylineTuning.poolCardsPerCall`), which is why this moved
+  /// from a derived constant to a field: the cap is a property of the CALL,
+  /// not of the task.
+  static const int defaultCardsPerCall = 12;
+
+  /// How many whole cards this call shows. See [defaultCardsPerCall].
+  ///
+  /// The three ceilings below are read off it, so the schema, the prompt's
+  /// clamp and whatever the service built cannot disagree about how many
+  /// cards a call holds.
+  final int cardsPerCall;
 
   /// One card, whole. The same number the naming call uses, ALIASED rather
   /// than copied: the two calls read the same cards built by the same recipe,
@@ -1044,11 +1073,20 @@ class GroupThreadsTask implements JsonTask<GroupResult> {
   /// to the model that groups it than to the model that names it.
   static const int cardCap = NameStorylineTask.cardCap;
 
-  /// And the same whole-set clamp, for the same reason. What it means here is
-  /// that a neighbourhood of more than twelve cards does not fit one call —
-  /// the service splits such a neighbourhood up the cosine ladder until each
-  /// piece does, rather than showing the model a list it silently truncated.
-  static const int cardsCap = NameStorylineTask.cardsCap;
+  /// The joined set's exact length at [cardsPerCall] cards: that many whole
+  /// cards of [cardCap] plus the `\n---\n` separators between them.
+  ///
+  /// Derived rather than aliased since whole-pool grouping, and the
+  /// consequence is worth stating rather than discovering: at the default
+  /// twelve it reads 7,255 where it used to read [NameStorylineTask.cardsCap]
+  /// (7,300, that same figure rounded up), and at
+  /// `StorylineTuning.poolCardsPerCall` it reads 29,035. The per-card
+  /// [cardCap] is still the namer's own number, which is what makes a card
+  /// read the same to the model that groups it as to the model that names it;
+  /// only the whole-set belt moved. The service builds the set to fit either
+  /// way, so this is a belt rather than the rule.
+  int get cardsCap =>
+      cardsPerCall * cardCap + (cardsPerCall - 1) * _separatorLength;
 
   /// How long a `why` may be. A sentence, like the namer's `evidence`: it is
   /// read by the log and by whoever is reading a bench row, never by a user,
@@ -1067,33 +1105,35 @@ class GroupThreadsTask implements JsonTask<GroupResult> {
   @override
   String get schemaName => 'storyline_group';
 
-  /// How many whole cards the prompt can show: twelve.
+  /// The most groups an answer can legitimately name: half the cards.
   ///
-  /// The derivation is the truth, and the two ceilings below are read off it.
-  /// The service splits a neighbourhood down to this number and derives it the
-  /// same way, so the schema and the split cannot disagree. Three constants
-  /// and one number, because any one of the three can want to move alone: a
-  /// wider context window raises the card budget, and the two array bounds
-  /// following it is a consequence to state, not a coincidence to rely on.
-  static const int cardsPerCall = _groupingCardsPerCall;
-
-  /// A group per card is the most an answer can legitimately name: a thread is
-  /// used at most once, so [cardsPerCall] groups would be that many groups of
-  /// one and the validator would drop every one of them. A bound the answer
-  /// cannot reach is the point — it stops a server running the array open.
-  static const int maxGroups = cardsPerCall;
+  /// A group needs [minGroupSize] threads and a thread is used at most once,
+  /// so [cardsPerCall] cards cannot make more than `cardsPerCall ~/
+  /// minGroupSize` groups — six at the default, twenty-four at
+  /// `StorylineTuning.poolCardsPerCall`. It used to read [cardsPerCall]
+  /// itself, which was a bound no answer could reach; this is the tightest
+  /// sound one, and a bound the answer cannot exceed is the point — it stops
+  /// a server running the array open.
+  int get maxGroups => cardsPerCall ~/ minGroupSize;
 
   /// A thread per card is the most one group can hold, the same rule from the
   /// other side: every thread a group names is one of the cards shown.
-  static const int maxThreadsPerGroup = cardsPerCall;
-
-  /// How many whole cards of [cardCap] fit one call under [cardsCap].
-  static const int _groupingCardsPerCall =
-      (cardsCap + _separatorLength) ~/ (cardCap + _separatorLength);
+  int get maxThreadsPerGroup => cardsPerCall;
 
   /// The length of the `\n---\n` the cards are joined with. A literal because
   /// `String.length` is not a constant expression.
   static const int _separatorLength = 5;
+
+  /// The completion budget this task is run at, for
+  /// [NameStorylineTask.maxTokens]'s reason and on the same precedent. It
+  /// matters more here than there: at `StorylineTuning.poolCardsPerCall` the
+  /// answer's ceiling is twenty-four groups, and a Converse answer that runs
+  /// past the budget comes back `stopReason: max_tokens` and throws, which
+  /// `_groupOne` counts as one `grouping_failed` and carries on from. So a
+  /// pool row with `grouping_failed` above zero reads as a budget symptom
+  /// first, and the answer to it is a larger number here rather than a
+  /// narrower chunk.
+  static const int maxTokens = 1024;
 
   @override
   Map<String, dynamic> get schema => {

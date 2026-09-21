@@ -335,6 +335,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The thread the add-to-storyline pane is filing. Same overlay contract.
   ({String source, String id})? _pickingStorylineForThread;
 
+  /// Whether the New storyline pane is up — a storyline declared from a title
+  /// and a charter with no thread in it yet. Same overlay contract as the two
+  /// above, and it takes the main pane rather than a layer over it.
+  bool _declaringStoryline = false;
+
   /// The message the docked composer is answering, if the user named one.
   ///
   /// Unnamed is the DEFAULT and the ordinary case: a send with no target
@@ -903,6 +908,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _focusSideOnMount = null;
     _addingToStorylineId = null;
     _pickingStorylineForThread = null;
+    _declaringStoryline = false;
     _railOpen = false;
     _replyTo = null;
     _showingActivityLog = false;
@@ -1749,6 +1755,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onSelectSection: _selectSection,
       onSelectStoryline: _selectStoryline,
       onSelectLaterDay: _selectLaterDay,
+      onNewStoryline: () => setState(() => _declaringStoryline = true),
       onKeepSuggestion: (id) =>
           ref.read(storylinesProvider.notifier).keep(id),
       onDismissSuggestion: (id) {
@@ -3087,6 +3094,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // next.
     }
 
+    // Above the picking branch because it is the outer act: declaring a
+    // storyline is not about any one thread, and the two are never up at once
+    // anyway — the rail's control clears nothing but sets this, and every
+    // selection clears both.
+    if (_declaringStoryline) return _declareStorylinePane();
+
     final picking = _pickingStorylineForThread;
     if (picking != null) return _pickStorylinePane(picking);
 
@@ -3421,6 +3434,47 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ref.read(storylineTimelineProvider(id).notifier).load();
           _reloadHistoryBeside();
         },
+        // The same create with the charter the user typed beside the name, and
+        // the same ending: the difference is entirely inside the service, which
+        // locks the charter and sends the recruit hunting for the other threads
+        // this one is the first of.
+        onCreateWithCharter: (title, charter) async {
+          final id = await ref.read(storylinesProvider.notifier).create(
+                title,
+                conversationKey: thread.id,
+                source: thread.source,
+                charter: charter,
+              );
+          if (!mounted) return;
+          setState(() => _pickingStorylineForThread = null);
+          ref.read(storylineTimelineProvider(id).notifier).load();
+          _reloadHistoryBeside();
+        },
+      ),
+    );
+  }
+
+  /// The New storyline pane: a title and a charter, and nothing in it yet.
+  ///
+  /// It ends the way the picker's create does, on the storyline it just made —
+  /// [_selectStoryline] is the rail's own selection path, so the user lands in
+  /// the storyline they declared and watches the recruit fill it.
+  Widget _declareStorylinePane() {
+    return Padding(
+      padding: const EdgeInsets.all(BondSpacing.s24),
+      child: NewStorylinePane(
+        onBack: () => setState(() => _declaringStoryline = false),
+        onCreate: (title, charter) async {
+          final id = await ref
+              .read(storylinesProvider.notifier)
+              .declare(title, charter);
+          if (!mounted) return;
+          // No clearing of the flag here: `_selectStoryline` runs
+          // `_clearOverlays` inside its own `setState`, and that is what drops
+          // this pane. Clearing it first would be a second frame saying the
+          // same thing.
+          _selectStoryline(id);
+        },
       ),
     );
   }
@@ -3518,6 +3572,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         ref.read(storylineTimelineProvider(storyline.id).notifier).load();
       },
       onAudit: () => notifier.auditNow(storyline.id),
+      onRecruit: () => notifier.recruitNow(storyline.id),
       auditing: _storylineAuditing(storyline.id),
       onOpenThread: (source, key) => _select(key, source: source),
       // The card's own tap. A thread opens BESIDE the spine rather than over

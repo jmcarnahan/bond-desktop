@@ -305,6 +305,10 @@ String? needsYouWhoFor(Conversation c) {
 /// the rail can be rebuilt from scratch on any data change without losing the
 /// user's place.
 class AppRail extends StatefulWidget {
+  /// The Storylines header's New storyline control, absent unless
+  /// [onNewStoryline] is given.
+  static const Key newStorylineKey = ValueKey('storyline-new');
+
   final List<Conversation> conversations;
 
   /// Suggestions and live storylines together, suggestions first. Empty is
@@ -376,6 +380,11 @@ class AppRail extends StatefulWidget {
   final void Function(String storylineId)? onSelectStoryline;
   final void Function(String storylineId)? onKeepSuggestion;
   final void Function(String storylineId)? onDismissSuggestion;
+
+  /// Opens the pane where a person declares a storyline from a title and a
+  /// description, with no thread in it yet. Null renders no such control at
+  /// all, the way the three above do.
+  final VoidCallback? onNewStoryline;
 
   /// The section caption, compose, refresh, the source chips and the triage
   /// line — built by the screen, drawn by the rail at the TOP of the column.
@@ -463,6 +472,7 @@ class AppRail extends StatefulWidget {
     this.onSelectLaterDay,
     this.onKeepSuggestion,
     this.onDismissSuggestion,
+    this.onNewStoryline,
     required this.header,
     required this.scope,
     required this.rooms,
@@ -640,9 +650,22 @@ class _AppRailState extends State<AppRail> {
 
   List<Widget> _storylinesSection({bool collapsible = true}) {
     final needle = normalizeFind(widget.find);
+    final onNew = widget.onNewStoryline;
     return _section(
       RailSection.storylines,
       collapsible: collapsible,
+      // The one door into a storyline a person declares before anything is in
+      // it. It sits on the section header because that is where the list it
+      // adds to is, and it is absent rather than inert when the host has no
+      // handler for it.
+      action: onNew == null
+          ? null
+          : _storylineAction(
+              Icons.add,
+              'New storyline',
+              onNew,
+              key: AppRail.newStorylineKey,
+            ),
       rows: [
         for (final s in storylineRows(widget.storylines))
           if (storylineMatches(s, needle)) _storylineItem(s),
@@ -769,6 +792,7 @@ class _AppRailState extends State<AppRail> {
     RailSection section, {
     required List<Widget> rows,
     Widget? badge,
+    Widget? action,
     String? placeholder,
     bool collapsible = true,
   }) {
@@ -777,6 +801,7 @@ class _AppRailState extends State<AppRail> {
       _header(
         section,
         badge: badge,
+        action: action,
         collapsed: collapsed,
         collapsible: collapsible,
       ),
@@ -794,10 +819,16 @@ class _AppRailState extends State<AppRail> {
   /// [collapsible] is false when this section is the ONLY thing in the column:
   /// there is nothing for a chevron to reveal underneath it, and one that
   /// emptied the column would be an affordance that lied.
+  ///
+  /// [action] is a section-wide control, rendered after the badge and before
+  /// the chevron — the one place in the row that is neither the label's target
+  /// nor the chevron's. Null on every section but Storylines, which renders
+  /// nothing extra and lays out exactly as it did.
   Widget _header(
     RailSection section, {
     required Widget? badge,
     required bool collapsed,
+    Widget? action,
     bool collapsible = true,
   }) {
     final selected = widget.selectedSection == section;
@@ -836,6 +867,7 @@ class _AppRailState extends State<AppRail> {
                 ),
               ),
               ?badge,
+              ?action,
               if (collapsible)
                 InkWell(
                   onTap: () => _toggle(section),
@@ -1227,15 +1259,18 @@ class _AppRailState extends State<AppRail> {
     );
   }
 
-  /// Keep / Dismiss. Small and quiet: they sit inside a row whose main target
-  /// is opening the storyline, and a pair of buttons loud enough to compete
-  /// with that would get mis-tapped.
+  /// Keep / Dismiss, and the Storylines header's New storyline. Small and
+  /// quiet: they sit inside a row whose main target is somewhere else — opening
+  /// the storyline, or selecting the section — and a button loud enough to
+  /// compete with that would get mis-tapped.
   Widget _storylineAction(
     IconData icon,
     String tooltip,
-    VoidCallback? onTap,
-  ) {
+    VoidCallback? onTap, {
+    Key? key,
+  }) {
     return Tooltip(
+      key: key,
       message: tooltip,
       child: InkWell(
         onTap: onTap,

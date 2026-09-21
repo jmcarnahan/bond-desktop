@@ -11,6 +11,11 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/context_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/activity_log.dart';
+// `show`: the charter centroid goes through the ONE clustering-card recipe,
+// and this file pins its bytes against that same call rather than against a
+// literal that would agree only until the shipped variant moved.
+import 'package:bond_inbox/services/clustering_card.dart'
+    show buildClusteringCard, shippedClusteringCard;
 // `show`: the one thing this file wants from the extraction pass is the hash
 // function behind both storyline hash recipes.
 import 'package:bond_inbox/services/extract_handler.dart' show cardHash;
@@ -84,6 +89,43 @@ class FakeLlm extends LlmClient {
     final step = script.length > 1 ? script.removeAt(0) : script.first;
     if (step is Exception) throw step;
     return Map<String, dynamic>.from(step as Map);
+  }
+}
+
+/// An [EmbeddingsClient] that answers from memory and never opens a socket,
+/// recording what it was asked to embed and under which prefix.
+///
+/// A subclass rather than a fake HTTP server because the one thing these tests
+/// are about is the TEXT the charter centroid is built from, and a subclass is
+/// the only double that can be read for it without decoding a request body.
+class FakeEmbeddings extends EmbeddingsClient {
+  final EmbedResult Function() _answer;
+
+  final List<String> texts = [];
+  final List<String> prefixes = [];
+
+  FakeEmbeddings(this._answer)
+      : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
+
+  /// A server that answers with the unit vector at cosine [c] against
+  /// `vectorAt(1)`, the same two-dimensional geometry every other vector in
+  /// this file lives in.
+  factory FakeEmbeddings.at(double c) =>
+      FakeEmbeddings(() => EmbedResult(EmbedOutcome.ok, vector: vectorAt(c)));
+
+  /// A server that fails the same way every time. [EmbedOutcome.unavailable]
+  /// is the park and [EmbedOutcome.rejected] is the quiet drop.
+  factory FakeEmbeddings.failing(EmbedOutcome outcome) =>
+      FakeEmbeddings(() => EmbedResult(outcome, reason: 'fake'));
+
+  @override
+  Future<EmbedResult> embedResult(
+    String text, {
+    String prefix = EmbeddingsClient.clusteringPrefix,
+  }) async {
+    texts.add(text);
+    prefixes.add(prefix);
+    return _answer();
   }
 }
 
@@ -495,6 +537,53 @@ void main() {
         refreshedMemberHash: memberHashOf(keys),
         refreshedMemberCount: keys.length,
       );
+
+  /// Whether [later] sorts after [earlier]. Both are ISO stamps and the
+  /// comparison the drain makes is SQLite's string compare, so this is
+  /// `compareTo` rather than `greaterThan` — `String` has no `<`, and the
+  /// ordering matchers call it.
+  bool sortsAfter(String later, String earlier) => later.compareTo(earlier) > 0;
+
+  /// One work row's `created_at`, which is what the drain's `created_at DESC`
+  /// claim order reads and what `refreshCreatedAt` moves.
+  Future<String> workCreatedAt(String kind, String entityId) async {
+    final row = await db
+        .customSelect(
+          'SELECT created_at FROM work_items '
+          'WHERE task_kind = ? AND entity_id = ?',
+          variables: [Variable(kind), Variable(entityId)],
+        )
+        .getSingle();
+    return row.data['created_at'] as String;
+  }
+
+  /// Moves one work row's `created_at` back a day, so a later row's stamp is
+  /// unambiguously newer than it. `_nowIso()` has millisecond precision and two
+  /// rows written in one test can share a stamp; a claim-order assertion needs
+  /// the two to be genuinely apart.
+  Future<void> backdateWork(String kind, String entityId) => db.customUpdate(
+        'UPDATE work_items SET created_at = ? '
+        'WHERE task_kind = ? AND entity_id = ?',
+        variables: [
+          Variable(MessageStore.isoStamp(
+              DateTime.now().subtract(const Duration(days: 1)))),
+          Variable(kind),
+          Variable(entityId),
+        ],
+      );
+
+  /// How many pending rows of [kind] the queue holds. `nextPendingWork`
+  /// answers whether there is one; this answers whether there is exactly one.
+  Future<int> pendingCount(String kind) async {
+    final rows = await db
+        .customSelect(
+          "SELECT COUNT(*) AS n FROM work_items "
+          "WHERE task_kind = ? AND status = 'pending'",
+          variables: [Variable(kind)],
+        )
+        .getSingle();
+    return rows.data['n'] as int;
+  }
 
   Future<String?> drainRefresh(StorylineService service) async {
     final work = await store.nextPendingWork('storyline_refresh');
@@ -5036,6 +5125,453 @@ void main() {
         (await store.membersOf('sl-1')).map((m) => m.conversationKey),
         ['member', 'c1'],
       );
+    });
+  });
+
+  group('a storyline the user declares', () {
+    /// A charter long enough to be a real one and fictional in every word.
+    const charter = 'The move to the Harbour Lane office — the lease, the '
+        'movers, the desk order and the day everyone is in the new room.';
+
+    /// Seeds [count] embedded threads whose cosine against [vectorAt(1)]
+    /// descends from 0.99 by a hundredth apiece, so the shortlist's order is
+    /// the seeding order and every one of them clears the assignment gate.
+    Future<void> seedPool(int count) async {
+      for (var i = 0; i < count; i++) {
+        await seed(store, 'p$i', vector: vectorAt(0.99 - i * 0.01));
+      }
+    }
+
+    /// The declared storyline itself: active, memberless, both locks, and the
+    /// charter the recruit will rank on.
+    Future<StorylineService> declare(
+      LlmClient llm, {
+      EmbeddingsClient? embeddings,
+      ActivityLog? log,
+    }) async {
+      final service = StorylineService(
+        store,
+        llm,
+        embeddings: embeddings ?? FakeEmbeddings.at(1),
+        activityLog: log,
+      );
+      await service.declareStoryline(title: 'Harbour Lane move', charter: charter);
+      return service;
+    }
+
+    /// The id [declareStoryline] minted, read back off the one storyline row.
+    Future<String> onlyStorylineId() async {
+      final rows = await store.loadStorylines();
+      return rows.single.id;
+    }
+
+    test('writes an active storyline of the user own, locked on both counts',
+        () async {
+      await declare(FakeLlm(const {}));
+
+      final storyline = (await store.loadStorylines()).single;
+      expect(storyline.status, 'active');
+      expect(storyline.createdBy, 'user');
+      expect(storyline.title, 'Harbour Lane move');
+      expect(storyline.charter, charter);
+      expect(storyline.titleLocked, true);
+      expect(storyline.charterLocked, true);
+      expect(await store.membersOf(storyline.id), isEmpty);
+    });
+
+    test('queues one recruit and neither a refresh nor a recap', () async {
+      await declare(FakeLlm(const {}));
+      final id = await onlyStorylineId();
+
+      final recruit = await store.nextPendingWork('storyline_recruit');
+      expect(recruit?['entity_id'], id);
+      expect(await pendingCount('storyline_recruit'), 1);
+      // Nothing is in it yet, so there is nothing to describe and nothing to
+      // catch up on.
+      expect(await store.nextPendingWork('storyline_refresh'), null);
+      expect(await store.nextPendingWork('storyline_recap'), null);
+    });
+
+    test('and the recruit it queues is the next one claimed', () async {
+      // The drain claims `created_at DESC`, so a row queued for somebody
+      // sitting in front of the pane has to be at the head of the order rather
+      // than behind whatever the sweep left there.
+      await store.requeueWork('storyline_recruit', 'email', 'older');
+      await backdateWork('storyline_recruit', 'older');
+
+      await declare(FakeLlm(const {}));
+      final id = await onlyStorylineId();
+
+      expect((await store.nextPendingWork('storyline_recruit'))?['entity_id'],
+          id);
+      expect(
+        sortsAfter(
+          await workCreatedAt('storyline_recruit', id),
+          await workCreatedAt('storyline_recruit', 'older'),
+        ),
+        isTrue,
+      );
+    });
+
+    test('the charter lap ranks on a clustering card of the title and charter',
+        () async {
+      await seedPool(1);
+      final embeddings = FakeEmbeddings.at(1);
+      final service = await declare(
+        FakeLlm({'storyline_membership': [confirmAnswer()]}),
+        embeddings: embeddings,
+      );
+      await service.recruit(await onlyStorylineId());
+
+      // The shape a thread whose extraction found no topics already has: the
+      // title in the subject slot, the charter in the summary slot, and the
+      // two middle segments empty.
+      expect(embeddings.texts.single, 'Harbour Lane move |  |  | $charter');
+      expect(embeddings.prefixes.single, EmbeddingsClient.clusteringPrefix);
+      // And it is the ONE recipe's bytes, not a second assembly that happens
+      // to agree today: the charter card goes through `buildClusteringCard` at
+      // the shipped variant, so it moves with every thread vector it is
+      // measured against rather than drifting away from them.
+      expect(
+        embeddings.texts.single,
+        buildClusteringCard(
+          subject: 'Harbour Lane move',
+          participants: const [],
+          topics: const [],
+          summary: charter,
+          variant: shippedClusteringCard,
+        ),
+      );
+    });
+
+    test('a storyline WITH members and no vectors is not a declared hunt',
+        () async {
+      // Mid re-embed: the member exists and carries no comparable vector. That
+      // is a storyline waiting for its vectors, not one that never held
+      // anything, and ranking it on its charter would turn the re-embed window
+      // into the widest hunt this pass can make.
+      await seed(store, 'bare');
+      await seedPool(20);
+      final embeddings = FakeEmbeddings.at(1);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final service = StorylineService(store, llm, embeddings: embeddings);
+      final id = await service.declareStoryline(
+          title: 'Harbour Lane move', charter: charter);
+      await store.addStorylineMember(id, 'email', 'bare', addedBy: 'user');
+
+      await service.recruit(id);
+
+      // The empty-pass ending it always took: no charter embedding asked for,
+      // no candidate confirmed.
+      expect(embeddings.texts, isEmpty);
+      expect(llm.schemas, isEmpty);
+      expect((await store.membersOf(id)).map((m) => m.conversationKey),
+          ['bare']);
+    });
+
+    test('the charter lap shortlists sixteen and the next one eight', () async {
+      await seedPool(20);
+      // One yes, then no for the rest of the run: the first lap files a single
+      // member, so the second ranks on a real centroid and takes eight.
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer(), confirmAnswer(belongs: false)],
+      });
+      final service = await declare(llm);
+
+      await service.recruit(await onlyStorylineId());
+
+      expect(llm.callsFor('storyline_membership'),
+          StorylineTuning.recruitMaxCandidatesDeclared +
+              StorylineTuning.recruitMaxCandidates);
+      expect(await store.membersOf(await onlyStorylineId()), hasLength(1));
+    });
+
+    test('and laps no more than three times however much it files', () async {
+      await seedPool(40);
+      // One yes at the top of each lap and no for the rest of it: every lap
+      // files, so nothing but the bound stops the hunt.
+      final yesAt = {
+        0,
+        StorylineTuning.recruitMaxCandidatesDeclared,
+        StorylineTuning.recruitMaxCandidatesDeclared +
+            StorylineTuning.recruitMaxCandidates,
+      };
+      final llm = FakeLlm({
+        'storyline_membership': [
+          for (var i = 0; i < 40; i++) confirmAnswer(belongs: yesAt.contains(i)),
+        ],
+      });
+      final service = await declare(llm);
+
+      await service.recruit(await onlyStorylineId());
+
+      expect(
+        llm.callsFor('storyline_membership'),
+        StorylineTuning.recruitMaxCandidatesDeclared +
+            StorylineTuning.recruitMaxCandidates * 2,
+      );
+      expect(await store.membersOf(await onlyStorylineId()),
+          hasLength(StorylineTuning.recruitMaxLapsDeclared));
+    });
+
+    test('and stops on the first lap that files nothing', () async {
+      await seedPool(20);
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer(belongs: false)],
+      });
+      final service = await declare(llm);
+
+      await service.recruit(await onlyStorylineId());
+
+      // One lap of sixteen and no second: a lap that files nothing cannot
+      // move a centroid, so another would ask the same questions.
+      expect(llm.callsFor('storyline_membership'),
+          StorylineTuning.recruitMaxCandidatesDeclared);
+      expect(await store.membersOf(await onlyStorylineId()), isEmpty);
+    });
+
+    test('a medium yes is taken because a declared storyline is active',
+        () async {
+      await seedPool(1);
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer(confidence: 'medium')],
+      });
+      final service = await declare(llm);
+
+      await service.recruit(await onlyStorylineId());
+
+      expect(
+        (await store.membersOf(await onlyStorylineId()))
+            .map((m) => m.conversationKey),
+        ['p0'],
+      );
+    });
+
+    test('an unavailable embedding server parks the hunt and files nothing',
+        () async {
+      await seedPool(2);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      final service = await declare(
+        llm,
+        embeddings: FakeEmbeddings.failing(EmbedOutcome.unavailable),
+        log: log,
+      );
+      final id = await onlyStorylineId();
+
+      await expectLater(
+        service.recruit(id),
+        throwsA(isA<LlmUnavailableException>()),
+      );
+
+      expect(llm.schemas, isEmpty);
+      expect(await store.membersOf(id), isEmpty);
+      await log.record('storyline_recruit', source: 'email', entityId: id);
+      final rows = await store.recentActivity();
+      expect(ActivityEvent.fromRow(rows.single).detail['embed'], 'unavailable');
+    });
+
+    test('a rejected embedding ends the pass quietly', () async {
+      await seedPool(2);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      final service = await declare(
+        llm,
+        embeddings: FakeEmbeddings.failing(EmbedOutcome.rejected),
+        log: log,
+      );
+      final id = await onlyStorylineId();
+
+      // No throw: the server answered, and it will answer the same thing on
+      // the next drain, so parking would park forever.
+      await service.recruit(id);
+
+      expect(llm.schemas, isEmpty);
+      expect(await store.membersOf(id), isEmpty);
+      await log.record('storyline_recruit', source: 'email', entityId: id);
+      final detail = ActivityEvent.fromRow(
+        (await store.recentActivity()).single,
+      ).detail;
+      expect(detail['embed'], 'rejected');
+      expect(detail['recruited'], 0);
+    });
+
+    test('no embedding client at all is silent rather than parking', () async {
+      await seedPool(2);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      final service = StorylineService(store, llm, activityLog: log);
+      await service.declareStoryline(
+          title: 'Harbour Lane move', charter: charter);
+      final id = await onlyStorylineId();
+
+      await service.recruit(id);
+
+      expect(llm.schemas, isEmpty);
+      expect(await store.membersOf(id), isEmpty);
+      // Nothing noted at all, so nothing recorded: the all-zero pass is the
+      // genuine nothing a quiet kind suppresses, and no `embed` word rides
+      // along to make it look like a failure. A user action without an
+      // embedding client must not start parking queues or writing rows.
+      await log.record('storyline_recruit', source: 'email', entityId: id);
+      expect(await store.recentActivity(), isEmpty);
+    });
+
+    test('the first declared storyline to recruit takes the threads',
+        () async {
+      // Two charters that both describe the same pool. Whichever hunts first
+      // files; the second is offered nothing it already holds, because the app
+      // has one live storyline per thread and the second filing would be
+      // invisible work over the first.
+      await seedPool(4);
+      final firstLlm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final first = StorylineService(
+        store,
+        firstLlm,
+        embeddings: FakeEmbeddings.at(1),
+      );
+      final firstId = await first.declareStoryline(
+          title: 'Harbour Lane move', charter: charter);
+
+      final secondLlm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final second = StorylineService(
+        store,
+        secondLlm,
+        embeddings: FakeEmbeddings.at(1),
+      );
+      final secondId = await second.declareStoryline(
+        title: 'Harbour Lane desks',
+        charter: 'The desk order for the Harbour Lane office and nothing else.',
+      );
+
+      await first.recruit(firstId);
+      await second.recruit(secondId);
+
+      expect((await store.membersOf(firstId)).map((m) => m.conversationKey),
+          ['p0', 'p1', 'p2', 'p3']);
+      expect(await store.membersOf(secondId), isEmpty);
+      // Not even asked about: the exclusion is in the candidate walk, so the
+      // second storyline spends no model time on threads it cannot have.
+      expect(secondLlm.schemas, isEmpty);
+    });
+
+    test('and a thread in a suggested storyline is not recruited either',
+        () async {
+      await seedPool(2);
+      await store.insertStoryline(
+        id: 'sl-proposed',
+        title: 'Proposed group',
+        status: 'suggested',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-proposed', 'email', 'p0',
+          addedBy: 'auto');
+
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      // Declared directly rather than through the group's helper: there are two
+      // storylines in the database here, so the id has to come from the call.
+      final service = StorylineService(
+        store,
+        llm,
+        embeddings: FakeEmbeddings.at(1),
+      );
+      final id = await service.declareStoryline(
+          title: 'Harbour Lane move', charter: charter);
+
+      await service.recruit(id);
+
+      // `assignedOrBlockedKeys` counts `suggested` as live, because a proposal
+      // on screen is a question the owner has not answered yet and filing its
+      // thread elsewhere would answer it for them.
+      expect((await store.membersOf(id)).map((m) => m.conversationKey), ['p1']);
+    });
+
+    test('the refresh backstop skips it until it holds a thread', () async {
+      await seedPool(1);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final service = await declare(llm);
+      final id = await onlyStorylineId();
+
+      // Memberless: both hashes are null, and `refreshed_member_hash IS NOT
+      // member_hash` is false between two nulls.
+      expect(await store.staleRefreshStorylineIds(), isEmpty);
+
+      await service.recruit(id);
+
+      expect(await store.staleRefreshStorylineIds(), [id]);
+    });
+  });
+
+  group('createStoryline', () {
+    test('with a charter it locks the charter and sends the recruit out',
+        () async {
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      final id = await service.createStoryline(
+        'Harbour Lane move',
+        source: 'email',
+        conversationKey: 'c1',
+        charter: 'Everything about the move to the Harbour Lane office.',
+      );
+
+      final storyline = (await store.getStoryline(id))!;
+      expect(storyline.charter,
+          'Everything about the move to the Harbour Lane office.');
+      expect(storyline.titleLocked, true);
+      expect(storyline.charterLocked, true);
+      expect((await store.membersOf(id)).map((m) => m.conversationKey), ['c1']);
+      expect((await store.nextPendingWork('storyline_recruit'))?['entity_id'],
+          id);
+    });
+
+    test('and that recruit is the next one claimed', () async {
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      await store.requeueWork('storyline_recruit', 'email', 'older');
+      await backdateWork('storyline_recruit', 'older');
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      final id = await service.createStoryline(
+        'Harbour Lane move',
+        source: 'email',
+        conversationKey: 'c1',
+        charter: 'Everything about the move to the Harbour Lane office.',
+      );
+
+      expect((await store.nextPendingWork('storyline_recruit'))?['entity_id'],
+          id);
+      expect(
+        sortsAfter(
+          await workCreatedAt('storyline_recruit', id),
+          await workCreatedAt('storyline_recruit', 'older'),
+        ),
+        isTrue,
+      );
+    });
+
+    test('and without one it writes and queues exactly what it always did',
+        () async {
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      final id = await service.createStoryline(
+        'Harbour Lane move',
+        source: 'email',
+        conversationKey: 'c1',
+      );
+
+      final storyline = (await store.getStoryline(id))!;
+      expect(storyline.charter, null);
+      expect(storyline.titleLocked, true);
+      expect(storyline.charterLocked, false);
+      // The add's own refresh, and no recruit: there is no charter to hunt
+      // with, so a hunt would rank on nothing the user asked for.
+      expect(await store.nextPendingWork('storyline_recruit'), null);
+      expect((await store.nextPendingWork('storyline_refresh'))?['entity_id'],
+          id);
     });
   });
 

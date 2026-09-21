@@ -462,7 +462,7 @@ cat > /opt/bond/Caddyfile <<'CADDY'
 $(caddyfile)
 CADDY
 docker run --rm -v /opt/bond/Caddyfile:/etc/caddy/Caddyfile:ro \\
-  --env-file /opt/bond/caddy.env caddy:2 validate --config /etc/caddy/Caddyfile --adapter caddyfile
+  --env-file /opt/bond/caddy.env caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 docker rm -f caddy 2>/dev/null || true
 docker run -d --name caddy --restart unless-stopped --network host \\
   --env-file /opt/bond/caddy.env \\

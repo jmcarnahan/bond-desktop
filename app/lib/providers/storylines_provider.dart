@@ -350,18 +350,53 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
 
   /// Starts a storyline around one thread and returns its id, so the caller
   /// can select what it just made.
+  ///
+  /// A [charter] given here queues a recruit inside the service, so it gets
+  /// [setCharter]'s ending as well: the pump is what turns "queued" into "runs
+  /// now". A create with no charter queues nothing and pumps nothing.
   Future<String> create(
     String title, {
     required String conversationKey,
     String source = _source,
+    String? charter,
   }) async {
     final id = await _service.createStoryline(
       title,
       source: source,
       conversationKey: conversationKey,
+      charter: charter,
     );
     await load();
+    if ((charter ?? '').trim().isNotEmpty) unawaited(_worker?.pump());
     return id;
+  }
+
+  /// Makes a storyline out of a title and a charter alone, with nothing in it
+  /// yet, and returns its id so the caller can select it. The recruit the
+  /// service queued is what fills it, and the pump is what starts that now
+  /// rather than at the next sync.
+  Future<String> declare(String title, String charter) async {
+    final id = await _service.declareStoryline(title: title, charter: charter);
+    await load();
+    unawaited(_worker?.pump());
+    return id;
+  }
+
+  /// Sends the model hunting again on the charter already saved.
+  ///
+  /// [auditNow] without the latch or the backstop timer: the recruit files
+  /// rather than removes, so nothing has to go inert while it runs, and a
+  /// second press at temperature zero asks the same questions of the same
+  /// threads. `refreshCreatedAt` for [auditNow]'s reason — the owner pressed
+  /// the button, so this goes to the front of the storyline lane.
+  Future<void> recruitNow(String id) async {
+    await _store.requeueWork(
+      'storyline_recruit',
+      _source,
+      id,
+      refreshCreatedAt: true,
+    );
+    unawaited(_worker?.pump());
   }
 }
 

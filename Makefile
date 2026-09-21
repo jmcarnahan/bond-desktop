@@ -156,7 +156,8 @@ RESET  := \033[0m
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ab ab-membership drain bench-pipeline bench-compare \
         golden-check golden-baseline golden-score golden golden-prose \
-        golden-storyline golden-sweep golden-vector golden-gate \
+        golden-storyline golden-sweep golden-vector golden-declared \
+        golden-gate \
         golden-judge-pack golden-judge-tally \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
         dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
@@ -198,6 +199,7 @@ help:
 	@printf "  make golden-storyline GOLDEN_RUN=<run.json> → storyline confirm for every golden item against the gold registry, on the bulk slot (GOLDEN_CHARTER_CAP=…)\n"
 	@printf "  make golden-sweep GOLDEN_RUN=<run.json> → the golden set through the app's own sweep, naming, confirms and assign shortlist, scored against the gold registry (SWEEP_CARD=participants|topics|subject|subject_topics|summary)\n"
 	@printf "  make golden-vector GOLDEN_RUN=<run.json> → the clustering vector alone: the clusters it would form and the pool pairs by cosine, subject and people; needs only the embed server (SWEEP_CARD=…, SWEEP_EMBED_PREFIX=…, EMBED_URL=…)\n"
+	@printf "  make golden-declared GOLDEN_RUN=<run.json> → every registry storyline declared by hand and then recruited into, on the embed server and the bulk slot; the ceiling the sweep is read against\n"
 	@printf "  make golden-gate   → the golden set through the app's gates, offline (GOLDEN_RUN=<run.json> adds the model's notification proxy)\n"
 	@printf "  make golden-baseline → what the shipping app scores on the golden set (needs golden/)\n"
 	@printf "  make golden-score R=<run.json> → score a golden run file (BREAKDOWN= per-bucket tables, JSON= the tallies)\n"
@@ -741,6 +743,13 @@ SWEEP_CARD ?= topics
 # and needs only the embedding server. One test body serves both, which is what
 # keeps the two readings of one mailbox from drifting apart.
 SWEEP_STAGE ?= full
+# Which pass decides what goes together on that bench: cosine (the shipped
+# clustering), model (the cosine pass draws a neighbourhood and a model says
+# what is inside it) or pool (no neighbourhood at all — the whole pool in
+# consecutive chunks of 48 cards, one call each). A define and not a sed of
+# StorylineTuning.groupingMode, so a row names the mode it was taken under.
+# The default follows the app.
+SWEEP_GROUPING ?= cosine
 # The instruction the embedding model is given about what a card is FOR. Empty
 # means the app's own `EmbeddingsClient.clusteringPrefix`; the literal `none`,
 # matched EXACTLY and with no trimming, means no prefix at all; anything else
@@ -789,6 +798,7 @@ BENCH_DEFINES := \
   --dart-define=GOLDEN_CHARTER_CAP='$(GOLDEN_CHARTER_CAP)' \
   --dart-define=SWEEP_CARD='$(SWEEP_CARD)' \
   --dart-define=SWEEP_STAGE='$(SWEEP_STAGE)' \
+  --dart-define=SWEEP_GROUPING='$(SWEEP_GROUPING)' \
   --dart-define=SWEEP_EMBED_PREFIX='$(SWEEP_EMBED_PREFIX)' \
   --dart-define=EMBED_URL='$(if $(strip $(EMBED_URL)),$(EMBED_URL),http://localhost:$(EMBED_PORT)/v1/embeddings)' \
   --dart-define=BENCH_WIRE='$(BENCH_WIRE)' \
@@ -1193,6 +1203,21 @@ golden-vector: golden-check
 	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-vector GOLDEN_RUN=<golden-run-….json from make golden> [SWEEP_CARD=participants|topics|subject|subject_topics|summary SWEEP_EMBED_PREFIX='…' EMBED_URL=…]\n"; exit 1; }
 	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'sweep' $(BENCH_DEFINES) --dart-define=SWEEP_STAGE=vector
+
+# Every registry storyline declared by hand, then the recruit — the same test
+# body and the same seeding as golden-sweep, with the clustering taken out.
+# What it measures: how much of the pool a charter a PERSON wrote can pull in,
+# which is the ceiling the sweep's own grouping is read against.
+#
+# Two servers, not three: the embedding one for the vectors and the bulk slot
+# for the confirms. The recruit never names anything — it queues
+# storyline_refresh rows and the bench holds no worker to drain them — so the
+# prose slot is never dialled and bench-verify-prose is not run.
+golden-declared: golden-check
+	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-declared GOLDEN_RUN=<golden-run-….json from make golden> [BENCH_URL=…]\n"; exit 1; }
+	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'sweep' $(BENCH_DEFINES) --dart-define=SWEEP_STAGE=declared
 
 # The gate half, and the only golden target with no server in it: the app's
 # gates are pure, so this replays them over the set offline — the item's

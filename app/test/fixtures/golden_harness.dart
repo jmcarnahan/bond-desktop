@@ -6,10 +6,11 @@ import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/llm/reply_decision_task.dart';
-// `show`: the one thing this file wants from the storyline service is the
-// charter clamp the app ships, so the harness default cannot drift from it.
+// `show`: the two things this file wants from the storyline service are the
+// charter clamp the app ships and the grouping mode a define can pick, so a
+// harness default cannot drift from either.
 import 'package:bond_inbox/services/storyline_service.dart'
-    show StorylineTuning;
+    show GroupingMode, StorylineTuning;
 
 import 'bench_stats.dart';
 import 'golden_prices.dart';
@@ -97,14 +98,28 @@ class GoldenDefines {
       String.fromEnvironment('SWEEP_CARD', defaultValue: 'topics');
 
   /// How much of the sweep replay runs: `vector` stops after the seeding and
-  /// reads the clustering vector alone, `full` is the whole filing path.
-  /// Parsed by [parseSweepStage], which refuses anything else.
+  /// reads the clustering vector alone, `full` is the whole filing path, and
+  /// `declared` skips the clustering entirely and recruits into storylines
+  /// declared from the registry. Parsed by [parseSweepStage], which refuses
+  /// anything else.
   ///
-  /// One test body and one seeding serve both, which is what keeps the two
+  /// One test body and one seeding serve all three, which is what keeps the
   /// readings of one mailbox from drifting apart. `full` is the default
   /// because it is what `make golden-sweep` has always run.
   static const String sweepStageRaw =
       String.fromEnvironment('SWEEP_STAGE', defaultValue: 'full');
+
+  /// Which pass decides what goes together on a sweep replay: `cosine`,
+  /// `model` or `pool`. Parsed by [parseSweepGrouping], which refuses
+  /// anything else.
+  ///
+  /// A define rather than a `sed` of `StorylineTuning.groupingMode`, for the
+  /// reason every other knob here is one: a row has to name the mode it was
+  /// taken under, and a constant edited for one run and forgotten is how two
+  /// rows from different trees end up in one table. The default follows the
+  /// app, so a run nobody passed a mode to measures the mode that ships.
+  static const String sweepGroupingRaw =
+      String.fromEnvironment('SWEEP_GROUPING', defaultValue: 'cosine');
 
   /// The instruction the embedding model is given about what a card is FOR,
   /// verbatim — a trailing space included, which is why nothing here trims it.
@@ -182,6 +197,11 @@ enum SweepStage {
   /// The whole filing path: clustering, naming, confirms and the assign
   /// shortlist.
   full,
+
+  /// Every registry storyline declared by hand, then recruit. No clustering
+  /// and no naming call: what the recruit can do from a charter a person
+  /// wrote, which is the ceiling the sweep is measured against.
+  declared,
 }
 
 /// The stage `SWEEP_STAGE` names, or a thrown [ArgumentError].
@@ -193,10 +213,29 @@ enum SweepStage {
 SweepStage parseSweepStage(String raw) => switch (raw.trim().toLowerCase()) {
       'vector' => SweepStage.vector,
       'full' => SweepStage.full,
+      'declared' => SweepStage.declared,
       _ => throw ArgumentError.value(
           raw,
           'SWEEP_STAGE',
-          'must be one of vector, full',
+          'must be one of vector, full, declared',
+        ),
+    };
+
+/// The grouping mode `SWEEP_GROUPING` names, or a thrown [ArgumentError].
+///
+/// Loud rather than defaulted, for [parseSweepStage]'s reason: the three modes
+/// are three different experiments, they cost three different numbers of prose
+/// calls, and a typo that quietly ran the shipped one would record a row
+/// against a question nobody asked.
+GroupingMode parseSweepGrouping(String raw) =>
+    switch (raw.trim().toLowerCase()) {
+      'cosine' => GroupingMode.cosine,
+      'model' => GroupingMode.model,
+      'pool' => GroupingMode.pool,
+      _ => throw ArgumentError.value(
+          raw,
+          'SWEEP_GROUPING',
+          'must be one of cosine, model, pool',
         ),
     };
 

@@ -1421,6 +1421,7 @@ void main() {
       List<PersonRoom>? rooms,
       void Function(String)? onSelectRoom,
       void Function(String)? onRestoreStoryline,
+      VoidCallback? onNewStoryline,
     }) async {
       await tester.binding.setSurfaceSize(const Size(1200, 800));
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -1441,8 +1442,54 @@ void main() {
         onKeepSuggestion: onKeepSuggestion ?? (_) {},
         onDismissSuggestion: onDismissSuggestion ?? (_) {},
         onRestoreStoryline: onRestoreStoryline ?? (_) {},
+        onNewStoryline: onNewStoryline,
       )));
     }
+
+    testWidgets('the header carries New storyline only when a host wants it',
+        (tester) async {
+      await pumpRail(tester, storylines: const []);
+      expect(find.byKey(AppRail.newStorylineKey), findsNothing);
+
+      await pumpRail(tester, storylines: const [], onNewStoryline: () {});
+      expect(find.byKey(AppRail.newStorylineKey), findsOneWidget);
+      expect(find.byTooltip('New storyline'), findsOneWidget);
+    });
+
+    testWidgets('and it opens the pane rather than selecting the section',
+        (tester) async {
+      var opened = 0;
+      final sections = <RailSection>[];
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_host(AppRail(
+        header: const SizedBox(),
+        scope: RailSection.home,
+        rooms: const [],
+        onSelectRoom: (_) {},
+        conversations: const [],
+        storylines: const [],
+        selectedId: null,
+        selectedSection: RailSection.storylines,
+        onSelectConversation: (_, _) {},
+        onSelectSection: sections.add,
+        onNewStoryline: () => opened++,
+      )));
+
+      await tester.tap(find.byKey(AppRail.newStorylineKey));
+      await tester.pump();
+
+      expect(opened, 1);
+      expect(sections, isEmpty);
+    });
+
+    testWidgets('no other section grows a header control', (tester) async {
+      await pumpRail(tester, storylines: const [], onNewStoryline: () {});
+
+      // One control on the whole column, and it is the Storylines header's.
+      expect(find.byKey(AppRail.newStorylineKey), findsOneWidget);
+      expect(find.byIcon(Icons.add), findsOneWidget);
+    });
 
     testWidgets('an empty list keeps the placeholder', (tester) async {
       await pumpRail(tester, storylines: const []);

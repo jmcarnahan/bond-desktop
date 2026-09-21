@@ -1183,31 +1183,76 @@ void main() {
       expect(grouper.systemPrompt, isNot(name.systemPrompt));
     });
 
-    test('reuses the naming call\'s card budget rather than copying it', () {
+    test('reuses the naming call\'s PER-CARD budget rather than copying it',
+        () {
+      // The per-card cap is still the namer's own, aliased: a card has to read
+      // the same to the model that groups it as to the model that names it.
       expect(GroupThreadsTask.cardCap, NameStorylineTask.cardCap);
-      expect(GroupThreadsTask.cardsCap, NameStorylineTask.cardsCap);
+
+      // The WHOLE-SET cap is derived instead, and no longer equals the
+      // namer's. Twelve whole cards of 600 joined by eleven five-character
+      // separators is 7,255; the namer's 7,300 is that figure rounded up. The
+      // service builds the set to fit either way, so the difference clamps no
+      // card.
+      expect(const GroupThreadsTask().cardsCap, 7255);
+      expect(
+        const GroupThreadsTask().cardsCap,
+        lessThan(NameStorylineTask.cardsCap),
+      );
     });
 
     test('three meanings, one number, each pinned on its own', () {
-      // They are equal today and each is free to move: the card budget is
-      // what the prompt can show and what the service's split ladder reads,
-      // the two ceilings are what the grammar will let the answer say. An
+      // The card budget is what the prompt can show and what the service's
+      // split ladder reads; the two ceilings are what the grammar will let the
+      // answer say, and they are DERIVED from it rather than equal to it. An
       // `expect` each, so a change to one of them is a deliberate change to
-      // that one. While all three read 12 the schema half below pins the
-      // VALUES the grammar carries, not which name fed them; the day one moves
-      // the two expectations start telling them apart.
-      expect(GroupThreadsTask.cardsPerCall, 12);
-      expect(GroupThreadsTask.maxGroups, 12);
-      expect(GroupThreadsTask.maxThreadsPerGroup, 12);
+      // that one.
+      expect(grouper.cardsPerCall, 12);
+      expect(GroupThreadsTask.defaultCardsPerCall, 12);
+      // Six, not twelve: a group needs two threads and a thread is used once,
+      // so twelve cards cannot make more than six groups. The old bound of
+      // twelve was one no answer could reach.
+      expect(grouper.maxGroups, 6);
+      expect(grouper.maxThreadsPerGroup, 12);
 
       // And the ceilings are where the schema puts them, each on its own
       // array: the answer's groups and one group's threads.
       final properties = grouper.schema['properties'] as Map<String, dynamic>;
       final groups = properties['groups'] as Map;
-      expect(groups['maxItems'], GroupThreadsTask.maxGroups);
+      expect(groups['maxItems'], 6);
       final fields = (groups['items'] as Map)['properties'] as Map;
-      expect((fields['threads'] as Map)['maxItems'],
-          GroupThreadsTask.maxThreadsPerGroup);
+      expect((fields['threads'] as Map)['maxItems'], 12);
+    });
+
+    test('a whole-pool call derives four times the budget from one number',
+        () {
+      // `GroupingMode.pool` asks for 48 cards in one call. Forty-eight whole
+      // cards of 600 plus the 47 separators between them is 29,035
+      // characters, and the answer's ceiling is 24 groups.
+      const pool = GroupThreadsTask(cardsPerCall: 48);
+
+      expect(pool.cardsPerCall, 48);
+      expect(pool.cardsCap, 29035);
+      expect(pool.maxGroups, 24);
+      expect(pool.maxThreadsPerGroup, 48);
+
+      // The grammar reads the same two numbers off the same field, so a call
+      // built for 48 cards cannot be handed a schema written for 12.
+      final properties = pool.schema['properties'] as Map<String, dynamic>;
+      final groups = properties['groups'] as Map;
+      expect(groups['maxItems'], 24);
+      final fields = (groups['items'] as Map)['properties'] as Map;
+      expect((fields['threads'] as Map)['maxItems'], 48);
+    });
+
+    test('the namer and the grouper each carry a 1024-token budget', () {
+      // On `StorylineRecapTask.maxTokens`'s precedent: a task that names no
+      // budget lands on runTask's generic 512, which on the Converse wire
+      // becomes a `max_tokens` stop and a thrown answer. Local rows are
+      // unchanged — a grammar-constrained answer that finished under 512 is
+      // identical under a larger ceiling.
+      expect(NameStorylineTask.maxTokens, 1024);
+      expect(GroupThreadsTask.maxTokens, 1024);
     });
 
     test('the prompt asks for one specific thing and allows an empty answer',

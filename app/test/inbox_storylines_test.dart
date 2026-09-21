@@ -894,4 +894,126 @@ void main() {
       expect(find.text('Sync'), findsOneWidget);
     });
   });
+
+  group('a storyline the user declares', () {
+    /// Opens the Storylines stop, which is where the rail's New storyline
+    /// control lives. The overview beside the column is not what this group is
+    /// about; the column's header is.
+    Future<void> openStorylinesStop(WidgetTester tester) async {
+      await pumpInbox(tester);
+      await tester.tap(find.descendant(
+        of: find.byType(IconRail),
+        matching: find.text('Storylines'),
+      ));
+      await tester.pump();
+      await tester.pump();
+    }
+
+    testWidgets('the rail plus swaps the main pane for the New storyline pane',
+        (tester) async {
+      await openStorylinesStop(tester);
+      expect(find.byType(NewStorylinePane), findsNothing);
+
+      await tester.tap(find.byKey(AppRail.newStorylineKey));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(NewStorylinePane), findsOneWidget);
+      expect(find.byKey(NewStorylinePane.titleKey), findsOneWidget);
+      expect(find.byKey(NewStorylinePane.charterKey), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('and Back puts the pane it replaced back', (tester) async {
+      await openStorylinesStop(tester);
+      await tester.tap(find.byKey(AppRail.newStorylineKey));
+      await tester.pump();
+      await tester.pump();
+
+      await tester.tap(find.descendant(
+        of: find.byKey(NewStorylinePane.paneKey),
+        matching: find.byTooltip('Back'),
+      ));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(NewStorylinePane), findsNothing);
+      await settleQueues(tester);
+    });
+
+    testWidgets('Create writes the storyline and lands the user in it',
+        (tester) async {
+      await openStorylinesStop(tester);
+      await tester.tap(find.byKey(AppRail.newStorylineKey));
+      await tester.pump();
+      await tester.pump();
+
+      await tester.enterText(
+          find.byKey(NewStorylinePane.titleKey), 'Harbour Lane move');
+      await tester.enterText(find.byKey(NewStorylinePane.charterKey),
+          'The lease, the movers and the desk order.');
+      await tester.pump();
+      await tester.tap(find.byKey(NewStorylinePane.createKey));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      final storyline = (await store.loadStorylines()).single;
+      expect(storyline.title, 'Harbour Lane move');
+      expect(storyline.charter, 'The lease, the movers and the desk order.');
+      expect(storyline.createdBy, 'user');
+      // The pane is gone and the storyline it made is what the main pane shows.
+      expect(find.byType(NewStorylinePane), findsNothing);
+      expect(find.byType(StorylineTimelinePanel), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('Find more threads on the About tab queues another recruit',
+        (tester) async {
+      await seedThread('c1', 'Homepage copy');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'user',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'user');
+      await store.updateStoryline(
+        'sl-1',
+        charter: 'Threads about the new homepage.',
+        charterLocked: true,
+      );
+
+      await openStoryline(tester, 'Website redesign');
+      await tester.tap(find.text('About'));
+      await tester.pump();
+
+      await tester.tap(find.byKey(StorylineTimelinePanel.recruitButtonKey));
+      await tester.pump();
+      await tester.pump();
+
+      expect((await store.nextPendingWork('storyline_recruit'))?['entity_id'],
+          'sl-1');
+      await settleQueues(tester);
+    });
+
+    testWidgets('and a storyline with no charter offers no such button',
+        (tester) async {
+      await seedThread('c1', 'Homepage copy');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      await openStoryline(tester, 'Website redesign');
+      await tester.tap(find.text('About'));
+      await tester.pump();
+
+      expect(find.byKey(StorylineTimelinePanel.recruitButtonKey), findsNothing);
+      await settleQueues(tester);
+    });
+  });
 }

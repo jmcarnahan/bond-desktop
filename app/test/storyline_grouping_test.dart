@@ -763,6 +763,203 @@ void main() {
     });
   });
 
+  group('the whole pool, in chunks of its own order', () {
+    /// [count] threads spread right round the circle, so no two consecutive
+    /// pool rows are neighbours and the cosine pass would draw nothing like
+    /// these chunks. `lastMessageAt` strictly descends, which is the pool's
+    /// own order.
+    ///
+    /// The keys are zero-padded to three digits so that no thread's spelled
+    /// subject is a PREFIX of another's: `subjectOf('p1')` sits inside
+    /// `subjectOf('p11')`, and [numberedKeys] reads a card back by the first
+    /// subject it contains.
+    Future<List<String>> seedPool(int count) async {
+      final keys = <String>[];
+      for (var i = 0; i < count; i++) {
+        final key = 'p${(i + 1).toString().padLeft(3, '0')}';
+        keys.add(key);
+        final second = 3599 - i * 30;
+        await seed(
+          store,
+          key,
+          at: i * 3.6,
+          lastMessageAt: '2026-08-29T10:'
+              '${(second ~/ 60).toString().padLeft(2, '0')}:'
+              '${(second % 60).toString().padLeft(2, '0')}Z',
+        );
+      }
+      return keys;
+    }
+
+    /// The pool in the order the service reads it, which is the order the
+    /// chunks are cut from. Read from the store rather than assumed, so the
+    /// assertion is about the chunking and not about the seeding.
+    Future<List<String>> poolOrder() async => [
+          for (final row in await store.conversationsWithEmbeddings(
+            embedModel: EmbeddingsClient.modelTag,
+            sources: const ['email', 'teams'],
+          ))
+            row['conversation_key'] as String,
+        ];
+
+    test('a hundred threads are three calls, cut in pool order', () async {
+      final keys = await seedPool(100);
+      final llm = GroupFakeLlm(
+        keys: keys,
+        groups: [
+          // The first chunk names three, the second four, the third nothing:
+          // the two groups come back largest first however the pool ordered
+          // the calls.
+          [
+            ['p001', 'p002', 'p003'],
+          ],
+          [
+            ['p049', 'p050', 'p051', 'p052'],
+          ],
+          const [],
+        ],
+        scripts: {
+          'storyline_name': [nameAnswer()],
+          'storyline_membership': [confirmAnswer()],
+        },
+      );
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      final seen = <SeenCluster>[];
+
+      final detail = await sweepDetail(
+        StorylineService(
+          store,
+          llm,
+          activityLog: log,
+          groupingMode: GroupingMode.pool,
+          clusterObserver: (threads, outcome) =>
+              seen.add((threads: threads, outcome: outcome)),
+        ),
+        log,
+      );
+
+      // Three calls of 48, 48 and 4, and not one neighbourhood: the threads
+      // are spread round the whole circle, so the cosine ladder would have
+      // drawn something else entirely.
+      expect(detail['grouping_calls'], 3);
+      expect(detail['grouping_unfit'], 0);
+      expect(llm.numberings.map((order) => order.length), [48, 48, 4]);
+
+      // Each call holds exactly its slice of the pool's own order. The cards
+      // inside one call are ordered by centrality, so the slices are compared
+      // as sets.
+      final pool = await poolOrder();
+      expect(llm.numberings[0].toSet(), pool.sublist(0, 48).toSet());
+      expect(llm.numberings[1].toSet(), pool.sublist(48, 96).toSet());
+      expect(llm.numberings[2].toSet(), pool.sublist(96).toSet());
+
+      // Largest first, whichever chunk found it.
+      expect(
+        [for (final cluster in seen) cluster.threads.map((t) => t.key).toList()],
+        [
+          ['p049', 'p050', 'p051', 'p052'],
+          ['p001', 'p002', 'p003'],
+        ],
+      );
+    });
+
+    test('a tail chunk under the minimum is unfit and never asked', () async {
+      // Fifty threads: forty-eight in the first chunk and two in the second,
+      // which is under `groupingNeighbourhoodMinSize`.
+      final keys = await seedPool(50);
+      final llm = GroupFakeLlm(
+        keys: keys,
+        groups: [
+          [
+            ['p001', 'p002', 'p003'],
+          ],
+        ],
+        scripts: {
+          'storyline_name': [nameAnswer()],
+          'storyline_membership': [confirmAnswer()],
+        },
+      );
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+
+      final detail = await sweepDetail(
+        StorylineService(
+          store,
+          llm,
+          activityLog: log,
+          groupingMode: GroupingMode.pool,
+        ),
+        log,
+      );
+
+      expect(detail['grouping_calls'], 1);
+      expect(detail['grouping_unfit'], 1);
+      expect(llm.numberings.single, hasLength(48));
+    });
+
+    test('the room the sweep has left does NOT stop the chunk loop', () async {
+      // The opposite of the cosine path's rule, deliberately: reading the
+      // whole pool is what this mode is for, and `room` is at most three, so a
+      // first chunk that filled it would leave the rest of the mailbox unread
+      // for the sake of one prose call. A hundred threads, and one suggestion
+      // already in the rail so there is room for two.
+      final keys = await seedPool(100);
+      await store.insertStoryline(
+        id: 'sl-old1',
+        title: 'Something already proposed',
+        status: 'suggested',
+        createdBy: 'auto',
+      );
+      final llm = GroupFakeLlm(
+        keys: keys,
+        groups: [
+          // The first chunk alone returns three groups, one more than there is
+          // room for.
+          [
+            ['p001', 'p002', 'p003'],
+            ['p004', 'p005', 'p006'],
+            ['p007', 'p008', 'p009'],
+          ],
+          [
+            ['p049', 'p050', 'p051'],
+          ],
+          const [],
+        ],
+        scripts: {
+          'storyline_name': [nameAnswer()],
+          'storyline_membership': [confirmAnswer()],
+        },
+      );
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+
+      final detail = await sweepDetail(
+        StorylineService(
+          store,
+          llm,
+          activityLog: log,
+          groupingMode: GroupingMode.pool,
+        ),
+        log,
+      );
+
+      // Every chunk was asked, and the fourth group the pool found was seen
+      // even though the first chunk had already overrun `room`.
+      expect(detail['grouping_calls'], 3);
+      expect(detail['grouping_unfit'], 0);
+      expect(detail['grouped'], 12);
+
+      // And the caller still spends only what it has: two slots left, two
+      // naming calls, two new storylines beside the one already there.
+      expect(llm.callsFor('storyline_name'), 2);
+      expect(
+        await store.loadStorylines(statuses: const ['suggested']),
+        hasLength(3),
+      );
+    });
+  });
+
   group('determinism and the shipped default', () {
     test('two identical mailboxes group identically', () async {
       final otherDb = testDb();
@@ -825,7 +1022,12 @@ void main() {
 
       await StorylineService(store, llm).sweep();
 
+      // Cosine and neither of the two dark modes: `model` reads a
+      // neighbourhood and `pool` reads the whole pool, and both ship behind a
+      // pre-registered rule in `docs/pipeline/06-storylines.md`.
       expect(StorylineTuning.groupingMode, GroupingMode.cosine);
+      expect(StorylineTuning.groupingMode, isNot(GroupingMode.model));
+      expect(StorylineTuning.groupingMode, isNot(GroupingMode.pool));
       expect(llm.callsFor('storyline_group'), 0);
       expect(llm.schemas, isNot(contains('storyline_group')));
       // And the cosine pass did its own job: one cluster of seven, named.

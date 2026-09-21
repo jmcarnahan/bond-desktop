@@ -173,6 +173,10 @@ class _AddThreadToStorylinePaneState extends State<AddThreadToStorylinePane> {
 
 /// Which storyline this thread joins — or the one it starts.
 class AddToStorylinePane extends StatefulWidget {
+  static const Key titleKey = ValueKey('storyline-create-title');
+  static const Key charterKey = ValueKey('storyline-create-charter');
+  static const Key createKey = ValueKey('storyline-create');
+
   /// The storylines that can take the thread, stripped only of the ones it is
   /// already in. Suggestions are on offer here: filing a thread into one is
   /// accepting it.
@@ -182,12 +186,19 @@ class AddToStorylinePane extends StatefulWidget {
   final void Function(String storylineId) onPick;
   final void Function(String title) onCreate;
 
+  /// The same create with the charter the user typed beside the name. Separate
+  /// from [onCreate] rather than widening it, so every caller that has no
+  /// charter to give keeps the ending it had; when this is null the pane still
+  /// creates, it just creates without one.
+  final void Function(String title, String charter)? onCreateWithCharter;
+
   const AddToStorylinePane({
     super.key,
     required this.choices,
     required this.onBack,
     required this.onPick,
     required this.onCreate,
+    this.onCreateWithCharter,
   });
 
   @override
@@ -196,18 +207,34 @@ class AddToStorylinePane extends StatefulWidget {
 
 class _AddToStorylinePaneState extends State<AddToStorylinePane> {
   final TextEditingController _title = TextEditingController();
+  final TextEditingController _charter = TextEditingController();
 
   String _typed = '';
+  String _typedCharter = '';
 
   @override
   void dispose() {
     _title.dispose();
+    _charter.dispose();
     super.dispose();
+  }
+
+  /// The name alone is enough. A charter makes the new storyline go hunting for
+  /// the threads this one is only the first of, but a person who just wants a
+  /// place to put this thread should not have to describe it first.
+  void _create(String title, String charter) {
+    final withCharter = widget.onCreateWithCharter;
+    if (charter.isNotEmpty && withCharter != null) {
+      withCharter(title, charter);
+      return;
+    }
+    widget.onCreate(title);
   }
 
   @override
   Widget build(BuildContext context) {
     final trimmed = _typed.trim();
+    final trimmedCharter = _typedCharter.trim();
 
     return PaneSurface(
       title: 'Add to storyline',
@@ -225,24 +252,50 @@ class _AddToStorylinePaneState extends State<AddToStorylinePane> {
               BondSpacing.s16,
               BondSpacing.s8,
             ),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Expanded(
-                  child: TextField(
-                    controller: _title,
-                    style: BondType.small,
-                    decoration: const InputDecoration(
-                      isDense: true,
-                      hintText: 'Name a new storyline',
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        key: AddToStorylinePane.titleKey,
+                        controller: _title,
+                        style: BondType.small,
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          hintText: 'Name a new storyline',
+                        ),
+                        onChanged: (value) => setState(() => _typed = value),
+                      ),
                     ),
-                    onChanged: (value) => setState(() => _typed = value),
-                  ),
+                    const SizedBox(width: BondSpacing.s8),
+                    TextButton(
+                      key: AddToStorylinePane.createKey,
+                      onPressed: trimmed.isEmpty
+                          ? null
+                          : () => _create(trimmed, trimmedCharter),
+                      child: const Text('Create'),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: BondSpacing.s8),
-                TextButton(
-                  onPressed:
-                      trimmed.isEmpty ? null : () => widget.onCreate(trimmed),
-                  child: const Text('Create'),
+                const SizedBox(height: BondSpacing.s8),
+                // Dead when the host gave no charter door. A field that took
+                // the text and then dropped it on Create would be worse than
+                // no field: the user would believe they had said what belongs
+                // here, and nothing would ever hunt on it.
+                TextField(
+                  key: AddToStorylinePane.charterKey,
+                  controller: _charter,
+                  style: BondType.small,
+                  maxLines: 2,
+                  enabled: widget.onCreateWithCharter != null,
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    hintText: 'What belongs here',
+                  ),
+                  onChanged: (value) =>
+                      setState(() => _typedCharter = value),
                 ),
               ],
             ),
@@ -285,6 +338,106 @@ class _AddToStorylinePaneState extends State<AddToStorylinePane> {
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// A storyline declared out of nothing: a name and a description of what
+/// belongs in it, with no thread to hang it on.
+///
+/// The charter is required here and optional on [AddToStorylinePane], and the
+/// difference is what each pane starts with. A create from a thread already
+/// has a member, so it is a storyline whether or not anything is ever recruited
+/// into it. A declared one has nothing at all, and the charter is the only
+/// thing the recruit can hunt with, so a declared storyline with no charter
+/// would be an empty list that stays empty.
+class NewStorylinePane extends StatefulWidget {
+  static const Key titleKey = ValueKey('storyline-new-title');
+  static const Key charterKey = ValueKey('storyline-new-charter');
+  static const Key createKey = ValueKey('storyline-new-create');
+
+  /// The pane's own key, which is how a caller scopes [PaneSurface]'s Back
+  /// arrow to this pane. The arrow is built inside the surface and carries no
+  /// key of its own; the house idiom finds it by its `Back` tooltip, and this
+  /// says which pane's.
+  static const Key paneKey = ValueKey('storyline-new-back');
+
+  final VoidCallback onBack;
+  final void Function(String title, String charter) onCreate;
+
+  const NewStorylinePane({
+    super.key,
+    required this.onBack,
+    required this.onCreate,
+  });
+
+  @override
+  State<NewStorylinePane> createState() => _NewStorylinePaneState();
+}
+
+class _NewStorylinePaneState extends State<NewStorylinePane> {
+  final TextEditingController _title = TextEditingController();
+  final TextEditingController _charter = TextEditingController();
+
+  String _typedTitle = '';
+  String _typedCharter = '';
+
+  @override
+  void dispose() {
+    _title.dispose();
+    _charter.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final title = _typedTitle.trim();
+    final charter = _typedCharter.trim();
+    final ready = title.isNotEmpty && charter.isNotEmpty;
+
+    return PaneSurface(
+      key: NewStorylinePane.paneKey,
+      title: 'New storyline',
+      onBack: widget.onBack,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(
+          BondSpacing.s16,
+          BondSpacing.s12,
+          BondSpacing.s16,
+          BondSpacing.s12,
+        ),
+        children: [
+          Text('Title', style: BondType.caption),
+          const SizedBox(height: BondSpacing.s4),
+          TextField(
+            key: NewStorylinePane.titleKey,
+            controller: _title,
+            style: BondType.small,
+            decoration: const InputDecoration(isDense: true),
+            onChanged: (value) => setState(() => _typedTitle = value),
+          ),
+          const SizedBox(height: BondSpacing.s12),
+          Text('What belongs here', style: BondType.caption),
+          const SizedBox(height: BondSpacing.s4),
+          TextField(
+            key: NewStorylinePane.charterKey,
+            controller: _charter,
+            style: BondType.small,
+            maxLines: 3,
+            decoration: const InputDecoration(isDense: true),
+            onChanged: (value) => setState(() => _typedCharter = value),
+          ),
+          const SizedBox(height: BondSpacing.s12),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              key: NewStorylinePane.createKey,
+              onPressed: ready ? () => widget.onCreate(title, charter) : null,
+              child: const Text('Create'),
+            ),
+          ),
+        ],
       ),
     );
   }

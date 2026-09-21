@@ -96,14 +96,28 @@ recap after the sweep. See [10-model-routing.md](10-model-routing.md).
    nothing and queues nothing — it only notes what it checked, the way the
    recruit notes a lap that filed nothing.
 5. **Recruit** (`StorylineRecruitHandler` → `recruit`) — after a user saves a
-   charter, or after a refresh widened one, judges up to 8 candidate threads
-   against it. It hunts again if the charter moved while it ran: a save landing
-   after the row went `processing` enqueues against that row and is swallowed,
-   and this is the one pass with no sweep catch-up to find it later, so the
-   wakeup has to live inside the pass. Bounded by the user rather than the
-   model — an extra lap needs a save *during* the previous one, and at
-   temperature zero a lap with no save would ask the same questions of the same
-   threads.
+   charter, declares a storyline, creates one with a charter, or presses *Find
+   more threads*, and after a refresh widened a charter, judges up to 8
+   candidate threads against it. A storyline with **no members** has nothing to
+   average, so it ranks on a **charter centroid** instead — the
+   title and the charter embedded as a clustering card — and that lap takes
+   **16** candidates rather than 8, because the shortlist is the only thing
+   between a declared charter and the whole mailbox. A thread already in a live
+   storyline, or blocked from one, is never offered to another: the pass reads
+   the same `assignedOrBlockedKeys` taken set the sweep reads, so one thread
+   belongs to one storyline here as it does everywhere else. Such a hunt laps
+   while it
+   is still filing, at most **3** times, each later lap ranking on the members
+   the one before it found. The test is *no members*, not *no centroid*: a
+   storyline whose members are all mid re-embed has members and no centroid,
+   and it takes the empty-pass ending it always took rather than the widest
+   hunt this pass can make. It also hunts again if the charter moved while it
+   ran: a save landing after the row went `processing` enqueues against that
+   row and is swallowed, and this is the one pass with no sweep catch-up to
+   find it later, so the wakeup has to live inside the pass. That lap is
+   bounded by the user rather than the model — an extra one needs a save
+   *during* the previous one, and at temperature zero a lap with no save would
+   ask the same questions of the same threads.
 6. **Recap** (`StorylineRecapHandler` → `recap`) — re-writes the storyline's
    running state of play from the newest messages across its member threads.
    Its own section below.
@@ -599,6 +613,99 @@ the window with a non-null `storyline_id`, and `hotStorylines` groups by it —
 filing one long thread by hand can add many messages to both at once. That is
 the intended reading (the messages really are in that storyline), not a
 double-count.
+
+### Declared storylines
+
+The sweep is not the only proposer any more. A person can say a storyline
+exists before anything is in it, and the recruit fills it from the charter they
+wrote. That is the measured path: a human list plus the confirm files far more
+of a mailbox correctly than any clustering the app can do for itself, and until
+this there was no door to it in the app.
+
+Two panes, both on the house pattern of a screen with a way back rather than a
+popup, both in `storyline_pickers.dart`:
+
+- **Add to storyline**, the pane a thread is filed from, gained a second field
+  under the name: *What belongs here*. Create is live on the **name alone** —
+  a person who only wants somewhere to put this thread should not have to
+  describe it first — and a name typed with a charter routes through
+  `createStoryline(…, charter:)`, which locks the charter and queues one
+  recruit **after** the thread is added, so the drain sees the handler order
+  and the refresh the add queued runs first. A create with no charter writes
+  exactly what it always wrote: no charter, no lock, no recruit.
+- **New storyline**, reached from a `+` on the rail's *Storylines* header, is
+  the charter-first door. It takes a title and a charter and Create needs
+  **both**: a declared storyline with no charter has nothing to hunt with, so
+  it would be an empty list that stays empty. It calls `declareStoryline`,
+  which inserts an `active` storyline created by the user with both locks set,
+  queues one recruit, and adds no thread — so no refresh and no recap are
+  queued either, because there is nothing yet to describe. The screen then
+  selects the storyline it just made, so the user watches the recruit fill it.
+
+**What a memberless storyline looks like.** The list query computes its counts
+as correlated subqueries with no join, so the row loads with zero threads, zero
+open and no sources, and it appears in the rail like any other. It is absent
+from the hot-storylines strip, which joins `message_progress` — right, because
+nothing has been said in it yet. Its timeline is an empty spine. The
+refresh backstop skips it as well: `staleRefreshStorylineIds` asks whether
+`refreshed_member_hash IS NOT member_hash`, and both are null until the recruit
+files something, so a storyline with nothing in it is never handed to the pass
+that would describe it.
+
+**How the recruit ranks with no members.** It embeds the storyline's own words
+as a **clustering card**, through the same one recipe every thread vector goes
+through: `buildClusteringCard` at the shipped variant, with the title in the
+subject slot, the charter in the summary slot and both middle segments empty,
+under the clustering prefix. That is the card shape a thread whose extraction
+found no topics already has, so the charter's vector lands in the same space
+and at the same shape as every thread vector it is about to be measured
+against, and it moves with them when the shipped variant moves. A bare sentence
+would sit in that space at a different shape and every
+cosine would be reading the formatting as much as the meaning. That lap takes
+16 candidates rather than 8, and the hunt laps while it is still filing, at
+most 3 laps, each later one ranking on the members the previous lap found. It
+stops early on the first lap that files nothing, because a lap that adds no
+member cannot move the centroid.
+
+**One thread, one storyline.** The candidate walk excludes every thread that is
+already a member of a live storyline or blocked from one, the same
+`assignedOrBlockedKeys` set the sweep's pool is built from, read once per lap.
+This is not special to declared storylines: a charter edit could always pull a
+thread into a second group, and the app has no reading for that — the feed and
+the hot strip take one `storyline_id` per message and the oldest membership
+wins, so the second filing was invisible work that only muddied the first.
+Measured on the declared bench on 2026-09-20, before the exclusion, 41 of 57
+recruited threads had landed in more than one storyline. A thread the owner
+filed by hand is in the same set, which is right: they put it somewhere on
+purpose.
+
+The trigger is **no members**, not a missing centroid. A storyline whose
+members are all being re-embedded has members and no comparable vectors, and
+it is waiting for those vectors rather than waiting to be filled; ranking it on
+its charter would turn a re-embed window into a sixteen-candidate three-lap
+hunt over the whole mailbox. Such a storyline reports the empty pass it always
+reported.
+
+A declared storyline is `active`, not `suggested`, so the confirm's bar is the
+lower one: a `medium` yes is taken. That is intended — the user said this group
+exists — and it is the single biggest difference between this path and the
+sweep's own, which is why wrong accepts rather than recall are the number to
+watch on it.
+
+If the embedding server is not running, the pass throws and parks with its
+attempt unspent, so the hunt happens the moment `make embed` is up. A server
+that answers something that is not a vector ends the pass quietly instead: the
+answer will not change on the next drain. A build with no embedding client at
+all says nothing and queues nothing, because that is every user action in a
+test and none of them should start parking queues.
+
+**Find more threads** sits beside *Edit* on the About tab, on a storyline that
+has a charter and only while the field is closed — the sentence on screen
+during an edit is not the sentence saved. It queues the same recruit the
+charter save queues, revived to the front of the storyline lane, and pumps the
+worker. There is no latch on it: the recruit files rather than removes, so
+nothing has to go inert while it runs, and a second press at temperature zero
+asks the same questions of the same threads.
 
 ## Removing a thread
 
@@ -1176,8 +1283,8 @@ neighbourhood at once and says what is inside it.
 
 `StorylineTuning.groupingMode` chooses between them, and it is a constant with
 no setting behind it. `GroupingMode.cosine` is what ships: the clustering
-above forms the proposals. `GroupingMode.model` keeps that pass and demotes it
-to a **neighbourhood finder** —
+above forms the proposals. The other two are dark. `GroupingMode.model` keeps
+the cosine pass and demotes it to a **neighbourhood finder** —
 
 - one sweep of `clusterBySimilarity` at `groupingNeighbourhoodThreshold`,
   0.41, which is just under the recall-70 rung so that most same-effort pairs
@@ -1197,25 +1304,98 @@ to a **neighbourhood finder** —
   so a group either pass proposes is recognised by a dismissal the other one
   earned.
 
+`GroupingMode.pool` draws no neighbourhood at all. There is no similarity
+table, no ladder and no split: the pool is cut into consecutive slices of
+`StorylineTuning.poolCardsPerCall`, 48, in the pool's own order, and each
+slice is one `GroupThreadsTask` call. Forty-eight because 48 whole cards of
+`cardCap` plus the 47 separators between them is 29,035 characters, about 7.3K
+tokens, which fits the 16K context the box runs its prose slot at with the bulk
+slot loaded beside it; the answer's ceiling at that width is 24 groups. The
+golden pool of about 71 threads is two calls. A tail slice under
+`groupingNeighbourhoodMinSize` is counted `grouping_unfit` and never asked.
+
+Unlike the cosine path, `room` does **not** stop the slice loop. `room` is at
+most `maxPendingSuggestions`, three, so a first slice returning three groups
+would end the pass with the second half of the mailbox unread, and reading the
+whole pool is the point of the mode. The call budget it would be protecting is
+small here in a way it is not on the cosine path: about two prose calls a pass
+on this pool, where a neighbourhood walk can reach forty. `_propose` still
+spends `room` on the sorted list, so what ships is unchanged; only what was
+looked at is. Everything after the call is the pass it already was: the
+same centrality ordering inside a slice, the same range check on the numbers,
+the same propose floor, the same largest-first order.
+
+The task itself is parametrised by `cardsPerCall` rather than fixed, and its
+three ceilings are read off that one number: the whole-set clamp, the maximum
+groups an answer may name and the maximum threads in a group. At the default
+twelve that is 7,255 characters, 6 groups and 12 threads; at 48 it is 29,035,
+24 and 48. The per-card cap is still the namer's own, so a card reads the same
+to the model that groups it as to the model that names it. No prompt wording
+changed with any of this.
+
 Determinism holds the way the cosine pass's does: temperature 0, the
 neighbourhoods walked in the pool's own order, the cards inside one ordered by
-centrality, and every group's members returned ascending. A call that throws
+centrality, and every group's members returned ascending. The pool mode is
+deterministic for the simpler reason that the store's order is. A call that throws
 `LlmUnavailableException` parks the sweep exactly as the naming call does; a
 malformed answer or an answer naming no group leaves that neighbourhood
 ungrouped and the pass carries on.
 
-The sweep's activity row carries four counts in **both** modes, zeroes under
-`cosine`, so one row can be read against the other: `grouping_calls`,
+The sweep's activity row carries four counts in **all three** modes, zeroes
+under `cosine`, so any row can be read against any other: `grouping_calls`,
 `grouped` (threads placed in a proposable group), `grouping_failed` (calls that
-left their piece ungrouped) and `grouping_unfit` (pieces dropped before any
-call). `make golden-sweep` prints them on its `calls` line.
+left their piece ungrouped) and `grouping_unfit` (pieces or slices dropped
+before any call). `make golden-sweep` prints them on its `calls` line.
 
-**It ships dark behind `GroupingMode.cosine` until a sweep row clears the
+**The mode is chosen by a define, never by a `sed`.** `make golden-sweep
+SWEEP_GROUPING=cosine|model|pool` sets it for one run, the define is refused
+loudly on anything else, and the run prints the mode it took on its stage line
+and records it in the result JSON. The default follows the app, so a run nobody
+passed a mode to measures the mode that ships.
+
+**Both budgets are 1024 tokens.** `NameStorylineTask.maxTokens` and
+`GroupThreadsTask.maxTokens` are task constants, on the recap task's precedent:
+a task that names no budget lands on the generic 512, and on the Converse wire
+512 becomes a `max_tokens` stop that throws, which is how one whole cloud
+naming pass was lost. A grammar-constrained local answer that already finished
+under 512 is unchanged by the larger ceiling, so the two local rows on each
+side of the change are expected to match exactly. It matters most in pool mode,
+where a 24-group answer runs closest to the ceiling: a pool row with
+`grouping_failed` above zero reads as a budget symptom first, and the answer to
+it is a larger budget rather than a narrower slice.
+
+**`model` ships dark behind `GroupingMode.cosine` until a sweep row clears the
 rule.** The rule was registered before the first row was taken: correct
 positives at or above 10, forbidden hits at or below 3, `storyline.id` above 50
 (the abstention score — a sweep that files nothing scores 50), and the formed
 clusters at or above 60% pure before naming. Otherwise the mode and the task
 stay in the tree unused and the row is the record.
+
+**`pool` ships dark behind the same constant, under a rule of its own,
+registered on 2026-09-20 before the first pool row was taken.** On two passes
+with the grouper and the namer on the box 27B: correct positives at or above 15
+among the 40 formable items, forbidden hits at or below 3, `storyline.id` above
+55, and the formed clusters at or above 60% pure before naming. Met and
+`StorylineTuning.groupingMode` becomes `GroupingMode.pool` with a row on each
+side of the change; missed and it stays dark like `model`, and the row is the
+record either way.
+
+**A row is read against the ceiling, not against the item count.** The sweep
+never proposes a group under `proposeMinClusterSize`, so an item whose gold
+effort has fewer than three golden threads is one no clustering pass on this
+bench can reach. `make golden-sweep` prints one line saying so:
+
+```
+  formable: P of F correct   ceiling C of N
+```
+
+`F` is the items whose effort the sweep could have formed, `P` how many of
+those it filed correctly, and `C` the most items any run could have got right —
+the gold-`none` items it scores by abstaining, plus the formable ones, plus the
+`should` items under an unformable effort, which the scorer also credits for
+abstaining. On the golden set the three-thread floor puts the ceiling at 77 of
+98, and the same three numbers ride the result JSON as `formable_items`,
+`formable_positives` and `ceiling`.
 
 Measured 2026-09-19 on the Qwen vector at `:8081`, 1,024 wide, prefix length
 86, with neighbourhoods at 0.41 / min 3 / cap 40, temperature 0, and the
@@ -1277,6 +1457,13 @@ beside them. The proposal is `suggested`, so the bar there is `high`. They are
 judged against
 the participants of the storyline as it actually stands, read back from the
 stored members rather than from the pre-confirmation cluster.
+
+A sweep-born storyline always has members by the time the probe runs, so the
+probe never takes the charter-centroid path and never takes the declared
+sixteen: those are for a storyline a person declared with nothing in it. The
+two are the same funnel read from opposite ends — the probe has a group and
+goes looking for the thread it forgot, and a declared storyline has a sentence
+and goes looking for the group.
 
 This closes an asymmetry rather than opening a door. `recruit` has always
 considered done threads — it walks every embedded thread in the mailbox and has
