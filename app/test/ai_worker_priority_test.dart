@@ -519,6 +519,106 @@ void main() {
       ]);
     });
 
+    test('refs landing mid-kind are served at the next claim, not next pass',
+        () async {
+      // The shape the box measured: a backlog under way, and a message named
+      // while the walk is part way through the FIRST kind. Ten messages, two
+      // kinds each. `fresh` is seeded first, so it is the OLDEST row and the
+      // walk claiming newest first would reach it last of all.
+      await seed('fresh');
+      for (var i = 1; i <= 10; i++) {
+        await seed('b$i');
+      }
+      final order = <String>[];
+      late AiWorker worker;
+      var pumped = false;
+      worker = AiWorker(
+        store,
+        handlers: [
+          ScriptedHandler('needs_you', order, onRun: (_) {
+            if (pumped) return;
+            pumped = true;
+            // Triage finished beside this drain and knocks, naming what it
+            // just decided. The walk is mid-kind with nine rows to go.
+            unawaited(
+              worker.pump(first: const [(source: 'email', id: 'fresh')]),
+            );
+          }),
+          ScriptedHandler('extract', order),
+        ],
+      );
+      addTearDown(worker.dispose);
+
+      await worker.pump();
+      await pumpEventQueue();
+
+      final firstWalked = order.first;
+      expect(firstWalked, startsWith('needs_you:'));
+      expect(firstWalked, isNot('needs_you:fresh'));
+      // Both of the named message's kinds ran at the very next claim
+      // boundary, before the walk took its second backlog row.
+      expect(order[1], 'needs_you:fresh');
+      expect(order[2], 'extract:fresh');
+      expect(order[3], startsWith('needs_you:'));
+
+      final secondWalkedNeedsYou = order.indexWhere((e) =>
+          e.startsWith('needs_you:') &&
+          e != 'needs_you:fresh' &&
+          e != firstWalked);
+      expect(
+        order.indexOf('extract:fresh'),
+        lessThan(secondWalkedNeedsYou),
+        reason: 'the extraction did not wait behind the needs-you backlog',
+      );
+      // And the walk carried on with the kind it was part way through.
+      expect(order.where((e) => e.startsWith('needs_you:')).length, 11);
+      expect(order.where((e) => e.startsWith('extract:')).length, 11);
+    });
+
+    test('refs landing during a later kind still run the earlier kind first',
+        () async {
+      // Same drain, but the message arrives while the walk is on the SECOND
+      // kind, with its own needs-you still pending. The pass runs that first,
+      // because the order across kinds is an argument and not a preference.
+      for (var i = 1; i <= 10; i++) {
+        await seed('b$i');
+      }
+      final order = <String>[];
+      late AiWorker worker;
+      var arrived = false;
+      worker = AiWorker(
+        store,
+        handlers: [
+          ScriptedHandler('needs_you', order),
+          ScriptedHandler('extract', order, onRun: (_) async {
+            if (arrived) return;
+            arrived = true;
+            // The message lands now, after the needs-you kind has been walked
+            // past entirely.
+            await seed('fresh');
+            unawaited(
+              worker.pump(first: const [(source: 'email', id: 'fresh')]),
+            );
+          }),
+        ],
+      );
+      addTearDown(worker.dispose);
+
+      await worker.pump();
+      await pumpEventQueue();
+
+      // Ten needs-you, then the first extraction, then the newcomer's two in
+      // handler order, then the extraction backlog resumes.
+      expect(order.take(10).every((e) => e.startsWith('needs_you:')), isTrue);
+      expect(order[10], startsWith('extract:'));
+      expect(order[11], 'needs_you:fresh');
+      expect(order[12], 'extract:fresh');
+      expect(order[13], startsWith('extract:'));
+      expect(order[13], isNot('extract:fresh'));
+      expect(await statusOf('needs_you', 'fresh'), 'done');
+      expect(await statusOf('extract', 'fresh'), 'done');
+    });
+
     test('a kind parked in the pass is not dialled again by the walk',
         () async {
       for (final id in ['b1', 'b2']) {
@@ -547,6 +647,56 @@ void main() {
         expect(await statusOf('extract', id), 'pending');
       }
       expect(worker.lastDrainCount, 0);
+    });
+
+    test('a second serve in one pass skips the kind the first parked',
+        () async {
+      // Two serves, one pass. The first finds needs-you's server down; the
+      // second must not dial it again for a different message over the same
+      // seconds.
+      await seed('ref1');
+      await seed('ref2');
+      for (final id in ['b1', 'b2', 'b3']) {
+        await seed(id);
+      }
+      final order = <String>[];
+      late AiWorker worker;
+      var arrived = false;
+      worker = AiWorker(
+        store,
+        handlers: [
+          // Down for the first item, answering for every one after it — so a
+          // second dial would be visible rather than silently parking again.
+          ScriptedHandler(
+            'needs_you',
+            order,
+            script: [const LlmUnavailableException('off'), null],
+          ),
+          ScriptedHandler('extract', order, onRun: (_) {
+            if (arrived) return;
+            arrived = true;
+            unawaited(
+              worker.pump(first: const [(source: 'email', id: 'ref2')]),
+            );
+          }),
+        ],
+      );
+      addTearDown(worker.dispose);
+
+      await worker.pump(first: const [(source: 'email', id: 'ref1')]);
+      await pumpEventQueue();
+
+      // The second serve ran the extraction and skipped the parked kind, so
+      // ref2's needs-you comes later, on the repump, rather than inside the
+      // serve that ran its extraction.
+      final secondServe = order.indexOf('extract:ref2');
+      expect(secondServe, greaterThan(0));
+      expect(
+        order.take(secondServe).where((e) => e.startsWith('needs_you:')),
+        ['needs_you:ref1'],
+        reason: 'one dial at the down server in the whole pass, not two',
+      );
+      expect(order.indexOf('needs_you:ref2'), greaterThan(secondServe));
     });
 
     test('a halt mid-pass keeps the refs it had not reached yet', () async {

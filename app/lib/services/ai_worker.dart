@@ -443,11 +443,12 @@ class AiWorker {
   ///
   /// [first] names messages whose work should run AHEAD of the backlog — the
   /// pairs a triage drain has just written verdicts for. They are claimed one
-  /// handler at a time in the walk's own order at the top of the next pass,
-  /// so a message that arrived mid-backlog costs its own needs-you and
-  /// extraction rather than a whole pass of everybody else's. A ref for a
-  /// source this worker does not drain is dropped, a duplicate is ignored,
-  /// and the queue is capped at [maxPriorityRefs].
+  /// handler at a time in the walk's own order, at the next CLAIM BOUNDARY
+  /// rather than at the top of the next pass, so a message that arrived mid
+  /// backlog costs its own needs-you and extraction rather than a whole pass
+  /// of everybody else's — see [_servePriority]. A ref for a source this
+  /// worker does not drain is dropped, a duplicate is ignored, and the queue
+  /// is capped at [maxPriorityRefs].
   Future<void> pump({List<({String source, String id})> first = const []}) {
     // Merged before the off check, not after it: a ref named while
     // processing is off is still the newest message, and the pump that
@@ -557,25 +558,32 @@ class AiWorker {
       // ends a PASS, not a drain: the repump below is what resumes the walk
       // from the top once triage has had its turn.
       var yielding = false;
-      // Kinds the priority pass found a downed server for. Per PASS, so the
+      // Kinds a priority pass found a downed server for. Per PASS, so the
       // walk below does not dial the same down server a second time over the
       // same seconds. A repump walks them again, which is the accepted cost
       // commented at the yield return.
-      var parkedKinds = const <String>{};
-      if (_priority.isNotEmpty) {
-        final refs = List.of(_priority);
-        _priority.clear();
-        final priority = await _runPriority(refs);
-        if (priority.parkedDrain) return;
-        parkedKinds = priority.parkedKinds;
-      }
+      final parkedKinds = <String>{};
+      if (_priority.isNotEmpty && await _servePriority(parkedKinds)) return;
       for (final handler in _handlers) {
         // The switch is re-read per handler as well as per item: an off that
         // lands mid-drain must stop the NEXT launch, while the item already at
         // the server finishes and its answer is written — see the
         // `Future.wait(_inFlight)` below, which is outside every break.
         if (_halted) break;
-        // The priority pass just found this kind's server down. Every item
+        // The yield first, as at the claim boundary below: a triage drain
+        // that is already waiting must not be made to sit out a whole
+        // priority pass on top of the kind that just finished. Nothing is in
+        // flight at a kind boundary, so there is nothing to wait for before
+        // handing the gate back — the repump is what resumes the walk, and
+        // the refs are still queued for it.
+        if (_gate.yieldRequested) {
+          _repump = true;
+          return;
+        }
+        // Refs that landed while the PREVIOUS kind was draining, served
+        // before this kind starts rather than at the top of the next pass.
+        if (_priority.isNotEmpty && await _servePriority(parkedKinds)) return;
+        // A priority pass just found this kind's server down. Every item
         // behind it would fail identically, and it is the same seconds and
         // the same server: skipped before the emit, so the walk costs no
         // query for a kind it is not going to dial.
@@ -610,6 +618,19 @@ class AiWorker {
             // the waiting drain one item, not a whole pass.
             if (_gate.yieldRequested) {
               yielding = true;
+              break;
+            }
+            // And the claim boundary is where a REF is served too. This is
+            // the one that matters for the wall clock: a message named while
+            // this kind is half way through a sixty-row backlog must not wait
+            // for the backlog to end. Its own needs-you and extraction run
+            // here, and the walk picks up where it left off afterwards.
+            if (_priority.isNotEmpty &&
+                await _servePriority(parkedKinds)) {
+              return;
+            }
+            if (parkedKinds.contains(handler.kind)) {
+              parkedKind = true;
               break;
             }
             final item = await _store.claimPendingWork(
@@ -681,6 +702,37 @@ class AiWorker {
     _inFlight.add(future);
   }
 
+  /// Serves whatever refs are waiting, wherever the drain happens to be.
+  ///
+  /// Called at three points, and the third is the one the wall clock cares
+  /// about: the top of a pass, the top of each handler's turn, and before
+  /// every claim in the launch loop. The first two alone were not enough, and
+  /// the box measured it — a pump that lands while a pass is already walking
+  /// finds that pass's `_priority` snapshot already taken, so the ref sat
+  /// until the pass ended and a message's extraction waited behind every
+  /// needs-you in the backlog. A claim boundary is where the drain is free to
+  /// do something else, so it is where a ref gets in.
+  ///
+  /// Every caller guards the call with a SYNCHRONOUS `_priority.isNotEmpty`
+  /// and short-circuits, and that is load bearing rather than tidiness. This
+  /// method is `async`, so awaiting it costs a microtask hop even when it
+  /// returns at once — three of them per claim, on a path that runs for every
+  /// item of every kind. A drain that suspends where it used to run straight
+  /// through finishes later than its caller expects, and the callers that
+  /// fire a pump and do not await it are real: `StorylinesNotifier.recruitNow`
+  /// and its siblings. The guard below stays as a second line of defence.
+  ///
+  /// Returns true when the whole drain must end, which every caller turns
+  /// into a return. [parkedKinds] is the PASS's set, read and written by the
+  /// serve rather than rebuilt per serve: a second serve must not dial a kind
+  /// the first one already found down.
+  Future<bool> _servePriority(Set<String> parkedKinds) async {
+    if (_priority.isEmpty) return false;
+    final refs = List.of(_priority);
+    _priority.clear();
+    return _runPriority(refs, parkedKinds);
+  }
+
   /// Puts refs back at the FRONT of the priority queue, so a pass cut short
   /// keeps the promise [pump] makes: a named message is still the newest one
   /// when the worker comes back.
@@ -702,6 +754,13 @@ class AiWorker {
   /// that has just been triaged gets `needs_you`, then `extract`, then its
   /// embedding and the rest before the backlog resumes.
   ///
+  /// Reentrant with the walk by design: [_servePriority] calls this from
+  /// inside the launch loop, so a pass that is half way through one kind
+  /// stops there, runs the named refs through EVERY handler, and then carries
+  /// on with the kind it was on. The walk's own loop variables are untouched
+  /// by that, because the parks this pass sees come back as a return value
+  /// rather than as a write into somebody else's `parkedKind`.
+  ///
   /// EVERY handler is walked, not the message-keyed ones. Five of the fast
   /// lane's eight kinds are keyed on attachment ids, conversation keys and
   /// file paths rather than on a message id, so a message's ref misses them
@@ -720,18 +779,22 @@ class AiWorker {
   /// let through, and reading one here would starve exactly the message the
   /// ask was made for.
   ///
-  /// Returns the parked-drain verdict, which its caller turns into a return,
-  /// and the kinds whose server was found down, which the walk then skips for
-  /// the rest of the pass.
-  Future<({bool parkedDrain, Set<String> parkedKinds})> _runPriority(
+  /// [parkedKinds] is the whole PASS's set, read as well as written. A kind
+  /// the walk or an earlier serve already found down is skipped here, so two
+  /// serves in one pass cost one dial at a dead server rather than two, and a
+  /// kind this pass parks is added for everybody after it.
+  ///
+  /// Returns the parked-drain verdict, which its caller turns into a return.
+  Future<bool> _runPriority(
     List<({String source, String id})> refs,
+    Set<String> parkedKinds,
   ) async {
-    final parkedKinds = <String>{};
     for (final handler in _handlers) {
       if (_halted) {
         _keepPriority(refs);
-        return (parkedDrain: false, parkedKinds: parkedKinds);
+        return false;
       }
+      if (parkedKinds.contains(handler.kind)) continue;
       var parkedKind = false;
       var parkedDrain = false;
       var emitted = false;
@@ -763,13 +826,13 @@ class AiWorker {
       // never the work already at the server.
       await Future.wait(_inFlight.toList());
       if (parkedKind) parkedKinds.add(handler.kind);
-      if (parkedDrain) return (parkedDrain: true, parkedKinds: parkedKinds);
+      if (parkedDrain) return true;
       if (_halted) {
         _keepPriority(refs);
-        return (parkedDrain: false, parkedKinds: parkedKinds);
+        return false;
       }
     }
-    return (parkedDrain: false, parkedKinds: parkedKinds);
+    return false;
   }
 
   static (String, String, String) _claimKey(
