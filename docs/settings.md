@@ -1078,9 +1078,11 @@ Before the sign-in gate and after the server bootstrap sits `SetupGate`
 or the rest of the app from one stored word — `setup_state['setup']`, holding
 a `SetupStep.name` — and one check against the manifest. `'done'` is the only
 value that lets the app through, AND the download ledger must describe the
-three checkpoints this build ships (`DownloadLedger.matches`): a manifest bump
-that keeps the file names would otherwise leave a machine serving the previous
-weights for ever, since nothing downstream compares digests. A bumped digest
+three checkpoints this build ships and the writing model's MTP head
+(`DownloadLedger.matches`, which wants the `bond-prose.draft` row as well as
+`bond-prose`): a manifest bump that keeps the file names would otherwise leave
+a machine serving the previous weights for ever, since nothing downstream
+compares digests. A bumped digest
 sends the wizard back to its **download** step, where `_onEnter` fetches what
 has moved. The gate answers ONCE, on `AuthGate`'s pattern, and re-decides only
 when the flow reports itself finished or when **Set up again** bumps the
@@ -1098,9 +1100,9 @@ One `PaneSurface`, whose title is the step's and whose trailing slot reads
 |---|---|---|---|
 | 1 | Welcome to Bond | `Get started` | What Bond is; the container-migration line when there was one |
 | 2 | Your Mac | `Continue` | Chip, memory, macOS, and which models this Mac takes. Intel or Rosetta renders **no** button at all. At 40 GiB and up, one line saying it runs all three; below it, an alert naming the memory, saying the writing model is not downloaded here and that the writing stages run on the inbox model until a target is added under Settings, Models. Under 16 GiB the same alert gains one sentence about slower triage. All of it is a warning that still continues |
-| 3 | Models | `Continue` | The RESOLVED manifest's rows — name, role sentence, size, licence button, and any `notice` verbatim — and the total. Three rows and 22.3 GB on a full Mac, two rows and 4.6 GB on an inbox one, and the first sentence says which |
+| 3 | Models | `Continue` | The RESOLVED manifest's rows — name, role sentence, size, licence button, and any `notice` verbatim — and the total. Three rows and 23.8 GB on a full Mac — four files, because the writing model's row says `+ MTP head, 1.6 GB` under its size — two rows and 4.6 GB on an inbox one, and the first sentence says which |
 | 4 | Storage | `Continue` | The effective folder, **Change folder…**, and `checkDisk`. Dead until the preflight answers and passes; free space that could not be asked counts as passing, a folder that cannot be WRITTEN does not — `Bond can't write to this folder. Choose another one.` |
-| 5 | Download | `Continue` | One bar per file this Mac's tier wants, smallest first. Enabled only when EVERY file is done — see below |
+| 5 | Download | `Continue` | One bar per MODEL this Mac's tier wants, smallest first — the writing model's MTP head rides on its model's bar rather than taking one of its own, so the bar counts both files and finishes once. Enabled only when EVERY file is done — see below |
 | 6 | Sign in | `Continue` | `SignInBody(showTitle: false)` when signed out (signing in advances, and there is no Continue); `You're signed in.` and a Continue when already signed in |
 | 7 | Notifications | `Continue` | The press IS the ask. Exactly one button, and the word `Allow` appears nowhere — macOS is about to put its own Allow up |
 | 8 | All set | `Finish` | Folder, port, account, notifications, then this Mac's tier defaults, `managedServer = true` and `setup = 'done'`, and only then the server |
@@ -1132,8 +1134,10 @@ reads the folder once per run: a transfer left going would keep filling the
 folder the user has just left. The parts stay where they are, exactly as a
 Cancel leaves them.
 
-**Continue on the download step waits for all three files**, not for
-`ModelManifest.usableIds` (embed + bulk, informational and gating nothing).
+**Continue on the download step waits for every file this Mac's tier asked
+for** — four on a full Mac, since the writing model brings its MTP head — and
+not for `ModelManifest.usableIds` (embed + bulk, informational and gating
+nothing).
 `ModelServerSupervisor._launch`
 refuses to start while any file the preset names is missing, so a partial set
 could not serve the inbox anyway — and finishing early would leave a

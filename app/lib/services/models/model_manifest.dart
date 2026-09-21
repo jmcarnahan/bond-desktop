@@ -50,6 +50,110 @@ MachineTier _tierFrom(String value) {
 final RegExp _hex64 = RegExp(r'^[0-9a-f]{64}$');
 final RegExp _hex40 = RegExp(r'^[0-9a-f]{40}$');
 
+/// A SECOND file a checkpoint cannot be served without — today the MTP head
+/// the prose model drafts with, which `RouterPreset` names as `model-draft`.
+///
+/// It has no `repo` of its own because it does not have one: the head is
+/// published beside the weights it belongs to, which is how llama-server finds
+/// it after an `-hf` download, and a sidecar from some other repo would be a
+/// different model's draft. It carries its own [revision] all the same, so a
+/// head republished on its own is a two-field edit rather than a manifest that
+/// lies about which commit the bytes came from.
+///
+/// It is NOT a fourth [ModelFile]. Every entry in `models` is a section in the
+/// preset INI and a role the router serves, and the parser allows exactly one
+/// model per role; a draft head is neither. Nesting it here is what keeps
+/// `--models-max` and the one-model-per-role rule true while the downloader
+/// still fetches two files for one entry.
+@immutable
+class ModelSidecar {
+  /// The artefact inside the PARENT's repo.
+  final String file;
+
+  /// The repo revision as a COMMIT SHA, on [ModelFile.revision]'s reasoning.
+  final String revision;
+
+  /// Lower-case hex sha256, from the hub's LFS oid.
+  final String sha256;
+
+  final int sizeBytes;
+
+  const ModelSidecar({
+    required this.file,
+    required this.revision,
+    required this.sha256,
+    required this.sizeBytes,
+  });
+
+  /// The same rules [ModelFile.fromJson] applies to its own fields, with the
+  /// messages PREFIXED, so a manifest that is wrong about the head says which
+  /// half of the entry it is wrong about.
+  static String _string(Map<String, Object?> json, String field) {
+    final value = json[field];
+    if (value is! String || value.isEmpty) {
+      throw FormatException(
+        'manifest: "sidecar.$field" must be a non-empty string',
+      );
+    }
+    return value;
+  }
+
+  factory ModelSidecar.fromJson(Map<String, Object?> json) {
+    final revision = _string(json, 'revision');
+    if (!_hex40.hasMatch(revision)) {
+      throw FormatException(
+        'manifest: "sidecar.revision" must be a 40-character lower-case '
+        'commit sha, not "$revision"',
+      );
+    }
+    final digest = _string(json, 'sha256');
+    if (!_hex64.hasMatch(digest)) {
+      throw const FormatException(
+        'manifest: "sidecar.sha256" must be 64 lower-case hex characters',
+      );
+    }
+    final rawSize = json['sizeBytes'];
+    if (rawSize is! num) {
+      throw const FormatException('manifest: "sidecar.sizeBytes" must be a '
+          'number');
+    }
+    final sizeBytes = rawSize.toInt();
+    if (sizeBytes <= 0) {
+      throw const FormatException(
+        'manifest: "sidecar.sizeBytes" must be positive',
+      );
+    }
+    return ModelSidecar(
+      file: _string(json, 'file'),
+      revision: revision,
+      sha256: digest,
+      sizeBytes: sizeBytes,
+    );
+  }
+
+  Map<String, Object?> toJson() => {
+        'file': file,
+        'revision': revision,
+        'sha256': sha256,
+        'sizeBytes': sizeBytes,
+      };
+
+  @override
+  bool operator ==(Object other) =>
+      other is ModelSidecar &&
+      other.file == file &&
+      other.revision == revision &&
+      other.sha256 == sha256 &&
+      other.sizeBytes == sizeBytes;
+
+  @override
+  int get hashCode => Object.hash(file, revision, sha256, sizeBytes);
+
+  @override
+  String toString() =>
+      'ModelSidecar($file @ ${revision.substring(0, 7)}, $sizeBytes B)';
+}
+
 /// One downloadable checkpoint: what it is, where it comes from, what it must
 /// hash to, and the flags the router loads it with.
 ///
@@ -103,6 +207,11 @@ class ModelFile {
   /// them verbatim.
   final Map<String, String> serverArgs;
 
+  /// The second file this checkpoint is served with, or null for the ones
+  /// that are a single GGUF. See [ModelSidecar] for why it is nested here
+  /// rather than being a fourth entry in `models`.
+  final ModelSidecar? sidecar;
+
   const ModelFile({
     required this.id,
     required this.role,
@@ -117,6 +226,7 @@ class ModelFile {
     required this.licenseUrl,
     this.notice,
     this.serverArgs = const {},
+    this.sidecar,
   });
 
   static String _string(Map<String, Object?> json, String field) {
@@ -179,6 +289,12 @@ class ModelFile {
         serverArgs['$key'] = value;
       });
     }
+    final rawSidecar = json['sidecar'];
+    if (rawSidecar != null && rawSidecar is! Map) {
+      throw const FormatException(
+        'manifest: "sidecar" must be an object or null',
+      );
+    }
     return ModelFile(
       id: id,
       role: role,
@@ -193,6 +309,9 @@ class ModelFile {
       licenseUrl: _string(json, 'licenseUrl'),
       notice: notice as String?,
       serverArgs: Map.unmodifiable(serverArgs),
+      sidecar: rawSidecar is Map
+          ? ModelSidecar.fromJson(rawSidecar.cast<String, Object?>())
+          : null,
     );
   }
 
@@ -210,6 +329,7 @@ class ModelFile {
         'licenseUrl': licenseUrl,
         'notice': notice,
         'serverArgs': serverArgs,
+        'sidecar': sidecar?.toJson(),
       };
 
   /// `<repo with '/' → '_'>/<file>` — the same rule as
@@ -221,8 +341,37 @@ class ModelFile {
   Uri get resolveUri =>
       Uri.parse('https://huggingface.co/$repo/resolve/$revision/$file');
 
-  RouterModelSpec toSpec() =>
-      RouterModelSpec(id: id, repo: repo, file: file, args: serverArgs);
+  /// The sidecar's path, by the same two rules, in the PARENT's repo folder —
+  /// null when there is no sidecar. One folder per repo means the head lands
+  /// beside the weights it belongs to, which is also where the preset's
+  /// `model-draft` points.
+  String? get sidecarRelativePath {
+    final head = sidecar;
+    if (head == null) return null;
+    return '${repo.replaceAll('/', '_')}/${head.file}';
+  }
+
+  /// The hub URL for the sidecar's bytes, at the SIDECAR's revision.
+  Uri? get sidecarResolveUri {
+    final head = sidecar;
+    if (head == null) return null;
+    return Uri.parse(
+      'https://huggingface.co/$repo/resolve/${head.revision}/${head.file}',
+    );
+  }
+
+  /// Every byte this entry costs a download — the weights and the sidecar.
+  /// What the wizard's total, the disk preflight and one progress bar all
+  /// count, because one entry is one row on the screen whatever it fetches.
+  int get downloadBytes => sizeBytes + (sidecar?.sizeBytes ?? 0);
+
+  RouterModelSpec toSpec() => RouterModelSpec(
+        id: id,
+        repo: repo,
+        file: file,
+        draftFile: sidecar?.file,
+        args: serverArgs,
+      );
 
   /// The same checkpoint with [overrides] merged ONTO [serverArgs] — what a
   /// tier's `serverArgs` block produces on a resolved manifest.
@@ -247,6 +396,7 @@ class ModelFile {
       licenseUrl: licenseUrl,
       notice: notice,
       serverArgs: Map.unmodifiable({...serverArgs, ...overrides}),
+      sidecar: sidecar,
     );
   }
 
@@ -265,6 +415,7 @@ class ModelFile {
       other.license == license &&
       other.licenseUrl == licenseUrl &&
       other.notice == notice &&
+      other.sidecar == sidecar &&
       _sameArgs(other.serverArgs, serverArgs);
 
   static bool _sameArgs(Map<String, String> a, Map<String, String> b) {
@@ -289,6 +440,7 @@ class ModelFile {
         license,
         licenseUrl,
         notice,
+        sidecar,
         Object.hashAll([
           for (final key in serverArgs.keys.toList()..sort())
             '$key=${serverArgs[key]}',
@@ -726,10 +878,14 @@ class ModelManifest {
   List<ModelFile> get bySize =>
       [...models]..sort((a, b) => a.sizeBytes.compareTo(b.sizeBytes));
 
+  /// Every byte this manifest asks the network for, sidecars included — the
+  /// number the wizard quotes and the disk preflight budgets against. A
+  /// sidecar is not a row of its own anywhere, so it must not be a total of
+  /// its own either.
   int get totalBytes {
     var total = 0;
     for (final model in models) {
-      total += model.sizeBytes;
+      total += model.downloadBytes;
     }
     return total;
   }

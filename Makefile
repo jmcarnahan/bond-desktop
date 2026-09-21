@@ -59,9 +59,10 @@ SLOTS        ?= 1
 # that ships an MTP sidecar can use it — MODEL_HF's Qwen3.8-27B does, and
 # llama-server resolves the sidecar from the same repo as the -hf download, so
 # a MODEL_HF pointed at a model without one wants `SPEC_TYPE =` (empty) in
-# local.mk. The app's own managed server does NOT get this flag: its preset
-# names a local path rather than a repo, so there is no sidecar for it to
-# resolve (docs/pipeline/10-model-routing.md, "The manifest").
+# local.mk. The app's own managed server gets the same configuration by the
+# other route since Round G: the manifest ships the head as the prose entry's
+# `sidecar` and the preset writes `model-draft` beside `spec-type`
+# (docs/pipeline/10-model-routing.md, "The manifest").
 # Set DRAFT_HF or SPEC_TYPE, not both — the combination is untried.
 #   make model DRAFT_HF=ggml-org/Qwen3.5-0.8B-GGUF   → draft-model speculation
 #                                                      (measured a net loss)

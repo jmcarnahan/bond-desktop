@@ -69,6 +69,11 @@ class SetupModelsBody extends StatelessWidget {
         ModelRole.prose => 'Writes drafts and replies',
       };
 
+  /// What a checkpoint's second file adds, under its size. Named here so a
+  /// test can pin the sentence rather than rebuild it.
+  static String sidecarLine(ModelSidecar sidecar) =>
+      '+ MTP head, ${formatBytes(sidecar.sizeBytes)}';
+
   @override
   Widget build(BuildContext context) {
     final open = onOpenLicense;
@@ -100,7 +105,21 @@ class SetupModelsBody extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: BondSpacing.s12),
-              Text(formatBytes(model.sizeBytes), style: BondType.small),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(formatBytes(model.sizeBytes), style: BondType.small),
+                  // A second file, not a second model: the writing model
+                  // drafts with its own MTP head and cannot be served without
+                  // it. Said under the size rather than as a row of its own,
+                  // because the row is what the person is choosing and the
+                  // head is not a choice — and the footer totals both.
+                  if (model.sidecar case final head?) ...[
+                    const SizedBox(height: BondSpacing.s4),
+                    Text(sidecarLine(head), style: BondType.caption),
+                  ],
+                ],
+              ),
               if (open != null) ...[
                 const SizedBox(width: BondSpacing.s8),
                 TextButton(

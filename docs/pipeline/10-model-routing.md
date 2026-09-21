@@ -363,6 +363,7 @@ twenty-seven-billion-parameter prose model is still being mapped.
 | `sizeBytes`, `sha256` | The measured size and the LFS oid. Both are checked against the hub's `X-Linked-Size` / `X-Linked-ETag` on the redirect, so a manifest that is wrong about a file is caught before eighteen gigabytes are spent. |
 | `minRamBytes` | What the machine must have. 0 when it always fits. Nothing refuses on it: which checkpoints a Mac takes is the tier's answer, and this is the number the wizard quotes when it says why the writing model is not among them. |
 | `license`, `licenseUrl`, `notice` | What the first-run screen shows. `notice` is null for the permissive ones, so a screen can skip the line entirely rather than render an empty string. |
+| `sidecar` | Optional. A SECOND file the entry cannot be served without — today the writing model's MTP head — as `file`, `revision`, `sha256` and `sizeBytes`. No `repo` of its own: it lives in the parent's, which is also the folder it downloads into. Validated by the same rules as the entry's own fields, with the messages prefixed `sidecar.`. |
 | `serverArgs` | llama-server's long flags with the leading dashes stripped — the spelling the preset INI wants. Values are strings; the INI writer prints them verbatim. |
 | `tiers` | The machine ladder, one entry per tier: `id` (a `MachineTier` name), `minRamBytes`, the `models` that tier downloads and starts, and optional `serverArgs` overrides per id, merged onto the entry's own. |
 
@@ -391,7 +392,7 @@ reason from the other side: `adoptBox` owns that placement's stage map.
 class, holding only that tier's entries with its overrides merged in. The
 wizard's device step, its models rows and total, the disk preflight, the
 download run, the ledger check and the preset the supervisor writes all read
-the resolved view, so a Mac under the floor downloads 4.6 GB rather than 22.3,
+the resolved view, so a Mac under the floor downloads 4.6 GB rather than 23.8,
 starts two servers rather than three, and is never sent back through the wizard
 for a file its tier never wanted. A resolved view may have no prose model, which
 is what `byRoleOrNull` is for; `byRole` still throws, and the master list still
@@ -434,17 +435,51 @@ here instead:
   slot, 4K a slot for the bulk one at four. The Makefile's `CTX_SIZE` default is
   the same number, and `app/test/manifest_makefile_parity_test.dart` is what
   says the two cannot drift.
-- **No `spec-type`, deliberately.** `make model` launches the prose model with
-  `--spec-type draft-mtp`, its own MTP head, which is worth about 4 tok/s of
-  decode on the maintainer's machine — and the preset INI could carry the flag
-  verbatim, since the bundled llama-server (b10896, reporting 0.4.0-dev) still
-  spells it that way. What it cannot carry is the sidecar: `draft-mtp` needs the
-  `mtp-…` GGUF, and llama-server resolves that from the repo an `-hf` download
-  came from. The managed preset names a local PATH, and the manifest ships
-  three files with no sidecar among them, so the flag would find no draft model
-  and the launch would be the one thing a first run cannot survive. The managed
-  server therefore runs the prose model plain until the manifest ships the
-  sidecar as a fourth file and the preset names it.
+- **`spec-type = draft-mtp`, and the sidecar that makes it legal.** Since Round
+  G the prose entry carries a `sidecar` — `mtp-Qwen3.8-27B-Q4_0.gguf`, 1.6 GB,
+  at the same commit as the weights — and its `serverArgs` carry the flag. The
+  two travel together and neither is safe alone: `draft-mtp` is worth about
+  4 tok/s of decode on the maintainer's machine, and a `draft-mtp` with no head
+  to load is the one thing a first run cannot survive.
+
+  `make model` gets the head for free, because llama-server resolves it from
+  the repo an `-hf` download came from. The managed preset names a local PATH,
+  so it has to say where the head is, and `RouterPreset.toIni` writes it:
+
+  ```
+  [bond-prose]
+  model = <folder>/ggml-org_Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf
+  model-draft = <folder>/ggml-org_Qwen3.8-27B-GGUF/mtp-Qwen3.8-27B-Q4_0.gguf
+  c = 16384
+  parallel = 1
+  load-on-startup = true
+  spec-type = draft-mtp
+  ```
+
+  The draft line sits immediately after `model` and before the flags, unquoted
+  for the same reason `model` is: llama-server's INI parser reads a value to
+  end of line, and a helpfully quoted path arrives with its quotes still in it.
+  The path is DERIVED from the manifest, never a literal in `serverArgs` — the
+  downloader's folder and the preset's are the same rule in one place.
+
+  **`model-draft` as a per-model key in a `--models-preset` INI is the expected
+  spelling of llama-server's `--model-draft` flag, and it is UNVERIFIED.** The
+  INI writer prints every key as that model's flag and nothing in this repo
+  names this one; the bundled build is b10896 (reporting 0.4.0-dev); and the
+  gate cannot run llama-server. It stays unverified until the managed server
+  has been started with the sidecar on disk and its log names a draft model.
+  A wrong key fails loudly at startup rather than quietly, which is why it is
+  safe to ship in this state and not safe to assume.
+
+  **Why it is nested rather than a fourth entry.** Every item in `models` is a
+  section in the preset, a role the router serves and a file the supervisor
+  waits for, and the parser allows exactly one model per role. A fourth entry
+  would need a fourth `ModelRole` that rule forbids, and it would raise
+  `--models-max`. Nested, the head is one more FILE on an entry that already
+  has one: the downloader fetches it after its parent under the ledger row
+  `bond-prose.draft`, the preflight budgets its bytes, `DownloadLedger.isCurrent`
+  wants both rows before it calls the checkpoint current, and the wizard draws
+  one bar and one row that says `+ MTP head, 1.6 GB` under the size.
 
 ### The downloader
 
@@ -639,10 +674,15 @@ at the server is never abandoned and the pass simply ends there. The gate goes
 back to the queue, triage runs, and the worker walks again from the top. The
 ask is a ticket rather than a latch: the drain queued at or after it clears it
 as its body starts, so the flag cannot outlive one handoff and neither side
-can starve the other. When the worker comes back it runs the messages triage
-just decided on before it resumes the backlog. Those pairs ride the
-`onDrained` callback into `pump`, and the priority pass claims each of them
-through every fast handler in the walk's own order. A message that arrives
+can starve the other. The messages triage just decided on then run ahead of
+the backlog, and they do not wait for the current pass to end. Those pairs
+ride the `onDrained` callback into `pump`, and the worker serves them at its
+next claim boundary, which is the moment before it would have taken another
+backlog row. The priority pass claims each of them through every fast handler
+in the walk's own order and then the walk carries on with the kind it was
+part way through. Serving them only at the top of the next pass was measured
+on the shared box and was not enough: a named message's extraction still
+waited behind every needs-you in the backlog. A message that arrives
 mid-backlog therefore costs its own triage, its own needs-you and its own
 extraction, plus whatever item was in flight when it landed, instead of a full
 pass over everybody else's. The claim behind the pass repeats the untriaged

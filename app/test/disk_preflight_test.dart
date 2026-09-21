@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:bond_inbox/services/models/disk_preflight.dart';
 import 'package:bond_inbox/services/models/download_state.dart';
+import 'package:bond_inbox/services/models/model_downloader.dart';
 import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -338,5 +339,124 @@ void main() {
 
     expect(check.ok, isTrue);
     expect(check.requiredBytes, wholeSet);
+  });
+
+  group('a checkpoint with a sidecar', () {
+    /// The same fixture, with a 2 KiB MTP head on the prose entry.
+    const int head = 2048;
+
+    setUp(() => manifest = testManifest(proseSidecar: testSidecar()));
+
+    Future<void> writeDraftDone() async {
+      final file = manifest.byRole(ModelRole.prose);
+      final path = p.join(folder(), file.sidecarRelativePath!);
+      await Directory(p.dirname(path)).create(recursive: true);
+      await File(path).writeAsBytes(List.filled(file.sidecar!.sizeBytes, 0));
+    }
+
+    Future<void> writeDraftPart(int length) async {
+      final file = manifest.byRole(ModelRole.prose);
+      // The downloader's own suffix, not a literal: the only part worth
+      // discounting is one the run would actually find.
+      final path = '${p.join(folder(), file.sidecarRelativePath!)}'
+          '${ModelDownloader.partSuffix}';
+      await Directory(p.dirname(path)).create(recursive: true);
+      await File(path).writeAsBytes(List.filled(length, 0));
+    }
+
+    test('its bytes are part of the budget', () async {
+      final check = await checkDisk(
+        system: system,
+        manifest: manifest,
+        ledger: DownloadLedger.empty,
+        folder: folder(),
+      );
+
+      expect(check.neededBytes, wholeSet + head);
+    });
+
+    test('its own part discounts its own remainder', () async {
+      await writeDraftPart(500);
+
+      final check = await checkDisk(
+        system: system,
+        manifest: manifest,
+        ledger: DownloadLedger.empty,
+        folder: folder(),
+      );
+
+      expect(check.neededBytes, wholeSet + head - 500);
+    });
+
+    test('the weights can be paid for while the head is not', () async {
+      // The parent is done and here; the head is not. `isCurrent` is false
+      // for the entry, and a preflight that asked it would re-budget
+      // eighteen gigabytes that are already on the volume.
+      final prose = manifest.byRole(ModelRole.prose);
+      await writeDone(prose.id);
+      final ledger = DownloadLedger.empty.record(FileDownloadState(
+        id: prose.id,
+        status: DownloadStatus.done,
+        sha256: prose.sha256,
+      ));
+      expect(ledger.isCurrent(prose), isFalse);
+
+      final check = await checkDisk(
+        system: system,
+        manifest: manifest,
+        ledger: ledger,
+        folder: folder(),
+      );
+
+      expect(check.neededBytes, wholeSet - 16384 + head);
+    });
+
+    test('both rows done and both files here cost nothing', () async {
+      final prose = manifest.byRole(ModelRole.prose);
+      await writeDone(prose.id);
+      await writeDraftDone();
+      final ledger = DownloadLedger.empty
+          .record(FileDownloadState(
+            id: prose.id,
+            status: DownloadStatus.done,
+            sha256: prose.sha256,
+          ))
+          .record(FileDownloadState(
+            id: DownloadLedger.draftId(prose.id),
+            status: DownloadStatus.done,
+            sha256: prose.sidecar!.sha256,
+          ));
+      expect(ledger.isCurrent(prose), isTrue);
+
+      final check = await checkDisk(
+        system: system,
+        manifest: manifest,
+        ledger: ledger,
+        folder: folder(),
+      );
+
+      expect(check.neededBytes, wholeSet - 16384);
+    });
+
+    test('a head part at the previous digest is not resumed into', () async {
+      // The `.draft` row disagreeing with the manifest is a bumped head, and
+      // the part is full of the previous one's bytes.
+      final prose = manifest.byRole(ModelRole.prose);
+      await writeDraftPart(500);
+      final ledger = DownloadLedger.empty.record(FileDownloadState(
+        id: DownloadLedger.draftId(prose.id),
+        status: DownloadStatus.paused,
+        sha256: 'e' * 64,
+      ));
+
+      final check = await checkDisk(
+        system: system,
+        manifest: manifest,
+        ledger: ledger,
+        folder: folder(),
+      );
+
+      expect(check.neededBytes, wholeSet + head);
+    });
   });
 }

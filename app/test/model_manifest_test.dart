@@ -62,6 +62,15 @@ Map<String, Object?> proseJson() => {
       'serverArgs': {'c': '32768'},
     };
 
+/// A well-formed sidecar, for the refusals to break one field of at a time.
+Map<String, Object?> sidecarJson() => {
+      'file': 'mtp-Qwen3.8-27B-Q4_0.gguf',
+      'revision': '0669b98607d47046c7c2b3f801011d54a08cfccf',
+      'sha256':
+          '051a1764cff8c4f3ee6ae8b00593a0364c7539c67fa50ffc58f3f96509fca38e',
+      'sizeBytes': 1680271648,
+    };
+
 Map<String, Object?> fullTierJson() => {
       'id': 'full',
       'minRamBytes': fullTierMinBytes,
@@ -124,7 +133,55 @@ void main() {
         manifest.byId(routerProseId).sha256,
         '31629f53165ab6a7dad8c9847dcfd1fdf55829dac1e6e748f4a68581b0033d34',
       );
-      expect(manifest.totalBytes, 639150592 + 4280403520 + 18973870432);
+      expect(
+        manifest.totalBytes,
+        639150592 + 4280403520 + 18973870432 + 1680271648,
+      );
+    });
+
+    test('the prose entry ships its MTP head, at the parent commit', () {
+      final prose = realManifest().byRole(ModelRole.prose);
+      final head = prose.sidecar!;
+
+      expect(head.file, 'mtp-Qwen3.8-27B-Q4_0.gguf');
+      expect(head.sizeBytes, 1680271648);
+      expect(
+        head.sha256,
+        '051a1764cff8c4f3ee6ae8b00593a0364c7539c67fa50ffc58f3f96509fca38e',
+      );
+      // ONE commit for both files. The head is only a draft for the weights
+      // published beside it, so a sidecar resolved from another revision
+      // would be a tokenizer mismatch at startup.
+      expect(head.revision, prose.revision);
+
+      // And the flag that needs it travels with it: the manifest may carry
+      // `spec-type` only because it now ships the sidecar the flag looks for.
+      expect(prose.serverArgs['spec-type'], 'draft-mtp');
+    });
+
+    test('a checkpoint with no sidecar answers null for all of it', () {
+      final embed = realManifest().byRole(ModelRole.embed);
+
+      expect(embed.sidecar, isNull);
+      expect(embed.sidecarRelativePath, isNull);
+      expect(embed.sidecarResolveUri, isNull);
+      expect(embed.downloadBytes, embed.sizeBytes);
+    });
+
+    test('the sidecar path and URI sit in the parent repo, at its revision',
+        () {
+      final prose = realManifest().byRole(ModelRole.prose);
+
+      expect(
+        prose.sidecarRelativePath,
+        'ggml-org_Qwen3.8-27B-GGUF/mtp-Qwen3.8-27B-Q4_0.gguf',
+      );
+      expect(
+        prose.sidecarResolveUri.toString(),
+        'https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF/resolve/'
+        '0669b98607d47046c7c2b3f801011d54a08cfccf/mtp-Qwen3.8-27B-Q4_0.gguf',
+      );
+      expect(prose.downloadBytes, 18973870432 + 1680271648);
     });
 
     test('every revision is a commit sha, never a branch', () {
@@ -193,9 +250,11 @@ load-on-startup = true
 
 [bond-prose]
 model = /tmp/Bond Models/ggml-org_Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf
+model-draft = /tmp/Bond Models/ggml-org_Qwen3.8-27B-GGUF/mtp-Qwen3.8-27B-Q4_0.gguf
 c = 16384
 parallel = 1
 load-on-startup = true
+spec-type = draft-mtp
 ''');
     });
 
@@ -217,6 +276,57 @@ load-on-startup = true
     test('toJson round-trips to an equal manifest', () {
       final manifest = realManifest();
       expect(ModelManifest.parse(jsonEncode(manifest.toJson())), manifest);
+    });
+
+    test('the sidecar round-trips, and a different head is a different entry',
+        () {
+      final prose = realManifest().byRole(ModelRole.prose);
+
+      expect(
+        ModelSidecar.fromJson(
+          jsonDecode(jsonEncode(prose.sidecar!.toJson()))
+              as Map<String, Object?>,
+        ),
+        prose.sidecar,
+      );
+
+      // `==` and `hashCode` have to see it. A build whose manifest bumped
+      // only the head would otherwise compare equal to the previous one, and
+      // nothing downstream would notice the draft had moved.
+      final other = ModelFile(
+        id: prose.id,
+        role: prose.role,
+        displayName: prose.displayName,
+        repo: prose.repo,
+        file: prose.file,
+        revision: prose.revision,
+        sizeBytes: prose.sizeBytes,
+        sha256: prose.sha256,
+        minRamBytes: prose.minRamBytes,
+        license: prose.license,
+        licenseUrl: prose.licenseUrl,
+        serverArgs: prose.serverArgs,
+        sidecar: ModelSidecar(
+          file: prose.sidecar!.file,
+          revision: prose.sidecar!.revision,
+          sha256: 'f' * 64,
+          sizeBytes: prose.sidecar!.sizeBytes,
+        ),
+      );
+      expect(other, isNot(prose));
+      expect(other.hashCode, isNot(prose.hashCode));
+    });
+
+    test('a tier override keeps the sidecar it merged onto', () {
+      // `withArgs` rebuilds the entry field by field, and a sidecar dropped
+      // there would be a preset with no `model-draft` on the very machines a
+      // tier narrows.
+      final prose = realManifest().byRole(ModelRole.prose);
+      final narrowed = prose.withArgs(const {'c': '8192'});
+
+      expect(narrowed.serverArgs['c'], '8192');
+      expect(narrowed.sidecar, prose.sidecar);
+      expect(narrowed.toSpec().draftFile, 'mtp-Qwen3.8-27B-Q4_0.gguf');
     });
   });
 
@@ -328,8 +438,13 @@ load-on-startup = true
       final manifest = realManifest();
       final inbox = manifest.forTier(MachineTier.inbox);
 
+      // The inbox tier never takes the writing model, so it never takes the
+      // head either: two files, and neither of them a sidecar.
       expect(inbox.totalBytes, 639150592 + 4280403520);
-      expect(manifest.totalBytes, 639150592 + 4280403520 + 18973870432);
+      expect(
+        manifest.totalBytes,
+        639150592 + 4280403520 + 18973870432 + 1680271648,
+      );
       expect([for (final m in inbox.bySize) m.id],
           [routerEmbedId, routerBulkId]);
       expect(
@@ -422,6 +537,58 @@ load-on-startup = true
         proseJson(),
       ]),
       contains('sha256'),
+    );
+
+    refuses(
+      'a sidecar sha256 of the wrong length',
+      manifestText([
+        embedJson(),
+        bulkJson(),
+        {...proseJson(), 'sidecar': {...sidecarJson(), 'sha256': 'abc123'}},
+      ]),
+      equals('manifest: "sidecar.sha256" must be 64 lower-case hex '
+          'characters'),
+    );
+
+    refuses(
+      'a sidecar revision that is a branch name',
+      manifestText([
+        embedJson(),
+        bulkJson(),
+        {...proseJson(), 'sidecar': {...sidecarJson(), 'revision': 'main'}},
+      ]),
+      startsWith('manifest: "sidecar.revision" must be a 40-character '
+          'lower-case commit sha'),
+    );
+
+    refuses(
+      'a sidecar with no size',
+      manifestText([
+        embedJson(),
+        bulkJson(),
+        {...proseJson(), 'sidecar': {...sidecarJson(), 'sizeBytes': 0}},
+      ]),
+      equals('manifest: "sidecar.sizeBytes" must be positive'),
+    );
+
+    refuses(
+      'a sidecar with no file name',
+      manifestText([
+        embedJson(),
+        bulkJson(),
+        {...proseJson(), 'sidecar': {...sidecarJson(), 'file': ''}},
+      ]),
+      equals('manifest: "sidecar.file" must be a non-empty string'),
+    );
+
+    refuses(
+      'a sidecar that is not an object',
+      manifestText([
+        embedJson(),
+        bulkJson(),
+        {...proseJson(), 'sidecar': 'mtp-Qwen3.8-27B-Q4_0.gguf'},
+      ]),
+      equals('manifest: "sidecar" must be an object or null'),
     );
 
     refuses(

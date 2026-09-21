@@ -142,17 +142,16 @@ void main() {
       );
     });
 
-    test('the prose spec-type agrees, or the manifest carries none', () {
-      // `--spec-type` is a plain long flag, so the preset INI could carry it
-      // as `spec-type = draft-mtp`. It deliberately does not: the managed
-      // server is pointed at a local path rather than a repo, and llama-server
-      // resolves the MTP head from the repo the `-hf` download came from, so
-      // there would be no sidecar for it to load. Either the manifest stays
-      // silent about speculation, or it says exactly what `make model`
-      // launches with — a third answer is the drift this file exists to stop.
+    test('the prose spec-type is the one the Makefile launches with', () {
+      // The manifest carries the flag because it now SHIPS the file the flag
+      // needs: the prose entry has an `mtp-…` sidecar, the preset names it as
+      // `model-draft`, and the downloader fetches it. `make model` gets the
+      // same head from the repo its `-hf` download came from. Two routes to
+      // one configuration, and a spec type that differed between them would
+      // mean the ledger's rows describe a server nobody runs.
       expect(
         full.byId(routerProseId).serverArgs['spec-type'],
-        anyOf(isNull, equals(defaults['SPEC_TYPE'])),
+        equals(defaults['SPEC_TYPE']),
         reason: 'SPEC_TYPE in ../Makefile is ${defaults['SPEC_TYPE']}; '
             'app/assets/models/manifest.json gives the prose entry '
             'spec-type = '
@@ -210,7 +209,13 @@ String? _skipReason(File makefile) => makefile.existsSync()
 /// is left as it was written, and nothing here reads one.
 Map<String, String> _makeDefaults(String text) {
   final defaults = <String, String>{};
-  final pattern = RegExp(r'^([A-Z_][A-Z0-9_]*)\s*\?=\s*(.*)$', multiLine: true);
+  // Spaces and tabs around `?=`, never `\s`: `\s` matches a newline, so an
+  // EMPTY default (`DRAFT_HF ?=`) swallowed the line under it and recorded
+  // that line's text as this variable's value — which also meant the variable
+  // on it was never seen at all. `SPEC_TYPE` sits under `DRAFT_HF` and was
+  // invisible here until Round G asked the manifest to agree with it.
+  final pattern =
+      RegExp(r'^([A-Z_][A-Z0-9_]*)[ \t]*\?=[ \t]*(.*)$', multiLine: true);
   for (final match in pattern.allMatches(text)) {
     final value = match.group(2)!.trim();
     if (value.isEmpty) continue;

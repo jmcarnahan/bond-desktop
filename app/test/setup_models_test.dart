@@ -18,12 +18,17 @@ import 'fixtures/test_manifest.dart';
 /// in `assets/models/manifest.json`, formatted the way the rest of the app
 /// formats bytes.
 void main() {
-  /// The real sizes, so the rows below say what a real first run says.
-  final manifest = testManifest(sizes: {
-    routerEmbedId: 639150592,
-    routerBulkId: 4280403520,
-    routerProseId: 18973870432,
-  });
+  /// The real sizes, so the rows below say what a real first run says — the
+  /// writing model's MTP head among them, because it is a real file the real
+  /// download fetches and the footer really totals.
+  final manifest = testManifest(
+    sizes: {
+      routerEmbedId: 639150592,
+      routerBulkId: 4280403520,
+      routerProseId: 18973870432,
+    },
+    proseSidecar: testSidecar(sizeBytes: 1680271648),
+  );
 
   Future<void> open(
     WidgetTester tester, {
@@ -57,13 +62,16 @@ void main() {
     expect(find.text('610 MB'), findsOneWidget);
     expect(find.text('4.0 GB'), findsOneWidget);
     expect(find.text('17.7 GB'), findsOneWidget);
+    // Two files, one row: the head is said under the size it adds to, so a
+    // person reading the total can see where the difference came from.
+    expect(find.text('+ MTP head, 1.6 GB'), findsOneWidget);
   });
 
   testWidgets('the footer totals what is about to be downloaded',
       (tester) async {
     await open(tester);
 
-    expect(find.text('Total download: 22.3 GB'), findsOneWidget);
+    expect(find.text('Total download: 23.8 GB'), findsOneWidget);
     expect(
       find.text('Bond downloads three models from Hugging Face. They run on '
           'this Mac and never send your mail anywhere.'),
@@ -87,6 +95,8 @@ void main() {
     expect(find.text('Writes drafts and replies'), findsNothing);
     expect(find.text('Total download: 4.6 GB'), findsOneWidget);
     expect(find.text('17.7 GB'), findsNothing);
+    // No writing model on this tier, so no head either.
+    expect(find.text('+ MTP head, 1.6 GB'), findsNothing);
   });
 
   testWidgets('a full Mac is told three models, and totalled for three',
@@ -94,7 +104,7 @@ void main() {
     await open(tester, which: manifest.forTier(MachineTier.full));
 
     expect(find.text('Writes drafts and replies'), findsOneWidget);
-    expect(find.text('Total download: 22.3 GB'), findsOneWidget);
+    expect(find.text('Total download: 23.8 GB'), findsOneWidget);
   });
 
   testWidgets('the licence opens through the host, and hides when unwired',

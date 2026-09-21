@@ -933,6 +933,13 @@ class SetupController extends StateNotifier<SetupState> {
     for (final model in resolvedManifest.models) {
       if (!ledger.isCurrent(model)) return false;
       if (!File(p.join(folder, model.relativePath)).existsSync()) return false;
+      // The sidecar as well, on the same reasoning: the preset names it as
+      // `model-draft` and the server is started `--offline`, so a Continue
+      // granted without it hands over a server that will not start.
+      final draft = model.sidecarRelativePath;
+      if (draft != null && !File(p.join(folder, draft)).existsSync()) {
+        return false;
+      }
     }
     return true;
   }
