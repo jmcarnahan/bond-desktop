@@ -21,43 +21,33 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
 import 'fixtures/fake_embed_server.dart';
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/vec_test_db.dart';
 
-/// An [LlmClient] that answers from a script, records what it was asked, and
-/// never opens a socket.
-class FakeLlm extends LlmClient {
-  final List<Object> script;
-  final List<String> userMessages = [];
-  final List<double> temperatures = [];
-  final List<int> tokenBudgets = [];
-
-  /// Which task each call was, in order — `reply_decision` then `draft_reply`
-  /// on the eager path, and `draft_reply` alone when a person asked.
-  final List<String> schemaNames = [];
-
-  FakeLlm(this.script) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    userMessages.add(user);
-    schemaNames.add(schemaName);
-    temperatures.add(temperature);
-    tokenBudgets.add(maxTokens);
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-    final step = script.length > 1 ? script.removeAt(0) : script.first;
-    if (step is Exception) throw step;
-    return Map<String, dynamic>.from(step as Map);
-  }
+/// A client scripted by TASK rather than by position: the handler asks
+/// `reply_decision` first and `draft_reply` second on the eager path, and
+/// `draft_reply` alone when a person asked, so the two named steps say which
+/// half of the pair a test is scripting.
+///
+/// [chunks] is what a STREAMED draft call pushes through `onText`; the plain
+/// calls never touch it. A streamed call still answers with its [draft] step,
+/// which is either the chunks [decoded] or the failure the stream dies with.
+ScriptedLlm draftClient({
+  Object? decision,
+  Object? draft,
+  List<String> chunks = draftChunks,
+}) {
+  final llm = ScriptedLlm();
+  if (decision != null) llm.answer('reply_decision', decision);
+  if (draft != null) llm.answer('draft_reply', draft);
+  llm.streamChunks = chunks;
+  return llm;
 }
+
+/// The whole answer a run of chunks reassembles into.
+Map<String, dynamic> decoded(List<String> chunks) =>
+    jsonDecode(chunks.join()) as Map<String, dynamic>;
 
 /// A store whose `upsertDraft` refuses. Everything else is the real thing:
 /// the handler reads a real thread out of it and only the write fails, which
@@ -80,50 +70,8 @@ class RefusingStore extends MessageStore {
   }
 }
 
-/// A [FakeLlm] whose DRAFT call streams, in chunks that split the answer in
-/// awkward places — mid-key, mid-word, mid-escape.
-///
-/// It overrides only the new method. `completeJson` is inherited untouched, so
-/// the decision call still runs exactly as it does in every other test here,
-/// and a handler given no bus still reaches the inherited one.
-class StreamingFakeLlm extends FakeLlm {
-  StreamingFakeLlm(super.script, {this.chunks = draftChunks, this.throws});
-
-  /// The draft, in pieces. Concatenated they are the whole answer.
-  final List<String> chunks;
-
-  /// Thrown after the last chunk, for the failure case.
-  final Object? throws;
-
-  int streamedCalls = 0;
-
-  @override
-  Future<Map<String, dynamic>> completeJsonStreamed({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-    required void Function(String delta) onText,
-  }) async {
-    streamedCalls++;
-    userMessages.add(user);
-    schemaNames.add(schemaName);
-    temperatures.add(temperature);
-    tokenBudgets.add(maxTokens);
-    for (final chunk in chunks) {
-      onText(chunk);
-      await Future<void>.delayed(Duration.zero);
-    }
-    final failure = throws;
-    if (failure != null) throw failure;
-    return jsonDecode(chunks.join()) as Map<String, dynamic>;
-  }
-}
-
-/// One draft answer, cut into three.
+/// One draft answer, cut into three. The chunks split it in awkward places —
+/// mid-key, mid-word, mid-escape.
 const List<String> draftChunks = [
   '{"evidence":"Sarah is waiting on a date.","options":[{"stance":"Conf',
   'irm","reply_body":"Thursday still works."},{"stance":"Push","reply_bo'
@@ -399,7 +347,7 @@ void main() {
         () async {
       await seedInbound(id: 'm1', receivedAt: '2026-08-20T10:00:00Z');
       await seedInbound(id: 'm2', receivedAt: '2026-08-29T10:00:00Z');
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress), id: 'm1');
 
@@ -421,7 +369,7 @@ void main() {
 
     test('the decision runs first, cheap, and the draft after it', () async {
       await seedInbound();
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
@@ -436,7 +384,11 @@ void main() {
       await seedInbound();
 
       await runOne(
-        DraftHandler(store, FakeLlm([decision(), answer()]), progress: progress),
+        DraftHandler(
+          store,
+          draftClient(decision: decision(), draft: answer()),
+          progress: progress,
+        ),
       );
 
       final row = await progressOf('m2');
@@ -462,7 +414,11 @@ void main() {
       expect((await progressOf('m2'))['outcome'], 'pending');
 
       await runOne(
-        DraftHandler(store, FakeLlm([decision(), answer()]), progress: progress),
+        DraftHandler(
+          store,
+          draftClient(decision: decision(), draft: answer()),
+          progress: progress,
+        ),
       );
 
       expect((await progressOf('m2'))['outcome'], 'done');
@@ -472,10 +428,13 @@ void main() {
   group('the decision', () {
     test('a no stores nothing and spends one call', () async {
       await seedInbound();
-      final llm = FakeLlm([
-        decision(needsReply: false, reason: 'A receipt, nobody is waiting.'),
-        answer(),
-      ]);
+      final llm = draftClient(
+        decision: decision(
+          needsReply: false,
+          reason: 'A receipt, nobody is waiting.',
+        ),
+        draft: answer(),
+      );
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
@@ -495,13 +454,10 @@ void main() {
 
       await runOne(DraftHandler(
         store,
-        FakeLlm([
-          decision(
+        draftClient(decision: decision(
             needsReply: false,
             reason: 'A receipt, nobody is waiting.',
-          ),
-          answer(),
-        ]),
+          ), draft: answer()),
         activityLog: log,
         progress: progress,
       ));
@@ -513,7 +469,7 @@ void main() {
     test('reads the message and the thread before it', () async {
       await seedOutbound(body: 'What is the current expiry? — Jo');
       await seedInbound(body: 'It expires Wednesday.');
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
@@ -534,7 +490,7 @@ void main() {
         receivedAt: '2026-08-29T10:00:00Z',
         body: 'Never mind, we shipped it.',
       );
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress), id: 'm1');
 
@@ -548,7 +504,7 @@ void main() {
 
     test('a draft a person asked for skips the decision entirely', () async {
       await seedInbound();
-      final llm = FakeLlm([answer()]);
+      final llm = draftClient(draft: answer());
       final log = _Recorder();
 
       await DraftHandler(store, llm, activityLog: log, progress: progress).run({
@@ -571,7 +527,7 @@ void main() {
       await seedInbound();
       final retriever = FakeRetriever(store);
       final directories = FakeContextRetriever(store, ContextStore(db));
-      final llm = FakeLlm([answer()]);
+      final llm = draftClient(draft: answer());
 
       await DraftHandler(
         store,
@@ -593,7 +549,7 @@ void main() {
 
     test('a malformed payload still runs the decision', () async {
       await seedInbound();
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
       final log = _Recorder();
 
       await DraftHandler(store, llm, activityLog: log, progress: progress).run({
@@ -611,7 +567,7 @@ void main() {
 
     test('only the literal true skips it', () async {
       await seedInbound();
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await DraftHandler(store, llm, progress: progress).run({
         'task_kind': 'draft',
@@ -636,7 +592,7 @@ void main() {
       );
       await seedInbound();
 
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress));
 
       expect(llm.userMessages.last, contains('style_examples'));
@@ -647,7 +603,7 @@ void main() {
       await seedOutbound(key: 'conv-0', to: 'someone.else@x.com');
       await seedInbound();
 
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress));
 
       expect(llm.userMessages.last, isNot(contains('style_examples')));
@@ -666,7 +622,7 @@ void main() {
       );
       await seedInbound();
 
-      final quiet = FakeLlm([decision(), answer()]);
+      final quiet = draftClient(decision: decision(), draft: answer());
       await runOne(DraftHandler(store, quiet, progress: progress));
       expect(quiet.userMessages.last, contains('style_examples'));
 
@@ -681,7 +637,7 @@ void main() {
       );
       await seedInbound(id: 'm3', key: 'conv-2');
 
-      final spoken = FakeLlm([decision(), answer()]);
+      final spoken = draftClient(decision: decision(), draft: answer());
       await runOne(DraftHandler(store, spoken, progress: progress), id: 'm3');
 
       expect(spoken.userMessages.last, isNot(contains('style_examples')));
@@ -709,7 +665,7 @@ void main() {
         );
       }
 
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress), id: 'm34');
 
       final prompt = llm.userMessages.last;
@@ -728,7 +684,7 @@ void main() {
       await seedInbound();
       await store.setPref(aboutMeKey, 'I own the website redesign and the launch.');
 
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress));
 
       // Both calls get it: who the owner is decides whether THEY have to
@@ -750,7 +706,7 @@ void main() {
       );
       await store.addStorylineMember('s1', 'email', 'conv-1', addedBy: 'auto');
 
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress));
 
       expect(llm.userMessages.last, contains('storyline_summary'));
@@ -761,7 +717,7 @@ void main() {
       await seedOutbound(body: 'What is the current expiry? — Jo');
       await seedInbound(body: 'It expires Wednesday.');
 
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress));
 
       expect(llm.userMessages.last, contains('What is the current expiry?'));
@@ -775,7 +731,7 @@ void main() {
       );
       await seedInbound();
 
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress));
 
       expect(llm.userMessages.last, contains('This is an email thread.'));
@@ -791,7 +747,7 @@ void main() {
       );
       await seedInbound();
 
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress));
 
       expect(llm.userMessages.last, isNot(contains('[[att:')));
@@ -815,7 +771,7 @@ void main() {
           'size': 0,
         },
       ]);
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(
         DraftHandler(store, llm, progress: progress),
@@ -829,10 +785,10 @@ void main() {
 
     test('and gets the chat channel note, not the email one', () async {
       await seedChat();
-      final llm = FakeLlm([
-        decision(),
-        answer(replyBody: 'Sending it over now.'),
-      ]);
+      final llm = draftClient(
+        decision: decision(),
+        draft: answer(replyBody: 'Sending it over now.'),
+      );
 
       await runOne(
         DraftHandler(store, llm, progress: progress),
@@ -866,7 +822,7 @@ void main() {
         'received_at': '2026-08-28T10:00:00Z',
         'body_text': 'On it — will check this afternoon.',
       });
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(
         DraftHandler(store, llm, progress: progress),
@@ -885,7 +841,7 @@ void main() {
     test('and its thread lines name the sender rather than the Graph id',
         () async {
       await seedChat();
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(
         DraftHandler(store, llm, progress: progress),
@@ -901,7 +857,7 @@ void main() {
   group('the documents in the prompt', () {
     test('one retrieval reaches both the decision and the draft', () async {
       await seedInbound();
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
       final retriever = FakeRetriever(store, answer: [excerpt()]);
 
       await runOne(DraftHandler(store, llm, attachments: retriever));
@@ -924,7 +880,7 @@ void main() {
       final retriever = FakeRetriever(store);
 
       await runOne(
-        DraftHandler(store, FakeLlm([decision(), answer()]),
+        DraftHandler(store, draftClient(decision: decision(), draft: answer()),
             attachments: retriever),
         id: 'm1',
       );
@@ -937,7 +893,7 @@ void main() {
     test('a handler built with no retriever drafts exactly as before',
         () async {
       await seedInbound();
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(DraftHandler(store, llm));
 
@@ -954,7 +910,7 @@ void main() {
 
       await DraftHandler(
         store,
-        FakeLlm([decision(), answer()]),
+        draftClient(decision: decision(), draft: answer()),
         attachments: retriever,
       ).run({
         'task_kind': 'draft',
@@ -975,7 +931,7 @@ void main() {
 
       await DraftHandler(
         store,
-        FakeLlm([decision(), answer()]),
+        draftClient(decision: decision(), draft: answer()),
         attachments: retriever,
       ).run({
         'task_kind': 'draft',
@@ -994,7 +950,7 @@ void main() {
           FakeRetriever(store, throws: StateError('the index fell over'));
 
       await runOne(
-        DraftHandler(store, FakeLlm([decision(), answer()]),
+        DraftHandler(store, draftClient(decision: decision(), draft: answer()),
             attachments: retriever),
       );
 
@@ -1006,7 +962,7 @@ void main() {
   group("the owner's own directories in the prompt", () {
     test('one pack reaches both the decision and the draft', () async {
       await seedInbound();
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
       final directories = FakeContextRetriever(store, ContextStore(db),
           answer: directoryPack());
 
@@ -1040,7 +996,7 @@ void main() {
       final directories = FakeContextRetriever(store, ContextStore(db));
 
       await runOne(
-        DraftHandler(store, FakeLlm([decision(), answer()]),
+        DraftHandler(store, draftClient(decision: decision(), draft: answer()),
             contextDirs: directories),
       );
 
@@ -1055,7 +1011,7 @@ void main() {
       await runOne(
         DraftHandler(
           store,
-          FakeLlm([decision(), answer()]),
+          draftClient(decision: decision(), draft: answer()),
           attachments: FakeRetriever(store, answer: [excerpt()]),
           contextDirs: directories,
         ),
@@ -1084,7 +1040,9 @@ void main() {
         () async {
       await seedInbound();
 
-      await runOne(DraftHandler(store, FakeLlm([decision(), answer()])));
+      await runOne(
+        DraftHandler(store, draftClient(decision: decision(), draft: answer())),
+      );
 
       final row = (await store.getDraftForMessage('email', 'm2'))!;
       // Null rather than an empty object: "nothing was read" and "the column
@@ -1104,7 +1062,7 @@ void main() {
 
       await runOne(DraftHandler(
         store,
-        FakeLlm([decision(), answer()]),
+        draftClient(decision: decision(), draft: answer()),
         contextDirs: FakeContextRetriever(
           store,
           ContextStore(db),
@@ -1129,7 +1087,7 @@ void main() {
 
       await runOne(DraftHandler(
         store,
-        FakeLlm([decision(), answer()]),
+        draftClient(decision: decision(), draft: answer()),
         activityLog: log,
         attachments: FakeRetriever(store, answer: [excerpt()]),
         contextDirs: FakeContextRetriever(store, ContextStore(db),
@@ -1153,7 +1111,7 @@ void main() {
 
       await DraftHandler(
         store,
-        FakeLlm([decision(), answer()]),
+        draftClient(decision: decision(), draft: answer()),
         activityLog: log,
         contextDirs: directories,
       ).run({
@@ -1176,7 +1134,7 @@ void main() {
 
       await DraftHandler(
         store,
-        FakeLlm([decision(), answer()]),
+        draftClient(decision: decision(), draft: answer()),
         activityLog: log,
         contextDirs: directories,
       ).run({
@@ -1200,7 +1158,7 @@ void main() {
 
       await runOne(DraftHandler(
         store,
-        FakeLlm([decision(), answer()]),
+        draftClient(decision: decision(), draft: answer()),
         activityLog: log,
         contextDirs: directories,
       ));
@@ -1244,7 +1202,7 @@ void main() {
 
       await runOne(DraftHandler(
         store,
-        FakeLlm([decision(), answer()]),
+        draftClient(decision: decision(), draft: answer()),
         activityLog: log,
         contextDirs: directories,
       ));
@@ -1260,7 +1218,7 @@ void main() {
 
       await runOne(DraftHandler(
         store,
-        FakeLlm([decision(), answer()]),
+        draftClient(decision: decision(), draft: answer()),
         activityLog: log,
         contextDirs: FakeContextRetriever(store, ContextStore(db),
             answer: directoryPack()),
@@ -1277,7 +1235,7 @@ void main() {
 
       await runOne(DraftHandler(
         store,
-        FakeLlm([decision(), answer()]),
+        draftClient(decision: decision(), draft: answer()),
         activityLog: log,
         contextDirs: FakeContextRetriever(store, ContextStore(db),
             throws: StateError('the index fell over')),
@@ -1360,7 +1318,7 @@ void main() {
 
       await DraftHandler(
         vecStore,
-        FakeLlm([decision(), answer()]),
+        draftClient(decision: decision(), draft: answer()),
         attachments: AttachmentRetriever(vecStore, embed.client),
         contextDirs: ContextRetriever(vecStore, directories, embed.client),
         embeddings: embed.client,
@@ -1375,7 +1333,7 @@ void main() {
     test('a handler built with no retriever drafts exactly as before',
         () async {
       await seedInbound();
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(DraftHandler(store, llm));
 
@@ -1394,7 +1352,7 @@ void main() {
         replyToMessageId: 'm2',
         body: 'an existing draft',
       );
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
@@ -1406,7 +1364,7 @@ void main() {
     });
 
     test('a message that vanished is done, not failed', () async {
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
@@ -1416,7 +1374,7 @@ void main() {
 
     test('the user\'s own message is skipped', () async {
       await seedOutbound();
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress), id: 'o1');
 
@@ -1427,7 +1385,7 @@ void main() {
 
     test('a message triage gated after the enqueue is skipped', () async {
       await seedInbound(triageStatus: 'skipped', gateReason: 'newsletter');
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
@@ -1449,7 +1407,7 @@ void main() {
         'triage_status': 'skipped',
         'gate_reason': 'teams_source',
       });
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(
         DraftHandler(store, llm, progress: progress),
@@ -1464,13 +1422,13 @@ void main() {
   group('the short replies', () {
     test('are stored beside the long form, stance and body', () async {
       await seedInbound();
-      final llm = FakeLlm([
-        decision(),
-        answer(options: const [
+      final llm = draftClient(
+        decision: decision(),
+        draft: answer(options: const [
           {'stance': 'Confirm Thursday', 'reply_body': 'Thursday still works.'},
           {'stance': 'Propose Monday', 'reply_body': 'Could we say Monday?'},
         ]),
-      ]);
+      );
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
@@ -1490,7 +1448,11 @@ void main() {
       await seedInbound();
 
       await runOne(
-        DraftHandler(store, FakeLlm([decision(), answer()]), progress: progress),
+        DraftHandler(
+          store,
+          draftClient(decision: decision(), draft: answer()),
+          progress: progress,
+        ),
       );
 
       expect((await store.getDraftForMessage('email', 'm2'))!['options_json'],
@@ -1499,13 +1461,13 @@ void main() {
 
     test('a half-written option does not reach the row', () async {
       await seedInbound();
-      final llm = FakeLlm([
-        decision(),
-        answer(options: const [
+      final llm = draftClient(
+        decision: decision(),
+        draft: answer(options: const [
           {'stance': '', 'reply_body': 'unlabelled'},
           {'stance': 'Confirm Thursday', 'reply_body': 'Thursday still works.'},
         ]),
-      ]);
+      );
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
@@ -1522,12 +1484,12 @@ void main() {
       // The long form is the product; options that arrived alongside a blank
       // reply are not a reason to store a draft the worker should retry.
       await seedInbound();
-      final llm = FakeLlm([
-        decision(),
-        answer(replyBody: '   ', options: const [
+      final llm = draftClient(
+        decision: decision(),
+        draft: answer(replyBody: '   ', options: const [
           {'stance': 'Confirm Thursday', 'reply_body': 'Thursday works.'},
         ]),
-      ]);
+      );
 
       await expectLater(
         runOne(DraftHandler(store, llm, progress: progress)),
@@ -1538,7 +1500,8 @@ void main() {
 
     test('throws rather than storing a blank suggestion', () async {
       await seedInbound();
-      final llm = FakeLlm([decision(), answer(replyBody: '   ')]);
+      final llm =
+          draftClient(decision: decision(), draft: answer(replyBody: '   '));
 
       await expectLater(
         runOne(DraftHandler(store, llm, progress: progress)),
@@ -1550,12 +1513,8 @@ void main() {
     test('and the worker retries it once, then gives up', () async {
       await seedInbound();
       await store.enqueueWork('draft', 'email', 'm2');
-      final llm = FakeLlm([
-        decision(),
-        answer(replyBody: ''),
-        decision(),
-        answer(replyBody: ''),
-      ]);
+      final llm =
+          draftClient(decision: decision(), draft: answer(replyBody: ''));
       final worker = AiWorker(
         store,
         handlers: [DraftHandler(store, llm, progress: progress)],
@@ -1584,7 +1543,7 @@ void main() {
         handlers: [
           DraftHandler(
             store,
-            FakeLlm([decision(), answer()]),
+            draftClient(decision: decision(), draft: answer()),
             progress: progress,
           ),
         ],
@@ -1607,7 +1566,12 @@ void main() {
         handlers: [
           DraftHandler(
             store,
-            FakeLlm([const LlmUnavailableException('not reachable')]),
+            // The server is down, and the same failure is scripted for both
+            // halves so the test does not depend on which one is reached.
+            draftClient(
+              decision: const LlmUnavailableException('not reachable'),
+              draft: const LlmUnavailableException('not reachable'),
+            ),
             progress: progress,
           ),
         ],
@@ -1632,10 +1596,10 @@ void main() {
         handlers: [
           DraftHandler(
             store,
-            FakeLlm([
-              decision(),
-              const LlmUnavailableException('not reachable'),
-            ]),
+            draftClient(
+              decision: decision(),
+              draft: const LlmUnavailableException('not reachable'),
+            ),
             progress: progress,
           ),
         ],
@@ -1655,7 +1619,10 @@ void main() {
     test('one at a time when nobody says otherwise', () {
       // What every test in this file, every bench and a single-slot
       // llama-server gets.
-      expect(DraftHandler(store, FakeLlm([decision()])).concurrency, 1);
+      expect(
+        DraftHandler(store, draftClient(decision: decision())).concurrency,
+        1,
+      );
     });
 
     test('it reads the closure, every time it is asked', () {
@@ -1667,7 +1634,7 @@ void main() {
       var width = 2;
       final handler = DraftHandler(
         store,
-        FakeLlm([decision()]),
+        draftClient(decision: decision()),
         concurrency: () => width,
       );
 
@@ -1680,8 +1647,8 @@ void main() {
   group('two clients', () {
     test('the decision goes to one and the draft to the other', () async {
       await seedInbound();
-      final decider = FakeLlm([decision()]);
-      final writer = FakeLlm([answer()]);
+      final decider = draftClient(decision: decision());
+      final writer = draftClient(draft: answer());
 
       await runOne(
         DraftHandler(store, writer, decisionClient: decider, progress: progress),
@@ -1697,8 +1664,8 @@ void main() {
 
     test('a no from the decision client still costs no draft', () async {
       await seedInbound();
-      final decider = FakeLlm([decision(needsReply: false)]);
-      final writer = FakeLlm([answer()]);
+      final decider = draftClient(decision: decision(needsReply: false));
+      final writer = draftClient(draft: answer());
 
       await runOne(
         DraftHandler(store, writer, decisionClient: decider, progress: progress),
@@ -1711,7 +1678,7 @@ void main() {
 
     test('without one, both halves stay on the client it was given', () async {
       await seedInbound();
-      final only = FakeLlm([decision(), answer()]);
+      final only = draftClient(decision: decision(), draft: answer());
 
       await runOne(DraftHandler(store, only, progress: progress));
 
@@ -1739,7 +1706,7 @@ void main() {
       await runOne(
         DraftHandler(
           store,
-          StreamingFakeLlm([decision()]),
+          draftClient(decision: decision(), draft: decoded(draftChunks)),
           progress: progress,
           stream: bus,
         ),
@@ -1779,7 +1746,7 @@ void main() {
     test('a handler with no bus makes the plain call it always made',
         () async {
       await seedInbound();
-      final llm = StreamingFakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
@@ -1799,7 +1766,7 @@ void main() {
       final events = <DraftStreamEvent>[];
       final sub = bus.stream.listen(events.add);
       addTearDown(sub.cancel);
-      final llm = StreamingFakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
 
       await runOne(
         DraftHandler(
@@ -1827,7 +1794,8 @@ void main() {
       await seedInbound();
       final bus = DraftStreamBus();
       addTearDown(bus.dispose);
-      final llm = StreamingFakeLlm([decision()]);
+      final llm =
+          draftClient(decision: decision(), draft: decoded(draftChunks));
 
       await runOne(
         DraftHandler(
@@ -1854,9 +1822,9 @@ void main() {
         runOne(
           DraftHandler(
             store,
-            StreamingFakeLlm(
-              [decision()],
-              throws: const LlmFormatException('cut off mid-object'),
+            draftClient(
+              decision: decision(),
+              draft: const LlmFormatException('cut off mid-object'),
             ),
             progress: progress,
             stream: bus,
@@ -1889,7 +1857,7 @@ void main() {
         runOne(
           DraftHandler(
             refusing,
-            StreamingFakeLlm([decision()]),
+            draftClient(decision: decision(), draft: decoded(draftChunks)),
             progress: progress,
             stream: bus,
           ),
@@ -1915,12 +1883,11 @@ void main() {
         runOne(
           DraftHandler(
             store,
-            StreamingFakeLlm(
-              [decision()],
-              chunks: const [
+            draftClient(decision: decision(), draft: decoded(const [
                 '{"evidence":"nothing to say","options":[],"reply_body":""}',
-              ],
-            ),
+              ]), chunks: const [
+                '{"evidence":"nothing to say","options":[],"reply_body":""}',
+              ]),
             progress: progress,
             stream: bus,
           ),

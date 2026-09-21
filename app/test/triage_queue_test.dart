@@ -10,52 +10,29 @@ import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
-/// An [LlmClient] that answers from a script and never opens a socket.
+/// A [ScriptedLlm] that answers the triage schema from a script and never
+/// opens a socket.
 ///
 /// It records concurrency as well as calls: how many requests the drain has in
 /// flight is the number this phase is about, and a fake that only counted
-/// calls could not tell a serial drain from a three-at-a-time one.
-class FakeLlm extends LlmClient {
-  /// Answers in order. A `Map` is returned, an `Exception` is thrown, and a
-  /// `Future` is awaited first and then treated as whichever of those it
-  /// yields — which is the only way to hold one request open while the drain
-  /// gets on with the others. The last entry repeats once the script runs out.
-  final List<Object> script;
+/// calls could not tell a serial drain from a three-at-a-time one. Both
+/// numbers are `maxInFlight` and `userMessages` on the shared fixture.
+///
+/// [TriageQueue] runs one task, so one schema name carries the whole script.
+/// A request that has to be HELD open while the drain gets on with the others
+/// is a COMPUTED step returning a completer's future — see [heldAnswer].
+ScriptedLlm fakeLlm(List<Object> script) =>
+    ScriptedLlm()..scriptFor('triage', script);
 
-  final List<String> userMessages = [];
-  int inFlight = 0;
-  int maxInFlight = 0;
-
-  FakeLlm(this.script) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    userMessages.add(user);
-    inFlight++;
-    if (inFlight > maxInFlight) maxInFlight = inFlight;
-    try {
-      // A real call suspends; without a suspension here two overlapping pumps
-      // could interleave in a way the fake would never see.
-      await Future<void>.delayed(const Duration(milliseconds: 1));
-      var step = script.length > 1 ? script.removeAt(0) : script.first;
-      if (step is Future<Object>) step = await step;
-      if (step is Exception) throw step;
-      return Map<String, dynamic>.from(step as Map);
-    } finally {
-      inFlight--;
-    }
-  }
-}
+/// A step that answers with whatever [held] is eventually completed with,
+/// which is how a request stays at the server while the drain launches its
+/// siblings.
+Future<Map<String, dynamic>> Function(LlmCall) heldAnswer(
+        Completer<Map<String, dynamic>> held) =>
+    (_) => held.future;
 
 /// Stands in for `MailSync.ensureMessageBody`: records what it was asked for
 /// and writes the detail a real Graph fetch would have stored.
@@ -234,7 +211,7 @@ void main() {
       await seedMessage(id: 'm1', receivedAt: '2026-08-29T10:00:00Z');
       await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
       await seedMessage(id: 'm3', receivedAt: '2026-08-29T12:00:00Z');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final queue = TriageQueue(store, llm);
 
       // Two pumps started together: the second must find the first running
@@ -266,8 +243,8 @@ void main() {
       // exists for — choosing a message and writing its `processing` are one
       // statement, so whichever claim lands second cannot be handed a row the
       // first already took.
-      final first = FakeLlm([answer()]);
-      final second = FakeLlm([answer()]);
+      final first = fakeLlm([answer()]);
+      final second = fakeLlm([answer()]);
 
       await Future.wait([
         TriageQueue(store, first).pump(),
@@ -293,7 +270,7 @@ void main() {
       for (var i = 0; i < 10; i++) {
         await seedMessage(id: 'm$i', receivedAt: '2026-08-29T${10 + i}:00:00Z');
       }
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -308,7 +285,7 @@ void main() {
       for (var i = 0; i < 10; i++) {
         await seedMessage(id: 'm$i', receivedAt: '2026-08-29T${10 + i}:00:00Z');
       }
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm, concurrency: 1).pump();
 
@@ -322,7 +299,7 @@ void main() {
       await seedMessage(id: 'old', subject: 'Oldest', receivedAt: '2026-08-27T10:00:00Z');
       await seedMessage(id: 'new', subject: 'Newest', receivedAt: '2026-08-29T10:00:00Z');
       await seedMessage(id: 'mid', subject: 'Middle', receivedAt: '2026-08-28T10:00:00Z');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -342,7 +319,7 @@ void main() {
 
     test('stops when nothing is pending, having called nothing', () async {
       await seedMessage(id: 'm1', triageStatus: 'triaged');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -353,7 +330,7 @@ void main() {
   group('gates', () {
     test('a gated message is skipped without reaching the model', () async {
       await seedMessage(id: 'm1', from: 'no-reply@bank.com');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -368,7 +345,7 @@ void main() {
       // the owner's standing rule says anything about it.
       await seedMessage(id: 'm1', from: 'dana@example.com');
       await store.setSenderPref('dana@example.com', 'drop');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -386,7 +363,7 @@ void main() {
       await seedMessage(id: 'm1', from: 'dana@example.com');
       await store.setSenderPref('dana@example.com', 'drop');
       await store.restoreMessage('email', 'm1');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -396,7 +373,7 @@ void main() {
 
     test('the self gate uses the address set after sign-in', () async {
       await seedMessage(id: 'm1', from: 'lo@bond.com');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final queue = TriageQueue(store, llm)..userAddress = 'LO@bond.com';
 
       await queue.pump();
@@ -412,7 +389,7 @@ void main() {
       await seedConversation();
       await seedMessage(id: 'm1', from: 'no-reply@bank.com');
 
-      await TriageQueue(store, FakeLlm([answer()])).pump();
+      await TriageQueue(store, fakeLlm([answer()])).pump();
 
       expect((await conversationRow())['state'], 'waiting');
     });
@@ -427,7 +404,7 @@ void main() {
       );
       await seedMessage(id: 'real', receivedAt: '2026-08-29T12:00:00Z');
 
-      await TriageQueue(store, FakeLlm([answer()])).pump();
+      await TriageQueue(store, fakeLlm([answer()])).pump();
 
       // One direction, and only when nothing kept is left: the newer message
       // is still somebody's question.
@@ -441,7 +418,7 @@ void main() {
         receivedAt: '2026-08-29T12:00:00Z',
       );
       await seedMessage(id: 'real', receivedAt: '2026-08-29T11:00:00Z');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -464,7 +441,7 @@ void main() {
 
       await TriageQueue(
         store,
-        FakeLlm([answer()]),
+        fakeLlm([answer()]),
         onGated: (source, id) async {
           gated.add((source, id));
           statusInside.add((await messageRow(id))['triage_status']);
@@ -492,7 +469,7 @@ void main() {
 
       await TriageQueue(
         store,
-        FakeLlm([answer()]),
+        fakeLlm([answer()]),
         ensureBody: fetch.call,
         onGated: (source, id) async => gated.add((source, id)),
       ).pump();
@@ -507,7 +484,7 @@ void main() {
 
       await TriageQueue(
         store,
-        FakeLlm([answer()]),
+        fakeLlm([answer()]),
         onGated: (source, id) async => gated.add((source, id)),
       ).pump();
 
@@ -526,7 +503,7 @@ void main() {
 
       await TriageQueue(
         store,
-        FakeLlm([answer()]),
+        fakeLlm([answer()]),
         onGated: (source, id) async => throw StateError('repair is down'),
       ).pump();
 
@@ -567,7 +544,7 @@ void main() {
 
     test('two drains defer, the third classifies headerless', () async {
       final fetch = await seedDeferrable();
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final log = ActivityLog(store);
       addTearDown(log.dispose);
       TriageQueue queue() => TriageQueue(
@@ -623,7 +600,7 @@ void main() {
         );
       }
       final fetch = FakeDetailFetch(store, error: Exception('graph down'));
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       // Concurrency 1 makes the count exact. With more, the claims already in
       // flight when the cap is reached defer too — still one attempt each and
@@ -653,7 +630,7 @@ void main() {
 
     test('a person is classified headerless on the first failure', () async {
       final fetch = await seedDeferrable(from: 'sarah@example.com');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm, ensureBody: fetch.call).pump();
 
@@ -678,7 +655,7 @@ void main() {
         conversationKey: 'conv-2',
         receivedAt: '2026-08-29T11:00:00Z',
       );
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm, ensureBody: fetch.call).pump();
 
@@ -692,7 +669,7 @@ void main() {
         () async {
       await seedChat(id: 'c1', bodyText: 'Deploy finished.');
       final fetch = FakeDetailFetch(store, error: Exception('graph down'));
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm, ensureBody: fetch.call).pump();
 
@@ -712,7 +689,7 @@ void main() {
         () async {
       await seedMessage(id: 'm1', from: 'no-reply@example.com');
       await store.restoreMessage('email', 'm1');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -727,7 +704,7 @@ void main() {
       // skipped without reaching the model` pins the same rule for
       // `no-reply@bank.com`.)
       await seedMessage(id: 'm1', from: 'no-reply@example.com');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -745,7 +722,7 @@ void main() {
         bodyPreview: 'This week in rates',
       );
       await store.restoreMessage('email', 'm1');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(
         store,
         bodyText: 'Body',
@@ -766,7 +743,7 @@ void main() {
   group('two-tier fetch', () {
     test('a bodyless message is fetched before the model sees it', () async {
       await seedMessage(id: 'm1', withBody: false, bodyPreview: 'Short preview');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(
         store,
         bodyText: 'The full unquoted body, all of it.',
@@ -784,7 +761,7 @@ void main() {
 
     test('headers from the fetch let the newsletter gate fire', () async {
       await seedMessage(id: 'm1', withBody: false, bodyPreview: 'This week in rates');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(
         store,
         bodyText: 'Body',
@@ -813,7 +790,7 @@ void main() {
         headers: const {'list-unsubscribe': '<mailto:stop@news.example.com>'},
       );
 
-      await TriageQueue(store, FakeLlm([answer()]), ensureBody: fetch.call)
+      await TriageQueue(store, fakeLlm([answer()]), ensureBody: fetch.call)
           .pump();
 
       expect((await messageRow('m1'))['gate_reason'], 'newsletter');
@@ -822,7 +799,7 @@ void main() {
 
     test('a sender gate skips the fetch entirely', () async {
       await seedMessage(id: 'm1', from: 'no-reply@bank.com', withBody: false);
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(store, bodyText: 'Body');
 
       await TriageQueue(store, llm, ensureBody: fetch.call).pump();
@@ -835,7 +812,7 @@ void main() {
 
     test('the self gate skips the fetch too', () async {
       await seedMessage(id: 'm1', from: 'lo@bond.com', withBody: false);
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(store, bodyText: 'Body');
 
       final queue = TriageQueue(store, llm, ensureBody: fetch.call)
@@ -848,7 +825,7 @@ void main() {
 
     test('a failed fetch degrades to the preview instead of parking', () async {
       await seedMessage(id: 'm1', withBody: false, bodyPreview: 'Short preview');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(
         store,
         error: StateError('Graph is having a moment'),
@@ -876,7 +853,7 @@ void main() {
         bodyPreview: 'Another preview',
         receivedAt: '2026-08-29T11:00:00Z',
       );
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(store, error: const NotSignedIn());
 
       // Serial: this asserts that m2's fetch was never ATTEMPTED, which is a
@@ -898,7 +875,7 @@ void main() {
 
     test('missing consent parks the drain the same way', () async {
       await seedMessage(id: 'm1', withBody: false, bodyPreview: 'Short preview');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(store, error: const ReconsentRequired());
 
       await TriageQueue(store, llm, ensureBody: fetch.call).pump();
@@ -909,7 +886,7 @@ void main() {
 
     test('a generic auth wobble still degrades to the preview', () async {
       await seedMessage(id: 'm1', withBody: false, bodyPreview: 'Short preview');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       // Not NotSignedIn and not ReconsentRequired: a 5xx or an offline
       // laptop, which the session survives.
       final fetch = FakeDetailFetch(
@@ -929,7 +906,7 @@ void main() {
         id: 'm1',
         headers: const {'received': 'from mail.example.com'},
       );
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(store, bodyText: 'Body');
 
       await TriageQueue(store, llm, ensureBody: fetch.call).pump();
@@ -941,7 +918,7 @@ void main() {
 
     test('with no fetcher wired, triage runs on whatever is stored', () async {
       await seedMessage(id: 'm1', withBody: false, bodyPreview: 'Short preview');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -953,7 +930,7 @@ void main() {
   group('chats', () {
     test('a chat is claimed and triaged like mail, and stays a chat', () async {
       await seedChat(id: 'c1', bodyText: 'Can you send the CD today?');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final log = ActivityLog(store);
       addTearDown(log.dispose);
 
@@ -987,7 +964,7 @@ void main() {
           'size': 0,
         },
       ]);
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -1009,7 +986,7 @@ void main() {
         withBody: false,
         bodyPreview: 'Short preview',
       );
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(store, bodyText: 'The full body');
 
       await TriageQueue(store, llm, ensureBody: fetch.call).pump();
@@ -1023,7 +1000,7 @@ void main() {
         () async {
       // What a lone emoji reaction or an image-only post leaves behind.
       await seedChat(id: 'c1', withBody: false);
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -1039,7 +1016,7 @@ void main() {
       // right key against the wrong source.
       await seedConversation(key: 'chat-1');
       await seedChat(id: 'c1');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         answer(urgency: 'urgent', actionItems: const ['Send the CD']),
       ]);
 
@@ -1055,7 +1032,7 @@ void main() {
     test('one drain empties both sources, newest first', () async {
       await seedMessage(id: 'm1', receivedAt: '2026-08-29T09:00:00Z');
       await seedChat(id: 'c1', receivedAt: '2026-08-29T11:00:00Z');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm, concurrency: 1).pump();
 
@@ -1069,7 +1046,7 @@ void main() {
       await seedChat(id: 'c1', triageStatus: 'processing');
       await seedMessage(id: 'm1', triageStatus: 'processing');
 
-      await TriageQueue(store, FakeLlm([answer()])).resetInterrupted();
+      await TriageQueue(store, fakeLlm([answer()])).resetInterrupted();
 
       expect((await messageRow('c1', source: 'teams'))['triage_status'],
           'pending');
@@ -1090,7 +1067,7 @@ void main() {
         receivedAt: '2026-08-29T10:00:00Z',
         bodyText: 'Any word on that?',
       );
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       // Serial, because the assertion is about WHICH request carried what:
       // newest first, so `second` goes out before `first`.
@@ -1125,7 +1102,7 @@ void main() {
         receivedAt: '2026-08-29T10:00:00Z',
         bodyText: 'Did the surveyor confirm?',
       );
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       // Serial, so the first request out is the one judging `latest`.
       await TriageQueue(store, llm, concurrency: 1).pump();
@@ -1147,7 +1124,7 @@ void main() {
         receivedAt: '2026-08-29T10:00:00Z',
         bodyText: 'Any word on that?',
       );
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm, concurrency: 1).pump();
 
@@ -1161,7 +1138,7 @@ void main() {
     test('a thread of one — the message itself is never its own context',
         () async {
       await seedMessage(id: 'm1', bodyText: 'The only message.');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -1190,7 +1167,7 @@ void main() {
         bodyText: 'A mail that merely shares the key.',
         triageStatus: 'triaged',
       );
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm, concurrency: 1).pump();
 
@@ -1214,7 +1191,7 @@ void main() {
           'is_inline': false,
         },
       ]);
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -1227,7 +1204,7 @@ void main() {
       // `ensureBody` inside the claim, so a mail attachment is on the row by
       // the time the prompt is built.
       await seedMessage(id: 'm1', withBody: false, bodyPreview: 'Short');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(
         store,
         bodyText: 'Signed copy attached.',
@@ -1252,7 +1229,7 @@ void main() {
 
     test('a failed fetch costs the line, never the triage', () async {
       await seedMessage(id: 'm1', withBody: false, bodyPreview: 'Short preview');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(store, error: StateError('graph is down'));
 
       await TriageQueue(store, llm, ensureBody: fetch.call).pump();
@@ -1263,7 +1240,7 @@ void main() {
 
     test('a message with nothing attached says nothing', () async {
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -1274,7 +1251,7 @@ void main() {
   group('results', () {
     test('a success writes every result column', () async {
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         answer(
           urgency: 'urgent',
           category: 'work',
@@ -1300,7 +1277,7 @@ void main() {
     test('reply_expected reaches the row, so a NULL becomes a judgement',
         () async {
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([answer(replyExpected: true, deadline: 'Friday')]);
+      final llm = fakeLlm([answer(replyExpected: true, deadline: 'Friday')]);
 
       await TriageQueue(store, llm).pump();
 
@@ -1313,7 +1290,7 @@ void main() {
 
     test('a nonsense answer is clamped rather than stored raw', () async {
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         {
           'urgency': 'CRITICAL',
           'category': 'errand',
@@ -1338,7 +1315,7 @@ void main() {
     test('the first action item becomes the thread CTA', () async {
       await seedConversation();
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         answer(urgency: 'urgent', actionItems: const ['Send the final invoice']),
       ]);
 
@@ -1353,7 +1330,7 @@ void main() {
     test('with no action items, a needed summary stands in', () async {
       await seedConversation();
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         answer(
           summary: 'Sarah is waiting on the lock extension.',
           actionItems: const [],
@@ -1371,7 +1348,7 @@ void main() {
     test('a deadline rides along on the CTA', () async {
       await seedConversation();
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         answer(
           actionItems: const ['Send the final invoice'],
           deadline: 'Friday',
@@ -1391,7 +1368,7 @@ void main() {
       await seedMessage(id: 'm1');
       // An ask already at the cap: appending the deadline must cost the ask
       // its tail rather than push the pair over.
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         answer(actionItems: ['a' * 200], deadline: 'Friday'),
       ]);
 
@@ -1405,7 +1382,7 @@ void main() {
     test('no deadline leaves the ask exactly as the model wrote it', () async {
       await seedConversation();
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([answer(actionItems: const ['Send the invoice'])]);
+      final llm = fakeLlm([answer(actionItems: const ['Send the invoice'])]);
 
       await TriageQueue(store, llm).pump();
 
@@ -1415,7 +1392,7 @@ void main() {
     test('a deadline with nothing to hang it on adds no CTA', () async {
       await seedConversation();
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         answer(needsAction: false, actionItems: const [], deadline: 'Friday'),
       ]);
 
@@ -1429,7 +1406,7 @@ void main() {
     test('a message that needs nothing leaves no CTA', () async {
       await seedConversation();
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         answer(
           urgency: 'low',
           needsAction: false,
@@ -1462,7 +1439,7 @@ void main() {
         triageStatus: 'triaged',
       );
       await seedMessage(id: 'older', receivedAt: '2026-08-20T09:00:00Z');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         answer(urgency: 'low', actionItems: const ['Reply about parking']),
       ]);
 
@@ -1488,7 +1465,7 @@ void main() {
         state: 'waiting',
       );
       await seedMessage(id: 'm1', receivedAt: '2026-08-29T10:00:00Z');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         answer(
           urgency: 'urgent',
           actionItems: const ['Confirm attendance'],
@@ -1518,7 +1495,7 @@ void main() {
         state: 'waiting',
       );
       await seedMessage(id: 'm1', receivedAt: '2026-08-29T10:00:00Z');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         answer(actionItems: const ['Confirm attendance']),
       ]);
 
@@ -1535,7 +1512,7 @@ void main() {
         lastOutboundAt: '2026-08-29T11:00:00Z',
       );
       await seedMessage(id: 'm2', receivedAt: '2026-08-29T12:00:00Z');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         answer(actionItems: const ['Send the revised draft']),
       ]);
 
@@ -1546,7 +1523,7 @@ void main() {
 
     test('a message with no conversation row folds up into nothing', () async {
       await seedMessage(id: 'm1', conversationKey: 'orphan');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -1558,7 +1535,7 @@ void main() {
   group('failure', () {
     test('a bad answer is retried once, then left as an error', () async {
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([const LlmFormatException('not json')]);
+      final llm = fakeLlm([const LlmFormatException('not json')]);
 
       await TriageQueue(store, llm).pump();
 
@@ -1571,7 +1548,7 @@ void main() {
 
     test('a retry that succeeds stores the result', () async {
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([const LlmFormatException('not json'), answer()]);
+      final llm = fakeLlm([const LlmFormatException('not json'), answer()]);
 
       await TriageQueue(store, llm).pump();
 
@@ -1582,7 +1559,7 @@ void main() {
 
     test('a schema 400 is this app\'s bug and is never retried', () async {
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         const LlmException('JSON schema conversion failed', 400),
       ]);
 
@@ -1597,7 +1574,7 @@ void main() {
     test('a failure does not stop the drain', () async {
       await seedMessage(id: 'bad', receivedAt: '2026-08-29T12:00:00Z');
       await seedMessage(id: 'good', receivedAt: '2026-08-29T11:00:00Z');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         const LlmException('boom', 400),
         answer(),
       ]);
@@ -1613,7 +1590,7 @@ void main() {
     test('a model server that is down costs the message nothing', () async {
       await seedMessage(id: 'm1', receivedAt: '2026-08-29T12:00:00Z');
       await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
-      final llm = FakeLlm([const LlmUnavailableException('not reachable')]);
+      final llm = fakeLlm([const LlmUnavailableException('not reachable')]);
 
       // Serial: the assertion is that exactly one call went out, which is a
       // claim about the launch AFTER the park. The concurrent case — a park
@@ -1637,11 +1614,11 @@ void main() {
       // Launch order is newest first, so m5, m4 and m3 go out together. m5 and
       // m3 are held open until m4 has found the server gone, which is the
       // state a serial drain can never be in: a park with siblings mid-flight.
-      final held = Completer<Object>();
-      final llm = FakeLlm([
-        held.future,
+      final held = Completer<Map<String, dynamic>>();
+      final llm = fakeLlm([
+        heldAnswer(held),
         const LlmUnavailableException('not reachable'),
-        held.future,
+        heldAnswer(held),
       ]);
       final queue = TriageQueue(store, llm);
 
@@ -1676,10 +1653,10 @@ void main() {
       // LAST. Serially that ordering was impossible; concurrently it is the
       // normal case, and `_foldUp`'s newest-inbound guard is the only thing
       // standing between it and a thread advertising last week's ask.
-      final held = Completer<Object>();
-      final llm = FakeLlm([
+      final held = Completer<Map<String, dynamic>>();
+      final llm = fakeLlm([
         answer(urgency: 'urgent', actionItems: const ['Ship on Thursday']),
-        held.future,
+        heldAnswer(held),
       ]);
 
       final drain = TriageQueue(store, llm).pump();
@@ -1698,7 +1675,7 @@ void main() {
 
     test('the next pump picks up where a downed server left off', () async {
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         const LlmUnavailableException('not reachable'),
         answer(),
       ]);
@@ -1716,7 +1693,7 @@ void main() {
     test('resetInterrupted returns a claimed message to the queue', () async {
       await seedMessage(id: 'm1', triageStatus: 'processing');
       await seedMessage(id: 'm2', triageStatus: 'triaged');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final queue = TriageQueue(store, llm);
 
       expect(await store.nextPendingTriage(), isNull);
@@ -1732,7 +1709,7 @@ void main() {
     test('a message is claimed before the model is called', () async {
       await seedMessage(id: 'm1');
       var statusDuringCall = '';
-      final llm = _InspectingLlm(() async {
+      final llm = inspectingLlm(() async {
         statusDuringCall = (await messageRow('m1'))['triage_status'] as String;
       });
 
@@ -1747,7 +1724,7 @@ void main() {
       await seedMessage(id: 'm1', receivedAt: '2026-08-29T12:00:00Z');
       await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
       await seedMessage(id: 'sent', direction: 'outbound', triageStatus: 'skipped');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       // Serial: the emitted numbers are the rows as they stand when each emit
       // reads them, so two messages finishing together legitimately skip a
       // number. What that would test is the scheduler; what this tests is that
@@ -1768,7 +1745,7 @@ void main() {
     test('counts are the rows, so done and total add up', () async {
       await seedMessage(id: 'm1');
       await seedMessage(id: 'gated', from: 'noreply@x.com');
-      final llm = FakeLlm([answer()]);
+      final llm = fakeLlm([answer()]);
       final queue = TriageQueue(store, llm);
       TriageProgress? last;
       final subscription = queue.progress.listen((p) => last = p);
@@ -1789,7 +1766,7 @@ void main() {
       // there. No poller: the reason rides the stream the counts already ride,
       // and the next pump is what clears it.
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([
+      final llm = fakeLlm([
         const LlmUnavailableException('down'),
         answer(),
       ]);
@@ -1812,7 +1789,7 @@ void main() {
 
     test('a refused key parks with its own reason', () async {
       await seedMessage(id: 'm1');
-      final llm = FakeLlm([const LlmUnauthorizedException('refused')]);
+      final llm = fakeLlm([const LlmUnauthorizedException('refused')]);
       final queue = TriageQueue(store, llm, concurrency: 1);
       TriageProgress? last;
       final subscription = queue.progress.listen((p) => last = p);
@@ -1838,7 +1815,7 @@ void main() {
       var called = 0;
       final queue = TriageQueue(
         store,
-        FakeLlm([answer()]),
+        fakeLlm([answer()]),
         onDrained: (_) async => called++,
       );
 
@@ -1857,7 +1834,7 @@ void main() {
       var called = 0;
       final queue = TriageQueue(
         store,
-        FakeLlm([answer()]),
+        fakeLlm([answer()]),
         concurrency: 1,
         onDrained: (_) async => called++,
       );
@@ -1889,7 +1866,7 @@ void main() {
       var called = 0;
       final queue = TriageQueue(
         store,
-        FakeLlm([answer()]),
+        fakeLlm([answer()]),
         onDrained: (_) async => called++,
       );
 
@@ -1903,7 +1880,7 @@ void main() {
       var called = 0;
       final queue = TriageQueue(
         store,
-        FakeLlm([answer()]),
+        fakeLlm([answer()]),
         onDrained: (_) async => called++,
       );
 
@@ -1920,7 +1897,7 @@ void main() {
       var called = 0;
       final queue = TriageQueue(
         store,
-        FakeLlm([const LlmUnavailableException('off')]),
+        fakeLlm([const LlmUnavailableException('off')]),
         onDrained: (_) async => called++,
       );
 
@@ -1942,7 +1919,7 @@ void main() {
       var called = 0;
       final queue = TriageQueue(
         store,
-        FakeLlm([const LlmException('JSON schema conversion failed', 400)]),
+        fakeLlm([const LlmException('JSON schema conversion failed', 400)]),
         onDrained: (_) async => called++,
       );
 
@@ -1957,7 +1934,7 @@ void main() {
       var called = 0;
       final queue = TriageQueue(
         store,
-        FakeLlm([answer()]),
+        fakeLlm([answer()]),
         onDrained: (_) async => called++,
       );
 
@@ -1971,7 +1948,7 @@ void main() {
       await seedMessage(id: 'm1');
       final queue = TriageQueue(
         store,
-        FakeLlm([answer()]),
+        fakeLlm([answer()]),
         onDrained: (_) async => throw StateError('the worker blew up'),
       );
 
@@ -1994,7 +1971,7 @@ void main() {
       var carried = <({String source, String id})>[];
       final queue = TriageQueue(
         store,
-        FakeLlm([answer()]),
+        fakeLlm([answer()]),
         onDrained: (triaged) async => carried = triaged,
       );
 
@@ -2013,7 +1990,7 @@ void main() {
       final seen = <List<({String source, String id})>>[];
       final queue = TriageQueue(
         store,
-        FakeLlm([answer()]),
+        fakeLlm([answer()]),
         onDrained: (triaged) async => seen.add(triaged),
       );
 
@@ -2031,7 +2008,7 @@ void main() {
     test('is made when something is pending', () async {
       await seedMessage(id: 'm1');
       final gate = _RecordingGate();
-      final queue = TriageQueue(store, FakeLlm([answer()]), gate: gate);
+      final queue = TriageQueue(store, fakeLlm([answer()]), gate: gate);
 
       await queue.pump();
 
@@ -2040,7 +2017,7 @@ void main() {
 
     test('is not made when nothing is pending', () async {
       final gate = _RecordingGate();
-      final queue = TriageQueue(store, FakeLlm([answer()]), gate: gate);
+      final queue = TriageQueue(store, fakeLlm([answer()]), gate: gate);
 
       await queue.pump();
 
@@ -2055,7 +2032,7 @@ void main() {
       final gate = _RecordingGate();
       final queue = TriageQueue(
         store,
-        FakeLlm([answer()]),
+        fakeLlm([answer()]),
         gate: gate,
         enabled: () => false,
       );
@@ -2071,7 +2048,7 @@ void main() {
     await seedMessage(id: 'm1', receivedAt: '2026-08-29T12:00:00Z');
     await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
     late TriageQueue queue;
-    final llm = _InspectingLlm(() => queue.stop());
+    final llm = inspectingLlm(() => queue.stop());
     // Serial, so "the message in flight" is exactly one message: at three at a
     // time the drain has legitimately launched siblings before the stop lands,
     // and what happens to those is the park test's subject rather than this
@@ -2085,34 +2062,12 @@ void main() {
   });
 }
 
-/// A fake that runs a callback mid-request, for the assertions that are about
-/// what is true WHILE the model is being called.
-class _InspectingLlm extends FakeLlm {
-  /// [FutureOr] because the interesting thing to inspect mid-request is now a
-  /// query: reading the row back is what tells us the claim landed.
-  final FutureOr<void> Function() onCall;
-
-  _InspectingLlm(this.onCall) : super([answer()]);
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    await onCall();
-    return super.completeJson(
-      system: system,
-      user: user,
-      schema: schema,
-      schemaName: schemaName,
-      maxTokens: maxTokens,
-      temperature: temperature,
-      think: think,
-    );
-  }
-}
+/// A client that runs a callback mid-request, for the assertions that are
+/// about what is true WHILE the model is being called.
+///
+/// The callback is the fixture's `onCall`, which runs inside the in-flight
+/// window and before the answer. [FutureOr] because the interesting thing to
+/// inspect mid-request is a query: reading the row back is what tells us the
+/// claim landed.
+ScriptedLlm inspectingLlm(FutureOr<void> Function() onCall) =>
+    ScriptedLlm(answers: {'triage': answer()}, onCall: (_) => onCall());

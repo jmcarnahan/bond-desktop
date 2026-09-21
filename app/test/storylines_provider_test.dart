@@ -8,12 +8,12 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/providers/storylines_provider.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// A handler that does nothing, so a [AiWorker.pump] emits one [WorkProgress]
@@ -63,11 +63,6 @@ class BlockingHandler extends WorkHandler {
   Future<void> run(Map<String, Object?> item) => gate.future;
 }
 
-/// Never called — every notifier method under test is a local write.
-class UnusedLlm extends LlmClient {
-  UnusedLlm() : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-}
-
 /// A store whose storyline reads fail, for the never-blank rule. Each read has
 /// its own switch: the two notifiers under test fail independently.
 class UnreadableStore extends MessageStore {
@@ -102,7 +97,8 @@ void main() {
   setUp(() {
     db = testDb();
     store = MessageStore(db);
-    service = StorylineService(store, UnusedLlm());
+    // Never called: every notifier method under test is a local write.
+    service = StorylineService(store, ScriptedLlm.never());
   });
 
   tearDown(() => db.close());
@@ -428,6 +424,7 @@ void main() {
         () async {
       await seedConversation('c1');
       final worker = RecordingWorker(store, handlers: [SilentHandler('none')]);
+      addTearDown(worker.dispose);
       final notifier =
           StorylinesNotifier(store, service, aiWorker: worker);
       await notifier.load();
@@ -450,6 +447,7 @@ void main() {
     test('and a create with no charter pumps nothing', () async {
       await seedConversation('c1');
       final worker = RecordingWorker(store, handlers: [SilentHandler('none')]);
+      addTearDown(worker.dispose);
       final notifier =
           StorylinesNotifier(store, service, aiWorker: worker);
       await notifier.load();
@@ -464,6 +462,7 @@ void main() {
 
     test('declare lands a memberless storyline and starts its hunt', () async {
       final worker = RecordingWorker(store, handlers: [SilentHandler('none')]);
+      addTearDown(worker.dispose);
       final notifier =
           StorylinesNotifier(store, service, aiWorker: worker);
       await notifier.load();
@@ -484,6 +483,7 @@ void main() {
     test('recruitNow revives a recruit the drain already finished', () async {
       await seedStoryline('sl-1', status: 'active');
       final worker = RecordingWorker(store, handlers: [SilentHandler('none')]);
+      addTearDown(worker.dispose);
       final notifier =
           StorylinesNotifier(store, service, aiWorker: worker);
       await notifier.load();

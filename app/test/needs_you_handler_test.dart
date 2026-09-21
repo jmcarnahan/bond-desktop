@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:bond_inbox/data/database.dart';
@@ -17,63 +18,31 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
-/// An [LlmClient] that answers from a script and never opens a socket, with a
-/// hook that runs at the moment of the call — which is how the drain-order
-/// test below observes the mailbox as extraction found it.
+/// One answer for one task, with a hook that runs at the moment of the call —
+/// which is how the drain-order test below observes the mailbox as extraction
+/// found it.
 ///
-/// It keeps the last prompt it was handed, because half of what this handler
-/// does happens on the way IN: which rules it read, whether it knew who the
-/// owner was, whether it waited on triage.
-class FakeLlm extends LlmClient {
-  final Map<String, dynamic> answer;
-  final Future<void> Function()? onCall;
-  int calls = 0;
-
-  /// The last call's two halves, or null before the first call.
-  String? system;
-  String? user;
-
-  FakeLlm(this.answer, {this.onCall})
-      : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    calls++;
-    this.system = system;
-    this.user = user;
-    await onCall?.call();
-    return Map<String, dynamic>.from(answer);
-  }
-}
-
-/// A model server that is there and answers badly. Not [LlmUnavailableException]
-/// on purpose: the worker parks on that one, and what the handler owes either
+/// Every call is kept, because half of what this handler does happens on the
+/// way IN: which rules it read, whether it knew who the owner was, whether it
+/// waited on triage. `systems.last` and `users.last` are the two halves of
+/// the last prompt.
+///
+/// An [answer] that is an exception is thrown instead, which is the model
+/// server that is there and answers badly. Not [LlmUnavailableException] on
+/// purpose: the worker parks on that one, and what the handler owes either
 /// way is the same — leave the verdict NULL and let the exception out.
-class BrokenLlm extends LlmClient {
-  BrokenLlm() : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async =>
-      throw const LlmFormatException('nothing that parses');
-}
+ScriptedLlm scriptedLlm(
+  Object answer, {
+  String schemaName = 'needs_you',
+  FutureOr<void> Function()? onCall,
+}) =>
+    ScriptedLlm(
+      answers: {schemaName: answer},
+      onCall: onCall == null ? null : (_) => onCall(),
+    );
 
 /// What the model says about a message that names the owner.
 const Map<String, dynamic> needsYouYes = {
@@ -200,12 +169,12 @@ void main() {
           'size': 0,
         },
       ]);
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm));
 
-      expect(llm.user, contains('Shared a file: Contract-v2.docx'));
-      expect(llm.user, isNot(contains('[[att:')));
+      expect(llm.users.last, contains('Shared a file: Contract-v2.docx'));
+      expect(llm.users.last, isNot(contains('[[att:')));
     });
 
     test('a re-run reads the digests the first pass could not see', () async {
@@ -234,14 +203,15 @@ void main() {
           asks: ['Sign and return by Thursday'],
         ).toJson()),
       );
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
-      expect(llm.user, contains('What the documents attached to this message '
+      final sent = llm.users.last;
+      expect(sent, contains('What the documents attached to this message '
           'say:'));
-      expect(llm.user, contains('<untrusted_data source="attachment_digests">'));
-      expect(llm.user, contains('Lease Addendum.pdf: The rent rises to 2,600 '
+      expect(sent, contains('<untrusted_data source="attachment_digests">'));
+      expect(sent, contains('Lease Addendum.pdf: The rent rises to 2,600 '
           'in January. Asks: Sign and return by Thursday'));
     });
 
@@ -259,11 +229,11 @@ void main() {
           const AttachmentDigest(summary: 'It rises.').toJson(),
         ),
       );
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
-      final sent = llm.user!;
+      final sent = llm.users.last;
       expect(
         sent.indexOf('source="attachment_digests"'),
         lessThan(sent.indexOf('Judge ONLY this message:')),
@@ -275,13 +245,13 @@ void main() {
       await store.upsertAttachments('email', 'm1', [
         {'attachment_id': 'a1', 'ordinal': 0, 'kind': 'file', 'name': 'A.pdf'},
       ]);
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
       // "Not read yet" and "says nothing" are different states, and only the
       // second is worth putting in front of a judgement.
-      expect(llm.user, isNot(contains('attachment_digests')));
+      expect(llm.users.last, isNot(contains('attachment_digests')));
     });
 
     test('needs-you sends the thread and never a digest', () async {
@@ -302,29 +272,29 @@ void main() {
         body: 'Any word on that sign-off?',
         receivedAt: '2026-08-29T10:00:00Z',
       );
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'latest');
 
-      expect(llm.user, contains('<untrusted_data source="thread">'));
+      expect(llm.users.last, contains('<untrusted_data source="thread">'));
       expect(
-        llm.user,
+        llm.users.last,
         contains('Alex, the wayfinding sheet is ready for you.'),
       );
-      expect(llm.user, isNot(contains('thread_digest')));
+      expect(llm.users.last, isNot(contains('thread_digest')));
     });
   });
 
   group('the deterministic floor', () {
     test('a direct chat is written down as a yes, with its reason', () async {
       await seed();
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm));
 
       expect(await verdictOf('teams', 't1'),
           {'verdict': 1, 'reason': 'teams_direct'});
-      expect(llm.calls, 0, reason: 'the floor settled it');
+      expect(llm.calls.length, 0, reason: 'the floor settled it');
     });
 
     test('the floor short-circuits the model, whatever the model would say',
@@ -333,7 +303,7 @@ void main() {
       // and the model is never asked, so a model that would have answered no
       // cannot take a direct chat off the list.
       await seed();
-      final llm = FakeLlm(const {
+      final llm = scriptedLlm(const {
         'evidence': 'nothing here points at the owner',
         'needs_you': false,
         'confidence': 'high',
@@ -341,7 +311,7 @@ void main() {
 
       await runOne(NeedsYouHandler(store, llm));
 
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
       expect((await verdictOf('teams', 't1'))['verdict'], 1);
     });
 
@@ -352,22 +322,22 @@ void main() {
       // carries is what proves — `teams_direct` here would be the floor
       // reading "the only address on the envelope" as an answer.
       await seed(source: 'email', id: 'm1', addressedMe: 1);
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
-      expect(llm.calls, 1);
+      expect(llm.calls.length, 1);
       expect((await verdictOf('email', 'm1'))['reason'],
           isNot('teams_direct'));
     });
 
     test('a group chat nobody named goes to the model too', () async {
       await seed(addressedMe: 0);
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm));
 
-      expect(llm.calls, 1);
+      expect(llm.calls.length, 1);
       expect((await verdictOf('teams', 't1'))['reason'], isNot('teams_direct'));
     });
   });
@@ -383,12 +353,13 @@ void main() {
         triageStatus: 'skipped',
         gateReason: 'newsletter',
       );
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
       expect((await verdictOf('email', 'm1'))['verdict'], isNull);
-      expect(llm.calls, 0, reason: 'a gated message costs no model time');
+      expect(llm.calls.length, 0,
+          reason: 'a gated message costs no model time');
     });
 
     test('a chat skipped-by-birth is still judged', () async {
@@ -396,29 +367,29 @@ void main() {
       // were triaged — not a verdict, so it must not gate this pass either.
       await seed(triageStatus: 'skipped', gateReason: 'teams_source');
 
-      await runOne(NeedsYouHandler(store, FakeLlm(needsYouYes)));
+      await runOne(NeedsYouHandler(store, scriptedLlm(needsYouYes)));
 
       expect((await verdictOf('teams', 't1'))['verdict'], 1);
     });
 
     test('the owner writing in their own chat is left unjudged', () async {
       await seed(direction: 'outbound');
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm));
 
       expect((await verdictOf('teams', 't1'))['verdict'], isNull);
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
     });
 
     test('a message deleted before the worker reached it completes', () async {
       // Nothing to judge and nothing wrong: the item is done, not failed.
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'gone');
 
       expect(await store.getMessageRow('email', 'gone'), isNull);
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
     });
   });
 
@@ -428,11 +399,11 @@ void main() {
       // Sole-recipient mail: the floor says nothing about it, which is not a
       // verdict, so the model reads the text.
       await seedAmbiguousMail();
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
-      expect(llm.calls, 1);
+      expect(llm.calls.length, 1);
       expect(await verdictOf('email', 'm1'), {
         'verdict': 1,
         'reason': 'Priya asks Alex to sign off on the wayfinding sheet.',
@@ -443,7 +414,7 @@ void main() {
       // The whole reason this branch exists: NULL is "never judged" and keeps
       // the row on the worklist forever. Only the model may write the 0.
       await seedAmbiguousMail();
-      final llm = FakeLlm(const {
+      final llm = scriptedLlm(const {
         'evidence': 'A newsletter; nothing in it asks the owner for anything.',
         'needs_you': false,
         'confidence': 'high',
@@ -461,7 +432,7 @@ void main() {
       // The raise policy. The verdict buys an interruption, and "possibly" is
       // not grounds for one.
       await seedAmbiguousMail();
-      final llm = FakeLlm(const {
+      final llm = scriptedLlm(const {
         'evidence': 'It might be asking the owner to look at the numbers.',
         'needs_you': true,
         'confidence': 'low',
@@ -479,7 +450,14 @@ void main() {
       await seedAmbiguousMail();
 
       await expectLater(
-        runOne(NeedsYouHandler(store, BrokenLlm()), source: 'email', id: 'm1'),
+        runOne(
+          NeedsYouHandler(
+            store,
+            scriptedLlm(const LlmFormatException('nothing that parses')),
+          ),
+          source: 'email',
+          id: 'm1',
+        ),
         throwsA(isA<LlmFormatException>()),
       );
       expect((await verdictOf('email', 'm1'))['verdict'], isNull);
@@ -490,12 +468,12 @@ void main() {
       // over rows whose `triage_status` is still `pending`, and waiting on
       // them would make the verdict depend on which drain got there first.
       await seedAmbiguousMail(triageStatus: 'pending');
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
-      expect(llm.calls, 1);
-      expect(llm.user, contains('Alex, can you sign off'));
+      expect(llm.calls.length, 1);
+      expect(llm.users.last, contains('Alex, can you sign off'));
       expect((await verdictOf('email', 'm1'))['verdict'], 1);
     });
   });
@@ -504,25 +482,25 @@ void main() {
     test("the owner's rules replace the system prompt's body", () async {
       await seedAmbiguousMail();
       await store.setPref(needsYouRulesKey, 'Invoices always need me.');
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
-      expect(llm.system, contains('Invoices always need me.'));
+      expect(llm.systems.last, contains('Invoices always need me.'));
       // The body is theirs; the answer's shape never is.
-      expect(llm.system, contains(needsYouOutputContract));
-      expect(llm.system, isNot(contains(needsYouDefaultRules)));
+      expect(llm.systems.last, contains(needsYouOutputContract));
+      expect(llm.systems.last, isNot(contains(needsYouDefaultRules)));
       // And nothing about the rules is in the user message any more.
-      expect(llm.user, isNot(contains('needs_you_rules')));
+      expect(llm.users.last, isNot(contains('needs_you_rules')));
     });
 
     test('and an empty pref means the default prompt', () async {
       await seedAmbiguousMail();
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
-      expect(llm.system, const NeedsYouTask().systemPrompt);
+      expect(llm.systems.last, const NeedsYouTask().systemPrompt);
     });
 
     test('an unchanged pref reuses the very same prompt string', () async {
@@ -532,13 +510,13 @@ void main() {
       await seedAmbiguousMail();
       await seedAmbiguousMail(id: 'm2');
       await store.setPref(needsYouRulesKey, 'Invoices always need me.');
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
       final handler = NeedsYouHandler(store, llm);
 
       await runOne(handler, source: 'email', id: 'm1');
-      final first = llm.system;
+      final first = llm.systems.last;
       await runOne(handler, source: 'email', id: 'm2');
-      final second = llm.system;
+      final second = llm.systems.last;
 
       expect(identical(first, second), isTrue);
     });
@@ -549,15 +527,15 @@ void main() {
       await seedAmbiguousMail();
       await seedAmbiguousMail(id: 'm2');
       await store.setPref(needsYouRulesKey, 'Invoices always need me.');
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
       final handler = NeedsYouHandler(store, llm);
 
       await runOne(handler, source: 'email', id: 'm1');
       await store.setPref(needsYouRulesKey, 'Only the studio lease needs me.');
       await runOne(handler, source: 'email', id: 'm2');
 
-      expect(llm.system, contains('Only the studio lease needs me.'));
-      expect(llm.system, isNot(contains('Invoices always need me.')));
+      expect(llm.systems.last, contains('Only the studio lease needs me.'));
+      expect(llm.systems.last, isNot(contains('Invoices always need me.')));
     });
 
     test('a pref that just retypes the defaults stays on the default prompt',
@@ -567,16 +545,19 @@ void main() {
       // non-const copy of the same words.
       await seedAmbiguousMail();
       await store.setPref(needsYouRulesKey, needsYouDefaultRules);
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
-      expect(identical(llm.system, const NeedsYouTask().systemPrompt), isTrue);
+      expect(
+        identical(llm.systems.last, const NeedsYouTask().systemPrompt),
+        isTrue,
+      );
     });
 
     test('the owner is named, from the lookup', () async {
       await seedAmbiguousMail();
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
       final handler = NeedsYouHandler(
         store,
         llm,
@@ -587,7 +568,7 @@ void main() {
       await runOne(handler, source: 'email', id: 'm1');
 
       expect(
-        llm.user,
+        llm.users.last,
         contains('The owner of this inbox is Alex Rivera '
             '<alex.rivera@rivermail.example.com>.'),
       );
@@ -599,7 +580,7 @@ void main() {
       // disposes the provider that built the handler.
       await seedAmbiguousMail();
       await seedAmbiguousMail(id: 'm2');
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
       var lookups = 0;
       final handler = NeedsYouHandler(
         store,
@@ -613,7 +594,7 @@ void main() {
       await runOne(handler, source: 'email', id: 'm1');
       await runOne(handler, source: 'email', id: 'm2');
 
-      expect(llm.calls, 2);
+      expect(llm.calls.length, 2);
       expect(lookups, 1);
     });
 
@@ -623,7 +604,7 @@ void main() {
       // again rather than inheriting the failure until the app restarts.
       await seedAmbiguousMail();
       await seedAmbiguousMail(id: 'm2');
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
       var lookups = 0;
       final handler = NeedsYouHandler(
         store,
@@ -636,21 +617,22 @@ void main() {
       );
 
       await runOne(handler, source: 'email', id: 'm1');
-      expect(llm.user, isNot(contains('The owner of this inbox is')));
+      expect(llm.users.last, isNot(contains('The owner of this inbox is')));
       expect((await verdictOf('email', 'm1'))['verdict'], 1);
 
       await runOne(handler, source: 'email', id: 'm2');
       expect(lookups, 2);
-      expect(llm.user, contains('The owner of this inbox is Alex Rivera.'));
+      expect(
+          llm.users.last, contains('The owner of this inbox is Alex Rivera.'));
     });
 
     test('a prompt with no owner to name says nothing about one', () async {
       await seedAmbiguousMail();
-      final llm = FakeLlm(needsYouYes);
+      final llm = scriptedLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
-      expect(llm.user, isNot(contains('The owner of this inbox is')));
+      expect(llm.users.last, isNot(contains('The owner of this inbox is')));
     });
   });
 
@@ -713,7 +695,7 @@ void main() {
       ticks.clear();
 
       await runOne(
-        NeedsYouHandler(store, FakeLlm(needsYouYes), progress: progress),
+        NeedsYouHandler(store, scriptedLlm(needsYouYes), progress: progress),
         source: 'email',
         id: 'm1',
       );
@@ -730,7 +712,7 @@ void main() {
       await seedSettled();
 
       await runOne(
-        NeedsYouHandler(store, FakeLlm(needsYouYes), progress: progress),
+        NeedsYouHandler(store, scriptedLlm(needsYouYes), progress: progress),
       );
 
       expect(await verdictOf('teams', 't1'),
@@ -743,13 +725,13 @@ void main() {
       // re-judge that agrees with itself must be silent.
       await seedSettled();
       await runOne(
-        NeedsYouHandler(store, FakeLlm(needsYouYes), progress: progress),
+        NeedsYouHandler(store, scriptedLlm(needsYouYes), progress: progress),
       );
       await pumpEventQueue();
       ticks.clear();
 
       await runOne(
-        NeedsYouHandler(store, FakeLlm(needsYouYes), progress: progress),
+        NeedsYouHandler(store, scriptedLlm(needsYouYes), progress: progress),
       );
 
       await pumpEventQueue();
@@ -763,7 +745,7 @@ void main() {
       await seedSettled(lastOutboundAt: '2026-08-29T12:00:00Z');
 
       await runOne(
-        NeedsYouHandler(store, FakeLlm(needsYouYes), progress: progress),
+        NeedsYouHandler(store, scriptedLlm(needsYouYes), progress: progress),
       );
 
       expect(await verdictOf('teams', 't1'),
@@ -774,7 +756,7 @@ void main() {
     test('and a handler with no recorder judges exactly as before', () async {
       await seedSettled();
 
-      await runOne(NeedsYouHandler(store, FakeLlm(needsYouYes)));
+      await runOne(NeedsYouHandler(store, scriptedLlm(needsYouYes)));
 
       expect(await verdictOf('teams', 't1'),
           {'verdict': 1, 'reason': 'teams_direct'});
@@ -800,8 +782,9 @@ void main() {
       await store.enqueueWork('needs_you', 'teams', 't1');
 
       Object? verdictWhenExtractRan;
-      final llm = FakeLlm(
+      final llm = scriptedLlm(
         extraction,
+        schemaName: 'extraction',
         onCall: () async {
           verdictWhenExtractRan =
               (await store.getMessageRow('teams', 't1'))!['needs_you_verdict'];
@@ -822,7 +805,7 @@ void main() {
 
       await worker.pump();
 
-      expect(llm.calls, 1, reason: 'extraction really ran');
+      expect(llm.calls.length, 1, reason: 'extraction really ran');
       expect(verdictWhenExtractRan, 1);
       expect(await store.workCounts('needs_you', sources: const ['teams']),
           {'done': 1});

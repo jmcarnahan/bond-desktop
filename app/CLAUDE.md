@@ -110,11 +110,20 @@ enforce the ones that are commands.
   NOW (Regenerate, Draft reply, the two Retries, Restore, a storyline action):
   the drain claims `created_at DESC`, so a bulk revive keeps its stamps rather
   than jumping the whole batch in front of new mail.
-- `completeJsonStreamed` is a SEPARATE method from `completeJson`: twenty-two
-  test doubles extend `LlmClient` and override the latter's exact signature,
-  so never add a named parameter to it. `runTask(onText:)` picks the path,
-  only the draft call streams, and a streamed and a plain call of the same
-  prompt must decode to the same object.
+- `ScriptedLlm` (`test/fixtures/scripted_llm.dart`) is the ONE `LlmClient`
+  double: a per-schema script whose steps are a map, a string, a hold, a
+  computed closure or a throw, with `calls` and the derived recorders
+  (`schemas`, `userMessages`, `systems`, `temperatures`, `budgets`,
+  `callsFor`, `maxInFlight`, `streamedCalls`) that the thirty-six hand-written
+  doubles it replaced, across twenty-nine files, each kept their own copy of.
+  A test needing a shape it cannot express hands it a computed step, never a
+  new subclass.
+  `completeJsonStreamed` stays a SEPARATE method from `completeJson`, and
+  never add a named parameter to either: `ScriptedLlm` overrides both exact
+  signatures, and a Dart override must accept every named parameter of the
+  method it overrides, so the two signatures are frozen together.
+  `runTask(onText:)` picks the path, only the draft call streams, and a
+  streamed and a plain call of the same prompt must decode to the same object.
 - Settings section titles and summary strings are pinned by
   `settings_screen_test.dart` and by the table in `docs/settings.md` — move
   all three together; a new segmented control is `SettingsSegments<T>`.

@@ -19,6 +19,7 @@ import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// What the pipeline actually writes to `activity_events`.
@@ -156,49 +157,19 @@ Map<String, dynamic> chatMessage(String id) => {
           DateTime.now().toUtc().subtract(const Duration(hours: 1)).toIso8601String(),
     };
 
-/// An [LlmClient] that answers from a script and never opens a socket, telling
-/// its observer what each call cost exactly as the real client does.
-class FakeLlm extends LlmClient {
-  /// Answers in order. A `Map` is returned, an `Exception` is thrown. The last
-  /// entry repeats once the script runs out.
-  final List<Object> script;
-
-  final LlmCallObserver? observer;
-
-  FakeLlm(this.script, {this.observer})
-      : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-    final step = script.length > 1 ? script.removeAt(0) : script.first;
-    if (step is Exception) {
-      observer?.call(LlmCallRecord(
-        label: schemaName,
-        durationMs: 5,
-        outcome: 'unavailable',
-        error: '$step',
-      ));
-      throw step;
-    }
-    observer?.call(LlmCallRecord(
-      label: schemaName,
-      durationMs: 5,
-      outcome: 'ok',
-      promptTokens: 700,
-      completionTokens: 40,
-    ));
-    return Map<String, dynamic>.from(step as Map);
-  }
-}
+/// The shared fixture, wired the way the real client is: one answer for
+/// whatever task asks, and a record per call to the log's observer, telling it
+/// what the call cost exactly as the real client does.
+///
+/// A `Map` [answer] is returned and an exception one is thrown. The three
+/// numbers on the record are the fixture's fixed ones, which is what lets the
+/// assertions below read as values.
+ScriptedLlm scriptedLlm(Object answer, {LlmCallObserver? observer}) =>
+    ScriptedLlm(
+      fallback: answer,
+      observer: observer,
+      emitRecords: true,
+    );
 
 /// A [WorkHandler] that does whatever the test hands it and nothing else.
 class ScriptedHandler extends WorkHandler {
@@ -423,7 +394,7 @@ void main() {
   group('TriageQueue', () {
     test('a triaged message carries the verdict and the model call', () async {
       await seedMessage('m1');
-      final llm = FakeLlm([triageAnswer()], observer: log.noteLlmCall);
+      final llm = scriptedLlm(triageAnswer(), observer: log.noteLlmCall);
 
       await TriageQueue(store, llm, activityLog: log).pump();
 
@@ -454,7 +425,7 @@ void main() {
         'body_text': 'Newsletter',
         'triage_status': 'pending',
       });
-      final llm = FakeLlm([triageAnswer()], observer: log.noteLlmCall);
+      final llm = scriptedLlm(triageAnswer(), observer: log.noteLlmCall);
 
       await TriageQueue(store, llm, activityLog: log).pump();
 
@@ -470,8 +441,8 @@ void main() {
 
     test('a model server that is down parks rather than errors', () async {
       await seedMessage('m1');
-      final llm = FakeLlm(
-        [const LlmUnavailableException('not reachable')],
+      final llm = scriptedLlm(
+        const LlmUnavailableException('not reachable'),
         observer: log.noteLlmCall,
       );
 
@@ -490,7 +461,7 @@ void main() {
 
     test('a retry and the error it becomes are two distinct rows', () async {
       await seedMessage('m1');
-      final llm = FakeLlm([const LlmFormatException('not JSON')]);
+      final llm = scriptedLlm(const LlmFormatException('not JSON'));
 
       await TriageQueue(store, llm, activityLog: log).pump();
 
@@ -620,7 +591,7 @@ void main() {
       );
     }
 
-    Future<void> pumpStoryline(String key, FakeLlm llm) async {
+    Future<void> pumpStoryline(String key, ScriptedLlm llm) async {
       await store.enqueueWork('storyline', 'email', key);
       await AiWorker(
         store,
@@ -637,7 +608,7 @@ void main() {
     test('a pass that found nothing to file writes no row at all', () async {
       await seedThread('c1', const [1.0, 0.0]);
 
-      await pumpStoryline('c1', FakeLlm([<String, dynamic>{}]));
+      await pumpStoryline('c1', scriptedLlm(<String, dynamic>{}));
 
       expect(await rows('storyline'), isEmpty);
       expect(await store.workCounts('storyline'), {'done': 1});
@@ -658,9 +629,13 @@ void main() {
 
       await pumpStoryline(
         'c1',
-        FakeLlm([
-          {'evidence': 'Different project.', 'belongs': false, 'confidence': 'high'},
-        ]),
+        scriptedLlm(
+          {
+            'evidence': 'Different project.',
+            'belongs': false,
+            'confidence': 'high',
+          },
+        ),
       );
 
       final row = (await rows('storyline')).single;
@@ -679,7 +654,7 @@ void main() {
       await seedThread('c1', const [1.0, 0.0]);
       await store.writeTriage('email', 'msg-c1',
           status: 'skipped', gateReason: 'no_reply');
-      final llm = FakeLlm([<String, dynamic>{}]);
+      final llm = scriptedLlm(<String, dynamic>{});
 
       await pumpStoryline('c1', llm);
 

@@ -7,7 +7,6 @@ import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/pipeline_repair_service.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
@@ -22,6 +21,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// The processing switch, as the assembled screen carries it.
@@ -61,12 +61,6 @@ class _FakeSync implements MailSync {
   Future<void> ensureMessageBody(String sourceMessageId) async {}
 }
 
-/// An [LlmClient] that never opens a socket. Nothing in this file is meant to
-/// reach a model at all.
-class _NeverLlm extends LlmClient {
-  _NeverLlm() : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-}
-
 /// A repair service that always says it queued a stage.
 ///
 /// What the Retry toast turns on is the ANSWER, not the repair: a row that
@@ -87,7 +81,8 @@ class _StubRepair extends PipelineRepairService {
 class _RecordingTriage extends TriageQueue {
   final List<String> order;
 
-  _RecordingTriage(MessageStore store, this.order) : super(store, _NeverLlm());
+  _RecordingTriage(MessageStore store, this.order)
+      : super(store, ScriptedLlm.never());
 
   @override
   Future<void> pump() async => order.add('triage');

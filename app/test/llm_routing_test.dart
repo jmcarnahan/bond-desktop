@@ -13,6 +13,7 @@ import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// Which server each model job goes to.
@@ -24,48 +25,18 @@ import 'fixtures/test_db.dart';
 /// to give the service two distinguishable clients and watch which one is
 /// dialled.
 ///
-/// The same [FakeLlm] as `storyline_service_test.dart`, keyed on `schemaName`
-/// for the same reason: assignment may go straight on to naming, and a
-/// positional script would hand the naming task the confirmation's answer.
-class FakeLlm extends LlmClient {
-  /// Names this fake in a failure message. Two fakes that record identically
-  /// are otherwise indistinguishable in an `expect` diff.
-  final String label;
-
-  final Map<String, List<Object>> scripts;
-
-  final List<String> schemas = [];
-
-  FakeLlm(this.label, this.scripts)
-      : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  int callsFor(String schemaName) =>
-      schemas.where((s) => s == schemaName).length;
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    schemas.add(schemaName);
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-
-    final script = scripts[schemaName];
-    if (script == null || script.isEmpty) {
-      // Louder than a missing answer deserves on its own: reaching this means
-      // a call landed on the WRONG server, which is the defect these tests
-      // exist for.
-      throw StateError('$label was asked for $schemaName and has no script');
-    }
-    final step = script.length > 1 ? script.removeAt(0) : script.first;
-    if (step is Exception) throw step;
-    return Map<String, dynamic>.from(step as Map);
-  }
+/// The shared [ScriptedLlm], keyed on `schemaName` as `storyline_service_test`
+/// keys it: assignment may go straight on to naming, and a positional script
+/// would hand the naming task the confirmation's answer.
+///
+/// [label] names the client in its own failure message, which matters more
+/// here than anywhere else: two clients that record identically are
+/// indistinguishable in an `expect` diff, and an unscripted schema means a
+/// call landed on the WRONG server, the defect these tests exist for.
+ScriptedLlm routed(String label, Map<String, List<Object>> scripts) {
+  final llm = ScriptedLlm(label: label);
+  scripts.forEach(llm.scriptFor);
+  return llm;
 }
 
 /// A unit vector whose cosine against `[1, 0]` is exactly [c].
@@ -203,10 +174,10 @@ void main() {
         () async {
       await seedUnnamedStoryline();
       await seed('c1', vector: vectorAt(0.9));
-      final primary = FakeLlm('primary', {
+      final primary = routed('primary', {
         'storyline_name': [nameAnswer()],
       });
-      final fast = FakeLlm('fast', {
+      final fast = routed('fast', {
         'storyline_membership': [confirmAnswer()],
       });
 
@@ -241,10 +212,10 @@ void main() {
       await seed('c3', vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
       await seed('c4', vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
       await seed('c5', vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T01:00:00Z');
-      final primary = FakeLlm('primary', {
+      final primary = routed('primary', {
         'storyline_name': [nameAnswer()],
       });
-      final fast = FakeLlm('fast', {
+      final fast = routed('fast', {
         'storyline_membership': [confirmAnswer()],
       });
 
@@ -270,11 +241,11 @@ void main() {
           vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
       await seed('c3', vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
       await seed('c4', vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
-      final primary = FakeLlm('primary', {
+      final primary = routed('primary', {
         'storyline_group': [groupAnswer([1, 2, 3])],
         'storyline_name': [nameAnswer()],
       });
-      final fast = FakeLlm('fast', {
+      final fast = routed('fast', {
         'storyline_membership': [confirmAnswer()],
       });
 
@@ -300,13 +271,13 @@ void main() {
       await seed('c2',
           vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
       await seed('c3', vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
-      final primary = FakeLlm('primary', {
+      final primary = routed('primary', {
         'storyline_name': [nameAnswer()],
       });
-      final grouper = FakeLlm('grouper', {
+      final grouper = routed('grouper', {
         'storyline_group': [groupAnswer([1, 2, 3])],
       });
-      final fast = FakeLlm('fast', {
+      final fast = routed('fast', {
         'storyline_membership': [confirmAnswer()],
       });
 
@@ -326,7 +297,7 @@ void main() {
         () async {
       await seedUnnamedStoryline();
       await seed('c1', vector: vectorAt(0.9));
-      final only = FakeLlm('only', {
+      final only = routed('only', {
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer()],
       });
@@ -378,10 +349,10 @@ void main() {
     test('storylineServiceProvider wires the split', () async {
       await seedUnnamedStoryline();
       await seed('c1', vector: vectorAt(0.9));
-      final primary = FakeLlm('primary', {
+      final primary = routed('primary', {
         'storyline_name': [nameAnswer()],
       });
-      final fast = FakeLlm('fast', {
+      final fast = routed('fast', {
         'storyline_membership': [confirmAnswer()],
       });
       final container = ProviderContainer(
@@ -418,7 +389,7 @@ void main() {
           'storyline_refresh',
           'storyline_recap',
         ])
-          id: FakeLlm(id, {
+          id: routed(id, {
             'storyline_membership': [confirmAnswer()],
             'storyline_name': [nameAnswer()],
             'storyline_refresh': [refineAnswer()],
@@ -429,7 +400,7 @@ void main() {
         overrides: [
           dbProvider.overrideWithValue(db),
           stageLlmClientProvider.overrideWith(
-            (ref, id) => clients[id] ?? FakeLlm(id, const {}),
+            (ref, id) => clients[id] ?? routed(id, const {}),
           ),
         ],
       );

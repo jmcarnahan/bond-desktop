@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -9,6 +10,7 @@ import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// The model-read grouping: the cosine pass draws a neighbourhood and
@@ -21,7 +23,7 @@ import 'fixtures/test_db.dart';
 ///
 /// Nothing here scripts a group by NUMBER. The cards are numbered in
 /// centrality order, which is the service's business and not a thing a test
-/// should hard-code; instead [GroupFakeLlm] is told which THREADS go together
+/// should hard-code; instead [groupLlm] is told which THREADS go together
 /// and reads the numbering off the call it was handed. What the tests pin is
 /// the mapping back — that the numbers the model answers with come home to the
 /// threads whose cards carried them.
@@ -87,94 +89,77 @@ List<String> numberedKeys(String user, Iterable<String> keys) => [
         ),
     ];
 
-/// An [LlmClient] that answers from a per-schema script, and answers a
-/// grouping call from a list of thread KEYS mapped back through the numbering
-/// the service actually sent.
-class GroupFakeLlm extends LlmClient {
-  final Map<String, List<Object>> scripts;
+/// The thread keys each grouping call was sent, in call order.
+///
+/// Read back out of the user messages the client recorded rather than kept
+/// in a field of its own: the numbering IS what the service built, so
+/// deriving it cannot drift from the call it describes.
+List<List<String>> numberingsOf(ScriptedLlm llm, Iterable<String> keys) => [
+      for (final call in llm.calls)
+        if (call.schemaName == 'storyline_group')
+          numberedKeys(call.user, keys),
+    ];
 
-  /// Every thread key this mailbox holds, so a card can be recognised.
-  final List<String> keys;
-
-  /// The groups each grouping call answers with, in thread keys, in call
-  /// order. The last entry repeats once the list runs out, exactly as
-  /// [scripts] does.
-  final List<List<List<String>>> groups;
-
-  /// Thrown instead of answering a grouping call, when set.
-  final Object? groupThrows;
-
-  /// Groups written as RAW card numbers rather than as thread keys, for the
-  /// cases about numbers no card carries. Takes precedence over [groups].
-  final List<List<int>>? rawGroups;
-
-  final List<String> schemas = [];
-  final List<double> temperatures = [];
-  final List<List<String>> numberings = [];
-
-  GroupFakeLlm({
-    required this.keys,
-    this.scripts = const {},
-    this.groups = const [],
-    this.groupThrows,
-    this.rawGroups,
-  }) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  int callsFor(String schemaName) =>
-      schemas.where((s) => s == schemaName).length;
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    schemas.add(schemaName);
-    temperatures.add(temperature);
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-
-    if (schemaName == 'storyline_group') {
-      if (groupThrows != null) throw groupThrows!;
-      final order = numberedKeys(user, keys);
-      numberings.add(order);
-      if (rawGroups case final List<List<int>> raw) {
-        return {
-          'groups': [
-            for (final group in raw)
-              {'threads': group, 'why': 'They are one specific piece of work.'},
-          ],
-        };
-      }
-      final at = callsFor('storyline_group') - 1;
-      final answer = groups.isEmpty
-          ? const <List<String>>[]
-          : groups[at < groups.length ? at : groups.length - 1];
+/// The grouping answer, computed from the call the service actually made.
+///
+/// [groups] names the threads that go together, in call order, the last entry
+/// repeating once the list runs out; [rawGroups] writes them as card NUMBERS
+/// instead, for the cases about numbers no card carries, and takes precedence.
+/// Either way the mapping back through the numbering is the whole point, so
+/// it happens here, where the call is.
+FutureOr<Map<String, dynamic>> Function(LlmCall) groupingAnswer({
+  required List<String> keys,
+  List<List<List<String>>> groups = const [],
+  List<List<int>>? rawGroups,
+}) {
+  var calls = 0;
+  return (LlmCall call) {
+    final order = numberedKeys(call.user, keys);
+    final at = calls++;
+    if (rawGroups case final List<List<int>> raw) {
       return {
         'groups': [
-          for (final group in answer)
-            {
-              'threads': [
-                for (final key in group)
-                  if (order.contains(key)) order.indexOf(key) + 1,
-              ],
-              'why': 'They are one specific piece of work.',
-            },
+          for (final group in raw)
+            {'threads': group, 'why': 'They are one specific piece of work.'},
         ],
       };
     }
+    final answer = groups.isEmpty
+        ? const <List<String>>[]
+        : groups[at < groups.length ? at : groups.length - 1];
+    return {
+      'groups': [
+        for (final group in answer)
+          {
+            'threads': [
+              for (final key in group)
+                if (order.contains(key)) order.indexOf(key) + 1,
+            ],
+            'why': 'They are one specific piece of work.',
+          },
+      ],
+    };
+  };
+}
 
-    final script = scripts[schemaName];
-    if (script == null || script.isEmpty) {
-      throw StateError('no scripted answer for $schemaName');
-    }
-    final step = script.length > 1 ? script.removeAt(0) : script.first;
-    if (step is Exception) throw step;
-    return Map<String, dynamic>.from(step as Map);
-  }
+/// A client that answers from a per-schema script, and answers a grouping call
+/// from a list of thread KEYS mapped back through the numbering the service
+/// actually sent. [groupThrows] is thrown instead of answering one.
+ScriptedLlm groupLlm({
+  required List<String> keys,
+  Map<String, List<Object>> scripts = const {},
+  List<List<List<String>>> groups = const [],
+  Object? groupThrows,
+  List<List<int>>? rawGroups,
+}) {
+  final llm = ScriptedLlm();
+  scripts.forEach(llm.scriptFor);
+  llm.answer(
+    'storyline_group',
+    groupThrows ??
+        groupingAnswer(keys: keys, groups: groups, rawGroups: rawGroups),
+  );
+  return llm;
 }
 
 Map<String, dynamic> confirmAnswer() => const {
@@ -277,7 +262,7 @@ void main() {
       // so two proposable groups plus a thread that belongs to neither is
       // three plus three plus one.
       final keys = await seedOneNeighbourhood(store);
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         groups: [
           [
@@ -300,10 +285,12 @@ void main() {
             seen.add((threads: threads, outcome: outcome)),
       ).sweep();
 
+      final numberings = numberingsOf(llm, keys);
+
       // One call over the whole neighbourhood, then a naming call per group.
       expect(llm.callsFor('storyline_group'), 1);
       expect(llm.callsFor('storyline_name'), 2);
-      expect(llm.numberings.single.toSet(), keys.toSet());
+      expect(numberings.single.toSet(), keys.toSet());
       // Two clusters, in the order the model named them, members ascending in
       // the pool's order.
       expect(
@@ -323,7 +310,7 @@ void main() {
 
     test('the call is made at temperature 0, on the naming client', () async {
       final keys = await seedOneNeighbourhood(store);
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         groups: [
           [
@@ -347,7 +334,7 @@ void main() {
 
     test('a group under the propose floor is dropped', () async {
       final keys = await seedOneNeighbourhood(store);
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         groups: [
           [
@@ -379,7 +366,7 @@ void main() {
 
     test('a number the model repeated is used once', () async {
       final keys = await seedOneNeighbourhood(store);
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         groups: [
           [
@@ -409,7 +396,7 @@ void main() {
     test('an answer naming nothing leaves the neighbourhood ungrouped',
         () async {
       final keys = await seedOneNeighbourhood(store);
-      final llm = GroupFakeLlm(keys: keys, groups: const [[]]);
+      final llm = groupLlm(keys: keys, groups: const [[]]);
       final log = ActivityLog(store);
       addTearDown(log.dispose);
 
@@ -433,7 +420,7 @@ void main() {
   group('a grouping call that fails', () {
     test('counts and carries on, rather than ending the pass', () async {
       final keys = await seedOneNeighbourhood(store);
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         groupThrows: const LlmFormatException('not an object'),
       );
@@ -463,7 +450,7 @@ void main() {
       // with its attempt unspent rather than the mailbox being written off as
       // ungroupable because a server was down for an afternoon.
       final keys = await seedOneNeighbourhood(store);
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         groupThrows: const LlmUnavailableException('server down'),
       );
@@ -500,7 +487,7 @@ void main() {
         () async {
       // Thirteen threads, one more than the twelve whole cards a call holds.
       final keys = await seedTwoLobes(7, 6);
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         groups: [
           [
@@ -528,14 +515,16 @@ void main() {
         log,
       );
 
+      final numberings = numberingsOf(llm, keys);
+
       // Two calls, one per piece, and neither piece was truncated: seven
       // cards then six, every thread shown exactly once.
       expect(detail['grouping_calls'], 2);
       expect(detail['grouping_unfit'], 0);
       expect(detail['grouped'], 6);
-      expect(llm.numberings.map((order) => order.length), [7, 6]);
+      expect(numberings.map((order) => order.length), [7, 6]);
       expect(
-        {for (final order in llm.numberings) ...order},
+        {for (final order in numberings) ...order},
         keys.toSet(),
       );
       expect(llm.callsFor('storyline_name'), 2);
@@ -546,7 +535,7 @@ void main() {
       // Eleven on one axis and two on the other: the split leaves a piece of
       // two, which is under `groupingNeighbourhoodMinSize`.
       final keys = await seedTwoLobes(11, 2);
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         groups: [
           [
@@ -573,7 +562,7 @@ void main() {
 
       expect(detail['grouping_calls'], 1);
       expect(detail['grouping_unfit'], 1);
-      expect(llm.numberings.single, hasLength(11));
+      expect(numberingsOf(llm, keys).single, hasLength(11));
       // Nothing was asked about the pair, so nothing is tombstoned either.
       expect(await store.dismissedHashExistsAny(const ['nothing']), isFalse);
     });
@@ -587,7 +576,7 @@ void main() {
       // of four threads should take a slot ahead of one of three however the
       // model happened to list them.
       final keys = await seedOneNeighbourhood(store);
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         groups: [
           [
@@ -621,7 +610,7 @@ void main() {
 
     test('two groups of a size are ordered by their first member', () async {
       final keys = await seedOneNeighbourhood(store);
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         groups: [
           [
@@ -671,7 +660,7 @@ void main() {
           createdBy: 'auto',
         );
       }
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         groups: [
           [
@@ -709,7 +698,7 @@ void main() {
   group('numbers no card carries', () {
     test('a number past the count and a zero are ignored', () async {
       final keys = await seedOneNeighbourhood(store);
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         rawGroups: const [
           [1, 99, 2, 0, 3, -4],
@@ -732,13 +721,13 @@ void main() {
       // Three real cards left, which still clears the propose floor.
       expect(seen.single.threads, hasLength(3));
       expect(seen.single.threads.map((t) => t.key).toSet(),
-          llm.numberings.single.take(3).toSet());
+          numberingsOf(llm, keys).single.take(3).toSet());
     });
 
     test('a group is dropped when the numbers it loses take it under the floor',
         () async {
       final keys = await seedOneNeighbourhood(store);
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         rawGroups: const [
           [1, 2, 99],
@@ -804,7 +793,7 @@ void main() {
 
     test('a hundred threads are three calls, cut in pool order', () async {
       final keys = await seedPool(100);
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         groups: [
           // The first chunk names three, the second four, the third nothing:
@@ -839,20 +828,22 @@ void main() {
         log,
       );
 
+      final numberings = numberingsOf(llm, keys);
+
       // Three calls of 48, 48 and 4, and not one neighbourhood: the threads
       // are spread round the whole circle, so the cosine ladder would have
       // drawn something else entirely.
       expect(detail['grouping_calls'], 3);
       expect(detail['grouping_unfit'], 0);
-      expect(llm.numberings.map((order) => order.length), [48, 48, 4]);
+      expect(numberings.map((order) => order.length), [48, 48, 4]);
 
       // Each call holds exactly its slice of the pool's own order. The cards
       // inside one call are ordered by centrality, so the slices are compared
       // as sets.
       final pool = await poolOrder();
-      expect(llm.numberings[0].toSet(), pool.sublist(0, 48).toSet());
-      expect(llm.numberings[1].toSet(), pool.sublist(48, 96).toSet());
-      expect(llm.numberings[2].toSet(), pool.sublist(96).toSet());
+      expect(numberings[0].toSet(), pool.sublist(0, 48).toSet());
+      expect(numberings[1].toSet(), pool.sublist(48, 96).toSet());
+      expect(numberings[2].toSet(), pool.sublist(96).toSet());
 
       // Largest first, whichever chunk found it.
       expect(
@@ -868,7 +859,7 @@ void main() {
       // Fifty threads: forty-eight in the first chunk and two in the second,
       // which is under `groupingNeighbourhoodMinSize`.
       final keys = await seedPool(50);
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         groups: [
           [
@@ -895,7 +886,7 @@ void main() {
 
       expect(detail['grouping_calls'], 1);
       expect(detail['grouping_unfit'], 1);
-      expect(llm.numberings.single, hasLength(48));
+      expect(numberingsOf(llm, keys).single, hasLength(48));
     });
 
     test('the room the sweep has left does NOT stop the chunk loop', () async {
@@ -911,7 +902,7 @@ void main() {
         status: 'suggested',
         createdBy: 'auto',
       );
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         groups: [
           // The first chunk alone returns three groups, one more than there is
@@ -968,7 +959,7 @@ void main() {
 
       Future<List<List<String>>> run(MessageStore into) async {
         final keys = await seedOneNeighbourhood(into);
-        final llm = GroupFakeLlm(
+        final llm = groupLlm(
           keys: keys,
           groups: [
             [
@@ -1012,7 +1003,7 @@ void main() {
       // `StorylineTuning.groupingMode`, and the fake has no grouping answer to
       // give — a call would throw rather than pass quietly.
       final keys = await seedOneNeighbourhood(store);
-      final llm = GroupFakeLlm(
+      final llm = groupLlm(
         keys: keys,
         scripts: {
           'storyline_name': [nameAnswer()],

@@ -8,7 +8,6 @@ import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/ai_workers.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
@@ -21,6 +20,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'fixtures/memory_token_store.dart';
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// The one sentence that tells somebody the pipeline is stuck, and why.
@@ -65,13 +65,9 @@ class _FakeSync implements MailSync {
   Future<void> ensureMessageBody(String sourceMessageId) async {}
 }
 
-class _NeverLlm extends LlmClient {
-  _NeverLlm() : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-}
-
 /// A triage queue that drains nothing and publishes whatever a test pushes.
 class _FeedTriage extends TriageQueue {
-  _FeedTriage(MessageStore store) : super(store, _NeverLlm());
+  _FeedTriage(MessageStore store) : super(store, ScriptedLlm.never());
 
   final StreamController<TriageProgress> _feed =
       StreamController<TriageProgress>.broadcast();

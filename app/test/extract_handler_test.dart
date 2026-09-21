@@ -18,34 +18,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
-/// An [LlmClient] that answers from a script and never opens a socket.
-class FakeLlm extends LlmClient {
-  final List<Object> script;
-  final List<String> userMessages = [];
-  final List<double> temperatures = [];
-
-  FakeLlm(this.script) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    userMessages.add(user);
-    temperatures.add(temperature);
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-    final step = script.length > 1 ? script.removeAt(0) : script.first;
-    if (step is Exception) throw step;
-    return Map<String, dynamic>.from(step as Map);
-  }
-}
+/// A client that answers one task from a script and never opens a socket.
+/// The extraction is what almost everything here asks for; the one drafting
+/// client below names its own task instead.
+ScriptedLlm scripted(
+  List<Object> script, {
+  String schemaName = 'extraction',
+}) =>
+    ScriptedLlm()..scriptFor(schemaName, script);
 
 /// An [ActivityLog] that keeps what the handler noted, so the REASON a message
 /// was not queued can be read — the progress row has no column for it.
@@ -196,7 +179,7 @@ void main() {
       await seedConversation();
       await store.writeTriage('email', 'm1',
           status: 'skipped', gateReason: 'newsletter');
-      final llm = FakeLlm([answer()]);
+      final llm = scripted([answer()]);
       final embeddings = FakeEmbeddings();
 
       await runOne(ExtractHandler(store, llm, embeddings.client));
@@ -227,7 +210,7 @@ void main() {
         'state': 'needs_reply',
         'last_message_at': '2026-08-29T10:00:00Z',
       });
-      final llm = FakeLlm([answer()]);
+      final llm = scripted([answer()]);
 
       await ExtractHandler(store, llm, FakeEmbeddings().client).run(
         {'task_kind': 'extract', 'source': 'teams', 'entity_id': 't1'},
@@ -264,7 +247,7 @@ void main() {
           'size': 0,
         },
       ]);
-      final llm = FakeLlm([answer()]);
+      final llm = scripted([answer()]);
 
       await ExtractHandler(store, llm, FakeEmbeddings().client).run(
         {'task_kind': 'extract', 'source': 'teams', 'entity_id': 't1'},
@@ -276,7 +259,7 @@ void main() {
 
     test('stores the model answer as JSON', () async {
       await seedMessage();
-      final llm = FakeLlm([answer()]);
+      final llm = scripted([answer()]);
       final embeddings = FakeEmbeddings();
 
       await runOne(ExtractHandler(store, llm, embeddings.client));
@@ -292,7 +275,7 @@ void main() {
     test('runs at temperature 0 — the same email twice is the same facts',
         () async {
       await seedMessage();
-      final llm = FakeLlm([answer()]);
+      final llm = scripted([answer()]);
 
       await runOne(ExtractHandler(store, llm, FakeEmbeddings().client));
 
@@ -320,7 +303,7 @@ void main() {
       });
       await seedMessage();
       await seedConversation();
-      final llm = FakeLlm([answer()]);
+      final llm = scripted([answer()]);
 
       await runOne(ExtractHandler(store, llm, FakeEmbeddings().client));
 
@@ -336,7 +319,7 @@ void main() {
     });
 
     test('a message that vanished is done, not failed', () async {
-      final llm = FakeLlm([answer()]);
+      final llm = scripted([answer()]);
 
       await runOne(ExtractHandler(store, llm, FakeEmbeddings().client));
 
@@ -346,7 +329,7 @@ void main() {
 
     test('a model failure surfaces, so the worker can retry it', () async {
       await seedMessage();
-      final llm = FakeLlm([const LlmFormatException('not json')]);
+      final llm = scripted([const LlmFormatException('not json')]);
 
       await expectLater(
         runOne(ExtractHandler(store, llm, FakeEmbeddings().client)),
@@ -362,7 +345,7 @@ void main() {
       await seedMessage(summary: 'Sarah needs the lock extended.');
       final embeddings = FakeEmbeddings();
 
-      await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
+      await runOne(ExtractHandler(store, scripted([answer()]), embeddings.client));
 
       // The people segment is empty since Round D Phase 2 — the card is four
       // segments by contract whatever the flag says, so the vector is taken
@@ -389,7 +372,7 @@ void main() {
       final embeddings = FakeEmbeddings();
       final handler = ExtractHandler(
         store,
-        FakeLlm([answer()]),
+        scripted([answer()]),
         embeddings.client,
       );
 
@@ -446,7 +429,7 @@ void main() {
       );
       final embeddings = FakeEmbeddings();
 
-      await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
+      await runOne(ExtractHandler(store, scripted([answer()]), embeddings.client));
 
       final expected = clusteringCardForConversationRow(
         (await store.getConversationRow('email', 'conv-1'))!,
@@ -475,7 +458,7 @@ void main() {
       final embeddings = FakeEmbeddings();
       final handler = ExtractHandler(
         store,
-        FakeLlm([answer()]),
+        scripted([answer()]),
         embeddings.client,
       );
 
@@ -504,7 +487,7 @@ void main() {
       final embeddings = FakeEmbeddings();
       final handler = ExtractHandler(
         store,
-        FakeLlm([answer()]),
+        scripted([answer()]),
         embeddings.client,
       );
 
@@ -525,7 +508,7 @@ void main() {
       final embeddings = FakeEmbeddings();
       final handler = ExtractHandler(
         store,
-        FakeLlm([
+        scripted([
           answer(),
           answer(topics: const ['homepage copy', 'launch date']),
         ]),
@@ -550,7 +533,7 @@ void main() {
 
       // Not a throw: the worker would mark the item failed and re-run the
       // model call that already succeeded, to retry an optimisation.
-      await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
+      await runOne(ExtractHandler(store, scripted([answer()]), embeddings.client));
 
       expect(await store.getExtraction('email', 'm1'), isNotNull);
       final row = await store.getConversationAi('email', 'conv-1');
@@ -563,7 +546,7 @@ void main() {
       await seedMessage(conversationKey: 'orphan');
       final embeddings = FakeEmbeddings();
 
-      await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
+      await runOne(ExtractHandler(store, scripted([answer()]), embeddings.client));
 
       expect(await store.getExtraction('email', 'm1'), isNotNull);
       expect(embeddings.clusteringInputs, isEmpty);
@@ -576,7 +559,7 @@ void main() {
       await seedMessage();
       final handler = ExtractHandler(
         store,
-        FakeLlm([answer(), answer(topics: const ['homepage copy'])]),
+        scripted([answer(), answer(topics: const ['homepage copy'])]),
         FakeEmbeddings().client,
       );
       await runOne(handler);
@@ -623,7 +606,7 @@ void main() {
           addedBy: 'auto');
       final handler = ExtractHandler(
         store,
-        FakeLlm([answer()]),
+        scripted([answer()]),
         FakeEmbeddings().client,
         progress: PipelineProgress(store),
       );
@@ -648,7 +631,7 @@ void main() {
       await seedMessage();
       final handler = ExtractHandler(
         store,
-        FakeLlm([answer()]),
+        scripted([answer()]),
         FakeEmbeddings().client,
         progress: PipelineProgress(store),
       );
@@ -666,7 +649,7 @@ void main() {
 
       await runOne(ExtractHandler(
         store,
-        FakeLlm([answer()]),
+        scripted([answer()]),
         FakeEmbeddings().client,
         progress: PipelineProgress(store),
       ));
@@ -692,7 +675,7 @@ void main() {
       await seedMessage();
       await fileInStoryline();
 
-      await runOne(ExtractHandler(store, FakeLlm([answer()]), FakeEmbeddings().client));
+      await runOne(ExtractHandler(store, scripted([answer()]), FakeEmbeddings().client));
 
       // The one storyline trigger that is not about membership: a message
       // landing in a thread that is ALREADY filed changes where that storyline
@@ -708,7 +691,7 @@ void main() {
       await seedConversation();
       await seedMessage();
 
-      await runOne(ExtractHandler(store, FakeLlm([answer()]), FakeEmbeddings().client));
+      await runOne(ExtractHandler(store, scripted([answer()]), FakeEmbeddings().client));
 
       expect(await store.nextPendingWork('storyline_recap'), isNull);
     });
@@ -719,7 +702,7 @@ void main() {
       await fileInStoryline();
 
       await runOne(
-        ExtractHandler(store, FakeLlm([answer()]), FakeEmbeddings(vector: null).client),
+        ExtractHandler(store, scripted([answer()]), FakeEmbeddings(vector: null).client),
       );
 
       // The recap has nothing to do with the vector. Hanging it off a
@@ -758,7 +741,7 @@ void main() {
       await store.addStorylineMember('sl-1', 'teams', 'chat-1',
           addedBy: 'auto');
 
-      await ExtractHandler(store, FakeLlm([answer()]), FakeEmbeddings().client)
+      await ExtractHandler(store, scripted([answer()]), FakeEmbeddings().client)
           .run({'task_kind': 'extract', 'source': 'teams', 'entity_id': 't1'});
 
       final work = await store.nextPendingWork('storyline_recap');
@@ -779,7 +762,7 @@ void main() {
       await store.addStorylineMember('sl-2', 'email', 'conv-1',
           addedBy: 'auto');
 
-      await runOne(ExtractHandler(store, FakeLlm([answer()]), FakeEmbeddings().client));
+      await runOne(ExtractHandler(store, scripted([answer()]), FakeEmbeddings().client));
 
       expect(await store.workCounts('storyline_recap'), {'pending': 2});
     });
@@ -804,7 +787,7 @@ void main() {
       await seedMessage(summary: 'Sarah needs the lock extended.');
       final embeddings = FakeEmbeddings();
 
-      await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
+      await runOne(ExtractHandler(store, scripted([answer()]), embeddings.client));
 
       final row = (await vectorRow('m1'))!;
       expect(row['embed_model'], EmbeddingsClient.documentModelTag);
@@ -825,7 +808,7 @@ void main() {
       await seedMessage(conversationKey: 'orphan');
       final embeddings = FakeEmbeddings();
 
-      await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
+      await runOne(ExtractHandler(store, scripted([answer()]), embeddings.client));
 
       expect(await vectorRow('m1'), isNotNull);
     });
@@ -839,7 +822,7 @@ void main() {
       // Not a throw, for `_refreshCard`'s reason: the facts are already
       // stored, and failing the item would re-run the model call that
       // succeeded in order to retry an optimisation.
-      await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
+      await runOne(ExtractHandler(store, scripted([answer()]), embeddings.client));
 
       expect(await store.getExtraction('email', 'm1'), isNotNull);
       expect(await vectorRow('m1'), isNull);
@@ -857,7 +840,7 @@ void main() {
         handlers: [
           ExtractHandler(
             store,
-            FakeLlm([answer()]),
+            scripted([answer()]),
             FakeEmbeddings(vector: null).client,
           )
         ],
@@ -897,7 +880,7 @@ void main() {
             as String?;
 
     ExtractHandler handlerFor(Map<String, dynamic> result) =>
-        ExtractHandler(store, FakeLlm([result]), FakeEmbeddings().client);
+        ExtractHandler(store, scripted([result]), FakeEmbeddings().client);
 
     test('a low-value fyi is deferred as the fact lands', () async {
       // Without this the row would appear in the inbox, sit there while the
@@ -1135,7 +1118,7 @@ void main() {
       runOne(
         ExtractHandler(
           store,
-          FakeLlm([answer()]),
+          scripted([answer()]),
           FakeEmbeddings().client,
           progress: PipelineProgress(store),
           activityLog: activityLog,
@@ -1615,7 +1598,7 @@ void main() {
       final log = _Recorder();
       final handler = ExtractHandler(
         store,
-        FakeLlm([answer()]),
+        scripted([answer()]),
         FakeEmbeddings().client,
         progress: PipelineProgress(store),
         activityLog: log,
@@ -1668,7 +1651,7 @@ void main() {
       final embeddings = FakeEmbeddings();
       final worker = AiWorker(
         store,
-        handlers: [ExtractHandler(store, FakeLlm([answer()]), embeddings.client)],
+        handlers: [ExtractHandler(store, scripted([answer()]), embeddings.client)],
       );
 
       await worker.pump();
@@ -1704,13 +1687,16 @@ void main() {
       await store.writeNeedsYouVerdict('email', 'm1',
           verdict: true, reason: 'Priya is waiting on your number');
       await store.enqueueWork('extract', 'email', 'm1');
-      final drafting = FakeLlm([
-        {'needs_reply': false, 'reason': 'A heads-up; nobody is waiting.'}
-      ]);
+      final drafting = scripted(
+        [
+          {'needs_reply': false, 'reason': 'A heads-up; nobody is waiting.'}
+        ],
+        schemaName: 'reply_decision',
+      );
       final worker = AiWorker(
         store,
         handlers: [
-          ExtractHandler(store, FakeLlm([answer()]), FakeEmbeddings().client),
+          ExtractHandler(store, scripted([answer()]), FakeEmbeddings().client),
           DraftHandler(store, drafting),
         ],
       );
@@ -1732,7 +1718,7 @@ void main() {
         handlers: [
           ExtractHandler(
             store,
-            FakeLlm([const LlmUnavailableException('not reachable')]),
+            scripted([const LlmUnavailableException('not reachable')]),
             FakeEmbeddings().client,
           )
         ],

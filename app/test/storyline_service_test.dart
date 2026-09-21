@@ -33,6 +33,7 @@ import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/vec_test_db.dart';
 
@@ -43,53 +44,22 @@ typedef SeenCluster = ({
   String outcome,
 });
 
-/// An [LlmClient] that answers from a per-schema script and never opens a
+/// A [ScriptedLlm] that answers from a per-schema script and never opens a
 /// socket.
 ///
 /// Keyed on `schemaName` rather than on call order because the two storyline
 /// tasks interleave: an assignment that confirms a membership may go straight
 /// on to name the storyline, and a positional script would silently hand the
 /// naming task the next confirmation answer.
-class FakeLlm extends LlmClient {
-  final Map<String, List<Object>> scripts;
-
-  final List<String> schemas = [];
-  final List<String> userMessages = [];
-  final List<double> temperatures = [];
-
-  /// The completion budget each call was made with, by schema name. Recorded
-  /// because a task that measured its own ceiling has to be run at it.
-  final Map<String, int> budgets = {};
-
-  FakeLlm(this.scripts) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  int callsFor(String schemaName) =>
-      schemas.where((s) => s == schemaName).length;
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    schemas.add(schemaName);
-    userMessages.add(user);
-    temperatures.add(temperature);
-    budgets[schemaName] = maxTokens;
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-
-    final script = scripts[schemaName];
-    if (script == null || script.isEmpty) {
-      throw StateError('no scripted answer for $schemaName');
-    }
-    final step = script.length > 1 ? script.removeAt(0) : script.first;
-    if (step is Exception) throw step;
-    return Map<String, dynamic>.from(step as Map);
-  }
+///
+/// Everything this file reads back — `schemas`, `userMessages`,
+/// `temperatures`, `budgets`, `callsFor` — is a projection of the fixture's
+/// one `calls` list, so the index-paired idiom below
+/// (`userMessages[schemas.indexOf('storyline_name')]`) still holds.
+ScriptedLlm fakeLlm(Map<String, List<Object>> scripts) {
+  final llm = ScriptedLlm();
+  scripts.forEach(llm.scriptFor);
+  return llm;
 }
 
 /// An [EmbeddingsClient] that answers from memory and never opens a socket,
@@ -129,34 +99,16 @@ class FakeEmbeddings extends EmbeddingsClient {
   }
 }
 
-/// A [FakeLlm] that runs [onCall] before answering — how a test lands a user
-/// action in the middle of a model call.
-class HookedFakeLlm extends FakeLlm {
-  final Future<void> Function(String schemaName) onCall;
-
-  HookedFakeLlm(super.scripts, this.onCall);
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    await onCall(schemaName);
-    return super.completeJson(
-      system: system,
-      user: user,
-      schema: schema,
-      schemaName: schemaName,
-      maxTokens: maxTokens,
-      temperature: temperature,
-      think: think,
-    );
-  }
+/// A [fakeLlm] that runs [onCall] before answering — how a test lands a user
+/// action in the middle of a model call. The fixture's own `onCall` seam,
+/// which runs inside the in-flight window and before the step.
+ScriptedLlm hookedFakeLlm(
+  Map<String, List<Object>> scripts,
+  Future<void> Function(String schemaName) onCall,
+) {
+  final llm = ScriptedLlm(onCall: (call) => onCall(call.schemaName));
+  scripts.forEach(llm.scriptFor);
+  return llm;
 }
 
 /// A real [MessageStore] over a real database that counts the two reads the
@@ -607,7 +559,7 @@ void main() {
       await seedStoryline(store);
       await seed(store, 'c1',
           vector: vectorAt(0.8), lastMessageAt: '2026-08-29T10:00:00Z');
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
@@ -629,7 +581,7 @@ void main() {
         () async {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.8));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
@@ -640,7 +592,7 @@ void main() {
       await seedStoryline(store);
       // 0.40 is under the plain gate of 0.44 and there is nobody in common.
       await seed(store, 'c1', vector: vectorAt(0.40), participants: const ['Ann Lu']);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
@@ -657,7 +609,7 @@ void main() {
           memberParticipants: const ['Sarah Chen', 'Ann Lu']);
       await seed(store, 'c1',
           vector: vectorAt(0.40), participants: const ['sarah chen']);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
           AssignOutcome.noCandidate);
@@ -681,7 +633,7 @@ void main() {
           memberParticipants: const ['Pat Owner', 'Ann Lu']);
       await seed(store, 'c1',
           vector: vectorAt(0.40), participants: const ['Pat Owner', 'Ann Lu']);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final service = StorylineService(
         store,
         llm,
@@ -714,7 +666,7 @@ void main() {
           (name: 'Pat Owner', email: 'pat.owner@partner.example.com'),
         ],
       );
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final service = StorylineService(
         store,
         llm,
@@ -742,7 +694,7 @@ void main() {
         // settles it.
         participantRecords: const [(name: 'P. Owner', email: 'pat@example.com')],
       );
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final service = StorylineService(
         store,
         llm,
@@ -768,7 +720,7 @@ void main() {
           vector: vectorAt(0.40), participants: const ['Pat Owner', 'Ann Lu']);
       // A no, so the storyline's centroid does not move between the two
       // threads and the only thing that changed is who the owner is.
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer(belongs: false)],
       });
       var lookups = 0;
@@ -821,7 +773,7 @@ void main() {
       // 0.62 against 0.60 is a coin toss dressed as a ranking, so the cosine
       // stops deciding and the answers decide instead.
       await seedTwoCandidates(firstCosine: 0.62, secondCosine: 0.60);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [
           confirmAnswer(confidence: 'medium'),
           confirmAnswer(confidence: 'high'),
@@ -839,7 +791,7 @@ void main() {
 
     test('and says in the log that it asked twice', () async {
       await seedTwoCandidates(firstCosine: 0.62, secondCosine: 0.60);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [
           confirmAnswer(confidence: 'medium'),
           confirmAnswer(confidence: 'high'),
@@ -858,7 +810,7 @@ void main() {
 
     test('a near-tie on equal confidence takes the higher cosine', () async {
       await seedTwoCandidates(firstCosine: 0.62, secondCosine: 0.60);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer(), confirmAnswer()],
       });
 
@@ -872,7 +824,7 @@ void main() {
 
     test('a near-tie where neither is accepted is rejected, once', () async {
       await seedTwoCandidates(firstCosine: 0.62, secondCosine: 0.60);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [
           confirmAnswer(belongs: false),
           confirmAnswer(belongs: false),
@@ -890,7 +842,7 @@ void main() {
     test('a gap beyond the margin is still a ranking, and one question',
         () async {
       await seedTwoCandidates(firstCosine: 0.70, secondCosine: 0.60);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
@@ -903,7 +855,7 @@ void main() {
       // A group the owner kept is a group they have looked at.
       await seedStoryline(store, memberKey: 'kept');
       await seed(store, 'c1', vector: vectorAt(0.8));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer(confidence: 'medium')],
       });
 
@@ -917,7 +869,7 @@ void main() {
       // so it needs the strongest answer the model gives.
       await seedStoryline(store, status: 'suggested', memberKey: 'new');
       await seed(store, 'c1', vector: vectorAt(0.8));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer(confidence: 'medium')],
       });
 
@@ -931,7 +883,7 @@ void main() {
     test('and a high yes files into it', () async {
       await seedStoryline(store, status: 'suggested', memberKey: 'new');
       await seed(store, 'c1', vector: vectorAt(0.8));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer(confidence: 'high')],
       });
 
@@ -945,7 +897,7 @@ void main() {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.95));
       await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
@@ -959,7 +911,7 @@ void main() {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.95));
       await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
@@ -969,7 +921,7 @@ void main() {
     test('a "no" adds nothing and blocks nothing', () async {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.95));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer(belongs: false)],
       });
 
@@ -984,7 +936,7 @@ void main() {
     test('a low-confidence yes is a no', () async {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.95));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer(confidence: 'low')],
       });
 
@@ -1002,7 +954,7 @@ void main() {
       // `gated` before it ever asks for a vector, and there is no park to
       // pin. `seed` writes no message of its own without a vector.
       await seedMessage(store, 'c1', 'c1-m1', triageStatus: 'triaged');
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       // The park is the point. Returning quietly wrote the work row `done`,
       // so a thread whose embedding had not landed yet — an embedding server
@@ -1019,7 +971,7 @@ void main() {
     test('a vector from another embedding model is not comparable', () async {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(1), embedModel: 'some-other-model');
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       // Same as having none at all: a cosine across two models' spaces is a
       // number with no meaning that still sorts.
@@ -1041,7 +993,7 @@ void main() {
       );
       await store.addStorylineMember('sl-1', 'email', 'member', addedBy: 'auto');
       await seed(store, 'c1', vector: vectorAt(1));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
@@ -1050,7 +1002,7 @@ void main() {
 
     test('an unknown conversation returns silently', () async {
       await seedStoryline(store);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'nope');
 
@@ -1065,7 +1017,7 @@ void main() {
           memberKey: 'near-member',
           memberVector: vectorAt(0.95));
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
@@ -1080,7 +1032,7 @@ void main() {
         () async {
       await seedStoryline(store, summary: null, titleLocked: true);
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer(title: 'A name the model preferred')],
       });
@@ -1102,7 +1054,7 @@ void main() {
         () async {
       await seedStoryline(store, summary: null);
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer(title: 'Brightsea launch')],
       });
@@ -1117,7 +1069,7 @@ void main() {
     test('a suggestion still collects members while it waits', () async {
       await seedStoryline(store, status: 'suggested');
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
@@ -1138,7 +1090,7 @@ void main() {
       // So the hoisted block read is exercised too, not merely made.
       await counting.removeStorylineMember('sl-blocked', 'email', 'c1',
           block: true);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       final outcome = await StorylineService(counting, llm)
           .assignConversation('email', 'c1');
@@ -1165,7 +1117,7 @@ void main() {
     test('a filing is assigned', () async {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       expect(
         await StorylineService(store, llm).assignConversation('email', 'c1'),
@@ -1176,7 +1128,7 @@ void main() {
     test('a model that says no is rejected, not merely nothing', () async {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.95));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer(belongs: false)],
       });
 
@@ -1189,7 +1141,7 @@ void main() {
     test('a low-confidence yes is rejected too', () async {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.95));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer(confidence: 'low')],
       });
 
@@ -1203,7 +1155,7 @@ void main() {
       await seedStoryline(store);
       await seed(store, 'c1',
           vector: vectorAt(0.40), participants: const ['Ann Lu']);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       expect(
         await StorylineService(store, llm).assignConversation('email', 'c1'),
@@ -1216,7 +1168,7 @@ void main() {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.95));
       await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       expect(
         await StorylineService(store, llm).assignConversation('email', 'c1'),
@@ -1227,7 +1179,7 @@ void main() {
     test('a conversation that no longer exists is noCandidate, not a park',
         () async {
       await seedStoryline(store);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       // Parking on it would hold the queue open forever for a thread no
       // embedding is ever coming for.
@@ -1243,7 +1195,7 @@ void main() {
       await seed(store, 'c1', keptInbound: false);
       await seedMessage(store, 'c1', 'm1',
           triageStatus: 'skipped', gateReason: 'no_reply');
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       // No embeddings client is given to this service, so a pass that
       // reached the re-embed would THROW rather than return — which is what
@@ -1266,7 +1218,7 @@ void main() {
       await seed(store, 'c1', vector: vectorAt(0.95), keptInbound: false);
       await seedMessage(store, 'c1', 'm1',
           triageStatus: 'skipped', gateReason: 'newsletter');
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       expect(
         await StorylineService(store, llm).assignConversation('email', 'c1'),
@@ -1283,7 +1235,7 @@ void main() {
           triageStatus: 'skipped',
           gateReason: 'no_reply');
       await seedMessage(store, 'c1', 'kept', triageStatus: 'triaged');
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       expect(
         await StorylineService(store, llm).assignConversation('email', 'c1'),
@@ -1300,7 +1252,7 @@ void main() {
           direction: 'outbound',
           triageStatus: 'skipped',
           gateReason: 'outbound');
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       expect(
         await StorylineService(store, llm).assignConversation('email', 'c1'),
@@ -1404,7 +1356,7 @@ void main() {
         () async {
       await seedShares(aVector: vectorAt(1), bVector: vectorAt(0));
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final service = StorylineService(store, llm);
 
       expect(await service.assignConversation('email', 'c1'),
@@ -1433,7 +1385,7 @@ void main() {
       // member to be told what it was told this morning.
       await seedShares(aVector: vectorAt(1), bVector: vectorAt(0));
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final service = StorylineService(store, llm);
 
       await service.assignConversation('email', 'c1');
@@ -1468,7 +1420,7 @@ void main() {
       // `sl-a` is the closer of the two and would have won the shortlist.
       await seedShares(aVector: vectorAt(0.9), bVector: vectorAt(0.7));
       await seed(store, 'c1', vector: vectorAt(1));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
           AssignOutcome.assigned);
@@ -1484,7 +1436,7 @@ void main() {
       // saying so would queue an audit for every thread in the mailbox.
       await seedShares(aVector: vectorAt(0.1), bVector: vectorAt(0));
       await seed(store, 'c1', vector: vectorAt(1));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
           AssignOutcome.noCandidate);
@@ -1498,7 +1450,7 @@ void main() {
       await seedShares(
           aVector: vectorAt(1), bVector: vectorAt(0), addedBy: 'user');
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
           AssignOutcome.assigned);
@@ -1512,7 +1464,7 @@ void main() {
       await seedShares(aVector: vectorAt(1), bVector: vectorAt(0.95));
       await seed(store, 'c1', vector: vectorAt(0.9));
       await store.removeStorylineMember('sl-b', 'email', 'c1', block: true);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       expect(await StorylineService(store, llm).assignConversation('email', 'c1'),
           AssignOutcome.catchAll);
@@ -1553,7 +1505,7 @@ void main() {
       }
     }
 
-    String confirmMessageOf(FakeLlm llm) =>
+    String confirmMessageOf(ScriptedLlm llm) =>
         llm.userMessages[llm.schemas.indexOf('storyline_membership')];
 
     test('the candidate card carries the topics and the triage summary',
@@ -1565,7 +1517,7 @@ void main() {
         summary: 'Asks what time to come on Friday and offers dessert.',
         extractionJson: '{"topics":["dinner plans","scheduling"]}',
       );
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
@@ -1580,7 +1532,7 @@ void main() {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.8));
       await seedInbound('c1', summary: 'Asks what time to come on Friday.');
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
@@ -1600,7 +1552,7 @@ void main() {
         summary: 'Asks what time to come on Friday.',
         extractionJson: 'not json at all',
       );
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
@@ -1616,7 +1568,7 @@ void main() {
         extractionJson: '{"topics":["homepage copy","review"]}',
       );
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer()],
       });
@@ -1638,7 +1590,7 @@ void main() {
       // there and the charter is not. One naming call backfills it.
       await seedStoryline(store, charter: null);
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer()],
       });
@@ -1660,7 +1612,7 @@ void main() {
         charterLocked: true,
       );
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer()],
       });
@@ -1685,7 +1637,7 @@ void main() {
       // honor the lock as it is NOW, not as it was when the call started.
       await seedStoryline(store, charter: null);
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = HookedFakeLlm({
+      final llm = hookedFakeLlm({
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer()],
       }, (schemaName) async {
@@ -1706,7 +1658,7 @@ void main() {
     test('a storyline that has both is left alone', () async {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
@@ -1730,7 +1682,7 @@ void main() {
           vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
       await seed(store, 'c4', vector: vectorAt(0));
       await seed(store, 'c5', vector: vectorAt(-0.9));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -1752,7 +1704,7 @@ void main() {
           vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
       await seed(store, 'c4', vector: vectorAt(0));
       await seed(store, 'c5', vector: vectorAt(-0.9));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer(charter: '')],
         'storyline_membership': [confirmAnswer()],
       });
@@ -1778,7 +1730,7 @@ void main() {
             addedBy: 'auto');
       }
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer()],
       });
@@ -1824,7 +1776,7 @@ void main() {
       // One thread is nothing to pair, and a storyline of one is just a
       // thread — the sweep does not reach the model at all.
       await seed(store, 'c1', vector: vectorAt(1));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -1846,7 +1798,7 @@ void main() {
           vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
       await seed(store, 'c2',
           vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -1902,7 +1854,7 @@ void main() {
             vector: vectorAt(math.cos(0.7 * index)),
             lastMessageAt: thread.$2);
       }
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -1934,7 +1886,7 @@ void main() {
           vector: vectorAt(-0.95), lastMessageAt: '2026-08-29T02:00:00Z');
       await seed(store, 'c6',
           vector: vectorAt(-1), lastMessageAt: '2026-08-29T01:00:00Z');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [
           nameAnswer(title: 'The near triple'),
           nameAnswer(title: 'The far triple'),
@@ -1970,7 +1922,7 @@ void main() {
             vector: vectorAt(1),
             lastMessageAt: '2026-08-${29 - i}T10:00:00Z');
       }
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2021,7 +1973,7 @@ void main() {
           receivedAt: '2026-08-29T05:00:00Z',
           triageStatus: 'skipped',
           gateReason: 'no_reply');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer(), confirmAnswer()],
       });
@@ -2045,7 +1997,7 @@ void main() {
       // first, so c1, c2, then c3. Distinct sentences, because the point of
       // the stage is that each thread gets its own reason rather than the
       // cluster's.
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [
           confirmAnswer(evidence: 'c1 is the homepage copy review.'),
@@ -2098,7 +2050,7 @@ void main() {
           vector: vectorAt(0.9), lastMessageAt: '2026-08-29T02:00:00Z');
       await seed(store, 'c4',
           vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T01:00:00Z');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [
           confirmAnswer(),
@@ -2135,7 +2087,7 @@ void main() {
           vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:00:00Z');
       await seed(store, 'c3',
           vector: vectorAt(0.9), lastMessageAt: '2026-08-29T02:00:00Z');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [
           confirmAnswer(),
@@ -2170,7 +2122,7 @@ void main() {
 
     test('a yes the model is not confident about is a no', () async {
       await seedMailbox(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [
           confirmAnswer(),
@@ -2191,7 +2143,7 @@ void main() {
       // it is not built at all. Three medium yeses leave no survivors, which
       // is the same ending an outright rejection reaches.
       await seedMailbox(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [
           confirmAnswer(confidence: 'medium'),
@@ -2220,7 +2172,7 @@ void main() {
 
     test('and three high ones build the storyline of three', () async {
       await seedMailbox(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2235,7 +2187,7 @@ void main() {
     test('a cluster the model rejects outright is never proposed twice',
         () async {
       await seedMailbox(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer(belongs: false)],
       });
@@ -2281,7 +2233,7 @@ void main() {
     test('a done thread is never the start of a story', () async {
       await seedMailbox(store);
       store.setConversationState('email', 'c2', ConversationState.done);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2304,7 +2256,7 @@ void main() {
         createdBy: 'user',
       );
       await store.addStorylineMember('sl-existing', 'email', 'c1', addedBy: 'user');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2321,7 +2273,7 @@ void main() {
 
     test('a dismissed cluster is not proposed again', () async {
       await seedMailbox(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2351,7 +2303,7 @@ void main() {
     test('a dismissed cluster whose membership drifted is not proposed again',
         () async {
       await seedMailbox(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2395,7 +2347,7 @@ void main() {
           vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:00:00Z');
       await seed(store, 'c3',
           vector: vectorAt(0.9), lastMessageAt: '2026-08-29T02:00:00Z');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2448,7 +2400,7 @@ void main() {
           createdBy: 'auto',
         );
       }
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer(), nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2486,7 +2438,7 @@ void main() {
           createdBy: 'auto',
         );
       }
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2505,7 +2457,7 @@ void main() {
         // between the two runs is the clustering itself.
         await StorylineService(
           target,
-          FakeLlm({
+          fakeLlm({
             'storyline_name': [nameAnswer()],
             'storyline_membership': [confirmAnswer()],
           }),
@@ -2538,7 +2490,7 @@ void main() {
           vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
       await seed(store, 'c4',
           vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T01:00:00Z');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2575,7 +2527,7 @@ void main() {
           vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
       await seed(store, 'c4',
           vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T01:00:00Z');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2624,7 +2576,7 @@ void main() {
       await seedMixedMailbox(store);
       await store.addStorylineMember('sl-existing', 'teams', 't1',
           addedBy: 'user');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2649,7 +2601,7 @@ void main() {
       // does for a mail thread.
       await store.removeStorylineMember('sl-existing', 'teams', 't1',
           block: true);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2693,7 +2645,7 @@ void main() {
       // been looked at.
       await store.addStorylineMember('sl-existing', 'email', 'shared',
           addedBy: 'user');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2721,7 +2673,7 @@ void main() {
       // chat, and it says nothing about the mail thread under that key.
       await store.removeStorylineMember('sl-existing', 'teams', 'shared',
           block: true);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2754,7 +2706,7 @@ void main() {
         createdBy: 'auto',
         clusterHash: cardHash('c1\nc2\nc3'),
       );
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2775,7 +2727,7 @@ void main() {
     ///
     /// Empty when the pass was quiet: the log suppresses an all-zero row as
     /// the genuine nothing it is, so an empty map here IS an assertion.
-    Future<Map<String, Object?>> sweepAndRecord(FakeLlm llm) async {
+    Future<Map<String, Object?>> sweepAndRecord(ScriptedLlm llm) async {
       final log = ActivityLog(store);
       addTearDown(log.dispose);
       await StorylineService(store, llm, activityLog: log).sweep();
@@ -2788,7 +2740,7 @@ void main() {
     /// The naming call's fenced body, split back into the cards the service
     /// numbered — so a test can say which thread the model was shown as `[2]`
     /// rather than guessing at the centrality order.
-    List<String> namingCards(FakeLlm llm) =>
+    List<String> namingCards(ScriptedLlm llm) =>
         fenceBody(llm.userMessages[llm.schemas.indexOf('storyline_name')],
                 'threads')
             .trim()
@@ -2816,7 +2768,7 @@ void main() {
           subject: 'Weekly ops digest 2026-09-01',
           vector: vectorAt(-1),
           lastMessageAt: '2026-08-29T02:00:00Z');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer(title: 'Weekly ops digest')],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2848,7 +2800,7 @@ void main() {
             fromAddress: 'alerts@example.com',
             lastMessageAt: '2026-08-2${9 - index}T10:00:00Z');
       }
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2885,7 +2837,7 @@ void main() {
       }
 
       await seedFeed(store);
-      final unset = FakeLlm({
+      final unset = fakeLlm({
         'storyline_name': [nameAnswer(title: 'Vendor status reports')],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2904,7 +2856,7 @@ void main() {
       await seedFeed(countedStore, counted: 1);
       final log = ActivityLog(countedStore);
       addTearDown(log.dispose);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2936,7 +2888,7 @@ void main() {
           vector: vectorAt(-1),
           fromAddress: 'dana@example.com',
           lastMessageAt: '2026-08-29T02:00:00Z');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer(title: 'Site walkthroughs')],
         'storyline_membership': [confirmAnswer()],
       });
@@ -2986,7 +2938,7 @@ void main() {
     test('coherent false naming no outlier at all tombstones the cluster',
         () async {
       await seedTrio(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer(coherent: false)],
         'storyline_membership': [confirmAnswer()],
       });
@@ -3026,7 +2978,7 @@ void main() {
 
     test('an outlier is dropped and the rest are confirmed', () async {
       await seedTrio(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer(outliers: [2])],
         'storyline_membership': [confirmAnswer()],
       });
@@ -3067,7 +3019,7 @@ void main() {
     test('outliers that leave fewer than two threads read as a refusal',
         () async {
       await seedTrio(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer(outliers: [1, 2])],
         'storyline_membership': [confirmAnswer()],
       });
@@ -3086,7 +3038,7 @@ void main() {
 
     test('every thread an outlier is a refusal spelled as a list', () async {
       await seedTrio(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer(coherent: false, outliers: [1, 2, 3])],
         'storyline_membership': [confirmAnswer()],
       });
@@ -3111,7 +3063,7 @@ void main() {
       // back false. So the kept group is proposed, and the per-member confirms
       // are the guard on it.
       await seedQuad(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer(coherent: false, outliers: [4])],
         'storyline_membership': [confirmAnswer()],
       });
@@ -3151,7 +3103,7 @@ void main() {
       // bootstrap path is where the fallback renders instead, because a
       // storyline a person made exists whatever the model says.
       await seedTrio(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer(title: '')],
         'storyline_membership': [confirmAnswer()],
       });
@@ -3170,7 +3122,7 @@ void main() {
 
     test('a placeholder charter is refused before the confirms', () async {
       await seedTrio(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [
           nameAnswer(
             title: 'Misc',
@@ -3195,7 +3147,7 @@ void main() {
 
     test('a charter that is a class of message is refused too', () async {
       await seedTrio(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [
           nameAnswer(
             title: 'Vendor mail',
@@ -3237,7 +3189,7 @@ void main() {
         'UPDATE messages SET summary = ? WHERE source_message_id = ?',
         ['s' * 700, 'long-p1'],
       );
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -3286,7 +3238,7 @@ void main() {
             inboundCount: 2,
             lastMessageAt: '2026-08-29T04:00:00Z');
         await seedTrio(s);
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [
             nameAnswer(title: 'The digest'),
             nameAnswer(title: 'The roof'),
@@ -3360,7 +3312,7 @@ void main() {
       await seedDone(store, 'd1', vector: vectorAt(0.95));
       // Three cluster members first, in the order the sweep reads the rows,
       // and then the one probe candidate.
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [
           confirmAnswer(evidence: 'c1 is the homepage copy review.'),
@@ -3391,7 +3343,7 @@ void main() {
     test('a finished thread far from the cluster is never offered', () async {
       await seedMailbox(store);
       await seedDone(store, 'd1', vector: vectorAt(0));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -3412,7 +3364,7 @@ void main() {
         () async {
       await seedMailbox(store);
       await seedDone(store, 'd1', vector: vectorAt(0.95));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [
           confirmAnswer(),
@@ -3439,7 +3391,7 @@ void main() {
       // cluster members were judged against, so it is held to the same bar.
       await seedMailbox(store);
       await seedDone(store, 'd1', vector: vectorAt(0.95));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [
           confirmAnswer(),
@@ -3464,7 +3416,7 @@ void main() {
         () async {
       await seedMailbox(store);
       await seedDone(store, 'd1', vector: vectorAt(0.95));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -3506,7 +3458,7 @@ void main() {
       );
       await store.addStorylineMember('sl-existing', 'email', 'd1',
           addedBy: 'user');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -3534,7 +3486,7 @@ void main() {
           lastMessageAt: '2026-08-28T10:${i.toString().padLeft(2, '0')}:00Z',
         );
       }
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -3571,7 +3523,7 @@ void main() {
     test('a cluster the model threw out probes nothing', () async {
       await seedMailbox(store);
       await seedDone(store, 'd1', vector: vectorAt(0.95));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer(belongs: false)],
       });
@@ -3597,7 +3549,7 @@ void main() {
       await seedDone(store, 'd1', vector: vectorAt(0.95));
       await seedDone(store, 'd2',
           vector: vectorAt(0.8), lastMessageAt: '2026-08-29T04:30:00Z');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [
           confirmAnswer(),
@@ -3640,7 +3592,7 @@ void main() {
           receivedAt: '2026-08-29T03:00:00Z');
       await seedMessage(store, 'd1', 'm-d1',
           receivedAt: '2026-08-29T05:00:00Z');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
         'storyline_recap': [recapAnswer()],
@@ -3680,7 +3632,7 @@ void main() {
       await seed(store, 'b3',
           vector: vectorAt(0), lastMessageAt: '2026-08-29T01:00:00Z');
       await seedDone(store, 'd1', vector: vectorAt(0.73));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer(), nameAnswer(title: 'Vendor invoices')],
         'storyline_membership': [confirmAnswer()],
       });
@@ -3717,7 +3669,7 @@ void main() {
           vector: vectorAt(1), lastMessageAt: '2026-08-29T05:00:00Z');
       await seedDone(store, 'd2',
           vector: vectorAt(0.95), lastMessageAt: '2026-08-29T04:00:00Z');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -3733,7 +3685,7 @@ void main() {
     test('creating a storyline locks its title and files the thread', () async {
       await seed(store, 'c1', lastMessageAt: '2026-08-29T10:00:00Z');
       final service =
-          StorylineService(store, FakeLlm(const {}));
+          StorylineService(store, fakeLlm(const {}));
 
       final id = await service.createStoryline(
         'Brightsea launch',
@@ -3765,7 +3717,7 @@ void main() {
         memberHash: 'h1',
       );
       await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       await service.keepSuggestion('sl-1');
       expect((await store.getStoryline('sl-1'))!.status, 'active');
@@ -3790,7 +3742,7 @@ void main() {
         memberHash: 'h1',
       );
       await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       await service.dismissSuggestion('sl-1');
       await service.restoreDismissed('sl-1');
@@ -3811,7 +3763,7 @@ void main() {
         status: 'active',
         createdBy: 'auto',
       );
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       await service.rename('sl-1', 'Brightsea launch');
 
@@ -3828,7 +3780,7 @@ void main() {
         createdBy: 'auto',
       );
       await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       await service.removeThread('sl-1', 'email', 'c1');
 
@@ -3847,7 +3799,7 @@ void main() {
       );
       await store.addStorylineMember('sl-1', 'email', 'c1',
           addedBy: 'auto', evidence: 'Both concern the website redesign.');
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       await service.removeThread('sl-1', 'email', 'c1');
 
@@ -3873,7 +3825,7 @@ void main() {
         status: 'active',
         createdBy: 'auto',
       );
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       await service.addThread('sl-1', 'email', 'c1');
 
@@ -3897,7 +3849,7 @@ void main() {
       final log = ActivityLog(store);
       addTearDown(log.dispose);
       final service =
-          StorylineService(store, FakeLlm(const {}), activityLog: log);
+          StorylineService(store, fakeLlm(const {}), activityLog: log);
 
       await service.unblockThread('sl-1', 'email', 'c1');
 
@@ -3930,7 +3882,7 @@ void main() {
       );
       await store.removeStorylineMember('sl-1', 'email', 'c1',
           block: true, blockedBy: 'audit', evidence: 'A different launch.');
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       await service.addThread('sl-1', 'email', 'c1');
 
@@ -3950,7 +3902,7 @@ void main() {
         status: 'active',
         createdBy: 'auto',
       );
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
       await service.addThread('sl-1', 'email', 'c1');
       await service.removeThread('sl-1', 'email', 'c1');
 
@@ -3971,7 +3923,7 @@ void main() {
         status: 'suggested',
         createdBy: 'auto',
       );
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       await service.addThread('sl-1', 'email', 'c1');
 
@@ -3988,7 +3940,7 @@ void main() {
         status: 'active',
         createdBy: 'auto',
       );
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       await service.addThread('sl-1', 'email', 'c1');
 
@@ -4005,7 +3957,7 @@ void main() {
   group('the owner teaches the prompt', () {
     /// A storyline the owner has corrected once each way: one thread filed by
     /// hand, one taken out. Returns nothing — the fixture is the database.
-    Future<StorylineService> taught(FakeLlm llm) async {
+    Future<StorylineService> taught(ScriptedLlm llm) async {
       await seedStoryline(store);
       await seed(store, 'k1');
       await seed(store, 'r1');
@@ -4018,7 +3970,7 @@ void main() {
 
     test('an assignment is judged against what the owner filed and removed',
         () async {
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final service = await taught(llm);
       await seed(store, 'c1', vector: vectorAt(0.8));
 
@@ -4040,7 +3992,7 @@ void main() {
       await seed(store, 'c1', vector: vectorAt(1));
       await seed(store, 'c2', vector: vectorAt(0.95));
       await seed(store, 'c3', vector: vectorAt(0.9));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -4067,7 +4019,7 @@ void main() {
     });
 
     test('a recruit lap carries the same lesson to every candidate', () async {
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final service = await taught(llm);
       await seed(store, 'c1', vector: vectorAt(0.8));
       await seed(store, 'c2', vector: vectorAt(0.7));
@@ -4093,7 +4045,7 @@ void main() {
 
     test('a block whose thread is gone teaches nothing rather than a blank',
         () async {
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final service = await taught(llm);
       // The block outlives the conversation row it was written about; an
       // example nothing can be said about is left out, not rendered empty.
@@ -4117,7 +4069,7 @@ void main() {
       // they are the newest three. Counting to three BEFORE the gone-thread
       // filter would spend the whole example budget on them and teach the
       // model nothing at all.
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final service = await taught(llm);
       for (final key in const ['r2', 'r3', 'r4']) {
         await seed(store, key);
@@ -4157,7 +4109,7 @@ void main() {
       const narrowed = 'The redesign of the Northline Studio website — the '
           'homepage copy, the new photography, and the launch date. Payroll '
           'and other back-office mail does not belong.';
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_refresh': [refineAnswer(charter: narrowed)],
       });
       final service = await taught(llm);
@@ -4173,7 +4125,7 @@ void main() {
 
     test('and a locked one only ever gets the offer', () async {
       const narrowed = 'The website redesign. Payroll mail does not belong.';
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_refresh': [refineAnswer(charter: narrowed)],
       });
       final service = await taught(llm);
@@ -4211,7 +4163,7 @@ void main() {
       await seedMixed();
       await seedMessage(store, 'a2', 'm-a2');
       await store.stampStorylineId('email', 'a2', storylineId: 'sl-1');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [
           confirmAnswer(),
           confirmAnswer(
@@ -4267,7 +4219,7 @@ void main() {
       // `active` means the owner looked at this group and kept it, and a
       // medium yes has always been enough to stay in one.
       await seedMixed();
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [
           confirmAnswer(confidence: 'medium'),
           confirmAnswer(confidence: 'medium'),
@@ -4288,7 +4240,7 @@ void main() {
       // audit's removals always do.
       await seedMixed();
       await store.updateStoryline('sl-1', status: 'suggested');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [
           confirmAnswer(confidence: 'medium'),
           confirmAnswer(confidence: 'medium'),
@@ -4309,7 +4261,7 @@ void main() {
       await store.updateStoryline('sl-1',
           recapText: 'The a2 thread is where the launch date came from.',
           recapThrough: '2026-08-03T00:00:00Z');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [
           confirmAnswer(),
           confirmAnswer(belongs: false, evidence: 'no'),
@@ -4329,7 +4281,7 @@ void main() {
 
     test('and the recruit cannot put back what the audit took out', () async {
       await seedMixed();
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [
           confirmAnswer(),
           confirmAnswer(belongs: false, evidence: 'A different launch.'),
@@ -4350,7 +4302,7 @@ void main() {
 
     test('a low-confidence yes is a no here too', () async {
       await seedMixed();
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [
           confirmAnswer(),
           confirmAnswer(confidence: 'low', evidence: 'Could be either.'),
@@ -4368,7 +4320,7 @@ void main() {
 
     test('an audit that removes nothing still says it checked', () async {
       await seedMixed(memberHash: 'h-before');
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final log = ActivityLog(store);
       addTearDown(log.dispose);
 
@@ -4402,7 +4354,7 @@ void main() {
           variables: [Variable('email'), Variable(key)],
         );
       }
-      final llm = FakeLlm({'storyline_membership': const []});
+      final llm = fakeLlm({'storyline_membership': const []});
       final log = ActivityLog(store);
       addTearDown(log.dispose);
 
@@ -4418,7 +4370,7 @@ void main() {
       await seedMixed();
       await seedMessage(store, 'a1', 'm-a1');
       await store.stampStorylineId('email', 'a1', storylineId: 'sl-1');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [
           confirmAnswer(belongs: false, evidence: 'no'),
           const LlmUnavailableException('server off'),
@@ -4445,7 +4397,7 @@ void main() {
     test("an audit's own block never comes back as the owner's lesson",
         () async {
       await seedMixed();
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [
           confirmAnswer(),
           confirmAnswer(belongs: false, evidence: 'A different launch.'),
@@ -4471,7 +4423,7 @@ void main() {
         () async {
       await seedMixed();
       await store.updateStoryline('sl-1', status: 'dismissed');
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).audit('sl-1');
 
@@ -4489,7 +4441,7 @@ void main() {
         createdBy: 'user',
       );
       await store.addStorylineMember('sl-1', 'email', 'u1', addedBy: 'user');
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).audit('sl-1');
 
@@ -4499,7 +4451,7 @@ void main() {
 
     test('the handler hands its row to the audit', () async {
       await seedMixed();
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [
           confirmAnswer(),
           confirmAnswer(belongs: false, evidence: 'A different launch.'),
@@ -4537,7 +4489,7 @@ void main() {
         status: 'active',
         createdBy: 'auto',
       );
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       await service.addThread('sl-1', 'email', 'c1');
 
@@ -4559,7 +4511,7 @@ void main() {
       }
       await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
       await memberAddedAt('sl-1', 'c1', '2026-08-01T00:00:00Z');
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       await service.addThread('sl-2', 'email', 'c1');
 
@@ -4585,7 +4537,7 @@ void main() {
       await memberAddedAt('sl-1', 'c1', '2026-08-01T00:00:00Z');
       await memberAddedAt('sl-2', 'c1', '2026-08-02T00:00:00Z');
       await store.stampStorylineId('email', 'c1', storylineId: 'sl-1');
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       await service.removeThread('sl-1', 'email', 'c1');
 
@@ -4604,7 +4556,7 @@ void main() {
         status: 'active',
         createdBy: 'auto',
       );
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
       await service.addThread('sl-1', 'email', 'c1');
 
       await service.removeThread('sl-1', 'email', 'c1');
@@ -4630,7 +4582,7 @@ void main() {
       );
       final service = StorylineService(
         store,
-        FakeLlm(const {}),
+        fakeLlm(const {}),
         progress: PipelineProgress(store, bus: bus),
       );
 
@@ -4661,7 +4613,7 @@ void main() {
 
       await StorylineService(
         store,
-        FakeLlm({'storyline_membership': [confirmAnswer()]}),
+        fakeLlm({'storyline_membership': [confirmAnswer()]}),
         activityLog: log,
       ).assignConversation('email', 'c1');
 
@@ -4681,7 +4633,7 @@ void main() {
 
       await StorylineService(
         store,
-        FakeLlm({'storyline_membership': [confirmAnswer()]}),
+        fakeLlm({'storyline_membership': [confirmAnswer()]}),
         activityLog: log,
       ).assignConversation('email', 'c1');
 
@@ -4691,7 +4643,7 @@ void main() {
     });
 
     /// Runs a sweep with [llm] and returns the recorded activity detail.
-    Future<Map<String, Object?>> sweepAndRecord(FakeLlm llm) async {
+    Future<Map<String, Object?>> sweepAndRecord(ScriptedLlm llm) async {
       final log = ActivityLog(store);
       addTearDown(log.dispose);
       await StorylineService(store, llm, activityLog: log).sweep();
@@ -4708,7 +4660,7 @@ void main() {
       await seed(store, 'c4', vector: vectorAt(0));
       await seed(store, 'c5', vector: vectorAt(-0.9));
 
-      final detail = await sweepAndRecord(FakeLlm({
+      final detail = await sweepAndRecord(fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       }));
@@ -4728,7 +4680,7 @@ void main() {
       await seed(store, 'c4', vector: vectorAt(0));
       await seed(store, 'c5', vector: vectorAt(-0.9));
 
-      final detail = await sweepAndRecord(FakeLlm({
+      final detail = await sweepAndRecord(fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer(belongs: false)],
       }));
@@ -4747,7 +4699,7 @@ void main() {
       await seed(store, 'c3', vector: vectorAt(0.9));
       await seed(store, 'c4', vector: vectorAt(0));
       await seed(store, 'c5', vector: vectorAt(-0.9));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -4777,7 +4729,7 @@ void main() {
           state: 'done',
           lastMessageAt: '2026-08-29T05:00:00Z');
 
-      final detail = await sweepAndRecord(FakeLlm({
+      final detail = await sweepAndRecord(fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       }));
@@ -4799,7 +4751,7 @@ void main() {
       await seed(store, 'c2', vector: vectorAt(0.95));
       await seed(store, 'c3', vector: vectorAt(0.9));
 
-      final detail = await sweepAndRecord(FakeLlm({
+      final detail = await sweepAndRecord(fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       }));
@@ -4812,7 +4764,7 @@ void main() {
       // there is not even a tally to be zero about.
       await seed(store, 'c1', vector: vectorAt(1));
 
-      final detail = await sweepAndRecord(FakeLlm({
+      final detail = await sweepAndRecord(fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       }));
@@ -4825,7 +4777,7 @@ void main() {
     /// Runs a recruit with [llm] and returns the recorded activity detail —
     /// every recruit notes, so the row is part of the pass's contract.
     Future<Map<String, Object?>> recruitAndRecord(
-      FakeLlm llm, {
+      ScriptedLlm llm, {
       String id = 'sl-1',
     }) async {
       final log = ActivityLog(store);
@@ -4842,7 +4794,7 @@ void main() {
       await seedStoryline(store);
       await seed(store, 'c1',
           vector: vectorAt(0.8), lastMessageAt: '2026-08-30T10:00:00Z');
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       final detail = await recruitAndRecord(llm);
 
@@ -4875,7 +4827,7 @@ void main() {
           source: 'teams',
           vector: vectorAt(0.8),
           lastMessageAt: '2026-08-30T10:00:00Z');
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       final detail = await recruitAndRecord(llm);
 
@@ -4892,7 +4844,7 @@ void main() {
       // user's charter is what buys the look instead of a shared name.
       await seed(store, 'c1',
           vector: vectorAt(0.40), participants: const ['Ann Lu']);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await recruitAndRecord(llm);
 
@@ -4907,7 +4859,7 @@ void main() {
       await seedStoryline(store, status: 'suggested', memberKey: 'new');
       await seed(store, 'c1', vector: vectorAt(0.8));
 
-      final refused = await recruitAndRecord(FakeLlm({
+      final refused = await recruitAndRecord(fakeLlm({
         'storyline_membership': [confirmAnswer(confidence: 'medium')],
       }));
 
@@ -4922,7 +4874,7 @@ void main() {
       // [recruitAndRecord], which reads the log's `single` row and the pass
       // above already wrote one.
       await seed(store, 'c2', vector: vectorAt(0.9));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [
           confirmAnswer(confidence: 'high'),
           confirmAnswer(confidence: 'medium'),
@@ -4945,7 +4897,7 @@ void main() {
     test('under the gate never reaches the model', () async {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.30));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       final detail = await recruitAndRecord(llm);
 
@@ -4961,7 +4913,7 @@ void main() {
       // Removing a non-member with block: true records the user's "no"
       // without ever having had a membership to delete.
       await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       final detail = await recruitAndRecord(llm);
 
@@ -4979,7 +4931,7 @@ void main() {
       await seed(store, 'shared', source: 'teams', vector: vectorAt(0.95));
       await store.removeStorylineMember('sl-1', 'teams', 'shared',
           block: true);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       final detail = await recruitAndRecord(llm);
 
@@ -4997,7 +4949,7 @@ void main() {
       for (var i = 0; i < 10; i++) {
         await seed(store, 'c$i', vector: vectorAt(0.51 + 0.04 * i));
       }
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       final detail = await recruitAndRecord(llm);
 
@@ -5015,7 +4967,7 @@ void main() {
     test('a low-confidence yes is a no', () async {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.8));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer(confidence: 'low')],
       });
 
@@ -5030,7 +4982,7 @@ void main() {
         () async {
       await seedStoryline(store, status: 'dismissed');
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final log = ActivityLog(store);
       addTearDown(log.dispose);
 
@@ -5053,7 +5005,7 @@ void main() {
       );
       await store.addStorylineMember('sl-1', 'email', 'bare', addedBy: 'user');
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       final detail = await recruitAndRecord(llm);
 
@@ -5066,7 +5018,7 @@ void main() {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.9));
       await seed(store, 'c2', vector: vectorAt(0.8));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [
           confirmAnswer(),
           const LlmUnavailableException('server off'),
@@ -5092,7 +5044,7 @@ void main() {
       const second = 'The launch party for the Northline site, and the venue.';
       late final StorylineService service;
       var calls = 0;
-      final llm = HookedFakeLlm(
+      final llm = hookedFakeLlm(
         {
           'storyline_membership': [
             // The first lap turns the candidate away, so it is still a
@@ -5167,7 +5119,7 @@ void main() {
 
     test('writes an active storyline of the user own, locked on both counts',
         () async {
-      await declare(FakeLlm(const {}));
+      await declare(fakeLlm(const {}));
 
       final storyline = (await store.loadStorylines()).single;
       expect(storyline.status, 'active');
@@ -5180,7 +5132,7 @@ void main() {
     });
 
     test('queues one recruit and neither a refresh nor a recap', () async {
-      await declare(FakeLlm(const {}));
+      await declare(fakeLlm(const {}));
       final id = await onlyStorylineId();
 
       final recruit = await store.nextPendingWork('storyline_recruit');
@@ -5199,7 +5151,7 @@ void main() {
       await store.requeueWork('storyline_recruit', 'email', 'older');
       await backdateWork('storyline_recruit', 'older');
 
-      await declare(FakeLlm(const {}));
+      await declare(fakeLlm(const {}));
       final id = await onlyStorylineId();
 
       expect((await store.nextPendingWork('storyline_recruit'))?['entity_id'],
@@ -5218,7 +5170,7 @@ void main() {
       await seedPool(1);
       final embeddings = FakeEmbeddings.at(1);
       final service = await declare(
-        FakeLlm({'storyline_membership': [confirmAnswer()]}),
+        fakeLlm({'storyline_membership': [confirmAnswer()]}),
         embeddings: embeddings,
       );
       await service.recruit(await onlyStorylineId());
@@ -5253,7 +5205,7 @@ void main() {
       await seed(store, 'bare');
       await seedPool(20);
       final embeddings = FakeEmbeddings.at(1);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final service = StorylineService(store, llm, embeddings: embeddings);
       final id = await service.declareStoryline(
           title: 'Harbour Lane move', charter: charter);
@@ -5273,7 +5225,7 @@ void main() {
       await seedPool(20);
       // One yes, then no for the rest of the run: the first lap files a single
       // member, so the second ranks on a real centroid and takes eight.
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer(), confirmAnswer(belongs: false)],
       });
       final service = await declare(llm);
@@ -5296,7 +5248,7 @@ void main() {
         StorylineTuning.recruitMaxCandidatesDeclared +
             StorylineTuning.recruitMaxCandidates,
       };
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [
           for (var i = 0; i < 40; i++) confirmAnswer(belongs: yesAt.contains(i)),
         ],
@@ -5316,7 +5268,7 @@ void main() {
 
     test('and stops on the first lap that files nothing', () async {
       await seedPool(20);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer(belongs: false)],
       });
       final service = await declare(llm);
@@ -5333,7 +5285,7 @@ void main() {
     test('a medium yes is taken because a declared storyline is active',
         () async {
       await seedPool(1);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer(confidence: 'medium')],
       });
       final service = await declare(llm);
@@ -5350,7 +5302,7 @@ void main() {
     test('an unavailable embedding server parks the hunt and files nothing',
         () async {
       await seedPool(2);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final log = ActivityLog(store);
       addTearDown(log.dispose);
       final service = await declare(
@@ -5374,7 +5326,7 @@ void main() {
 
     test('a rejected embedding ends the pass quietly', () async {
       await seedPool(2);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final log = ActivityLog(store);
       addTearDown(log.dispose);
       final service = await declare(
@@ -5400,7 +5352,7 @@ void main() {
 
     test('no embedding client at all is silent rather than parking', () async {
       await seedPool(2);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final log = ActivityLog(store);
       addTearDown(log.dispose);
       final service = StorylineService(store, llm, activityLog: log);
@@ -5427,7 +5379,7 @@ void main() {
       // has one live storyline per thread and the second filing would be
       // invisible work over the first.
       await seedPool(4);
-      final firstLlm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final firstLlm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final first = StorylineService(
         store,
         firstLlm,
@@ -5436,7 +5388,7 @@ void main() {
       final firstId = await first.declareStoryline(
           title: 'Harbour Lane move', charter: charter);
 
-      final secondLlm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final secondLlm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final second = StorylineService(
         store,
         secondLlm,
@@ -5470,7 +5422,7 @@ void main() {
       await store.addStorylineMember('sl-proposed', 'email', 'p0',
           addedBy: 'auto');
 
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       // Declared directly rather than through the group's helper: there are two
       // storylines in the database here, so the id has to come from the call.
       final service = StorylineService(
@@ -5491,7 +5443,7 @@ void main() {
 
     test('the refresh backstop skips it until it holds a thread', () async {
       await seedPool(1);
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
       final service = await declare(llm);
       final id = await onlyStorylineId();
 
@@ -5509,7 +5461,7 @@ void main() {
     test('with a charter it locks the charter and sends the recruit out',
         () async {
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       final id = await service.createStoryline(
         'Harbour Lane move',
@@ -5532,7 +5484,7 @@ void main() {
       await seed(store, 'c1', vector: vectorAt(0.9));
       await store.requeueWork('storyline_recruit', 'email', 'older');
       await backdateWork('storyline_recruit', 'older');
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       final id = await service.createStoryline(
         'Harbour Lane move',
@@ -5555,7 +5507,7 @@ void main() {
     test('and without one it writes and queues exactly what it always did',
         () async {
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       final id = await service.createStoryline(
         'Harbour Lane move',
@@ -5578,7 +5530,7 @@ void main() {
   group('setCharter', () {
     test('a save trims, locks, and queues one recruit', () async {
       await seedStoryline(store);
-      final llm = FakeLlm(const {});
+      final llm = fakeLlm(const {});
 
       await StorylineService(store, llm)
           .setCharter('sl-1', '  Only the venue booking.  ');
@@ -5596,7 +5548,7 @@ void main() {
       await seedStoryline(store);
       await store.updateStoryline('sl-1', charterLocked: true);
 
-      await StorylineService(store, FakeLlm(const {}))
+      await StorylineService(store, fakeLlm(const {}))
           .setCharter('sl-1', '   ');
 
       final storyline = (await store.getStoryline('sl-1'))!;
@@ -5608,7 +5560,7 @@ void main() {
     test('a second save revives a recruit the drain already finished',
         () async {
       await seedStoryline(store);
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       await service.setCharter('sl-1', 'First charter.');
       await store.writeWork('storyline_recruit', 'email', 'sl-1',
@@ -5623,7 +5575,7 @@ void main() {
       await seedStoryline(store);
       await store.updateStoryline('sl-1',
           charterSuggestion: 'Also the launch party.');
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       await service.setCharter('sl-1', 'Only the homepage copy.');
 
@@ -5634,7 +5586,7 @@ void main() {
       await seedStoryline(store);
       await store.updateStoryline('sl-1',
           charterSuggestion: 'Also the launch party.');
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       await service.setCharter('sl-1', '   ');
 
@@ -5651,7 +5603,7 @@ void main() {
           charterLocked: true,
           charterSuggestion: 'Also the launch party.');
 
-      await StorylineService(store, FakeLlm(const {}))
+      await StorylineService(store, fakeLlm(const {}))
           .dismissCharterSuggestion('sl-1');
 
       final storyline = (await store.getStoryline('sl-1'))!;
@@ -5673,7 +5625,7 @@ void main() {
       await seedStoryline(store);
       await markDescribed('sl-1', ['member']);
       await seed(store, 'c2', vector: vectorAt(0.9));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_refresh': [
           refineAnswer(
             title: 'Website redesign and launch',
@@ -5708,7 +5660,7 @@ void main() {
         'sl-1',
         charterSuggestion: 'What the folder says the project is.',
       );
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_refresh': [
           refineAnswer(
             title: 'Website redesign and launch',
@@ -5730,7 +5682,7 @@ void main() {
     test('runs at temperature zero — the same members must read the same twice',
         () async {
       await seedStoryline(store);
-      final llm = FakeLlm({'storyline_refresh': [refineAnswer()]});
+      final llm = fakeLlm({'storyline_refresh': [refineAnswer()]});
 
       await StorylineService(store, llm).refresh('sl-1');
 
@@ -5744,7 +5696,7 @@ void main() {
           charter: 'Only the homepage copy.', charterLocked: true);
       await markDescribed('sl-1', ['member']);
       await seed(store, 'c2', vector: vectorAt(0.9));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_refresh': [
           refineAnswer(charter: 'The homepage copy and the launch party.')
         ],
@@ -5768,7 +5720,7 @@ void main() {
       await seedStoryline(store);
       await store.updateStoryline('sl-1',
           charter: 'Only the homepage copy.', charterLocked: true);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_refresh': [refineAnswer(charter: widened)],
       });
 
@@ -5789,7 +5741,7 @@ void main() {
           charterSuggestion: 'A wider charter nobody needs any more.');
       // The model answers with the stored charter, spaced differently: the
       // same sentence, so there is nothing left to offer.
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_refresh': [
           refineAnswer(
             charter: '  The redesign of the Northline Studio website —   the '
@@ -5806,7 +5758,7 @@ void main() {
     test('a locked title survives a refresh that renamed everything else',
         () async {
       await seedStoryline(store, titleLocked: true);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_refresh': [
           refineAnswer(
             title: 'A name the model preferred',
@@ -5827,7 +5779,7 @@ void main() {
     test('a summary is refreshed even when both locks are set', () async {
       await seedStoryline(store, titleLocked: true);
       await store.updateStoryline('sl-1', charterLocked: true);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_refresh': [
           refineAnswer(
             title: 'A name the model preferred',
@@ -5852,7 +5804,7 @@ void main() {
 
     test('an empty title from the model keeps the stored one', () async {
       await seedStoryline(store);
-      final llm = FakeLlm({'storyline_refresh': [refineAnswer(title: '')]});
+      final llm = fakeLlm({'storyline_refresh': [refineAnswer(title: '')]});
 
       await StorylineService(store, llm).refresh('sl-1');
 
@@ -5866,7 +5818,7 @@ void main() {
       await seedStoryline(store);
       await markDescribed('sl-1', ['member']);
       // An empty script: any call at all throws rather than answering.
-      final llm = FakeLlm(const {});
+      final llm = fakeLlm(const {});
 
       await StorylineService(store, llm).refresh('sl-1');
 
@@ -5886,7 +5838,7 @@ void main() {
       // in different milliseconds.
       await memberAddedAt('sl-1', 'member', '2026-08-01T09:00:00Z');
       await memberAddedAt('sl-1', 'c2', '2026-08-02T09:00:00Z');
-      final llm = FakeLlm({'storyline_refresh': [refineAnswer()]});
+      final llm = fakeLlm({'storyline_refresh': [refineAnswer()]});
 
       await StorylineService(store, llm).refresh('sl-1');
 
@@ -5905,7 +5857,7 @@ void main() {
       await store.updateStoryline('sl-1',
           memberHash: memberHashOf(['member']),
           refreshedMemberHash: 'an-older-member-set');
-      final llm = FakeLlm({'storyline_refresh': [refineAnswer()]});
+      final llm = fakeLlm({'storyline_refresh': [refineAnswer()]});
 
       await StorylineService(store, llm).refresh('sl-1');
 
@@ -5917,7 +5869,7 @@ void main() {
         () async {
       await seedStoryline(store);
       await seed(store, 'c2', vector: vectorAt(0.9));
-      final llm = HookedFakeLlm({
+      final llm = hookedFakeLlm({
         'storyline_refresh': [refineAnswer()],
       }, (schemaName) async {
         if (schemaName != 'storyline_refresh') return;
@@ -5939,7 +5891,7 @@ void main() {
 
     test('a charter the refresh did not change recruits nothing', () async {
       await seedStoryline(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_refresh': [
           // The stored charter with its spacing mangled. A model that returns
           // the same sentence differently spaced has changed nothing, and
@@ -5959,7 +5911,7 @@ void main() {
 
     test('a charter the refresh widened sends the model hunting', () async {
       await seedStoryline(store);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_refresh': [refineAnswer(charter: widened)],
       });
 
@@ -5971,7 +5923,7 @@ void main() {
 
     test('a dismissed storyline is not refreshed', () async {
       await seedStoryline(store, status: 'dismissed');
-      final llm = FakeLlm(const {});
+      final llm = fakeLlm(const {});
 
       await StorylineService(store, llm).refresh('sl-1');
 
@@ -5982,7 +5934,7 @@ void main() {
       await seedStoryline(store);
       await store.removeStorylineMember('sl-1', 'email', 'member',
           block: true);
-      final llm = FakeLlm(const {});
+      final llm = fakeLlm(const {});
 
       await StorylineService(store, llm).refresh('sl-1');
 
@@ -6000,7 +5952,7 @@ void main() {
       await store.removeStorylineMember('sl-1', 'email', 'member',
           block: true);
 
-      await StorylineService(store, FakeLlm(const {})).refresh('sl-1');
+      await StorylineService(store, fakeLlm(const {})).refresh('sl-1');
 
       // The whole point of the stamp. Without it the sweep's catch-up asks
       // this durable question on every sync forever and gets the same answer:
@@ -6015,7 +5967,7 @@ void main() {
       // is every fixture and every storyline from before the column existed.
       await seedStoryline(store);
       expect((await store.getStoryline('sl-1'))!.memberHash, isNull);
-      final llm = FakeLlm({'storyline_refresh': [refineAnswer()]});
+      final llm = fakeLlm({'storyline_refresh': [refineAnswer()]});
 
       await StorylineService(store, llm).refresh('sl-1');
 
@@ -6033,7 +5985,7 @@ void main() {
     test('clearing a charter re-drafts one', () async {
       await seedStoryline(store);
       await store.updateStoryline('sl-1', charterLocked: true);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer(charter: 'A charter the model drafted.')],
       });
       final service = StorylineService(store, llm);
@@ -6059,7 +6011,7 @@ void main() {
       await seed(store, 'second', vector: vectorAt(0.95));
       await store.addStorylineMember('sl-1', 'email', 'second',
           addedBy: 'user');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [
           nameAnswer(
             coherent: false,
@@ -6088,7 +6040,7 @@ void main() {
       // The prompt tells the model the threads are listed in [brackets], and
       // a prompt that says so over unnumbered cards is a prompt that lies.
       await seedStoryline(store, charter: null);
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer(charter: 'A charter the model drafted.')],
       });
 
@@ -6101,7 +6053,7 @@ void main() {
     test('a recruit that filed threads refreshes the name', () async {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.8));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).recruit('sl-1');
 
@@ -6112,7 +6064,7 @@ void main() {
     test('a recruit that filed nothing leaves the description alone', () async {
       await seedStoryline(store);
       await seed(store, 'c1', vector: vectorAt(0.8));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer(belongs: false)],
       });
 
@@ -6125,7 +6077,7 @@ void main() {
       await seedStoryline(store);
       await markDescribed('sl-1', ['member']);
       await seed(store, 'c1', vector: vectorAt(0.9));
-      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
@@ -6141,7 +6093,7 @@ void main() {
       await markDescribed('sl-1', ['member']);
       await seed(store, 'c1', vector: vectorAt(0.9));
       await seed(store, 'c2', vector: vectorAt(0.9));
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_membership': [confirmAnswer(), confirmAnswer()],
       });
       final service = StorylineService(store, llm);
@@ -6165,7 +6117,7 @@ void main() {
       await store.writeWork('storyline_refresh', 'email', 'sl-1',
           status: 'done');
 
-      await StorylineService(store, FakeLlm(const {})).sweep();
+      await StorylineService(store, fakeLlm(const {})).sweep();
 
       // Found by the durable question rather than by an event — and found on
       // a sweep that returned early, which is why the catch-up runs before
@@ -6181,13 +6133,13 @@ void main() {
       await store.writeWork('storyline_refresh', 'email', 'sl-1',
           status: 'done');
 
-      await StorylineService(store, FakeLlm(const {})).sweep();
+      await StorylineService(store, fakeLlm(const {})).sweep();
 
       expect(await store.nextPendingWork('storyline_refresh'), isNull);
     });
 
     test('an unknown storyline is a quiet no-op, not a throw', () async {
-      final llm = FakeLlm(const {});
+      final llm = fakeLlm(const {});
 
       await StorylineService(store, llm).refresh('sl-nope');
 
@@ -6217,7 +6169,7 @@ void main() {
     test('a recap reads the newest messages across every member thread',
         () async {
       await seedTwoThreads();
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6284,7 +6236,7 @@ void main() {
     test('a digested attachment adds its facts to its message line', () async {
       await seedTwoThreads();
       await seedDigested('m2', 'a1');
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6302,7 +6254,7 @@ void main() {
       // m3 is outbound, and it is in the window on purpose.
       await seedDigested('m3', 'a1', name: 'Signed.pdf',
           facts: const ['countersigned 1 August']);
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6313,7 +6265,7 @@ void main() {
     test('a document with no facts contributes no aside', () async {
       await seedTwoThreads();
       await seedDigested('m2', 'a1', facts: const []);
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6327,7 +6279,7 @@ void main() {
         await seedDigested(id, 'a-$id',
             name: 'D-$id.pdf', facts: [for (var i = 0; i < 8; i++) 'F' * 90]);
       }
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6351,7 +6303,7 @@ void main() {
           name: 'Survey.pdf',
           summary: 'The site survey for the Riverside lot.',
           pinnedTo: 'sl-1');
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6367,7 +6319,7 @@ void main() {
     test('a pinned document still in the window is not said twice', () async {
       await seedTwoThreads();
       await seedDigested('m2', 'a1', pinnedTo: 'sl-1');
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6413,7 +6365,7 @@ void main() {
           summary: 'The site survey for the Riverside lot.',
           pinnedTo: 'sl-1');
       final context = await seedDirectory();
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
 
       await StorylineService(store, llm, contextStore: context).recap('sl-1');
 
@@ -6431,7 +6383,7 @@ void main() {
     test('a linked directory nothing has read yet adds nothing', () async {
       await seedTwoThreads();
       final context = await seedDirectory(about: '');
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
 
       await StorylineService(store, llm, contextStore: context).recap('sl-1');
 
@@ -6443,7 +6395,7 @@ void main() {
     test('a directory linked to another room adds nothing', () async {
       await seedTwoThreads();
       final context = await seedDirectory(linkedTo: 'sl-other');
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
 
       await StorylineService(store, llm, contextStore: context).recap('sl-1');
 
@@ -6460,7 +6412,7 @@ void main() {
             'name': 'Survey.pdf'},
       ]);
       await store.setAttachmentPinned('email', 'old-1', 'a9', 'sl-1');
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6470,7 +6422,7 @@ void main() {
     test('runs at temperature zero — the same window must read the same twice',
         () async {
       await seedTwoThreads();
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6483,7 +6435,7 @@ void main() {
       await store.updateStoryline('sl-1',
           recapThrough: '2026-08-01T11:00:00Z', recapText: 'Already said.');
       // An empty script: any call at all throws rather than answering.
-      final llm = FakeLlm(const {});
+      final llm = fakeLlm(const {});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6498,7 +6450,7 @@ void main() {
       for (var i = 0; i < 3; i++) {
         await store.requeueWork('storyline_recap', 'email', 'sl-1');
       }
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
       final service = StorylineService(store, llm);
 
       // One row on the queue for three arrivals, because `requeueWork` is
@@ -6514,7 +6466,7 @@ void main() {
     test('a dismissed storyline gets no recap', () async {
       await seedStoryline(store, status: 'dismissed', keptInbound: false);
       await seedMessage(store, 'member', 'm1');
-      final llm = FakeLlm(const {});
+      final llm = fakeLlm(const {});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6523,7 +6475,7 @@ void main() {
 
     test('a storyline with nothing said in it is a quiet no-op', () async {
       await seedStoryline(store, keptInbound: false);
-      final llm = FakeLlm(const {});
+      final llm = fakeLlm(const {});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6533,7 +6485,7 @@ void main() {
 
     test('open items and decisions survive the round trip', () async {
       await seedTwoThreads();
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_recap': [
           recapAnswer(
             recap: 'The launch is set and the photos are the last thing.',
@@ -6558,7 +6510,7 @@ void main() {
 
     test('an honest empty list is stored as an empty list', () async {
       await seedTwoThreads();
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_recap': [
           recapAnswer(openItems: const [], decisions: const [])
         ],
@@ -6578,7 +6530,7 @@ void main() {
       await store.updateStoryline('sl-1',
           recapText: 'The studio was still reviewing the homepage copy.',
           recapThrough: '2026-08-01T09:00:00Z');
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6592,7 +6544,7 @@ void main() {
 
     test('the storyline the recap is about rides in with it', () async {
       await seedTwoThreads();
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6604,7 +6556,7 @@ void main() {
     test('a message landing while the recap ran leaves the watermark behind it',
         () async {
       await seedTwoThreads();
-      final llm = HookedFakeLlm({
+      final llm = hookedFakeLlm({
         'storyline_recap': [recapAnswer()],
       }, (schemaName) async {
         if (schemaName != 'storyline_recap') return;
@@ -6622,7 +6574,7 @@ void main() {
 
       // Which the gate reads as stale, so the pass runs again — the only
       // outcome that gets the new message into the recap.
-      final second = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final second = fakeLlm({'storyline_recap': [recapAnswer()]});
       await StorylineService(store, second).recap('sl-1');
       expect(second.callsFor('storyline_recap'), 1);
       expect(second.userMessages.single, contains('one more thing'));
@@ -6634,7 +6586,7 @@ void main() {
           recapText: 'A recap worth keeping.',
           recapOpenJson: '["something still open"]',
           recapThrough: '2026-08-01T09:00:00Z');
-      final llm = FakeLlm({'storyline_recap': [recapAnswer(recap: '   ')]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer(recap: '   ')]});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6652,7 +6604,7 @@ void main() {
 
     test('a declined window is not re-asked every sync', () async {
       await seedTwoThreads();
-      final llm = FakeLlm({'storyline_recap': [recapAnswer(recap: '   ')]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer(recap: '   ')]});
 
       await StorylineService(store, llm).recap('sl-1');
 
@@ -6681,7 +6633,7 @@ void main() {
       await seed(store, 'c2', keptInbound: false);
       await seedMessage(store, 'c2', 'm2',
           receivedAt: '2026-08-01T09:00:00Z', body: 'the venue is booked');
-      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
       final service = StorylineService(store, llm);
 
       await service.addThread('sl-1', 'email', 'c2');
@@ -6705,7 +6657,7 @@ void main() {
       await store.updateStoryline('sl-1',
           recapText: 'Dana has the venue booked.',
           recapThrough: '2026-08-01T11:00:00Z');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_refresh': [refineAnswer()],
         'storyline_recap': [recapAnswer(recap: 'The venue is somebody else.')],
       });
@@ -6742,7 +6694,7 @@ void main() {
     test('a hand-added thread recaps the storyline', () async {
       await seedStoryline(store, keptInbound: false);
       await seed(store, 'c2', keptInbound: false);
-      final llm = FakeLlm(const {});
+      final llm = fakeLlm(const {});
 
       await StorylineService(store, llm).addThread('sl-1', 'email', 'c2');
 
@@ -6754,7 +6706,7 @@ void main() {
 
     test('a refresh queues a recap behind it', () async {
       await seedStoryline(store, keptInbound: false);
-      final llm = FakeLlm({'storyline_refresh': [refineAnswer()]});
+      final llm = fakeLlm({'storyline_refresh': [refineAnswer()]});
 
       await StorylineService(store, llm).refresh('sl-1');
 
@@ -6767,7 +6719,7 @@ void main() {
     test('a refresh that found nothing changed queues no recap', () async {
       await seedStoryline(store, keptInbound: false);
       await markDescribed('sl-1', ['member']);
-      final llm = FakeLlm(const {});
+      final llm = fakeLlm(const {});
 
       await StorylineService(store, llm).refresh('sl-1');
 
@@ -6786,7 +6738,7 @@ void main() {
       // them has ever been recapped.
       await markDescribed('sl-1', ['member']);
 
-      await StorylineService(store, FakeLlm(const {})).sweep();
+      await StorylineService(store, fakeLlm(const {})).sweep();
 
       // Found on a sweep that returns early, which is the whole reason the
       // catch-up runs at the head of the pass.
@@ -6812,7 +6764,7 @@ void main() {
           triageStatus: 'skipped',
           gateReason: 'outbound');
 
-      await StorylineService(store, FakeLlm(const {})).sweep();
+      await StorylineService(store, fakeLlm(const {})).sweep();
 
       final work = await store.nextPendingWork('storyline_recap');
       expect(work?['entity_id'], 'sl-1');
@@ -6827,7 +6779,7 @@ void main() {
       await store.writeWork('storyline_recap', 'email', 'sl-1',
           status: 'done');
 
-      await StorylineService(store, FakeLlm(const {})).sweep();
+      await StorylineService(store, fakeLlm(const {})).sweep();
 
       expect(await store.nextPendingWork('storyline_recap'), isNull);
     });
@@ -6843,7 +6795,7 @@ void main() {
       await seedMessage(store, 'c1', 'm1');
       await seedMessage(store, 'c2', 'm2');
       await seedMessage(store, 'c3', 'm3');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [
           confirmAnswer(),
@@ -6885,7 +6837,7 @@ void main() {
           vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
       await seed(store, 'c3',
           vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
-      final llm = FakeLlm({
+      final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -6898,7 +6850,7 @@ void main() {
     });
 
     test('an unknown storyline is a quiet no-op, not a throw', () async {
-      final llm = FakeLlm(const {});
+      final llm = fakeLlm(const {});
 
       await StorylineService(store, llm).recap('sl-nope');
 
@@ -6929,7 +6881,7 @@ void main() {
 
     Future<int> offer() => StorylineService(
           store,
-          FakeLlm(const {}),
+          fakeLlm(const {}),
           contextStore: context,
         ).offerDirectoryCharters(dirId);
 
@@ -7033,7 +6985,7 @@ void main() {
       await link();
 
       expect(
-        await StorylineService(store, FakeLlm(const {}))
+        await StorylineService(store, fakeLlm(const {}))
             .offerDirectoryCharters(dirId),
         0,
       );
@@ -7152,7 +7104,7 @@ void main() {
     /// reach it, tied on size and so ordered by their earliest member — `a`,
     /// then `b`, then `e` — and the last of them is thrown out whole, so the
     /// pass leaves a tombstone behind as well as two suggestions.
-    FakeLlm scriptedLlm() => FakeLlm({
+    ScriptedLlm scriptedLlm() => fakeLlm({
           'storyline_name': [
             nameAnswer(title: 'The first group'),
             nameAnswer(title: 'The second group'),
@@ -7339,7 +7291,7 @@ void main() {
       await seed(store, 'c1');
       await seedMessage(store, 'c1', 'm1');
       await storylineWith('sl-1');
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       expect(await service.evictGatedThread('email', 'c1'), 1);
 
@@ -7365,7 +7317,7 @@ void main() {
       await seed(store, 'c1');
       await storylineWith('sl-1');
       await storylineWith('sl-2');
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       expect(await service.evictGatedThread('email', 'c1'), 2);
 
@@ -7376,7 +7328,7 @@ void main() {
     test('a thread the owner filed by hand is not a gate\'s to take', () async {
       await seed(store, 'c1');
       await storylineWith('sl-1', addedBy: 'user');
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       expect(await service.evictGatedThread('email', 'c1'), 0);
 
@@ -7387,7 +7339,7 @@ void main() {
 
     test('a thread in nothing is a no-op', () async {
       await seed(store, 'c1');
-      final service = StorylineService(store, FakeLlm(const {}));
+      final service = StorylineService(store, fakeLlm(const {}));
 
       expect(await service.evictGatedThread('email', 'c1'), 0);
     });
@@ -7401,7 +7353,7 @@ void main() {
     /// Empty when the pass was quiet: the log suppresses an all-zero row as
     /// the genuine nothing it is, so an empty map here IS an assertion.
     Future<Map<String, Object?>> sweepAndRecord(
-      FakeLlm llm, {
+      ScriptedLlm llm, {
       MessageStore? into,
     }) async {
       final target = into ?? store;
@@ -7477,7 +7429,7 @@ void main() {
         }
         // No scripts at all: this fake throws on its first call, which is how
         // "not one model was dialled" is proved rather than counted.
-        final llm = FakeLlm(const {});
+        final llm = fakeLlm(const {});
 
         final detail = await sweepAndRecord(llm);
 
@@ -7494,7 +7446,7 @@ void main() {
         for (var i = 0; i < 26; i++) {
           await store.enqueueWork('embed_message', 'email', 'm$i');
         }
-        final llm = FakeLlm(const {});
+        final llm = fakeLlm(const {});
 
         final detail = await sweepAndRecord(llm);
 
@@ -7511,7 +7463,7 @@ void main() {
         for (var i = 0; i < 21; i++) {
           await seedMessage(store, 'unjudged$i', 'u$i');
         }
-        final llm = FakeLlm(const {});
+        final llm = fakeLlm(const {});
 
         final detail = await sweepAndRecord(llm);
 
@@ -7531,7 +7483,7 @@ void main() {
         for (var i = 0; i < 20; i++) {
           await seedMessage(store, 'unjudged$i', 'u$i');
         }
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [nameAnswer()],
           'storyline_membership': [confirmAnswer()],
         });
@@ -7555,7 +7507,7 @@ void main() {
             await store.claimPendingWork('extract', sources: const ['email']);
         expect(claimed, isNotNull);
 
-        final detail = await sweepAndRecord(FakeLlm(const {}));
+        final detail = await sweepAndRecord(fakeLlm(const {}));
 
         expect(detail['deferred'], 'unsettled');
         expect(detail['extract'], 11);
@@ -7569,7 +7521,7 @@ void main() {
           await store.enqueueWork('extract', 'local', 'f$i');
         }
 
-        final detail = await sweepAndRecord(FakeLlm(const {}));
+        final detail = await sweepAndRecord(fakeLlm(const {}));
 
         expect(detail['deferred'], 'unsettled');
         expect(detail['extract'], 11);
@@ -7591,7 +7543,7 @@ void main() {
           await store.enqueueWork('extract', 'email', 'm$i');
         }
 
-        final detail = await sweepAndRecord(FakeLlm(const {}));
+        final detail = await sweepAndRecord(fakeLlm(const {}));
 
         expect(detail['deferred'], 'unsettled');
         expect(detail['expired'], 1);
@@ -7608,7 +7560,7 @@ void main() {
         await store.addStorylineMember('sl-stale', 'email', 'member',
             addedBy: 'auto', evidence: 'The same website redesign.');
 
-        final detail = await sweepAndRecord(FakeLlm(const {}));
+        final detail = await sweepAndRecord(fakeLlm(const {}));
 
         expect(detail['expired'], 1);
         expect((await store.getStoryline('sl-stale'))!.status, 'dismissed');
@@ -7631,7 +7583,7 @@ void main() {
         await seedSuggestion('sl-kept', status: 'active', daysOld: 15);
         await seedSuggestion('sl-mine', createdBy: 'user', daysOld: 15);
 
-        final detail = await sweepAndRecord(FakeLlm(const {}));
+        final detail = await sweepAndRecord(fakeLlm(const {}));
 
         expect(detail['expired'], isNull);
         expect((await store.getStoryline('sl-young'))!.status, 'suggested');
@@ -7647,7 +7599,7 @@ void main() {
           await seedSuggestion(id, daysOld: 15);
         }
         await seedTrio(store);
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [nameAnswer()],
           'storyline_membership': [confirmAnswer()],
         });
@@ -7665,7 +7617,7 @@ void main() {
           await seedSuggestion(id, daysOld: 13);
         }
         await seedTrio(store);
-        final llm = FakeLlm(const {});
+        final llm = fakeLlm(const {});
 
         final detail = await sweepAndRecord(llm);
 
@@ -7677,10 +7629,10 @@ void main() {
 
       test('Restore lifts an expiry like any other dismissal', () async {
         await seedSuggestion('sl-stale', daysOld: 15);
-        await sweepAndRecord(FakeLlm(const {}));
+        await sweepAndRecord(fakeLlm(const {}));
         expect((await store.getStoryline('sl-stale'))!.status, 'dismissed');
 
-        await StorylineService(store, FakeLlm(const {}))
+        await StorylineService(store, fakeLlm(const {}))
             .restoreDismissed('sl-stale');
 
         expect((await store.getStoryline('sl-stale'))!.status, 'suggested');
@@ -7693,7 +7645,7 @@ void main() {
     /// never passes. What these pin is what that observer will see.
     group('the clusters are observable', () {
       /// Sweeps with [llm] and returns every report the observer was handed.
-      Future<List<SeenCluster>> sweepAndObserve(FakeLlm llm) async {
+      Future<List<SeenCluster>> sweepAndObserve(ScriptedLlm llm) async {
         final log = ActivityLog(store);
         addTearDown(log.dispose);
         final seen = <SeenCluster>[];
@@ -7727,7 +7679,7 @@ void main() {
       test('a formed storyline is reported once, as the cluster was formed',
           () async {
         await seedTrio(store);
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [alphaName()],
           'storyline_membership': [confirmAnswer()],
         });
@@ -7746,7 +7698,7 @@ void main() {
         await seedTrio(store);
         // No membership script at all: this fake throws on a confirm, so the
         // count below is proof rather than bookkeeping.
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [alphaName(coherent: false)],
         });
 
@@ -7760,7 +7712,7 @@ void main() {
 
       test('an outlier narrows the confirms but not the report', () async {
         await seedTrio(store);
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [alphaName(coherent: false, outliers: [3])],
           'storyline_membership': [confirmAnswer()],
         });
@@ -7778,14 +7730,14 @@ void main() {
       test('a tombstone that already answers is reported as answered and asks '
           'no model', () async {
         await seedTrio(store);
-        final first = await sweepAndObserve(FakeLlm({
+        final first = await sweepAndObserve(fakeLlm({
           'storyline_name': [alphaName(coherent: false)],
         }));
         expect(first.single.outcome, 'incoherent');
 
         // The same three threads rebuild the same cluster next pass, and the
         // tombstone answers it for nothing.
-        final second = FakeLlm(const {});
+        final second = fakeLlm(const {});
         final seen = await sweepAndObserve(second);
 
         expect(seen, hasLength(1));
@@ -7796,7 +7748,7 @@ void main() {
 
       test('a lint hit is reported as lint', () async {
         await seedTrio(store);
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [
             nameAnswer(title: 'Placeholder', charter: 'placeholder'),
           ],
@@ -7811,7 +7763,7 @@ void main() {
 
       test('confirms that leave one survivor are reported as thin', () async {
         await seedTrio(store);
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [alphaName()],
           'storyline_membership': [
             confirmAnswer(belongs: false),
@@ -7841,7 +7793,7 @@ void main() {
             participants: const ['Sarah Chen'],
             vector: vectorAt(0.99),
             lastMessageAt: '2026-08-27T10:00:00Z');
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [alphaName()],
           'storyline_membership': [confirmAnswer()],
         });
@@ -7868,7 +7820,7 @@ void main() {
 
       test('a service without an observer sweeps as before', () async {
         await seedTrio(store);
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [alphaName()],
           'storyline_membership': [confirmAnswer()],
         });
@@ -7905,7 +7857,7 @@ void main() {
       }
 
       /// How many cards the naming call was shown.
-      int namingCardCount(FakeLlm llm) =>
+      int namingCardCount(ScriptedLlm llm) =>
           fenceBody(llm.userMessages[llm.schemas.indexOf('storyline_name')],
                   'threads')
               .trim()
@@ -7922,7 +7874,7 @@ void main() {
             lastMessageAt: '2026-08-29T10:00:00Z');
         await seedFragmentsOfA(store);
         await seed(store, 'b', participants: const ['Sarah Chen']);
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [nameAnswer()],
           'storyline_membership': [confirmAnswer()],
         });
@@ -7968,7 +7920,7 @@ void main() {
             lastMessageAt: '2026-08-29T10:00:00Z');
         await seedFragmentsOfA(store);
         await seed(store, 'b', participants: const ['Sarah Chen']);
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [nameAnswer()],
           'storyline_membership': [confirmAnswer()],
         });
@@ -7994,7 +7946,7 @@ void main() {
             participants: const ['Dana Whitfield'],
             vector: vectorAt(0.97),
             lastMessageAt: '2026-08-27T10:00:00Z');
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [nameAnswer()],
           'storyline_membership': [confirmAnswer()],
         });
@@ -8019,7 +7971,7 @@ void main() {
             participants: const ['Sarah Chen'],
             vector: vectorAt(0.97),
             lastMessageAt: '2026-08-14T10:00:00Z');
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [nameAnswer()],
           'storyline_membership': [confirmAnswer()],
         });
@@ -8058,7 +8010,7 @@ void main() {
             subject: 'Delta pricing sheet',
             vector: vectorAt(0.94),
             lastMessageAt: '2026-08-28T08:00:00Z');
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [nameAnswer()],
           'storyline_membership': [
             confirmAnswer(belongs: false),
@@ -8108,7 +8060,7 @@ void main() {
             participants: const ['Sarah Chen'],
             vector: vectorAt(-1),
             lastMessageAt: '2026-08-29T02:00:00Z');
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [nameAnswer(title: 'Weekly ops digest')],
           'storyline_membership': [confirmAnswer()],
         });
@@ -8146,7 +8098,7 @@ void main() {
             participants: const ['Dana Whitfield'],
             vector: vectorAt(0.97),
             lastMessageAt: '2026-08-26T10:00:00Z');
-        final llm = FakeLlm(const {});
+        final llm = fakeLlm(const {});
 
         final detail = await sweepAndRecord(llm);
 
@@ -8178,7 +8130,7 @@ void main() {
             participants: const ['Sarah Chen'],
             vector: vectorAt(0.96),
             lastMessageAt: '2026-08-27T10:00:00Z');
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [nameAnswer()],
           'storyline_membership': [confirmAnswer()],
         });
@@ -8208,7 +8160,7 @@ void main() {
             subject: 'Re: Alpha launch review',
             vector: vectorAt(0.98),
             lastMessageAt: '2026-08-28T10:00:00Z');
-        final llm = FakeLlm(const {});
+        final llm = fakeLlm(const {});
 
         final detail = await sweepAndRecord(llm);
 
@@ -8232,7 +8184,7 @@ void main() {
               fromAddress: 'alerts@example.com',
               lastMessageAt: '2026-08-2${6 - index}T10:00:00Z');
         }
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [nameAnswer()],
           'storyline_membership': [confirmAnswer()],
         });
@@ -8269,7 +8221,7 @@ void main() {
             subject: 'Gamma migration notes',
             vector: vectorAt(0.96),
             lastMessageAt: '2026-08-28T09:00:00Z');
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [nameAnswer()],
           'storyline_membership': [confirmAnswer()],
         });
@@ -8303,7 +8255,7 @@ void main() {
             participants: const ['Sarah Chen'],
             vector: vectorAt(0.97),
             lastMessageAt: 'not-a-date');
-        final llm = FakeLlm({
+        final llm = fakeLlm({
           'storyline_name': [nameAnswer()],
           'storyline_membership': [confirmAnswer()],
         });
@@ -8404,7 +8356,7 @@ void main() {
           }
           await StorylineService(
             into,
-            FakeLlm({
+            fakeLlm({
               'storyline_name': [nameAnswer()],
               'storyline_membership': [confirmAnswer()],
             }),

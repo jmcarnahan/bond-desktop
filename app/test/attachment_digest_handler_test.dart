@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
 import 'fixtures/fake_embed_server.dart';
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/vec_test_db.dart';
 
 /// A model that answers from a script and counts what it was asked.
@@ -15,33 +16,8 @@ import 'fixtures/vec_test_db.dart';
 /// The count is what most of this file asserts: "no text means no model call"
 /// and "an already digested file is skipped" are both statements about a
 /// request that was never sent.
-class FakeLlm extends LlmClient {
-  final List<Object> script;
-  final List<String> userMessages = [];
-  final List<double> temperatures = [];
-
-  FakeLlm(this.script) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  int get calls => userMessages.length;
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    userMessages.add(user);
-    temperatures.add(temperature);
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-    final step = script.length > 1 ? script.removeAt(0) : script.first;
-    if (step is Exception) throw step;
-    return Map<String, dynamic>.from(step as Map);
-  }
-}
+ScriptedLlm digestLlm(List<Object> script) =>
+    ScriptedLlm()..scriptFor('attachment_digest', script);
 
 void main() {
   late bool available;
@@ -129,7 +105,7 @@ void main() {
     test('writes the digest and one more chunk for it', () async {
       if (!available) return;
       await seed();
-      final llm = FakeLlm([answer()]);
+      final llm = digestLlm([answer()]);
       final server = FakeEmbedServer();
 
       await AttachmentDigestHandler(store, llm, server.client)
@@ -165,7 +141,7 @@ void main() {
 
       await AttachmentDigestHandler(
         store,
-        FakeLlm([answer()]),
+        digestLlm([answer()]),
         FakeEmbedServer().client,
       ).run(item('m1', 'a1'));
 
@@ -178,7 +154,7 @@ void main() {
         () async {
       if (!available) return;
       await seed();
-      final llm = FakeLlm([answer()]);
+      final llm = digestLlm([answer()]);
 
       await AttachmentDigestHandler(store, llm, FakeEmbedServer().client)
           .run(item('m1', 'a1'));
@@ -199,7 +175,7 @@ void main() {
 
       await AttachmentDigestHandler(
         store,
-        FakeLlm([answer(facts: const [])..['summary'] = '']),
+        digestLlm([answer(facts: const [])..['summary'] = '']),
         FakeEmbedServer().client,
       ).run(item('m1', 'a1'));
 
@@ -217,12 +193,12 @@ void main() {
     test('no text means no model call', () async {
       if (!available) return;
       await seed(text: null, textStatus: 'skipped');
-      final llm = FakeLlm([answer()]);
+      final llm = digestLlm([answer()]);
 
       await AttachmentDigestHandler(store, llm, FakeEmbedServer().client)
           .run(item('m1', 'a1'));
 
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
     });
 
     test('a status that claims words the table does not have closes the digest',
@@ -231,12 +207,12 @@ void main() {
       await seed(text: null);
       // `done` with nothing behind it. Closing the digest is what stops the
       // pair being re-examined on every drain.
-      final llm = FakeLlm([answer()]);
+      final llm = digestLlm([answer()]);
 
       await AttachmentDigestHandler(store, llm, FakeEmbedServer().client)
           .run(item('m1', 'a1'));
 
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
       expect(
         (await store.attachmentRow('email', 'm1', 'a1'))!['digest_status'],
         'skipped',
@@ -254,24 +230,24 @@ void main() {
         digestJson: '{"evidence":"","kind":"other","summary":"","facts":[],'
             '"asks":[]}',
       );
-      final llm = FakeLlm([answer()]);
+      final llm = digestLlm([answer()]);
 
       await AttachmentDigestHandler(store, llm, FakeEmbedServer().client)
           .run(item('m1', 'a1'));
 
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
     });
 
     test('a message gated after the words landed keeps them and pays nothing',
         () async {
       if (!available) return;
       await seed(triageStatus: 'skipped');
-      final llm = FakeLlm([answer()]);
+      final llm = digestLlm([answer()]);
 
       await AttachmentDigestHandler(store, llm, FakeEmbedServer().client)
           .run(item('m1', 'a1'));
 
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
       // The words stay. What is refused is spending a model call on them.
       expect(
         await store.attachmentTextOf('email', 'm1', 'a1'),
@@ -282,12 +258,12 @@ void main() {
     test('a message gated after its words landed closes the digest', () async {
       if (!available) return;
       await seed(triageStatus: 'skipped');
-      final llm = FakeLlm([answer()]);
+      final llm = digestLlm([answer()]);
 
       await AttachmentDigestHandler(store, llm, FakeEmbedServer().client)
           .run(item('m1', 'a1'));
 
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
       // Left `pending` over `done` text, this is exactly the pair the chip
       // renders as `reading…`, and nothing else comes back to answer it.
       final row = (await store.attachmentRow('email', 'm1', 'a1'))!;
@@ -298,12 +274,12 @@ void main() {
 
     test('an attachment that vanished is done, not failed', () async {
       if (!available) return;
-      final llm = FakeLlm([answer()]);
+      final llm = digestLlm([answer()]);
 
       await AttachmentDigestHandler(store, llm, FakeEmbedServer().client)
           .run(item('gone', 'a1'));
 
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
     });
   });
 
@@ -315,7 +291,7 @@ void main() {
       await expectLater(
         AttachmentDigestHandler(
           store,
-          FakeLlm([const LlmUnavailableException('not running')]),
+          digestLlm([const LlmUnavailableException('not running')]),
           FakeEmbedServer().client,
         ).run(item('m1', 'a1')),
         throwsA(isA<LlmUnavailableException>()),
@@ -338,7 +314,7 @@ void main() {
       // already paid for, and parking here would risk spending it twice.
       await AttachmentDigestHandler(
         store,
-        FakeLlm([answer()]),
+        digestLlm([answer()]),
         FakeEmbedServer(status: null).client,
       ).run(item('m1', 'a1'));
 
@@ -370,7 +346,7 @@ void main() {
 
       await AttachmentDigestHandler(
         store,
-        FakeLlm([answer(asks: const ['Sign page four'])]),
+        digestLlm([answer(asks: const ['Sign page four'])]),
         FakeEmbedServer().client,
       ).run(item('m1', 'a1'));
 
@@ -384,7 +360,7 @@ void main() {
 
       await AttachmentDigestHandler(
         store,
-        FakeLlm([answer(asks: const ['Sign page four'])]),
+        digestLlm([answer(asks: const ['Sign page four'])]),
         FakeEmbedServer().client,
         onRequeue: () => woken++,
       ).run(item('m1', 'a1'));
@@ -401,7 +377,7 @@ void main() {
 
       await AttachmentDigestHandler(
         store,
-        FakeLlm([answer(asks: const [])]),
+        digestLlm([answer(asks: const [])]),
         FakeEmbedServer().client,
         onRequeue: () => woken++,
       ).run(item('m1', 'a1'));
@@ -432,7 +408,7 @@ void main() {
 
       await AttachmentDigestHandler(
         store,
-        FakeLlm([answer(asks: const ['Sign page four'])]),
+        digestLlm([answer(asks: const ['Sign page four'])]),
         FakeEmbedServer().client,
       ).run(item('m1', 'a1'));
       // The first requeue is drained and finished, exactly as the worker would
@@ -442,7 +418,7 @@ void main() {
 
       await AttachmentDigestHandler(
         store,
-        FakeLlm([answer(asks: const ['Return the W-9'])]),
+        digestLlm([answer(asks: const ['Return the W-9'])]),
         FakeEmbedServer().client,
       ).run(item('m1', 'a2'));
 
@@ -463,7 +439,7 @@ void main() {
 
       await AttachmentDigestHandler(
         store,
-        FakeLlm([answer(asks: const ['Sign page four'])]),
+        digestLlm([answer(asks: const ['Sign page four'])]),
         FakeEmbedServer().client,
       ).run(item('m1', 'a1'));
 
@@ -483,7 +459,7 @@ void main() {
 
       await AttachmentDigestHandler(
         store,
-        FakeLlm([answer(asks: const ['Sign page four'])]),
+        digestLlm([answer(asks: const ['Sign page four'])]),
         FakeEmbedServer().client,
       ).run(item('m1', 'a1'));
 
@@ -498,7 +474,7 @@ void main() {
 
       await AttachmentDigestHandler(
         store,
-        FakeLlm([answer()]),
+        digestLlm([answer()]),
         FakeEmbedServer().client,
       ).run(item('m1', 'a1'));
 
@@ -514,12 +490,12 @@ void main() {
 
       await AttachmentDigestHandler(
         store,
-        FakeLlm([answer(asks: const ['Sign page four'])]),
+        digestLlm([answer(asks: const ['Sign page four'])]),
         FakeEmbedServer().client,
       ).run(item('m1', 'a1'));
       await AttachmentDigestHandler(
         store,
-        FakeLlm([answer()]),
+        digestLlm([answer()]),
         FakeEmbedServer().client,
       ).run(item('m2', 'b1'));
 
@@ -553,7 +529,7 @@ void main() {
       for (final id in ['a1', 'a2']) {
         await AttachmentDigestHandler(
           store,
-          FakeLlm([answer(asks: const ['Sign page four'])]),
+          digestLlm([answer(asks: const ['Sign page four'])]),
           FakeEmbedServer().client,
         ).run(item('m1', id));
       }

@@ -8,6 +8,7 @@ import 'package:bond_inbox/services/context/context_brief_handler.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// One brief per directory, and the hash that keeps it to one.
@@ -17,33 +18,10 @@ import 'fixtures/test_db.dart';
 /// nothing has touched, because a digest backlog lands on later passes — so
 /// what stops the app paying for a brief every minute is that this handler
 /// compares its own inputs first. Several tests below hand it a script with
-/// exactly ONE answer in it: a second call would run off the end and throw.
-class _FakeLlm extends LlmClient {
-  _FakeLlm(this.script) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  final List<Object> script;
-  final List<String> userMessages = [];
-
-  int get calls => userMessages.length;
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    userMessages.add(user);
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-    if (script.isEmpty) throw StateError('the script ran out');
-    final step = script.length > 1 ? script.removeAt(0) : script.first;
-    if (step is Exception) throw step;
-    return Map<String, dynamic>.from(step as Map);
-  }
-}
+/// exactly ONE answer in it and then assert the call count: the last step
+/// repeats, so a brief the handler paid for twice shows up as a two.
+ScriptedLlm briefLlm(List<Object> script) =>
+    ScriptedLlm()..scriptFor('context_brief', script);
 
 class _Recorder extends ActivityLog {
   _Recorder() : super.disabled();
@@ -119,7 +97,7 @@ void main() {
   }
 
   Future<void> runFor(
-    _FakeLlm llm,
+    ScriptedLlm llm,
     String dirId, {
     Future<int> Function(String dirId)? onBriefChanged,
   }) =>
@@ -135,13 +113,13 @@ void main() {
       });
 
   test('a directory nobody registered is skipped as gone', () async {
-    final llm = _FakeLlm([briefAnswer()]);
+    final llm = briefLlm([briefAnswer()]);
 
     await runFor(llm, 'no-such-directory');
 
     expect(log.status, 'skipped');
     expect(log.notes['reason'], 'gone');
-    expect(llm.calls, 0);
+    expect(llm.calls.length, 0);
   });
 
   test('a directory with no notes and no digests is cleared, not briefed',
@@ -153,7 +131,7 @@ void main() {
       briefHash: 'old',
     );
     await addFile(dirId, relPath: 'art/logo.png', text: '');
-    final llm = _FakeLlm([briefAnswer()]);
+    final llm = briefLlm([briefAnswer()]);
 
     await runFor(llm, dirId);
 
@@ -163,7 +141,7 @@ void main() {
     expect(dir.briefJson, isNull);
     expect(dir.briefHash, isNull);
     expect(log.notes['reason'], 'nothing_to_brief');
-    expect(llm.calls, 0);
+    expect(llm.calls.length, 0);
   });
 
   test('standing notes alone are enough, imports and all', () async {
@@ -178,7 +156,7 @@ void main() {
       relPath: 'docs/conventions.md',
       text: 'Always cite the notebook.',
     );
-    final llm = _FakeLlm([briefAnswer()]);
+    final llm = briefLlm([briefAnswer()]);
 
     await runFor(llm, dirId);
 
@@ -206,7 +184,7 @@ void main() {
         questionsAnswered: ['What does it cost?', 'When does it renew?'],
       ),
     );
-    final llm = _FakeLlm([briefAnswer()]);
+    final llm = briefLlm([briefAnswer()]);
 
     await runFor(llm, dirId);
 
@@ -234,7 +212,7 @@ void main() {
       text: 'The renewal is 2,600 a month.',
       digest: const ContextFileDigest(purpose: 'Works out the renewal.'),
     );
-    final llm = _FakeLlm([briefAnswer()]);
+    final llm = briefLlm([briefAnswer()]);
 
     await runFor(llm, dirId);
 
@@ -257,7 +235,7 @@ void main() {
       text: 'The renewal is 2,600 a month.',
       digest: const ContextFileDigest(purpose: 'Works out the renewal.'),
     );
-    final llm = _FakeLlm([briefAnswer()]);
+    final llm = briefLlm([briefAnswer()]);
 
     await runFor(llm, dirId);
 
@@ -272,8 +250,9 @@ void main() {
       relPath: 'CLAUDE.md',
       text: '# Atlas\n\nReplies here stay short.\n',
     );
-    // ONE answer in the script: a second call runs off the end and throws.
-    final llm = _FakeLlm([briefAnswer()]);
+    // ONE answer in the script, and it repeats: the call count below is what
+    // says a second call was never made.
+    final llm = briefLlm([briefAnswer()]);
     await runFor(llm, dirId);
     final hash = (await store.directory(dirId))!.briefHash;
 
@@ -282,7 +261,7 @@ void main() {
 
     expect(log.status, 'skipped');
     expect(log.notes['reason'], 'unchanged');
-    expect(llm.calls, 1);
+    expect(llm.calls.length, 1);
     expect((await store.directory(dirId))!.briefHash, hash);
   });
 
@@ -293,8 +272,9 @@ void main() {
     // the last thousand never reach the model.
     final notes = 'Replies here stay short. '.padRight(9000, 'x');
     final fileId = await addFile(dirId, relPath: 'CLAUDE.md', text: notes);
-    // ONE answer in the script: a second call runs off the end and throws.
-    final llm = _FakeLlm([briefAnswer()]);
+    // ONE answer in the script, and it repeats: the call count below is what
+    // says a second call was never made.
+    final llm = briefLlm([briefAnswer()]);
     await runFor(llm, dirId);
     final hash = (await store.directory(dirId))!.briefHash;
 
@@ -310,7 +290,7 @@ void main() {
     // past the ceiling buys a call that reads the identical message.
     expect(log.status, 'skipped');
     expect(log.notes['reason'], 'unchanged');
-    expect(llm.calls, 1);
+    expect(llm.calls.length, 1);
     expect((await store.directory(dirId))!.briefHash, hash);
   });
 
@@ -326,7 +306,7 @@ void main() {
       relPath: 'docs/a.md',
       text: 'Always cite the notebook.\n@../CLAUDE.md\n',
     );
-    final llm = _FakeLlm([briefAnswer()]);
+    final llm = briefLlm([briefAnswer()]);
 
     await runFor(llm, dirId);
 
@@ -348,7 +328,7 @@ void main() {
       text: 'The renewal is 2,600 a month.',
       digest: const ContextFileDigest(purpose: 'Works out the renewal.'),
     );
-    final llm = _FakeLlm([
+    final llm = briefLlm([
       briefAnswer(),
       briefAnswer(about: 'Atlas now covers the escalator too.'),
     ]);
@@ -365,7 +345,7 @@ void main() {
     log = _Recorder();
     await runFor(llm, dirId);
 
-    expect(llm.calls, 2);
+    expect(llm.calls.length, 2);
     final dir = (await store.directory(dirId))!;
     expect(dir.briefHash, isNot(first));
     expect(
@@ -381,7 +361,7 @@ void main() {
       relPath: 'CLAUDE.md',
       text: '# Atlas\n\nReplies here stay short.\n',
     );
-    final llm = _FakeLlm([
+    final llm = briefLlm([
       briefAnswer(
         pointers: [
           for (var i = 0; i < 20; i++) {'topic': 'topic $i', 'path': 'p$i.md'},
@@ -407,7 +387,7 @@ void main() {
       );
       final told = <String>[];
 
-      await runFor(_FakeLlm([briefAnswer()]), dirId,
+      await runFor(briefLlm([briefAnswer()]), dirId,
           onBriefChanged: (id) async {
         told.add(id);
         return 2;
@@ -424,7 +404,7 @@ void main() {
         relPath: 'CLAUDE.md',
         text: '# Atlas\n\nReplies here stay short.\n',
       );
-      final llm = _FakeLlm([briefAnswer()]);
+      final llm = briefLlm([briefAnswer()]);
       final told = <String>[];
       Future<int> record(String id) async {
         told.add(id);
@@ -445,7 +425,7 @@ void main() {
       final dirId = await register();
       final told = <String>[];
 
-      await runFor(_FakeLlm([briefAnswer()]), dirId,
+      await runFor(briefLlm([briefAnswer()]), dirId,
           onBriefChanged: (id) async {
         told.add(id);
         return 1;
@@ -464,7 +444,7 @@ void main() {
       );
 
       await runFor(
-        _FakeLlm([briefAnswer()]),
+        briefLlm([briefAnswer()]),
         dirId,
         onBriefChanged: (_) async => throw StateError('the storylines are out'),
       );
@@ -487,7 +467,7 @@ void main() {
         text: '# Atlas\n\nReplies here stay short.\n',
       );
 
-      await runFor(_FakeLlm([briefAnswer()]), dirId,
+      await runFor(briefLlm([briefAnswer()]), dirId,
           onBriefChanged: (_) async => 0);
 
       expect(log.notes['charters_offered'], isNull);
@@ -509,7 +489,7 @@ void main() {
     );
 
     await expectLater(
-      runFor(_FakeLlm([const LlmUnavailableException('fast slot off')]), dirId),
+      runFor(briefLlm([const LlmUnavailableException('fast slot off')]), dirId),
       throwsA(isA<LlmUnavailableException>()),
     );
 

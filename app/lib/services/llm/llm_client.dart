@@ -443,12 +443,13 @@ class LlmClient {
   /// [completeJson], with the answer's text handed to [onText] as it arrives.
   ///
   /// A separate METHOD rather than an optional parameter on [completeJson],
-  /// which is the shape it looks like it should be. Twenty-two test doubles
-  /// `extends LlmClient` and override `completeJson` with its exact signature,
-  /// and a Dart override must accept every named parameter of the method it
-  /// overrides — so one added parameter would be twenty-two edits to files
-  /// that have nothing to do with streaming and would behave identically
-  /// afterwards.
+  /// which is the shape it looks like it should be. The test tree's one
+  /// double, `ScriptedLlm` in `test/fixtures/scripted_llm.dart`, overrides
+  /// both of these methods with their exact signatures, and a Dart override
+  /// must accept every named parameter of the method it overrides — so the
+  /// two signatures are frozen together: a parameter added to either is an
+  /// edit to the other's override as well, in a fixture that has nothing to
+  /// do with streaming and would behave identically afterwards.
   ///
   /// The answer, the failure semantics and the observer's record are the same
   /// as [completeJson]'s in every respect but one: the record carries
