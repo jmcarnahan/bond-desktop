@@ -105,7 +105,8 @@ class _RecordingWorker extends AiWorker {
       : super(handlers: const []);
 
   @override
-  Future<void> pump() async => order.add(name);
+  Future<void> pump({List<({String source, String id})> first = const []}) async =>
+      order.add(name);
 
   @override
   void stop() => order.add('stop $name');

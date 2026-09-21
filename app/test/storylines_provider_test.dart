@@ -43,9 +43,9 @@ class RecordingWorker extends AiWorker {
   RecordingWorker(super.store, {required super.handlers});
 
   @override
-  Future<void> pump() {
+  Future<void> pump({List<({String source, String id})> first = const []}) {
     pumps++;
-    return super.pump();
+    return super.pump(first: first);
   }
 }
 

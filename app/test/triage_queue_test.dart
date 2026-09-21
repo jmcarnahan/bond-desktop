@@ -5,6 +5,7 @@ import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
+import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -97,6 +98,20 @@ class FakeDetailFetch {
     if (attachments.isNotEmpty) {
       await store.upsertAttachments('email', sourceMessageId, attachments);
     }
+  }
+}
+
+/// A [DrainGate] that records every ask for a yield. The ask is what this
+/// queue does on behalf of a waiting message, and the flag itself is cleared
+/// by the very run the ask precedes, so counting the calls is the only way to
+/// see it from outside.
+class _RecordingGate extends DrainGate {
+  int asks = 0;
+
+  @override
+  void requestYield() {
+    asks++;
+    super.requestYield();
   }
 }
 
@@ -1824,7 +1839,7 @@ void main() {
       final queue = TriageQueue(
         store,
         FakeLlm([answer()]),
-        onDrained: () async => called++,
+        onDrained: (_) async => called++,
       );
 
       await queue.pump();
@@ -1844,7 +1859,7 @@ void main() {
         store,
         FakeLlm([answer()]),
         concurrency: 1,
-        onDrained: () async => called++,
+        onDrained: (_) async => called++,
       );
 
       final drain = queue.pump();
@@ -1875,7 +1890,7 @@ void main() {
       final queue = TriageQueue(
         store,
         FakeLlm([answer()]),
-        onDrained: () async => called++,
+        onDrained: (_) async => called++,
       );
 
       await queue.pump();
@@ -1889,7 +1904,7 @@ void main() {
       final queue = TriageQueue(
         store,
         FakeLlm([answer()]),
-        onDrained: () async => called++,
+        onDrained: (_) async => called++,
       );
 
       await queue.pump();
@@ -1906,7 +1921,7 @@ void main() {
       final queue = TriageQueue(
         store,
         FakeLlm([const LlmUnavailableException('off')]),
-        onDrained: () async => called++,
+        onDrained: (_) async => called++,
       );
 
       await queue.pump();
@@ -1928,7 +1943,7 @@ void main() {
       final queue = TriageQueue(
         store,
         FakeLlm([const LlmException('JSON schema conversion failed', 400)]),
-        onDrained: () async => called++,
+        onDrained: (_) async => called++,
       );
 
       await queue.pump();
@@ -1943,7 +1958,7 @@ void main() {
       final queue = TriageQueue(
         store,
         FakeLlm([answer()]),
-        onDrained: () async => called++,
+        onDrained: (_) async => called++,
       );
 
       await queue.pump();
@@ -1957,13 +1972,98 @@ void main() {
       final queue = TriageQueue(
         store,
         FakeLlm([answer()]),
-        onDrained: () async => throw StateError('the worker blew up'),
+        onDrained: (_) async => throw StateError('the worker blew up'),
       );
 
       await expectLater(queue.pump(), completes);
       // The verdicts are written and kept: re-running them would cost a
       // second set of model calls for the same answers.
       expect(await store.triageCounts(), {'triaged': 1});
+    });
+
+    test('carries the pairs this drain wrote a verdict for', () async {
+      await seedMessage(id: 'm1');
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
+      // A gated message is a verdict too, and it unblocks the work queue's
+      // untriaged guard exactly as a triaged one does, so it rides along.
+      await seedMessage(
+        id: 'm3',
+        receivedAt: '2026-08-29T09:00:00Z',
+        from: 'noreply@example.com',
+      );
+      var carried = <({String source, String id})>[];
+      final queue = TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onDrained: (triaged) async => carried = triaged,
+      );
+
+      await queue.pump();
+
+      expect(
+        carried.map((ref) => ref.id).toSet(),
+        {'m1', 'm2', 'm3'},
+      );
+      expect(carried.every((ref) => ref.source == 'email'), isTrue);
+      expect(await store.triageCounts(), {'triaged': 2, 'skipped': 1});
+    });
+
+    test('the list is fresh each drain, not the session', () async {
+      await seedMessage(id: 'm1');
+      final seen = <List<({String source, String id})>>[];
+      final queue = TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        onDrained: (triaged) async => seen.add(triaged),
+      );
+
+      await queue.pump();
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
+      await queue.pump();
+
+      expect(seen.length, 2);
+      expect(seen[0].map((ref) => ref.id), ['m1']);
+      expect(seen[1].map((ref) => ref.id), ['m2']);
+    });
+  });
+
+  group('the yield ask', () {
+    test('is made when something is pending', () async {
+      await seedMessage(id: 'm1');
+      final gate = _RecordingGate();
+      final queue = TriageQueue(store, FakeLlm([answer()]), gate: gate);
+
+      await queue.pump();
+
+      expect(gate.asks, 1);
+    });
+
+    test('is not made when nothing is pending', () async {
+      final gate = _RecordingGate();
+      final queue = TriageQueue(store, FakeLlm([answer()]), gate: gate);
+
+      await queue.pump();
+
+      // A sixty-second poll over an empty queue would otherwise end the
+      // worker's pass every minute for nothing.
+      expect(gate.asks, 0);
+    });
+
+    test('is not made on the OFF branch, however much is pending', () async {
+      await seedMessage(id: 'm1');
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
+      final gate = _RecordingGate();
+      final queue = TriageQueue(
+        store,
+        FakeLlm([answer()]),
+        gate: gate,
+        enabled: () => false,
+      );
+
+      await queue.pump();
+
+      expect(gate.asks, 0);
+      expect(await store.triageCounts(), {'pending': 2});
     });
   });
 

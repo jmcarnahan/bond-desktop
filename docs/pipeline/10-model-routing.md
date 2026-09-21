@@ -631,6 +631,29 @@ sits and waits for. Where the two prose lanes genuinely contend the SERVER
 queues them, so the worst case for an asked-for draft is one recap rather than
 a drain pass.
 
+**The newest message goes first.** Since Round G the fast gate carries one
+flag as well as its queue. A triage pump that finds something waiting asks for
+a yield and enqueues its own drain in the same step. The fast worker reads
+that flag only where it is about to claim its next item, so the item already
+at the server is never abandoned and the pass simply ends there. The gate goes
+back to the queue, triage runs, and the worker walks again from the top. The
+ask is a ticket rather than a latch: the drain queued at or after it clears it
+as its body starts, so the flag cannot outlive one handoff and neither side
+can starve the other. When the worker comes back it runs the messages triage
+just decided on before it resumes the backlog. Those pairs ride the
+`onDrained` callback into `pump`, and the priority pass claims each of them
+through every fast handler in the walk's own order. A message that arrives
+mid-backlog therefore costs its own triage, its own needs-you and its own
+extraction, plus whatever item was in flight when it landed, instead of a full
+pass over everybody else's. The claim behind the pass repeats the untriaged
+guard verbatim, so a named message that triage has not yet spoken about is
+refused and the ordinary walk collects it once the verdict lands. The pass
+itself reads no yield, because it is the work a yield was asked for and
+stopping inside it would starve the very message that prompted the ask. At
+most eight messages ride one pass; the rest are ordinary pending rows a moment
+later. Nothing here touches the draft lane or the storyline lane, which hold
+gates of their own, and nothing changes the sixty-second poll.
+
 **…and one switch.** Model work runs only while **AI processing** is on. The
 switch is the first row of the sidebar's list header (`InboxScreen._listHeader`,
 keyed `processing-toggle`) and its state is `processingProvider` — session

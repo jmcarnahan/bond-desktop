@@ -200,7 +200,7 @@ void main() {
       gate: gate,
       // No `ensureBody`: there is no Graph here, and the seeded row already
       // carries the body a detail fetch would have written.
-      onDrained: () => worker.pump(),
+      onDrained: (triaged) => worker.pump(first: triaged),
     );
     addTearDown(triage.dispose);
     return (triage: triage, worker: worker, llm: llm, embed: embed);
@@ -253,6 +253,28 @@ void main() {
     expect(await storylineRows(), 0);
   });
 
+  test('a skipped ref is closed by the priority pass, with no model call',
+      () async {
+    // A gate is a verdict, so a gated message rides `onDrained` into the
+    // priority lane beside the kept ones. What the pass does with it is close
+    // its rows: the handlers honour the gate, and the whole point of gating
+    // is that the 4B is never dialled for a newsletter.
+    await seedFreshMessage(from: 'noreply@example.com');
+    final p = pipeline();
+
+    await p.triage.pump();
+    await pumpEventQueue();
+
+    expect((await store.getMessageRow('email', 'm1'))!['triage_status'],
+        'skipped');
+    expect(await statusOf('extract', 'm1'), 'done');
+    expect(await statusOf('needs_you', 'm1'), 'done');
+    expect(p.llm.calls, isEmpty);
+    expect(p.embed.inputs, isEmpty);
+    expect(await store.getExtraction('email', 'm1'), isNull);
+    expect(await storylineRows(), 0);
+  });
+
   test('a kept message is extracted exactly once, and only after triage',
       () async {
     await seedFreshMessage();
@@ -285,6 +307,72 @@ void main() {
     expect(await storylineRows(), 1);
   });
 
+  test('a priority ref is refused before triage and taken after it', () async {
+    await seedFreshMessage();
+    final p = pipeline();
+
+    // The caller names the message as urgent while it is still untriaged,
+    // which is the one way a priority claim could become a hole in the
+    // invariant. `claimWorkItem` carries the same guard the walk's claim
+    // carries, so the pass finds nothing to take.
+    await p.worker.pump(first: const [(source: 'email', id: 'm1')]);
+
+    expect(await statusOf('extract', 'm1'), 'pending');
+    expect(await statusOf('needs_you', 'm1'), 'pending');
+    expect(p.llm.calls, isEmpty);
+    expect(await store.getExtraction('email', 'm1'), isNull);
+
+    // Triage speaks, and the pairs it wrote ride back to the worker through
+    // `onDrained` as the priority refs of the next pass.
+    await p.triage.pump();
+    await pumpEventQueue();
+
+    expect((await store.getMessageRow('email', 'm1'))!['triage_status'],
+        'triaged');
+    expect(await statusOf('extract', 'm1'), 'done');
+    expect(await statusOf('needs_you', 'm1'), 'done');
+    expect(p.llm.calls.first, 'triage');
+    expect(p.llm.calls.where((c) => c == 'extraction').length, 1);
+    expect(p.llm.calls.where((c) => c == 'needs_you').length, 1);
+    expect(await store.getExtraction('email', 'm1'), isNotNull);
+  });
+
+  test('a priority claim does not hand a backlog item out twice', () async {
+    // Two messages, both already triaged, so both are claimable — and the
+    // newer one is named as urgent. Whichever of the priority pass and the
+    // handler walk reaches a row second finds nothing pending to match.
+    await seedFreshMessage(id: 'm1');
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'm2',
+      'conversation_key': 'conv-1',
+      'direction': 'inbound',
+      'subject': 'Re: Launch date',
+      'from_name': 'Sarah',
+      'from_address': 'sarah@example.com',
+      'received_at': '2026-08-29T11:00:00Z',
+      'body_text': 'And the copy deck?',
+    });
+    await store.enqueueWork('extract', 'email', 'm2');
+    await store.enqueueWork('needs_you', 'email', 'm2');
+    for (final id in ['m1', 'm2']) {
+      await store.writeTriage('email', id, status: 'triaged');
+    }
+
+    final p = pipeline();
+    await p.worker.pump(first: const [(source: 'email', id: 'm2')]);
+
+    for (final id in ['m1', 'm2']) {
+      expect(await statusOf('extract', id), 'done');
+      expect(await statusOf('needs_you', id), 'done');
+    }
+    // Two messages, two of each call: a row claimed by both paths would show
+    // up here as a third.
+    expect(p.llm.calls.where((c) => c == 'extraction').length, 2);
+    expect(p.llm.calls.where((c) => c == 'needs_you').length, 2);
+    expect(p.llm.calls, isNot(contains('triage')));
+  });
+
   test('a drain with nothing pending does not wake the worker', () async {
     // No message at all, so nothing was written and there is nothing for the
     // worker to collect. A knock here would be a drain per poll for a mailbox
@@ -296,7 +384,7 @@ void main() {
       store,
       llm,
       gate: gate,
-      onDrained: () async => pumps++,
+      onDrained: (_) async => pumps++,
     );
     addTearDown(triage.dispose);
 

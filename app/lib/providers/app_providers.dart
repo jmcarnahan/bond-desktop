@@ -900,10 +900,12 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     // which is inside this callback, long after both exist. Unawaited because
     // a worker drain is minutes of model time and the triage pump that fires
     // it must not wait for it; the guard is for the read itself, which throws
-    // against a torn-down container.
-    onDrained: () async {
+    // against a torn-down container. The pairs this drain wrote verdicts for
+    // ride along as `first:`, so the worker runs those messages' needs-you
+    // and extraction ahead of whatever backlog it was already walking.
+    onDrained: (triaged) async {
       try {
-        unawaited(ref.read(aiWorkerProvider).pump());
+        unawaited(ref.read(aiWorkerProvider).pump(first: triaged));
       } catch (_) {}
     },
     // A gate landing on a message whose thread has nothing kept left in it
