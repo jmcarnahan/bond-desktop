@@ -592,6 +592,19 @@ void main() {
       // storyline and is therefore free again.
       expect(await store.assignedOrBlockedKeys('email'), {'c1', 'c2'});
     });
+
+    test('assignedKeys is the same read without the block arm', () async {
+      await seedStoryline('sl-live', status: 'active');
+      await seedStoryline('sl-dead', status: 'dismissed');
+      await store.addStorylineMember('sl-live', 'email', 'c1', addedBy: 'auto');
+      await store.addStorylineMember('sl-live', 'email', 'c2', addedBy: 'auto');
+      await store.removeStorylineMember('sl-live', 'email', 'c2', block: true);
+      await store.addStorylineMember('sl-dead', 'email', 'c3', addedBy: 'auto');
+
+      // c2 was pulled out of sl-live, and that is sl-live's business: it is
+      // not filed anywhere, so it is on offer to a storyline that asks.
+      expect(await store.assignedKeys('email'), {'c1'});
+    });
   });
 
   group('staleRefreshStorylineIds', () {

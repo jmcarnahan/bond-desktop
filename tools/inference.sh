@@ -15,7 +15,7 @@
 #   tools/inference.sh extend  --days D [--name NAME]     move the self-termination timer
 #   tools/inference.sh down    [--name NAME] [--keep-ip]   terminate; the key pair and SG stay
 #   tools/inference.sh persist --domain HOST --api-key-file FILE [--route53-zone ZONE]
-#                              [--acme-email YOU] [--name NAME]
+#                              [--acme-email YOU] [--name NAME] [--force]
 #                            turn a running box into an always-on keyed HTTPS endpoint
 #
 # A box serves one or two SLOTS, mirroring the app's two servers: `prose`
@@ -33,6 +33,12 @@
 # Its options: --persistent, --domain HOST, --api-key KEY or --api-key-file
 # FILE, --route53-zone ZONE to write the A record, --acme-email YOU for the
 # certificate notices, --keep-ip to keep the address after the box goes down.
+# Give the key as --api-key-file FILE. That is the recommended form, because
+# --api-key KEY puts the key on this command's argv, where anyone with an
+# account on this machine can read it out of the process table, and where the
+# shell history keeps it. A key file is read once and never logged.
+# `persist` on a box that already holds this key and is serving does nothing
+# to the slots; --force restarts them anyway.
 # On a persistent box the access key is the credential for the app and for the
 # bench recipes. Port 22 stays open to the operator's IP alone and `tunnel` is
 # still the operator's own path to the slots.
@@ -111,6 +117,9 @@ DOMAIN=
 ROUTE53_ZONE=
 ACME_EMAIL=
 KEEP_IP=0
+# persist skips the slot restart when the box already holds the key it was
+# given; --force restarts them regardless.
+FORCE=0
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 STATE_DIR=$ROOT/tmp/inference
@@ -131,6 +140,12 @@ save_state() {  # save_state KEY VALUE — one line per key, sourceable
 load_state() { [ -f "$(state_file)" ] && . "$(state_file)"; :; }
 
 my_ip() { curl -s --max-time 10 https://checkip.amazonaws.com | tr -d '[:space:]'; }
+
+# The digest of stdin, with the tool this machine has: sha256sum where there
+# is one, shasum on a Mac.
+sha256_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | awk '{print $1}'
+}
 
 ssh_box() {  # ssh_box IP CMD…
   local ip=$1; shift
@@ -198,9 +213,28 @@ allow_ingress() {  # allow_ingress REGION SG PORT CIDR
 # exactly that reason. For an existing instance the group is ITS group, which
 # may predate this script.
 allow_my_ip() {  # allow_my_ip REGION [INSTANCE_ID]
-  local r=$1 sg=${SG:-} ip
-  [ -n "${2:-}" ] && sg=$(aws ec2 describe-instances --region "$r" --instance-ids "$2" \
-                           --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' --output text)
+  local r=$1 sg=${SG:-} ip ids n
+  if [ -n "${2:-}" ]; then
+    # A converted box carries the web group as well, and SecurityGroups[0] is
+    # then whichever the API lists first, so port 22 would land on the group
+    # that is open to the world. Port 22 belongs to bond-inference-ssh, and the
+    # group is chosen by that name.
+    ids=$(aws ec2 describe-instances --region "$r" --instance-ids "$2" \
+            --query 'Reservations[0].Instances[0].SecurityGroups[?GroupName==`bond-inference-ssh`].GroupId' --output text) \
+      || die "could not read the security groups of $2"
+    sg=$(echo $ids)
+    if [ -z "$sg" ]; then
+      # A box that predates this script has one group of its own name; that is
+      # the only case where a group not called bond-inference-ssh is taken.
+      ids=$(aws ec2 describe-instances --region "$r" --instance-ids "$2" \
+              --query 'Reservations[0].Instances[0].SecurityGroups[].GroupId' --output text) \
+        || die "could not read the security groups of $2"
+      n=$(echo $ids | wc -w | tr -d ' ')
+      [ "$n" = 1 ] || die "$2 has $n security groups and none named bond-inference-ssh; open port 22 by hand"
+      sg=$(echo $ids)
+    fi
+  fi
+  [ -n "$sg" ] && [ "$sg" != None ] || die "no security group to open port 22 on in $r"
   ip=$(my_ip); [ -n "$ip" ] || die "could not learn this machine's public IP"
   allow_ingress "$r" "$sg" 22 "$ip/32"
 }
@@ -304,7 +338,7 @@ slot=\${1:-prose}; shift 2>/dev/null || true
 . /opt/bond/\$slot.env
 # The api-key a persistent box checks, as an env file rather than a flag: a
 # flag would show in the box's process table. The value is still readable in
-# `docker inspect` .Config.Env, on a box only the operator can reach.
+# \`docker inspect\` .Config.Env, on a box only the operator can reach.
 KEYENV=; [ -f /opt/bond/api.env ] && KEYENV="--env-file /opt/bond/api.env"
 docker rm -f vllm vllm-\$slot 2>/dev/null || true
 GPUS=\$(nvidia-smi -L | wc -l)
@@ -366,6 +400,24 @@ push_api_key() {  # push_api_key IP
     | ssh_box "$ip" 'sudo install -m 600 /dev/stdin /opt/bond/api.key' \
     || die "could not write /opt/bond/api.key on $ip"
   log "the access key is on the box at /opt/bond/api.env, mode 600, root only"
+}
+
+# Re-running `persist` on a box that is already converted used to restart both
+# vLLM containers, which costs minutes of downtime for nothing when the key has
+# not changed. The box's copy of the key is hashed over ssh and compared with
+# the key in hand, and the slots are left alone when they match and every slot
+# is still running. --force restarts them anyway.
+key_unchanged() {  # key_unchanged IP
+  local ip=$1 here there slots=prose s
+  [ "$FORCE" = 1 ] && return 1
+  has_bulk && slots="prose bulk"
+  here=$(printf '%s\n' "$API_KEY" | sha256_stdin)
+  there=$(ssh_box "$ip" 'sudo sha256sum /opt/bond/api.key 2>/dev/null | cut -d" " -f1' 2>/dev/null) || return 1
+  [ -n "$here" ] && [ "$here" = "$there" ] || return 1
+  for s in $slots; do
+    [ "$(ssh_box "$ip" "docker inspect -f '{{.State.Running}}' vllm-$s 2>/dev/null")" = true ] || return 1
+  done
+  return 0
 }
 
 # The second group: 443 for the app, 80 for ACME's HTTP-01 challenge and
@@ -535,14 +587,17 @@ RS
 # Caddy binds 443 before its first ACME order has finished, so the fallback
 # route is what says the endpoint is really ready: a 200 with no key, on a path
 # that reaches no model.
+# The budget is wall clock, as wait_instance's is: a poll that blocks for its
+# own ten seconds makes a counted loop run far longer than the five minutes it
+# promises.
 wait_https() {
-  local i=0 code
+  local t0 code=
+  t0=$(date +%s)
   log "waiting for the certificate on https://$DOMAIN, up to five minutes"
   while :; do
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://$DOMAIN/" 2>/dev/null)
     [ "$code" = 200 ] && { log "https://$DOMAIN answers 200; the certificate is in place"; return 0; }
-    i=$((i + 1))
-    [ $((i * POLL)) -ge 300 ] && die "https://$DOMAIN did not answer 200 within five minutes; on the box, docker logs caddy"
+    [ $(( $(date +%s) - t0 )) -ge 300 ] && die "https://$DOMAIN did not answer 200 within five minutes; the last answer was ${code:-none}. On the box, docker logs caddy"
     sleep "$POLL"
   done
 }
@@ -631,9 +686,9 @@ cmd_up() {
       *)   die "$r: $out" ;;
     esac
   done
-  rm -f "$ud"
+  rm -f -- "$ud"
   [ -n "${INSTANCE_ID:-}" ] || die "no region in [$REGIONS] had $TYPE capacity; retry later, try --spot, another --type, or more --regions"
-  rm -f "$(state_file)"
+  rm -f -- "$(state_file)"
   save_state REGION "$REGION"; save_state INSTANCE_ID "$INSTANCE_ID"; save_state SERVED_NAME "$SERVED"
   [ -n "$BULK_MODEL" ] && save_state BULK_SERVED_NAME "$BULK_SERVED"
   ITYPE=$TYPE IMODEL=$MODEL IBULK=$BULK_MODEL
@@ -742,7 +797,7 @@ EOF
 # then tokens/s for one stream and for four at once.
 run_test() {  # run_test URL MODEL BEARER
   local url=$1 model=$2 bearer=$3 r content usage n t0 t1 ok=1 tps agg tmp pids i cfg= mcode
-  tmp=$(mktemp -d)
+  tmp=$(mktemp -d) || die "could not make a temporary directory"
   # The key goes to curl in a 0600 config file, never as an argument: an
   # argument is readable in this machine's process table by anyone on it.
   if [ -n "$bearer" ]; then
@@ -751,7 +806,7 @@ run_test() {  # run_test URL MODEL BEARER
   fi
   # Self-clearing: a RETURN trap outlives the function that set it and would
   # fire again in the caller, where `cfg` and `tmp` are unbound under set -u.
-  trap '[ -n "$cfg" ] && rm -f "$cfg"; rm -rf "$tmp"; trap - RETURN' RETURN
+  trap '[ -n "$cfg" ] && rm -f -- "$cfg"; rm -rf -- "$tmp"; trap - RETURN' RETURN
   post() { curl -s --max-time 180 ${cfg:+--config "$cfg"} -H 'Content-Type: application/json' "$url/v1/chat/completions" -d "$1"; }
   body() {  # body PROMPT MAX_TOKENS [EXTRA_JSON]
     jq -n --arg m "$model" --arg p "$1" --argjson n "$2" \
@@ -777,7 +832,7 @@ run_test() {  # run_test URL MODEL BEARER
   case "$content" in alpha|beta|gamma) printf '  %-26s ok (asked for zeta, got %s)\n' "constrained json_schema" "$content";;
     *) ok=0; printf '  %-26s FAIL: got %s\n' "constrained json_schema" "$(echo "$r" | jq -c '.choices[0].message.content // .' | cut -c1-160)";; esac
 
-  [ "$ok" = 1 ] || { printf '  %-26s FAIL (throughput skipped)\n' "result"; rm -rf "$tmp"; return 1; }
+  [ "$ok" = 1 ] || { printf '  %-26s FAIL (throughput skipped)\n' "result"; rm -rf -- "$tmp"; return 1; }
   t0=$(date +%s); r=$(post "$(body 'Write two paragraphs about how tides work.' 256)"); t1=$(date +%s)
   n=$(echo "$r" | jq -r '.usage.completion_tokens // 0')
   tps=$(awk -v n="$n" -v s="$((t1 - t0))" 'BEGIN{ if (s>0) printf "%.1f", n/s; else print "?" }')
@@ -785,7 +840,7 @@ run_test() {  # run_test URL MODEL BEARER
   t0=$(date +%s); pids=
   for i in 1 2 3 4; do post "$(body 'Write two paragraphs about how tides work.' 256)" | jq -r '.usage.completion_tokens // 0' > "$tmp/$i" & pids="$pids $!"; done
   wait $pids   # only these four — a plain `wait` would also wait on the tunnel
-  t1=$(date +%s); n=$(cat "$tmp"/[1-4] | awk '{s+=$1} END{print s+0}'); rm -rf "$tmp"
+  t1=$(date +%s); n=$(cat "$tmp"/[1-4] | awk '{s+=$1} END{print s+0}'); rm -rf -- "$tmp"
   agg=$(awk -v n="$n" -v s="$((t1 - t0))" 'BEGIN{ if (s>0) printf "%.1f", n/s; else print "?" }')
   printf '  %-26s %s tok/s aggregate (%s tokens in %ss)\n' "four streams" "$agg" "$n" "$((t1 - t0))"
   [ "$ok" = 1 ] && printf '  %-26s PASS\n' "result" || { printf '  %-26s FAIL\n' "result"; return 1; }
@@ -889,7 +944,7 @@ cmd_extend() {
 cmd_down() {
   need aws
   kill_tunnel
-  find_instance || { rm -f "$(state_file)"; log "nothing named '$NAME' is running"; return 0; }
+  find_instance || { rm -f -- "$(state_file)"; log "nothing named '$NAME' is running"; return 0; }
   local alloc=${ALLOC_ID:-} i=0
   [ -n "$alloc" ] || alloc=$(instance_tag eip)
   aws ec2 terminate-instances --region "$REGION" --instance-ids "$INSTANCE_ID" \
@@ -906,7 +961,7 @@ cmd_down() {
     done
     [ "$i" -lt 12 ] && log "released the Elastic IP $alloc"
   fi
-  rm -f "$(state_file)"
+  rm -f -- "$(state_file)"
   log "the root volume goes with it; key pair bond-inference and SG bond-inference-ssh stay (free)"
 }
 
@@ -931,11 +986,19 @@ cmd_persist() {
   ssh_box "$IP" 'sudo shutdown -c' >/dev/null 2>&1 || :
   log "the self-termination timer is cancelled; this box now runs until 'down' ends it"
   aws ec2 create-tags --region "$REGION" --resources "$INSTANCE_ID" \
-    --tags Key=persistent,Value=1 "Key=domain,Value=$DOMAIN" >/dev/null
+    --tags Key=persistent,Value=1 "Key=domain,Value=$DOMAIN" >/dev/null \
+    || die "could not tag $INSTANCE_ID as persistent in $REGION"
   ensure_web_sg "$REGION"
   local groups
+  # --groups REPLACES the instance's list, so an unread or empty answer here
+  # would send the web group alone and take port 22 off the box. Both the
+  # failure and the empty list are fatal.
   groups=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INSTANCE_ID" \
-             --query 'Reservations[0].Instances[0].SecurityGroups[].GroupId' --output text)
+             --query 'Reservations[0].Instances[0].SecurityGroups[].GroupId' --output text) \
+    || die "could not read the security groups of $INSTANCE_ID"
+  [ -n "$(echo $groups)" ] \
+    || die "no security group came back for $INSTANCE_ID; refusing to replace its list with $WEB_SG alone"
+
   # --output text separates with TABS, so the list is re-split on whitespace
   # before it is matched or extended. --groups REPLACES the list, so every group
   # the box already has goes back in, each exactly once: a duplicate id is
@@ -951,8 +1014,12 @@ cmd_persist() {
   kill_tunnel
   ensure_eip "$REGION" "$NAME"
   dns_note "$IP"
-  push_api_key "$IP"
-  restart_slots "$IP"
+  if key_unchanged "$IP"; then
+    log "the key is unchanged; the slots keep running"
+  else
+    push_api_key "$IP"
+    restart_slots "$IP"
+  fi
   install_caddy "$IP"
   save_state DOMAIN "$DOMAIN"
   wait_https
@@ -965,7 +1032,12 @@ cmd_persist() {
 CMD=$1; shift
 while [ $# -gt 0 ]; do
   case "$1" in
-    --name) NAME=$2; shift ;;        --type) TYPE=$2; shift ;;
+    # A name reaches a state file path, an AWS tag filter and the log, so it
+    # is held to letters, digits, dash and underscore at the door.
+    --name) NAME=$2
+      case "$NAME" in ''|*[!A-Za-z0-9_-]*) die "--name takes letters, digits, dash and underscore only" ;; esac
+      shift ;;
+    --type) TYPE=$2; shift ;;
     --days) DAYS=$2; shift ;;        --model) MODEL=$2 MODEL_SET=1; shift ;;
     --served-name) SERVED=$2; shift ;; --image) IMAGE=$2; shift ;;
     --max-len) MAXLEN=$2; shift ;;   --mem) MEM=$2; shift ;;
@@ -982,7 +1054,7 @@ while [ $# -gt 0 ]; do
     --persistent) PERSISTENT=1 ;;    --domain) DOMAIN=$2; shift ;;
     --api-key) API_KEY=$2; shift ;;  --api-key-file) API_KEY_FILE=$2; shift ;;
     --route53-zone) ROUTE53_ZONE=$2; shift ;; --acme-email) ACME_EMAIL=$2; shift ;;
-    --keep-ip) KEEP_IP=1 ;;
+    --keep-ip) KEEP_IP=1 ;;      --force) FORCE=1 ;;
     -h|--help) usage ;;
     *) die "unknown option $1 (see --help)" ;;
   esac; shift

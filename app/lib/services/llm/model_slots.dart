@@ -198,6 +198,20 @@ String normalizeBoxBaseUrl(String raw) {
   return base;
 }
 
+/// The box ORIGIN behind a stored [boxProseId] target's URL, or the empty
+/// string when [url] is not one this app wrote.
+///
+/// [normalizeBoxBaseUrl] read backwards, and the reason it is a function: the
+/// Settings pane prefills its address field from the pair already stored so
+/// that somebody whose access key was rotated types the key alone, and
+/// re-deriving the origin by hand is how the two halves of one recipe drift.
+String boxBaseFromProseUrl(String url) {
+  const suffix = '/prose/v1/chat/completions';
+  return url.endsWith(suffix)
+      ? url.substring(0, url.length - suffix.length)
+      : '';
+}
+
 /// Hosts whose operator is a third party: a target here on `draft_reply` or
 /// `draft_improve` needs the one-time consent (decision 9).
 ///
@@ -449,6 +463,16 @@ const List<String> proseStageIds = [
   'reply_decision',
   'draft_reply',
 ];
+
+/// The two stages that write a reply in the owner's name, and the ONE place
+/// that pair is named.
+///
+/// Not a preset — `draft_improve` is in none — but the same closed set of two
+/// is what four places ask about: the consent gate in `specForStage`, the
+/// stages `applyPreset` skips when consent is missing, the picker's gated note
+/// and the picker's consent prompt. Written out at each of them, a third
+/// drafting stage would have to be remembered four times.
+const List<String> draftStageIds = ['draft_reply', 'draft_improve'];
 
 /// The stages **Use for storyline confirm** writes. One stage, and the one
 /// Round D measured a 27B worth pointing at.

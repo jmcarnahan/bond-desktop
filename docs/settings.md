@@ -467,8 +467,11 @@ second passes and the reading.
 screen opens a third pane, `PaneSurface` titled **Cloud drafts** over
 `CloudDraftsConsentPane` (`app/lib/screens/consent_screen.dart`), whose back
 arrow is the same answer as **Not now**. Third party means the `converse` wire or
-a host under `amazonaws.com`, `anthropic.com`, `openai.com` or `deepseek.com`
-(`isThirdPartyHost`); loopback is not a signal in either direction. The flag
+a host under `anthropic.com`, `openai.com` or `deepseek.com`, or a Bedrock
+runtime host, one starting `bedrock` and ending `.amazonaws.com`
+(`isThirdPartyHost`); AWS as a whole stopped being the test in Round G, because
+the shared GPU box is an instance the owner rents and runs. Loopback is not a
+signal in either direction. The flag
 is one flag, so a yes covers `draft_reply` and `draft_improve` alike, and the
 pane says so in its second line. No other
 stage ever asks — a triage or a storyline-name prompt carries a subject line and

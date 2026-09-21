@@ -66,7 +66,7 @@ void main() {
     Future<void> Function(String baseUrl, String key)? onAdoptBox,
     Future<void> Function()? onAdoptLocal,
     bool wirePlacement = false,
-    bool boxParked = false,
+    String? boxParkedReason,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -110,7 +110,7 @@ void main() {
           onApplyTierDefaults:
               wireTier ? (onApplyTierDefaults ?? () async {}) : null,
           modelPlacement: modelPlacement,
-          boxParked: boxParked,
+          boxParkedReason: boxParkedReason,
           onAdoptBox: wirePlacement
               ? (onAdoptBox ?? (_, _) async {})
               : null,
@@ -679,7 +679,7 @@ void main() {
         wireTier: true,
         wirePlacement: true,
         modelPlacement: ModelPlacement.box,
-        boxParked: true,
+        boxParkedReason: 'model_unavailable',
       );
       await expand(tester, 'Models');
       expect(find.text(SettingsModelsBody.boxParkedText), findsOneWidget);
@@ -690,10 +690,112 @@ void main() {
         tester,
         wireTier: true,
         wirePlacement: true,
-        boxParked: true,
+        boxParkedReason: 'model_unavailable',
       );
       await expand(tester, 'Models');
       expect(find.text(SettingsModelsBody.boxParkedText), findsNothing);
+    });
+
+    // A refused key is not a box that is down, and the two sentences send a
+    // person to two different places: one to wait, one to type a new key into
+    // the pane the button below it opens.
+    testWidgets('a refused key reads as a refused key, not as a dead box',
+        (tester) async {
+      await open(
+        tester,
+        wireTier: true,
+        wirePlacement: true,
+        modelPlacement: ModelPlacement.box,
+        boxParkedReason: 'unauthorized',
+      );
+      await expand(tester, 'Models');
+      expect(find.text(SettingsModelsBody.boxUnauthorizedText), findsOneWidget);
+      expect(find.text(SettingsModelsBody.boxParkedText), findsNothing);
+    });
+
+    // Not gated on a park: a key is rotated on the box's side, and the door to
+    // type the new one has to be open before anything has failed yet.
+    testWidgets('Change the access key is on the box placement and not on this '
+        'Mac', (tester) async {
+      await open(
+        tester,
+        wireTier: true,
+        wirePlacement: true,
+        modelPlacement: ModelPlacement.box,
+      );
+      await expand(tester, 'Models');
+      expect(find.byKey(SettingsModelsBody.changeBoxKeyKey), findsOneWidget);
+    });
+
+    testWidgets('Change the access key is absent on the local placement',
+        (tester) async {
+      await open(tester, wireTier: true, wirePlacement: true);
+      await expand(tester, 'Models');
+      expect(find.byKey(SettingsModelsBody.changeBoxKeyKey), findsNothing);
+    });
+
+    // The whole point of the button: the same pane, the address already in it
+    // off the stored pair, and a save that re-adopts. `adoptBox` replaces both
+    // fixed-id targets and the keychain entry, so re-adopting the same address
+    // IS the key change.
+    testWidgets('Change the access key re-adopts with the stored address',
+        (tester) async {
+      final adopted = <(String, String)>[];
+      await open(
+        tester,
+        wireTier: true,
+        wirePlacement: true,
+        wireTargets: true,
+        modelPlacement: ModelPlacement.box,
+        targets: const [
+          LlmTargetSpec(
+            id: boxProseId,
+            name: boxProseName,
+            url: 'https://box.example.com/prose/v1/chat/completions',
+            model: boxProseModel,
+          ),
+        ],
+        onAdoptBox: (url, key) async => adopted.add((url, key)),
+      );
+      await expand(tester, 'Models');
+
+      await tester.ensureVisible(
+        find.byKey(SettingsModelsBody.changeBoxKeyKey),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(SettingsModelsBody.changeBoxKeyKey));
+      await tester.pumpAndSettle();
+
+      // The same pane the adopt button opens, and no dialog.
+      expect(find.text('Shared GPU box'), findsOneWidget);
+      // Prefilled from the stored writing target, origin only.
+      expect(
+        tester.widget<TextField>(find.byKey(SetupWhereBody.urlKey)).controller
+            ?.text,
+        'https://box.example.com',
+      );
+      // The key field starts EMPTY: nothing on this screen ever holds one.
+      expect(
+        tester.widget<TextField>(find.byKey(SetupWhereBody.keyFieldKey))
+            .controller
+            ?.text,
+        '',
+      );
+
+      await tester.enterText(
+        find.byKey(SetupWhereBody.keyFieldKey),
+        'sk-fixture-rotated-not-a-real-key',
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.byKey(setupContinueKey));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(setupContinueKey));
+      await tester.pumpAndSettle();
+
+      expect(adopted, [
+        ('https://box.example.com', 'sk-fixture-rotated-not-a-real-key'),
+      ]);
+      expect(find.text('Shared GPU box'), findsNothing);
     });
 
     // The two controls write different things and are wired apart. A host

@@ -110,9 +110,11 @@ import 'new_message_screen.dart';
 /// Processing being off wins over every park: a queue nobody is draining is
 /// not a queue that is stuck. `session` keeps today's wording, because a
 /// sign-out is already routed by the inbox notifier and a second sentence
-/// about it here would be the app saying the same thing twice. Only
-/// `model_unavailable` reads differently on the two placements, because only
-/// there does the answer change what a person should go and look at.
+/// about it here would be the app saying the same thing twice.
+/// `model_unavailable` and `unauthorized` read differently on the two
+/// placements, because there the answer changes what a person should go and
+/// look at; `embed_unavailable` does not, because that server is on this Mac
+/// under either placement.
 ///
 /// "Retrying each minute" is the inbox's own poll and the supervisor's
 /// `onReady`, and it is the only cadence this sentence may claim: nothing
@@ -134,6 +136,13 @@ String railProgressLine({
           ? 'GPU box unreachable · $waiting waiting · retrying each minute'
           : 'Model server unreachable · $waiting waiting · retrying each '
               'minute';
+    // The same sentence on BOTH placements, because the embedding server is
+    // on this Mac either way: the box placement moves every generating stage
+    // and leaves embeddings local, so "GPU box unreachable" would name a
+    // machine that is answering fine.
+    case 'embed_unavailable':
+      return 'Embedding server unreachable · $waiting waiting · retrying each '
+          'minute';
     // Named for the machine that refused, like the arm above it: a local
     // server behind a reverse proxy can answer 401 too, and telling that
     // person to go and look at a GPU box would send them to the wrong place.
@@ -2613,8 +2622,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         await notifier.applyTierDefaults(tier);
       },
       modelPlacement: prefs.modelPlacement,
-      boxParked: ref.watch(parkedProvider).valueOrNull?.reason ==
-          'model_unavailable',
+      // Only the two words the box can answer for. `embed_unavailable` is a
+      // local server under this placement and `session` is a sign-out, and
+      // neither is a sentence for the box's block to be putting on screen.
+      boxParkedReason: switch (ref.watch(parkedProvider).valueOrNull?.reason) {
+        'model_unavailable' => 'model_unavailable',
+        'unauthorized' => 'unauthorized',
+        _ => null,
+      },
       onAdoptBox: (baseUrl, key) =>
           notifier.adoptBox(baseUrl: baseUrl, bearer: key),
       // This Mac's HARDWARE tier, not the effective one: going back to local

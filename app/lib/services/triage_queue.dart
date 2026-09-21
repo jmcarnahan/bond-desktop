@@ -726,8 +726,7 @@ class TriageQueue {
       // A refused key is the same park with a different reason, because it is
       // the same fact about every message behind this one — and the rail can
       // then say which of the two it is.
-      final reason =
-          e is LlmUnauthorizedException ? 'unauthorized' : 'model_unavailable';
+      final reason = parkReasonFor(e);
       _parkedReason = reason;
       await _writeTriage(source, id, status: 'pending');
       await _log.record(

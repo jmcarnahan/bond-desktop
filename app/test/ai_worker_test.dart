@@ -450,6 +450,30 @@ void main() {
       expect((await workRow('extract', 'a'))['attempts'], 0);
     });
 
+    test('a dead embedding server parks naming the embedding server', () async {
+      // The two slots are placed separately: the box can be serving every
+      // generating stage while the local embedding server is the one that is
+      // down, and a rail saying "GPU box unreachable" would send the person to
+      // the wrong machine.
+      await store.enqueueWork('extract', 'email', 'a');
+      final handler = ScriptedHandler(
+        'extract',
+        script: [const EmbedUnavailableException('embedding server unavailable')],
+      );
+      final worker = AiWorker(store, handlers: [handler]);
+      WorkProgress? last;
+      final subscription = worker.progress.listen((p) => last = p);
+
+      await worker.pump();
+      await Future<void>.delayed(Duration.zero);
+      await subscription.cancel();
+
+      expect(last!.parkedReason, 'embed_unavailable');
+      // Still the same park: waiting, and no attempt spent.
+      expect((await workRow('extract', 'a'))['status'], 'pending');
+      expect((await workRow('extract', 'a'))['attempts'], 0);
+    });
+
     test('a park for the session says so, not that a model is down', () async {
       await store.enqueueWork('extract', 'email', 'a');
       final handler = ScriptedHandler(

@@ -71,6 +71,26 @@ enforce the ones that are commands.
   body and the same seeding as `golden-sweep`, stopped after the embedding,
   one embed server and no model call. A new live STAGE goes inside the
   existing test body under a define, never as a second test name.
+  `SWEEP_STAGE=declared` and `make golden-declared` are the same shape again.
+- Read only SCALAR fields off a sweep timing JSON. `extra.sweep.coverage`
+  carries a `by_slug` map keyed by the registry's slugs, which name real
+  efforts, so print `coverage.mean` and nothing under it. The same rule holds
+  for every other `by_slug` map a tally writes.
+- The FORMABLE line says how far a row sits from what the bench could reach.
+  The sweep never proposes a group under three threads, so an item whose gold
+  effort has fewer threads than that is unreachable by construction;
+  `formable: P of F correct · ceiling C of N` counts the reachable ones from
+  the fixture's own THREAD counts, which is why this set reads 35 formable and
+  a ceiling of 74 of 100 where an estimate by items said 40 and 77 of 98. A
+  row is read against the ceiling, never against 98.
+- A bench runs from a DETACHED checkout whenever a later phase is editing the
+  main one: `git worktree add --detach ~/projects/bond-desktop-bench <commit>`,
+  copy the gitignored machine files in, `flutter pub get` in its `app/`, then
+  `make -C` that checkout with `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_RUN` and
+  `BENCH_OUT` pointed back at the main one. It compiles the committed tree, its
+  build directory is its own so narrow tests cannot race it over the native
+  assets, and its results still land in the main `tmp/bench`. A wall taken this
+  way while the main checkout is busy is under load, and the row says so.
 - The gate runs ALONE. A concurrent `flutter test`, typically an agent
   re-checking its own files, rebuilds
   `build/native_assets/macos/libsqlite3.dylib` while the gate's isolates are
@@ -90,6 +110,9 @@ enforce the ones that are commands.
   app-analyze` / `make app-test` from the repo root.
 - Never `dart format` a tracked file (it once rewrote `inbox_screen.dart`);
   gates are analyze + test only.
+- `unnecessary_import` fires when one file imports both a re-exporting library
+  and the library it re-exports. The fix is `show` on the wider import, naming
+  what that file actually uses, never dropping the narrower one.
 - `services/` never imports `providers/`; no dialogs or popups
   (`test/no_dialogs_test.dart`) — every surface is a screen or pane with a
   back button.
@@ -135,7 +158,34 @@ enforce the ones that are commands.
   in `sync_service.dart` (Round A's pref idiom).
 - `_accepts` in `storyline_service.dart` is the one membership rule at all
   five confirm sites (assign, recruit, sweep member, probe, audit), and a
-  `suggested` storyline needs `high`.
+  `suggested` storyline needs `high`. It and `_confirm` stayed in the service
+  through the split, because one rule at five sites is not a seam.
+- The storyline service is four files now and one public face: the user
+  actions in `storyline_edits.dart` (`StorylineEdits`), the clustering in
+  `storyline_grouper.dart` (`StorylineGrouper`), the shared card statics in
+  `storyline_cards.dart`, and `storyline_service.dart` keeping one-line
+  delegates so its twenty-two importers, six in `lib` and sixteen in `test`, did
+  not change. A new pass goes in the file whose job it is, and the service gets
+  a delegate only if callers outside already reach for it.
+- ONE THREAD, ONE LIVE STORYLINE. `recruit`'s candidate walk excludes the
+  sweep's `assignedOrBlockedKeys` set, read once per lap, so a declared
+  storyline cannot take a thread another storyline already holds. Measured:
+  before the rule, 41 of 57 recruited threads on the declared bench had landed
+  in more than one storyline. The cost is that a contested thread goes to the
+  first storyline to ask rather than the best match.
+- The fast gate carries a YIELD TICKET beside its queue. A triage pump that
+  finds work asks for the yield and enqueues its own drain in the same step;
+  the worker reads the flag only where it would claim its next item, so the
+  item at the server is never abandoned; the drain queued at or after the ask
+  clears it as its body starts, so the flag cannot outlive one handoff.
+- The refs triage just wrote are served INSIDE a running pass, at every handler
+  boundary and before every claim, not at the next pass top. Serving them at
+  the top was measured on the box and was not enough: the late message's
+  extraction still waited behind every needs-you in the backlog. The serve is
+  guarded by a synchronous `isNotEmpty` check, because three bare awaits on the
+  empty path let a drain outlive a test's database and three provider tests
+  went red with "Can't re-open a database after closing it"; a test that builds
+  a worker `addTearDown(worker.dispose)`.
 - The sweep is re-armed by the fast lane only after a drain that processed
   something (`AiWorker.lastDrainCount`), and it defers above three floors read
   from ONE `pipelinePulse`; the sync-time `requeueSweep()` is the durable
@@ -163,6 +213,11 @@ enforce the ones that are commands.
   to say which placement it is in, and the effective manifest tier is
   `effectiveTierProvider` (`remote` on the box) rather than
   `machineTierProvider`, which still answers what this Mac could run.
+- `adoptBox`'s PRESET ORDER is load-bearing and pinned by a test: bulk first,
+  then prose and confirm. `storyline_membership` is in both preset lists, so
+  the second call is what decides which model confirms, and the row of record
+  wants the 27B. Two presets rather than a hand-written stage map, because the
+  preset lists are pinned against `pipelineStages` and a literal map is not.
 - A probe of a target with a stored bearer PASSES it:
   `ModelServerProbe.probe(url, bearer:)`, resolved through
   `AppPrefsNotifier.bearerFor(id)` at the moment of the press. The widgets take
@@ -179,6 +234,14 @@ enforce the ones that are commands.
 - Consent for a third-party target on `draft_reply` or `draft_improve` is
   enforced in `AppPrefs.specForStage` and in `applyPreset`, never on the
   screen alone.
+- THIRD PARTY means Bedrock and the three model vendors, not AWS.
+  `isThirdPartyHost` lives in `app/lib/services/llm/model_slots.dart`, beside
+  `LlmTargetSpec`, and is true for a host under `anthropic.com`, `openai.com`
+  or `deepseek.com`, and for a Bedrock runtime host, meaning one starting
+  `bedrock` and ending `.amazonaws.com`. The owner's own inference box under a
+  Route 53 name or an EC2 public name is the owner's machine and needs no
+  drafts consent; `LlmTargetSpec.isThirdParty` still ORs the Converse wire, so
+  a Converse target is third party wherever it lives.
 - Cloud drafts: every door reads `CloudDraftLedger.refusal()`, meaning
   Improve, the standing rule, a prefetched draft on a third-party target and
   an asked-for one before its row is touched. The handler notes `cloud: N` on
@@ -210,6 +273,18 @@ enforce the ones that are commands.
   and the prose spec type. One blind spot remains: the recipes launch the
   servers from `MODEL_FLAGS` and `FAST_FLAGS`, so a literal written into those
   in place of `$(CTX_SIZE)` drifts past every assertion the test makes.
+- The MTP head is a nested `sidecar` record on the manifest's prose entry, not
+  a fourth model: it carries its own revision, sha256 and size, lands in the
+  parent's repo folder, and `downloadBytes` counts it so the wizard's total is
+  the weights plus the head. `RouterPreset` writes it as a `model-draft` line
+  straight after `model` and unquoted, and the entry's `spec-type = draft-mtp`
+  only because the head is now on disk. `model-draft` as a preset key is
+  UNVERIFIED: no managed server has been started with the head present, so the
+  first live start is what confirms llama-server reads it. The parity test's
+  Makefile parser is the other half of this: it splits on `[ \t]*\?=` and never
+  `\s*`, because `\s` matches a newline and an empty default such as
+  `DRAFT_HF ?=` swallowed the line under it, which is how `SPEC_TYPE` stayed
+  invisible to the test until Round G asked the manifest to agree with it.
 - A Converse namer can stop on `max_tokens` and lose a whole sweep pass after
   the seeding, so a cloud namer row is read on two COMPLETED passes and a lost
   pass is re-run, never patched.

@@ -5290,6 +5290,29 @@ FROM storylines s''';
     };
   }
 
+  /// Every thread that is a MEMBER of a live storyline, blocks excluded.
+  ///
+  /// [assignedOrBlockedKeys] read without its block arm, for the caller that
+  /// carries its own blocks. The sweep wants both arms because a thread the
+  /// user pulled out of a group is not a thread to propose a new group around.
+  /// A declared storyline's recruit wants only the first: a block belongs to
+  /// the storyline it was taken in, and reading every storyline's blocks here
+  /// would mean one removal anywhere hid that thread from every other
+  /// storyline in the mailbox for good.
+  Future<Set<String>> assignedKeys(String source) async {
+    final result = await db
+        .customSelect(
+          'SELECT m.conversation_key AS conversation_key FROM storyline_members m '
+          'JOIN storylines s ON s.id = m.storyline_id '
+          "WHERE m.source = ? AND s.status IN ('suggested', 'active')",
+          variables: _args([source]),
+        )
+        .get();
+    return {
+      for (final row in result) row.data['conversation_key'] as String? ?? '',
+    };
+  }
+
   /// Whether this exact set of threads has already been proposed and thrown
   /// away. The sweep is deterministic, so without this a dismissed suggestion
   /// would be re-proposed identically on the very next sync.

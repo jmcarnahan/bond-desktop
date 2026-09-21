@@ -99,6 +99,31 @@ class LlmUnauthorizedException extends LlmUnavailableException {
   const LlmUnauthorizedException(super.message);
 }
 
+/// The EMBEDDING server is the one that could not be reached.
+///
+/// A subclass of [LlmUnavailableException] for the same reason
+/// [LlmUnauthorizedException] is: every existing `on LlmUnavailableException`
+/// arm keeps catching it and the drains park exactly as they did. What it adds
+/// is WHICH SLOT died. The two slots are separately placed — the box serves
+/// every generating stage while embeddings stay on this Mac — so a park that
+/// says only `model_unavailable` puts "GPU box unreachable" in the rail when
+/// the truth is a local embedding server that is not running. The drains tell
+/// it apart by type and record the reason `embed_unavailable`.
+class EmbedUnavailableException extends LlmUnavailableException {
+  const EmbedUnavailableException(super.message);
+}
+
+/// The word a drain records when [e] parked it, for the rail to read.
+///
+/// One recipe rather than one per drain: the three subclasses are a closed set
+/// and the rail's sentences are written against these exact words, so a new
+/// subclass that is added here reaches every park site at once.
+String parkReasonFor(Object e) => switch (e) {
+      LlmUnauthorizedException() => 'unauthorized',
+      EmbedUnavailableException() => 'embed_unavailable',
+      _ => 'model_unavailable',
+    };
+
 /// The model answered, but not with the JSON object that was asked for.
 class LlmFormatException extends LlmException {
   const LlmFormatException(super.message);

@@ -741,6 +741,46 @@ void main() {
         expect(await statusOf('extract', id), 'done');
       }
     });
+
+    test('a parked DRAIN keeps the refs it had not reached yet', () async {
+      // The same loss as a halt, by the other door. A signed-out session, or
+      // any other whole-drain park, ends the priority pass before the later
+      // handlers run — and the named message would go back to waiting its turn
+      // in `created_at` order, which is the one thing this lane exists to
+      // stop. The ref is the OLDEST row, so the backlog reaches it last and
+      // only the keep can put it first.
+      await seed('m1');
+      await seed('b1');
+      await seed('b2');
+      final order = <String>[];
+      final worker = AiWorker(
+        store,
+        handlers: [
+          // Once: the session is back for the resume this test is about.
+          ScriptedHandler('needs_you', order, script: [const NotSignedIn(), null]),
+          ScriptedHandler('extract', order),
+        ],
+      );
+      addTearDown(worker.dispose);
+
+      await worker.pump(first: const [(source: 'email', id: 'm1')]);
+
+      // One attempt at the dead session, then the whole drain ended: the
+      // second handler never ran, and the park put the row back untouched.
+      expect(order, ['needs_you:m1']);
+      expect(await statusOf('needs_you', 'm1'), 'pending');
+
+      // No `first:` this time: the refs the parked pass put back are what
+      // makes m1 run ahead of a backlog it is the oldest member of.
+      await worker.pump();
+
+      expect(order[1], 'needs_you:m1');
+      expect(order[2], 'extract:m1');
+      for (final id in ['m1', 'b1', 'b2']) {
+        expect(await statusOf('needs_you', id), 'done');
+        expect(await statusOf('extract', id), 'done');
+      }
+    });
   });
 
   group('a quiesce and the refs', () {

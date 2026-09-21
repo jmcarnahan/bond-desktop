@@ -1678,10 +1678,11 @@ class StorylineService {
   /// top [StorylineTuning.recruitMaxCandidates] by cosine each get the same
   /// confirmation call a normal assignment gets, against that charter.
   ///
-  /// A thread already in a live storyline, or blocked from one, is never
-  /// offered: this pass reads the same `assignedOrBlockedKeys` taken set the
-  /// sweep reads, so one thread belongs to one storyline here exactly as it
-  /// does everywhere else in the app.
+  /// A thread already in a live storyline is never offered: this pass reads
+  /// the sweep's taken set without its block arm (`assignedKeys`), so one
+  /// thread belongs to one storyline here exactly as it does everywhere else
+  /// in the app, while a thread the owner removed from SOME OTHER storyline is
+  /// still on offer to this one. This storyline's own blocks hold, as ever.
   ///
   /// A storyline with NO MEMBERS ranks on [_charterCentroid] instead, and that
   /// lap takes [StorylineTuning.recruitMaxCandidatesDeclared] rather than
@@ -1767,8 +1768,8 @@ class StorylineService {
       // gate, same order.
       final blocked = await _store.blockedThreadsOf(storylineId);
 
-      // And one read of the taken set, the SAME set the sweep reads, computed
-      // once for the lap rather than once per candidate.
+      // And one read of the taken set, the sweep's set without its block arm,
+      // computed once for the lap rather than once per candidate.
       //
       // A thread already in a live storyline is not on offer to another one.
       // Every other path in this app already works that way —
@@ -1783,13 +1784,20 @@ class StorylineService {
       // 2026-09-20 on the declared bench: 41 of 57 recruited threads had
       // landed in more than one storyline.
       //
+      // MEMBERSHIPS ONLY, and `blocked` above already carries this storyline's
+      // own blocks. The sweep's set folds in every storyline's blocks, which is
+      // right for a pass proposing brand-new groups and wrong here: a thread
+      // the owner removed from one storyline would then be invisible to every
+      // other storyline they ever declare, including the one they removed it
+      // in order to file it into.
+      //
       // Keyed by source, like the sweep's, because two connectors can carry
       // one conversation key and a flat set of bare keys would let a filed
       // chat hide an unrelated mail thread. A hand filing is in this set too,
       // which is right: the owner put that thread somewhere on purpose.
       final taken = {
         for (final source in _sources)
-          for (final key in await _store.assignedOrBlockedKeys(source))
+          for (final key in await _store.assignedKeys(source))
             threadKey(source, key),
       };
 
@@ -1968,8 +1976,8 @@ class StorylineService {
     if (vector == null) {
       if (embedded.outcome == EmbedOutcome.unavailable) {
         _log.note({'embed': 'unavailable'});
-        throw const LlmUnavailableException(
-          'No embedding for this storyline yet — run: make embed',
+        throw const EmbedUnavailableException(
+          'No embedding for this storyline yet. Start the embedding server.',
         );
       }
       _log.note({'embed': 'rejected'});
@@ -3481,10 +3489,10 @@ class StorylineService {
     final embeddings = _embeddings;
     if (embeddings == null) {
       // `embed`, not `reason`: the worker's park writes its own
-      // `{'reason': 'model_unavailable'}` and its merge wins on a collision.
+      // `{'reason': 'embed_unavailable'}` and its merge wins on a collision.
       _log.note({'embed': 'missing'});
-      throw const LlmUnavailableException(
-        'No embedding for this thread yet — run: make embed',
+      throw const EmbedUnavailableException(
+        'No embedding for this thread yet. Start the embedding server.',
       );
     }
 
@@ -3497,8 +3505,8 @@ class StorylineService {
     if (vector == null) {
       if (embedded.outcome == EmbedOutcome.unavailable) {
         _log.note({'embed': 'unavailable'});
-        throw const LlmUnavailableException(
-          'No embedding for this thread yet — run: make embed',
+        throw const EmbedUnavailableException(
+          'No embedding for this thread yet. Start the embedding server.',
         );
       }
       // Quiet, the same deliberate drop the extraction path makes on

@@ -490,7 +490,7 @@ class AppPrefs {
     if (id == null) return null;
     final spec = specById(id);
     if (spec == null) return null;
-    final gated = stageId == 'draft_reply' || stageId == 'draft_improve';
+    final gated = draftStageIds.contains(stageId);
     if (gated && spec.isThirdParty && !cloudDraftsConsent) {
       return stageIsOptional(stageId) ? null : proseSpec;
     }
@@ -1303,10 +1303,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       // Untouched, not cleared: a stage the user pointed somewhere by hand is
       // theirs, and a preset that silently reset it would be a second
       // surprise on top of the one this guard exists to prevent.
-      if (skipDrafts &&
-          (stageId == 'draft_reply' || stageId == 'draft_improve')) {
-        continue;
-      }
+      if (skipDrafts && draftStageIds.contains(stageId)) continue;
       final slot = stageSlot(stageId);
       final isDefault =
           slot != ModelSlot.embed && targetId == defaultTargetIdFor(slot);

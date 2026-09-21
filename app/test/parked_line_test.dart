@@ -180,6 +180,25 @@ void main() {
       );
     });
 
+    test('a dead embedding server reads the same on both placements', () {
+      // The box placement moves every generating stage and leaves embeddings
+      // on this Mac, so "GPU box unreachable" would be naming a machine that
+      // is answering fine. One sentence, both placements.
+      for (final onBox in [true, false]) {
+        expect(
+          railProgressLine(
+            on: true,
+            remaining: 3,
+            reason: 'embed_unavailable',
+            waiting: 3,
+            onBox: onBox,
+          ),
+          'Embedding server unreachable · 3 waiting · retrying each minute',
+          reason: 'onBox: $onBox',
+        );
+      }
+    });
+
     test('session keeps the wording it always had', () {
       // A sign-out is already routed by the inbox notifier, and a second
       // sentence about it here would be the app saying the same thing twice.
@@ -213,7 +232,12 @@ void main() {
     test('processing being off wins over every park', () {
       // A queue nobody is draining is not a queue that is stuck, and the
       // sentence has to say the thing the person can actually change.
-      for (final reason in [null, 'model_unavailable', 'unauthorized']) {
+      for (final reason in [
+        null,
+        'model_unavailable',
+        'unauthorized',
+        'embed_unavailable',
+      ]) {
         expect(
           railProgressLine(
             on: false,
@@ -244,7 +268,13 @@ void main() {
     });
 
     test('no sentence carries an em-dash, a parenthesis or an arrow', () {
-      for (final reason in [null, 'model_unavailable', 'unauthorized', 'session']) {
+      for (final reason in [
+        null,
+        'model_unavailable',
+        'unauthorized',
+        'embed_unavailable',
+        'session',
+      ]) {
         for (final on in [true, false]) {
           final line = railProgressLine(
             on: on,

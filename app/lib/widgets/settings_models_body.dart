@@ -13,6 +13,7 @@ import '../services/llm/model_slots.dart'
         PipelineStageInfo,
         builtInProseName,
         defaultTargetIdFor,
+        draftStageIds,
         slotDefaults;
 import '../services/system/system_info.dart' show HardwareInfo;
 import '../theme/tokens.dart';
@@ -140,9 +141,19 @@ class SettingsModelsBody extends StatefulWidget {
   /// does when the placement is already the box.
   final Future<void> Function()? onAdoptLocal;
 
-  /// The pipeline is parked because the box is not answering. One sentence
-  /// under the placement line, on the same fact the rail reads.
-  final bool boxParked;
+  /// Why the pipeline is parked, when the reason is one the BOX placement can
+  /// answer for: `model_unavailable` or `unauthorized`, and null for neither.
+  /// One sentence under the placement line, on the same fact the rail reads.
+  ///
+  /// The reason rather than a bool, because the two park differently and the
+  /// sentences send a person to two different places: one waits for a machine
+  /// to come back, the other needs a key typed again right here.
+  final String? boxParkedReason;
+
+  /// Opens the box pane with the address prefilled and the key field empty,
+  /// for a key that was rotated. Null takes the button off, this section's
+  /// usual discipline.
+  final VoidCallback? onChangeBoxKey;
 
   const SettingsModelsBody({
     super.key,
@@ -172,7 +183,8 @@ class SettingsModelsBody extends StatefulWidget {
     this.modelPlacement = ModelPlacement.local,
     this.onOpenBoxPane,
     this.onAdoptLocal,
-    this.boxParked = false,
+    this.boxParkedReason,
+    this.onChangeBoxKey,
   });
 
   /// The collapsed summary — where the three slots point, in one line.
@@ -222,6 +234,19 @@ class SettingsModelsBody extends StatefulWidget {
   /// The sentence under the placement line when the box is not answering.
   static const String boxParkedText =
       'The box is not answering. Work is waiting and will retry each minute.';
+
+  /// The same line when the box ANSWERED and refused the key. A different
+  /// sentence because it is a different job: waiting fixes the first and
+  /// nothing but a new key fixes this one, and the pane that takes one is the
+  /// button directly under it.
+  static const String boxUnauthorizedText =
+      'The box refused the access key. Change it here.';
+
+  /// The key on **Change the access key**, beside the placement button. Keyed
+  /// like every other control in this section, because two outlined buttons
+  /// sit side by side here and a test that tapped by words would tap
+  /// whichever came first.
+  static const Key changeBoxKeyKey = ValueKey('settings-change-box-key');
 
   /// The key on one stage's target picker. Every picker carries the same
   /// words, so a test that tapped by label would be tapping whichever came
@@ -456,6 +481,13 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
   /// which models this Mac runs only matters once the answer here is this Mac.
   List<Widget> _whereModelsRun() {
     final onBox = widget.modelPlacement == ModelPlacement.box;
+    final parkedText = switch (widget.boxParkedReason) {
+      'model_unavailable' => SettingsModelsBody.boxParkedText,
+      'unauthorized' => SettingsModelsBody.boxUnauthorizedText,
+      // Every other park word is about something that is not the box — the
+      // local embedding server, a sign-out — and this block must not claim it.
+      _ => null,
+    };
     return [
       Text(
         SettingsModelsBody.whereHeading,
@@ -469,10 +501,10 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
             : 'Everything runs on this Mac.',
         style: BondType.caption,
       ),
-      if (onBox && widget.boxParked) ...[
+      if (onBox && parkedText != null) ...[
         const SizedBox(height: BondSpacing.s4),
         Text(
-          SettingsModelsBody.boxParkedText,
+          parkedText,
           style: BondType.caption.copyWith(color: BondColors.error),
         ),
       ],
@@ -483,16 +515,33 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
       const SizedBox(height: BondSpacing.s8),
       Align(
         alignment: Alignment.centerLeft,
-        child: OutlinedButton(
-          key: SettingsModelsBody.adoptBoxKey,
-          onPressed: onBox
-              ? (widget.onAdoptLocal == null
-                  ? null
-                  : () => unawaited(widget.onAdoptLocal!()))
-              : widget.onOpenBoxPane,
-          child: Text(
-            onBox ? "Use this Mac's models" : 'Use the shared GPU box',
-          ),
+        child: Wrap(
+          spacing: BondSpacing.s8,
+          runSpacing: BondSpacing.s8,
+          children: [
+            OutlinedButton(
+              key: SettingsModelsBody.adoptBoxKey,
+              onPressed: onBox
+                  ? (widget.onAdoptLocal == null
+                      ? null
+                      : () => unawaited(widget.onAdoptLocal!()))
+                  : widget.onOpenBoxPane,
+              child: Text(
+                onBox ? "Use this Mac's models" : 'Use the shared GPU box',
+              ),
+            ),
+            // Only on the box, and not only when parked. A key is rotated on
+            // the box's side and this install finds out by being refused, so
+            // the door to type the new one has to be standing open before
+            // anything parks — and once something has, the sentence above
+            // points straight at it.
+            if (onBox && widget.onChangeBoxKey != null)
+              OutlinedButton(
+                key: SettingsModelsBody.changeBoxKeyKey,
+                onPressed: widget.onChangeBoxKey,
+                child: const Text('Change the access key'),
+              ),
+          ],
         ),
       ),
       const SizedBox(height: BondSpacing.s4),
@@ -693,7 +742,7 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
   /// would be the screen quietly lying about where the work goes.
   bool _gatedNote(PipelineStageInfo stage) {
     if (widget.cloudDraftsConsent) return false;
-    if (stage.id != 'draft_reply' && stage.id != 'draft_improve') return false;
+    if (!draftStageIds.contains(stage.id)) return false;
     final picked = widget.stageTargetIds[stage.id];
     if (picked == null) return false;
     for (final spec in widget.targets) {
@@ -738,7 +787,7 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
     }
     for (final spec in widget.targets) {
       if (spec.id != picked) continue;
-      final drafting = stage.id == 'draft_reply' || stage.id == 'draft_improve';
+      final drafting = draftStageIds.contains(stage.id);
       if (drafting && spec.isThirdParty && !widget.cloudDraftsConsent) {
         widget.onConsentNeeded?.call(stage.id, spec);
         return;

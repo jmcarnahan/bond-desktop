@@ -1371,14 +1371,16 @@ positives at or above 10, forbidden hits at or below 3, `storyline.id` above 50
 clusters at or above 60% pure before naming. Otherwise the mode and the task
 stay in the tree unused and the row is the record.
 
-**`pool` ships dark behind the same constant, under a rule of its own,
-registered on 2026-09-20 before the first pool row was taken.** On two passes
-with the grouper and the namer on the box 27B: correct positives at or above 15
-among the 40 formable items, forbidden hits at or below 3, `storyline.id` above
-55, and the formed clusters at or above 60% pure before naming. Met and
-`StorylineTuning.groupingMode` becomes `GroupingMode.pool` with a row on each
-side of the change; missed and it stays dark like `model`, and the row is the
-record either way.
+**`pool` ships dark behind the same constant too.** Its rule was registered on
+2026-09-20 before the first pool row was taken: on two passes with the grouper
+and the namer on the box 27B, correct positives at or above 15 among the
+formable items, forbidden hits at or below 3, `storyline.id` above 55, and the
+formed clusters at or above 60% pure before naming. Met and
+`StorylineTuning.groupingMode` would become `GroupingMode.pool` with a row on
+each side of the change; missed and it stays dark like `model`, and the row is
+the record either way. It was **MISSED on every clause on 2026-09-21**, in the
+dated section below, so `GroupingMode.cosine` stays the default and both other
+modes stay in the tree unused.
 
 **A row is read against the ceiling, not against the item count.** The sweep
 never proposes a group under `proposeMinClusterSize`, so an item whose gold
@@ -1393,8 +1395,11 @@ bench can reach. `make golden-sweep` prints one line saying so:
 those it filed correctly, and `C` the most items any run could have got right —
 the gold-`none` items it scores by abstaining, plus the formable ones, plus the
 `should` items under an unformable effort, which the scorer also credits for
-abstaining. On the golden set the three-thread floor puts the ceiling at 77 of
-98, and the same three numbers ride the result JSON as `formable_items`,
+abstaining. The denominators come from the fixture's own THREAD counts rather
+than from its item counts, so on the golden set the three-thread floor puts the
+ceiling at **74 of 100** over **35 formable items**, where an estimate by items
+had said 77 of 98 over 40. The tally's numbers are the ones a row is read
+against, and the same three ride the result JSON as `formable_items`,
 `formable_positives` and `ceiling`.
 
 Measured 2026-09-19 on the Qwen vector at `:8081`, 1,024 wide, prefix length
@@ -1425,6 +1430,50 @@ a group, and every group they returned held two threads — the task allows a
 pair and `proposeMinClusterSize` does not, so all of them were dropped before
 a naming call. The model was not silent; it found nothing it would put a third
 thread in.
+
+**Measured 2026-09-21: the declared path and the whole-pool read.** Two
+pre-registered readings were taken on Round G's tree, both with the embedding
+model on this Mac and the model calls on the shared GPU box over TLS. The
+declared path is `make golden-declared`, which declares every registry
+storyline from its title and charter, runs the recruit against the same pool
+the sweep reads, and scores the filing through the same run file and the same
+scorer, so its rows and the sweep's are comparable line for line. It makes no
+naming call at all.
+
+| row | confirm | storyline.id | correct positives | forbidden | recruited / filed twice | formed purity | wall |
+|-----|---------|--------------|-------------------|-----------|-------------------------|---------------|------|
+| declared, before one thread to one storyline | the local 4B | 66 of 98 | 32 | 3 | 57 / 41 | 0.56 | 1,144 s |
+| declared, after it | the local 4B | 70 of 98 | 35 | 8 | 57 / 0 | 0.81 | 597 s |
+| declared, pass 1 | the box 27B | 86 of 98 | 42 | 1 | 40 / 0 | 0.996 | 1,404 s |
+| declared, pass 2 | the box 27B | 86 of 98 | 42 | 1 | 40 / 0 | 0.996 | 1,405 s |
+| the sweep on the same tree | the local 4B | 45 of 98 | 5 | 4 | | 0.487 | 153 s |
+| pool, two 48-card calls, box | the local 4B | 50 by abstention | 0 | 0 | 0 grouped | | 15.2 s |
+| pool, pass 2, box | the local 4B | 50 | 0 | 0 | 0 grouped | | about 15 s |
+| pool, the local 27B | the local 4B | 50 | 0 | 0 | 0 grouped | | 85.3 s |
+
+**The declared reading was MET.** It asked for `storyline.id` at or above 70 of
+98 with forbidden hits at or below 3, with the confirm on the box 27B, on two
+passes; both read 86 and 1, identical to the count. Three things in the table
+are worth more than that headline. One thread belonging to one live storyline
+is what lifts the local row from 66 to 70 and its formed purity from 0.56 to
+0.81 and halves its wall, since no storyline spends a confirm on a thread
+another already holds; the price is forbidden hits rising from 3 to 8, because
+a thread now stays with the FIRST storyline that recruits it, where before a
+later and better-matching one could overwrite a wrong first filing. The stronger
+confirm recruits fewer threads and gets them right, 40 against 57, which is the
+same shape as its 8% wrong accepts against the 4B's 17% on the human list. And
+42 correct positives against the sweep's 5, on the same pool and the same
+vector, is the finding the round was for: what files a mailbox is a person
+saying what the storylines are, not the app guessing.
+
+**The pool reading was MISSED on every clause**, so `GroupingMode.pool` ships
+dark. Shown the whole mailbox in two calls of 48 numbered cards, the box 27B
+named no group at all, the local 27B did the same, and `grouping_failed` is 0
+on every pass, so neither the wire nor the 1024-token budget is the cause. That
+is the third time a model has declined to group this pool: `model` mode at six
+cards in Round E, `pool` mode at 48 cards here on two machines. The base rate
+above is why, and nothing about how much context the model is shown at once
+changes it.
 
 **Brute force is the fallback, and it is not exceptional.** The sweep does its
 own arithmetic when there is no usable index (the ordinary state of a build

@@ -190,9 +190,11 @@ class EmbedHandler extends WorkHandler {
         _log.note({'embed': 'rejected'});
       case MessageEmbedOutcome.unavailable:
         // The one case that must NOT spend an attempt: the same request will
-        // succeed once `make embed` is running. Throwing this parks this kind
-        // only and puts the item back to `pending`.
-        throw const LlmUnavailableException('embedding server unavailable');
+        // succeed once the embedding server is up, or once a refused key is
+        // put right. Throwing this parks this kind only and puts the item back
+        // to `pending`; the subclass is what tells the rail it was the
+        // EMBEDDING slot rather than whichever server the other stages use.
+        throw const EmbedUnavailableException('embedding server unavailable');
     }
   }
 }

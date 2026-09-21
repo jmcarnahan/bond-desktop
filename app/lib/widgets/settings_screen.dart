@@ -248,9 +248,10 @@ class SettingsScreen extends StatefulWidget {
   /// does when the placement is already the box.
   final Future<void> Function()? onAdoptLocal;
 
-  /// The pipeline is parked because the box is not answering. One sentence in
-  /// the Models section, on the same fact the rail reads.
-  final bool boxParked;
+  /// Why the pipeline is parked, when the reason is one the BOX placement can
+  /// answer for. One sentence in the Models section, on the same fact the rail
+  /// reads. See [SettingsModelsBody.boxParkedReason].
+  final String? boxParkedReason;
 
   /// Fired by a slot editor's Save. **Null hides the whole Models section**,
   /// the same discipline every other optional section follows: a host that
@@ -573,7 +574,7 @@ class SettingsScreen extends StatefulWidget {
     this.modelPlacement = ModelPlacement.local,
     this.onAdoptBox,
     this.onAdoptLocal,
-    this.boxParked = false,
+    this.boxParkedReason,
     this.onStageTargetChanged,
     this.onCloudDraftsConsent,
     this.cloudDraftsStanding = false,
@@ -1242,10 +1243,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
     hardware: widget.hardware,
     machineTier: widget.machineTier,
     modelPlacement: widget.modelPlacement,
-    boxParked: widget.boxParked,
+    boxParkedReason: widget.boxParkedReason,
     onOpenBoxPane: widget.onAdoptBox == null
         ? null
-        : () => setState(() => _subpane = const _BoxPane()),
+        : () => setState(() {
+              // Adopting from this Mac starts at the compiled address: there
+              // is no stored pair to read one out of.
+              _boxUrl = boxUrlDefault;
+              _subpane = const _BoxPane();
+            }),
+    // The same pane, opened with the address already filled in, because the
+    // only thing being changed is the key. `adoptBox` replaces the pair and
+    // the keychain entry under the same two fixed ids, so re-adopting with the
+    // same address IS the key change.
+    onChangeBoxKey: widget.onAdoptBox == null
+        ? null
+        : () => setState(() {
+              final stored = _storedBoxBase;
+              if (stored.isNotEmpty) _boxUrl = stored;
+              _subpane = const _BoxPane();
+            }),
     onAdoptLocal: widget.onAdoptLocal,
     onApplyTierDefaults: widget.onApplyTierDefaults,
     onConsentNeeded: (stageId, target) =>
@@ -1302,6 +1319,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   /// **Check server** on the box pane, with the typed key.
   ///
+  /// The box origin behind the stored writing target, or empty when this
+  /// install has never adopted a box. The URL alone: a target's BEARER is in
+  /// the keychain and never comes near this screen.
+  String get _storedBoxBase {
+    for (final spec in widget.targets) {
+      if (spec.id == boxProseId) return boxBaseFromProseUrl(spec.url);
+    }
+    return '';
+  }
+
   /// The key goes onto one request's `Authorization` header and is not stored
   /// here, in the result or anywhere else. Guarded, on the slot editors'
   /// shape: the probe promises never to throw, and a diagnostics call must not

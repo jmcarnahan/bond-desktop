@@ -46,10 +46,16 @@ presses **Use this Mac's defaults** under Settings, Models. It writes the way a
 preset does, so an entry equal to a stage's own default is removed rather than
 stored and a fresh install on a big Mac still holds an empty object.
 
-**The shared GPU box is a PLACEMENT, and the default one.** `ModelPlacement`
-(`box` or `local`, stored in `model_placement`) is a machine preference, not a
-reading of the hardware: the same Mac can be pointed at the box today and at its
-own servers tomorrow. On the box placement the map above is replaced wholesale:
+**The shared GPU box is a PLACEMENT, the one recommended and offered first.**
+`ModelPlacement` (`box` or `local`, stored in `model_placement`) is a machine
+preference, not a reading of the hardware: the same Mac can be pointed at the
+box today and at its own servers tomorrow. It is offered first in two places,
+the wizard's **Where the models run** step and one press in Settings, but the
+shipped default value is `local`: `AppPrefs.modelPlacement` defaults to `local`,
+the wizard's step starts with neither card chosen, and the box card wants an
+address and a pasted key, so a machine runs on its own servers until that card
+or the Settings button is used. On the box placement the map above is replaced
+wholesale:
 
 | Stage group | Target | Model |
 |-------------|--------|-------|
@@ -693,6 +699,36 @@ stopping inside it would starve the very message that prompted the ask. At
 most eight messages ride one pass; the rest are ordinary pending rows a moment
 later. Nothing here touches the draft lane or the storyline lane, which hold
 gates of their own, and nothing changes the sixty-second poll.
+
+**What the lane is worth, measured 2026-09-21.** `make bench-pipeline` upserts
+one extra message at the moment the prose server starts its first draft and
+times it to its own extraction finishing, over 48 ungated messages at policy
+`all` and width 1 in the `lanes` shape. Both slots on the box means bulk on the
+box 4B-FP8 and prose on the box 27B-FP8, reached over TLS.
+
+| tree and placement | needs-you at | extraction done at |
+|---|---|---|
+| Round F, both slots on the box | not taken | 32 s |
+| Round G Phase 3 tip, both slots on the box | 5.6 s | 22.8 s |
+| Round G final tree, both slots on the box, pass 1 | 5.1 s | 6.9 s |
+| Round G final tree, both slots on the box, pass 2 | 5.4 s | 7.2 s |
+| Round G Phase 3 tip, all local, under load | 10.9 s | 72.4 s |
+| Round G final tree, all local, under swap | 10.1 s | 13.2 s |
+| Round F, all local | not taken | 91.4 s |
+
+The Phase 3 tip is the row that explains the shape of the fix. The yield alone
+took the late arrival from 32 s to 22.8 s, and the stage split says the
+priority pass never actually served that message: its needs-you ran early only
+by claim order, and its extraction waited behind every needs-you in the
+backlog, because refs handed to a pass that had already started with an empty
+priority list were consumed only at the next pass top. Serving them at every
+handler boundary and before every claim is what closes it, and it is the same
+shape on both machines, which is why the local row is quoted here although its
+walls were taken under load and are not comparable. On the final tree the same
+message is extracted 7.2 s after it lands, against 22.8 s before the fix and
+32 s before the round, and the backlog's own walls do not move. The local
+final-tree pass falls the same way, 13.2 s against 72.4 s under comparable
+load, although its own walls were taken with the machine in swap.
 
 **…and one switch.** Model work runs only while **AI processing** is on. The
 switch is the first row of the sidebar's list header (`InboxScreen._listHeader`,

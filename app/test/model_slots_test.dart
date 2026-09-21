@@ -155,6 +155,19 @@ void main() {
     }
   });
 
+  test('the drafting stages are every stage that writes in the owner\'s name',
+      () {
+    // Not a preset — `draft_improve` is in none — but the same closed pair is
+    // what the consent gate, the preset's skip, the picker's gated note and
+    // the picker's consent prompt all ask about. Named once so a third
+    // drafting stage is not four things to remember.
+    expect(draftStageIds, ['draft_reply', 'draft_improve']);
+    for (final id in draftStageIds) {
+      expect(pipelineStages.map((s) => s.id), contains(id));
+      expect(stageSlot(id), ModelSlot.prose);
+    }
+  });
+
   test('a third-party host is Bedrock and the three vendors', () {
     expect(isThirdPartyHost('https://bedrock-runtime.us-east-2.amazonaws.com/x'),
         isTrue);
@@ -398,6 +411,24 @@ void main() {
       // Empty in, empty out: what both callers read as "nothing typed yet".
       expect(normalizeBoxBaseUrl('   '), isEmpty);
       expect(normalizeBoxBaseUrl('///'), isEmpty);
+    });
+
+    test('the stored writing URL gives its origin back', () {
+      // The same recipe backwards, so Settings can prefill the address for
+      // somebody whose access key was rotated and let them type the key alone.
+      expect(
+        boxBaseFromProseUrl('https://box.example.com/prose/v1/chat/completions'),
+        'https://box.example.com',
+      );
+      // Anything this app did not write gives nothing: a bulk URL, a target
+      // somebody added by hand, an empty string.
+      expect(
+        boxBaseFromProseUrl('https://box.example.com/bulk/v1/chat/completions'),
+        isEmpty,
+      );
+      expect(boxBaseFromProseUrl('http://127.0.0.1:8080/v1/chat/completions'),
+          isEmpty);
+      expect(boxBaseFromProseUrl(''), isEmpty);
     });
   });
 }

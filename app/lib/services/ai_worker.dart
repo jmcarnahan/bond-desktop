@@ -826,7 +826,16 @@ class AiWorker {
       // never the work already at the server.
       await Future.wait(_inFlight.toList());
       if (parkedKind) parkedKinds.add(handler.kind);
-      if (parkedDrain) return true;
+      if (parkedDrain) {
+        // The same keep the halt arm makes, for the same reason: the handlers
+        // after this one never ran, so the named message has not finished its
+        // walk. Without it a signed-out session, or any other whole-drain
+        // park, dropped the just-triaged refs on the floor and the newest
+        // message went back to waiting its turn in `created_at` order — which
+        // is the one thing this whole path exists to stop.
+        _keepPriority(refs);
+        return true;
+      }
       if (_halted) {
         _keepPriority(refs);
         return false;
@@ -905,15 +914,18 @@ class AiWorker {
       // identically, and marking a hundred of them is just noise on a laptop
       // where that model server is not running.
       //
-      // A refused key is the same park with a different reason, because it is
-      // the same fact about every item behind this one — and the rail can then
-      // say which of the two it is.
+      // A refused key, and a dead EMBEDDING server, are the same park with a
+      // different reason, because each is the same fact about every item
+      // behind this one — and the rail can then say which of the three it is.
+      // The slot matters because the two are placed separately: the box can be
+      // serving every generating stage while the local embedding server is the
+      // one that is down.
       return _park(
         handler.kind,
         source,
         id,
         _RunOutcome.parkKind,
-        e is LlmUnauthorizedException ? 'unauthorized' : 'model_unavailable',
+        parkReasonFor(e),
         sw.elapsedMilliseconds,
       );
     } on NotSignedIn {

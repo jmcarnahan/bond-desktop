@@ -5441,6 +5441,44 @@ void main() {
       expect((await store.membersOf(id)).map((m) => m.conversationKey), ['p1']);
     });
 
+    test('a thread the owner removed from ANOTHER storyline is still on offer',
+        () async {
+      // The block is a statement about the storyline it was made in, not about
+      // the thread. Read globally — which is what the sweep's taken set does,
+      // rightly, for a pass PROPOSING new groups — one removal hid that thread
+      // from every storyline the owner would ever declare, including the one
+      // they removed it in order to file it into.
+      await seedPool(2);
+      await store.insertStoryline(
+        id: 'sl-other',
+        title: 'Another group',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      // p0 was pulled OUT of sl-other and blocked there; p1 is still its
+      // member.
+      await store.addStorylineMember('sl-other', 'email', 'p0', addedBy: 'auto');
+      await store.removeStorylineMember('sl-other', 'email', 'p0', block: true);
+      await store.addStorylineMember('sl-other', 'email', 'p1', addedBy: 'auto');
+
+      final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
+      final service = StorylineService(
+        store,
+        llm,
+        embeddings: FakeEmbeddings.at(1),
+      );
+      final id = await service.declareStoryline(
+          title: 'Harbour Lane move', charter: charter);
+
+      await service.recruit(id);
+
+      // p0 recruited, p1 left where it is: one thread, one live storyline
+      // still holds, and it is memberships that decide it.
+      expect((await store.membersOf(id)).map((m) => m.conversationKey), ['p0']);
+      expect((await store.membersOf('sl-other')).map((m) => m.conversationKey),
+          ['p1']);
+    });
+
     test('the refresh backstop skips it until it holds a thread', () async {
       await seedPool(1);
       final llm = fakeLlm({'storyline_membership': [confirmAnswer()]});
