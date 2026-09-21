@@ -228,7 +228,7 @@ void main() {
       final result = await McpAttachmentBackend(mcp).extractText(
         ref(
           kind: 'reference',
-          sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/x',
+          sourceUrl: 'https://contoso2-my.sharepoint.com/:b:/g/x',
         ),
       );
 
@@ -543,7 +543,7 @@ void main() {
     test('a mail link fetches its bytes through the file inspector by url',
         () async {
       const url =
-          'https://southbayequity2-my.sharepoint.com/:b:/g/personal/x/abc';
+          'https://contoso2-my.sharepoint.com/:b:/g/personal/x/abc';
       final mcp = _FakeMcp({
         'inspect_file': [
           <String, dynamic>{

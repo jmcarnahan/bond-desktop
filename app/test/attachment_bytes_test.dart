@@ -371,7 +371,7 @@ void main() {
         name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
         contentType: null,
         size: 0,
-        sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/x',
+        sourceUrl: 'https://contoso2-my.sharepoint.com/:b:/g/x',
       );
       await seed(attachment);
       backend.throwOnThumbnail = const AttachmentUnavailable('no_thumbnail');

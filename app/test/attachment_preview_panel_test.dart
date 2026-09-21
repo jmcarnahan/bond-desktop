@@ -329,7 +329,7 @@ void main() {
         kind: 'reference',
         name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
         size: 0,
-        sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/x',
+        sourceUrl: 'https://contoso2-my.sharepoint.com/:b:/g/x',
       );
       bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] =
           Uint8List.fromList([1, 2, 3]);
@@ -355,7 +355,7 @@ void main() {
         kind: 'reference',
         name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
         size: 0,
-        sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/x',
+        sourceUrl: 'https://contoso2-my.sharepoint.com/:b:/g/x',
       );
       // A link row is born size 0, so the ceiling is discovered by asking.
       bytes.throwOnBytes = const AttachmentUnavailable('too_large');
@@ -390,7 +390,7 @@ void main() {
           attachmentId: 'link-a',
           name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
           size: 0,
-          sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/a',
+          sourceUrl: 'https://contoso2-my.sharepoint.com/:b:/g/a',
         ),
         onOpen: () {},
         onSave: () {},
@@ -406,7 +406,7 @@ void main() {
           attachmentId: 'link-b',
           name: 'Schedule.docx',
           size: 0,
-          sourceUrl: 'https://southbayequity2-my.sharepoint.com/:w:/g/b',
+          sourceUrl: 'https://contoso2-my.sharepoint.com/:w:/g/b',
         ),
         onOpen: () {},
         onSave: () {},
@@ -425,7 +425,7 @@ void main() {
         kind: 'reference',
         name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
         size: 0,
-        sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/x',
+        sourceUrl: 'https://contoso2-my.sharepoint.com/:b:/g/x',
       );
       bytes.throwOnBytes = const AttachmentUnavailable('too_large');
       bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] =
@@ -534,7 +534,7 @@ void main() {
         name: 'Schedule.docx',
         contentType: null,
         size: 0,
-        sourceUrl: 'https://southbayequity2-my.sharepoint.com/:w:/g/x',
+        sourceUrl: 'https://contoso2-my.sharepoint.com/:w:/g/x',
       );
       bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] =
           'The survey is booked for the ninth.';

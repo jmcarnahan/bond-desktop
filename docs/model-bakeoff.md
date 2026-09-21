@@ -2500,7 +2500,7 @@ recommended and is still one press away under **Use this Mac's models**.
 | drafts, 25 reply-rubric items | the box 27B: 6 to 7 of 25, at a draft p50 of 3.7 to 4.9 s with a first token of 680 ms through Round F's SSH tunnel on 2026-09-20, and 5.9 s with a first token of 816 ms over the TLS endpoint on 2026-09-21, which is the path that ships | the local 27B: 5 of 25 at 17.6 s, first token 2,520 ms | a draft a person waits for arrives in a quarter of the time; the rubric is unmoved | the box; Improve with a cloud target on request is still the only path to 15 of 25 |
 | storyline confirm | the box 27B: 84 of 98 on the final tree with 7 of 88 named neighbours accepted at 8% and 1 extra of 300, keep-only 73 of 85, at 34.1 calls a minute | the local 4B: 84 of 98 at 17% | the same score at half the wrong accepts | the box; the confirm is worth 16 points on the declared path, 86 of 98 against 70 |
 | storyline naming, the sweep's own path | the box 27B: 50 of 98, 9 correct positives, 5 forbidden | the local 27B: 45 of 98, 5, 4 | thread cards travel to the owner's own AWS box over TLS, which needs no third-party consent | the box; and the sweep is no longer the path that matters |
-| storyline filing, the declared path | the box 27B confirm: 86 of 98, 42 correct positives, 1 forbidden, on two identical passes | the local 4B confirm: 70 of 98, 35, 8 | nothing beyond the confirm calls it already makes | the measured way to file a mailbox, and the only thing on this page that meets the roadmap's exit |
+| storyline filing, the declared path | the box 27B confirm: 86 of 98, 42 correct positives, 1 forbidden, on two identical passes | the local 4B confirm: 70 of 98, 35, 8 | nothing beyond the confirm calls it already makes | the measured way to file a mailbox once a person has declared its storylines, here the registry's own thirty titles and charters, and the only thing on this page that meets the roadmap's exit |
 | the clustering vector | Qwen3-Embedding-0.6B, Q8_0, pooling last, topics card, instruction prefix, 1,024 dims, ON THIS MAC in every placement: recall-70 cross 15%, reproduced on the final tree at five clusters and a mean purity of 76% at 0.48 | the same | the embedding model is the one model the box placement still downloads | unchanged |
 | the gate | 83 of 100 on the final tree, drops caught 10 of 24, keeps kept 73 of 76, trap misses 3 of 12 | the same | deterministic, no model call | unchanged; the remaining loss is Tier 2 header overreach the set cannot replay |
 
@@ -2546,7 +2546,7 @@ rather than every host under `amazonaws.com`.
    `max_tokens` blocker is gone at 1024 and only the consent sentence for
    thread cards is left, but Round G weakened the case: the declared path files
    86 of 98 with nothing leaving the owner's own machines, where the best cloud
-   namer files 57.
+   namer files 57; the two are not one task, since the declared path was handed the registry's own titles and charters and the namer invents names from the threads alone.
 4. **The MTP sidecar verified live.** It is in the manifest, the preset names
    it as `model-draft` and the wizard downloads and counts it, but no managed
    server has started with it yet; every ledger row above was taken with the

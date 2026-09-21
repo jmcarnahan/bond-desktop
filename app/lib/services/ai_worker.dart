@@ -454,9 +454,9 @@ class AiWorker {
     // processing is off is still the newest message, and the pump that
     // follows the switch coming back on should carry it.
     for (final ref in first) {
-      if (_priority.length >= maxPriorityRefs) break;
       if (!sources.contains(ref.source)) continue;
       if (_priority.contains(ref)) continue;
+      if (_priority.length >= maxPriorityRefs) break;
       _priority.add(ref);
     }
     // A quiesce in progress counts as off: the latch it set must survive
@@ -629,6 +629,9 @@ class AiWorker {
                 await _servePriority(parkedKinds)) {
               return;
             }
+            // A ref pass is long enough for the processing switch to have
+            // moved under it; read the halt again before claiming.
+            if (_halted) break;
             if (parkedKinds.contains(handler.kind)) {
               parkedKind = true;
               break;

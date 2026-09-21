@@ -87,8 +87,10 @@ class SetupWhereBody extends StatefulWidget {
   /// em-dashes.
   static const String boxTitle = 'Shared GPU box · recommended';
   static const String boxBlurb =
-      'The inbox and writing steps run on the project’s GPU box. The '
-      'embedding model stays on this Mac.';
+      'The inbox and writing steps run on the project’s GPU box, a machine '
+      'the project rents in the cloud, so message text and drafts travel '
+      'there over an encrypted connection. The embedding model stays on '
+      'this Mac.';
   static const String localTitle = 'This Mac';
   static const String localBlurb =
       'Everything runs here and nothing leaves the machine.';

@@ -38,3 +38,5 @@ dist/windows/out/
 # A Windows code-signing certificate export. None exists — the Windows design
 # signs in Azure — and a stray one must not be the exception.
 *.pfx
+# Local release notes the /branch skill writes; never published.
+docs/releasenotes/
