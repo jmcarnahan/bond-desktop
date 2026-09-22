@@ -134,7 +134,11 @@ enforce the ones that are commands.
   what keeps `docs/pipeline/06-storylines.md`'s ordering true), the DRAFT lane
   (`draft` alone, at `AppPrefs.proseParallel` wide). A new handler goes on the
   lane whose server it calls, and order ACROSS lanes is enqueue-and-pump, not
-  list position.
+  list position. A handler that must wake the drain it runs INSIDE is handed
+  the worker through a `late final` local in the lane's body, never
+  `ref.read` of that lane's own provider: Riverpod asserts self-dependency on
+  a `read` as much as on a `watch`, so a debug build throws `A provider cannot
+  depend on itself` out of the handler mid-drain.
 - `requeueWork(refreshCreatedAt: true)` only where a person asked for the work
   NOW (Regenerate, Draft reply, the two Retries, Restore, a storyline action):
   the drain claims `created_at DESC`, so a bulk revive keeps its stamps rather

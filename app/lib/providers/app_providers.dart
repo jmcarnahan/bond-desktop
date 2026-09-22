@@ -1184,7 +1184,16 @@ final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
 /// fast-server calls, so the worst case at that server is three plus one,
 /// which is `FAST_SLOTS`.
 final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
-  return _lane(
+  // Named before it is built, because one handler below has to reach it: the
+  // digest's requeue wakes the drain it is running inside, and a `ref.read` of
+  // THIS provider from inside its own body is what Riverpod's
+  // `_debugAssertCanDependOn` refuses — "A provider cannot depend on itself" —
+  // on a `read` as much as on a `watch`. Every debug build threw it out of the
+  // handler's `run` from the first digest that carried an ask. A late local is
+  // assigned by the time any handler runs and reads no provider at all; it is
+  // the same shape [_lane] uses for its own `onDrained`.
+  late final AiWorker worker;
+  worker = _lane(
     ref,
     handlers: [
       // First, and it drains completely before extraction starts. The verdict
@@ -1218,13 +1227,21 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         activityLog: ref.watch(activityLogProvider),
         progress: ref.watch(pipelineProgressProvider),
         // The draft lane, woken as the row is written rather than at the end
-        // of this drain — `AttachmentDigestHandler.onRequeue`'s shape, and the
-        // same `read`-inside-a-closure reasoning: a `watch` here would be a
-        // cycle through the provider being built, and a `read` from inside a
-        // drain is a read of a worker that already exists. On a sixty-message
-        // backlog this is the difference between a prefetch starting seconds
-        // after its extraction and minutes after it.
-        onDraftQueued: () => unawaited(ref.read(draftWorkerProvider).pump()),
+        // of this drain. A `read` inside the closure of a DIFFERENT lane's
+        // provider, which is allowed; a `watch` here would be a cycle through
+        // the provider being built, and a read of THIS lane's own provider
+        // would be the self-dependency the note at the top of this body is
+        // about. Guarded, on [_lane]'s own `onDrained` shape: the closure
+        // outlives this body and fires from inside a drain, where a
+        // torn-down container must cost nothing rather than fail the
+        // extraction row. On a sixty-message backlog this is the difference
+        // between a prefetch starting seconds after its extraction and
+        // minutes after it.
+        onDraftQueued: () {
+          try {
+            unawaited(ref.read(draftWorkerProvider).pump());
+          } catch (_) {}
+        },
         // When a reply is written ahead of being asked for — the user's
         // setting, read at the moment each message finishes rather than
         // captured here. `ref.read` inside the closure, never `watch`, in
@@ -1266,13 +1283,13 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(stageLlmClientProvider('attachment_digest')),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
-        // The worker this handler runs inside, read at CALL time — the same
-        // shape as needs-you's owner lookup. A `watch` here would be a cycle
-        // through the provider being built; a `read` from inside a drain is a
-        // read of a worker that already exists. `pump` on a running drain only
-        // sets a flag and hands back that drain's future, which is why it is
-        // not awaited: see [AttachmentDigestHandler].
-        onRequeue: () => unawaited(ref.read(aiWorkerProvider).pump()),
+        // The worker this handler runs inside — the late local above, never a
+        // `ref.read` of this lane's own provider: Riverpod asserts
+        // self-dependency on a `read` too, and the note at the top of this
+        // body says what that cost. `pump` on a running drain only sets a
+        // flag and hands back that drain's future, which is why it is not
+        // awaited: see [AttachmentDigestHandler].
+        onRequeue: () => unawaited(worker.pump()),
       ),
       // The owner's own directories, read here and nowhere else in the drain.
       // It talks to no chat model — the embedding server is its only server —
@@ -1366,6 +1383,7 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       }
     },
   );
+  return worker;
 });
 
 /// The STORYLINE lane's worker: the six passes, in the order their arguments
