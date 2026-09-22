@@ -8,6 +8,7 @@ import 'package:bond_inbox/data/setup_store.dart';
 import 'package:bond_inbox/models/setup_step.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart' show AppPrefs;
 import 'package:bond_inbox/providers/setup_provider.dart';
+import 'package:bond_inbox/services/llm/model_probe.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/models/download_state.dart';
 import 'package:bond_inbox/services/models/model_downloader.dart';
@@ -76,6 +77,15 @@ void main() {
   late List<String> foldersSet;
   late List<MachineTier> tiersApplied;
 
+  /// What `adoptBox` was called with, KEYS INCLUDED — this is a fake, the
+  /// "key" is the fictional string the test typed, and nothing real is here.
+  late List<({String baseUrl, String bearer})> boxAdoptions;
+  late List<MachineTier> localAdoptions;
+
+  /// What **Check server** asked, with the bearer it was handed.
+  late List<({String url, String? bearer})> probes;
+  ModelProbeResult probeAnswer = const ModelProbeResult(reachable: true);
+
   String folder() => p.join(root.path, 'models');
 
   String destOf(ModelFile file) => p.join(folder(), file.relativePath);
@@ -142,6 +152,18 @@ void main() {
         prefs = prefs.copyWith(modelsFolder: path);
       },
       applyTierDefaults: (tier) async => tiersApplied.add(tier),
+      probe: (url, {bearer}) async {
+        probes.add((url: url, bearer: bearer));
+        return probeAnswer;
+      },
+      adoptBox: ({required baseUrl, required bearer}) async {
+        boxAdoptions.add((baseUrl: baseUrl, bearer: bearer));
+        prefs = prefs.copyWith(modelPlacement: ModelPlacement.box);
+      },
+      adoptLocal: (tier) async {
+        localAdoptions.add(tier);
+        prefs = prefs.copyWith(modelPlacement: ModelPlacement.local);
+      },
       auth: () => auth,
       notifier: notifier,
       seedAuthorization: seeded.add,
@@ -200,6 +222,10 @@ void main() {
     seeded = [];
     foldersSet = [];
     tiersApplied = [];
+    boxAdoptions = [];
+    localAdoptions = [];
+    probes = [];
+    probeAnswer = const ModelProbeResult(reachable: true);
     manifest = publish();
     prefs = AppPrefs(modelsFolder: folder());
     supervisor = ModelServerSupervisor(
@@ -749,6 +775,195 @@ void main() {
     expect(await controller.finish(), isTrue);
 
     expect(tiersApplied, [MachineTier.full]);
+  });
+
+  group('Where the models run', () {
+    test('the box placement reads as the remote tier and one model', () async {
+      // A big Mac, so the tier this would otherwise be is `full`. The
+      // placement outranks the memory: what this Mac SERVES is the embedding
+      // model, and the models, storage and download steps are about that.
+      final controller = build();
+      await controller.init();
+      expect(controller.tier, MachineTier.full);
+
+      controller.chooseBox();
+
+      expect(controller.tier, MachineTier.remote);
+      expect([for (final m in controller.resolvedManifest.models) m.id],
+          [routerEmbedId]);
+      // And `lowMemory` still answers about the MACHINE, which is what the
+      // device step's sentence is about.
+      expect(controller.lowMemory, isFalse);
+    });
+
+    test('a small Mac on the box is still a small Mac to the device step',
+        () async {
+      system.hardwareInfo = const HardwareInfo(
+        chip: 'Apple M2',
+        memoryBytes: 17179869184,
+        appleSilicon: true,
+        rosetta: false,
+        osVersion: '15.6',
+      );
+      final controller = build();
+      await controller.init();
+      await controller.probeHardware();
+      expect(controller.lowMemory, isTrue);
+
+      controller.chooseBox();
+
+      expect(controller.tier, MachineTier.remote);
+      // Unchanged: the writing model is still one this Mac could not run.
+      expect(controller.lowMemory, isTrue);
+    });
+
+    test('Continue on the box adopts it, and refuses with a field empty',
+        () async {
+      final controller = build();
+      await controller.init();
+      controller.chooseBox();
+      controller.setBoxUrl('https://box.example.com/');
+
+      // No key: nothing is adopted and the step does not move.
+      await controller.continueFromWhere('  ');
+      expect(boxAdoptions, isEmpty);
+      expect(controller.state.step, SetupStep.welcome);
+
+      // No address either.
+      controller.setBoxUrl('   ');
+      await controller.continueFromWhere('sk-fixture-not-a-real-box-key');
+      expect(boxAdoptions, isEmpty);
+
+      controller.setBoxUrl('https://box.example.com/');
+      await controller.continueFromWhere('sk-fixture-not-a-real-box-key');
+
+      // Trimmed of its trailing slash by the controller, before `adoptBox`
+      // builds the two paths from it.
+      expect(boxAdoptions, [
+        (
+          baseUrl: 'https://box.example.com',
+          bearer: 'sk-fixture-not-a-real-box-key',
+        )
+      ]);
+      expect(controller.state.step, SetupStep.models);
+      expect(await store.get(SetupStore.setupKey), 'models');
+    });
+
+    test('Continue on this Mac adopts LOCAL and moves on', () async {
+      final controller = build();
+      await controller.init();
+
+      controller.chooseLocal();
+      await controller.continueFromWhere('');
+
+      expect(boxAdoptions, isEmpty);
+      // Not nothing: the write is what undoes a box install, and on a first
+      // run it is the same no-op `finish()` was going to make anyway.
+      expect(localAdoptions, [MachineTier.full]);
+      expect(controller.state.step, SetupStep.models);
+    });
+
+    test('a box install re-run choosing This Mac ends up local', () async {
+      // The re-entry case. Without the write, "Set up again" on a box install
+      // would leave both box targets, the box stage map and
+      // `model_placement = box` standing while `finish()` applied this
+      // machine's tier defaults on top.
+      prefs = prefs.copyWith(modelPlacement: ModelPlacement.box);
+      await store.set(SetupStore.setupKey, SetupStep.notifications.name);
+      final controller = build();
+      await controller.init();
+
+      // The stored answer is seeded, so the step opens on the box rather than
+      // on nothing and the tier reads `remote`.
+      expect(controller.placement, ModelPlacement.box);
+      expect(controller.tier, MachineTier.remote);
+
+      controller.chooseLocal();
+      await controller.continueFromWhere('');
+
+      expect(localAdoptions, [MachineTier.full]);
+      expect(controller.placement, ModelPlacement.local);
+      expect(controller.tier, MachineTier.full);
+      expect(controller.state.step, SetupStep.models);
+    });
+
+    test('the tier adoptLocal is given is the HARDWARE tier', () async {
+      // Not `tier`, which answers `remote` while the placement is still the
+      // box: the defaults being restored are the ones this machine can run.
+      system.hardwareInfo = const HardwareInfo(
+        chip: 'Apple M2',
+        memoryBytes: 17179869184,
+        appleSilicon: true,
+        rosetta: false,
+        osVersion: '15.6',
+      );
+      prefs = prefs.copyWith(modelPlacement: ModelPlacement.box);
+      final controller = build();
+      await controller.init();
+
+      controller.chooseLocal();
+      await controller.continueFromWhere('');
+
+      expect(localAdoptions, [MachineTier.inbox]);
+    });
+
+    test('Check server asks the writing slot with the typed key', () async {
+      probeAnswer = const ModelProbeResult(
+        reachable: true,
+        modelIds: ['qwen3.8'],
+      );
+      final controller = build();
+      await controller.init();
+      controller.chooseBox();
+      controller.setBoxUrl('https://box.example.com');
+
+      await controller.checkBox('sk-fixture-not-a-real-box-key');
+
+      expect(probes, [
+        (
+          url: 'https://box.example.com/prose/v1/chat/completions',
+          bearer: 'sk-fixture-not-a-real-box-key',
+        )
+      ]);
+      expect(controller.state.boxProbe?.reachable, isTrue);
+      expect(controller.state.boxProbing, isFalse);
+      // The key is a secret and never enters the state.
+      expect(controller.state.toString(),
+          isNot(contains('sk-fixture-not-a-real-box-key')));
+    });
+
+    test('editing the address drops a result taken against the old one',
+        () async {
+      final controller = build();
+      await controller.init();
+      controller.chooseBox();
+      controller.setBoxUrl('https://box.example.com');
+      await controller.checkBox('k');
+      expect(controller.state.boxProbe, isNotNull);
+
+      controller.setBoxUrl('https://box2.example.com');
+
+      // A "Reachable" line under an address that has since been edited is a
+      // report about a different server.
+      expect(controller.state.boxProbe, isNull);
+    });
+
+    test('Finish on the box placement writes no tier defaults', () async {
+      await seedComplete();
+      await store.set(SetupStore.setupKey, SetupStep.notifications.name);
+      final controller = build();
+      await controller.init();
+      controller.chooseBox();
+      await controller.next();
+
+      expect(await controller.finish(), isTrue);
+
+      // `adoptBox` owns the stage map on this placement. A tier write here
+      // would clear every one of its picks back to a local built-in.
+      expect(tiersApplied, isEmpty);
+      // The managed server still goes on: it serves the embedding model.
+      expect(managed, isTrue);
+    });
   });
 
   test('the done step names who is signed in', () async {

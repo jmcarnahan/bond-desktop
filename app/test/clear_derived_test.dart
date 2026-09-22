@@ -18,7 +18,6 @@ import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart' show LlmTargetSpec;
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
@@ -29,6 +28,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/vec_test_db.dart';
 
 /// The two resets behind Settings' Processing section.
@@ -70,75 +70,39 @@ class _Handler extends WorkHandler {
   }
 }
 
-/// An [LlmClient] that answers one scripted verdict and can be held open.
+/// A client that answers one scripted verdict and can be held open.
 ///
-/// Duplicated from `triage_queue_test.dart` rather than shared, on the house
-/// rule the sync stubs follow: neither file may break the other by editing it.
-class _FakeLlm extends LlmClient {
-  _FakeLlm({this.hold}) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
+/// [hold] runs at the top of every call, before the answer and inside the
+/// in-flight window, which is where the old double awaited it: a test that
+/// wants to stop the drain mid-flight returns a completer's future from it.
+ScriptedLlm _triageLlm({Future<void> Function()? hold}) => ScriptedLlm(
+      answers: const {
+        'triage': {
+          'urgency': 'normal',
+          'category': 'work',
+          'summary': 'Sarah asks about the launch date.',
+          'needs_action': false,
+          'action_items': <String>[],
+          'reply_expected': false,
+          'deadline': '',
+        },
+      },
+      onCall: hold == null ? null : (_) => hold(),
+    );
 
-  final Future<void> Function()? hold;
-
-  int calls = 0;
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    calls++;
-    await hold?.call();
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-    return {
-      'urgency': 'normal',
-      'category': 'work',
-      'summary': 'Sarah asks about the launch date.',
-      'needs_action': false,
-      'action_items': const <String>[],
-      'reply_expected': false,
-      'deadline': '',
-    };
-  }
-}
-
-/// An [LlmClient] that answers one draft and can be held open at the server.
-///
-/// [_FakeLlm]'s twin for the prose schema: `improve` sends a [DraftTask], so
-/// a verdict-shaped answer would be thrown away before the row was written
-/// and the ordering this file is about would never be reached.
-class _FakeDraftLlm extends LlmClient {
-  _FakeDraftLlm({this.hold})
-      : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  final Future<void> Function()? hold;
-
-  int calls = 0;
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    calls++;
-    await hold?.call();
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-    return {
-      'evidence': 'Sarah is waiting on the invoice.',
-      'reply_body': 'The improved answer, from somewhere else.',
-      'options': const <Map<String, String>>[],
-    };
-  }
-}
+/// The same for the prose schema: `improve` sends a [DraftTask], so a
+/// verdict-shaped answer would be thrown away before the row was written and
+/// the ordering this file is about would never be reached.
+ScriptedLlm _draftLlm({Future<void> Function()? hold}) => ScriptedLlm(
+      answers: const {
+        'draft_reply': {
+          'evidence': 'Sarah is waiting on the invoice.',
+          'reply_body': 'The improved answer, from somewhere else.',
+          'options': <Map<String, String>>[],
+        },
+      },
+      onCall: hold == null ? null : (_) => hold(),
+    );
 
 /// A target on this machine, so no consent and no ledger are in the way of
 /// the ordering under test.
@@ -1162,7 +1126,7 @@ void main() {
       await seedMessage('m2', conversationKey: 'conv-2');
       final held = Completer<void>();
       var first = true;
-      final llm = _FakeLlm(hold: () {
+      final llm = _triageLlm(hold: () {
         if (!first) return Future<void>.value();
         first = false;
         return held.future;
@@ -1186,7 +1150,7 @@ void main() {
       expect(statuses.where((s) => s == 'pending'), hasLength(1));
 
       await queue.pump();
-      expect(llm.calls, 2);
+      expect(llm.calls.length, 2);
       for (final id in ['m1', 'm2']) {
         expect((await messageRow(id))['triage_status'], 'triaged');
       }
@@ -1227,7 +1191,7 @@ void main() {
       await seedMessage('m2', conversationKey: 'conv-2');
       final held = Completer<void>();
       var first = true;
-      final llm = _FakeLlm(hold: () {
+      final llm = _triageLlm(hold: () {
         if (!first) return Future<void>.value();
         first = false;
         return held.future;
@@ -1249,10 +1213,10 @@ void main() {
       ];
       expect(statuses.where((s) => s == 'triaged'), hasLength(1));
       expect(statuses.where((s) => s == 'pending'), hasLength(1));
-      expect(llm.calls, 1);
+      expect(llm.calls.length, 1);
 
       await queue.pump();
-      expect(llm.calls, 2);
+      expect(llm.calls.length, 2);
     });
 
     test('two concurrent worker quiesces are one run, and both see it out',
@@ -1302,7 +1266,7 @@ void main() {
       await seedMessage('m2', conversationKey: 'conv-2');
       final held = Completer<void>();
       var first = true;
-      final llm = _FakeLlm(hold: () {
+      final llm = _triageLlm(hold: () {
         if (!first) return Future<void>.value();
         first = false;
         return held.future;
@@ -1328,14 +1292,14 @@ void main() {
       ];
       expect(statuses.where((s) => s == 'triaged'), hasLength(1));
       expect(statuses.where((s) => s == 'pending'), hasLength(1));
-      expect(llm.calls, 1);
+      expect(llm.calls.length, 1);
 
       final again = queue.quiesce();
       expect(again, isNot(same(quiet)));
       await again;
 
       await queue.pump();
-      expect(llm.calls, 2);
+      expect(llm.calls.length, 2);
     });
 
     /// The improve pair: `DraftHandler.improve` is a button press and not
@@ -1357,8 +1321,8 @@ void main() {
       final held = Completer<void>();
       final handler = DraftHandler(
         store,
-        _FakeDraftLlm(),
-        improveClient: _FakeDraftLlm(hold: () => held.future),
+        _draftLlm(),
+        improveClient: _draftLlm(hold: () => held.future),
         routes: DraftRoutes(
           draftTarget: () => null,
           improveTarget: () => _improveTarget,

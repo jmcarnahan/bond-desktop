@@ -16,6 +16,7 @@ import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/fake_auth_session.dart';
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// **Improve with `<target>`**: the same draft prompt, sent again to a target
@@ -30,45 +31,19 @@ import 'fixtures/test_db.dart';
 /// the standing rule, and a prefetch whose draft stage points off this
 /// machine.
 
-/// An [LlmClient] that answers from a script and never opens a socket.
+/// A client scripted by TASK rather than by position: the decision call and
+/// the draft call are two schemas, and the handler asks for them in that
+/// order. The improve call's schema is `draft_reply` too, because it IS the
+/// draft task, so an improve client scripts [draft] alone.
 ///
-/// A private copy rather than an import of `draft_handler_test.dart`'s: a
-/// test file that imports another test file's helpers ties the two together
-/// at exactly the seam each of them exists to pin separately.
-class FakeLlm extends LlmClient {
-  final List<Object> script;
-
-  /// Which task each call was, in order. The improve call's is `draft_reply`,
-  /// because it IS the draft task.
-  final List<String> schemaNames = [];
-
-  /// The prompt bytes each call carried, in order — what the phase's whole
-  /// claim rests on: an improve sends exactly what the local draft sent.
-  final List<String> systems = [];
-  final List<String> users = [];
-
-  FakeLlm(this.script) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  int get calls => schemaNames.length;
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    schemaNames.add(schemaName);
-    systems.add(system);
-    users.add(user);
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-    final step = script.length > 1 ? script.removeAt(0) : script.first;
-    if (step is Exception) throw step;
-    return Map<String, dynamic>.from(step as Map);
-  }
+/// The fixture records `schemaNames`, `systems` and `users` per call, which
+/// is what the phase's whole claim rests on: an improve sends exactly what
+/// the local draft sent.
+ScriptedLlm draftClient({Object? decision, Object? draft}) {
+  final llm = ScriptedLlm();
+  if (decision != null) llm.answer('reply_decision', decision);
+  if (draft != null) llm.answer('draft_reply', draft);
+  return llm;
 }
 
 /// A backend that would notice if a draft test reached for it. None does.
@@ -222,18 +197,16 @@ void main() {
     test('rewrites the body, the evidence and the options in place', () async {
       await seedInbound();
       await seedDraft();
-      final improveLlm = FakeLlm([
-        answer(
+      final improveLlm = draftClient(draft: answer(
           evidence: 'The improved evidence.',
           replyBody: 'Thursday works, and I will bring the notes.',
           options: [
             {'stance': 'Confirm', 'reply_body': 'Thursday works.'},
           ],
-        ),
-      ]);
+        ));
       final handler = DraftHandler(
         store,
-        FakeLlm([answer()]),
+        draftClient(draft: answer()),
         improveClient: improveLlm,
         activityLog: ActivityLog(store),
         routes: routes(improve: boxTarget),
@@ -259,8 +232,9 @@ void main() {
       // through the queue, then the button rewrites it — and the two draft
       // prompts are one string, system and user alike.
       await seedInbound();
-      final draftLlm = FakeLlm([decision(), answer()]);
-      final improveLlm = FakeLlm([answer(replyBody: 'The better answer.')]);
+      final draftLlm = draftClient(decision: decision(), draft: answer());
+      final improveLlm =
+          draftClient(draft: answer(replyBody: 'The better answer.'));
       final handler = DraftHandler(
         store,
         draftLlm,
@@ -288,8 +262,8 @@ void main() {
       await seedDraft();
       final handler = DraftHandler(
         store,
-        FakeLlm([answer()]),
-        improveClient: FakeLlm([answer(replyBody: 'Improved.')]),
+        draftClient(draft: answer()),
+        improveClient: draftClient(draft: answer(replyBody: 'Improved.')),
         activityLog: ActivityLog(store),
         routes: routes(improve: boxTarget),
       );
@@ -310,8 +284,8 @@ void main() {
       await seedDraft();
       final handler = DraftHandler(
         store,
-        FakeLlm([answer()]),
-        improveClient: FakeLlm([answer(replyBody: 'Improved.')]),
+        draftClient(draft: answer()),
+        improveClient: draftClient(draft: answer(replyBody: 'Improved.')),
         activityLog: ActivityLog(store),
         routes: routes(improve: cloudTarget, ledger: ledgerOf(50)),
       );
@@ -327,10 +301,10 @@ void main() {
       await seedDraft();
       final handler = DraftHandler(
         store,
-        FakeLlm([answer()]),
-        improveClient: FakeLlm([
-          const LlmUnavailableException('the target is not answering'),
-        ]),
+        draftClient(draft: answer()),
+        improveClient: draftClient(
+          draft: const LlmUnavailableException('the target is not answering'),
+        ),
         activityLog: ActivityLog(store),
         routes: routes(improve: cloudTarget, ledger: ledgerOf(50)),
       );
@@ -355,10 +329,10 @@ void main() {
         'not an uncapped call', () async {
       await seedInbound();
       await seedDraft();
-      final improveLlm = FakeLlm([answer()]);
+      final improveLlm = draftClient(draft: answer());
       final handler = DraftHandler(
         store,
-        FakeLlm([answer()]),
+        draftClient(draft: answer()),
         improveClient: improveLlm,
         activityLog: ActivityLog(store),
         routes: routes(improve: cloudTarget),
@@ -368,7 +342,7 @@ void main() {
         handler.improve('email', 'm1'),
         throwsA(isA<StateError>()),
       );
-      expect(improveLlm.calls, 0);
+      expect(improveLlm.calls.length, 0);
     });
 
     test('an empty answer is a sentence, and the local draft stays', () async {
@@ -376,8 +350,8 @@ void main() {
       await seedDraft();
       final handler = DraftHandler(
         store,
-        FakeLlm([answer()]),
-        improveClient: FakeLlm([answer(replyBody: '')]),
+        draftClient(draft: answer()),
+        improveClient: draftClient(draft: answer(replyBody: '')),
         activityLog: ActivityLog(store),
         routes: routes(improve: boxTarget),
       );
@@ -398,10 +372,10 @@ void main() {
       await seedDraft();
       await seedCloudUse();
       await seedCloudUse();
-      final improveLlm = FakeLlm([answer(replyBody: 'Never written.')]);
+      final improveLlm = draftClient(draft: answer(replyBody: 'Never written.'));
       final handler = DraftHandler(
         store,
-        FakeLlm([answer()]),
+        draftClient(draft: answer()),
         improveClient: improveLlm,
         activityLog: ActivityLog(store),
         routes: routes(improve: cloudTarget, ledger: ledgerOf(2)),
@@ -412,7 +386,7 @@ void main() {
         "Cloud drafts are at today's cap of 2. Raise it under Settings, "
         'Processing.',
       );
-      expect(improveLlm.calls, 0);
+      expect(improveLlm.calls.length, 0);
       expect(
         (await store.getDraftForMessage('email', 'm1'))!['body'],
         'The local model wrote this one.',
@@ -431,8 +405,9 @@ void main() {
       await seedCloudUse();
       final handler = DraftHandler(
         store,
-        FakeLlm([answer()]),
-        improveClient: FakeLlm([answer(replyBody: 'Improved locally.')]),
+        draftClient(draft: answer()),
+        improveClient:
+            draftClient(draft: answer(replyBody: 'Improved locally.')),
         activityLog: ActivityLog(store),
         routes: routes(improve: boxTarget, ledger: ledgerOf(2)),
       );
@@ -448,10 +423,10 @@ void main() {
         () async {
       await seedInbound();
       await seedDraft();
-      final improveLlm = FakeLlm([answer()]);
+      final improveLlm = draftClient(draft: answer());
       final handler = DraftHandler(
         store,
-        FakeLlm([answer()]),
+        draftClient(draft: answer()),
         improveClient: improveLlm,
         activityLog: ActivityLog(store),
         routes: routes(),
@@ -461,7 +436,7 @@ void main() {
         await handler.improve('email', 'm1'),
         'Pick a target for Improve a draft under Settings, Models first.',
       );
-      expect(improveLlm.calls, 0);
+      expect(improveLlm.calls.length, 0);
       final row = await lastImproveRow();
       expect(row['status'], 'skipped');
       expect(detailOf(row)['reason'], 'unrouted');
@@ -471,8 +446,8 @@ void main() {
         () async {
       final handler = DraftHandler(
         store,
-        FakeLlm([answer()]),
-        improveClient: FakeLlm([answer()]),
+        draftClient(draft: answer()),
+        improveClient: draftClient(draft: answer()),
         activityLog: ActivityLog(store),
         routes: routes(improve: boxTarget),
       );
@@ -500,7 +475,7 @@ void main() {
       await seedDraft();
       final handler = DraftHandler(
         store,
-        FakeLlm([answer()]),
+        draftClient(draft: answer()),
         activityLog: ActivityLog(store),
         routes: routes(improve: boxTarget),
       );
@@ -522,7 +497,7 @@ void main() {
       LlmTargetSpec? draft,
       LlmTargetSpec? improve = cloudTarget,
       CloudDraftLedger? ledger,
-      required FakeLlm improveLlm,
+      required ScriptedLlm improveLlm,
     }) async {
       await seedInbound(needsYou: needsYou, urgency: urgency);
       final log = _Recorder();
@@ -530,7 +505,7 @@ void main() {
         store,
         // An asked-for draft makes no decision call, so its script is the
         // draft answer alone.
-        FakeLlm(asked ? [answer()] : [decision(), answer()]),
+        draftClient(decision: asked ? null : decision(), draft: answer()),
         improveClient: improveLlm,
         activityLog: log,
         routes: routes(
@@ -551,13 +526,14 @@ void main() {
 
     test('replaces the local draft with the target\'s answer, on one row',
         () async {
-      final improveLlm = FakeLlm([answer(replyBody: 'The better answer.')]);
+      final improveLlm =
+          draftClient(draft: answer(replyBody: 'The better answer.'));
       final log = await runStanding(
         improveLlm: improveLlm,
         ledger: ledgerOf(50),
       );
 
-      expect(improveLlm.calls, 1);
+      expect(improveLlm.calls.length, 1);
       final draft = (await store.getDraftForMessage('email', 'm1'))!;
       expect(draft['body'], 'The better answer.');
       expect(
@@ -572,7 +548,7 @@ void main() {
     test('a third-party DRAFT stage as well counts two prompts leaving',
         () async {
       final log = await runStanding(
-        improveLlm: FakeLlm([answer(replyBody: 'The better answer.')]),
+        improveLlm: draftClient(draft: answer(replyBody: 'The better answer.')),
         draft: cloudTarget,
         ledger: ledgerOf(50),
       );
@@ -591,7 +567,8 @@ void main() {
       ]) {
         await db.customUpdate('DELETE FROM messages');
         await db.customUpdate('DELETE FROM drafts');
-        final improveLlm = FakeLlm([answer(replyBody: 'Never written.')]);
+        final improveLlm =
+            draftClient(draft: answer(replyBody: 'Never written.'));
         await runStanding(
           improveLlm: improveLlm,
           standing: case_['standing'] as bool? ?? true,
@@ -601,7 +578,7 @@ void main() {
           ledger: ledgerOf(50),
         );
 
-        expect(improveLlm.calls, 0, reason: '$case_');
+        expect(improveLlm.calls.length, 0, reason: '$case_');
         expect(
           (await store.getDraftForMessage('email', 'm1'))!['body'],
           startsWith('Thursday still works.'),
@@ -612,7 +589,7 @@ void main() {
 
     test('a failure leaves the local draft and notes the reason', () async {
       final log = await runStanding(
-        improveLlm: FakeLlm([const LlmException('the target refused')]),
+        improveLlm: draftClient(draft: const LlmException('the target refused')),
         ledger: ledgerOf(50),
       );
 
@@ -627,10 +604,10 @@ void main() {
 
     test('at the cap it notes the refusal and dials nothing', () async {
       await seedCloudUse();
-      final improveLlm = FakeLlm([answer(replyBody: 'Never written.')]);
+      final improveLlm = draftClient(draft: answer(replyBody: 'Never written.'));
       final log = await runStanding(improveLlm: improveLlm, ledger: ledgerOf(1));
 
-      expect(improveLlm.calls, 0);
+      expect(improveLlm.calls.length, 0);
       expect(log.notes['improve'], 'cloud_cap');
       expect(
         (await store.getDraftForMessage('email', 'm1'))!['body'],
@@ -643,12 +620,12 @@ void main() {
         'improve_error on the row, never a failure of the draft', () async {
       await seedInbound(needsYou: true, urgency: 'high');
       final log = _Recorder();
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
       var reads = 0;
       final handler = DraftHandler(
         store,
         llm,
-        improveClient: FakeLlm([answer()]),
+        improveClient: draftClient(draft: answer()),
         activityLog: log,
         routes: DraftRoutes(
           draftTarget: () => null,
@@ -668,7 +645,7 @@ void main() {
         'payload_json': DraftRequest().encode(),
       });
 
-      expect(llm.calls, 2);
+      expect(llm.calls.length, 2);
       expect(log.notes['improve_error'], 'other');
       expect(log.notes.containsKey('improved'), isFalse);
       final draft = await store.getDraftForMessage('email', 'm1');
@@ -681,7 +658,7 @@ void main() {
         'notes it, and still writes the local draft', () async {
       await seedInbound(needsYou: true, urgency: 'high');
       final log = _Recorder();
-      final llm = FakeLlm([decision(), answer()]);
+      final llm = draftClient(decision: decision(), draft: answer());
       final handler = DraftHandler(
         store,
         llm,
@@ -700,7 +677,7 @@ void main() {
         'payload_json': DraftRequest().encode(),
       });
 
-      expect(llm.calls, 2);
+      expect(llm.calls.length, 2);
       expect(log.notes['improve'], 'unwired');
       expect(log.notes.containsKey('improved'), isFalse);
       final draft = await store.getDraftForMessage('email', 'm1');
@@ -713,8 +690,8 @@ void main() {
     Future<_Recorder> runPrefetch({
       required bool asked,
       required CloudDraftLedger ledger,
-      required FakeLlm llm,
-      FakeLlm? decisionLlm,
+      required ScriptedLlm llm,
+      ScriptedLlm? decisionLlm,
     }) async {
       await seedInbound();
       final log = _Recorder();
@@ -740,27 +717,27 @@ void main() {
 
     test('is skipped at the cap, before the prose prompt is dialled', () async {
       await seedCloudUse();
-      final llm = FakeLlm([answer()]);
+      final llm = draftClient(draft: answer());
 
       final log = await runPrefetch(
         asked: false,
         ledger: ledgerOf(1),
         llm: llm,
-        decisionLlm: FakeLlm([decision()]),
+        decisionLlm: draftClient(decision: decision()),
       );
 
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
       expect(log.notes['reason'], 'cloud_cap');
       expect(await store.getDraftForMessage('email', 'm1'), isNull);
     });
 
     test('but a draft a person pressed for is written anyway', () async {
       await seedCloudUse();
-      final llm = FakeLlm([answer()]);
+      final llm = draftClient(draft: answer());
 
       final log = await runPrefetch(asked: true, ledger: ledgerOf(1), llm: llm);
 
-      expect(llm.calls, 1);
+      expect(llm.calls.length, 1);
       expect(log.notes['cloud'], 1);
       expect(await store.getDraftForMessage('email', 'm1'), isNotNull);
     });
@@ -769,11 +746,11 @@ void main() {
         'a retry', () async {
       await seedInbound();
       final log = _Recorder();
-      final llm = FakeLlm([answer()]);
+      final llm = draftClient(draft: answer());
       final handler = DraftHandler(
         store,
         llm,
-        decisionClient: FakeLlm([decision()]),
+        decisionClient: draftClient(decision: decision()),
         activityLog: log,
         routes: routes(
           draft: cloudTarget,
@@ -790,7 +767,7 @@ void main() {
         'payload_json': DraftRequest().encode(),
       });
 
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
       expect(log.notes['reason'], 'ledger_error');
       expect(log.notes.containsKey('cloud'), isFalse);
       expect(await store.getDraftForMessage('email', 'm1'), isNull);
@@ -800,11 +777,11 @@ void main() {
         'not retried', () async {
       await seedInbound();
       final log = _Recorder();
-      final llm = FakeLlm([answer()]);
+      final llm = draftClient(draft: answer());
       final handler = DraftHandler(
         store,
         llm,
-        decisionClient: FakeLlm([decision()]),
+        decisionClient: draftClient(decision: decision()),
         activityLog: log,
         // A third-party draft target and NO ledger: the wiring bug fails
         // closed as a skip, so the item is done rather than parked.
@@ -818,7 +795,7 @@ void main() {
         'payload_json': DraftRequest().encode(),
       });
 
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
       expect(log.notes['reason'], 'unwired');
       expect(log.notes.containsKey('cloud'), isFalse);
       expect(await store.getDraftForMessage('email', 'm1'), isNull);

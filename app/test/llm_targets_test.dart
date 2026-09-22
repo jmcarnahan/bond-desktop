@@ -854,6 +854,216 @@ void main() {
     });
   });
 
+  group('the shared GPU box as a placement', () {
+    const url = 'https://box.example.com';
+    // A fictional string, and the only "key" anywhere in this file.
+    const key = 'sk-fixture-not-a-real-box-key';
+
+    test('adoptBox writes the two targets, one key, and the placement',
+        () async {
+      final tokens = MemoryTokenStore();
+      final prefs = await notifier(tokens);
+
+      await prefs.adoptBox(baseUrl: url, bearer: key);
+
+      final prose = prefs.state.specById(boxProseId)!;
+      final bulk = prefs.state.specById(boxBulkId)!;
+      expect(prose.name, boxProseName);
+      expect(prose.url, 'https://box.example.com/prose/v1/chat/completions');
+      expect(prose.model, boxProseModel);
+      expect(prose.parallel, 4);
+      expect(prose.streams, isTrue);
+      expect(bulk.name, boxBulkName);
+      expect(bulk.url, 'https://box.example.com/bulk/v1/chat/completions');
+      expect(bulk.model, boxBulkModel);
+      expect(bulk.parallel, 4);
+      expect(bulk.streams, isTrue);
+
+      expect(prefs.state.modelPlacement, ModelPlacement.box);
+      expect(prefs.state.draftPolicy, DraftPolicy.needsYou);
+    });
+
+    test('a trailing slash on the address does not double up', () async {
+      final prefs = await notifier();
+      await prefs.adoptBox(baseUrl: '  https://box.example.com///  ',
+          bearer: key);
+
+      expect(prefs.state.specById(boxProseId)!.url,
+          'https://box.example.com/prose/v1/chat/completions');
+    });
+
+    test('an address that is not an http origin is refused', () async {
+      // The last line rather than the validation: the Settings pane and the
+      // wizard both disable their way forward on an empty field. What this
+      // stops is two targets nothing can dial and a placement that parks the
+      // whole pipeline.
+      final prefs = await notifier();
+
+      for (final bad in ['', '   ', 'box.example.com', 'ftp://box', '///']) {
+        await expectLater(
+          prefs.adoptBox(baseUrl: bad, bearer: key),
+          throwsA(isA<ArgumentError>()
+              .having((e) => e.name, 'name', 'baseUrl')
+              .having((e) => e.message, 'message',
+                  contains('http or https origin'))),
+          reason: bad,
+        );
+      }
+
+      // Nothing was written by any of them.
+      expect(prefs.state.targets, isEmpty);
+      expect(prefs.state.modelPlacement, ModelPlacement.local);
+      expect(prefs.state.stageTargets, isEmpty);
+    });
+
+    test('a plain http origin is allowed, for a box behind a tunnel',
+        () async {
+      final prefs = await notifier();
+
+      await prefs.adoptBox(baseUrl: 'http://localhost:18100', bearer: key);
+
+      expect(prefs.state.specById(boxProseId)!.url,
+          'http://localhost:18100/prose/v1/chat/completions');
+    });
+
+    test('the one key lands under both keychain ids and in no pref', () async {
+      final tokens = MemoryTokenStore();
+      final prefs = await notifier(tokens);
+
+      await prefs.adoptBox(baseUrl: url, bearer: key);
+
+      expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'], key);
+      expect(tokens.values['$llmTargetBearerKeyPrefix$boxBulkId'], key);
+      for (final value in await prefValues()) {
+        expect(value, isNot(contains(key)));
+      }
+      // What the table carries is the presence flag, twice.
+      expect(prefs.state.specById(boxProseId)!.hasBearer, isTrue);
+      expect(prefs.state.specById(boxBulkId)!.hasBearer, isTrue);
+      // And the one door onto the cache answers for both.
+      expect(prefs.bearerFor(boxProseId), key);
+      expect(prefs.bearerFor(boxBulkId), key);
+      expect(prefs.bearerFor('nobody'), isNull);
+    });
+
+    test('the confirm lands on the 27B and the other seven on the 4B',
+        () async {
+      final prefs = await notifier();
+
+      await prefs.adoptBox(baseUrl: url, bearer: key);
+
+      final map = prefs.state.stageTargets;
+      expect(map['storyline_membership'], boxProseId,
+          reason: 'the row of record puts the confirm on the 27B');
+      for (final id in bulkStageIds) {
+        if (id == 'storyline_membership') continue;
+        expect(map[id], boxBulkId, reason: id);
+      }
+      for (final id in proseStageIds) {
+        expect(map[id], boxProseId, reason: id);
+      }
+      // The one stage no preset writes: a routing destination somebody picks
+      // on purpose, never turned on by adopting a server.
+      expect(map.containsKey('draft_improve'), isFalse);
+      // A box hostname is NOT third party, so the drafts guard does not fire
+      // and `draft_reply` is written like every other prose stage.
+      expect(map['draft_reply'], boxProseId);
+    });
+
+    test('the preset ORDER is bulk first, then prose and confirm', () async {
+      // The pin. `storyline_membership` is in both preset lists, so whichever
+      // call runs second owns it. Swap the two lines in `adoptBox` and the
+      // confirm silently drops to the 4B, moving the storyline numbers with
+      // no code looking wrong. This test is the only thing that notices.
+      final prefs = await notifier();
+      await prefs.adoptBox(baseUrl: url, bearer: key);
+      expect(prefs.state.stageTargets['storyline_membership'], boxProseId);
+
+      // Read the other way round too: applying them in the WRONG order on the
+      // same two targets leaves the confirm on the 4B, which is the outcome
+      // `adoptBox` is ordered to avoid.
+      await prefs.applyPreset(targetId: boxProseId, prose: true, confirm: true);
+      await prefs.applyPreset(targetId: boxBulkId, bulk: true);
+      expect(prefs.state.stageTargets['storyline_membership'], boxBulkId);
+    });
+
+    test('adopting twice replaces the pair rather than stacking it', () async {
+      final prefs = await notifier();
+
+      await prefs.adoptBox(baseUrl: url, bearer: key);
+      await prefs.adoptBox(baseUrl: 'https://box2.example.com', bearer: key);
+
+      expect(prefs.state.targets.where((t) => t.id == boxProseId), hasLength(1));
+      expect(prefs.state.targets.where((t) => t.id == boxBulkId), hasLength(1));
+      expect(prefs.state.specById(boxBulkId)!.url,
+          'https://box2.example.com/bulk/v1/chat/completions');
+    });
+
+    test('adoptLocal removes both targets, both keys and every stage entry',
+        () async {
+      final tokens = MemoryTokenStore();
+      final prefs = await notifier(tokens);
+      await prefs.adoptBox(baseUrl: url, bearer: key);
+
+      await prefs.adoptLocal(MachineTier.full);
+
+      expect(prefs.state.modelPlacement, ModelPlacement.local);
+      expect(prefs.state.specById(boxProseId), isNull);
+      expect(prefs.state.specById(boxBulkId), isNull);
+      expect(tokens.values.containsKey('$llmTargetBearerKeyPrefix$boxProseId'),
+          isFalse);
+      expect(tokens.values.containsKey('$llmTargetBearerKeyPrefix$boxBulkId'),
+          isFalse);
+      expect(prefs.bearerFor(boxProseId), isNull);
+      // The full tier writes nothing, so a machine that adopted the box and
+      // changed its mind is back to a fresh install's empty map.
+      expect(prefs.state.stageTargets, isEmpty);
+      expect(prefs.state.draftPolicy, DraftPolicy.needsYou);
+    });
+
+    test('adoptLocal on a small Mac restores the inbox tier, not an empty map',
+        () async {
+      final prefs = await notifier();
+      await prefs.adoptBox(baseUrl: url, bearer: key);
+
+      await prefs.adoptLocal(MachineTier.inbox);
+
+      expect(prefs.state.stageTargets,
+          {for (final id in proseStageIds) id: builtInFastId});
+      expect(prefs.state.draftPolicy, DraftPolicy.onDemand);
+    });
+
+    test('applyTierDefaults(remote) is a no-op, so it cannot undo adoptBox',
+        () async {
+      final prefs = await notifier();
+      await prefs.adoptBox(baseUrl: url, bearer: key);
+      final before = Map.of(prefs.state.stageTargets);
+
+      await prefs.applyTierDefaults(MachineTier.remote);
+
+      expect(prefs.state.stageTargets, before);
+      expect(prefs.state.draftPolicy, DraftPolicy.needsYou);
+    });
+
+    test('the placement survives a wipe, like the other machine prefs',
+        () async {
+      final prefs = await notifier();
+      await prefs.adoptBox(baseUrl: url, bearer: key);
+
+      await store.wipeAll();
+
+      final after = await AppPrefsNotifier.read(store);
+      expect(after.modelPlacement, ModelPlacement.box);
+      expect(after.specById(boxProseId), isNotNull);
+    });
+
+    test('a fresh install is on this Mac', () async {
+      final prefs = await notifier();
+      expect(prefs.state.modelPlacement, ModelPlacement.local);
+      expect(await store.getPref(modelPlacementKey), isNull);
+    });
+  });
+
   test('the three keys survive a wipe, like prose_parallel', () async {
     final prefs = await notifier();
     await prefs.upsertTarget(box);

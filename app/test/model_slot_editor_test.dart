@@ -29,7 +29,7 @@ void main() {
     LlmTarget current = _default,
     LlmTarget compiledDefault = _default,
     bool isDefault = true,
-    Future<ModelProbeResult> Function(String)? probe,
+    Future<ModelProbeResult> Function(String, {String? bearer})? probe,
     void Function({required String url, required String model})? onSave,
     VoidCallback? onReset,
     bool wireProbe = true,
@@ -49,7 +49,8 @@ void main() {
             probe: !wireProbe
                 ? null
                 : probe ??
-                    (_) async => const ModelProbeResult(reachable: true),
+                    (_, {bearer}) async =>
+                        const ModelProbeResult(reachable: true),
             onSave: onSave ?? ({required url, required model}) {},
             onReset: onReset ?? () {},
           ),
@@ -113,7 +114,7 @@ void main() {
   testWidgets('Check server asks about the URL in the FIELD, and lists what it '
       'finds', (tester) async {
     final asked = <String>[];
-    await pump(tester, probe: (url) async {
+    await pump(tester, probe: (url, {bearer}) async {
       asked.add(url);
       return ModelProbeResult(
         reachable: true,
@@ -148,7 +149,7 @@ void main() {
   testWidgets('picking a listed model makes the editor dirty', (tester) async {
     await pump(
       tester,
-      probe: (_) async => const ModelProbeResult(
+      probe: (_, {bearer}) async => const ModelProbeResult(
         reachable: true,
         modelIds: ['qwen3-4b', 'qwen3.8'],
       ),
@@ -286,7 +287,7 @@ void main() {
         model: 'qwen3.8',
       ),
       isDefault: false,
-      probe: (_) async => ModelProbeResult(
+      probe: (_, {bearer}) async => ModelProbeResult(
         reachable: false,
         probedUrl: Uri.parse('http://127.0.0.1:9000/v1/models'),
         error: 'Nothing is listening at 127.0.0.1:9000',
@@ -317,7 +318,7 @@ void main() {
     await pump(
       tester,
       current: const LlmTarget(baseUrl: _defaultUrl, model: 'mystery'),
-      probe: (_) async =>
+      probe: (_, {bearer}) async =>
           const ModelProbeResult(reachable: true, modelIds: ['qwen3-4b']),
     );
     await check(tester);
@@ -334,7 +335,7 @@ void main() {
       'server status', (tester) async {
     await pump(
       tester,
-      probe: (_) async => const ModelProbeResult(
+      probe: (_, {bearer}) async => const ModelProbeResult(
         reachable: false,
         error: 'Not a model server URL — expected something ending in /v1/…',
       ),
@@ -356,7 +357,7 @@ void main() {
       (tester) async {
     await pump(
       tester,
-      probe: (_) async => const ModelProbeResult(reachable: true),
+      probe: (_, {bearer}) async => const ModelProbeResult(reachable: true),
     );
     await check(tester);
 
@@ -375,7 +376,7 @@ void main() {
       (tester) async {
     await pump(
       tester,
-      probe: (_) async =>
+      probe: (_, {bearer}) async =>
           const ModelProbeResult(reachable: true, modelIds: ['qwen3-4b']),
     );
     await check(tester);
@@ -453,7 +454,7 @@ void main() {
   testWidgets('a probe landing after the editor is gone does nothing',
       (tester) async {
     final pending = Completer<ModelProbeResult>();
-    await pump(tester, probe: (_) => pending.future);
+    await pump(tester, probe: (_, {bearer}) => pending.future);
 
     await tester.tap(find.byKey(ModelSlotEditor.checkKey(ModelSlot.fast)));
     await tester.pump();
@@ -469,7 +470,7 @@ void main() {
     // The probe's own contract is never to throw; this is the editor keeping
     // that promise on the probe's behalf, because a settings screen must not
     // crash on diagnostics.
-    await pump(tester, probe: (_) async => throw StateError('socket'));
+    await pump(tester, probe: (_, {bearer}) async => throw StateError('socket'));
     await check(tester);
 
     expect(tester.takeException(), isNull);
@@ -480,7 +481,7 @@ void main() {
   testWidgets('an answer for a URL that was edited away is dropped',
       (tester) async {
     final pending = Completer<ModelProbeResult>();
-    await pump(tester, probe: (_) => pending.future);
+    await pump(tester, probe: (_, {bearer}) => pending.future);
     await tester.tap(find.byKey(ModelSlotEditor.checkKey(ModelSlot.fast)));
     await tester.pump();
     expect(find.text('Checking…'), findsOneWidget);

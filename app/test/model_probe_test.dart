@@ -170,4 +170,65 @@ void main() {
       expect(asked, isFalse);
     });
   });
+
+  group('the bearer', () {
+    /// One probe against a recording client, so each case can read the exact
+    /// headers the request carried.
+    Future<(ModelProbeResult, Map<String, String>)> ask({
+      String? bearer,
+      int status = 200,
+      String body = '{"data": [{"id": "qwen3.8"}]}',
+    }) async {
+      var headers = <String, String>{};
+      final probe = ModelServerProbe(
+        httpClient: MockClient((request) async {
+          headers = request.headers;
+          return http.Response(body, status);
+        }),
+      );
+      final result = await probe.probe(
+        'https://box.example.com/prose/v1/chat/completions',
+        bearer: bearer,
+      );
+      return (result, headers);
+    }
+
+    test('a keyed endpoint is asked with the Authorization header', () async {
+      final (result, headers) = await ask(bearer: 'k');
+
+      expect(headers['Authorization'], 'Bearer k');
+      expect(headers['Accept'], 'application/json');
+      expect(result.reachable, isTrue);
+      expect(result.modelIds, ['qwen3.8']);
+    });
+
+    test('no bearer and an empty bearer send no Authorization header',
+        () async {
+      // Empty is the same answer as null on purpose. A field somebody cleared
+      // must not turn into `Authorization: Bearer `, which a keyed server
+      // rejects with a different error than the one that is true.
+      for (final token in [null, '']) {
+        final (_, headers) = await ask(bearer: token);
+        expect(headers.containsKey('Authorization'), isFalse,
+            reason: token == null ? 'null' : 'empty');
+      }
+    });
+
+    test('a refused key appears in no field of the result', () async {
+      // The whole discipline in one assertion: the probe is the only place a
+      // stored token is handed to a widget's call, and what comes back is
+      // rendered on a settings screen.
+      final (result, _) = await ask(bearer: 'sekret', status: 401, body: 'no');
+
+      expect(result.reachable, isFalse);
+      expect(result.error, isNotNull);
+      final rendered = [
+        result.error ?? '',
+        result.probedUrl?.toString() ?? '',
+        result.modelIds.join(','),
+        result.toString(),
+      ].join(' ');
+      expect(rendered, isNot(contains('sekret')));
+    });
+  });
 }

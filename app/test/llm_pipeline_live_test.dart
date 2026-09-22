@@ -304,7 +304,8 @@ void main() {
         userAddress: userAddress,
         concurrency: 3,
         gate: fastGate,
-        onDrained: () async => unawaited(track('fast', worker.pump())),
+        onDrained: (triaged) async =>
+            unawaited(track('fast', worker.pump(first: triaged))),
       );
       addTearDown(queue.dispose);
 

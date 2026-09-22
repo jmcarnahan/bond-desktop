@@ -8,30 +8,11 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/gate_repair_service.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
-
-/// An [LlmClient] that would throw if anything dialled it. Nothing here does:
-/// a repair is store work, and a model call in it would be a bug this fake
-/// turns into a failure.
-class NeverCalledLlm extends LlmClient {
-  NeverCalledLlm() : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async =>
-      throw StateError('the repair asked a model something');
-}
 
 /// A store whose kept-count throws, for the one test about failing soft.
 class BrokenStore extends MessageStore {
@@ -64,7 +45,10 @@ void main() {
   GateRepairService serviceOn(MessageStore on, {DrainGate? storylineGate}) =>
       GateRepairService(
         on,
-        StorylineService(on, NeverCalledLlm()),
+        // A client that would throw if anything dialled it. Nothing here
+        // does: a repair is store work, and a model call in it would be a bug
+        // this fixture turns into a failure.
+        StorylineService(on, ScriptedLlm.never(label: 'the repair')),
         activityLog: ActivityLog(on),
         storylineGate: storylineGate,
       );

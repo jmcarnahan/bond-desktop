@@ -21,6 +21,7 @@ import 'setup_notifications_body.dart';
 import 'setup_signin_body.dart';
 import 'setup_storage_body.dart';
 import 'setup_welcome_body.dart';
+import 'setup_where_body.dart';
 
 /// The first run, laid out.
 ///
@@ -167,6 +168,23 @@ class _SetupFlowState extends ConsumerState<SetupFlow> {
           proseName: prose.displayName,
           fullTierMinRamBytes: fullTierMinBytes,
           onContinue: next,
+        );
+      case SetupStep.where:
+        // The third step whose Continue is not the shared `next`: the press
+        // carries the typed access key, which lives in the body's own
+        // controller and in no state anywhere.
+        return SetupWhereBody(
+          placement: state.placement,
+          boxUrl: state.boxUrl,
+          probeResult: state.boxProbe,
+          probing: state.boxProbing,
+          onChoose: (choice) => choice == ModelPlacement.box
+              ? _controller.chooseBox()
+              : _controller.chooseLocal(),
+          onUrlChanged: _controller.setBoxUrl,
+          onCheck: (key) => unawaited(_controller.checkBox(key)),
+          onContinue: (key) =>
+              unawaited(_controller.continueFromWhere(key)),
         );
       case SetupStep.models:
         return SetupModelsBody(

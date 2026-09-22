@@ -46,6 +46,40 @@ presses **Use this Mac's defaults** under Settings, Models. It writes the way a
 preset does, so an entry equal to a stage's own default is removed rather than
 stored and a fresh install on a big Mac still holds an empty object.
 
+**The shared GPU box is a PLACEMENT, the one recommended and offered first.**
+`ModelPlacement` (`box` or `local`, stored in `model_placement`) is a machine
+preference, not a reading of the hardware: the same Mac can be pointed at the
+box today and at its own servers tomorrow. It is offered first in two places,
+the wizard's **Where the models run** step and one press in Settings, but the
+shipped default value is `local`: `AppPrefs.modelPlacement` defaults to `local`,
+the wizard's step starts with neither card chosen, and the box card wants an
+address and a pasted key, so a machine runs on its own servers until that card
+or the Settings button is used. On the box placement the map above is replaced
+wholesale:
+
+| Stage group | Target | Model |
+|-------------|--------|-------|
+| the eight bulk stages | `GPU box · inbox` (`box-bulk`) | `qwen3-4b` |
+| the six prose stages | `GPU box · writing` (`box-prose`) | `qwen3.8` |
+| `storyline_membership`, the confirm | `GPU box · writing` (`box-prose`) | `qwen3.8` |
+| `draft_improve` | none until picked | nothing |
+| `embeddings` | not routed, and stays on this Mac | `make embed` |
+
+`storyline_membership` appears twice on purpose: it is in both `bulkStageIds`
+and `confirmStageIds`, and `adoptBox` applies the bulk preset FIRST and the
+prose-and-confirm preset SECOND, which is what leaves the confirm on the
+writing model. That is the row of record, 84 of 98 with 8% wrong accepts.
+`llm_targets_test.dart` pins the order, because swapping the two calls drops
+the confirm to the 4B and moves the storyline numbers with no code looking
+wrong.
+
+**What travels, on that placement.** Message text, attachment text and drafts
+go to the owner's own AWS instance over TLS, keyed with an api-key that lives
+in this Mac's keychain. The embedding model stays here, so every vector is
+written on this machine. That is the whole of what leaves, and it is why the
+box is not a third-party target: it is a machine this install's owner rents,
+pays for and runs.
+
 The map is only half of what `applyTierDefaults` writes. The other half is the
 draft policy: the `inbox` tier gets `DraftPolicy.onDemand`, because the inbox
 model's drafts are unmeasured and nobody should pay for one unasked, and the
@@ -115,10 +149,14 @@ and without interrupting work in flight.
   `LlmTarget.toString()`. A keychain that refuses costs the header on the next
   request, never the launch and never the write of the spec.
 - **Third-party drafts sit behind one consent.** A target is THIRD PARTY when
-  it speaks the Converse wire or its host is under `amazonaws.com`,
-  `anthropic.com`, `openai.com` or `deepseek.com` (`isThirdPartyHost`).
-  Loopback is deliberately not the test: the GPU box arrives on an `ssh`
-  tunnel at `localhost:18100`. Such a target on `draft_reply` or
+  it speaks the Converse wire, or its host is under `anthropic.com`,
+  `openai.com` or `deepseek.com`, or it is a Bedrock runtime host — `bedrock`
+  at the front and `.amazonaws.com` at the end (`isThirdPartyHost`). AWS as a
+  whole is NOT the test, and was until Round G: the shared GPU box is an EC2
+  instance the owner rents and runs, whether it is reached by a Route 53 name
+  or by the public name AWS gave it, and mail going there is not mail going to
+  a vendor. Loopback is deliberately not the test either: the box also arrives
+  on an `ssh` tunnel at `localhost:18100`. Such a target on `draft_reply` or
   `draft_improve` needs `cloud_drafts_consent`; without it `draft_reply`
   resolves back to `Local prose` and `draft_improve` resolves to nothing. The
   check lives in `AppPrefs.specForStage`, where the target is RESOLVED, so a
@@ -331,22 +369,36 @@ twenty-seven-billion-parameter prose model is still being mapped.
 | `sizeBytes`, `sha256` | The measured size and the LFS oid. Both are checked against the hub's `X-Linked-Size` / `X-Linked-ETag` on the redirect, so a manifest that is wrong about a file is caught before eighteen gigabytes are spent. |
 | `minRamBytes` | What the machine must have. 0 when it always fits. Nothing refuses on it: which checkpoints a Mac takes is the tier's answer, and this is the number the wizard quotes when it says why the writing model is not among them. |
 | `license`, `licenseUrl`, `notice` | What the first-run screen shows. `notice` is null for the permissive ones, so a screen can skip the line entirely rather than render an empty string. |
+| `sidecar` | Optional. A SECOND file the entry cannot be served without — today the writing model's MTP head — as `file`, `revision`, `sha256` and `sizeBytes`. No `repo` of its own: it lives in the parent's, which is also the folder it downloads into. Validated by the same rules as the entry's own fields, with the messages prefixed `sidecar.`. |
 | `serverArgs` | llama-server's long flags with the leading dashes stripped — the spelling the preset INI wants. Values are strings; the INI writer prints them verbatim. |
 | `tiers` | The machine ladder, one entry per tier: `id` (a `MachineTier` name), `minRamBytes`, the `models` that tier downloads and starts, and optional `serverArgs` overrides per id, merged onto the entry's own. |
 
-**The tiers, and what a resolved manifest is.** Two rungs, chosen from
-`hw.memsize` alone and stored nowhere:
+**The tiers, and what a resolved manifest is.** Two rungs chosen from
+`hw.memsize` alone and stored nowhere, and one that is not a rung at all:
 
 | tier | starts at | models | what differs |
 |---|---|---|---|
 | `full` | 40 GiB | the embedding model, the inbox model, the writing model | nothing; this is the manifest as written |
 | `inbox` | 0 | the embedding model, the inbox model | the writing model is neither downloaded nor started, and the inbox model runs at `c = 16384` over `parallel = 2` |
+| `remote` | not a memory rung | the embedding model | the inbox and writing stages are on the shared GPU box, so this Mac downloads and starts one model |
+
+`remote` is what the box PLACEMENT resolves to, not what a machine's memory
+says: `machineTierFor` never returns it at any byte count, and
+`effectiveTierProvider` answers it whenever `model_placement` is `box`. Its
+`minRamBytes` must be 0 and the parser refuses anything else, because the
+ladder that decides which memory rung a Mac is on is built over the other two
+and a second zero in it would make "the lowest tier" a coin toss.
+`tierStageDefaults(remote)` is empty and must stay empty:
+`applyTierDefaults` builds the set of stages it governs from the union of every
+tier's keys, so a stage named there would be cleared on a machine that never
+saw the box. `applyTierDefaults` returns at once on `remote` for the same
+reason from the other side: `adoptBox` owns that placement's stage map.
 
 `ModelManifest.forTier(MachineTier)` returns a RESOLVED manifest: the same
 class, holding only that tier's entries with its overrides merged in. The
 wizard's device step, its models rows and total, the disk preflight, the
 download run, the ledger check and the preset the supervisor writes all read
-the resolved view, so a Mac under the floor downloads 4.6 GB rather than 22.3,
+the resolved view, so a Mac under the floor downloads 4.6 GB rather than 23.8,
 starts two servers rather than three, and is never sent back through the wizard
 for a file its tier never wanted. A resolved view may have no prose model, which
 is what `byRoleOrNull` is for; `byRole` still throws, and the master list still
@@ -354,7 +406,8 @@ carries exactly one model per role.
 
 The parser refuses a ladder it cannot trust: a tier id that is not a
 `MachineTier` name, a rung named twice, a rung missing, a model id the manifest
-does not ship, a tier without the embedding or the inbox model, a ladder that
+does not ship, a tier without the embedding model, a tier other than `remote`
+without the inbox model, a `remote` tier with a memory floor, a ladder that
 does not start at zero, and a `full` tier whose `minRamBytes` is not the
 `fullTierMinBytes` this build was compiled with. The last one is what keeps the
 JSON and `model_slots.dart` from drifting apart about where the writing model
@@ -388,17 +441,51 @@ here instead:
   slot, 4K a slot for the bulk one at four. The Makefile's `CTX_SIZE` default is
   the same number, and `app/test/manifest_makefile_parity_test.dart` is what
   says the two cannot drift.
-- **No `spec-type`, deliberately.** `make model` launches the prose model with
-  `--spec-type draft-mtp`, its own MTP head, which is worth about 4 tok/s of
-  decode on the maintainer's machine — and the preset INI could carry the flag
-  verbatim, since the bundled llama-server (b10896, reporting 0.4.0-dev) still
-  spells it that way. What it cannot carry is the sidecar: `draft-mtp` needs the
-  `mtp-…` GGUF, and llama-server resolves that from the repo an `-hf` download
-  came from. The managed preset names a local PATH, and the manifest ships
-  three files with no sidecar among them, so the flag would find no draft model
-  and the launch would be the one thing a first run cannot survive. The managed
-  server therefore runs the prose model plain until the manifest ships the
-  sidecar as a fourth file and the preset names it.
+- **`spec-type = draft-mtp`, and the sidecar that makes it legal.** Since Round
+  G the prose entry carries a `sidecar` — `mtp-Qwen3.8-27B-Q4_0.gguf`, 1.6 GB,
+  at the same commit as the weights — and its `serverArgs` carry the flag. The
+  two travel together and neither is safe alone: `draft-mtp` is worth about
+  4 tok/s of decode on the maintainer's machine, and a `draft-mtp` with no head
+  to load is the one thing a first run cannot survive.
+
+  `make model` gets the head for free, because llama-server resolves it from
+  the repo an `-hf` download came from. The managed preset names a local PATH,
+  so it has to say where the head is, and `RouterPreset.toIni` writes it:
+
+  ```
+  [bond-prose]
+  model = <folder>/ggml-org_Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf
+  model-draft = <folder>/ggml-org_Qwen3.8-27B-GGUF/mtp-Qwen3.8-27B-Q4_0.gguf
+  c = 16384
+  parallel = 1
+  load-on-startup = true
+  spec-type = draft-mtp
+  ```
+
+  The draft line sits immediately after `model` and before the flags, unquoted
+  for the same reason `model` is: llama-server's INI parser reads a value to
+  end of line, and a helpfully quoted path arrives with its quotes still in it.
+  The path is DERIVED from the manifest, never a literal in `serverArgs` — the
+  downloader's folder and the preset's are the same rule in one place.
+
+  **`model-draft` as a per-model key in a `--models-preset` INI is the expected
+  spelling of llama-server's `--model-draft` flag, and it is UNVERIFIED.** The
+  INI writer prints every key as that model's flag and nothing in this repo
+  names this one; the bundled build is b10896 (reporting 0.4.0-dev); and the
+  gate cannot run llama-server. It stays unverified until the managed server
+  has been started with the sidecar on disk and its log names a draft model.
+  A wrong key fails loudly at startup rather than quietly, which is why it is
+  safe to ship in this state and not safe to assume.
+
+  **Why it is nested rather than a fourth entry.** Every item in `models` is a
+  section in the preset, a role the router serves and a file the supervisor
+  waits for, and the parser allows exactly one model per role. A fourth entry
+  would need a fourth `ModelRole` that rule forbids, and it would raise
+  `--models-max`. Nested, the head is one more FILE on an entry that already
+  has one: the downloader fetches it after its parent under the ledger row
+  `bond-prose.draft`, the preflight budgets its bytes, `DownloadLedger.isCurrent`
+  wants both rows before it calls the checkpoint current, and the wizard draws
+  one bar and one row that says `+ MTP head, 1.6 GB` under the size.
 
 ### The downloader
 
@@ -509,9 +596,48 @@ what Bond is would be the app asking for credentials as its opening line.
 - Per-request timeout, per slot (`llm_client.dart`): **90 s on the prose
   client** (`LlmClient.proseTimeout`), **120 s on the bulk one**. 5xx →
   unavailable/park;
-  429 (a throttled cloud server) → unavailable/park as well; timeout →
+  429 (a throttled cloud server) → unavailable/park as well; **401 and 403 →
+  unavailable/park too**, as `LlmUnauthorizedException`, since Round G; timeout →
   counted against the item; HTTP 400 → fatal, never retried — which
   is what a model name the server does not have looks like.
+- **A refused key parks rather than spending the backlog.** A wrong api-key
+  answers every item identically, so counting it against each one would burn
+  the whole queue's attempts in seconds and fill the activity log with one
+  error a hundred times. `LlmUnauthorizedException` is a subclass of
+  `LlmUnavailableException`, so every existing `on LlmUnavailableException` arm
+  catches it unchanged; what the subclass buys is the reason the drains record.
+  Its sentence reads `The model server at <url> refused the access key. Check
+  it in Settings, Models.`, and `redactEndpoints` takes the URL out of every
+  row it is written into.
+- **Parking is VISIBLE, and nothing polls for it.** Both drains carry the
+  reason on their progress streams — `WorkProgress.parkedReason` and
+  `TriageProgress.parkedReason`, one of `model_unavailable`, `unauthorized` or
+  `session` — and `parkedProvider` merges them. Triage keeps one slot and the
+  worker lanes keep ONE SLOT PER KIND, because `AiWorkers` forwards three lanes
+  onto one stream and a drain emits per handler even when that handler had no
+  rows: a single slot would let the storyline lane's empty emit erase the fast
+  lane's park a microsecond after it happened. The reason is triage's, else the
+  first non-null across the kinds in a stable order; the count is triage plus
+  the sum over the kinds. The inbox rail renders one sentence from it:
+
+  | reason | placement | sentence |
+  |---|---|---|
+  | `model_unavailable` | box | `GPU box unreachable · N waiting · retrying each minute` |
+  | `model_unavailable` | local | `Model server unreachable · N waiting · retrying each minute` |
+  | `unauthorized` | box | `GPU box refused the access key · N waiting` |
+  | `unauthorized` | local | `Model server refused the access key · N waiting` |
+  | `session` | either | today's `Triaging N remaining…` |
+
+  Processing being off still wins over all five. Settings, Models carries the
+  same fact as one line under the placement block. **What clears it is the next
+  pump**: the reason is dropped at the top of `pump()` and again on the first
+  item that gets through, so the line goes away because work got done rather
+  than on a timer. Pumps come from the inbox's own sixty-second poll and from
+  `ModelServerSupervisor.onReady`, which is the only cadence the sentence
+  claims. A refused key claims no retry at all, because retrying will not help
+  until somebody fixes it. `N` is the WHOLE pipeline's backlog, triage and the
+  three lanes together, so a parked worker queue is still reported once triage
+  itself has nothing left.
 - `TriageQueue` and the FAST `AiWorker` share one `DrainGate`
   (`app/lib/services/drain_gate.dart`) so those two drains never compete for
   the fast server's slots. The storyline and draft lanes hold their own gates
@@ -545,6 +671,64 @@ server would break it. The draft is alone because it is the one kind a person
 sits and waits for. Where the two prose lanes genuinely contend the SERVER
 queues them, so the worst case for an asked-for draft is one recap rather than
 a drain pass.
+
+**The newest message goes first.** Since Round G the fast gate carries one
+flag as well as its queue. A triage pump that finds something waiting asks for
+a yield and enqueues its own drain in the same step. The fast worker reads
+that flag only where it is about to claim its next item, so the item already
+at the server is never abandoned and the pass simply ends there. The gate goes
+back to the queue, triage runs, and the worker walks again from the top. The
+ask is a ticket rather than a latch: the drain queued at or after it clears it
+as its body starts, so the flag cannot outlive one handoff and neither side
+can starve the other. The messages triage just decided on then run ahead of
+the backlog, and they do not wait for the current pass to end. Those pairs
+ride the `onDrained` callback into `pump`, and the worker serves them at its
+next claim boundary, which is the moment before it would have taken another
+backlog row. The priority pass claims each of them through every fast handler
+in the walk's own order and then the walk carries on with the kind it was
+part way through. Serving them only at the top of the next pass was measured
+on the shared box and was not enough: a named message's extraction still
+waited behind every needs-you in the backlog. A message that arrives
+mid-backlog therefore costs its own triage, its own needs-you and its own
+extraction, plus whatever item was in flight when it landed, instead of a full
+pass over everybody else's. The claim behind the pass repeats the untriaged
+guard verbatim, so a named message that triage has not yet spoken about is
+refused and the ordinary walk collects it once the verdict lands. The pass
+itself reads no yield, because it is the work a yield was asked for and
+stopping inside it would starve the very message that prompted the ask. At
+most eight messages ride one pass; the rest are ordinary pending rows a moment
+later. Nothing here touches the draft lane or the storyline lane, which hold
+gates of their own, and nothing changes the sixty-second poll.
+
+**What the lane is worth, measured 2026-09-21.** `make bench-pipeline` upserts
+one extra message at the moment the prose server starts its first draft and
+times it to its own extraction finishing, over 48 ungated messages at policy
+`all` and width 1 in the `lanes` shape. Both slots on the box means bulk on the
+box 4B-FP8 and prose on the box 27B-FP8, reached over TLS.
+
+| tree and placement | needs-you at | extraction done at |
+|---|---|---|
+| Round F, both slots on the box | not taken | 32 s |
+| Round G Phase 3 tip, both slots on the box | 5.6 s | 22.8 s |
+| Round G final tree, both slots on the box, pass 1 | 5.1 s | 6.9 s |
+| Round G final tree, both slots on the box, pass 2 | 5.4 s | 7.2 s |
+| Round G Phase 3 tip, all local, under load | 10.9 s | 72.4 s |
+| Round G final tree, all local, under swap | 10.1 s | 13.2 s |
+| Round F, all local | not taken | 91.4 s |
+
+The Phase 3 tip is the row that explains the shape of the fix. The yield alone
+took the late arrival from 32 s to 22.8 s, and the stage split says the
+priority pass never actually served that message: its needs-you ran early only
+by claim order, and its extraction waited behind every needs-you in the
+backlog, because refs handed to a pass that had already started with an empty
+priority list were consumed only at the next pass top. Serving them at every
+handler boundary and before every claim is what closes it, and it is the same
+shape on both machines, which is why the local row is quoted here although its
+walls were taken under load and are not comparable. On the final tree the same
+message is extracted 7.2 s after it lands, against 22.8 s before the fix and
+32 s before the round, and the backlog's own walls do not move. The local
+final-tree pass falls the same way, 13.2 s against 72.4 s under comparable
+load, although its own walls were taken with the machine in swap.
 
 **…and one switch.** Model work runs only while **AI processing** is on. The
 switch is the first row of the sidebar's list header (`InboxScreen._listHeader`,

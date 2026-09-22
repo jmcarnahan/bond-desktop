@@ -2,11 +2,11 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/conversations_provider.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// How the inbox kicks its two queues.
@@ -55,35 +55,28 @@ class LoggingHandler extends WorkHandler {
   }
 }
 
-/// An [LlmClient] that logs around each call, so a triage run and an AI run
+/// A [ScriptedLlm] that logs around each call, so a triage run and an AI run
 /// can be seen not to overlap.
-class LoggingLlm extends LlmClient {
-  final List<String> log;
-
-  LoggingLlm(this.log) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    log.add('triage:start');
-    await Future<void>.delayed(const Duration(milliseconds: 5));
-    log.add('triage:end');
-    return {
-      'urgency': 'normal',
-      'category': 'other',
-      'summary': 'A summary.',
-      'needs_action': false,
-      'action_items': <String>[],
-    };
-  }
-}
+///
+/// The logging is a COMPUTED step rather than a subclass: the list it writes
+/// into belongs to the test, and a closure can be handed it where a class had
+/// to be constructed around it. `fallback` rather than a schema name because
+/// this client answers whatever triage asks it, which is what the double it
+/// replaces did.
+ScriptedLlm loggingLlm(List<String> log) => ScriptedLlm(
+      fallback: (LlmCall call) async {
+        log.add('triage:start');
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        log.add('triage:end');
+        return <String, dynamic>{
+          'urgency': 'normal',
+          'category': 'other',
+          'summary': 'A summary.',
+          'needs_action': false,
+          'action_items': <String>[],
+        };
+      },
+    );
 
 void main() {
   late BondDatabase db;
@@ -121,7 +114,7 @@ void main() {
     await seedPendingMessage('m1');
     await store.enqueueWork('extract', 'email', 'm1');
     final log = <String>[];
-    final triage = TriageQueue(store, LoggingLlm(log));
+    final triage = TriageQueue(store, loggingLlm(log));
     final worker = AiWorker(
       store,
       handlers: [LoggingHandler('extract', log, 'ai')],
@@ -196,7 +189,7 @@ void main() {
     await store.writeAttentionScore('email', 'conv-1', 0.9);
 
     final log = <String>[];
-    final triage = TriageQueue(store, LoggingLlm(log));
+    final triage = TriageQueue(store, loggingLlm(log));
     final worker = AiWorker(
       store,
       handlers: [

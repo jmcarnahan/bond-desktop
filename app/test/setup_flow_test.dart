@@ -3,12 +3,17 @@ import 'dart:io';
 
 import 'package:bond_inbox/data/app_paths.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
+import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/data/setup_store.dart';
 import 'package:bond_inbox/models/setup_step.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/notification_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
+import 'package:bond_inbox/providers/setup_provider.dart';
+import 'package:bond_inbox/services/llm/model_probe.dart';
+import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/screens/setup/setup_flow.dart';
+import 'package:bond_inbox/screens/setup/setup_where_body.dart';
 import 'package:bond_inbox/services/models/download_state.dart';
 import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:bond_inbox/services/notify/desktop_notification_service.dart';
@@ -25,6 +30,7 @@ import 'fixtures/fake_auth_session.dart';
 import 'fixtures/fake_desktop_notifier.dart';
 import 'fixtures/fake_process_runner.dart';
 import 'fixtures/fake_system_info.dart';
+import 'fixtures/memory_token_store.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/test_manifest.dart';
 
@@ -171,6 +177,12 @@ void main() {
     await settle(tester);
   }
 
+  /// Whether the way forward is available. Disabled rather than absent on a
+  /// wizard, so the step never reads as a dead end.
+  bool continueEnabled(WidgetTester tester) =>
+      tester.widget<FilledButton>(find.byKey(SetupFlow.continueKey)).onPressed !=
+      null;
+
   /// The arrow itself, not the tooltip wrapped around it — `byTooltip` finds
   /// the wrapper, and the disabled state lives on the button.
   bool backEnabled(WidgetTester tester) => tester
@@ -185,7 +197,7 @@ void main() {
 
     // 1 — Welcome. Nowhere to go back to, and the button says so.
     expect(find.text('Welcome to Bond'), findsOneWidget);
-    expect(find.text('Step 1 of 8'), findsOneWidget);
+    expect(find.text('Step 1 of 9'), findsOneWidget);
     expect(find.text('Get started'), findsOneWidget);
     expect(backEnabled(tester), isFalse);
 
@@ -193,7 +205,7 @@ void main() {
 
     // 2 — Your Mac.
     expect(find.text('Your Mac'), findsOneWidget);
-    expect(find.text('Step 2 of 8'), findsOneWidget);
+    expect(find.text('Step 2 of 9'), findsOneWidget);
     expect(find.text('Apple M3 Max'), findsOneWidget);
     expect(find.text('64.0 GB'), findsOneWidget);
     expect(backEnabled(tester), isTrue);
@@ -201,40 +213,53 @@ void main() {
 
     await tapContinue(tester);
 
-    // 3 — Models.
+    // 3 — Where the models run. Both cards, nothing chosen, no way forward
+    // until one of them is pressed.
+    expect(find.text('Where the models run'), findsOneWidget);
+    expect(find.text('Step 3 of 9'), findsOneWidget);
+    expect(find.byKey(SetupWhereBody.boxCardKey), findsOneWidget);
+    expect(find.byKey(SetupWhereBody.localCardKey), findsOneWidget);
+    expect(continueEnabled(tester), isFalse);
+    expect(await store.get(SetupStore.setupKey), 'where');
+
+    await tester.tap(find.byKey(SetupWhereBody.localCardKey));
+    await settle(tester);
+    await tapContinue(tester);
+
+    // 4 — Models. This Mac, so all three.
     expect(find.text('Models'), findsOneWidget);
-    expect(find.text('Step 3 of 8'), findsOneWidget);
+    expect(find.text('Step 4 of 9'), findsOneWidget);
     expect(find.text('Finds related messages'), findsOneWidget);
 
     await tapContinue(tester);
 
-    // 4 — Storage. Everything is already here, so there is nothing to fit.
+    // 5 — Storage. Everything is already here, so there is nothing to fit.
     expect(find.text('Storage'), findsOneWidget);
-    expect(find.text('Step 4 of 8'), findsOneWidget);
+    expect(find.text('Step 5 of 9'), findsOneWidget);
     expect(find.text(folder()), findsOneWidget);
     expect(find.text('All models are already in this folder.'), findsOneWidget);
 
     await tapContinue(tester);
 
-    // 5 — Download. A seeded set starts no run at all.
+    // 6 — Download. A seeded set starts no run at all.
     expect(find.text('Download'), findsOneWidget);
-    expect(find.text('Step 5 of 8'), findsOneWidget);
+    expect(find.text('Step 6 of 9'), findsOneWidget);
     expect(find.text('All models are on this Mac.'), findsOneWidget);
     expect(find.text('Ready'), findsNWidgets(3));
 
     await tapContinue(tester);
 
-    // 6 — Sign in. Already signed in, so one sentence and a Continue.
+    // 7 — Sign in. Already signed in, so one sentence and a Continue.
     expect(find.text('Sign in'), findsOneWidget);
-    expect(find.text('Step 6 of 8'), findsOneWidget);
+    expect(find.text('Step 7 of 9'), findsOneWidget);
     expect(find.text("You're signed in."), findsOneWidget);
     expect(find.text('Bond Inbox'), findsNothing);
 
     await tapContinue(tester);
 
-    // 7 — Notifications. The press is the ask.
+    // 8 — Notifications. The press is the ask.
     expect(find.text('Notifications'), findsOneWidget);
-    expect(find.text('Step 7 of 8'), findsOneWidget);
+    expect(find.text('Step 8 of 9'), findsOneWidget);
     expect(find.text('Allow'), findsNothing);
     expect(notifier.authorizeCalls, 0);
 
@@ -242,9 +267,9 @@ void main() {
 
     expect(notifier.authorizeCalls, 1);
 
-    // 8 — All set.
+    // 9 — All set.
     expect(find.text('All set'), findsOneWidget);
-    expect(find.text('Step 8 of 8'), findsOneWidget);
+    expect(find.text('Step 9 of 9'), findsOneWidget);
     expect(find.text('Bond is ready.'), findsOneWidget);
     expect(find.text(folder()), findsOneWidget);
     expect(find.text('Bond runs it on port 8080'), findsOneWidget);
@@ -285,6 +310,9 @@ void main() {
     );
 
     await tapContinue(tester);
+    await tester.tap(find.byKey(SetupWhereBody.localCardKey));
+    await settle(tester);
+    await tapContinue(tester);
 
     expect(find.text('Models'), findsOneWidget);
     expect(find.textContaining('Bond downloads two models'), findsOneWidget);
@@ -298,11 +326,15 @@ void main() {
     auth.signedIn = false;
 
     await mount(tester);
-    for (var step = 0; step < 5; step++) {
+    await tapContinue(tester);
+    await tapContinue(tester);
+    await tester.tap(find.byKey(SetupWhereBody.localCardKey));
+    await settle(tester);
+    for (var step = 0; step < 4; step++) {
       await tapContinue(tester);
     }
 
-    expect(find.text('Step 6 of 8'), findsOneWidget);
+    expect(find.text('Step 7 of 9'), findsOneWidget);
     expect(
       find.text('Sign in to your Bond workspace to read your mail.'),
       findsOneWidget,
@@ -317,7 +349,7 @@ void main() {
     // Signing in advances rather than re-probing: the session answered a
     // microsecond ago.
     expect(find.text('Notifications'), findsOneWidget);
-    expect(find.text('Step 7 of 8'), findsOneWidget);
+    expect(find.text('Step 8 of 9'), findsOneWidget);
     expect(auth.signIns, 1);
   });
 
@@ -325,7 +357,11 @@ void main() {
       (tester) async {
     makeContainer(overStore: _UnwritableStore(db));
     await mount(tester);
-    for (var step = 0; step < 7; step++) {
+    await tapContinue(tester);
+    await tapContinue(tester);
+    await tester.tap(find.byKey(SetupWhereBody.localCardKey));
+    await settle(tester);
+    for (var step = 0; step < 6; step++) {
       await tapContinue(tester);
     }
     expect(find.text('All set'), findsOneWidget);
@@ -347,7 +383,8 @@ void main() {
     await mount(tester);
     await tapContinue(tester);
     await tapContinue(tester);
-    expect(find.text('Step 3 of 8'), findsOneWidget);
+    expect(find.text('Step 3 of 9'), findsOneWidget);
+    expect(find.text('Where the models run'), findsOneWidget);
 
     await tester.tap(find.byTooltip('Back'));
     await settle(tester);
@@ -361,6 +398,252 @@ void main() {
     expect(find.text('Welcome to Bond'), findsOneWidget);
     expect(backEnabled(tester), isFalse);
     expect(await store.get(SetupStore.setupKey), 'welcome');
+  });
+
+  group('Where the models run', () {
+    /// The wizard with a REAL prefs notifier over an in-memory keychain, so
+    /// the box choice can be followed all the way to the two targets it
+    /// writes. `appPrefsProvider` builds a `SecureTokenStore`, which throws
+    /// under `flutter test`.
+    late MemoryTokenStore tokens;
+    late AppPrefsNotifier prefs;
+
+    void makeWithPrefs({
+      Future<ModelProbeResult> Function(String url, {String? bearer})? probe,
+    }) {
+      tokens = MemoryTokenStore();
+      // Disposed by the container that owns the override, not here.
+      prefs = AppPrefsNotifier(MessageStore(db), tokens: tokens);
+      container = ProviderContainer(overrides: [
+        dbProvider.overrideWithValue(db),
+        appPathsProvider.overrideWithValue(AppPaths(support)),
+        modelManifestProvider.overrideWithValue(manifest),
+        systemInfoProvider.overrideWithValue(system),
+        modelServerSupervisorProvider.overrideWithValue(supervisor),
+        authSessionProvider.overrideWithValue(auth),
+        desktopNotifierProvider.overrideWithValue(notifier),
+        desktopNotificationServiceProvider.overrideWithValue(notifications),
+        appPrefsProvider.overrideWith((_) => prefs),
+        if (probe != null)
+          setupControllerProvider.overrideWith((ref) => SetupController(
+                store: ref.watch(setupStoreProvider),
+                system: system,
+                manifest: manifest,
+                downloader: ref.watch(modelDownloaderProvider),
+                supervisor: supervisor,
+                paths: AppPaths(support),
+                readPrefs: () => prefs.state,
+                setManagedServer: prefs.setManagedServer,
+                setModelsFolder: prefs.setModelsFolder,
+                applyTierDefaults: prefs.applyTierDefaults,
+                probe: probe,
+                adoptBox: ({required baseUrl, required bearer}) =>
+                    prefs.adoptBox(baseUrl: baseUrl, bearer: bearer),
+                adoptLocal: prefs.adoptLocal,
+                auth: () => auth,
+                notifier: notifier,
+                seedAuthorization: (_) {},
+              )),
+      ]);
+      addTearDown(container.dispose);
+    }
+
+    /// Welcome, Your Mac, and there.
+    Future<void> reachWhere(WidgetTester tester) async {
+      await mount(tester);
+      await tapContinue(tester);
+      await tapContinue(tester);
+      expect(find.text('Where the models run'), findsOneWidget);
+    }
+
+    testWidgets('both cards say what they mean, and neither is chosen',
+        (tester) async {
+      await reachWhere(tester);
+
+      expect(find.text(SetupWhereBody.boxTitle), findsOneWidget);
+      expect(find.text(SetupWhereBody.boxBlurb), findsOneWidget);
+      expect(find.text(SetupWhereBody.localTitle), findsOneWidget);
+      expect(find.text(SetupWhereBody.localBlurb), findsOneWidget);
+      // The three controls belong to the box and are not up until it is
+      // picked.
+      expect(find.byKey(SetupWhereBody.urlKey), findsNothing);
+      expect(find.byKey(SetupWhereBody.keyFieldKey), findsNothing);
+      expect(continueEnabled(tester), isFalse);
+    });
+
+    testWidgets('the box card reveals the address, the key and Check server',
+        (tester) async {
+      await reachWhere(tester);
+
+      await tester.tap(find.byKey(SetupWhereBody.boxCardKey));
+      await settle(tester);
+
+      expect(find.byKey(SetupWhereBody.urlKey), findsOneWidget);
+      expect(find.byKey(SetupWhereBody.keyFieldKey), findsOneWidget);
+      expect(find.byKey(SetupWhereBody.checkKey), findsOneWidget);
+      expect(find.text('Box address'), findsOneWidget);
+      expect(find.text('Access key'), findsOneWidget);
+      expect(find.text('https://box.example.com'), findsOneWidget);
+      // The key field hides what is typed into it.
+      expect(
+        tester
+            .widget<TextField>(find.byKey(SetupWhereBody.keyFieldKey))
+            .obscureText,
+        isTrue,
+      );
+    });
+
+    testWidgets('neither field alone opens the way forward', (tester) async {
+      await reachWhere(tester);
+      await tester.tap(find.byKey(SetupWhereBody.boxCardKey));
+      await settle(tester);
+      expect(continueEnabled(tester), isFalse);
+
+      await tester.enterText(
+        find.byKey(SetupWhereBody.urlKey),
+        'https://box.example.com',
+      );
+      await settle(tester);
+      expect(continueEnabled(tester), isFalse,
+          reason: 'an address with no key adopts a box that will refuse');
+
+      await tester.enterText(find.byKey(SetupWhereBody.keyFieldKey), 'k');
+      await settle(tester);
+      expect(continueEnabled(tester), isTrue);
+    });
+
+    testWidgets('Check server reports what the box answered', (tester) async {
+      final asked = <(String, String?)>[];
+      makeWithPrefs(probe: (url, {bearer}) async {
+        asked.add((url, bearer));
+        return const ModelProbeResult(reachable: true, modelIds: ['qwen3.8']);
+      });
+      await reachWhere(tester);
+      await tester.tap(find.byKey(SetupWhereBody.boxCardKey));
+      await settle(tester);
+      await tester.enterText(
+        find.byKey(SetupWhereBody.urlKey),
+        'https://box.example.com',
+      );
+      await tester.enterText(
+        find.byKey(SetupWhereBody.keyFieldKey),
+        'sk-fixture-not-a-real-box-key',
+      );
+      await settle(tester);
+
+      await tester.tap(find.byKey(SetupWhereBody.checkKey));
+      await settle(tester);
+
+      expect(asked, [
+        (
+          'https://box.example.com/prose/v1/chat/completions',
+          'sk-fixture-not-a-real-box-key',
+        )
+      ]);
+      expect(find.text('Reachable · 1 model'), findsOneWidget);
+    });
+
+    testWidgets('the box choice adopts it and the next step lists ONE model',
+        (tester) async {
+      makeWithPrefs();
+      await reachWhere(tester);
+      await tester.tap(find.byKey(SetupWhereBody.boxCardKey));
+      await settle(tester);
+      await tester.enterText(
+        find.byKey(SetupWhereBody.urlKey),
+        'https://box.example.com',
+      );
+      await tester.enterText(
+        find.byKey(SetupWhereBody.keyFieldKey),
+        'sk-fixture-not-a-real-box-key',
+      );
+      await settle(tester);
+
+      await tapContinue(tester);
+
+      // Adopted: the placement, the two targets, and the key in the keychain
+      // rather than in a preference.
+      expect(prefs.state.modelPlacement, ModelPlacement.box);
+      expect(prefs.state.specById(boxProseId)!.url,
+          'https://box.example.com/prose/v1/chat/completions');
+      expect(prefs.state.specById(boxBulkId), isNotNull);
+      expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'],
+          'sk-fixture-not-a-real-box-key');
+
+      // And the models step is about what THIS Mac downloads, which on the
+      // box placement is the embedding model alone.
+      expect(find.text('Models'), findsOneWidget);
+      expect(find.text('Step 4 of 9'), findsOneWidget);
+      expect(find.text('Test Embed'), findsOneWidget);
+      expect(find.text('Test Bulk'), findsNothing);
+      expect(find.text('Test Prose'), findsNothing);
+    });
+
+    testWidgets('this Mac writes the local answer and the next step lists '
+        'three', (tester) async {
+      makeWithPrefs();
+      await reachWhere(tester);
+
+      await tester.tap(find.byKey(SetupWhereBody.localCardKey));
+      await settle(tester);
+      await tapContinue(tester);
+
+      // No box target and no key: on a first run `adoptLocal` is the same
+      // no-op twice, and what it leaves is a fresh install.
+      expect(prefs.state.modelPlacement, ModelPlacement.local);
+      expect(prefs.state.targets, isEmpty);
+      expect(tokens.values, isEmpty);
+
+      expect(find.text('Models'), findsOneWidget);
+      expect(find.text('Test Embed'), findsOneWidget);
+      expect(find.text('Test Bulk'), findsOneWidget);
+      expect(find.text('Test Prose'), findsOneWidget);
+    });
+
+    testWidgets('a box install that chooses This Mac is undone end to end',
+        (tester) async {
+      makeWithPrefs();
+      // The install this wizard is re-entered on: both box targets, the box
+      // stage map, the key in the keychain and the placement.
+      await prefs.adoptBox(
+        baseUrl: 'https://box.example.com',
+        bearer: 'sk-fixture-not-a-real-box-key',
+      );
+      expect(prefs.state.modelPlacement, ModelPlacement.box);
+
+      await reachWhere(tester);
+      // The stored answer is seeded, so the box card opens chosen.
+      expect(continueEnabled(tester), isFalse,
+          reason: 'the key field is empty on a re-entry');
+
+      await tester.tap(find.byKey(SetupWhereBody.localCardKey));
+      await settle(tester);
+      await tapContinue(tester);
+
+      // Nothing of the box is left: not the targets, not their keychain
+      // entries, not their stage entries, not the placement.
+      expect(prefs.state.modelPlacement, ModelPlacement.local);
+      expect(prefs.state.specById(boxProseId), isNull);
+      expect(prefs.state.specById(boxBulkId), isNull);
+      expect(tokens.values, isEmpty);
+      expect(prefs.state.stageTargets, isEmpty);
+
+      // And the models step is about this Mac again.
+      expect(find.text('Test Prose'), findsOneWidget);
+    });
+
+    testWidgets('a quit on this step resumes here, having adopted nothing',
+        (tester) async {
+      makeWithPrefs();
+      await reachWhere(tester);
+      await tester.tap(find.byKey(SetupWhereBody.boxCardKey));
+      await settle(tester);
+
+      // The step is recorded on ARRIVAL, and the choice is not.
+      expect(await store.get(SetupStore.setupKey), 'where');
+      expect(prefs.state.modelPlacement, ModelPlacement.local);
+      expect(prefs.state.targets, isEmpty);
+    });
   });
 
   testWidgets('the pane carries the step title and the counter', (tester) async {

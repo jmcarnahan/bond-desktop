@@ -18,10 +18,15 @@ import 'package:bond_inbox/services/server/router_preset.dart';
 /// The TIERS are the real ones: the same two rungs and the same floors the
 /// committed manifest carries, so a test that resolves a tier is resolving
 /// the ladder the app ships. The entries' own arguments stay fictional.
+/// [proseSidecar] is OPT-IN and null by default, so the fixture every other
+/// suite builds still describes three files and one INI line per model. A
+/// sidecar changes the preset's text, the download count, the ledger's rows
+/// and the total, and only the suites that are about those want it.
 ModelManifest testManifest({
   Map<String, int>? sizes,
   Map<String, String>? sha256s,
   String revision = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  ModelSidecar? proseSidecar,
 }) {
   final defaultSha = '0' * 64;
   ModelFile file({
@@ -32,6 +37,7 @@ ModelManifest testManifest({
     required String name,
     required int size,
     required Map<String, String> args,
+    ModelSidecar? sidecar,
   }) =>
       ModelFile(
         id: id,
@@ -46,6 +52,7 @@ ModelManifest testManifest({
         license: 'Fictional-1.0',
         licenseUrl: 'https://example.invalid/licence',
         serverArgs: args,
+        sidecar: sidecar,
       );
 
   return ModelManifest(version: 2, tiers: testTiers, models: [
@@ -79,13 +86,30 @@ ModelManifest testManifest({
       name: 'Qwen3.8-27B-Q4_K_M.gguf',
       size: 16384,
       args: const {'c': '32768', 'parallel': '1', 'load-on-startup': 'true'},
+      sidecar: proseSidecar,
     ),
   ]);
 }
 
-/// The two rungs the committed manifest declares: the full tier takes all
-/// three checkpoints, the inbox tier takes the embedding and inbox models and
-/// halves the inbox model's slots.
+/// The fictional MTP head for the prose entry — the real file NAME, because
+/// the path and the INI line are what the assertions are written against, and
+/// a size and digest the test chooses.
+ModelSidecar testSidecar({
+  int sizeBytes = 2048,
+  String? sha256,
+  String revision = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+}) =>
+    ModelSidecar(
+      file: 'mtp-Qwen3.8-27B-Q4_0.gguf',
+      revision: revision,
+      sha256: sha256 ?? 'd' * 64,
+      sizeBytes: sizeBytes,
+    );
+
+/// The three the committed manifest declares: the full tier takes all three
+/// checkpoints, the inbox tier takes the embedding and inbox models and halves
+/// the inbox model's slots, and the remote tier takes the embedding model
+/// alone, because on the shared GPU box placement that is all this Mac serves.
 final List<ManifestTier> testTiers = List.unmodifiable([
   ManifestTier(
     tier: MachineTier.full,
@@ -99,6 +123,11 @@ final List<ManifestTier> testTiers = List.unmodifiable([
     serverArgs: {
       routerBulkId: {'c': '16384', 'parallel': '2'},
     },
+  ),
+  const ManifestTier(
+    tier: MachineTier.remote,
+    minRamBytes: 0,
+    models: [routerEmbedId],
   ),
 ]);
 

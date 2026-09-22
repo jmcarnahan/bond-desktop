@@ -7,7 +7,6 @@ import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/needs_you_handler.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/restore_service.dart';
@@ -17,52 +16,35 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
-/// One model server for the whole chain: triage, extraction and the needs-you
-/// judgement each read the keys they know out of the same map and ignore the
+/// One answer for the whole chain: triage, extraction and the needs-you
+/// judgement each read the keys they know out of this map and ignore the
 /// rest, so a single answer can serve all three without the test having to
-/// script which handler asks in which order.
-class FakeLlm extends LlmClient {
-  final List<String> userMessages = [];
-
-  FakeLlm() : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    userMessages.add(user);
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-    return {
-      // Triage.
-      'urgency': 'normal',
-      'category': 'work',
-      'summary': 'Dana asks about the renewal.',
-      'needs_action': true,
-      'action_items': const ['Look at the DPA'],
-      'reply_expected': true,
-      'deadline': '',
-      // Extraction.
-      'evidence': 'Dana wants the DPA looked at.',
-      'topics': const ['DPA'],
-      'people': const ['Dana'],
-      'organizations': const ['Acme'],
-      'project': 'Acme renewal',
-      'intent': 'request',
-      'importance': 'high',
-      // Needs-you.
-      'needs_you': true,
-      'confidence': 'high',
-    };
-  }
-}
+/// script which handler asks in which order. Handed to a [ScriptedLlm] as its
+/// `fallback`, which is what makes it the answer to every schema.
+const Map<String, dynamic> unionAnswer = {
+  // Triage.
+  'urgency': 'normal',
+  'category': 'work',
+  'summary': 'Dana asks about the renewal.',
+  'needs_action': true,
+  'action_items': ['Look at the DPA'],
+  'reply_expected': true,
+  'deadline': '',
+  // Extraction.
+  'evidence': 'Dana wants the DPA looked at.',
+  'topics': ['DPA'],
+  'people': ['Dana'],
+  'organizations': ['Acme'],
+  'project': 'Acme renewal',
+  'intent': 'request',
+  'importance': 'high',
+  // Needs-you.
+  'needs_you': true,
+  'confidence': 'high',
+};
 
 /// An embedding server that always answers, so extraction can finish without
 /// one running.
@@ -438,7 +420,7 @@ void main() {
     await seed();
     // Through the real queue, so the row starts exactly where a gate leaves
     // one: skipped, with the drop cascaded over its progress.
-    final llm = FakeLlm();
+    final llm = ScriptedLlm(fallback: unionAnswer);
     final progress = PipelineProgress(store);
     // One gate across both drains, as the app wires it. The gate alone is not
     // what orders them — see the chaining in `pumpTriageThenWorkers` — but

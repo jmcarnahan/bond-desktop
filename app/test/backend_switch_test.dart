@@ -11,7 +11,6 @@ import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
 import 'package:bond_inbox/services/graph_people.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/mcp/bond_mcp_client.dart';
 import 'package:bond_inbox/services/mcp/mcp_auth.dart';
 import 'package:bond_inbox/services/mcp/mcp_mail_backend.dart';
@@ -22,6 +21,7 @@ import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// The switch between the two backends, as a property of the WIRING.
@@ -235,7 +235,19 @@ void main() {
     /// again. Before the queues released them, a switch taken while a message
     /// was at the model left that message `processing` until the next launch.
     test('strands no processing row', () async {
-      final llm = _HeldLlm();
+      // An LLM that holds its answer until the test lets go, so the backend
+      // switch below lands while a message is genuinely at the model. The
+      // hold is an `onCall` closure rather than a subclass: the two completers
+      // belong to this test and nothing else reads them.
+      final started = Completer<void>();
+      final release = Completer<void>();
+      final llm = ScriptedLlm(
+        answers: const {'triage': heldTriageAnswer},
+        onCall: (_) {
+          if (!started.isCompleted) started.complete();
+          return release.future;
+        },
+      );
       final made = ProviderContainer(
         overrides: [
           dbProvider.overrideWithValue(db),
@@ -264,13 +276,13 @@ void main() {
 
       final queue = made.read(triageQueueProvider);
       final pumping = queue.pump();
-      await llm.started.future;
+      await started.future;
       expect((await store.triageCounts())['processing'], 1);
 
       // The switch. Everything downstream of the preference is rebuilt, which
       // is what disposes the queue holding the claim.
       await made.read(appPrefsProvider.notifier).setBackendMode(backendModeSdk);
-      llm.release.complete();
+      release.complete();
       await pumping;
       // The dispose is not awaited by `ref.onDispose`, so give the release it
       // schedules a turn of the loop to land.
@@ -328,35 +340,14 @@ void main() {
   });
 }
 
-/// An [LlmClient] that holds its answer until the test lets go, so a backend
-/// switch can land while a message is genuinely at the model.
-class _HeldLlm extends LlmClient {
-  final Completer<void> started = Completer<void>();
-  final Completer<void> release = Completer<void>();
-
-  _HeldLlm() : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    if (!started.isCompleted) started.complete();
-    await release.future;
-    return {
-      'urgency': 'high',
-      'category': 'work',
-      'summary': 'Sarah asks about the launch date.',
-      'needs_action': true,
-      'action_items': const ['Call Sarah'],
-    };
-  }
-}
+/// The triage answer the held client gives once the test lets go.
+const Map<String, dynamic> heldTriageAnswer = {
+  'urgency': 'high',
+  'category': 'work',
+  'summary': 'Sarah asks about the launch date.',
+  'needs_action': true,
+  'action_items': ['Call Sarah'],
+};
 
 class _RecordingTeams extends TeamsSync {
   int calls = 0;

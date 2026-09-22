@@ -59,9 +59,10 @@ SLOTS        ?= 1
 # that ships an MTP sidecar can use it — MODEL_HF's Qwen3.8-27B does, and
 # llama-server resolves the sidecar from the same repo as the -hf download, so
 # a MODEL_HF pointed at a model without one wants `SPEC_TYPE =` (empty) in
-# local.mk. The app's own managed server does NOT get this flag: its preset
-# names a local path rather than a repo, so there is no sidecar for it to
-# resolve (docs/pipeline/10-model-routing.md, "The manifest").
+# local.mk. The app's own managed server gets the same configuration by the
+# other route since Round G: the manifest ships the head as the prose entry's
+# `sidecar` and the preset writes `model-draft` beside `spec-type`
+# (docs/pipeline/10-model-routing.md, "The manifest").
 # Set DRAFT_HF or SPEC_TYPE, not both — the combination is untried.
 #   make model DRAFT_HF=ggml-org/Qwen3.5-0.8B-GGUF   → draft-model speculation
 #                                                      (measured a net loss)
@@ -156,7 +157,8 @@ RESET  := \033[0m
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ab ab-membership drain bench-pipeline bench-compare \
         golden-check golden-baseline golden-score golden golden-prose \
-        golden-storyline golden-sweep golden-vector golden-gate \
+        golden-storyline golden-sweep golden-vector golden-declared \
+        golden-gate \
         golden-judge-pack golden-judge-tally \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
         dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
@@ -198,6 +200,7 @@ help:
 	@printf "  make golden-storyline GOLDEN_RUN=<run.json> → storyline confirm for every golden item against the gold registry, on the bulk slot (GOLDEN_CHARTER_CAP=…)\n"
 	@printf "  make golden-sweep GOLDEN_RUN=<run.json> → the golden set through the app's own sweep, naming, confirms and assign shortlist, scored against the gold registry (SWEEP_CARD=participants|topics|subject|subject_topics|summary)\n"
 	@printf "  make golden-vector GOLDEN_RUN=<run.json> → the clustering vector alone: the clusters it would form and the pool pairs by cosine, subject and people; needs only the embed server (SWEEP_CARD=…, SWEEP_EMBED_PREFIX=…, EMBED_URL=…)\n"
+	@printf "  make golden-declared GOLDEN_RUN=<run.json> → every registry storyline declared by hand and then recruited into, on the embed server and the bulk slot; the ceiling the sweep is read against\n"
 	@printf "  make golden-gate   → the golden set through the app's gates, offline (GOLDEN_RUN=<run.json> adds the model's notification proxy)\n"
 	@printf "  make golden-baseline → what the shipping app scores on the golden set (needs golden/)\n"
 	@printf "  make golden-score R=<run.json> → score a golden run file (BREAKDOWN= per-bucket tables, JSON= the tallies)\n"
@@ -741,6 +744,13 @@ SWEEP_CARD ?= topics
 # and needs only the embedding server. One test body serves both, which is what
 # keeps the two readings of one mailbox from drifting apart.
 SWEEP_STAGE ?= full
+# Which pass decides what goes together on that bench: cosine (the shipped
+# clustering), model (the cosine pass draws a neighbourhood and a model says
+# what is inside it) or pool (no neighbourhood at all — the whole pool in
+# consecutive chunks of 48 cards, one call each). A define and not a sed of
+# StorylineTuning.groupingMode, so a row names the mode it was taken under.
+# The default follows the app.
+SWEEP_GROUPING ?= cosine
 # The instruction the embedding model is given about what a card is FOR. Empty
 # means the app's own `EmbeddingsClient.clusteringPrefix`; the literal `none`,
 # matched EXACTLY and with no trimming, means no prefix at all; anything else
@@ -754,12 +764,14 @@ SWEEP_EMBED_PREFIX ?=
 # Single-quoted values, every one: a label carries spaces and parentheses, and
 # an unquoted --dart-define would hand the shell a second word to run.
 #
-# BENCH_BEARER is the exception, and deliberately: `:=` expands `$$` to a
-# literal `$` once, here, so what is STORED is the text `$(grep …)` and every
-# recipe that uses BENCH_DEFINES has its own shell run that grep at recipe
-# time. The key therefore never sits in a make variable, never appears in
-# `make -n` output, and never reaches the environment of anything but the one
-# flutter test that needs it.
+# BENCH_BEARER and BENCH_BOX_KEY are the exceptions, and deliberately: `:=`
+# expands `$$` to a literal `$` once, here, so what is STORED is the text
+# `$(grep …)` and every recipe that uses BENCH_DEFINES has its own shell run
+# that grep at recipe time. A key therefore never sits in a make variable,
+# never appears in `make -n` output, and never reaches the environment of
+# anything but the one flutter test that needs it. BENCH_BOX_KEY is the shared
+# GPU box's access key, which a bench needs because it runs outside the app and
+# has no keychain to read it from; BOND_BOX_KEY lives in `.env` alone.
 BENCH_DEFINES := \
   --dart-define=BENCH_URL='$(BENCH_URL)' \
   --dart-define=BENCH_LABEL='$(BENCH_LABEL)' \
@@ -787,11 +799,13 @@ BENCH_DEFINES := \
   --dart-define=GOLDEN_CHARTER_CAP='$(GOLDEN_CHARTER_CAP)' \
   --dart-define=SWEEP_CARD='$(SWEEP_CARD)' \
   --dart-define=SWEEP_STAGE='$(SWEEP_STAGE)' \
+  --dart-define=SWEEP_GROUPING='$(SWEEP_GROUPING)' \
   --dart-define=SWEEP_EMBED_PREFIX='$(SWEEP_EMBED_PREFIX)' \
   --dart-define=EMBED_URL='$(if $(strip $(EMBED_URL)),$(EMBED_URL),http://localhost:$(EMBED_PORT)/v1/embeddings)' \
   --dart-define=BENCH_WIRE='$(BENCH_WIRE)' \
   --dart-define=PROSE_WIRE='$(PROSE_WIRE)' \
-  --dart-define=BENCH_BEARER="$$(grep -m1 '^BEDROCK_API_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)"
+  --dart-define=BENCH_BEARER="$$(grep -m1 '^BEDROCK_API_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)" \
+  --dart-define=BENCH_BOX_KEY="$$(grep -m1 '^BOND_BOX_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)"
 
 # ── the bakeoff: oMLX, the candidate runtime ───────────────────────────
 # oMLX is an MLX-based OpenAI-compatible server, and unlike llama-server it is
@@ -891,7 +905,9 @@ omlx-stop:
 # Emits --dart-define=MS_CLIENT_ID/MS_TENANT_ID/MS_CLIENT_SECRET=... for each
 # value that can be read; emits nothing for any that cannot (sign-in then
 # refuses with a config error; a missing secret alone means public-client
-# behavior).
+# behavior). BOND_BOX_URL rides along: it only prefills the box address in the
+# wizard and in Settings. The box's access key is NOT here. It is typed in the
+# app and kept in the keychain.
 define APP_SECRET_DEFINE
 $$(CID=$$(grep -m1 '^MICROSOFT_CLIENT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
    TID=$$(grep -m1 '^MICROSOFT_TENANT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
@@ -900,6 +916,8 @@ $$(CID=$$(grep -m1 '^MICROSOFT_CLIENT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-)
    if [ -n "$$CID" ]; then printf -- '--dart-define=MS_CLIENT_ID=%s ' "$$CID"; fi; \
    if [ -n "$$TID" ]; then printf -- '--dart-define=MS_TENANT_ID=%s ' "$$TID"; fi; \
    if [ -n "$$MCPURL" ]; then printf -- '--dart-define=BOND_MCP_SERVER_URL=%s ' "$$MCPURL"; fi; \
+   BOXURL=$$(grep -m1 '^BOND_BOX_URL=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
+   if [ -n "$$BOXURL" ]; then printf -- '--dart-define=BOND_BOX_URL=%s ' "$$BOXURL"; fi; \
    if [ -n "$$SECRET" ]; then printf -- '--dart-define=MS_CLIENT_SECRET=%s' "$$SECRET"; fi)
 endef
 
@@ -1186,6 +1204,21 @@ golden-vector: golden-check
 	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-vector GOLDEN_RUN=<golden-run-….json from make golden> [SWEEP_CARD=participants|topics|subject|subject_topics|summary SWEEP_EMBED_PREFIX='…' EMBED_URL=…]\n"; exit 1; }
 	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'sweep' $(BENCH_DEFINES) --dart-define=SWEEP_STAGE=vector
+
+# Every registry storyline declared by hand, then the recruit — the same test
+# body and the same seeding as golden-sweep, with the clustering taken out.
+# What it measures: how much of the pool a charter a PERSON wrote can pull in,
+# which is the ceiling the sweep's own grouping is read against.
+#
+# Two servers, not three: the embedding one for the vectors and the bulk slot
+# for the confirms. The recruit never names anything — it queues
+# storyline_refresh rows and the bench holds no worker to drain them — so the
+# prose slot is never dialled and bench-verify-prose is not run.
+golden-declared: golden-check
+	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-declared GOLDEN_RUN=<golden-run-….json from make golden> [BENCH_URL=…]\n"; exit 1; }
+	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'sweep' $(BENCH_DEFINES) --dart-define=SWEEP_STAGE=declared
 
 # The gate half, and the only golden target with no server in it: the app's
 # gates are pure, so this replays them over the set offline — the item's

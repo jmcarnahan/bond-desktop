@@ -49,10 +49,80 @@ load-on-startup = true
 
 [bond-prose]
 model = /tmp/Bond Models/ggml-org_Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf
+model-draft = /tmp/Bond Models/ggml-org_Qwen3.8-27B-GGUF/mtp-Qwen3.8-27B-Q4_0.gguf
 c = 16384
 parallel = 1
 load-on-startup = true
+spec-type = draft-mtp
 ''');
+    });
+
+    test('the draft line sits between the model and its flags', () {
+      // POSITION is the assertion. `model-draft` is the other half of what
+      // the section loads rather than one more option, and llama-server reads
+      // an INI value to end of line, so the path is unquoted exactly as
+      // `model` is.
+      final preset = testManifest(proseSidecar: testSidecar())
+          .toPreset('/tmp/Bond Models');
+      final lines = preset.toIni().split('\n');
+      final start = lines.indexOf('[bond-prose]');
+      const folder = '/tmp/Bond Models/ggml-org_Qwen3.8-27B-GGUF';
+
+      expect(
+        lines.sublist(start, start + 6),
+        [
+          '[bond-prose]',
+          'model = $folder/Qwen3.8-27B-Q4_K_M.gguf',
+          'model-draft = $folder/mtp-Qwen3.8-27B-Q4_0.gguf',
+          'c = 32768',
+          'parallel = 1',
+          'load-on-startup = true',
+        ],
+      );
+    });
+
+    test('a model with no draft writes no line for one', () {
+      final preset = testPreset('/tmp/models');
+
+      expect(preset.toIni(), isNot(contains('model-draft')));
+      for (final m in preset.models) {
+        expect(preset.draftPath(m), isNull, reason: m.id);
+      }
+    });
+
+    test('adding a draft moves the hash', () {
+      // The hash is what says an adopted server is serving the right
+      // configuration. A server started before the head existed is loading
+      // one file where this build loads two, so it must not be reused.
+      final plain = testManifest().toPreset('/tmp/models');
+      final drafted =
+          testManifest(proseSidecar: testSidecar()).toPreset('/tmp/models');
+
+      expect(drafted.hash, isNot(plain.hash));
+      expect(drafted.hash, hasLength(64));
+    });
+
+    test('missingFiles names the draft alone when only it is absent',
+        () async {
+      final root = await Directory.systemTemp.createTemp('router_draft');
+      addTearDown(() => root.delete(recursive: true));
+
+      final preset =
+          testManifest(proseSidecar: testSidecar()).toPreset(root.path);
+      // Four files for three sections, which is the point of the case.
+      expect(preset.missingFiles(), hasLength(4));
+
+      for (final m in preset.models) {
+        final path = preset.modelPath(m);
+        await Directory(p.dirname(path)).create(recursive: true);
+        await File(path).writeAsString('not really a gguf');
+      }
+
+      final missing = preset.missingFiles();
+      expect(missing, [
+        p.join(root.path, 'ggml-org_Qwen3.8-27B-GGUF',
+            'mtp-Qwen3.8-27B-Q4_0.gguf'),
+      ]);
     });
 
     test('an inbox Mac gets a preset with no writing model in it', () {

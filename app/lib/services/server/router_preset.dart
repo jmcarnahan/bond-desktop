@@ -23,12 +23,23 @@ class RouterModelSpec {
   final String id;
   final String repo;
   final String file;
+
+  /// A second GGUF in the SAME repo folder that this model drafts with — the
+  /// MTP head, today. A bare name rather than a path, on [file]'s reasoning:
+  /// the folder is [RouterPreset.draftPath]'s to derive, in the one place
+  /// [RouterPreset.modelPath] derives the other.
+  ///
+  /// Null for a model served from one file, which is every model but the
+  /// writing one.
+  final String? draftFile;
+
   final Map<String, String> args;
 
   const RouterModelSpec({
     required this.id,
     required this.repo,
     required this.file,
+    this.draftFile,
     this.args = const {},
   });
 }
@@ -71,6 +82,17 @@ class RouterPreset {
   String modelPath(RouterModelSpec m) =>
       p.join(modelsFolder, m.repo.replaceAll('/', '_'), m.file);
 
+  /// Where [RouterModelSpec.draftFile] lands, or null when there is none.
+  ///
+  /// The same folder as [modelPath] because the sidecar comes from the same
+  /// repo: one download, one directory, and a `model-draft` line a person
+  /// reading the INI can see is the file next to the one above it.
+  String? draftPath(RouterModelSpec m) {
+    final draft = m.draftFile;
+    if (draft == null) return null;
+    return p.join(modelsFolder, m.repo.replaceAll('/', '_'), draft);
+  }
+
   List<String> get modelIds => [for (final m in models) m.id];
 
   /// The preset file's text.
@@ -95,6 +117,14 @@ class RouterPreset {
       out.writeln();
       out.writeln('[${m.id}]');
       out.writeln('model = ${modelPath(m)}');
+      // Immediately after `model` and before the flags, because it is the
+      // other half of what this section loads rather than one more option —
+      // and unquoted for the same reason `model` is. `model-draft` is the
+      // per-model spelling of llama-server's `--model-draft`; see
+      // docs/pipeline/10-model-routing.md, "The manifest", which records that
+      // it is UNVERIFIED against a running server.
+      final draft = draftPath(m);
+      if (draft != null) out.writeln('model-draft = $draft');
       m.args.forEach((key, value) => out.writeln('$key = $value'));
     }
     return out.toString();
@@ -113,8 +143,15 @@ class RouterPreset {
   /// Asked before spawning: llama-server's answer to a missing model is to
   /// exit with a code and a line in a log the user is not reading, and
   /// "Model files are missing" is a sentence the first-run screen can act on.
+  ///
+  /// A draft the INI names counts as a model file. The server is started with
+  /// `--offline`, so a `model-draft` line pointing at nothing is the same
+  /// startup failure as a missing checkpoint.
   List<String> missingFiles() => [
-        for (final m in models)
+        for (final m in models) ...[
           if (!File(modelPath(m)).existsSync()) modelPath(m),
+          if (draftPath(m) case final draft?)
+            if (!File(draft).existsSync()) draft,
+        ],
       ];
 }

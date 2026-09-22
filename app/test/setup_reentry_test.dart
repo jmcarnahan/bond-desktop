@@ -9,6 +9,7 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/notification_provider.dart';
 import 'package:bond_inbox/providers/setup_provider.dart';
 import 'package:bond_inbox/screens/setup/setup_flow.dart';
+import 'package:bond_inbox/screens/setup/setup_where_body.dart';
 import 'package:bond_inbox/screens/setup/setup_gate.dart';
 import 'package:bond_inbox/screens/setup/setup_welcome_body.dart';
 import 'package:bond_inbox/services/models/download_state.dart';
@@ -294,9 +295,16 @@ void main() {
     await setUpAgain(tester);
     expect(find.text('Back to the inbox'), findsOneWidget);
 
-    // Welcome, Your Mac, Models, Storage, Download, Sign in, Notifications,
-    // All set — eight presses, the last of them Finish.
-    for (var step = 0; step < 8; step++) {
+    // Welcome, Your Mac, then Where the models run, which needs a card
+    // pressed before it offers a way forward.
+    await tapContinue(tester);
+    await tapContinue(tester);
+    await tester.tap(find.byKey(SetupWhereBody.localCardKey));
+    await settle(tester);
+
+    // Models, Storage, Download, Sign in, Notifications, All set — seven more
+    // presses, the last of them Finish.
+    for (var step = 0; step < 7; step++) {
       await tapContinue(tester);
     }
 

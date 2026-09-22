@@ -364,8 +364,8 @@ void main() {
     // parity can mean here is that the two hand the sync the same string.
     const zwsp = '\u200b';
     const linkUrl =
-        'https://southbayequity2-my.sharepoint.com/:b:/g/personal/'
-        'jane_southbayequity2_onmicrosoft_com/EaBcDeFgHiJkLmNoPqRsTuVwXyZ';
+        'https://contoso2-my.sharepoint.com/:b:/g/personal/'
+        'jane_contoso2_onmicrosoft_com/EaBcDeFgHiJkLmNoPqRsTuVwXyZ';
     const body = 'Please review.\n\n'
         '$zwsp[https://res-1.cdn.office.net/files/assets/pdf.svg]'
         'HARBORLIGHT TALENT AGREEMENT.pdf<$linkUrl>$zwsp\n\nThanks';

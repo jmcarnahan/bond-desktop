@@ -113,6 +113,11 @@ class ActivityLogPanel extends StatefulWidget {
   /// disappearing.
   static const Map<String, String> _reasons = {
     'model_unavailable': 'model server off',
+    // The other two park words a drain can record. They say WHICH slot and
+    // WHY, so a reader scanning a column of parked rows can tell a server
+    // nobody started from a key somebody rotated.
+    'unauthorized': 'the access key was refused',
+    'embed_unavailable': 'embedding server unreachable',
     'session': 'signed out',
     'no_scope': 'not connected',
     'deleted': 'message deleted',

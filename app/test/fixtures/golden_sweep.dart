@@ -172,6 +172,55 @@ Map<String, int> goldThreadsBySlug(GoldenSet set) {
   return counts;
 }
 
+/// Whether a run could ever have filed [item] correctly by FORMING the
+/// storyline it belongs to.
+///
+/// The sweep never proposes a group under
+/// [StorylineTuning.proposeMinClusterSize], so an item whose gold effort has
+/// fewer golden threads than that is one no clustering pass on this set can
+/// reach, however good the model is. [goldThreads] is [goldThreadsBySlug]'s
+/// map, passed in rather than recomputed so a loop over a hundred items walks
+/// the set once.
+///
+/// Gold-`none` items are not formable and are not a miss either: they are
+/// scored by being left alone, which is the [sweepCeilingOf] half of this
+/// pair.
+bool formableItem(GoldenItem item, Map<String, int> goldThreads) =>
+    item.gold.storylineId != noneId &&
+    (goldThreads[item.gold.storylineId] ?? 0) >=
+        StorylineTuning.proposeMinClusterSize;
+
+/// The most items a sweep run could get right on [set], against the
+/// `set.items.length` a `storyline.id` row is quoted out of.
+///
+/// Three populations add up to it: every gold-`none` item, which a run scores
+/// by filing nowhere; every formable item, which it scores by forming the
+/// group; and the `should` items under an UNFORMABLE effort, which the scorer
+/// credits for abstaining. A `may` item under an unformable effort is excluded
+/// by the scorer entirely, and it is the whole gap between this number and the
+/// item count.
+///
+/// Why it is printed at all: the roadmap's storyline exit was written against
+/// `set.items.length`, and a row read against a total it cannot reach says
+/// nothing about the model. On the golden set the three-thread floor puts this
+/// at 77 of 98.
+/// [goldThreads] is [goldThreadsBySlug]'s map, and it is a parameter for
+/// [formableItem]'s reason: a caller that is already walking the items with
+/// that map in hand passes the one it is using, so the printed line and the
+/// per-item verdicts cannot be read off two different maps.
+int sweepCeilingOf(GoldenSet set, {Map<String, int>? goldThreads}) {
+  final threads = goldThreads ?? goldThreadsBySlug(set);
+  var ceiling = 0;
+  for (final item in set.items) {
+    if (item.gold.storylineId == noneId ||
+        formableItem(item, threads) ||
+        item.gold.storylineStrength == 'should') {
+      ceiling++;
+    }
+  }
+  return ceiling;
+}
+
 /// The live storylines and their members, as the store holds them after a run.
 class SweepMembership {
   /// Storyline id → the thread keys it holds, in `membersOf` order.
@@ -1121,6 +1170,22 @@ class SweepTally {
   /// has never once produced.
   final int correctPositives;
 
+  /// Items whose gold effort has enough golden threads for the sweep to form
+  /// it at all. See [formableItem].
+  final int formableItems;
+
+  /// How many of [formableItems] were filed correctly — [correctPositives]
+  /// narrowed to the population a clustering pass could have reached.
+  final int formablePositives;
+
+  /// The most items this run could have got right. See [sweepCeilingOf].
+  final int ceiling;
+
+  /// How many items the run was over — the denominator [ceiling] and
+  /// [correctPositives] are both quoted out of. Carried so the printed line
+  /// is readable on its own rather than against a count three lines down.
+  final int items;
+
   /// Forbidden slug → how many items were filed under it. The buckets are
   /// registry slugs, which is all a derived id can ever be: an `ANTI-*` slug
   /// names a MISTAKE and has no membership to be filed into, so it is reached
@@ -1236,6 +1301,10 @@ class SweepTally {
     required this.coverageBySlug,
     required this.largestShare,
     required this.correctPositives,
+    required this.formableItems,
+    required this.formablePositives,
+    required this.ceiling,
+    required this.items,
     required this.forbiddenByAnti,
     required this.unmapped,
     required this.filedNowhere,
@@ -1317,6 +1386,10 @@ class SweepTally {
         },
         'largest_share': largestShare,
         'correct_positives': correctPositives,
+        'formable_items': formableItems,
+        'formable_positives': formablePositives,
+        'ceiling': ceiling,
+        'items': items,
         'forbidden': {
           'hits': forbiddenHits,
           'by_slug': forbiddenByAnti,
@@ -1402,6 +1475,8 @@ class SweepTally {
         '  series  seeded $seriesSeeded  excluded $seriesExcluded'
         '  outliers dropped $outliersDropped  fragments $fragmentsJoined'
         '  folded $fragmentsFolded\n'
+        '  formable: $formablePositives of $formableItems correct'
+        '   ceiling $ceiling of $items\n'
         '  purity mean ${pct(purityMean)} over $purityWithCarrier of '
         '${purityByStoryline.length} storylines   '
         'coverage mean ${pct(coverageMean)} over '

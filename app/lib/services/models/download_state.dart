@@ -230,6 +230,15 @@ class DownloadLedger {
 
   FileDownloadState? operator [](String id) => files[id];
 
+  /// The row a checkpoint's sidecar is kept under.
+  ///
+  /// A row of its own rather than a flag on the parent's, because the two
+  /// files are fetched, resumed and verified separately and a single row
+  /// could not say that one of them landed. Derived from the parent's id in
+  /// ONE place, so the downloader, the preflight and the ledger check cannot
+  /// spell it three ways.
+  static String draftId(String id) => '$id.draft';
+
   DownloadLedger record(FileDownloadState state) => DownloadLedger(
         Map.unmodifiable({...files, state.id: state}),
       );
@@ -248,12 +257,18 @@ class DownloadLedger {
   /// previous checkpoint, and an install that trusted it would go on serving
   /// the old weights for ever: nothing else compares digests, because hashing
   /// eighteen gigabytes to open a window is not a thing this app may do.
+  /// A checkpoint with a SIDECAR is current only when both rows are: the
+  /// preset names the draft as well as the weights and the server is started
+  /// `--offline`, so half a set is a server that does not start.
   bool isCurrent(ModelFile file) {
-    final row = files[file.id];
-    return row != null &&
-        row.status == DownloadStatus.done &&
-        row.sha256 == file.sha256;
+    if (!_rowIsCurrent(files[file.id], file.sha256)) return false;
+    final head = file.sidecar;
+    if (head == null) return true;
+    return _rowIsCurrent(files[draftId(file.id)], head.sha256);
   }
+
+  static bool _rowIsCurrent(FileDownloadState? row, String sha256) =>
+      row != null && row.status == DownloadStatus.done && row.sha256 == sha256;
 
   /// Every file in [manifest] is [isCurrent] — the whole set, at this build's
   /// digests. What the gate and the wizard's resume both ask.

@@ -172,6 +172,7 @@ void main() {
     void Function(String source, String key)? onUnblockThread,
     void Function(String source, String key)? onAddBackThread,
     VoidCallback? onAudit,
+    VoidCallback? onRecruit,
     bool auditing = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 900));
@@ -204,6 +205,7 @@ void main() {
           onUnblockThread: onUnblockThread,
           onAddBackThread: onAddBackThread,
           onAudit: onAudit,
+          onRecruit: onRecruit,
           auditing: auditing,
         ),
       ),
@@ -910,6 +912,53 @@ void main() {
       // Nothing to open while it is already open.
       expect(
         find.byKey(StorylineTimelinePanel.charterEditKey),
+        findsNothing,
+      );
+    });
+
+    testWidgets('Find more threads stands beside Edit, on a charter and a host',
+        (tester) async {
+      // Three conditions, because a hunt with nothing to hunt on and a button
+      // with nowhere to report are both buttons that lie.
+      await pumpPanel(tester, storyline: _chartered);
+      await openTab(tester, StorylineTab.about);
+      expect(
+        find.byKey(StorylineTimelinePanel.recruitButtonKey),
+        findsNothing,
+      );
+
+      await pumpPanel(tester, storyline: _storyline, onRecruit: () {});
+      await openTab(tester, StorylineTab.about);
+      expect(
+        find.byKey(StorylineTimelinePanel.recruitButtonKey),
+        findsNothing,
+      );
+
+      await pumpPanel(tester, storyline: _chartered, onRecruit: () {});
+      await openTab(tester, StorylineTab.about);
+      expect(find.text('Find more threads'), findsOneWidget);
+    });
+
+    testWidgets('and it goes away while the charter is being rewritten',
+        (tester) async {
+      var hunts = 0;
+      await pumpPanel(
+        tester,
+        storyline: _chartered,
+        onRecruit: () => hunts++,
+      );
+      await openTab(tester, StorylineTab.about);
+
+      await tester.tap(find.byKey(StorylineTimelinePanel.recruitButtonKey));
+      await tester.pumpAndSettle();
+      expect(hunts, 1);
+
+      // The sentence on screen is not the sentence saved, so a hunt started
+      // from here would run on the old one.
+      await tester.tap(find.byKey(StorylineTimelinePanel.charterEditKey));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(StorylineTimelinePanel.recruitButtonKey),
         findsNothing,
       );
     });

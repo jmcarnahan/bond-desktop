@@ -12,6 +12,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/testing.dart';
 import 'package:http/http.dart' as http;
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// What the worker does with more than one item of a kind at the server at
@@ -22,50 +23,18 @@ import 'fixtures/test_db.dart';
 /// raises [WorkHandler.concurrency] — so the number it declares is exercised
 /// rather than asserted about in isolation.
 
-/// An [LlmClient] that answers from a script, never opens a socket, and counts
-/// how many answers it is producing at once.
-class FakeLlm extends LlmClient {
-  /// Consumed in order. A `Map` is returned, an `Exception` is thrown, and a
-  /// `Future` is awaited first and then treated as whichever of those it
-  /// yields — which is the only way to hold one request open while the drain
-  /// gets on with the others. The last entry repeats once the script runs out.
-  final List<Object> script;
-
-  final List<String> userMessages = [];
-  int inFlight = 0;
-  int maxInFlight = 0;
-
-  FakeLlm(List<Object> script)
-      : script = [...script],
-        super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    userMessages.add(user);
-    inFlight++;
-    if (inFlight > maxInFlight) maxInFlight = inFlight;
-    try {
-      // A real call suspends. Without a suspension here every item would run
-      // to completion before the next one launched, and the ceiling this file
-      // measures would always read 1.
-      await Future<void>.delayed(const Duration(milliseconds: 1));
-      var step = script.length > 1 ? script.removeAt(0) : script.first;
-      if (step is Future<Object>) step = await step;
-      if (step is Exception) throw step;
-      return Map<String, dynamic>.from(step as Map);
-    } finally {
-      inFlight--;
-    }
-  }
-}
+/// A client that answers the extraction script, never opens a socket, and
+/// counts how many answers it is producing at once.
+///
+/// The script is consumed in order, the last entry repeating: a `Map` is
+/// returned, an `Exception` is thrown, and a closure is a computed step,
+/// awaited for its answer — which is how one request is held open while the
+/// drain gets on with the others. Every call suspends for a millisecond
+/// inside the fixture; without that every item would run to completion before
+/// the next one launched, and the ceiling this file measures would always
+/// read 1.
+ScriptedLlm extractLlm(List<Object> script) =>
+    ScriptedLlm()..scriptFor('extraction', script);
 
 /// Stands in for [DraftHandler]: a second kind, on a second server, whose own
 /// model is answering perfectly well while extraction's is not.
@@ -146,7 +115,7 @@ void main() {
           Map<String, Object?>.from(row.data),
       ];
 
-  ExtractHandler extractWith(FakeLlm llm) =>
+  ExtractHandler extractWith(ScriptedLlm llm) =>
       ExtractHandler(store, llm, noEmbeddings());
 
   group('per-handler concurrency', () {
@@ -154,7 +123,7 @@ void main() {
       for (var i = 0; i < 6; i++) {
         await seedQueued('m$i');
       }
-      final llm = FakeLlm([extraction()]);
+      final llm = extractLlm([extraction()]);
 
       await AiWorker(store, handlers: [extractWith(llm)]).pump();
 
@@ -175,8 +144,8 @@ void main() {
       // genuinely overlap. It is the case the atomic claim exists for —
       // choosing an item and writing its `processing` are one statement, so
       // whichever claim lands second cannot be handed a row the first took.
-      final first = FakeLlm([extraction()]);
-      final second = FakeLlm([extraction()]);
+      final first = extractLlm([extraction()]);
+      final second = extractLlm([extraction()]);
 
       await Future.wait([
         AiWorker(store, handlers: [extractWith(first)]).pump(),
@@ -218,7 +187,7 @@ void main() {
         await seedQueued('m$i');
       }
       await store.enqueueWork('draft', 'email', 'd1');
-      final llm = FakeLlm([const LlmUnavailableException('not reachable')]);
+      final llm = extractLlm([const LlmUnavailableException('not reachable')]);
       final draft = DraftStub();
 
       await AiWorker(store, handlers: [extractWith(llm), draft]).pump();
@@ -241,7 +210,7 @@ void main() {
         await seedQueued('m$i');
       }
       await store.enqueueWork('draft', 'email', 'd1');
-      final llm = FakeLlm([const NotSignedIn()]);
+      final llm = extractLlm([const NotSignedIn()]);
       final draft = DraftStub();
 
       await AiWorker(store, handlers: [extractWith(llm), draft]).pump();
@@ -256,7 +225,7 @@ void main() {
     test('missing consent parks the whole drain the same way', () async {
       await seedQueued('m0');
       await store.enqueueWork('draft', 'email', 'd1');
-      final llm = FakeLlm([const ReconsentRequired()]);
+      final llm = extractLlm([const ReconsentRequired()]);
       final draft = DraftStub();
 
       await AiWorker(store, handlers: [extractWith(llm), draft]).pump();
@@ -273,11 +242,14 @@ void main() {
       // The first and third of the batch are held open until the second has
       // found the server gone, so the park lands on siblings that are still
       // mid-request — the state a serial drain could never be in.
-      final held = Completer<Object>();
-      final llm = FakeLlm([
-        held.future,
+      // A computed step rather than a plain future: a future step is a HOLD,
+      // awaited so that the NEXT step answers, and what these two calls owe
+      // is the completer's own value.
+      final held = Completer<Map<String, dynamic>>();
+      final llm = extractLlm([
+        (LlmCall _) => held.future,
         const LlmUnavailableException('not reachable'),
-        held.future,
+        (LlmCall _) => held.future,
       ]);
 
       final drain = AiWorker(store, handlers: [extractWith(llm)]).pump();
@@ -303,7 +275,7 @@ void main() {
       for (var i = 0; i < 4; i++) {
         await seedQueued('m$i');
       }
-      final llm = FakeLlm([
+      final llm = extractLlm([
         const LlmException('JSON schema conversion failed', 400),
         extraction(),
       ]);
@@ -324,7 +296,7 @@ void main() {
     test('any other failure is still retried once, then left as an error',
         () async {
       await seedQueued('m0');
-      final llm = FakeLlm([const LlmFormatException('not json')]);
+      final llm = extractLlm([const LlmFormatException('not json')]);
 
       await AiWorker(store, handlers: [extractWith(llm)]).pump();
 
@@ -340,7 +312,7 @@ void main() {
       await seedQueued('m$i');
       await store.writeWork('extract', 'email', 'm$i', status: 'processing');
     }
-    final llm = FakeLlm([extraction()]);
+    final llm = extractLlm([extraction()]);
     final worker = AiWorker(store, handlers: [extractWith(llm)]);
 
     // A crash mid-batch now leaves up to three rows claimed rather than one,

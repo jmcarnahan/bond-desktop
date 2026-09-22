@@ -170,7 +170,10 @@ class SetupDownloadBody extends StatelessWidget {
 
   List<Widget> _row(ModelFile file) {
     final entry = progress[file.id];
-    final total = entry?.totalBytes ?? file.sizeBytes;
+    // `downloadBytes`, not `sizeBytes`: an entry with a sidecar costs both
+    // files and the run's own events say so, so a row drawn before the first
+    // event must not quote a smaller number and then jump.
+    final total = entry?.totalBytes ?? file.downloadBytes;
     // See [_status]: an entry-less file on a complete set is a file that is
     // all here, and its bar and its byte count have to say the same thing the
     // word does.

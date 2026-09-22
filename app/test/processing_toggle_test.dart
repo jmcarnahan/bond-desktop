@@ -5,10 +5,10 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/ai_workers.dart';
 import 'package:bond_inbox/services/drain_gate.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// The processing switch, at the two drains it gates.
@@ -57,27 +57,6 @@ class _CountingGate extends DrainGate {
   Future<T> run<T>(Future<T> Function() body) {
     runs++;
     return super.run(body);
-  }
-}
-
-/// An [LlmClient] that fails the test if anything dials it.
-class _NeverLlm extends LlmClient {
-  _NeverLlm() : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  int calls = 0;
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    calls++;
-    throw StateError('the model was dialled while processing was off');
   }
 }
 
@@ -308,14 +287,14 @@ void main() {
         () async {
       await seedMessage('m1');
       await seedMessage('m2');
-      final llm = _NeverLlm();
+      final llm = ScriptedLlm.never();
       final gate = _CountingGate();
       final queue = TriageQueue(store, llm, gate: gate, enabled: () => false);
       addTearDown(queue.dispose);
 
       await queue.pump();
 
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
       expect(gate.runs, 0);
       // Still pending rather than claimed: a `processing` row left behind by a
       // drain that never ran would sit there until the next launch.
@@ -333,7 +312,8 @@ void main() {
       await seedMessage('m1');
       await seedMessage('m2');
       await seedMessage('m3');
-      final queue = TriageQueue(store, _NeverLlm(), enabled: () => false);
+      final queue =
+          TriageQueue(store, ScriptedLlm.never(), enabled: () => false);
       addTearDown(queue.dispose);
       final seen = <TriageProgress>[];
       final sub = queue.progress.listen(seen.add);
@@ -351,12 +331,12 @@ void main() {
     test('turning the flag back on lets the queue claim', () async {
       await seedMessage('m1');
       var on = false;
-      final llm = _NeverLlm();
+      final llm = ScriptedLlm.never();
       final queue = TriageQueue(store, llm, enabled: () => on);
       addTearDown(queue.dispose);
 
       await queue.pump();
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
 
       on = true;
       await queue.pump();
@@ -364,7 +344,7 @@ void main() {
       // The model is dialled, which is all this asserts: the fake throws, and
       // what the queue does with a failure — the retry, the attempt count — is
       // `triage_queue_test`'s subject, not this file's.
-      expect(llm.calls, greaterThan(0));
+      expect(llm.calls.length, greaterThan(0));
     });
   });
 }

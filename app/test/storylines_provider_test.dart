@@ -8,11 +8,12 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/providers/storylines_provider.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// A handler that does nothing, so a [AiWorker.pump] emits one [WorkProgress]
@@ -29,6 +30,25 @@ class SilentHandler extends WorkHandler {
   Future<void> run(Map<String, Object?> item) async {}
 }
 
+/// A real worker that counts the pumps it was asked for.
+///
+/// The notifier's contract is not only what it WRITES but what it starts: a
+/// queued row with nothing to pump it waits for the next sync, which is the
+/// difference between a user action that happens now and one that happens
+/// eventually. Counting is the only way to see it, because the drain itself
+/// is the same either way.
+class RecordingWorker extends AiWorker {
+  int pumps = 0;
+
+  RecordingWorker(super.store, {required super.handlers});
+
+  @override
+  Future<void> pump({List<({String source, String id})> first = const []}) {
+    pumps++;
+    return super.pump(first: first);
+  }
+}
+
 /// A handler that parks on a gate the test opens, so a queue can be looked at
 /// while an item of it is genuinely still in flight.
 class BlockingHandler extends WorkHandler {
@@ -41,11 +61,6 @@ class BlockingHandler extends WorkHandler {
 
   @override
   Future<void> run(Map<String, Object?> item) => gate.future;
-}
-
-/// Never called — every notifier method under test is a local write.
-class UnusedLlm extends LlmClient {
-  UnusedLlm() : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
 }
 
 /// A store whose storyline reads fail, for the never-blank rule. Each read has
@@ -82,7 +97,8 @@ void main() {
   setUp(() {
     db = testDb();
     store = MessageStore(db);
-    service = StorylineService(store, UnusedLlm());
+    // Never called: every notifier method under test is a local write.
+    service = StorylineService(store, ScriptedLlm.never());
   });
 
   tearDown(() => db.close());
@@ -402,6 +418,105 @@ void main() {
       expect(storylines.single.id, id);
       expect(storylines.single.status, 'active');
       expect(storylines.single.memberCount, 1);
+    });
+
+    test('create with a charter carries it through and starts the hunt',
+        () async {
+      await seedConversation('c1');
+      final worker = RecordingWorker(store, handlers: [SilentHandler('none')]);
+      addTearDown(worker.dispose);
+      final notifier =
+          StorylinesNotifier(store, service, aiWorker: worker);
+      await notifier.load();
+
+      final id = await notifier.create(
+        'Brightsea launch',
+        conversationKey: 'c1',
+        charter: 'The launch of the Brightsea site and everything around it.',
+      );
+
+      expect((await store.getStoryline(id))!.charter,
+          'The launch of the Brightsea site and everything around it.');
+      expect((await store.nextPendingWork('storyline_recruit'))?['entity_id'],
+          id);
+      // Queued AND started: without the pump the hunt would sit until the next
+      // sync happened to drain the queue.
+      expect(worker.pumps, 1);
+    });
+
+    test('and a create with no charter pumps nothing', () async {
+      await seedConversation('c1');
+      final worker = RecordingWorker(store, handlers: [SilentHandler('none')]);
+      addTearDown(worker.dispose);
+      final notifier =
+          StorylinesNotifier(store, service, aiWorker: worker);
+      await notifier.load();
+
+      await notifier.create('Brightsea launch', conversationKey: 'c1');
+
+      // Nothing was queued for the storyline lane that this act has to start,
+      // so waking the worker would be work for no reason.
+      expect(await store.nextPendingWork('storyline_recruit'), null);
+      expect(worker.pumps, 0);
+    });
+
+    test('declare lands a memberless storyline and starts its hunt', () async {
+      final worker = RecordingWorker(store, handlers: [SilentHandler('none')]);
+      addTearDown(worker.dispose);
+      final notifier =
+          StorylinesNotifier(store, service, aiWorker: worker);
+      await notifier.load();
+
+      final id = await notifier.declare(
+        'Brightsea launch',
+        'The launch of the Brightsea site and everything around it.',
+      );
+
+      final storylines = (notifier.state as StorylinesLoaded).storylines;
+      expect(storylines.single.id, id);
+      expect(storylines.single.memberCount, 0);
+      expect((await store.nextPendingWork('storyline_recruit'))?['entity_id'],
+          id);
+      expect(worker.pumps, 1);
+    });
+
+    test('recruitNow revives a recruit the drain already finished', () async {
+      await seedStoryline('sl-1', status: 'active');
+      final worker = RecordingWorker(store, handlers: [SilentHandler('none')]);
+      addTearDown(worker.dispose);
+      final notifier =
+          StorylinesNotifier(store, service, aiWorker: worker);
+      await notifier.load();
+
+      // A spent row with an old stamp, which is what the second press of the
+      // day actually meets. `writeWork` is an UPDATE, so the row has to exist
+      // before it can be marked done, and the stamp is moved back a day so the
+      // millisecond precision of two writes in one test cannot tie.
+      final stale = MessageStore.isoStamp(
+          DateTime.now().subtract(const Duration(days: 1)));
+      await store.requeueWork('storyline_recruit', 'email', 'sl-1');
+      await db.customUpdate(
+        'UPDATE work_items SET created_at = ? '
+        "WHERE task_kind = 'storyline_recruit' AND entity_id = 'sl-1'",
+        variables: [Variable(stale)],
+      );
+      await store.writeWork('storyline_recruit', 'email', 'sl-1',
+          status: 'done');
+
+      await notifier.recruitNow('sl-1');
+
+      final row = (await store.nextPendingWork('storyline_recruit'))!;
+      expect(row['entity_id'], 'sl-1');
+      // `refreshCreatedAt`: the owner pressed the button, so the row goes to
+      // the head of the `created_at DESC` claim order rather than sitting
+      // behind everything queued since it was last spent.
+      // `compareTo`, not `greaterThan`: these are ISO strings and the ordering
+      // matchers reach for an operator `String` does not have. The drain's own
+      // comparison is SQLite's string compare, which is this one.
+      expect((row['created_at'] as String).compareTo(stale) > 0, isTrue);
+      expect(worker.pumps, 1);
+      // And nothing goes inert: unlike a re-check, a second press is harmless.
+      expect((notifier.state as StorylinesLoaded).auditing, isEmpty);
     });
   });
 

@@ -21,7 +21,17 @@ class TriageProgress {
   /// `triage_status` → row count. Statuses with no rows are absent.
   final Map<String, int> counts;
 
-  const TriageProgress(this.counts);
+  /// Why the last claim parked, or null when nothing is parked.
+  ///
+  /// `'model_unavailable'`, `'unauthorized'` or `'session'` — the same words
+  /// the parked activity row carries. It rides the progress stream because
+  /// the fact already exists inside the drain and dies there otherwise, and
+  /// the alternative would be a health poller nobody wants. Cleared on the
+  /// next pump and on the next message that reached a verdict, so the rail's
+  /// sentence goes away by work getting done rather than by a timer.
+  final String? parkedReason;
+
+  const TriageProgress(this.counts, {this.parkedReason});
 
   /// Messages the worker still has to look at. The only number the UI shows —
   /// [total] counts every message ever synced, most of which were skipped as
@@ -166,7 +176,12 @@ class TriageQueue {
   /// Called OUTSIDE the gate on purpose — the worker's own pump queues on the
   /// same [DrainGate], so calling it from inside would deadlock — and not at
   /// all when a drain wrote nothing, which is a park or an empty queue.
-  final Future<void> Function()? _onDrained;
+  ///
+  /// It is handed the `(source, id)` pairs this drain wrote a verdict for, so
+  /// the worker can run those messages' own work before it resumes the
+  /// backlog. A COPY is passed: the list is reused by the next drain.
+  final Future<void> Function(List<({String source, String id})> triaged)?
+      _onDrained;
 
   /// Told after either gate tier writes `skipped`, before the progress emit.
   /// In the app: `GateRepairService.afterGate`.
@@ -191,6 +206,19 @@ class TriageQueue {
   /// that move a message past triage for good. Reset when a drain starts, so
   /// it describes the drain that just ended rather than the session.
   int _drainWrote = 0;
+
+  /// The same verdicts as [_drainWrote], as the pairs that name them.
+  ///
+  /// `skipped` rides along with `triaged` on purpose: both are verdicts that
+  /// unblock the work queue's untriaged guard, and the handlers' own
+  /// `skipped` branch is what closes those rows. Cleared per drain beside
+  /// [_drainWrote], and handed to [_onDrained] as a copy.
+  final List<({String source, String id})> _triagedNow = [];
+
+  /// Why the last claim parked, or null. Published on every [TriageProgress],
+  /// set at the two park sites, and cleared by a pump and by a message that
+  /// reached a verdict.
+  String? _parkedReason;
 
   String? _userAddress;
   bool _running = false;
@@ -361,12 +389,25 @@ class TriageQueue {
     // wait for the next poll. This is [stop]'s promise — the next pump drains
     // again — read the only way it can be while a drain is still open.
     _stopped = false;
+    // A new pump is a fresh attempt, so the last park is no longer the news.
+    // If the server is still down the first claim parks again and the reason
+    // comes straight back.
+    _parkedReason = null;
     if (_running) return;
     _running = true;
     // Before the first message, not after it: the header counter would
     // otherwise sit blank for the seventeen seconds that message takes, which
     // is exactly when a user with a fresh backlog is looking for it.
-    await _emit();
+    final counts = await _emit();
+    // The counts this emit already read, so the ask costs no second query.
+    // Only when something is actually waiting: a pump over an empty queue
+    // that asked anyway would end the worker's pass for nothing, and the
+    // sixty-second poll would do it every minute.
+    //
+    // Asked in the same synchronous step as the `_gate.run` below, which is
+    // what makes the flag transient — this run holds the ticket that clears
+    // it. See [DrainGate.yieldRequested].
+    if ((counts['pending'] ?? 0) > 0) _gate.requestYield();
     try {
       await _gate.run(_drain);
       // After the gate is released and before the drain flag is: the worker
@@ -380,7 +421,7 @@ class TriageQueue {
         // the messages are already written and re-running them would cost a
         // second set of model calls for the same verdicts.
         try {
-          await _onDrained?.call();
+          await _onDrained?.call(List.of(_triagedNow));
         } catch (_) {}
       }
     } finally {
@@ -398,6 +439,7 @@ class TriageQueue {
   /// and comes back null.
   Future<void> _drain() async {
     _drainWrote = 0;
+    _triagedNow.clear();
     _deferred.clear();
     var parked = false;
     // [_halted] and not [_stopped]: the processing switch is read on every
@@ -673,13 +715,19 @@ class TriageQueue {
       );
       await _emit();
       return true;
-    } on LlmUnavailableException {
+    } on LlmUnavailableException catch (e) {
       // Nothing about this message failed, so it does not spend an attempt.
       // The drain launches nothing more either: every message behind it would
       // fail identically, and marking a hundred of them is just noise on a
       // laptop where the model server is not running. Triage is one kind on
       // one server, so unlike the AI worker there is no other queue here that
       // a different server could still be answering for.
+      //
+      // A refused key is the same park with a different reason, because it is
+      // the same fact about every message behind this one — and the rail can
+      // then say which of the two it is.
+      final reason = parkReasonFor(e);
+      _parkedReason = reason;
       await _writeTriage(source, id, status: 'pending');
       await _log.record(
         'triage',
@@ -687,7 +735,7 @@ class TriageQueue {
         source: source,
         entityId: id,
         durationMs: sw.elapsedMilliseconds,
-        detail: {'reason': 'model_unavailable'},
+        detail: {'reason': reason},
       );
       await _emit();
       return false;
@@ -789,7 +837,14 @@ class TriageQueue {
     // claimable, but it is not counted here: it arrives on a drain the model
     // was failing through, and waking a second drain onto the same servers is
     // the last thing that moment needs. The next sync's pump picks it up.
-    if (status == 'triaged' || status == 'skipped') _drainWrote++;
+    if (status == 'triaged' || status == 'skipped') {
+      _drainWrote++;
+      _triagedNow.add((source: source, id: id));
+      // A message got through, so whatever the last park was about is over.
+      // Here rather than at the two verdict call sites, so a third one cannot
+      // be added that forgets to clear it.
+      _parkedReason = null;
+    }
     _claimed.remove('$source|$id');
   }
 
@@ -799,6 +854,7 @@ class TriageQueue {
   /// sign-out routing lives in the inbox notifier; triage's whole job here is
   /// to stop burning model time on previews it cannot improve on.
   Future<bool> _parkForSession(String source, String id, int durationMs) async {
+    _parkedReason = 'session';
     await _writeTriage(source, id, status: 'pending');
     await _log.record(
       'triage',
@@ -925,10 +981,15 @@ class TriageQueue {
   /// Awaited by every caller, never fired and forgotten: the counts are read
   /// from the rows, so an unawaited emit would be free to report a queue that
   /// has already moved on.
-  Future<void> _emit() async {
-    if (_progress.isClosed) return;
+  /// Returns the counts it read, so a caller that needs them — [pump],
+  /// deciding whether a yield is worth asking for — does not run a second
+  /// aggregate query over the same rows. Empty when the stream is closed and
+  /// nothing was read.
+  Future<Map<String, int>> _emit() async {
+    if (_progress.isClosed) return const {};
     final counts = await _store.triageCounts(sources: sources);
-    if (_progress.isClosed) return;
-    _progress.add(TriageProgress(counts));
+    if (_progress.isClosed) return counts;
+    _progress.add(TriageProgress(counts, parkedReason: _parkedReason));
+    return counts;
   }
 }

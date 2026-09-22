@@ -489,7 +489,7 @@ class ContextReconcileHandler extends WorkHandler {
         // Everything the pass wrote is deleted above; the throw still parks
         // the KIND, because that is a statement about the server rather
         // than about this directory.
-        throw const LlmUnavailableException('embedding server unavailable');
+        throw const EmbedUnavailableException('embedding server unavailable');
       }
       await _context.setDirectoryWalked(
         dirId,
@@ -501,7 +501,7 @@ class ContextReconcileHandler extends WorkHandler {
       await _context.indexPendingChunks();
       await _context.ensureKeywordIndex();
       _log.note(notes());
-      throw const LlmUnavailableException('embedding server unavailable');
+      throw const EmbedUnavailableException('embedding server unavailable');
     }
 
     for (final chunk in pending) {

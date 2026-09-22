@@ -73,6 +73,25 @@ void main() {
         );
       }
     });
+
+    test('a refused access key, which waiting will not fix but a park will',
+        () async {
+      // Read as `rejected` this was worse than useless: nothing about the text
+      // is wrong, every item behind it is refused identically, and a declared
+      // recruit embedded its charter, got a null with no park, and filed
+      // nothing at all without a word anywhere.
+      for (final status in [401, 403]) {
+        final client = clientThat((_) async => http.Response('nope', status));
+
+        final result = await client.embedResult('anything');
+
+        expect(result.outcome, EmbedOutcome.unavailable, reason: 'HTTP $status');
+        expect(result.vector, isNull);
+        // The sentence says which of the two unavailables it is, so the
+        // `embed_fail` row does not read as a server nobody started.
+        expect(result.reason, 'refused the access key (HTTP $status)');
+      }
+    });
   });
 
   group('rejected — something answered, and it was not a vector', () {

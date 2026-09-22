@@ -16,6 +16,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// The gap this closes: an embedding server that is down used to mean a thread
@@ -33,38 +34,13 @@ import 'fixtures/test_db.dart';
 /// drain, forever. The assignment pass now embeds the thread itself, which is
 /// what turns that park into a retry.
 
-/// An [LlmClient] that answers from a per-schema script, so an extraction and
-/// a membership confirmation can be scripted independently of the order the
+/// A client that answers from a per-schema script, so an extraction and a
+/// membership confirmation can be scripted independently of the order the
 /// drain happens to reach them in.
-class FakeLlm extends LlmClient {
-  final Map<String, List<Object>> scripts;
-  final List<String> schemas = [];
-
-  FakeLlm(this.scripts) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  int callsFor(String schemaName) =>
-      schemas.where((s) => s == schemaName).length;
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    schemas.add(schemaName);
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-    final script = scripts[schemaName];
-    if (script == null || script.isEmpty) {
-      throw StateError('no scripted answer for $schemaName');
-    }
-    final step = script.length > 1 ? script.removeAt(0) : script.first;
-    if (step is Exception) throw step;
-    return Map<String, dynamic>.from(step as Map);
-  }
+ScriptedLlm scripted(Map<String, List<Object>> scripts) {
+  final llm = ScriptedLlm();
+  scripts.forEach(llm.scriptFor);
+  return llm;
 }
 
 /// An embedding server in one of the three states the client can now tell
@@ -177,7 +153,7 @@ void main() {
 
   AiWorker workerWith(
     EmbedServer state,
-    FakeLlm llm, {
+    ScriptedLlm llm, {
     List<double>? vector,
     ScriptedHandler? draft,
   }) =>
@@ -203,7 +179,7 @@ void main() {
     test('keeps the extraction and queues the storyline pass anyway', () async {
       await seedThread();
       await store.enqueueWork('extract', 'email', 'm1');
-      final llm = FakeLlm({'extraction': [extractAnswer()]});
+      final llm = scripted({'extraction': [extractAnswer()]});
 
       await workerWith(EmbedServer.down, llm).pump();
 
@@ -224,7 +200,7 @@ void main() {
       await store.enqueueWork('extract', 'email', 'm1');
       await store.enqueueWork('draft', 'email', 'conv-1');
       final draft = ScriptedHandler('draft');
-      final llm = FakeLlm({'extraction': [extractAnswer()]});
+      final llm = scripted({'extraction': [extractAnswer()]});
 
       await workerWith(EmbedServer.down, llm, draft: draft).pump();
 
@@ -242,7 +218,7 @@ void main() {
         () async {
       await seedThread();
       await store.enqueueWork('extract', 'email', 'm1');
-      final llm = FakeLlm({
+      final llm = scripted({
         'extraction': [extractAnswer(), extractAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
@@ -305,7 +281,7 @@ void main() {
       await seedThread();
       final service = StorylineService(
         store,
-        FakeLlm({}),
+        ScriptedLlm.never(),
         embeddings: embeddings(EmbedServer.down),
       );
 
@@ -328,7 +304,7 @@ void main() {
     test('queues nothing — the next pass would only park again', () async {
       await seedThread();
       await store.enqueueWork('extract', 'email', 'm1');
-      final llm = FakeLlm({'extraction': [extractAnswer()]});
+      final llm = scripted({'extraction': [extractAnswer()]});
 
       await workerWith(EmbedServer.nonsense, llm).pump();
 
@@ -348,7 +324,7 @@ void main() {
       );
       final service = StorylineService(
         store,
-        FakeLlm({}),
+        ScriptedLlm.never(),
         embeddings: embeddings(EmbedServer.nonsense),
       );
 
@@ -373,7 +349,7 @@ void main() {
       // The default, and what every caller that cannot embed — the user
       // actions, most tests — still gets.
       await expectLater(
-        StorylineService(store, FakeLlm({})).assignConversation(
+        StorylineService(store, ScriptedLlm.never()).assignConversation(
           'email',
           'conv-1',
         ),

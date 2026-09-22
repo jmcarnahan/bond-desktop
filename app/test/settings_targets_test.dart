@@ -48,7 +48,8 @@ void main() {
   Future<void> open(
     WidgetTester tester, {
     List<LlmTargetSpec> targets = const [_fast, _prose, _box],
-    Future<ModelProbeResult> Function(String url)? probe,
+    Future<ModelProbeResult> Function(String url, {String? bearer})? probe,
+    String? Function(String targetId)? storedBearer,
     VoidCallback? onAdd,
     void Function(LlmTargetSpec spec)? onEdit,
     Future<void> Function(String id)? onRemove,
@@ -61,6 +62,7 @@ void main() {
           child: SettingsTargetsBody(
             targets: targets,
             probe: probe,
+            storedBearer: storedBearer,
             onAdd: onAdd ?? () {},
             onEdit: onEdit ?? (_) {},
             onRemove: onRemove ?? (_) async {},
@@ -197,7 +199,7 @@ void main() {
   testWidgets('Check server asks that row\'s own URL and reports the answer',
       (tester) async {
     final asked = <String>[];
-    await open(tester, probe: (url) async {
+    await open(tester, probe: (url, {bearer}) async {
       asked.add(url);
       return const ModelProbeResult(
         reachable: true,
@@ -209,6 +211,70 @@ void main() {
 
     expect(asked, [_box.url]);
     expect(find.text('Reachable · 1 model'), findsOneWidget);
+  });
+
+  testWidgets(
+      "Check server hands a keyed row its STORED token, and an unkeyed row "
+      'none', (tester) async {
+    final asked = <(String, String?)>[];
+    final looked = <String>[];
+    await open(
+      tester,
+      probe: (url, {bearer}) async {
+        asked.add((url, bearer));
+        return const ModelProbeResult(reachable: true);
+      },
+      storedBearer: (id) {
+        looked.add(id);
+        // A fictional string, and the only "token" in this file.
+        return id == _box.id ? 'sk-fixture-not-a-real-token' : null;
+      },
+    );
+
+    // The keyed row: a LOOKUP by id, and the answer rides the request.
+    await press(tester, find.byKey(SettingsTargetsBody.checkKey(_box.id)));
+    expect(looked, [_box.id]);
+    expect(asked, [(_box.url, 'sk-fixture-not-a-real-token')]);
+
+    // The unkeyed row: `hasBearer` is false, so the lookup is not even made.
+    await press(tester, find.byKey(SettingsTargetsBody.checkKey(_fast.id)));
+    expect(looked, [_box.id]);
+    expect(asked.last, (_fast.url, null));
+  });
+
+  testWidgets('a host with no lookup still checks, unauthenticated',
+      (tester) async {
+    // Null is a host that cannot answer "what is this target's token", which
+    // is every test that predates the key and the embeddings card beside it.
+    // The button still works; the request just carries no header.
+    final asked = <(String, String?)>[];
+    await open(tester, probe: (url, {bearer}) async {
+      asked.add((url, bearer));
+      return const ModelProbeResult(reachable: true);
+    });
+
+    await press(tester, find.byKey(SettingsTargetsBody.checkKey(_box.id)));
+
+    expect(asked, [(_box.url, null)]);
+  });
+
+  testWidgets('no token text is rendered by a checked row', (tester) async {
+    await open(
+      tester,
+      probe: (_, {bearer}) async =>
+          const ModelProbeResult(reachable: true, modelIds: ['qwen3-27b-fp8']),
+      storedBearer: (_) => 'sk-fixture-not-a-real-token',
+    );
+
+    await press(tester, find.byKey(SettingsTargetsBody.checkKey(_box.id)));
+
+    final rendered = [
+      for (final t in tester.widgetList<Text>(find.byType(Text))) t.data ?? '',
+    ];
+    expect(rendered, everyElement(isNot(contains('sk-fixture'))));
+    // The row says the token EXISTS, which is the only thing a screen may say
+    // about it.
+    expect(find.text('Bearer set'), findsOneWidget);
   });
 
   testWidgets('Add target reaches the host', (tester) async {
@@ -224,7 +290,7 @@ void main() {
     tester.platformDispatcher.textScaleFactorTestValue = 2.0;
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
 
-    await open(tester, probe: (_) async => const ModelProbeResult(reachable: true));
+    await open(tester, probe: (_, {bearer}) async => const ModelProbeResult(reachable: true));
 
     expect(tester.takeException(), isNull);
   });

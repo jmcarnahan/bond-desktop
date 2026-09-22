@@ -237,8 +237,8 @@ void main() {
               kind: 'reference',
               name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
               sourceUrl:
-                  'https://southbayequity2-my.sharepoint.com/:b:/g/personal/'
-                  'jane_southbayequity2_onmicrosoft_com/EaBcDeFgHiJkLmNoPqRsTuVwXyZ',
+                  'https://contoso2-my.sharepoint.com/:b:/g/personal/'
+                  'jane_contoso2_onmicrosoft_com/EaBcDeFgHiJkLmNoPqRsTuVwXyZ',
             ),
           ],
         );

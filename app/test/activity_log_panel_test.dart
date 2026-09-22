@@ -968,6 +968,30 @@ void main() {
       );
     });
 
+    test('the other two park words read as themselves, not as a raw reason',
+        () {
+      // Unmapped, both of these fell through to the underscores-opened
+      // fallback and a column of parked rows could not be scanned: which slot
+      // died, and whether waiting or a new key is what fixes it, is the whole
+      // content of the row.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'triage',
+          status: 'parked',
+          detail: const {'reason': 'unauthorized'},
+        )),
+        'Triage parked — the access key was refused',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'embed_message',
+          status: 'parked',
+          detail: const {'reason': 'embed_unavailable'},
+        )),
+        'Embed message parked — embedding server unreachable',
+      );
+    });
+
     test('a document read says how many passages it became', () {
       expect(
         ActivityLogPanel.describe(_event(

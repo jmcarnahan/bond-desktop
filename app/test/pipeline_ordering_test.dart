@@ -6,7 +6,6 @@ import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/needs_you_handler.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:drift/drift.dart' show Variable;
@@ -14,6 +13,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// The ordering invariant, end to end: a message is never extracted or judged
@@ -25,40 +25,6 @@ import 'fixtures/test_db.dart';
 /// and the queue's `onDrained` wired to the worker's pump the way the provider
 /// wires it. What the test drives is the ORDER the two drains run in, which is
 /// the one thing the unit tests on either side cannot see.
-
-/// An [LlmClient] that answers per task and records the order it was asked in.
-///
-/// The order is the assertion in most of this file, so the recording is by
-/// `schemaName` — `triage`, `extraction`, `needs_you` — rather than by call
-/// count, which cannot tell a drain that ran twice from one that ran backwards.
-class FakeLlm extends LlmClient {
-  final Map<String, Map<String, dynamic>> answers;
-  final List<String> calls = [];
-
-  FakeLlm(this.answers)
-      : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    calls.add(schemaName);
-    // A real call suspends, and both drains have to be able to interleave at
-    // the await if they are going to.
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-    final answer = answers[schemaName];
-    if (answer == null) {
-      throw StateError('no scripted answer for $schemaName');
-    }
-    return Map<String, dynamic>.from(answer);
-  }
-}
 
 /// An [EmbeddingsClient] over a scripted socket, so extraction can finish
 /// without a server — and so that "nothing was embedded" is a fact about the
@@ -175,15 +141,21 @@ void main() {
   /// The two drains as the app builds them: one store, one gate, the queue's
   /// `onDrained` pumping the worker. Returned rather than held in fields so a
   /// test can pump either one first, which is the whole subject.
-  ({TriageQueue triage, AiWorker worker, FakeLlm llm, FakeEmbeddings embed})
+  ({TriageQueue triage, AiWorker worker, ScriptedLlm llm, FakeEmbeddings embed})
       pipeline({Map<String, Map<String, dynamic>>? answers}) {
     final gate = DrainGate();
-    final llm = FakeLlm(answers ??
-        const {
-          'triage': _triageAnswer,
-          'extraction': _extractionAnswer,
-          'needs_you': _needsYouAnswer,
-        });
+    // The order is the assertion in most of this file, so the reading is
+    // `schemas` — `triage`, `extraction`, `needs_you` — rather than a call
+    // count, which cannot tell a drain that ran twice from one that ran
+    // backwards.
+    final llm = ScriptedLlm(
+      answers: answers ??
+          const {
+            'triage': _triageAnswer,
+            'extraction': _extractionAnswer,
+            'needs_you': _needsYouAnswer,
+          },
+    );
     final embed = FakeEmbeddings();
     final worker = AiWorker(
       store,
@@ -200,7 +172,7 @@ void main() {
       gate: gate,
       // No `ensureBody`: there is no Graph here, and the seeded row already
       // carries the body a detail fetch would have written.
-      onDrained: () => worker.pump(),
+      onDrained: (triaged) => worker.pump(first: triaged),
     );
     addTearDown(triage.dispose);
     return (triage: triage, worker: worker, llm: llm, embed: embed);
@@ -216,7 +188,7 @@ void main() {
     // the one `onDrained` fires — still has them to take.
     expect(await statusOf('extract', 'm1'), 'pending');
     expect(await statusOf('needs_you', 'm1'), 'pending');
-    expect(p.llm.calls, isEmpty, reason: 'no model was asked anything');
+    expect(p.llm.schemas, isEmpty, reason: 'no model was asked anything');
     expect(await store.getExtraction('email', 'm1'), isNull);
     expect(p.embed.inputs, isEmpty);
     expect(await embeddingOf('conv-1'), isNull);
@@ -246,10 +218,32 @@ void main() {
 
     // And the point of the whole round: a newsletter costs no model call, no
     // extraction, no embedding and no storyline pass.
-    expect(p.llm.calls, isEmpty);
+    expect(p.llm.schemas, isEmpty);
     expect(await store.getExtraction('email', 'm1'), isNull);
     expect(p.embed.inputs, isEmpty);
     expect(await embeddingOf('conv-1'), isNull);
+    expect(await storylineRows(), 0);
+  });
+
+  test('a skipped ref is closed by the priority pass, with no model call',
+      () async {
+    // A gate is a verdict, so a gated message rides `onDrained` into the
+    // priority lane beside the kept ones. What the pass does with it is close
+    // its rows: the handlers honour the gate, and the whole point of gating
+    // is that the 4B is never dialled for a newsletter.
+    await seedFreshMessage(from: 'noreply@example.com');
+    final p = pipeline();
+
+    await p.triage.pump();
+    await pumpEventQueue();
+
+    expect((await store.getMessageRow('email', 'm1'))!['triage_status'],
+        'skipped');
+    expect(await statusOf('extract', 'm1'), 'done');
+    expect(await statusOf('needs_you', 'm1'), 'done');
+    expect(p.llm.schemas, isEmpty);
+    expect(p.embed.inputs, isEmpty);
+    expect(await store.getExtraction('email', 'm1'), isNull);
     expect(await storylineRows(), 0);
   });
 
@@ -274,15 +268,81 @@ void main() {
 
     // Triage first, and exactly one extraction: a second claim would mean the
     // item was handed out twice.
-    expect(p.llm.calls.first, 'triage');
-    expect(p.llm.calls.where((c) => c == 'triage').length, 1);
-    expect(p.llm.calls.where((c) => c == 'extraction').length, 1);
-    expect(p.llm.calls, contains('needs_you'));
+    expect(p.llm.schemas.first, 'triage');
+    expect(p.llm.schemas.where((c) => c == 'triage').length, 1);
+    expect(p.llm.schemas.where((c) => c == 'extraction').length, 1);
+    expect(p.llm.schemas, contains('needs_you'));
 
     // The fan-out extraction owns: the thread is embedded and queued for
     // filing, which is what must not happen for gated mail.
     expect(await embeddingOf('conv-1'), isNotNull);
     expect(await storylineRows(), 1);
+  });
+
+  test('a priority ref is refused before triage and taken after it', () async {
+    await seedFreshMessage();
+    final p = pipeline();
+
+    // The caller names the message as urgent while it is still untriaged,
+    // which is the one way a priority claim could become a hole in the
+    // invariant. `claimWorkItem` carries the same guard the walk's claim
+    // carries, so the pass finds nothing to take.
+    await p.worker.pump(first: const [(source: 'email', id: 'm1')]);
+
+    expect(await statusOf('extract', 'm1'), 'pending');
+    expect(await statusOf('needs_you', 'm1'), 'pending');
+    expect(p.llm.schemas, isEmpty);
+    expect(await store.getExtraction('email', 'm1'), isNull);
+
+    // Triage speaks, and the pairs it wrote ride back to the worker through
+    // `onDrained` as the priority refs of the next pass.
+    await p.triage.pump();
+    await pumpEventQueue();
+
+    expect((await store.getMessageRow('email', 'm1'))!['triage_status'],
+        'triaged');
+    expect(await statusOf('extract', 'm1'), 'done');
+    expect(await statusOf('needs_you', 'm1'), 'done');
+    expect(p.llm.schemas.first, 'triage');
+    expect(p.llm.schemas.where((c) => c == 'extraction').length, 1);
+    expect(p.llm.schemas.where((c) => c == 'needs_you').length, 1);
+    expect(await store.getExtraction('email', 'm1'), isNotNull);
+  });
+
+  test('a priority claim does not hand a backlog item out twice', () async {
+    // Two messages, both already triaged, so both are claimable — and the
+    // newer one is named as urgent. Whichever of the priority pass and the
+    // handler walk reaches a row second finds nothing pending to match.
+    await seedFreshMessage(id: 'm1');
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'm2',
+      'conversation_key': 'conv-1',
+      'direction': 'inbound',
+      'subject': 'Re: Launch date',
+      'from_name': 'Sarah',
+      'from_address': 'sarah@example.com',
+      'received_at': '2026-08-29T11:00:00Z',
+      'body_text': 'And the copy deck?',
+    });
+    await store.enqueueWork('extract', 'email', 'm2');
+    await store.enqueueWork('needs_you', 'email', 'm2');
+    for (final id in ['m1', 'm2']) {
+      await store.writeTriage('email', id, status: 'triaged');
+    }
+
+    final p = pipeline();
+    await p.worker.pump(first: const [(source: 'email', id: 'm2')]);
+
+    for (final id in ['m1', 'm2']) {
+      expect(await statusOf('extract', id), 'done');
+      expect(await statusOf('needs_you', id), 'done');
+    }
+    // Two messages, two of each call: a row claimed by both paths would show
+    // up here as a third.
+    expect(p.llm.schemas.where((c) => c == 'extraction').length, 2);
+    expect(p.llm.schemas.where((c) => c == 'needs_you').length, 2);
+    expect(p.llm.schemas, isNot(contains('triage')));
   });
 
   test('a drain with nothing pending does not wake the worker', () async {
@@ -291,19 +351,19 @@ void main() {
     // that has not moved.
     var pumps = 0;
     final gate = DrainGate();
-    final llm = FakeLlm(const {'triage': _triageAnswer});
+    final llm = ScriptedLlm(answers: const {'triage': _triageAnswer});
     final triage = TriageQueue(
       store,
       llm,
       gate: gate,
-      onDrained: () async => pumps++,
+      onDrained: (_) async => pumps++,
     );
     addTearDown(triage.dispose);
 
     await triage.pump();
 
     expect(pumps, 0);
-    expect(llm.calls, isEmpty);
+    expect(llm.schemas, isEmpty);
   });
 
   test('the two drains share one gate, so neither runs inside the other',

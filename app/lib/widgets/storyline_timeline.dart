@@ -132,6 +132,13 @@ class StorylineTimelinePanel extends StatefulWidget {
   /// Re-judges the threads the model filed here. Null leaves the button inert.
   final VoidCallback? onAudit;
 
+  /// Runs the recruit again on the charter already saved — the model looking
+  /// once more for threads that belong here. Null renders no such control at
+  /// all, which is what a host with nothing to queue the work on wants, and it
+  /// never appears on a storyline with no charter because there would be
+  /// nothing to hunt with.
+  final VoidCallback? onRecruit;
+
   /// True while a re-check this owner asked for is still in the worker. Passed
   /// straight through to the section, which is where the running label and the
   /// inert button live.
@@ -173,6 +180,7 @@ class StorylineTimelinePanel extends StatefulWidget {
     this.onUnblockThread,
     this.onAddBackThread,
     this.onAudit,
+    this.onRecruit,
     this.auditing = false,
     this.onContext,
     this.contextLinked = 0,
@@ -184,6 +192,13 @@ class StorylineTimelinePanel extends StatefulWidget {
   /// is still tappable — two doors, one action — but a sentence that looks
   /// like prose is not an invitation, and this is the one that says so.
   static const Key charterEditKey = ValueKey('storyline-charter-edit');
+
+  /// Sends the recruit out again on the charter already saved. Beside Edit
+  /// rather than under it: a person who has just read the sentence and decided
+  /// it is right has nothing else to change, and until this existed the only
+  /// way to re-run the hunt was to edit the charter into something else and
+  /// back again.
+  static const Key recruitButtonKey = ValueKey('storyline-recruit-button');
 
   /// One episode card's evidence line, keyed by source AND key because two
   /// connectors can carry one conversation key.
@@ -965,11 +980,36 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
             // The sentence below is tappable and always was, but a sentence
             // that reads as prose is not an invitation. This is the door that
             // says so.
+            //
+            // Wrapped rather than laid out in the Row itself: two labelled
+            // buttons beside the caption are wider than the narrowest pane
+            // this panel is drawn in, and a Row would overflow rather than
+            // fold. The Wrap is Flexible so the caption keeps its place and
+            // the buttons take the second line when there is no room on the
+            // first.
             if (!_editingCharter)
-              _quietButton(
-                'Edit',
-                () => _startEditingCharter(charter),
-                key: StorylineTimelinePanel.charterEditKey,
+              Flexible(
+                child: Wrap(
+                  alignment: WrapAlignment.end,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    // Only with a charter to hunt with, and never while the
+                    // field is open: the sentence on screen is not the
+                    // sentence saved, so a hunt started here would run on the
+                    // old one.
+                    if (charter.isNotEmpty && widget.onRecruit != null)
+                      _quietButton(
+                        'Find more threads',
+                        widget.onRecruit,
+                        key: StorylineTimelinePanel.recruitButtonKey,
+                      ),
+                    _quietButton(
+                      'Edit',
+                      () => _startEditingCharter(charter),
+                      key: StorylineTimelinePanel.charterEditKey,
+                    ),
+                  ],
+                ),
               ),
           ],
         ),

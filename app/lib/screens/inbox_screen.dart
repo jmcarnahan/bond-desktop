@@ -45,7 +45,7 @@ import '../services/llm/model_probe.dart';
 // [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
 // re-exports them; `pipelineStages` is not re-exported, and the settings host
 // needs it to ask where every stage currently points.
-import '../services/llm/model_slots.dart' show pipelineStages;
+import '../services/llm/model_slots.dart' show ModelPlacement, pipelineStages;
 import '../services/llm/needs_you_task.dart'
     show needsYouDefaultRules, needsYouOutputContract, needsYouRulesCap;
 import '../services/profile_photos.dart' show photoKeyFor;
@@ -101,6 +101,60 @@ import 'new_message_screen.dart';
 /// behind it. The screen never waits on the network to render: it reads what
 /// is stored, asks for a refresh, and shows a banner if that refresh did not
 /// land.
+/// The one sentence under the inbox's list: how much is waiting, and whether
+/// anything is stuck.
+///
+/// A pure function, apart from the screen, because the WORDING is the thing
+/// worth pinning and the screen it lives on owns a sixty-second timer.
+///
+/// Processing being off wins over every park: a queue nobody is draining is
+/// not a queue that is stuck. `session` keeps today's wording, because a
+/// sign-out is already routed by the inbox notifier and a second sentence
+/// about it here would be the app saying the same thing twice.
+/// `model_unavailable` and `unauthorized` read differently on the two
+/// placements, because there the answer changes what a person should go and
+/// look at; `embed_unavailable` does not, because that server is on this Mac
+/// under either placement.
+///
+/// "Retrying each minute" is the inbox's own poll and the supervisor's
+/// `onReady`, and it is the only cadence this sentence may claim: nothing
+/// polls the box's health.
+String railProgressLine({
+  required bool on,
+  required int remaining,
+  required String? reason,
+  required int waiting,
+  required bool onBox,
+}) {
+  // [waiting] rather than [remaining], because the switch is about the whole
+  // pipeline and the worker lanes have backlogs of their own. The two numbers
+  // are the same whenever triage is the only queue holding rows.
+  if (!on) return 'Processing is off · $waiting waiting';
+  switch (reason) {
+    case 'model_unavailable':
+      return onBox
+          ? 'GPU box unreachable · $waiting waiting · retrying each minute'
+          : 'Model server unreachable · $waiting waiting · retrying each '
+              'minute';
+    // The same sentence on BOTH placements, because the embedding server is
+    // on this Mac either way: the box placement moves every generating stage
+    // and leaves embeddings local, so "GPU box unreachable" would name a
+    // machine that is answering fine.
+    case 'embed_unavailable':
+      return 'Embedding server unreachable · $waiting waiting · retrying each '
+          'minute';
+    // Named for the machine that refused, like the arm above it: a local
+    // server behind a reverse proxy can answer 401 too, and telling that
+    // person to go and look at a GPU box would send them to the wrong place.
+    case 'unauthorized':
+      return onBox
+          ? 'GPU box refused the access key · $waiting waiting'
+          : 'Model server refused the access key · $waiting waiting';
+    default:
+      return 'Triaging $remaining remaining…';
+  }
+}
+
 class InboxScreen extends ConsumerStatefulWidget {
   /// Fired after the stored credentials are cleared, so the gate above can
   /// swap back to the sign-in screen.
@@ -289,6 +343,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// The thread the add-to-storyline pane is filing. Same overlay contract.
   ({String source, String id})? _pickingStorylineForThread;
+
+  /// Whether the New storyline pane is up — a storyline declared from a title
+  /// and a charter with no thread in it yet. Same overlay contract as the two
+  /// above, and it takes the main pane rather than a layer over it.
+  bool _declaringStoryline = false;
 
   /// The message the docked composer is answering, if the user named one.
   ///
@@ -858,6 +917,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _focusSideOnMount = null;
     _addingToStorylineId = null;
     _pickingStorylineForThread = null;
+    _declaringStoryline = false;
     _railOpen = false;
     _replyTo = null;
     _showingActivityLog = false;
@@ -1704,6 +1764,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onSelectSection: _selectSection,
       onSelectStoryline: _selectStoryline,
       onSelectLaterDay: _selectLaterDay,
+      onNewStoryline: () => setState(() => _declaringStoryline = true),
       onKeepSuggestion: (id) =>
           ref.read(storylinesProvider.notifier).keep(id),
       onDismissSuggestion: (id) {
@@ -2491,6 +2552,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         for (final slot in ModelSlot.values) slot: prefs.slotBaseline(slot),
       },
       probeServer: _probe.probe,
+      // A LOOKUP by id, never the token: the closure reads one bearer out of
+      // the notifier's cache at the moment Check server is pressed, hands it
+      // to the probe and drops it. Nothing holds it.
+      storedBearer: (id) => ref.read(appPrefsProvider.notifier).bearerFor(id),
       onSlotTargetChanged: (slot, {required url, required model}) =>
           unawaited(switch (slot) {
             ModelSlot.fast => notifier.setFastLlmTarget(url: url, model: model),
@@ -2555,6 +2620,25 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         final tier = await ref.read(machineTierProvider.future);
         if (!mounted) return;
         await notifier.applyTierDefaults(tier);
+      },
+      modelPlacement: prefs.modelPlacement,
+      // Only the two words the box can answer for. `embed_unavailable` is a
+      // local server under this placement and `session` is a sign-out, and
+      // neither is a sentence for the box's block to be putting on screen.
+      boxParkedReason: switch (ref.watch(parkedProvider).valueOrNull?.reason) {
+        'model_unavailable' => 'model_unavailable',
+        'unauthorized' => 'unauthorized',
+        _ => null,
+      },
+      onAdoptBox: (baseUrl, key) =>
+          notifier.adoptBox(baseUrl: baseUrl, bearer: key),
+      // This Mac's HARDWARE tier, not the effective one: going back to local
+      // means going back to what this machine can run.
+      onAdoptLocal: () async {
+        if (!mounted) return;
+        final tier = await ref.read(machineTierProvider.future);
+        if (!mounted) return;
+        await notifier.adoptLocal(tier);
       },
       onStageTargetChanged: (stageId, targetId) => unawaited(
         targetId == null
@@ -2914,19 +2998,45 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// stopped moving would read as a stall rather than as a switch somebody
   /// threw. Nothing at all when there is nothing waiting — an off session with
   /// an empty queue has no news.
+  ///
+  /// A PARKED pipeline is the third sentence, and it is the one a person can
+  /// act on: the reason rides the drains' own progress streams, so there is no
+  /// health poll behind it and the line clears when the next pump gets an item
+  /// through. "Retrying each minute" is the inbox's own sixty-second poll and
+  /// is the only cadence this sentence may claim. Processing being off still
+  /// wins: a queue nobody is draining is not a queue that is stuck.
   Widget _triageProgress() {
     final on = ref.watch(processingProvider);
+    final parked = ref.watch(parkedProvider).valueOrNull;
+    final onBox =
+        ref.watch(appPrefsProvider).modelPlacement == ModelPlacement.box;
     return StreamBuilder<TriageProgress>(
       stream: ref.watch(triageQueueProvider).progress,
       builder: (context, snapshot) {
         final remaining = snapshot.data?.remaining ?? 0;
-        if (remaining == 0) return const SizedBox.shrink();
+        final waiting = parked?.waiting ?? remaining;
+        // The TRIAGE queue being empty is not the pipeline being empty: the
+        // three worker lanes have backlogs of their own, and a parked draft
+        // lane with nothing left to triage is exactly the case somebody needs
+        // told about.
+        //
+        // A park with something waiting therefore speaks even when triage is
+        // done. An unparked worker backlog does NOT: the only sentence there
+        // is to say is "Triaging N remaining…", which would read `0` and be a
+        // worse answer than silence. What the rail is for is the two states a
+        // person can act on, a queue moving and a queue stuck.
+        final stuck = parked?.reason != null && waiting > 0;
+        if (remaining == 0 && !stuck) return const SizedBox.shrink();
         return Padding(
           padding: const EdgeInsets.only(bottom: BondSpacing.s8),
           child: Text(
-            on
-                ? 'Triaging $remaining remaining…'
-                : 'Processing is off · $remaining waiting',
+            railProgressLine(
+              on: on,
+              remaining: remaining,
+              reason: parked?.reason,
+              waiting: waiting,
+              onBox: onBox,
+            ),
             style: BondType.caption.copyWith(color: BondColors.onDarkMuted),
           ),
         );
@@ -2998,6 +3108,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // Dismissed or gone from under the pane; fall through to whatever is
       // next.
     }
+
+    // Above the picking branch because it is the outer act: declaring a
+    // storyline is not about any one thread, and the two are never up at once
+    // anyway — the rail's control clears nothing but sets this, and every
+    // selection clears both.
+    if (_declaringStoryline) return _declareStorylinePane();
 
     final picking = _pickingStorylineForThread;
     if (picking != null) return _pickStorylinePane(picking);
@@ -3333,6 +3449,47 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ref.read(storylineTimelineProvider(id).notifier).load();
           _reloadHistoryBeside();
         },
+        // The same create with the charter the user typed beside the name, and
+        // the same ending: the difference is entirely inside the service, which
+        // locks the charter and sends the recruit hunting for the other threads
+        // this one is the first of.
+        onCreateWithCharter: (title, charter) async {
+          final id = await ref.read(storylinesProvider.notifier).create(
+                title,
+                conversationKey: thread.id,
+                source: thread.source,
+                charter: charter,
+              );
+          if (!mounted) return;
+          setState(() => _pickingStorylineForThread = null);
+          ref.read(storylineTimelineProvider(id).notifier).load();
+          _reloadHistoryBeside();
+        },
+      ),
+    );
+  }
+
+  /// The New storyline pane: a title and a charter, and nothing in it yet.
+  ///
+  /// It ends the way the picker's create does, on the storyline it just made —
+  /// [_selectStoryline] is the rail's own selection path, so the user lands in
+  /// the storyline they declared and watches the recruit fill it.
+  Widget _declareStorylinePane() {
+    return Padding(
+      padding: const EdgeInsets.all(BondSpacing.s24),
+      child: NewStorylinePane(
+        onBack: () => setState(() => _declaringStoryline = false),
+        onCreate: (title, charter) async {
+          final id = await ref
+              .read(storylinesProvider.notifier)
+              .declare(title, charter);
+          if (!mounted) return;
+          // No clearing of the flag here: `_selectStoryline` runs
+          // `_clearOverlays` inside its own `setState`, and that is what drops
+          // this pane. Clearing it first would be a second frame saying the
+          // same thing.
+          _selectStoryline(id);
+        },
       ),
     );
   }
@@ -3430,6 +3587,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         ref.read(storylineTimelineProvider(storyline.id).notifier).load();
       },
       onAudit: () => notifier.auditNow(storyline.id),
+      onRecruit: () => notifier.recruitNow(storyline.id),
       auditing: _storylineAuditing(storyline.id),
       onOpenThread: (source, key) => _select(key, source: source),
       // The card's own tap. A thread opens BESIDE the spine rather than over

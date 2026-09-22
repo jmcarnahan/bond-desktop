@@ -2496,6 +2496,46 @@ RETURNING *
     return Map<String, Object?>.from(claimed.first.data);
   }
 
+  /// Claims ONE NAMED item, by the key `writeWork` updates by — the priority
+  /// lane's claim, where [claimPendingWork] is the backlog's.
+  ///
+  /// Same statement shape and the same guarantee: one UPDATE…RETURNING, so
+  /// the item is chosen and taken off the pending list indivisibly, and a
+  /// drain racing the handler walk for the same row gets null rather than a
+  /// second copy of it. No `rowid IN (SELECT … LIMIT 1)` wrapper is needed,
+  /// because `(task_kind, source, entity_id)` names at most one row.
+  ///
+  /// The untriaged guard is repeated VERBATIM from [claimPendingWork], which
+  /// is the point of writing it out again rather than trusting the caller: a
+  /// priority claim must not be a hole in the invariant that no message is
+  /// extracted or judged before triage has spoken about it. A ref whose
+  /// message is still `pending` or `processing` comes back null and the
+  /// backlog walk takes it once the verdict lands.
+  ///
+  /// Null when nothing matched, which covers all three of: no such row, the
+  /// row is not `pending`, and the row is held back by the guard.
+  Future<Map<String, Object?>?> claimWorkItem(
+    String kind,
+    String source,
+    String entityId,
+  ) async {
+    final claimed = await db.customWriteReturning(
+      '''
+UPDATE work_items SET status = 'processing', updated_at = ?
+WHERE task_kind = ? AND source = ? AND entity_id = ? AND status = 'pending'
+  AND NOT (? IN ('needs_you','extract') AND EXISTS (
+    SELECT 1 FROM messages m
+    WHERE m.source = work_items.source
+      AND m.source_message_id = work_items.entity_id
+      AND m.triage_status IN ('pending','processing')))
+RETURNING *
+''',
+      variables: _args([_nowIso(), kind, source, entityId, kind]),
+    );
+    if (claimed.isEmpty) return null;
+    return Map<String, Object?>.from(claimed.first.data);
+  }
+
   /// Records the outcome of one work item. Like [writeTriage], only the
   /// fields this call carries are written, so claiming an item does not blank
   /// the error a previous attempt left behind.
@@ -5243,6 +5283,29 @@ FROM storylines s''';
           'JOIN storylines s ON s.id = b.storyline_id '
           "WHERE b.source = ? AND s.status IN ('suggested', 'active')",
           variables: _args([source, source]),
+        )
+        .get();
+    return {
+      for (final row in result) row.data['conversation_key'] as String? ?? '',
+    };
+  }
+
+  /// Every thread that is a MEMBER of a live storyline, blocks excluded.
+  ///
+  /// [assignedOrBlockedKeys] read without its block arm, for the caller that
+  /// carries its own blocks. The sweep wants both arms because a thread the
+  /// user pulled out of a group is not a thread to propose a new group around.
+  /// A declared storyline's recruit wants only the first: a block belongs to
+  /// the storyline it was taken in, and reading every storyline's blocks here
+  /// would mean one removal anywhere hid that thread from every other
+  /// storyline in the mailbox for good.
+  Future<Set<String>> assignedKeys(String source) async {
+    final result = await db
+        .customSelect(
+          'SELECT m.conversation_key AS conversation_key FROM storyline_members m '
+          'JOIN storylines s ON s.id = m.storyline_id '
+          "WHERE m.source = ? AND s.status IN ('suggested', 'active')",
+          variables: _args([source]),
         )
         .get();
     return {

@@ -16,6 +16,7 @@ import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 import 'package:bond_inbox/services/search_fusion.dart' show buildFtsQuery;
 
 import 'fixtures/fake_embed_server.dart';
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/vec_test_db.dart';
 
 /// One fast-slot call per file, and the ladder of reasons not to make it.
@@ -26,38 +27,12 @@ import 'fixtures/vec_test_db.dart';
 /// and the claim. Each rung has to close the row or deliberately leave it
 /// open, and which one it does is the difference between a backlog that
 /// drains and one that comes back on every pass.
-class _FakeLlm extends LlmClient {
-  _FakeLlm(this.script) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  final List<Object> script;
-  final List<String> userMessages = [];
-  final List<double> temperatures = [];
-  final List<int> tokenBudgets = [];
-
-  int get calls => userMessages.length;
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    userMessages.add(user);
-    temperatures.add(temperature);
-    tokenBudgets.add(maxTokens);
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-    final step = script.length > 1 ? script.removeAt(0) : script.first;
-    // An `Error` as well as an `Exception`: a schema the model answered
-    // outside of arrives here as a `StateError`, and that is the failure
-    // this handler's last attempt has to close the file row for.
-    if (step is! Map) throw step;
-    return Map<String, dynamic>.from(step);
-  }
-}
+/// An `Error` as well as an `Exception` is thrown from a script step: a
+/// schema the model answered outside of arrives here as a `StateError`, and
+/// that is the failure this handler's last attempt has to close the file row
+/// for.
+ScriptedLlm digestLlm(List<Object> script) =>
+    ScriptedLlm()..scriptFor('context_file_digest', script);
 
 /// An activity log that keeps what the handler told it. Most of the ladder
 /// is only observable as a `skipped` and a reason.
@@ -146,7 +121,7 @@ void main() {
   }) =>
       ContextDigestHandler(
         store,
-        _FakeLlm(script),
+        digestLlm(script),
         (embeddings ?? server).client,
         activityLog: log,
       );
@@ -232,7 +207,7 @@ void main() {
     test('the call is deterministic and budgeted', () async {
       final dirId = await register();
       final fileId = await addFile(dirId);
-      final llm = _FakeLlm([digestAnswer()]);
+      final llm = digestLlm([digestAnswer()]);
 
       await ContextDigestHandler(store, llm, server.client, activityLog: log)
           .run({
@@ -329,7 +304,7 @@ void main() {
     test('a digest already done costs nothing the second time', () async {
       final dirId = await register();
       final fileId = await addFile(dirId);
-      final llm = _FakeLlm([digestAnswer()]);
+      final llm = digestLlm([digestAnswer()]);
       final handler =
           ContextDigestHandler(store, llm, server.client, activityLog: log);
       final entity = ContextDigestHandler.entityIdFor(dirId, fileId);
@@ -344,14 +319,14 @@ void main() {
       // backlog, and a file already digested must not cost a second call.
       expect(log.status, 'skipped');
       expect(log.notes['reason'], 'already_digested');
-      expect(llm.calls, 1);
+      expect(llm.calls.length, 1);
     });
 
     test('a file under two hundred characters is closed as too short',
         () async {
       final dirId = await register();
       final fileId = await addFile(dirId, chars: 120);
-      final llm = _FakeLlm([digestAnswer()]);
+      final llm = digestLlm([digestAnswer()]);
 
       await ContextDigestHandler(store, llm, server.client, activityLog: log)
           .run({
@@ -364,7 +339,7 @@ void main() {
       // later pass.
       expect(log.notes['reason'], 'too_short');
       expect((await store.fileById(fileId))!.digestStatus, 'skipped');
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
     });
 
     test('a row that claims words the table does not have is closed',
@@ -380,7 +355,7 @@ void main() {
         claudeChain: const [],
         textChars: 400,
       );
-      final llm = _FakeLlm([digestAnswer()]);
+      final llm = digestLlm([digestAnswer()]);
 
       await ContextDigestHandler(store, llm, server.client, activityLog: log)
           .run({
@@ -390,7 +365,7 @@ void main() {
 
       expect(log.notes['reason'], 'no_text');
       expect((await store.fileById(fileId))!.digestStatus, 'skipped');
-      expect(llm.calls, 0);
+      expect(llm.calls.length, 0);
     });
   });
 

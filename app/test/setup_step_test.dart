@@ -39,18 +39,30 @@ void main() {
     expect(backwards.reversed.toList(), SetupStep.values);
   });
 
-  test('the counter reads 1 of 8 through 8 of 8', () {
-    expect(SetupStep.count, 8);
+  test('the counter reads 1 of 9 through 9 of 9', () {
+    expect(SetupStep.count, 9);
     expect(SetupStep.welcome.number, 1);
-    expect(SetupStep.done.number, 8);
+    expect(SetupStep.done.number, 9);
     for (final step in SetupStep.values) {
       expect(step.number, step.index + 1);
     }
   });
 
+  test('Where the models run sits between the device and the models steps',
+      () {
+    // The placement decides which models the next three steps are about, so
+    // it has to be answered before the models, storage and download steps
+    // size anything.
+    expect(SetupStep.device.next, SetupStep.where);
+    expect(SetupStep.where.next, SetupStep.models);
+    expect(SetupStep.where.previous, SetupStep.device);
+    expect(SetupStep.where.number, 3);
+  });
+
   test('every step has the title the pane shows', () {
     expect(SetupStep.welcome.title, 'Welcome to Bond');
     expect(SetupStep.device.title, 'Your Mac');
+    expect(SetupStep.where.title, 'Where the models run');
     expect(SetupStep.models.title, 'Models');
     expect(SetupStep.storage.title, 'Storage');
     expect(SetupStep.download.title, 'Download');

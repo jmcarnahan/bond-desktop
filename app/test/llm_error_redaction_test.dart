@@ -10,6 +10,7 @@ import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/testing.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// A target's URL is a setting, and a stored row outlives the setting.
@@ -39,24 +40,11 @@ class _Throwing extends WorkHandler {
 
 /// A triage model that fails with a sentence spelling an address, the way a
 /// 4xx body snippet or a transport wrapper can.
-class _ThrowingLlm extends LlmClient {
-  _ThrowingLlm() : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    throw StateError(
-      'bad answer from http://box.example.com:18101/v1/chat/completions',
+ScriptedLlm throwingLlm() => ScriptedLlm(
+      fallback: StateError(
+        'bad answer from http://box.example.com:18101/v1/chat/completions',
+      ),
     );
-  }
-}
 
 void main() {
   group('redactEndpoints', () {
@@ -187,7 +175,7 @@ void main() {
       });
       final queue = TriageQueue(
         store,
-        _ThrowingLlm(),
+        throwingLlm(),
         concurrency: 1,
         activityLog: ActivityLog(store),
       );

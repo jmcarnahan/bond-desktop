@@ -145,6 +145,73 @@ const String builtInProseId = 'local-prose';
 const String builtInFastName = 'Local fast';
 const String builtInProseName = 'Local prose';
 
+/// Where this install's model work runs.
+///
+/// A machine preference, not a tier read off memory: the same Mac can be
+/// pointed at the shared GPU box today and at its own servers tomorrow, and
+/// neither answer is derivable from the hardware. [box] means the inbox and
+/// writing stages dial two fixed targets over TLS and only the embedding
+/// model runs here; [local] is the shipped default and every stage runs on
+/// this Mac.
+enum ModelPlacement { box, local }
+
+/// The two targets [ModelPlacement.box] writes, by fixed id.
+///
+/// Fixed rather than generated so that adopting the box twice REPLACES the
+/// pair rather than stacking duplicates, and so `adoptLocal` knows exactly
+/// which two rows and which two keychain entries to remove. The names carry a
+/// middle dot rather than a dash because user-facing strings take no
+/// em-dashes.
+const String boxProseId = 'box-prose';
+const String boxBulkId = 'box-bulk';
+const String boxProseName = 'GPU box · writing';
+const String boxBulkName = 'GPU box · inbox';
+
+/// What each box slot calls its model on the wire: the 27B on the writing
+/// slot, the 4B on the inbox slot, as the box's two vLLM servers serve them.
+const String boxProseModel = 'qwen3.8';
+const String boxBulkModel = 'qwen3-4b';
+
+/// The box address the wizard prefills, compiled in from `.env`'s
+/// `BOND_BOX_URL` through the Makefile's `APP_SECRET_DEFINE`.
+///
+/// Empty in every build that did not pass the define, including the test
+/// suite, so a wizard on a plain `flutter run` asks for the address. The
+/// access key is NEVER compiled in: it is typed once and lives in the
+/// keychain.
+const String boxUrlDefault = String.fromEnvironment('BOND_BOX_URL');
+
+/// A typed box address as the two completions URLs are built from it: trimmed,
+/// and with every trailing slash gone.
+///
+/// One function rather than the same two lines in the wizard, the Settings
+/// pane and `adoptBox`: a pasted address arrives with whitespace and often
+/// with a slash, and three copies of the strip is three places for
+/// `https://box.example.com//prose/v1/chat/completions` to come from. Returns
+/// the empty string for an empty input, which is what both callers read as
+/// "nothing typed yet".
+String normalizeBoxBaseUrl(String raw) {
+  var base = raw.trim();
+  while (base.endsWith('/')) {
+    base = base.substring(0, base.length - 1);
+  }
+  return base;
+}
+
+/// The box ORIGIN behind a stored [boxProseId] target's URL, or the empty
+/// string when [url] is not one this app wrote.
+///
+/// [normalizeBoxBaseUrl] read backwards, and the reason it is a function: the
+/// Settings pane prefills its address field from the pair already stored so
+/// that somebody whose access key was rotated types the key alone, and
+/// re-deriving the origin by hand is how the two halves of one recipe drift.
+String boxBaseFromProseUrl(String url) {
+  const suffix = '/prose/v1/chat/completions';
+  return url.endsWith(suffix)
+      ? url.substring(0, url.length - suffix.length)
+      : '';
+}
+
 /// Hosts whose operator is a third party: a target here on `draft_reply` or
 /// `draft_improve` needs the one-time consent (decision 9).
 ///
@@ -152,14 +219,20 @@ const String builtInProseName = 'Local prose';
 /// `ssh` tunnel at `localhost:18100`, so "not loopback" would miss it, and a
 /// Bedrock endpoint proxied onto loopback would read as local. What this list
 /// answers is narrower and honest: whose machine is on the other end.
+///
+/// `amazonaws.com` as a whole is NOT here. The shared GPU box is an EC2
+/// instance this install's owner rents, pays for and runs, reached under a
+/// Route 53 name or an EC2 public name; sending mail to it is not sending
+/// mail to a vendor. Bedrock IS a vendor and is matched by its own hostname
+/// shape in [isThirdPartyHost].
 const Set<String> thirdPartyHosts = {
-  'amazonaws.com',
   'anthropic.com',
   'openai.com',
   'deepseek.com',
 };
 
-/// Whether [url]'s host is one of [thirdPartyHosts] or a subdomain of one.
+/// Whether [url]'s host is a Bedrock runtime host, one of [thirdPartyHosts],
+/// or a subdomain of one.
 ///
 /// A URL that does not parse is NOT third party: an unparseable target cannot
 /// be dialled at all, and treating it as cloud would put a consent screen in
@@ -167,6 +240,11 @@ const Set<String> thirdPartyHosts = {
 bool isThirdPartyHost(String url) {
   final host = Uri.tryParse(url)?.host.toLowerCase();
   if (host == null || host.isEmpty) return false;
+  // `bedrock-runtime.<region>.amazonaws.com`, and nothing else under AWS: the
+  // shared GPU box is an EC2 instance this install's owner rents and runs.
+  if (host.startsWith('bedrock') && host.endsWith('.amazonaws.com')) {
+    return true;
+  }
   for (final domain in thirdPartyHosts) {
     if (host == domain || host.endsWith('.$domain')) return true;
   }
@@ -386,6 +464,16 @@ const List<String> proseStageIds = [
   'draft_reply',
 ];
 
+/// The two stages that write a reply in the owner's name, and the ONE place
+/// that pair is named.
+///
+/// Not a preset — `draft_improve` is in none — but the same closed set of two
+/// is what four places ask about: the consent gate in `specForStage`, the
+/// stages `applyPreset` skips when consent is missing, the picker's gated note
+/// and the picker's consent prompt. Written out at each of them, a third
+/// drafting stage would have to be remembered four times.
+const List<String> draftStageIds = ['draft_reply', 'draft_improve'];
+
 /// The stages **Use for storyline confirm** writes. One stage, and the one
 /// Round D measured a 27B worth pointing at.
 const List<String> confirmStageIds = ['storyline_membership'];
@@ -550,15 +638,17 @@ const List<PipelineStageInfo> pipelineStages = [
   ),
 ];
 
-/// What this Mac can run, read off its memory alone.
+/// What this Mac runs.
 ///
-/// Two tiers, because two things differ between the machines the ledger has
+/// Two of the three are read off memory alone, because two things differ between the machines the ledger has
 /// numbers for: whether the writing model (the 27B, 19 GB on disk and 22 GB
 /// resident with its MTP head) is downloaded and started at all, and how the
 /// inbox model's context is split. Everything else — the embedding model, the
 /// 4B, the search corpora, sync — runs the same way on 16 GB as on 64 GB.
-/// A third tier for 8 GB machines is a measured row in `docs/model-bakeoff.md`
-/// and not shipped: one more checkpoint to pin and no machine to test it on.
+/// A third memory tier for 8 GB machines is a measured row in
+/// `docs/model-bakeoff.md` and not shipped: one more checkpoint to pin and no
+/// machine to test it on. [remote] is a third VALUE but not a third rung: it
+/// is what [ModelPlacement.box] resolves to.
 enum MachineTier {
   /// The embedding model, the inbox model and the writing model, all local.
   /// The 64 GB rows of the ledger are this tier.
@@ -568,6 +658,15 @@ enum MachineTier {
   /// the inbox model until a person adds a target under Settings, Models, and
   /// drafts are on demand rather than prefetched.
   inbox,
+
+  /// The embedding model alone: every other stage is on the shared GPU box.
+  ///
+  /// NOT a memory rung. [machineTierFor] never returns it at any byte count;
+  /// it is what `effectiveTierProvider` answers under
+  /// [ModelPlacement.box], and it is here rather than in a second enum
+  /// because `ModelManifest.forTier` is keyed on this one and a parallel
+  /// resolution API would touch the same consumers twice.
+  remote,
 }
 
 /// The memory at or above which the writing model is downloaded and started.
@@ -588,6 +687,9 @@ const int measuredFloorBytes = 16 * 1024 * 1024 * 1024;
 /// without the system channel answer) is [MachineTier.full]: nothing is
 /// refused for a fact the app could not read, the same rule
 /// `HardwareInfo.unknown` states.
+///
+/// Never [MachineTier.remote] at any byte count: that tier is a placement,
+/// not a reading of this machine.
 MachineTier machineTierFor(int memoryBytes) {
   if (memoryBytes <= 0) return MachineTier.full;
   return memoryBytes >= fullTierMinBytes ? MachineTier.full : MachineTier.inbox;
@@ -602,9 +704,15 @@ MachineTier machineTierFor(int memoryBytes) {
 /// with no prose server; built from [proseStageIds] so it cannot drift from the
 /// stage table. `draft_improve` is optional and stays unset; the confirm and
 /// the bulk stages already default to the fast target.
+///
+/// [MachineTier.remote] writes nothing, and MUST stay empty: `applyTierDefaults`
+/// builds its `governed` set from the union of every tier's keys, so a stage
+/// named here would widen what `applyTierDefaults(full)` clears on a machine
+/// that never saw the box.
 Map<String, String> tierStageDefaults(MachineTier tier) => switch (tier) {
       MachineTier.full => const {},
       MachineTier.inbox => {for (final id in proseStageIds) id: builtInFastId},
+      MachineTier.remote => const {},
     };
 
 /// The draft policy a tier writes.
@@ -612,7 +720,10 @@ Map<String, String> tierStageDefaults(MachineTier tier) => switch (tier) {
 /// The inbox tier drafts on demand: its writer is the 4B, whose drafts the
 /// golden set has not judged, and nobody should pay for them unasked. The full
 /// tier keeps the shipped default.
+/// [MachineTier.remote] drafts on the box's 27B, which is the writing model
+/// the ledger measured, so it keeps the shipped default.
 DraftPolicy tierDraftPolicy(MachineTier tier) => switch (tier) {
       MachineTier.full => DraftPolicy.needsYou,
       MachineTier.inbox => DraftPolicy.onDemand,
+      MachineTier.remote => DraftPolicy.needsYou,
     };

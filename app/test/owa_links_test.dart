@@ -19,11 +19,11 @@ void main() {
   const zwsp = '\u200b';
   const icon = 'https://res-1.cdn.office.net/files/assets/item-types/16/pdf.svg';
   const pdfUrl =
-      'https://southbayequity2-my.sharepoint.com/:b:/g/personal/'
-      'jane_southbayequity2_onmicrosoft_com/EaBcDeFgHiJkLmNoPqRsTuVwXyZ'
+      'https://contoso2-my.sharepoint.com/:b:/g/personal/'
+      'jane_contoso2_onmicrosoft_com/EaBcDeFgHiJkLmNoPqRsTuVwXyZ'
       '?e=abc123';
   const xlsxUrl =
-      'https://southbayequity2.sharepoint.com/:x:/s/deals/EqRsTuVwXyZ01234';
+      'https://contoso2.sharepoint.com/:x:/s/deals/EqRsTuVwXyZ01234';
 
   String run(String name, String url) => '$zwsp[$icon]$name<$url>$zwsp';
 
@@ -195,7 +195,7 @@ void main() {
     test('a personal OneDrive host counts', () {
       expect(isCloudFileUrl(pdfUrl), isTrue);
       expect(
-        isCloudFileUrl('https://southbayequity2.sharepoint.com/sites/deals/a'),
+        isCloudFileUrl('https://contoso2.sharepoint.com/sites/deals/a'),
         isTrue,
       );
     });

@@ -44,7 +44,18 @@
       "license": "Apache-2.0",
       "licenseUrl": "https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF",
       "notice": null,
-      "serverArgs": { "c": "16384", "parallel": "1", "load-on-startup": "true" }
+      "sidecar": {
+        "file": "mtp-Qwen3.8-27B-Q4_0.gguf",
+        "revision": "0669b98607d47046c7c2b3f801011d54a08cfccf",
+        "sha256": "051a1764cff8c4f3ee6ae8b00593a0364c7539c67fa50ffc58f3f96509fca38e",
+        "sizeBytes": 1680271648
+      },
+      "serverArgs": {
+        "c": "16384",
+        "parallel": "1",
+        "load-on-startup": "true",
+        "spec-type": "draft-mtp"
+      }
     }
   ],
   "tiers": [
@@ -58,6 +69,11 @@
       "minRamBytes": 0,
       "models": ["bond-embed", "bond-bulk"],
       "serverArgs": { "bond-bulk": { "c": "16384", "parallel": "2" } }
+    },
+    {
+      "id": "remote",
+      "minRamBytes": 0,
+      "models": ["bond-embed"]
     }
   ]
 }

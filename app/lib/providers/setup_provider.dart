@@ -10,6 +10,7 @@ import '../data/app_paths.dart';
 import '../data/setup_store.dart';
 import '../models/setup_step.dart';
 import '../services/backend/auth_session.dart';
+import '../services/llm/model_probe.dart';
 import '../services/llm/model_slots.dart';
 import '../services/models/disk_preflight.dart';
 import '../services/models/download_state.dart';
@@ -91,6 +92,25 @@ class SetupState {
   /// on a first run, where there is no inbox behind the wizard to go to.
   final bool canReturnToInbox;
 
+  /// The answer to **Where the models run**, or null until one is given. A
+  /// quit on that step resumes there with this still null, so nothing was
+  /// adopted and the step asks again.
+  final ModelPlacement? placement;
+
+  /// The box address as typed, prefilled from the compiled `boxUrlDefault`.
+  ///
+  /// The ACCESS KEY is deliberately not here and never will be. This object is
+  /// state, state is what gets stored, and a stored key would be a secret in
+  /// `setup_state`. The key lives in the step body's own controller and is
+  /// handed to `adoptBox` by value at Continue.
+  final String boxUrl;
+
+  /// The last **Check server** answer on the box, or null when none has been
+  /// asked for. Carries no token: see `ModelServerProbe.probe`.
+  final ModelProbeResult? boxProbe;
+
+  final bool boxProbing;
+
   const SetupState({
     this.loaded = false,
     this.step = SetupStep.welcome,
@@ -109,6 +129,10 @@ class SetupState {
     this.finishing = false,
     this.finishFailed = false,
     this.canReturnToInbox = false,
+    this.placement,
+    this.boxUrl = boxUrlDefault,
+    this.boxProbe,
+    this.boxProbing = false,
   });
 
   SetupState copyWith({
@@ -134,6 +158,12 @@ class SetupState {
     bool? finishing,
     bool? finishFailed,
     bool? canReturnToInbox,
+    ModelPlacement? placement,
+    bool clearPlacement = false,
+    String? boxUrl,
+    ModelProbeResult? boxProbe,
+    bool clearBoxProbe = false,
+    bool? boxProbing,
   }) =>
       SetupState(
         loaded: loaded ?? this.loaded,
@@ -156,6 +186,10 @@ class SetupState {
         finishing: finishing ?? this.finishing,
         finishFailed: finishFailed ?? this.finishFailed,
         canReturnToInbox: canReturnToInbox ?? this.canReturnToInbox,
+        placement: clearPlacement ? null : (placement ?? this.placement),
+        boxUrl: boxUrl ?? this.boxUrl,
+        boxProbe: clearBoxProbe ? null : (boxProbe ?? this.boxProbe),
+        boxProbing: boxProbing ?? this.boxProbing,
       );
 
   @override
@@ -178,7 +212,11 @@ class SetupState {
       other.notificationsGranted == notificationsGranted &&
       other.finishing == finishing &&
       other.finishFailed == finishFailed &&
-      other.canReturnToInbox == canReturnToInbox;
+      other.canReturnToInbox == canReturnToInbox &&
+      other.placement == placement &&
+      other.boxUrl == boxUrl &&
+      other.boxProbe == boxProbe &&
+      other.boxProbing == boxProbing;
 
   static bool _sameDownloads(
     Map<String, DownloadProgress> a,
@@ -213,11 +251,15 @@ class SetupState {
         finishing,
         finishFailed,
         canReturnToInbox,
+        // Nested: `Object.hash` takes twenty arguments and the four fields the
+        // placement added are the twenty-first onward.
+        Object.hash(placement, boxUrl, boxProbe, boxProbing),
       );
 
   @override
   String toString() => 'SetupState(${step.name}, loaded: $loaded, '
-      'complete: $downloadsComplete, signedIn: $signedIn)';
+      'complete: $downloadsComplete, signedIn: $signedIn, '
+      'placement: ${placement?.name})';
 }
 
 /// Drives the first run: which step, what each step probed, what it wrote.
@@ -245,6 +287,9 @@ class SetupController extends StateNotifier<SetupState> {
     required this.setManagedServer,
     required this.setModelsFolder,
     required this.applyTierDefaults,
+    this.probe,
+    required this.adoptBox,
+    required this.adoptLocal,
     required this.auth,
     required this.notifier,
     required this.seedAuthorization,
@@ -268,6 +313,28 @@ class SetupController extends StateNotifier<SetupState> {
   /// notifier's state is protected, and this controller is told what to do
   /// rather than reaching for the provider.
   final Future<void> Function(MachineTier) applyTierDefaults;
+
+  /// Asks a model server what it serves, for **Check server** on the box.
+  /// Null takes the button off the step, the discipline every optional
+  /// control in this app follows.
+  final Future<ModelProbeResult> Function(String url, {String? bearer})? probe;
+
+  /// Writes the two box targets, the one key, the stage map, the draft policy
+  /// and the placement. A CLOSURE for the reason the three writes above are:
+  /// the prefs notifier's state is protected.
+  ///
+  /// [bearer] is a SECRET and passes straight through to the keychain. It is
+  /// never stored on this controller and never enters [SetupState].
+  final Future<void> Function({
+    required String baseUrl,
+    required String bearer,
+  }) adoptBox;
+
+  /// Puts the install back on this Mac's own models and applies the tier's
+  /// defaults. Unused by the wizard's happy path today and wired all the
+  /// same, so the two answers to **Where the models run** have one shape.
+  final Future<void> Function(MachineTier) adoptLocal;
+
   final AuthSession Function() auth;
   final DesktopNotifier notifier;
   final void Function(bool granted) seedAuthorization;
@@ -311,6 +378,22 @@ class SetupController extends StateNotifier<SetupState> {
     await probeHardware();
     if (!mounted) return;
     final prefs = readPrefs();
+    // The stored answer, before anything reads [tier]: the `done` branch below
+    // compares the ledger against [resolvedManifest], and on a box install
+    // that is the embedding model alone. It also means a re-entry through
+    // "Set up again" opens the where step knowing which install this is, so
+    // choosing This Mac there writes the undo.
+    //
+    // ONLY the box is seeded. `AppPrefs.modelPlacement` is `local` by default,
+    // so a stored `local` and an install that has never been asked are the
+    // same value, and seeding it would open a first run with This Mac already
+    // chosen and the way forward live — a question answered before it was
+    // put. A local re-entry loses nothing by asking again: choosing This Mac
+    // there writes the same defaults it already has.
+    if (prefs.modelPlacement == ModelPlacement.box) {
+      if (!mounted) return;
+      state = state.copyWith(placement: ModelPlacement.box);
+    }
     SetupStep step = SetupStep.welcome;
     MigrationReport? migration;
     var canReturn = false;
@@ -348,6 +431,90 @@ class SetupController extends StateNotifier<SetupState> {
       canReturnToInbox: canReturn,
     );
     await _onEnter(step);
+  }
+
+  // ── Where the models run ─────────────────────────────────────────────────
+
+  /// Picks the shared GPU box. Nothing is written until Continue: the choice
+  /// reveals the three controls and nothing more.
+  void chooseBox() {
+    if (!mounted) return;
+    state = state.copyWith(placement: ModelPlacement.box);
+  }
+
+  void chooseLocal() {
+    if (!mounted) return;
+    state = state.copyWith(placement: ModelPlacement.local);
+  }
+
+  /// Records the typed address and drops any probe result taken against the
+  /// previous one: a "Reachable" line under a URL that has since been edited
+  /// is a report about a different server.
+  void setBoxUrl(String value) {
+    if (!mounted) return;
+    state = state.copyWith(boxUrl: value, clearBoxProbe: true);
+  }
+
+  /// Asks the box's writing slot what it serves, with the typed key.
+  ///
+  /// [key] is a SECRET: it goes onto one request's `Authorization` header and
+  /// is not stored here, in [SetupState] or in the result. Nothing is adopted
+  /// by a check.
+  Future<void> checkBox(String key) async {
+    final probe = this.probe;
+    if (probe == null) return;
+    final base = normalizeBoxBaseUrl(state.boxUrl);
+    if (base.isEmpty) return;
+    if (!mounted) return;
+    state = state.copyWith(boxProbing: true, clearBoxProbe: true);
+    ModelProbeResult result;
+    try {
+      result = await probe(
+        '$base/prose/v1/chat/completions',
+        bearer: key.isEmpty ? null : key,
+      );
+    } on Object {
+      // `ModelServerProbe` promises never to throw, and a settings-shaped
+      // diagnostic must not be able to strand the wizard anyway.
+      result = const ModelProbeResult(
+        reachable: false,
+        error: 'Could not check the server',
+      );
+    }
+    if (!mounted) return;
+    state = state.copyWith(boxProbing: false, boxProbe: result);
+  }
+
+  /// The step's Continue.
+  ///
+  /// On the box choice it REFUSES to advance with an empty address or an
+  /// empty key, because adopting a box with neither would write two targets
+  /// that cannot be dialled and a placement that parks everything.
+  ///
+  /// This Mac WRITES too, and that is not symmetry for its own sake. A wizard
+  /// re-entered through "Set up again" on an install that is already on the
+  /// box would otherwise leave both box targets, the box stage map and
+  /// `model_placement = box` standing while `finish()` applied this machine's
+  /// tier defaults on top — an install claiming to run locally with every
+  /// stage still pointed at a server it no longer means to use.
+  /// [AppPrefsNotifier.adoptLocal] is called unconditionally rather than only
+  /// when the stored answer was the box: `removeTarget` returns at once on an
+  /// id nothing carries, and the tier write is the one `finish()` was going to
+  /// make anyway, so on a first run it is the same no-op twice.
+  ///
+  /// The tier is the HARDWARE's, read here rather than through [tier], which
+  /// answers `remote` while the placement is still the box.
+  Future<void> continueFromWhere(String key) async {
+    if (placement == ModelPlacement.box) {
+      final base = normalizeBoxBaseUrl(state.boxUrl);
+      final token = key.trim();
+      if (base.isEmpty || token.isEmpty) return;
+      await adoptBox(baseUrl: base, bearer: token);
+    } else {
+      await adoptLocal(machineTierFor(state.hardware?.memoryBytes ?? 0));
+    }
+    if (!mounted) return;
+    await _goTo(SetupStep.models);
   }
 
   static MigrationReport? _readMigration(String? raw) {
@@ -415,6 +582,7 @@ class SetupController extends StateNotifier<SetupState> {
         await probeSignIn();
       case SetupStep.done:
         await _probeAccount();
+      case SetupStep.where:
       case SetupStep.welcome:
       case SetupStep.models:
       case SetupStep.notifications:
@@ -459,7 +627,18 @@ class SetupController extends StateNotifier<SetupState> {
   /// of a Mac it may have been moved away from. Before the first probe, and
   /// on a machine whose memory could not be read, it is
   /// [MachineTier.full] — the never-refuse rule [machineTierFor] states.
-  MachineTier get tier => machineTierFor(state.hardware?.memoryBytes ?? 0);
+  ///
+  /// On [ModelPlacement.box] it is [MachineTier.remote] whatever the memory
+  /// is: this Mac serves the embedding model and nothing else, so the models
+  /// step lists one file, the storage step sizes one, the download step
+  /// fetches one and `init`'s ledger comparison asks for one.
+  MachineTier get tier => placement == ModelPlacement.box
+      ? MachineTier.remote
+      : machineTierFor(state.hardware?.memoryBytes ?? 0);
+
+  /// The answer so far, defaulting to this Mac. Null means nobody has chosen
+  /// yet, and the steps before the choice read the same as they always did.
+  ModelPlacement get placement => state.placement ?? ModelPlacement.local;
 
   /// The manifest as [tier] wants it. THE view every step reads: the models
   /// step's rows and total, the disk preflight, the download run, the ledger
@@ -473,7 +652,14 @@ class SetupController extends StateNotifier<SetupState> {
   /// It reads the TIER rather than a threshold of its own, so there is one
   /// answer to "is this Mac small" and the sentence the device step shows
   /// cannot disagree with the files the download step fetches.
-  bool get lowMemory => state.hardware != null && tier == MachineTier.inbox;
+  ///
+  /// It reads the HARDWARE tier directly rather than [tier], because a Mac
+  /// pointed at the box is still a small Mac and the device step is still
+  /// describing it. [tier] answers what this install runs; this answers what
+  /// this machine could.
+  bool get lowMemory =>
+      state.hardware != null &&
+      machineTierFor(state.hardware?.memoryBytes ?? 0) == MachineTier.inbox;
 
   /// Below the smallest machine the golden set was measured on. Not a third
   /// tier and not a refusal: one more sentence on the device step, because a
@@ -665,7 +851,12 @@ class SetupController extends StateNotifier<SetupState> {
       // with no writing model must not have six stages pointing at a server
       // this tier never starts. A write that throws leaves the wizard on this
       // screen with the button again, exactly as a half-written setup does.
-      await applyTierDefaults(tier);
+      // Only on the local placement. `applyTierDefaults` returns at once on
+      // [MachineTier.remote] anyway, and saying so here is what keeps the box
+      // adoption's stage map obviously untouched by the wizard's last step.
+      if (placement == ModelPlacement.local) {
+        await applyTierDefaults(tier);
+      }
       await setManagedServer(true);
       // The stash exists only while the welcome step is offering a way back;
       // finishing is the end of that offer, and a leftover value would have
@@ -742,6 +933,13 @@ class SetupController extends StateNotifier<SetupState> {
     for (final model in resolvedManifest.models) {
       if (!ledger.isCurrent(model)) return false;
       if (!File(p.join(folder, model.relativePath)).existsSync()) return false;
+      // The sidecar as well, on the same reasoning: the preset names it as
+      // `model-draft` and the server is started `--offline`, so a Continue
+      // granted without it hands over a server that will not start.
+      final draft = model.sidecarRelativePath;
+      if (draft != null && !File(p.join(folder, draft)).existsSync()) {
+        return false;
+      }
     }
     return true;
   }
@@ -795,6 +993,12 @@ final setupControllerProvider =
         ref.read(appPrefsProvider.notifier).setModelsFolder(path),
     applyTierDefaults: (tier) =>
         ref.read(appPrefsProvider.notifier).applyTierDefaults(tier),
+    probe: ModelServerProbe().probe,
+    adoptBox: ({required baseUrl, required bearer}) => ref
+        .read(appPrefsProvider.notifier)
+        .adoptBox(baseUrl: baseUrl, bearer: bearer),
+    adoptLocal: (tier) =>
+        ref.read(appPrefsProvider.notifier).adoptLocal(tier),
     auth: () => ref.read(authSessionProvider),
     notifier: ref.watch(desktopNotifierProvider),
     // Late-bound: reading the service provider here would build the whole

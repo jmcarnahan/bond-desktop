@@ -177,8 +177,8 @@ void main() {
         name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
         contentType: null,
         size: 0,
-        sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/personal/'
-            'jane_southbayequity2_onmicrosoft_com/EaBcDeFgHiJkLmNoPqRsTuVwXyZ',
+        sourceUrl: 'https://contoso2-my.sharepoint.com/:b:/g/personal/'
+            'jane_contoso2_onmicrosoft_com/EaBcDeFgHiJkLmNoPqRsTuVwXyZ',
       );
       backend.textByKey['email|m1|link-abc'] = const AttachmentText.ok(
         'The agency confirms the September dates.',

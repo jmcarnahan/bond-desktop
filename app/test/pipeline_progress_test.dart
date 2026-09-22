@@ -17,6 +17,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// Where each stage of the real pipeline writes its progress.
@@ -28,28 +29,17 @@ import 'fixtures/test_db.dart';
 /// retry is not an error, and a gate finishes a message rather than stalling
 /// it.
 
-/// An [LlmClient] that answers from a script and never opens a socket.
-class FakeLlm extends LlmClient {
-  final List<Object> script;
-
-  FakeLlm(this.script) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-    final step = script.length > 1 ? script.removeAt(0) : script.first;
-    if (step is Exception) throw step;
-    return Map<String, dynamic>.from(step as Map);
-  }
-}
+/// A [ScriptedLlm] that answers from a script and never opens a socket.
+///
+/// The steps go under BOTH schema names this file drives, because a script
+/// belongs to a schema and each test here drives one of the two: `triage` for
+/// the queue, `extraction` for the handler. No client here is ever shared
+/// across both names, so the two copies `scriptFor` makes are never consumed
+/// against each other — a test that did drive both would need one script per
+/// schema rather than this one split in two.
+ScriptedLlm fakeLlm(List<Object> script) => ScriptedLlm()
+  ..scriptFor('triage', script)
+  ..scriptFor('extraction', script);
 
 /// An embedding server that is not running — the state every test here wants,
 /// since none of them is about vectors.
@@ -63,7 +53,7 @@ class FakeStorylines extends StorylineService {
   final AssignOutcome outcome;
 
   FakeStorylines(MessageStore store, this.outcome)
-      : super(store, FakeLlm(const [<String, dynamic>{}]));
+      : super(store, fakeLlm(const [<String, dynamic>{}]));
 
   @override
   Future<AssignOutcome> assignConversation(String source, String key) async =>
@@ -186,7 +176,7 @@ void main() {
       await seedMessage('m1');
       final queue = TriageQueue(
         store,
-        FakeLlm([triageAnswer()]),
+        fakeLlm([triageAnswer()]),
         concurrency: 1,
         progress: progress,
       );
@@ -206,7 +196,7 @@ void main() {
       await seedMessage('m1', from: 'no-reply@example.com');
       final queue = TriageQueue(
         store,
-        FakeLlm([triageAnswer()]),
+        fakeLlm([triageAnswer()]),
         concurrency: 1,
         progress: progress,
       );
@@ -226,7 +216,7 @@ void main() {
       await seedMessage('m1');
       final queue = TriageQueue(
         store,
-        FakeLlm([const LlmUnavailableException('server off')]),
+        fakeLlm([const LlmUnavailableException('server off')]),
         concurrency: 1,
         progress: progress,
       );
@@ -244,7 +234,7 @@ void main() {
       await seedMessage('m1');
       final queue = TriageQueue(
         store,
-        FakeLlm([const LlmException('bad json', 400)]),
+        fakeLlm([const LlmException('bad json', 400)]),
         concurrency: 1,
         progress: progress,
       );
@@ -259,7 +249,7 @@ void main() {
   group('extraction', () {
     ExtractHandler handler(List<Object> script) => ExtractHandler(
           store,
-          FakeLlm(script),
+          fakeLlm(script),
           downEmbeddings(),
           progress: progress,
         );
@@ -596,7 +586,7 @@ void main() {
     // Every constructor takes the disabled recorder, which is what keeps the
     // rest of the suite from paying for this file's subject.
     await seedMessage('m1');
-    final queue = TriageQueue(store, FakeLlm([triageAnswer()]), concurrency: 1);
+    final queue = TriageQueue(store, fakeLlm([triageAnswer()]), concurrency: 1);
     addTearDown(queue.dispose);
 
     await queue.pump();

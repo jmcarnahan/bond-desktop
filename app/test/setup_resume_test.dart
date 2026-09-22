@@ -84,6 +84,8 @@ void main() {
       setManagedServer: (_) async {},
       setModelsFolder: (_) async {},
       applyTierDefaults: (_) async {},
+      adoptBox: ({required baseUrl, required bearer}) async {},
+      adoptLocal: (_) async {},
       auth: () => auth ?? FakeAuthSession(),
       notifier: FakeDesktopNotifier(),
       seedAuthorization: (_) {},

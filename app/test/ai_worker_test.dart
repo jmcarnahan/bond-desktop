@@ -399,6 +399,97 @@ void main() {
       expect(last!.remaining, 0);
       expect(last!.counts, {'error': 1, 'done': 1});
     });
+
+    test('a park carries its reason, and the next success clears it',
+        () async {
+      // The fact already exists inside the drain; before Round G it died
+      // there and the rail could only say how much was waiting. No poller:
+      // the reason rides the stream the counts already ride.
+      await store.enqueueWork('extract', 'email', 'a');
+      final handler = ScriptedHandler(
+        'extract',
+        script: [const LlmUnavailableException('down'), null],
+      );
+      final worker = AiWorker(store, handlers: [handler]);
+      final seen = <String?>[];
+      final subscription =
+          worker.progress.listen((p) => seen.add(p.parkedReason));
+
+      await worker.pump();
+      await Future<void>.delayed(Duration.zero);
+      expect(seen.last, 'model_unavailable');
+
+      // The next pump is a fresh attempt, and the item goes through.
+      await worker.pump();
+      await Future<void>.delayed(Duration.zero);
+      await subscription.cancel();
+
+      expect(seen.last, isNull);
+      expect(seen.first, isNull, reason: 'nothing is parked before the first');
+    });
+
+    test('a refused key parks with its own reason', () async {
+      // Same park, a different sentence in the rail: one is "go and look at
+      // the box", the other is "go and fix the key in Settings".
+      await store.enqueueWork('extract', 'email', 'a');
+      final handler = ScriptedHandler(
+        'extract',
+        script: [const LlmUnauthorizedException('refused')],
+      );
+      final worker = AiWorker(store, handlers: [handler]);
+      WorkProgress? last;
+      final subscription = worker.progress.listen((p) => last = p);
+
+      await worker.pump();
+      await Future<void>.delayed(Duration.zero);
+      await subscription.cancel();
+
+      expect(last!.parkedReason, 'unauthorized');
+      // Parked, so the item is still waiting and cost no attempt.
+      expect((await workRow('extract', 'a'))['status'], 'pending');
+      expect((await workRow('extract', 'a'))['attempts'], 0);
+    });
+
+    test('a dead embedding server parks naming the embedding server', () async {
+      // The two slots are placed separately: the box can be serving every
+      // generating stage while the local embedding server is the one that is
+      // down, and a rail saying "GPU box unreachable" would send the person to
+      // the wrong machine.
+      await store.enqueueWork('extract', 'email', 'a');
+      final handler = ScriptedHandler(
+        'extract',
+        script: [const EmbedUnavailableException('embedding server unavailable')],
+      );
+      final worker = AiWorker(store, handlers: [handler]);
+      WorkProgress? last;
+      final subscription = worker.progress.listen((p) => last = p);
+
+      await worker.pump();
+      await Future<void>.delayed(Duration.zero);
+      await subscription.cancel();
+
+      expect(last!.parkedReason, 'embed_unavailable');
+      // Still the same park: waiting, and no attempt spent.
+      expect((await workRow('extract', 'a'))['status'], 'pending');
+      expect((await workRow('extract', 'a'))['attempts'], 0);
+    });
+
+    test('a park for the session says so, not that a model is down', () async {
+      await store.enqueueWork('extract', 'email', 'a');
+      final handler = ScriptedHandler(
+        'extract',
+        script: [const NotSignedIn('signed out')],
+      );
+      final worker = AiWorker(store, handlers: [handler]);
+      WorkProgress? last;
+      final subscription = worker.progress.listen((p) => last = p);
+
+      await worker.pump();
+      await Future<void>.delayed(Duration.zero);
+      await subscription.cancel();
+
+      expect(last!.parkedReason, 'session');
+    });
   });
 
   test('stop ends the drain after the item in flight', () async {

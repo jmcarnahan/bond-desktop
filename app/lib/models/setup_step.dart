@@ -15,6 +15,7 @@
 enum SetupStep {
   welcome,
   device,
+  where,
   models,
   storage,
   download,
@@ -40,7 +41,7 @@ enum SetupStep {
 
   SetupStep? get previous => index > 0 ? SetupStep.values[index - 1] : null;
 
-  /// 1-based, for `Step 3 of 8`. The enum's own index is 0-based and nothing
+  /// 1-based, for `Step 3 of 9`. The enum's own index is 0-based and nothing
   /// on screen ever wants that.
   int get number => index + 1;
 
@@ -50,6 +51,7 @@ enum SetupStep {
   String get title => switch (this) {
         SetupStep.welcome => 'Welcome to Bond',
         SetupStep.device => 'Your Mac',
+        SetupStep.where => 'Where the models run',
         SetupStep.models => 'Models',
         SetupStep.storage => 'Storage',
         SetupStep.download => 'Download',

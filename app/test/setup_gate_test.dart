@@ -204,7 +204,7 @@ void main() {
     await mount(tester);
 
     expect(find.text('Welcome to Bond'), findsOneWidget);
-    expect(find.text('Step 1 of 8'), findsOneWidget);
+    expect(find.text('Step 1 of 9'), findsOneWidget);
     expect(find.text('the app'), findsNothing);
   });
 
@@ -371,7 +371,7 @@ void main() {
 
     expect(find.text('the app'), findsNothing);
     expect(find.text('Download'), findsOneWidget);
-    expect(find.text('Step 5 of 8'), findsOneWidget);
+    expect(find.text('Step 6 of 9'), findsOneWidget);
   });
 
   testWidgets('"Set up again" brings the wizard back over a running app',

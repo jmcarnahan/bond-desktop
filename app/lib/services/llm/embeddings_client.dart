@@ -316,6 +316,19 @@ class EmbeddingsClient {
       );
     }
 
+    // A refused key is a PARK, not a rejection. Nothing about this text is
+    // wrong, every other item behind it would be refused identically, and the
+    // next pass succeeds the moment somebody fixes the key — which is the
+    // definition this class draws between its two failure outcomes. Read as
+    // `rejected` it was worse than useless: a declared recruit embedded its
+    // charter, got a null with no park, and filed nothing at all, silently.
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      return _fail(
+        'refused the access key (HTTP ${response.statusCode})',
+        EmbedOutcome.unavailable,
+      );
+    }
+
     if (response.statusCode != 200) {
       return _fail(
         'rejected the request (HTTP ${response.statusCode})',

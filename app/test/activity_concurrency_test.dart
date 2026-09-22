@@ -10,6 +10,7 @@ import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/fake_llama_server.dart';
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// The activity log under the concurrent drains — the exact break its
@@ -26,47 +27,38 @@ import 'fixtures/test_db.dart';
 /// Answers every triage request only after [release] completes, reporting a
 /// per-message [LlmCallRecord] the way the real client's observer does —
 /// from inside the request, which is what places it inside the item's span.
-class HeldLlm extends LlmClient {
-  final ActivityLog log;
-  final Completer<void> release = Completer<void>();
+///
+/// A COMPUTED step on the shared [ScriptedLlm] rather than a subclass of its
+/// own, because both things it writes into belong to the test: the latch that
+/// holds all three requests open together, and [reported], which is
+/// `entity id → the duration its record carried` for the assertion.
+Future<Map<String, dynamic>> Function(LlmCall) heldTriage(
+  ActivityLog log,
+  Completer<void> release,
+  Map<String, int> reported,
+) =>
+    (call) async {
+      // The message id rides in the user prompt's subject line; a distinct
+      // duration per message is what makes cross-attribution visible.
+      final id = RegExp(r'Subject: (m\d)').firstMatch(call.user)!.group(1)!;
+      final durationMs = 100 * (int.parse(id.substring(1)) + 1);
+      reported[id] = durationMs;
 
-  /// `entity id → the duration its record carried`, for the assertion.
-  final Map<String, int> reported = {};
-
-  HeldLlm(this.log) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    // The message id rides in the user prompt's subject line; a distinct
-    // duration per message is what makes cross-attribution visible.
-    final id = RegExp(r'Subject: (m\d)').firstMatch(user)!.group(1)!;
-    final durationMs = 100 * (int.parse(id.substring(1)) + 1);
-    reported[id] = durationMs;
-
-    await release.future;
-    log.noteLlmCall(LlmCallRecord(
-      label: 'triage',
-      durationMs: durationMs,
-      outcome: 'ok',
-      completionTokens: durationMs,
-    ));
-    return {
-      'urgency': 'normal',
-      'category': 'work',
-      'summary': 'A client question.',
-      'needs_action': true,
-      'action_items': const ['Reply'],
+      await release.future;
+      log.noteLlmCall(LlmCallRecord(
+        label: 'triage',
+        durationMs: durationMs,
+        outcome: 'ok',
+        completionTokens: durationMs,
+      ));
+      return {
+        'urgency': 'normal',
+        'category': 'work',
+        'summary': 'A client question.',
+        'needs_action': true,
+        'action_items': const ['Reply'],
+      };
     };
-  }
-}
 
 void main() {
   late BondDatabase db;
@@ -109,20 +101,28 @@ void main() {
     for (final id in ['m0', 'm1', 'm2']) {
       await seedMessage(id);
     }
-    final llm = HeldLlm(log);
+    final release = Completer<void>();
+    final reported = <String, int>{};
+    final llm = ScriptedLlm(
+      answers: {'triage': heldTriage(log, release, reported)},
+      // No artificial tick before the step, as this double never had one: the
+      // window below is 20 ms, and the three requests have to be AT the
+      // server inside it.
+      delay: Duration.zero,
+    );
     final queue = TriageQueue(store, llm, activityLog: log);
 
     final drain = queue.pump();
     // All three must be AT the server together before any answers: overlap is
     // the condition under test, not an accident of timing.
     await Future<void>.delayed(const Duration(milliseconds: 20));
-    expect(llm.reported.length, 3);
-    llm.release.complete();
+    expect(reported.length, 3);
+    release.complete();
     await drain;
 
     final events = await triageEventsById();
     expect(events.keys, unorderedEquals(['m0', 'm1', 'm2']));
-    for (final entry in llm.reported.entries) {
+    for (final entry in reported.entries) {
       final event = events[entry.key]!;
       // One call each, carrying ITS duration — the single-slot design would
       // have put all three calls (600ms) on one row and nothing on the rest.

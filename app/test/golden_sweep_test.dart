@@ -3,7 +3,8 @@ import 'dart:io';
 
 import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
-import 'package:bond_inbox/services/storyline_service.dart' show StorylineTuning;
+import 'package:bond_inbox/services/storyline_service.dart'
+    show GroupingMode, StorylineTuning;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/golden_harness.dart';
@@ -205,6 +206,121 @@ void main() {
       // Only the efforts, never `none`, reach the coverage denominators.
       expect(goldThreadsBySlug(set).containsKey(noneId), isFalse);
       expect(goldThreadsBySlug(set)['river-office-lease'], 2);
+    });
+  });
+
+  group('what the bench could have reached', () {
+    /// The committed fixture, plus [extra] items appended before decoding, so
+    /// a case can add an item the fixture does not carry without touching it.
+    GoldenSet setWith([List<Map<String, dynamic>> extra = const []]) {
+      final json =
+          jsonDecode(File(fixturePath).readAsStringSync()) as Map<String, dynamic>;
+      if (extra.isNotEmpty) {
+        json['items'] = [...(json['items']! as List), ...extra];
+      }
+      return GoldenSet.fromJson(json);
+    }
+
+    /// One more item, on a thread of its own, under [slug] and at [strength].
+    /// Built from an existing item so every other field is the fixture's own.
+    Map<String, dynamic> leaseItemAt(
+      String strength, {
+      String slug = 'river-office-lease',
+    }) {
+      final json =
+          jsonDecode(File(fixturePath).readAsStringSync()) as Map<String, dynamic>;
+      final template = Map<String, dynamic>.from(
+        (json['items']! as List).firstWhere(
+          (item) =>
+              (((item as Map)['gold'] as Map)['storyline'] as Map)['id'] ==
+              'river-office-lease',
+        ) as Map,
+      );
+      template['id'] = 'email:fx-$slug-$strength';
+      // A key of its own, so the effort gains a THREAD rather than a second
+      // item on one it already has: `goldThreadsBySlug` counts threads.
+      template['provenance'] = {
+        ...Map<String, dynamic>.from(template['provenance']! as Map),
+        'conversation_key': 'email:fx-conv-$slug-$strength',
+      };
+      final gold = Map<String, dynamic>.from(template['gold']! as Map);
+      final storyline = Map<String, dynamic>.from(gold['storyline']! as Map);
+      storyline['id'] = slug;
+      storyline['strength'] = strength;
+      gold['storyline'] = storyline;
+      template['gold'] = gold;
+      return template;
+    }
+
+    test('an effort under the propose floor is not formable', () {
+      final set = setWith();
+
+      // The fixture's one effort holds two gold threads and the sweep never
+      // proposes under three, so no item on this set is formable at all.
+      expect(StorylineTuning.proposeMinClusterSize, 3);
+      expect(goldThreadsBySlug(set)['river-office-lease'], 2);
+      final goldThreads = goldThreadsBySlug(set);
+      expect(
+        set.items.where((item) => formableItem(item, goldThreads)),
+        isEmpty,
+      );
+    });
+
+    test('an effort at the floor is formable, and only its own items are', () {
+      // A third thread under the lease effort makes it formable, and the two
+      // items that were already under it become formable with it. Everything
+      // gold files nowhere stays outside the population either way.
+      final set = setWith([leaseItemAt('must')]);
+      final goldThreads = goldThreadsBySlug(set);
+
+      expect(goldThreads['river-office-lease'], 3);
+      expect(
+        set.items.where((item) => formableItem(item, goldThreads)).length,
+        3,
+      );
+      expect(
+        set.items
+            .where((item) => item.gold.storylineId == noneId)
+            .every((item) => !formableItem(item, goldThreads)),
+        isTrue,
+      );
+    });
+
+    test('the ceiling credits abstaining on a should, never on a may', () {
+      // Five gold-`none` items a run scores by filing nowhere, no formable
+      // item, and one `should` item under the unformable lease effort, which
+      // the scorer credits for abstaining. The `must` item beside it is the
+      // one thing on this set nothing could have got right.
+      final set = setWith();
+      expect(set.items, hasLength(7));
+      expect(
+        set.items.where((item) => item.gold.storylineId == noneId).length,
+        5,
+      );
+      expect(sweepCeilingOf(set), 6);
+
+      // A `may` item on a one-thread effort adds nothing: that effort is
+      // unformable, and the scorer excludes a `may` under one entirely. It is
+      // the whole gap between the ceiling and the item count.
+      final withMay = setWith([leaseItemAt('may', slug: 'sprinkler-remediation')]);
+      expect(withMay.items, hasLength(8));
+      expect(sweepCeilingOf(withMay), 6);
+
+      // A `should` on the same one-thread effort does add one: abstaining on
+      // it is an answer the scorer credits.
+      final withShould =
+          setWith([leaseItemAt('should', slug: 'sprinkler-remediation')]);
+      expect(withShould.items, hasLength(8));
+      expect(sweepCeilingOf(withShould), 7);
+    });
+
+    test('a formable effort lifts the ceiling by its whole membership', () {
+      // Three lease threads: the effort becomes formable, so the `must` item
+      // that could not be reached before now can be, and the ceiling covers
+      // every item on the set.
+      final set = setWith([leaseItemAt('must')]);
+
+      expect(sweepCeilingOf(set), set.items.length);
     });
   });
 
@@ -925,8 +1041,20 @@ void main() {
     test('SWEEP_STAGE names a stage or fails loudly', () {
       expect(parseSweepStage('vector'), SweepStage.vector);
       expect(parseSweepStage(' FULL '), SweepStage.full);
-      for (final raw in ['', 'vectors', 'seed', 'all']) {
+      expect(parseSweepStage('declared'), SweepStage.declared);
+      for (final raw in ['', 'vectors', 'seed', 'all', 'declare']) {
         expect(() => parseSweepStage(raw), throwsArgumentError, reason: raw);
+      }
+    });
+
+    test('SWEEP_GROUPING names a mode or fails loudly', () {
+      // Three modes and three experiments: a typo that quietly ran the shipped
+      // one would record a row against a question nobody asked.
+      expect(parseSweepGrouping('cosine'), GroupingMode.cosine);
+      expect(parseSweepGrouping(' MODEL '), GroupingMode.model);
+      expect(parseSweepGrouping('pool'), GroupingMode.pool);
+      for (final raw in ['', 'cosign', 'whole', 'grouping']) {
+        expect(() => parseSweepGrouping(raw), throwsArgumentError, reason: raw);
       }
     });
 
@@ -973,6 +1101,10 @@ void main() {
           coverageBySlug: coverage,
           largestShare: 0.4,
           correctPositives: 7,
+          formableItems: 9,
+          formablePositives: 5,
+          ceiling: 12,
+          items: 14,
           forbiddenByAnti: forbidden,
           unmapped: 4,
           filedNowhere: 11,
@@ -1100,6 +1232,21 @@ void main() {
       expect(json['grouping_unfit'], 2);
     });
 
+    test('the formable line says how far the row sits from the ceiling', () {
+      // Two readings of one row: how many of the items a clustering pass could
+      // have reached it did reach, and how many of all the items it could ever
+      // have reached.
+      expect(
+        tally().table(),
+        contains('formable: 5 of 9 correct   ceiling 12 of 14'),
+      );
+      final json = tally().toJson();
+      expect(json['formable_items'], 9);
+      expect(json['formable_positives'], 5);
+      expect(json['ceiling'], 12);
+      expect(json['items'], 14);
+    });
+
     test('the grouping counts print on the calls line', () {
       expect(
         tally().table(),
@@ -1125,6 +1272,10 @@ void main() {
         coverageBySlug: const {},
         largestShare: 0,
         correctPositives: 0,
+        formableItems: 0,
+        formablePositives: 0,
+        ceiling: 0,
+        items: 0,
         forbiddenByAnti: const {},
         unmapped: 0,
         filedNowhere: 0,
@@ -1178,6 +1329,10 @@ void main() {
         coverageBySlug: const {},
         largestShare: 0,
         correctPositives: 0,
+        formableItems: 0,
+        formablePositives: 0,
+        ceiling: 0,
+        items: 0,
         forbiddenByAnti: const {},
         unmapped: 0,
         filedNowhere: 0,

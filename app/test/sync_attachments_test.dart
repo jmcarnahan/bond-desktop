@@ -394,8 +394,8 @@ void main() {
     const zwsp = '\u200b';
     const icon = 'https://res-1.cdn.office.net/files/assets/pdf.svg';
     const linkUrl =
-        'https://southbayequity2-my.sharepoint.com/:b:/g/personal/'
-        'jane_southbayequity2_onmicrosoft_com/EaBcDeFgHiJkLmNoPqRsTuVwXyZ';
+        'https://contoso2-my.sharepoint.com/:b:/g/personal/'
+        'jane_contoso2_onmicrosoft_com/EaBcDeFgHiJkLmNoPqRsTuVwXyZ';
     const run = '$zwsp[$icon]HARBORLIGHT TALENT AGREEMENT.pdf<$linkUrl>$zwsp';
     const linkBody = 'Please review.\n\n$run\n\nThanks';
 

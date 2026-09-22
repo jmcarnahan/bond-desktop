@@ -1136,6 +1136,7 @@ void main() {
       }
       final variant = parseSweepCard(GoldenDefines.sweepCardRaw);
       final stage = parseSweepStage(GoldenDefines.sweepStageRaw);
+      final groupingMode = parseSweepGrouping(GoldenDefines.sweepGroupingRaw);
       final prefix = GoldenDefines.sweepEmbedPrefix;
 
       final db = vecTestDb();
@@ -1160,7 +1161,8 @@ void main() {
         );
         // ignore: avoid_print
         print(
-          'stage ${stage.name}, card ${variant.wireName}, '
+          'stage ${stage.name}, grouping ${groupingMode.name}, '
+          'card ${variant.wireName}, '
           'prefix length ${report.prefixLength}, dims ${report.dims}, '
           'cards from the run for '
           '${set.items.where((i) => cards.byId.containsKey(i.id)).length} of '
@@ -1206,32 +1208,42 @@ void main() {
         // declined cluster, so this seam is the only place its gold purity can
         // be read from.
         final judged = <JudgedCluster>[];
-        final service = StorylineService(
-          store,
-          BenchTarget.prose.client(onCall: nameCollector.record)
-            ..onReasoningLeak = nameCollector.noteLeak,
-          confirmClient: BenchTarget.bulk.client(onCall: confirmCollector.record)
-            ..onReasoningLeak = confirmCollector.noteLeak,
-          embeddings: EmbeddingsClient(),
-          activityLog: log,
-          // The overlap rule counts shared people who are not the owner, so
-          // the bench has to name the owner the way the app does or every
-          // mailbox-wide participant would buy the lower gate.
-          owner: () async => GoldenDefines.ownerName == null &&
-                  GoldenDefines.ownerAddress == null
-              ? null
-              : (
-                  name: GoldenDefines.ownerName,
-                  address: GoldenDefines.ownerAddress
-                ),
-          clusterObserver: (threads, outcome) => judged.add((
-            threads: [
-              for (final thread in threads)
-                threadKeyOf(thread.source, thread.key),
-            ],
-            outcome: outcome,
-          )),
-        );
+        // One literal for both branches. The declared stage forms no cluster
+        // and so has nothing to observe; everything else about the service is
+        // the same service, which is what makes the two rows readable against
+        // each other.
+        StorylineService buildService({bool observe = true}) => StorylineService(
+              store,
+              BenchTarget.prose.client(onCall: nameCollector.record)
+                ..onReasoningLeak = nameCollector.noteLeak,
+              confirmClient:
+                  BenchTarget.bulk.client(onCall: confirmCollector.record)
+                    ..onReasoningLeak = confirmCollector.noteLeak,
+              embeddings: EmbeddingsClient(),
+              activityLog: log,
+              // No `groupClient`: the grouping call goes to the prose client,
+              // exactly as the naming call does.
+              groupingMode: groupingMode,
+              // The overlap rule counts shared people who are not the owner,
+              // so the bench has to name the owner the way the app does or
+              // every mailbox-wide participant would buy the lower gate.
+              owner: () async => GoldenDefines.ownerName == null &&
+                      GoldenDefines.ownerAddress == null
+                  ? null
+                  : (
+                      name: GoldenDefines.ownerName,
+                      address: GoldenDefines.ownerAddress
+                    ),
+              clusterObserver: !observe
+                  ? null
+                  : (threads, outcome) => judged.add((
+                        threads: [
+                          for (final thread in threads)
+                            threadKeyOf(thread.source, thread.key),
+                        ],
+                        outcome: outcome,
+                      )),
+            );
 
         // The room cap is a `static const` of three, so the loop KEEPS what it
         // is offered rather than widening it. A pass that leaves the storyline
@@ -1242,7 +1254,73 @@ void main() {
         final wallPerPassMs = <int>[];
         var passes = 0;
         var keptSuggestions = 0;
-        for (var pass = 1; pass <= maxPasses; pass++) {
+        // The declared stage's own four counts, zero on every other stage.
+        // `slugById` is the mapping itself here rather than something derived
+        // from the members: a declared storyline's identity is the charter it
+        // was declared with.
+        final slugById = <String, String>{};
+        var recruitCalls = 0;
+        var recruited = 0;
+        var multiFiled = 0;
+        final service =
+            buildService(observe: stage != SweepStage.declared);
+
+        if (stage == SweepStage.declared) {
+          // Every registry storyline, in registry order, declared from its
+          // title and its charter. The anti-storylines are skipped: an
+          // `ANTI-*` slug names a MISTAKE, has no charter to recruit on, and
+          // is reached through an item's forbidden list rather than by being
+          // filed into.
+          final idBySlug = <String, String>{};
+          for (final storyline in registry.storylines) {
+            if (registry.antiSlugs.contains(storyline.slug)) continue;
+            idBySlug[storyline.slug] = await service.declareStoryline(
+              title: storyline.title,
+              charter: storyline.charter,
+            );
+          }
+          slugById.addAll({
+            for (final entry in idBySlug.entries) entry.value: entry.key,
+          });
+
+          // Two rounds, in registry order, calling the service the way the
+          // full stage calls `sweep()`. Round two exists because round one's
+          // laps ran while every neighbour was still empty, so a charter that
+          // would have recruited on a member's vector had no member to read.
+          //
+          // The `storyline_refresh` rows the recruit queues are NEVER drained
+          // — this bench holds no worker — so no naming call is made on this
+          // stage at all and the prose slot is never dialled.
+          for (var round = 1; round <= 2; round++) {
+            for (final storyline in registry.storylines) {
+              final id = idBySlug[storyline.slug];
+              if (id == null) continue;
+              await service.recruit(id);
+              recruitCalls++;
+            }
+          }
+
+          final beforeAssign = await readSweepMembership(store);
+          recruited = beforeAssign.filedThreads;
+          // `recruit` skips its own members and the threads a user blocked,
+          // and knows nothing about any other storyline, so two overlapping
+          // charters can both file one thread — which
+          // `SweepMembership.storylineByThread` silently resolves to the last
+          // writer. A non-zero count here is a finding about declared
+          // storylines, not a bench defect.
+          final filedIn = <String, int>{};
+          for (final threads in beforeAssign.threadsByStoryline.values) {
+            for (final thread in threads) {
+              filedIn[thread] = (filedIn[thread] ?? 0) + 1;
+            }
+          }
+          multiFiled = filedIn.values.where((count) => count > 1).length;
+        }
+
+        // The declared stage does not run the sweep at all: it has no proposer
+        // to loop over and nothing to keep.
+        final sweeps = stage == SweepStage.declared ? 0 : maxPasses;
+        for (var pass = 1; pass <= sweeps; pass++) {
           final before = await _storylineCount(store);
           final callsBefore =
               _callsMade(confirmCollector) + _callsMade(nameCollector);
@@ -1301,23 +1379,47 @@ void main() {
         // ── what the run filed ────────────────────────────────────────────
         final membership = await readSweepMembership(store);
         final goldByThread = goldSlugByThread(set);
-        final mapping = mapStorylinesToSlugs(
-          members: membership.threadsByStoryline,
-          goldByThread: goldByThread,
-        );
+        // On the declared stage the map is known by construction and plurality
+        // mapping would be wrong twice over: `_pluralitySlug` returns null
+        // below two carrying members, so a storyline that recruited exactly
+        // one correct thread would read as `unmapped` and a right answer would
+        // score as a miss; and one that recruited mostly wrong threads would
+        // be RENAMED to the slug of the effort it stole from, hiding the
+        // forbidden hit this stage exists to count.
+        final mapping = stage == SweepStage.declared
+            ? {
+                for (final id in membership.threadsByStoryline.keys)
+                  id: slugById[id] ?? unmappedId,
+              }
+            : mapStorylinesToSlugs(
+                members: membership.threadsByStoryline,
+                goldByThread: goldByThread,
+              );
         final derived = deriveSweepIds(
           items: set.items,
           storylineByThread: membership.storylineByThread,
           slugByStoryline: mapping,
         );
 
+        // How far from its own ceiling this row sits. The sweep never proposes
+        // a group under `proposeMinClusterSize`, so the items whose gold
+        // effort has fewer golden threads than that are ones no run could have
+        // reached, and a `storyline.id` quoted out of every item reads as a
+        // worse answer than the bench can give.
+        final goldThreads = goldThreadsBySlug(set);
+        final ceiling = sweepCeilingOf(set, goldThreads: goldThreads);
         final entries = <GoldenRunEntry>[];
         var correctPositives = 0;
+        var formableItems = 0;
+        var formablePositives = 0;
         var unmapped = 0;
         var filedNowhere = 0;
         final forbiddenHits = <String, int>{};
         for (final item in set.items) {
           final id = derived[item.id] ?? noneId;
+          final formable = formableItem(item, goldThreads);
+          if (formable) formableItems++;
+          if (formable && id == item.gold.storylineId) formablePositives++;
           entries.add(
             GoldenRunEntry(
               id: item.id,
@@ -1523,6 +1625,10 @@ void main() {
           ),
           largestShare: membership.largestShare,
           correctPositives: correctPositives,
+          formableItems: formableItems,
+          formablePositives: formablePositives,
+          ceiling: ceiling,
+          items: set.items.length,
           forbiddenByAnti: forbiddenHits,
           unmapped: unmapped,
           filedNowhere: filedNowhere,
@@ -1563,9 +1669,13 @@ void main() {
                 bench: 'golden-sweep',
                 // Both slots in the label: a sweep row is a pair of models,
                 // the confirms on one and the names on the other, and a row
-                // naming one of them could not be read a week later.
-                label: '${BenchTarget.bulk.label} + ${BenchTarget.prose.label} '
-                    'sweep',
+                // naming one of them could not be read a week later. The
+                // declared stage makes no naming call at all, so its label
+                // names the one slot it dialled.
+                label: stage == SweepStage.declared
+                    ? '${BenchTarget.bulk.label} declared'
+                    : '${BenchTarget.bulk.label} + '
+                        '${BenchTarget.prose.label} sweep',
                 outDir: BenchTarget.outDir,
               );
         final timingPath = await _sweepBench.writeResult(
@@ -1574,6 +1684,14 @@ void main() {
           extra: {
             'run_file': runPath,
             'cards_from': GoldenDefines.runPath,
+            // On both stages, so the two are one row read two ways.
+            'stage': stage.name,
+            'grouping': groupingMode.name,
+            // Zero on every stage but `declared`.
+            'declared': slugById.length,
+            'recruit_calls': recruitCalls,
+            'recruited': recruited,
+            'multi_filed': multiFiled,
             'card': variant.wireName,
             'prefix_length': report.prefixLength,
             'sweep': tally.toJson(),
@@ -1606,6 +1724,9 @@ void main() {
           '\n${confirmCollector.banner}\n${confirmCollector.table()}\n'
           '\n${nameCollector.banner}\n${nameCollector.table()}\n'
           '\n${tally.table()}\n'
+          '${stage != SweepStage.declared ? '' : '\n  declared '
+              '${slugById.length}, recruit calls $recruitCalls, '
+              'recruited $recruited, multi-filed $multiFiled'}'
           '\n  passes $passes, suggestions kept $keptSuggestions, '
           'assign ${[
             for (final entry in assignOutcomes.entries)

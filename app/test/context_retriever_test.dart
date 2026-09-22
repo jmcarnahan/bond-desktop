@@ -11,12 +11,12 @@ import 'package:bond_inbox/services/context/context_pack_render.dart'
 import 'package:bond_inbox/services/context/context_retriever.dart';
 import 'package:bond_inbox/services/llm/context_select_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/search_fusion.dart' show SearchTuning;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
 import 'fixtures/fake_embed_server.dart';
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/vec_test_db.dart';
 
 /// What a reply is allowed to read out of the owner's own folders, and — far
@@ -1297,7 +1297,7 @@ The kitchen inventory is counted on the first of the month.
     }
 
     Future<ContextPack> packWith(
-      FakeLlm? fake, {
+      ScriptedLlm? fake, {
       bool on = true,
       EmbeddingsClient? embedder,
       int perFile = 3,
@@ -1351,7 +1351,7 @@ Standard freight is 41 credits per pallet.
       final other = await seedFile(dir, 'docs/notes.md', text: notes);
       await seedChunked(other, 'docs/notes.md', notes);
       await context.indexPendingChunks();
-      final fake = FakeLlm([
+      final fake = selectLlm([
         answer(read: [
           {'path': 'docs/pricing.md', 'locator': 'Pricing'},
         ]),
@@ -1408,7 +1408,7 @@ Standard freight is 41 credits per pallet.
         );
       }
       await context.indexPendingChunks();
-      final fake = FakeLlm([
+      final fake = selectLlm([
         answer(read: [
           {'path': 'docs/pricing.md', 'locator': 'Pricing'},
         ]),
@@ -1451,7 +1451,7 @@ Standard freight is 41 credits per pallet.
         );
       }
       await context.indexPendingChunks();
-      final fake = FakeLlm([
+      final fake = selectLlm([
         answer(read: [
           {'path': 'docs/pricing.md', 'locator': 'Pricing'},
         ]),
@@ -1492,7 +1492,7 @@ Standard freight is 41 credits per pallet.
         );
       }
       await context.indexPendingChunks();
-      final fake = FakeLlm([
+      final fake = selectLlm([
         answer(read: [
           {'path': 'notes.txt', 'locator': 'part 2'},
         ]),
@@ -1516,7 +1516,7 @@ Standard freight is 41 credits per pallet.
         () async {
       if (!available) return;
       await seedDirectory();
-      final fake = FakeLlm([answer()]);
+      final fake = selectLlm([answer()]);
 
       await packWith(fake);
 
@@ -1536,7 +1536,7 @@ Standard freight is 41 credits per pallet.
       if (!available) return;
       final long = '## Pricing\n\n${'word ' * 4000}\n';
       await seedDirectory(sheet: long);
-      final fake = FakeLlm([
+      final fake = selectLlm([
         answer(read: [
           {'path': 'docs/pricing.md', 'locator': 'Pricing'},
         ]),
@@ -1552,7 +1552,7 @@ Standard freight is 41 credits per pallet.
     test('an empty answer changes nothing at all', () async {
       if (!available) return;
       await seedDirectory();
-      final fake = FakeLlm([answer()]);
+      final fake = selectLlm([answer()]);
 
       final chosen = await packWith(fake);
       final untouched = await packWith(null);
@@ -1567,7 +1567,7 @@ Standard freight is 41 credits per pallet.
     test('a selector that throws changes nothing and is noted', () async {
       if (!available) return;
       await seedDirectory();
-      final fake = FakeLlm([Exception('boom')]);
+      final fake = selectLlm([Exception('boom')]);
 
       final failed = await packWith(fake);
       final untouched = await packWith(null);
@@ -1585,7 +1585,7 @@ Standard freight is 41 credits per pallet.
     test('the preference off makes no call', () async {
       if (!available) return;
       await seedDirectory();
-      final fake = FakeLlm([answer()]);
+      final fake = selectLlm([answer()]);
 
       final pack = await packWith(fake, on: false);
 
@@ -1609,7 +1609,7 @@ Standard freight is 41 credits per pallet.
       }
       await context.indexPendingChunks();
       await context.link(dir, ContextScopeKind.thread, 'email', 'conv-1');
-      final fake = FakeLlm([answer()]);
+      final fake = selectLlm([answer()]);
 
       final pack = await packWith(fake);
 
@@ -1627,7 +1627,7 @@ Standard freight is 41 credits per pallet.
           await context.registerDirectory(path: '/b', displayName: 'ridge');
       await seedFile(other, 'secret/rates.md',
           text: '## Rates\n\nAnother client pays nineteen.\n');
-      final fake = FakeLlm([
+      final fake = selectLlm([
         answer(read: [
           {'path': 'secret/rates.md', 'locator': 'Rates'},
         ]),
@@ -1673,7 +1673,7 @@ Standard freight is 41 credits per pallet.
           near, encodeEmbedding(axes({1: 1.0})));
       await context.setFileDescEmbedding(
           second, encodeEmbedding(axes({1: 1.0, 2: 1.0})));
-      final fake = FakeLlm([answer(skills: const ['renewals'])]);
+      final fake = selectLlm([answer(skills: const ['renewals'])]);
 
       final pack = await packWith(fake);
 
@@ -1691,7 +1691,7 @@ Standard freight is 41 credits per pallet.
         () async {
       if (!available) return;
       await seedDirectory();
-      final fake = FakeLlm([
+      final fake = selectLlm([
         answer(read: [
           {'path': 'docs/pricing.md', 'locator': ''},
         ]),
@@ -1713,7 +1713,7 @@ Standard freight is 41 credits per pallet.
     test('a leading ./ on the answer still finds the file', () async {
       if (!available) return;
       await seedDirectory();
-      final fake = FakeLlm([
+      final fake = selectLlm([
         answer(read: [
           {'path': './docs/pricing.md', 'locator': 'Pricing'},
         ]),
@@ -1732,7 +1732,7 @@ Standard freight is 41 credits per pallet.
       // so this is exactly the pack it exists for.
       await seedDirectory(vectors: false, messageVector: false);
       final dead = FakeEmbedServer(status: null);
-      final fake = FakeLlm([
+      final fake = selectLlm([
         answer(read: [
           {'path': 'docs/pricing.md', 'locator': ''},
         ]),
@@ -1763,7 +1763,7 @@ Standard freight is 41 credits per pallet.
       );
       await seedFile(dir, 'docs/CLAUDE.md',
           text: 'Every rate in this folder is quoted per pallet.\n');
-      final fake = FakeLlm([
+      final fake = selectLlm([
         answer(read: [
           {'path': 'docs/pricing.md', 'locator': 'Pricing'},
         ]),
@@ -1789,7 +1789,7 @@ Standard freight is 41 credits per pallet.
           kind: 'rule',
           pathsJson: '["docs/**"]',
           text: '---\npaths: docs/**\n---\nNever round a rate up.\n');
-      final fake = FakeLlm([
+      final fake = selectLlm([
         answer(read: [
           {'path': 'docs/pricing.md', 'locator': 'Pricing'},
         ]),
@@ -1811,7 +1811,7 @@ Standard freight is 41 credits per pallet.
       final file = await seedFile(dir, 'lib/rate.dart', text: code);
       await seedChunked(file, 'lib/rate.dart', code);
       await context.indexPendingChunks();
-      final fake = FakeLlm([
+      final fake = selectLlm([
         answer(read: [
           {'path': 'lib/rate.dart', 'locator': 'lines 61–120'},
         ]),
@@ -1853,7 +1853,7 @@ Standard freight is 41 credits per pallet.
         ],
       ]) {
         await seedDirectory();
-        final fake = FakeLlm([answer(read: order)]);
+        final fake = selectLlm([answer(read: order)]);
 
         final pack = await packWith(fake);
 
@@ -1885,7 +1885,7 @@ Standard freight is 41 credits per pallet.
         text: '---\nname: quote-desk\ndescription: Answer a renewal '
             'question.\n---\nCite the rung.\n',
       );
-      final fake = FakeLlm([answer(skills: const ['renewals'])]);
+      final fake = selectLlm([answer(skills: const ['renewals'])]);
 
       final pack = await packWith(fake);
 
@@ -1913,36 +1913,11 @@ Standard freight is 41 credits per pallet.
   });
 }
 
-/// An [LlmClient] that answers from a script and never opens a socket.
-///
-/// The house shape — every test file declares its own, with the positional
-/// script `draft_handler_test.dart` uses — because there is no shared fake
-/// and two of them would drift.
-class FakeLlm extends LlmClient {
-  final List<Object> script;
-  final List<String> userMessages = [];
-  final List<double> temperatures = [];
-
-  FakeLlm(this.script) : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    userMessages.add(user);
-    temperatures.add(temperature);
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-    final step = script.length > 1 ? script.removeAt(0) : script.first;
-    if (step is Exception) throw step;
-    return Map<String, dynamic>.from(step as Map);
-  }
-}
+/// The selection client: it answers `context_select` from a script and never
+/// opens a socket. The shared [ScriptedLlm] is the fake; only the task name
+/// is this file's.
+ScriptedLlm selectLlm(List<Object> script) =>
+    ScriptedLlm()..scriptFor('context_select', script);
 
 /// A store whose vector half is broken. Everything above it must still answer.
 class _ThrowingContextStore extends ContextStore {

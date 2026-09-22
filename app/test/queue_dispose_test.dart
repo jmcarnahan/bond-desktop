@@ -4,11 +4,11 @@ import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart' show TriageResult;
 import 'package:bond_inbox/services/ai_worker.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// What a queue owes the rows it is holding when it is torn down.
@@ -19,45 +19,18 @@ import 'fixtures/test_db.dart';
 /// else in the suite notices: the app keeps working perfectly against the new
 /// backend, minus whatever the old one was mid-way through.
 
-/// An [LlmClient] that holds its first answer until the test lets go, so a
-/// dispose can land while a message is genuinely at the server.
-class HeldLlm extends LlmClient {
-  final Completer<void> started = Completer<void>();
-  final Completer<void> release = Completer<void>();
+/// The triage answer every client in this file gives.
+const Map<String, dynamic> launchAnswer = {
+  'urgency': 'high',
+  'category': 'work',
+  'summary': 'Sarah asks about the launch date.',
+  'needs_action': true,
+  'action_items': ['Call Sarah'],
+};
 
-  int calls = 0;
-
-  HeldLlm() : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    calls++;
-    if (!started.isCompleted) started.complete();
-    await release.future;
-    return {
-      'urgency': 'high',
-      'category': 'work',
-      'summary': 'Sarah asks about the launch date.',
-      'needs_action': true,
-      'action_items': const ['Call Sarah'],
-    };
-  }
-}
-
-/// An [LlmClient] that answers at once.
-class FastLlm extends HeldLlm {
-  FastLlm() {
-    release.complete();
-  }
-}
+/// A client that answers at once. The held ones are built in the tests that
+/// need them, because the latches they hold belong to those tests.
+ScriptedLlm fastLlm() => ScriptedLlm(answers: const {'triage': launchAnswer});
 
 /// A store whose result writes fail — a disk that filled, a database closed
 /// under a teardown. The one way an item can finish without ever clearing its
@@ -106,39 +79,6 @@ class HeldHandler extends WorkHandler {
     seen.add(item['entity_id'] as String? ?? '');
     if (!started.isCompleted) started.complete();
     await release.future;
-  }
-}
-
-/// An [LlmClient] that holds EACH call on its own latch, so a test can end
-/// the first message while the second is still at the server.
-class HeldPerCallLlm extends LlmClient {
-  final List<Completer<void>> started = [Completer(), Completer()];
-  final List<Completer<void>> release = [Completer(), Completer()];
-
-  int calls = 0;
-
-  HeldPerCallLlm() : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
-
-  @override
-  Future<Map<String, dynamic>> completeJson({
-    required String system,
-    required String user,
-    required Map<String, dynamic> schema,
-    String schemaName = 'result',
-    int maxTokens = 512,
-    double temperature = 0.2,
-    bool think = false,
-  }) async {
-    final i = calls++;
-    started[i].complete();
-    await release[i].future;
-    return {
-      'urgency': 'high',
-      'category': 'work',
-      'summary': 'Sarah asks about the launch date.',
-      'needs_action': true,
-      'action_items': const ['Call Sarah'],
-    };
   }
 }
 
@@ -237,21 +177,31 @@ void main() {
         () async {
       await seedMessage('1');
       await seedMessage('2');
-      final llm = HeldLlm();
+      // Holds its first answer until this test lets go, so the dispose below
+      // lands while a message is genuinely at the server.
+      final started = Completer<void>();
+      final release = Completer<void>();
+      final llm = ScriptedLlm(
+        answers: const {'triage': launchAnswer},
+        onCall: (_) {
+          if (!started.isCompleted) started.complete();
+          return release.future;
+        },
+      );
       final queue = TriageQueue(store, llm, concurrency: 1);
 
       final pumping = queue.pump();
-      await llm.started.future;
+      await started.future;
 
       final disposing = queue.dispose();
-      llm.release.complete();
+      release.complete();
       await disposing;
       await pumping;
 
       // The request was at the server and its answer is paid for, so it is
       // written rather than thrown away — and the message behind it (the drain
       // runs newest first) was never claimed, so it is simply still waiting.
-      expect(llm.calls, 1);
+      expect(llm.calls.length, 1);
       expect(await triageStatus('2'), 'triaged');
       expect(await triageStatus('1'), 'pending');
       expect((await store.triageCounts())['processing'], isNull);
@@ -260,7 +210,7 @@ void main() {
     test('hands back a claim whose result could not be written', () async {
       await seedMessage('1');
       final broken = BrokenStore(db);
-      final queue = TriageQueue(broken, FastLlm(), concurrency: 1);
+      final queue = TriageQueue(broken, fastLlm(), concurrency: 1);
 
       await expectLater(queue.pump(), throwsA(isA<StateError>()));
       // The row is stranded: the claim was taken and nothing ever cleared it.
@@ -278,13 +228,13 @@ void main() {
 
     test('and a fresh queue over the same store picks it up', () async {
       await seedMessage('1');
-      final queue = TriageQueue(BrokenStore(db), FastLlm(), concurrency: 1);
+      final queue = TriageQueue(BrokenStore(db), fastLlm(), concurrency: 1);
       await expectLater(queue.pump(), throwsA(isA<StateError>()));
       await queue.dispose();
 
       // What a backend switch does: the old queue goes, a new one over the
       // same rows arrives, and the work is where it was.
-      final replacement = TriageQueue(store, FastLlm(), concurrency: 1);
+      final replacement = TriageQueue(store, fastLlm(), concurrency: 1);
       await replacement.pump();
       await replacement.dispose();
 
@@ -296,13 +246,26 @@ void main() {
       await seedMessage('1');
       await seedMessage('2');
       final held = HeldSecondClaimStore(db);
-      final llm = HeldPerCallLlm();
+      // Each call on its own latch, so this test can end the first message
+      // while the second is still at the server. The index is the call's own
+      // ordinal, so a third call would range-error rather than pass quietly.
+      final started = [Completer<void>(), Completer<void>()];
+      final release = [Completer<void>(), Completer<void>()];
+      var nth = 0;
+      final llm = ScriptedLlm(
+        answers: const {'triage': launchAnswer},
+        onCall: (_) {
+          final i = nth++;
+          started[i].complete();
+          return release[i].future;
+        },
+      );
       final queue = TriageQueue(held, llm, concurrency: 2);
 
       final pumping = queue.pump();
       // Newest first: call 0 is message 2, and the claim for message 1 is now
       // suspended inside the store.
-      await llm.started[0].future;
+      await started[0].future;
 
       var disposed = false;
       final disposing = queue.dispose().whenComplete(() => disposed = true);
@@ -310,29 +273,29 @@ void main() {
       // The suspended claim lands AFTER dispose took its first look at what
       // was in flight — the message it claims is now genuinely running.
       held.holdSecond.complete();
-      await llm.started[1].future;
+      await started[1].future;
 
       // The first message finishes. A dispose that only waited for that
       // snapshot would now hand back message 1's claim — flipping a message
       // that is still at the server to `pending`, for a second queue to
       // claim and pay for again.
-      llm.release[0].complete();
+      release[0].complete();
       await pumpEventQueue();
       expect(disposed, isFalse);
       expect(await triageStatus('1'), 'processing');
 
-      llm.release[1].complete();
+      release[1].complete();
       await disposing;
       await pumping;
 
-      expect(llm.calls, 2);
+      expect(llm.calls.length, 2);
       expect(await triageStatus('1'), 'triaged');
       expect(await triageStatus('2'), 'triaged');
       expect((await store.triageCounts())['processing'], isNull);
     });
 
     test('is safe with nothing claimed, and twice', () async {
-      final queue = TriageQueue(store, FastLlm());
+      final queue = TriageQueue(store, fastLlm());
 
       await queue.dispose();
       await queue.dispose();

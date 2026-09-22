@@ -1,4 +1,7 @@
 import 'package:bond_inbox/screens/consent_screen.dart';
+import 'package:bond_inbox/screens/setup/setup_controls.dart'
+    show setupContinueKey;
+import 'package:bond_inbox/screens/setup/setup_where_body.dart';
 import 'package:bond_inbox/services/llm/model_probe.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/system/system_info.dart' show HardwareInfo;
@@ -31,7 +34,7 @@ void main() {
     WidgetTester tester, {
     Map<ModelSlot, LlmTarget>? slotTargets,
     Map<ModelSlot, bool>? isDefault,
-    Future<ModelProbeResult> Function(String)? probe,
+    Future<ModelProbeResult> Function(String, {String? bearer})? probe,
     void Function(ModelSlot, {required String url, required String model})?
         onSave,
     void Function(ModelSlot)? onReset,
@@ -59,6 +62,11 @@ void main() {
     MachineTier? machineTier,
     Future<void> Function()? onApplyTierDefaults,
     bool wireTier = false,
+    ModelPlacement modelPlacement = ModelPlacement.local,
+    Future<void> Function(String baseUrl, String key)? onAdoptBox,
+    Future<void> Function()? onAdoptLocal,
+    bool wirePlacement = false,
+    String? boxParkedReason,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -101,6 +109,13 @@ void main() {
           machineTier: machineTier,
           onApplyTierDefaults:
               wireTier ? (onApplyTierDefaults ?? () async {}) : null,
+          modelPlacement: modelPlacement,
+          boxParkedReason: boxParkedReason,
+          onAdoptBox: wirePlacement
+              ? (onAdoptBox ?? (_, _) async {})
+              : null,
+          onAdoptLocal:
+              wirePlacement ? (onAdoptLocal ?? () async {}) : null,
           modelsHeader: modelsHeader,
           localServerSummary: localServerSummary,
         ),
@@ -175,7 +190,7 @@ void main() {
       (tester) async {
     await open(
       tester,
-      probe: (_) async => const ModelProbeResult(reachable: true),
+      probe: (_, {bearer}) async => const ModelProbeResult(reachable: true),
     );
     await expand(tester, 'Models');
 
@@ -214,7 +229,7 @@ void main() {
 
   testWidgets('the embeddings card checks its own server', (tester) async {
     final asked = <String>[];
-    await open(tester, probe: (url) async {
+    await open(tester, probe: (url, {bearer}) async {
       asked.add(url);
       return const ModelProbeResult(
         reachable: true,
@@ -609,6 +624,358 @@ void main() {
 
   /// The fact line and **Use this Mac's defaults**: what the machine is, and
   /// one press that points the pipeline at what it can actually run.
+  group('where the models run', () {
+    testWidgets('the heading and both buttons render on this Mac',
+        (tester) async {
+      await open(tester, wireTier: true, wirePlacement: true);
+      await expand(tester, 'Models');
+
+      expect(find.text(SettingsModelsBody.whereHeading), findsOneWidget);
+      expect(find.text('Everything runs on this Mac.'), findsOneWidget);
+      expect(find.text('Use the shared GPU box'), findsOneWidget);
+      // The tier button is untouched and still says what it always said.
+      expect(find.byKey(SettingsModelsBody.tierDefaultsKey), findsOneWidget);
+      expect(find.text("Use this Mac's defaults"), findsOneWidget);
+    });
+
+    testWidgets('on the box the button offers this Mac instead', (tester) async {
+      var local = 0;
+      await open(
+        tester,
+        wireTier: true,
+        wirePlacement: true,
+        modelPlacement: ModelPlacement.box,
+        onAdoptLocal: () async => local++,
+      );
+      await expand(tester, 'Models');
+
+      expect(find.text("Use this Mac's models"), findsOneWidget);
+      expect(find.text('Use the shared GPU box'), findsNothing);
+      // The line says where work actually goes, and that the embedding model
+      // stays here.
+      expect(
+        find.text('The inbox and writing steps run on the shared GPU box. '
+            'The embedding model runs here.'),
+        findsOneWidget,
+      );
+      // And that the local models stop.
+      expect(
+        find.text('Puts every step back on this Mac and starts the local '
+            'models again.'),
+        findsOneWidget,
+      );
+
+      await tester.ensureVisible(find.byKey(SettingsModelsBody.adoptBoxKey));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(SettingsModelsBody.adoptBoxKey));
+      await tester.pumpAndSettle();
+      expect(local, 1);
+    });
+
+    testWidgets('the parked line shows only on the box, and only when parked',
+        (tester) async {
+      await open(
+        tester,
+        wireTier: true,
+        wirePlacement: true,
+        modelPlacement: ModelPlacement.box,
+        boxParkedReason: 'model_unavailable',
+      );
+      await expand(tester, 'Models');
+      expect(find.text(SettingsModelsBody.boxParkedText), findsOneWidget);
+
+      // Same fact, local placement: the sentence names the box, so it has no
+      // business on a machine that is not pointed at one.
+      await open(
+        tester,
+        wireTier: true,
+        wirePlacement: true,
+        boxParkedReason: 'model_unavailable',
+      );
+      await expand(tester, 'Models');
+      expect(find.text(SettingsModelsBody.boxParkedText), findsNothing);
+    });
+
+    // A refused key is not a box that is down, and the two sentences send a
+    // person to two different places: one to wait, one to type a new key into
+    // the pane the button below it opens.
+    testWidgets('a refused key reads as a refused key, not as a dead box',
+        (tester) async {
+      await open(
+        tester,
+        wireTier: true,
+        wirePlacement: true,
+        modelPlacement: ModelPlacement.box,
+        boxParkedReason: 'unauthorized',
+      );
+      await expand(tester, 'Models');
+      expect(find.text(SettingsModelsBody.boxUnauthorizedText), findsOneWidget);
+      expect(find.text(SettingsModelsBody.boxParkedText), findsNothing);
+    });
+
+    // Not gated on a park: a key is rotated on the box's side, and the door to
+    // type the new one has to be open before anything has failed yet.
+    testWidgets('Change the access key is on the box placement and not on this '
+        'Mac', (tester) async {
+      await open(
+        tester,
+        wireTier: true,
+        wirePlacement: true,
+        modelPlacement: ModelPlacement.box,
+      );
+      await expand(tester, 'Models');
+      expect(find.byKey(SettingsModelsBody.changeBoxKeyKey), findsOneWidget);
+    });
+
+    testWidgets('Change the access key is absent on the local placement',
+        (tester) async {
+      await open(tester, wireTier: true, wirePlacement: true);
+      await expand(tester, 'Models');
+      expect(find.byKey(SettingsModelsBody.changeBoxKeyKey), findsNothing);
+    });
+
+    // The whole point of the button: the same pane, the address already in it
+    // off the stored pair, and a save that re-adopts. `adoptBox` replaces both
+    // fixed-id targets and the keychain entry, so re-adopting the same address
+    // IS the key change.
+    testWidgets('Change the access key re-adopts with the stored address',
+        (tester) async {
+      final adopted = <(String, String)>[];
+      await open(
+        tester,
+        wireTier: true,
+        wirePlacement: true,
+        wireTargets: true,
+        modelPlacement: ModelPlacement.box,
+        targets: const [
+          LlmTargetSpec(
+            id: boxProseId,
+            name: boxProseName,
+            url: 'https://box.example.com/prose/v1/chat/completions',
+            model: boxProseModel,
+          ),
+        ],
+        onAdoptBox: (url, key) async => adopted.add((url, key)),
+      );
+      await expand(tester, 'Models');
+
+      await tester.ensureVisible(
+        find.byKey(SettingsModelsBody.changeBoxKeyKey),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(SettingsModelsBody.changeBoxKeyKey));
+      await tester.pumpAndSettle();
+
+      // The same pane the adopt button opens, and no dialog.
+      expect(find.text('Shared GPU box'), findsOneWidget);
+      // Prefilled from the stored writing target, origin only.
+      expect(
+        tester.widget<TextField>(find.byKey(SetupWhereBody.urlKey)).controller
+            ?.text,
+        'https://box.example.com',
+      );
+      // The key field starts EMPTY: nothing on this screen ever holds one.
+      expect(
+        tester.widget<TextField>(find.byKey(SetupWhereBody.keyFieldKey))
+            .controller
+            ?.text,
+        '',
+      );
+
+      await tester.enterText(
+        find.byKey(SetupWhereBody.keyFieldKey),
+        'sk-fixture-rotated-not-a-real-key',
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.byKey(setupContinueKey));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(setupContinueKey));
+      await tester.pumpAndSettle();
+
+      expect(adopted, [
+        ('https://box.example.com', 'sk-fixture-rotated-not-a-real-key'),
+      ]);
+      expect(find.text('Shared GPU box'), findsNothing);
+    });
+
+    // The two controls write different things and are wired apart. A host
+    // that can move the placement but not the tier defaults, or the other way
+    // round, must get exactly the one it can write: the placement block used
+    // to ride on the tier button's wiring and vanished with it. Four tests
+    // rather than four `open`s in one, because the section's expanded state
+    // survives a re-pump and a second `expand` would collapse it.
+    testWidgets('the placement alone renders without the tier button',
+        (tester) async {
+      await open(tester, wirePlacement: true);
+      await expand(tester, 'Models');
+
+      expect(find.byKey(SettingsModelsBody.adoptBoxKey), findsOneWidget);
+      expect(find.text(SettingsModelsBody.whereHeading), findsOneWidget);
+      expect(find.byKey(SettingsModelsBody.tierDefaultsKey), findsNothing);
+    });
+
+    testWidgets('the tier button alone renders without the placement block',
+        (tester) async {
+      await open(tester, wireTier: true);
+      await expand(tester, 'Models');
+
+      expect(find.byKey(SettingsModelsBody.tierDefaultsKey), findsOneWidget);
+      expect(find.byKey(SettingsModelsBody.adoptBoxKey), findsNothing);
+      expect(find.text(SettingsModelsBody.whereHeading), findsNothing);
+    });
+
+    testWidgets('neither wiring renders neither control', (tester) async {
+      await open(tester);
+      await expand(tester, 'Models');
+
+      expect(find.byKey(SettingsModelsBody.adoptBoxKey), findsNothing);
+      expect(find.byKey(SettingsModelsBody.tierDefaultsKey), findsNothing);
+      expect(find.text(SettingsModelsBody.whereHeading), findsNothing);
+    });
+
+    testWidgets('both wirings render both, which is the app', (tester) async {
+      await open(tester, wireTier: true, wirePlacement: true);
+      await expand(tester, 'Models');
+
+      expect(find.byKey(SettingsModelsBody.adoptBoxKey), findsOneWidget);
+      expect(find.byKey(SettingsModelsBody.tierDefaultsKey), findsOneWidget);
+    });
+
+    testWidgets('the button opens the pane, and its save calls adoptBox',
+        (tester) async {
+      final adopted = <(String, String)>[];
+      await open(
+        tester,
+        wireTier: true,
+        wirePlacement: true,
+        onAdoptBox: (url, key) async => adopted.add((url, key)),
+      );
+      await expand(tester, 'Models');
+
+      await tester.ensureVisible(find.byKey(SettingsModelsBody.adoptBoxKey));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(SettingsModelsBody.adoptBoxKey));
+      await tester.pumpAndSettle();
+
+      // A PANE with a title and a back arrow, never a dialog.
+      expect(find.text('Shared GPU box'), findsOneWidget);
+      expect(find.byKey(SetupWhereBody.urlKey), findsOneWidget);
+      expect(find.byKey(SetupWhereBody.keyFieldKey), findsOneWidget);
+      // The pane was opened by a button that already made the choice, so it
+      // does not ask again.
+      expect(find.byKey(SetupWhereBody.boxCardKey), findsNothing);
+
+      await tester.enterText(
+        find.byKey(SetupWhereBody.urlKey),
+        'https://box.example.com/',
+      );
+      await tester.enterText(
+        find.byKey(SetupWhereBody.keyFieldKey),
+        'sk-fixture-not-a-real-box-key',
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.byKey(setupContinueKey));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(setupContinueKey));
+      await tester.pumpAndSettle();
+
+      expect(adopted,
+          [('https://box.example.com', 'sk-fixture-not-a-real-box-key')]);
+      // Saved and gone: the sections are back.
+      expect(find.text('Shared GPU box'), findsNothing);
+    });
+
+    testWidgets('the pane refuses to save with a field empty', (tester) async {
+      final adopted = <(String, String)>[];
+      await open(
+        tester,
+        wireTier: true,
+        wirePlacement: true,
+        onAdoptBox: (url, key) async => adopted.add((url, key)),
+      );
+      await expand(tester, 'Models');
+      await tester.ensureVisible(find.byKey(SettingsModelsBody.adoptBoxKey));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(SettingsModelsBody.adoptBoxKey));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(SetupWhereBody.urlKey),
+        'https://box.example.com',
+      );
+      await tester.pumpAndSettle();
+
+      // Disabled rather than absent: a way forward that vanished would read
+      // as a dead end.
+      final button =
+          tester.widget<FilledButton>(find.byKey(setupContinueKey));
+      expect(button.onPressed, isNull);
+      expect(adopted, isEmpty);
+    });
+
+    testWidgets("Check server sends the typed key and shows what it found",
+        (tester) async {
+      final asked = <(String, String?)>[];
+      await open(
+        tester,
+        wireTier: true,
+        wirePlacement: true,
+        probe: (url, {bearer}) async {
+          asked.add((url, bearer));
+          return const ModelProbeResult(
+            reachable: true,
+            modelIds: ['qwen3.8'],
+          );
+        },
+      );
+      await expand(tester, 'Models');
+      await tester.ensureVisible(find.byKey(SettingsModelsBody.adoptBoxKey));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(SettingsModelsBody.adoptBoxKey));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(SetupWhereBody.urlKey),
+        'https://box.example.com',
+      );
+      await tester.enterText(
+        find.byKey(SetupWhereBody.keyFieldKey),
+        'sk-fixture-not-a-real-box-key',
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.byKey(SetupWhereBody.checkKey));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(SetupWhereBody.checkKey));
+      await tester.pumpAndSettle();
+
+      // The writing slot, because that is the one whose model a person
+      // recognises, and the key rides the request.
+      expect(asked, [
+        (
+          'https://box.example.com/prose/v1/chat/completions',
+          'sk-fixture-not-a-real-box-key',
+        )
+      ]);
+      expect(find.text('Reachable · 1 model'), findsOneWidget);
+
+      // The key is in the field it was typed into, obscured, and NOWHERE
+      // else: not in the probe's answer, not in a caption, not in a label.
+      // `find.text` reads an EditableText's controller rather than the
+      // bullets it draws, so the field itself is the one match allowed.
+      expect(
+        tester
+            .widget<TextField>(find.byKey(SetupWhereBody.keyFieldKey))
+            .obscureText,
+        isTrue,
+      );
+      final rendered = [
+        for (final t in tester.widgetList<Text>(find.byType(Text)))
+          t.data ?? '',
+      ];
+      expect(rendered, everyElement(isNot(contains('sk-fixture'))));
+    });
+  });
+
   group('this Mac and its defaults', () {
     const big = HardwareInfo(
       chip: 'Apple M2 Max',

@@ -85,6 +85,45 @@ class LlmUnavailableException extends LlmException {
   const LlmUnavailableException(super.message);
 }
 
+/// The server answered, and refused the access key: HTTP 401 or 403.
+///
+/// A subclass of [LlmUnavailableException] on purpose. It says nothing about
+/// the message being sent either, so every existing `on
+/// LlmUnavailableException` arm catches it and the drains PARK rather than
+/// spending one attempt per item against a key that will refuse all of them.
+/// The drains tell it apart by type to record the reason `unauthorized`,
+/// which is what lets the rail say the key was refused rather than that the
+/// box is down. Unlike its parent, coming back later will not help: somebody
+/// has to fix the key.
+class LlmUnauthorizedException extends LlmUnavailableException {
+  const LlmUnauthorizedException(super.message);
+}
+
+/// The EMBEDDING server is the one that could not be reached.
+///
+/// A subclass of [LlmUnavailableException] for the same reason
+/// [LlmUnauthorizedException] is: every existing `on LlmUnavailableException`
+/// arm keeps catching it and the drains park exactly as they did. What it adds
+/// is WHICH SLOT died. The two slots are separately placed — the box serves
+/// every generating stage while embeddings stay on this Mac — so a park that
+/// says only `model_unavailable` puts "GPU box unreachable" in the rail when
+/// the truth is a local embedding server that is not running. The drains tell
+/// it apart by type and record the reason `embed_unavailable`.
+class EmbedUnavailableException extends LlmUnavailableException {
+  const EmbedUnavailableException(super.message);
+}
+
+/// The word a drain records when [e] parked it, for the rail to read.
+///
+/// One recipe rather than one per drain: the three subclasses are a closed set
+/// and the rail's sentences are written against these exact words, so a new
+/// subclass that is added here reaches every park site at once.
+String parkReasonFor(Object e) => switch (e) {
+      LlmUnauthorizedException() => 'unauthorized',
+      EmbedUnavailableException() => 'embed_unavailable',
+      _ => 'model_unavailable',
+    };
+
 /// The model answered, but not with the JSON object that was asked for.
 class LlmFormatException extends LlmException {
   const LlmFormatException(super.message);
@@ -429,12 +468,13 @@ class LlmClient {
   /// [completeJson], with the answer's text handed to [onText] as it arrives.
   ///
   /// A separate METHOD rather than an optional parameter on [completeJson],
-  /// which is the shape it looks like it should be. Twenty-two test doubles
-  /// `extends LlmClient` and override `completeJson` with its exact signature,
-  /// and a Dart override must accept every named parameter of the method it
-  /// overrides — so one added parameter would be twenty-two edits to files
-  /// that have nothing to do with streaming and would behave identically
-  /// afterwards.
+  /// which is the shape it looks like it should be. The test tree's one
+  /// double, `ScriptedLlm` in `test/fixtures/scripted_llm.dart`, overrides
+  /// both of these methods with their exact signatures, and a Dart override
+  /// must accept every named parameter of the method it overrides — so the
+  /// two signatures are frozen together: a parameter added to either is an
+  /// edit to the other's override as well, in a fixture that has nothing to
+  /// do with streaming and would behave identically afterwards.
   ///
   /// The answer, the failure semantics and the observer's record are the same
   /// as [completeJson]'s in every respect but one: the record carries
@@ -781,6 +821,19 @@ class LlmClient {
       throw LlmUnavailableException(
         '${_serverNoun(target)} is not ready (HTTP $statusCode). '
         '${_snippet(bodyText)}',
+      );
+    }
+
+    // A 401 or a 403 is the server refusing the key, and it will refuse every
+    // other item in the backlog for exactly the same reason. Parking costs one
+    // attempt and stops; the plain `LlmException` this used to throw cost one
+    // attempt PER ITEM and filled the activity log with the same error. The
+    // sentence names the URL, which `redactEndpoints` takes back out of any
+    // row it is written into, and never the key.
+    if (statusCode == 401 || statusCode == 403) {
+      throw LlmUnauthorizedException(
+        'The model server at ${_endpoint(target)} refused the access key. '
+        'Check it in Settings, Models.',
       );
     }
 

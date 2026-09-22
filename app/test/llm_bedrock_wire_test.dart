@@ -492,7 +492,14 @@ void main() {
       expect(seen.single.statusCode, 400);
     });
 
-    test('a 403 is the request\'s fault too — a key, not an outage', () async {
+    test('a 403 is a refused key, and parks rather than spending the queue',
+        () async {
+      // Deliberately changed in Round G, and for Converse exactly as for every
+      // other wire. It used to be a plain [LlmException] counted against the
+      // item; a refused key refuses every item identically, so the drain parks
+      // once instead of burning the whole backlog's attempts. The subclass is
+      // what lets the rail say the key was refused rather than that the server
+      // is down.
       final client = LlmClient(
         baseUrl: converseHost,
         model: converseModel,
@@ -502,9 +509,10 @@ void main() {
 
       await expectLater(
         client.complete(system: 's', user: 'u'),
-        throwsA(isA<LlmException>()
-            .having((e) => e, 'type', isNot(isA<LlmUnavailableException>()))
-            .having((e) => e.statusCode, 'statusCode', 403)),
+        throwsA(isA<LlmUnauthorizedException>()
+            .having((e) => e, 'parks', isA<LlmUnavailableException>())
+            .having((e) => e.message, 'message',
+                contains('refused the access key'))),
       );
     });
   });

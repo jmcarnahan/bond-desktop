@@ -111,6 +111,17 @@ void main() {
   String partOf(ModelFile file) =>
       '${destOf(file)}${ModelDownloader.partSuffix}';
 
+  String draftDestOf(ModelFile file) =>
+      p.join(folder(), file.sidecarRelativePath!);
+
+  /// The hub URL for a sidecar — the same shape as [FakeHubServer.resolveUriFor]
+  /// with the head's own name and revision, which is the whole reason the
+  /// downloader takes a second seam.
+  Uri draftUri(ModelFile file, ModelSidecar sidecar) => Uri.parse(
+        'http://127.0.0.1:${hub.port}/${file.repo}/resolve/'
+        '${sidecar.revision}/${sidecar.file}',
+      );
+
   /// Fills the hub with deterministic bytes and returns a manifest whose
   /// sizes and digests describe exactly those bytes.
   ModelManifest publish({
@@ -136,6 +147,22 @@ void main() {
     return testManifest(sizes: sizes, sha256s: digests);
   }
 
+  /// [publish], plus an MTP head for the prose entry served from the same
+  /// repo. Its bytes differ from every checkpoint's, so a leg that fetched
+  /// the wrong file would fail its digest rather than pass by accident.
+  ModelManifest publishWithSidecar({int head = 3072}) {
+    final base = publish();
+    final parent = base.byId(routerProseId);
+    final data = fakeWeights(head, seed: 9);
+    hub.contents['${parent.repo}/mtp-Qwen3.8-27B-Q4_0.gguf'] = data;
+    return testManifest(
+      sizes: {for (final m in base.models) m.id: m.sizeBytes},
+      sha256s: {for (final m in base.models) m.id: m.sha256},
+      proseSidecar:
+          testSidecar(sizeBytes: data.length, sha256: sha256Hex(data)),
+    );
+  }
+
   ModelDownloader build({
     ModelManifest? which,
     Duration progressInterval = const Duration(milliseconds: 1),
@@ -144,6 +171,7 @@ void main() {
     String Function()? at,
     OpenPart? openPart,
     Uri Function(ModelFile)? resolveUri,
+    ResolveSidecarUri? resolveSidecarUri,
   }) {
     final downloader = ModelDownloader(
       manifest: which ?? manifest,
@@ -158,6 +186,7 @@ void main() {
       beginActivity: system.beginActivity,
       endActivity: system.endActivity,
       resolveUri: resolveUri ?? hub.resolveUriFor,
+      resolveSidecarUri: resolveSidecarUri ?? draftUri,
       // Recorded, never slept: a backoff schedule is the property under test
       // and nine real minutes of it is not.
       sleep: (d) async => sleeps.add(d),
@@ -879,5 +908,210 @@ void main() {
     expect(sleeps, [const Duration(seconds: 2)]);
     expect(events.last.status, DownloadStatus.failed);
     expect(events.last.error, DownloadError.network);
+  });
+
+  group('the sidecar', () {
+    test('lands after its parent, verified, under its finished name',
+        () async {
+      manifest = publishWithSidecar();
+      final prose = manifest.byId(routerProseId);
+      final head = prose.sidecar!;
+
+      await build().run([prose]).toList();
+
+      // Both files, both renamed, no parts left behind.
+      expect(File(destOf(prose)).readAsBytesSync(),
+          hub.contents['${prose.repo}/${prose.file}']);
+      expect(File(draftDestOf(prose)).readAsBytesSync(),
+          hub.contents['${prose.repo}/${head.file}']);
+      expect(File(partOf(prose)).existsSync(), isFalse);
+      expect(
+        File('${draftDestOf(prose)}${ModelDownloader.partSuffix}').existsSync(),
+        isFalse,
+      );
+
+      // The PARENT first. A head with no model to draft for is worth nothing,
+      // so a run that stops between them keeps the file that is worth more.
+      final asked = [for (final u in hub.requests) p.basename(u.path)];
+      expect(asked.indexOf(prose.file), lessThan(asked.indexOf(head.file)));
+
+      // Two rows, each at its own digest, the head under `<id>.draft`.
+      expect(ledger[prose.id]?.status, DownloadStatus.done);
+      expect(ledger[prose.id]?.sha256, prose.sha256);
+      expect(ledger[prose.id]?.totalBytes, prose.sizeBytes);
+      final draft = ledger[DownloadLedger.draftId(prose.id)]!;
+      expect(draft.status, DownloadStatus.done);
+      expect(draft.sha256, head.sha256);
+      expect(draft.totalBytes, head.sizeBytes);
+      expect(ledger.isCurrent(prose), isTrue);
+    });
+
+    test('is ONE bar: one done, counted over both files', () async {
+      manifest = publishWithSidecar();
+      final prose = manifest.byId(routerProseId);
+
+      final events = await build().run([prose]).toList();
+
+      // Every event is the entry's, never the draft row's — a second id here
+      // would be a second row on the wizard's screen.
+      expect({for (final e in events) e.id}, {routerProseId});
+      // And exactly one terminal event, at the end. A `done` when the weights
+      // landed would finish the bar with the head still to come.
+      expect(
+        statusesFor(events, routerProseId)
+            .where((s) => s == DownloadStatus.done)
+            .length,
+        1,
+      );
+      expect(events.last.status, DownloadStatus.done);
+      expect(events.last.totalBytes, prose.downloadBytes);
+      expect(events.last.receivedBytes, prose.downloadBytes);
+      expect(events.last.fraction, 1);
+      // The bar never goes backwards across the seam: the sidecar's bytes are
+      // counted on top of the weights', not from zero again.
+      var high = 0;
+      for (final e in events) {
+        expect(e.receivedBytes, greaterThanOrEqualTo(high));
+        expect(e.totalBytes, prose.downloadBytes);
+        high = e.receivedBytes;
+      }
+    });
+
+    test('a head whose bytes are wrong is taken again, then failed', () async {
+      manifest = publishWithSidecar();
+      final good = manifest.byId(routerProseId);
+      // The manifest asks for a digest the repo's head does not have, which
+      // is what a bumped sidecar looks like from here.
+      manifest = testManifest(
+        sizes: {for (final m in manifest.models) m.id: m.sizeBytes},
+        sha256s: {for (final m in manifest.models) m.id: m.sha256},
+        proseSidecar: testSidecar(
+          sizeBytes: good.sidecar!.sizeBytes,
+          sha256: 'b' * 64,
+        ),
+      );
+      final prose = manifest.byId(routerProseId);
+      // The hub answers an etag that is not a sha at all, which is what the
+      // real one does for a non-LFS object — so the redirect check abstains
+      // and the failure is the VERIFY's, which is the path under test.
+      hub.linkedEtagOverride = 'not-a-sha';
+
+      final events = await build().run([prose]).toList();
+
+      // Twice is not a flipped bit in flight, it is the wrong file.
+      final headAsks = [
+        for (final u in hub.requests)
+          if (p.basename(u.path) == prose.sidecar!.file) u,
+      ];
+      expect(headAsks, hasLength(greaterThanOrEqualTo(4)));
+      expect(events.last.status, DownloadStatus.failed);
+      expect(events.last.error, DownloadError.checksum);
+      // Nothing is left behind for the next run to resume into, and the
+      // PARENT survives: its own bytes were never in question.
+      expect(
+        File('${draftDestOf(prose)}${ModelDownloader.partSuffix}').existsSync(),
+        isFalse,
+      );
+      expect(File(draftDestOf(prose)).existsSync(), isFalse);
+      expect(File(destOf(prose)).existsSync(), isTrue);
+      expect(ledger[prose.id]?.status, DownloadStatus.done);
+      expect(
+        ledger[DownloadLedger.draftId(prose.id)]?.status,
+        DownloadStatus.failed,
+      );
+    });
+
+    test('an unexpected throw on the head fails the head, not the weights',
+        () async {
+      manifest = publishWithSidecar();
+      final prose = manifest.byId(routerProseId);
+
+      // A bug, not a network fault: something the run has no word for, thrown
+      // while the SIDECAR is being written. Failing the entry's first leg
+      // here would write `failed` at zero bytes over a `done` row describing
+      // eighteen gigabytes that are on the disk and correct.
+      final events = await build(
+        openPart: (path, {required append}) async {
+          if (path.contains('mtp-')) throw StateError('a bug in the sink');
+          return File(path)
+              .openWrite(mode: append ? FileMode.append : FileMode.writeOnly);
+        },
+      ).run([prose]).toList();
+
+      expect(events.last.status, DownloadStatus.failed);
+      expect(events.last.error, DownloadError.network);
+
+      // The weights kept their row and their file.
+      expect(ledger[prose.id]?.status, DownloadStatus.done);
+      expect(ledger[prose.id]?.sha256, prose.sha256);
+      expect(ledger[prose.id]?.receivedBytes, prose.sizeBytes);
+      expect(File(destOf(prose)).existsSync(), isTrue);
+
+      // The head is the one that failed, under its own row.
+      final draft = ledger[DownloadLedger.draftId(prose.id)]!;
+      expect(draft.status, DownloadStatus.failed);
+      expect(draft.error, DownloadError.network);
+      // And the entry is not current, so the next launch fetches the head.
+      expect(ledger.isCurrent(prose), isFalse);
+    });
+
+    test('verify wants both files, not just the weights', () async {
+      manifest = publishWithSidecar();
+      final prose = manifest.byId(routerProseId);
+      final downloader = build();
+
+      await downloader.run([prose]).toList();
+      expect(await downloader.verify(prose), isTrue);
+
+      // A head from the previous build, under the right name. The weights
+      // still hash correctly, and a verify that stopped there would call this
+      // checkpoint servable when the preset's `model-draft` is wrong.
+      await File(draftDestOf(prose)).writeAsBytes(fakeWeights(64, seed: 77));
+      expect(await downloader.verify(prose), isFalse);
+    });
+
+    test('a parent done with no head is not current, and the run fetches it',
+        () async {
+      manifest = publishWithSidecar();
+      final prose = manifest.byId(routerProseId);
+
+      // The ledger a build BEFORE the sidecar would have left: the weights
+      // done, nothing about a head. A launch that trusted it would start a
+      // server whose preset names a file that is not there.
+      ledger = DownloadLedger.empty.record(FileDownloadState(
+        id: prose.id,
+        status: DownloadStatus.done,
+        receivedBytes: prose.sizeBytes,
+        totalBytes: prose.sizeBytes,
+        sha256: prose.sha256,
+      ));
+      expect(ledger.isCurrent(prose), isFalse);
+      expect(ledger.matches(manifest), isFalse);
+
+      await File(destOf(prose)).create(recursive: true);
+      await File(destOf(prose))
+          .writeAsBytes(hub.contents['${prose.repo}/${prose.file}']!);
+
+      final events = await build().run([prose]).toList();
+
+      expect(events.last.status, DownloadStatus.done);
+      expect(File(draftDestOf(prose)).existsSync(), isTrue);
+      expect(ledger.isCurrent(prose), isTrue);
+
+      // The skipped leg SAYS where the entry already is. Without that, the
+      // bar would read zero from the `pending` event until the head's first
+      // bytes landed, which on a real 1.6 GB head looks stuck.
+      final afterPending = events.skip(1).toList();
+      expect(afterPending.first.status, DownloadStatus.downloading);
+      expect(afterPending.first.receivedBytes, prose.sizeBytes);
+      for (final e in afterPending) {
+        expect(e.receivedBytes, greaterThanOrEqualTo(prose.sizeBytes));
+      }
+      // The weights were not fetched again: the row and the file agreed.
+      expect(
+        [for (final u in hub.requests) p.basename(u.path)],
+        isNot(contains(prose.file)),
+      );
+    });
   });
 }

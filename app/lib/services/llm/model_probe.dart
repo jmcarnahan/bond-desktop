@@ -93,7 +93,15 @@ class ModelServerProbe {
         pathSegments: pathSegments,
       );
 
-  Future<ModelProbeResult> probe(String completionsUrl) async {
+  /// Reads the listing behind [completionsUrl].
+  ///
+  /// [bearer] is a SECRET and is used for exactly one thing: the
+  /// `Authorization` header of this one request. It reaches no field of the
+  /// result, no error sentence and no log line, so a keyed endpoint answers
+  /// the probe with its model list rather than HTTP 401 and the token is gone
+  /// again when the future completes. Null or empty sends no header at all,
+  /// which is every local server.
+  Future<ModelProbeResult> probe(String completionsUrl, {String? bearer}) async {
     final url = modelsUrlFor(completionsUrl);
     if (url == null) {
       return const ModelProbeResult(
@@ -104,9 +112,10 @@ class ModelServerProbe {
 
     final http.Response response;
     try {
-      response = await _http
-          .get(url, headers: const {'Accept': 'application/json'})
-          .timeout(timeout);
+      response = await _http.get(url, headers: {
+        'Accept': 'application/json',
+        if (bearer != null && bearer.isNotEmpty) 'Authorization': 'Bearer $bearer',
+      }).timeout(timeout);
     } on SocketException {
       return ModelProbeResult(
         reachable: false,

@@ -81,7 +81,7 @@ class FakeWorker extends AiWorker {
   FakeWorker(super.store, this.log) : super(handlers: const []);
 
   @override
-  Future<void> pump() async {
+  Future<void> pump({List<({String source, String id})> first = const []}) async {
     await Future<void>.delayed(const Duration(milliseconds: 10));
     log.add('ai');
   }

@@ -8,10 +8,12 @@ import '../services/llm/model_slots.dart'
         LlmTarget,
         LlmTargetSpec,
         MachineTier,
+        ModelPlacement,
         ModelSlot,
         PipelineStageInfo,
         builtInProseName,
         defaultTargetIdFor,
+        draftStageIds,
         slotDefaults;
 import '../services/system/system_info.dart' show HardwareInfo;
 import '../theme/tokens.dart';
@@ -50,7 +52,11 @@ class SettingsModelsBody extends StatefulWidget {
 
   /// Null takes every 'Check server' off the section — the editors' and the
   /// embeddings card's alike. See [ModelSlotEditor.probe].
-  final Future<ModelProbeResult> Function(String url)? probe;
+  final Future<ModelProbeResult> Function(String url, {String? bearer})? probe;
+
+  /// Looks up one target's stored token for the probe's `Authorization`
+  /// header. A LOOKUP, never the value.
+  final String? Function(String targetId)? storedBearer;
   final void Function(ModelSlot slot, {required String url, required String model})
       onSave;
   final void Function(ModelSlot slot) onReset;
@@ -123,6 +129,32 @@ class SettingsModelsBody extends StatefulWidget {
   /// must not offer the control that makes one.
   final Future<void> Function()? onApplyTierDefaults;
 
+  /// Where this install's model work runs today, for the line and the button
+  /// above **Use this Mac's defaults**.
+  final ModelPlacement modelPlacement;
+
+  /// Opens the pane that takes the box address and the access key. Null takes
+  /// the adopt button off, this section's usual discipline.
+  final VoidCallback? onOpenBoxPane;
+
+  /// Puts the install back on this Mac's own models. What the same button
+  /// does when the placement is already the box.
+  final Future<void> Function()? onAdoptLocal;
+
+  /// Why the pipeline is parked, when the reason is one the BOX placement can
+  /// answer for: `model_unavailable` or `unauthorized`, and null for neither.
+  /// One sentence under the placement line, on the same fact the rail reads.
+  ///
+  /// The reason rather than a bool, because the two park differently and the
+  /// sentences send a person to two different places: one waits for a machine
+  /// to come back, the other needs a key typed again right here.
+  final String? boxParkedReason;
+
+  /// Opens the box pane with the address prefilled and the key field empty,
+  /// for a key that was rotated. Null takes the button off, this section's
+  /// usual discipline.
+  final VoidCallback? onChangeBoxKey;
+
   const SettingsModelsBody({
     super.key,
     this.header,
@@ -131,6 +163,7 @@ class SettingsModelsBody extends StatefulWidget {
     required this.compiledDefaults,
     required this.stages,
     this.probe,
+    this.storedBearer,
     required this.onSave,
     required this.onReset,
     this.proseParallel = 1,
@@ -147,6 +180,11 @@ class SettingsModelsBody extends StatefulWidget {
     this.hardware,
     this.machineTier,
     this.onApplyTierDefaults,
+    this.modelPlacement = ModelPlacement.local,
+    this.onOpenBoxPane,
+    this.onAdoptLocal,
+    this.boxParkedReason,
+    this.onChangeBoxKey,
   });
 
   /// The collapsed summary — where the three slots point, in one line.
@@ -184,6 +222,31 @@ class SettingsModelsBody extends StatefulWidget {
   /// for the reason every control here is: the section carries several
   /// buttons and a test that tapped by words would tap whichever came first.
   static const Key tierDefaultsKey = ValueKey('settings-tier-defaults');
+
+  /// The one button that moves the placement. It reads **Use the shared GPU
+  /// box** on this Mac and **Use this Mac's models** on the box, because
+  /// there are two placements and the press is always the other one.
+  static const Key adoptBoxKey = ValueKey('settings-adopt-box');
+
+  /// The heading above both buttons.
+  static const String whereHeading = 'Where the models run';
+
+  /// The sentence under the placement line when the box is not answering.
+  static const String boxParkedText =
+      'The box is not answering. Work is waiting and will retry each minute.';
+
+  /// The same line when the box ANSWERED and refused the key. A different
+  /// sentence because it is a different job: waiting fixes the first and
+  /// nothing but a new key fixes this one, and the pane that takes one is the
+  /// button directly under it.
+  static const String boxUnauthorizedText =
+      'The box refused the access key. Change it here.';
+
+  /// The key on **Change the access key**, beside the placement button. Keyed
+  /// like every other control in this section, because two outlined buttons
+  /// sit side by side here and a test that tapped by words would tap
+  /// whichever came first.
+  static const Key changeBoxKeyKey = ValueKey('settings-change-box-key');
 
   /// The key on one stage's target picker. Every picker carries the same
   /// words, so a test that tapped by label would be tapping whichever came
@@ -319,8 +382,16 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
           const SizedBox(height: BondSpacing.s16),
           ..._draftsInFlight(onChanged),
         ],
-        if (widget.onApplyTierDefaults case final apply?) ...[
+        // TWO wirings, read apart. The placement block and the tier-defaults
+        // button are different controls writing different things, and a host
+        // that can move one but not the other must get exactly the one it can
+        // write rather than neither.
+        if (_placementWired) ...[
           const SizedBox(height: BondSpacing.s24),
+          ..._whereModelsRun(),
+        ],
+        if (widget.onApplyTierDefaults case final apply?) ...[
+          SizedBox(height: _placementWired ? BondSpacing.s16 : BondSpacing.s24),
           ..._thisMac(apply),
         ],
         if (widget.onAddTarget != null) ...[
@@ -339,6 +410,7 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
           SettingsTargetsBody(
             targets: widget.targets,
             probe: widget.probe,
+            storedBearer: widget.storedBearer,
             onAdd: widget.onAddTarget,
             onEdit: widget.onEditTarget,
             onRemove: widget.onRemoveTarget,
@@ -395,16 +467,104 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
     ];
   }
 
+  /// Whether this host can move the placement at all. Either direction is
+  /// enough: a host that can adopt the box but not go back still has a button
+  /// worth drawing, and a host that can do neither gets no block.
+  bool get _placementWired =>
+      widget.onOpenBoxPane != null || widget.onAdoptLocal != null;
+
+  /// Where the models run: the heading, the placement this install is on, the
+  /// parked line when the box is not answering, and the one button that is
+  /// always the other placement.
+  ///
+  /// Above **Use this Mac's defaults**, because it is the larger question:
+  /// which models this Mac runs only matters once the answer here is this Mac.
+  List<Widget> _whereModelsRun() {
+    final onBox = widget.modelPlacement == ModelPlacement.box;
+    final parkedText = switch (widget.boxParkedReason) {
+      'model_unavailable' => SettingsModelsBody.boxParkedText,
+      'unauthorized' => SettingsModelsBody.boxUnauthorizedText,
+      // Every other park word is about something that is not the box — the
+      // local embedding server, a sign-out — and this block must not claim it.
+      _ => null,
+    };
+    return [
+      Text(
+        SettingsModelsBody.whereHeading,
+        style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(
+        onBox
+            ? 'The inbox and writing steps run on the shared GPU box. The '
+                'embedding model runs here.'
+            : 'Everything runs on this Mac.',
+        style: BondType.caption,
+      ),
+      if (onBox && parkedText != null) ...[
+        const SizedBox(height: BondSpacing.s4),
+        Text(
+          parkedText,
+          style: BondType.caption.copyWith(color: BondColors.error),
+        ),
+      ],
+      // One button, and the press is always the OTHER placement. Adopting the
+      // box needs an address and a key, so it opens a pane; going back to this
+      // Mac needs nothing and writes at once. One of the two is wired or this
+      // block does not render at all, so the button is never dead.
+      const SizedBox(height: BondSpacing.s8),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: Wrap(
+          spacing: BondSpacing.s8,
+          runSpacing: BondSpacing.s8,
+          children: [
+            OutlinedButton(
+              key: SettingsModelsBody.adoptBoxKey,
+              onPressed: onBox
+                  ? (widget.onAdoptLocal == null
+                      ? null
+                      : () => unawaited(widget.onAdoptLocal!()))
+                  : widget.onOpenBoxPane,
+              child: Text(
+                onBox ? "Use this Mac's models" : 'Use the shared GPU box',
+              ),
+            ),
+            // Only on the box, and not only when parked. A key is rotated on
+            // the box's side and this install finds out by being refused, so
+            // the door to type the new one has to be standing open before
+            // anything parks — and once something has, the sentence above
+            // points straight at it.
+            if (onBox && widget.onChangeBoxKey != null)
+              OutlinedButton(
+                key: SettingsModelsBody.changeBoxKeyKey,
+                onPressed: widget.onChangeBoxKey,
+                child: const Text('Change the access key'),
+              ),
+          ],
+        ),
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(
+        onBox
+            ? 'Puts every step back on this Mac and starts the local models '
+                'again.'
+            : 'Points the inbox and writing steps at the box and stops the '
+                'local inbox and writing models.',
+        style: BondType.caption,
+      ),
+    ];
+  }
+
   /// What this Mac is, and one press that points the pipeline at what it can
   /// actually run.
   ///
-  /// Above the Targets list and below the two slot editors, because it is
-  /// about the machine rather than about a server somebody added: the tier is
-  /// read from this Mac's memory every time it is asked for and stored
-  /// nowhere, so a models folder carried to another Mac gets that Mac's
-  /// answer. The caption names the stages the press rewrites, and it is not a
-  /// two-step: nothing is destroyed, and any stage can be re-picked in the
-  /// table above.
+  /// Below the placement block and above the Targets list, because it is about
+  /// the machine rather than about a server somebody added: the tier is read
+  /// from this Mac's memory every time it is asked for and stored nowhere, so
+  /// a models folder carried to another Mac gets that Mac's answer. The
+  /// caption names the stages the press rewrites, and it is not a two-step:
+  /// nothing is destroyed, and any stage can be re-picked in the table above.
   List<Widget> _thisMac(Future<void> Function() apply) {
     final hardware = widget.hardware;
     final tier = widget.machineTier;
@@ -459,6 +619,7 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
   String _tierWord(MachineTier tier) => switch (tier) {
         MachineTier.full => 'runs all three models',
         MachineTier.inbox => 'runs the inbox models',
+        MachineTier.remote => 'runs the embedding model',
       };
 
   /// What a press rewrites, in the words the controls it moves actually carry:
@@ -474,6 +635,8 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
         MachineTier.full =>
           'Clears the six prose stage picks back to Local prose and sets '
               'drafts to For messages that need you.',
+        MachineTier.remote =>
+          'The inbox and writing steps run on the shared GPU box.',
       };
 
   /// One authored row: what the stage is, what it does, and which target
@@ -579,7 +742,7 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
   /// would be the screen quietly lying about where the work goes.
   bool _gatedNote(PipelineStageInfo stage) {
     if (widget.cloudDraftsConsent) return false;
-    if (stage.id != 'draft_reply' && stage.id != 'draft_improve') return false;
+    if (!draftStageIds.contains(stage.id)) return false;
     final picked = widget.stageTargetIds[stage.id];
     if (picked == null) return false;
     for (final spec in widget.targets) {
@@ -624,7 +787,7 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
     }
     for (final spec in widget.targets) {
       if (spec.id != picked) continue;
-      final drafting = stage.id == 'draft_reply' || stage.id == 'draft_improve';
+      final drafting = draftStageIds.contains(stage.id);
       if (drafting && spec.isThirdParty && !widget.cloudDraftsConsent) {
         widget.onConsentNeeded?.call(stage.id, spec);
         return;

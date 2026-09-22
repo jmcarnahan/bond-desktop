@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 
 import '../system/system_info.dart';
 import 'download_state.dart';
+import 'model_downloader.dart' show ModelDownloader;
 import 'model_manifest.dart';
 
 /// 10 GiB — what the router and the OS need on top of the weights.
@@ -113,25 +114,24 @@ Future<DiskPreflight> checkDisk({
 }) async {
   var needed = 0;
   for (final model in manifest.models) {
-    final dest = p.join(folder, model.relativePath);
-    if (ledger.isCurrent(model) && File(dest).existsSync()) continue;
-    final part = File('$dest.part');
-    var already = 0;
-    try {
-      // Only a part the downloader will actually RESUME saves anything, and
-      // its rule is the one mirrored here: a row whose sha disagrees with the
-      // manifest is a model bump, and the part full of the previous
-      // checkpoint's bytes is deleted rather than resumed into. A part with no
-      // row at all is kept — the ledger can be lost to a crash, and it says
-      // nothing about the bytes.
-      final row = ledger[model.id];
-      final stale = row != null && row.sha256 != model.sha256;
-      if (!stale && part.existsSync()) already = part.lengthSync();
-    } on FileSystemException {
-      already = 0;
+    // PER FILE, not per entry: a checkpoint whose weights are here and whose
+    // sidecar is not costs only the sidecar, and `isCurrent` — which wants
+    // both — could not say that.
+    needed += _remaining(
+      dest: p.join(folder, model.relativePath),
+      sizeBytes: model.sizeBytes,
+      sha256: model.sha256,
+      row: ledger[model.id],
+    );
+    final head = model.sidecar;
+    if (head != null) {
+      needed += _remaining(
+        dest: p.join(folder, model.sidecarRelativePath!),
+        sizeBytes: head.sizeBytes,
+        sha256: head.sha256,
+        row: ledger[DownloadLedger.draftId(model.id)],
+      );
     }
-    final remaining = model.sizeBytes - already;
-    if (remaining > 0) needed += remaining;
   }
   // Asked BEFORE the probe, so the answer still comes from the volume the
   // folder will live on rather than from a directory this call just made.
@@ -143,6 +143,43 @@ Future<DiskPreflight> checkDisk({
     freeBytes: await system.freeBytes(volume),
     writable: _canWrite(folder),
   );
+}
+
+/// What one FILE still costs — 0 when it is done and here, its remainder when
+/// a resumable `.part` is here, its whole size otherwise.
+///
+/// [row] is that file's own ledger row: the parent's for a checkpoint, the
+/// `.draft` one for a sidecar. The suffix is [ModelDownloader.partSuffix]
+/// rather than a literal, because the only part worth discounting is one the
+/// downloader will actually find.
+int _remaining({
+  required String dest,
+  required int sizeBytes,
+  required String sha256,
+  required FileDownloadState? row,
+}) {
+  if (row != null &&
+      row.status == DownloadStatus.done &&
+      row.sha256 == sha256 &&
+      File(dest).existsSync()) {
+    return 0;
+  }
+  final part = File('$dest${ModelDownloader.partSuffix}');
+  var already = 0;
+  try {
+    // Only a part the downloader will actually RESUME saves anything, and its
+    // rule is the one mirrored here: a row whose sha disagrees with the
+    // manifest is a model bump, and the part full of the previous checkpoint's
+    // bytes is deleted rather than resumed into. A part with no row at all is
+    // kept — the ledger can be lost to a crash, and it says nothing about the
+    // bytes.
+    final stale = row != null && row.sha256 != sha256;
+    if (!stale && part.existsSync()) already = part.lengthSync();
+  } on FileSystemException {
+    already = 0;
+  }
+  final remaining = sizeBytes - already;
+  return remaining > 0 ? remaining : 0;
 }
 
 /// Whether Bond can really put bytes in [folder], by doing the two things the
