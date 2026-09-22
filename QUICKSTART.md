@@ -85,15 +85,17 @@ Two defines decide where the models run. Both are optional and neither carries
 a secret:
 
 - `BOND_BOX_URL=https://box.example.com`, with the hostname you were given, for
-  a build that should open on the project's GPU server. It makes the GPU server
-  the build's default placement and prefills the address on the wizard's "Where
-  the models run" step and on Settings, Models, where you can change it. The
-  access key is never compiled in. You type it in the app once and it is kept in
-  the macOS keychain. A separate `BOND_BOX_KEY` line is read only by the bench
-  recipes, which have no keychain to read from.
+  a build that should open on your own servers. It makes **User defined** the
+  build's default placement and fills both addresses in,
+  `<the address>/prose/v1/chat/completions` for the big model and
+  `<the address>/bulk/v1/chat/completions` for the small one, on the wizard's
+  **Where the models run** step and under Settings, Models, where you can
+  change them. The access key is never compiled in. You type it in the app once
+  and it is kept in the macOS keychain. A separate `BOND_BOX_KEY` line is read
+  only by the bench recipes, which have no keychain to read from.
 - `BOND_LLAMA_SERVER`, the path to a `llama-server` binary, for any dev build
-  that will start the local server. It is needed on the GPU server placement
-  too, because the embedding model always runs on this Mac. Without it the app
+  that will start the local server. It is needed under **User defined** too,
+  because the embedding model always runs on this Mac. Without it the app
   says `The model runtime is missing from this build`. It goes in `local.mk`
   rather than `.env`, next to the other machine-local overrides below.
 
@@ -112,7 +114,7 @@ whichever lines apply. Nothing else in the repo needs to change:
 # FAST_PORT  = 8082
 # EMBED_PORT = 8081
 # Lets the app run ONE bundled-style router from this dev build, instead of the
-# three servers you start by hand. Needed on the GPU server placement too: the
+# three servers you start by hand. Needed under User defined too: the
 # embedding model always runs here.
 # BOND_LLAMA_SERVER = /opt/homebrew/bin/llama-server
 # Skips the first-run setup wizard. Your models are in the Homebrew cache, not
@@ -185,8 +187,8 @@ make app-run
 The first build takes a few minutes.
 
 **The first launch opens the setup wizard** — nine screens that check the Mac,
-ask where the models run, download what this Mac needs, sign in, and turn
-Bond's managed model server on. That is not what you want on this path: you
+ask where the models run, download what this Mac needs, sign in, and start
+Bond's own model server. That is not what you want on this path: you
 have just started three servers by hand and the weights are already in
 `~/.cache/huggingface/hub/`. Add `BOND_DEV_SKIP_SETUP = 1` and
 `BOND_DEV_HAND_SERVERS = 1` to `local.mk` (step 2) and rebuild: the app goes
@@ -196,16 +198,16 @@ Run the wizard instead if you want the bundled shape — it downloads its own
 copies and switches the app onto one router. `docs/install.md` walks the
 screens; `docs/settings.md` (**First run**) is the reference.
 
-**What the third screen asks.** On a build with `BOND_BOX_URL` compiled in,
-**Where the models run** opens with **GPU server · recommended** already chosen
-and the address already filled in. Paste the access key you were given, press
-**Check server**, and two lines answer, **Writing model** and **Inbox model**.
-Press **Continue**. Nothing about the key is written anywhere but the macOS
-keychain, and the embedding model still runs on this Mac, so the download step
-that follows is the embedding model alone. **This Mac** is the second choice
-and the offline one: everything runs here and nothing leaves the machine. Either
-way, processing starts on by itself once the wizard finishes, so the inbox
-begins working without anybody finding a switch.
+**What the third screen asks.** **Where the models run** is two cards,
+**Managed · recommended** and **User defined**. On a build with `BOND_BOX_URL`
+compiled in, User defined opens already chosen with both addresses filled in.
+Paste the access key you were given and press **Continue**. The app asks each
+server which model it serves and takes the names they list, the key is kept in
+the macOS keychain and nowhere else, and the download step that follows is the
+embedding model alone, because that model always runs on this Mac. **Managed**
+is the offline choice: Bond downloads the models and runs them here, and
+nothing leaves the machine. Either way, processing starts on by itself once the
+wizard finishes, so the inbox begins working without anybody finding a switch.
 
 With the wizard skipped, the app opens on a sign-in screen:
 

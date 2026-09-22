@@ -895,14 +895,24 @@ void main() {
     // A fictional string, and the only "key" anywhere in this file.
     const key = 'sk-fixture-not-a-real-box-key';
 
+    /// The pair the wizard used to derive from one origin, spelled out: this
+    /// group is about what the placement does once written, not about the
+    /// form.
+    Future<void> useBoxAt(AppPrefsNotifier prefs, String base, {String? key}) =>
+        prefs.useBox(
+          bigUrl: '$base/prose/v1/chat/completions',
+          smallUrl: '$base/bulk/v1/chat/completions',
+          bigModel: boxProseModel,
+          smallModel: boxBulkModel,
+          bigKey: key,
+          smallKey: key,
+          hardwareTier: MachineTier.full,
+        );
+
     test('one address gives the two derived targets', () async {
       final prefs = await notifier();
 
-      await prefs.useBoxOrigin(
-        baseUrl: url,
-        key: key,
-        hardwareTier: MachineTier.full,
-      );
+      await useBoxAt(prefs, url, key: key);
 
       final prose = prefs.state.specById(boxProseId)!;
       final bulk = prefs.state.specById(boxBulkId)!;
@@ -930,36 +940,18 @@ void main() {
       expect(prefs.state.stageTargets, isEmpty);
     });
 
-    test('a trailing slash on the address does not double up', () async {
-      final prefs = await notifier();
-      await prefs.useBoxOrigin(
-        baseUrl: '  https://box.example.com///  ',
-        key: key,
-        hardwareTier: MachineTier.full,
-      );
-
-      expect(prefs.state.specById(boxProseId)!.url,
-          'https://box.example.com/prose/v1/chat/completions');
-    });
-
     test('an address that is not an http origin is refused', () async {
-      // The last line rather than the validation: the Settings pane and the
-      // wizard both disable their way forward on an empty field. What this
+      // The last line rather than the validation: the form refuses the same
+      // address under its own field before the press gets here. What this
       // stops is two derived targets nothing can dial and a placement that
       // parks the whole pipeline.
       final prefs = await notifier();
 
-      for (final bad in ['', '   ', 'box.example.com', 'ftp://box', '///']) {
+      for (final bad in ['box.example.com', 'ftp://box']) {
         await expectLater(
-          prefs.useBoxOrigin(
-            baseUrl: bad,
-            key: key,
-            hardwareTier: MachineTier.full,
-          ),
-          throwsA(isA<ArgumentError>()
-              .having((e) => e.name, 'name', 'baseUrl')
-              .having((e) => e.message, 'message',
-                  contains('http or https origin'))),
+          useBoxAt(prefs, bad, key: key),
+          throwsA(isA<ArgumentError>().having(
+              (e) => e.message, 'message', contains('http or https URL'))),
           reason: bad,
         );
       }
@@ -976,11 +968,7 @@ void main() {
         () async {
       final prefs = await notifier();
 
-      await prefs.useBoxOrigin(
-        baseUrl: 'http://localhost:18100',
-        key: key,
-        hardwareTier: MachineTier.full,
-      );
+      await useBoxAt(prefs, 'http://localhost:18100', key: key);
 
       expect(prefs.state.specById(boxProseId)!.url,
           'http://localhost:18100/prose/v1/chat/completions');
@@ -990,11 +978,7 @@ void main() {
       final tokens = MemoryTokenStore();
       final prefs = await notifier(tokens);
 
-      await prefs.useBoxOrigin(
-        baseUrl: url,
-        key: key,
-        hardwareTier: MachineTier.full,
-      );
+      await useBoxAt(prefs, url, key: key);
 
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'], key);
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxBulkId'], key);
@@ -1020,11 +1004,7 @@ void main() {
     test('the confirm lands on the 27B and the other seven on the 4B',
         () async {
       final prefs = await notifier();
-      await prefs.useBoxOrigin(
-        baseUrl: url,
-        key: key,
-        hardwareTier: MachineTier.full,
-      );
+      await useBoxAt(prefs, url, key: key);
 
       String? at(String stageId) => prefs.state.targetIdForStage(stageId);
 
@@ -1075,11 +1055,7 @@ void main() {
       // A preset onto the box still behaves, because a preset writes an
       // OVERRIDE and the rule is what it is measured against.
       final prefs = await notifier();
-      await prefs.useBoxOrigin(
-        baseUrl: url,
-        key: key,
-        hardwareTier: MachineTier.full,
-      );
+      await useBoxAt(prefs, url, key: key);
       await prefs.applyPreset(targetId: boxBulkId, bulk: true);
       expect(prefs.state.targetIdForStage('storyline_membership'), boxBulkId,
           reason: 'a preset onto the small model is an override and is kept');
@@ -1095,11 +1071,7 @@ void main() {
         () async {
       final prefs = await notifier();
       await prefs.upsertTarget(box);
-      await prefs.useBoxOrigin(
-        baseUrl: url,
-        key: key,
-        hardwareTier: MachineTier.full,
-      );
+      await useBoxAt(prefs, url, key: key);
       // Two entries the app itself could have written and two the owner
       // chose, one of which the tier's own pass rewrites on the way back.
       await prefs.setStageTarget('storyline_membership', boxBulkId);
@@ -1130,11 +1102,7 @@ void main() {
     test('this Mac on a small machine restores the inbox tier, not an empty '
         'map', () async {
       final prefs = await notifier();
-      await prefs.useBoxOrigin(
-        baseUrl: url,
-        key: key,
-        hardwareTier: MachineTier.full,
-      );
+      await useBoxAt(prefs, url, key: key);
 
       await prefs.usePlacement(
         ModelPlacement.local,
@@ -1152,11 +1120,7 @@ void main() {
       // must not ask for the key again.
       final tokens = MemoryTokenStore();
       final prefs = await notifier(tokens);
-      await prefs.useBoxOrigin(
-        baseUrl: url,
-        key: key,
-        hardwareTier: MachineTier.full,
-      );
+      await useBoxAt(prefs, url, key: key);
 
       await prefs.usePlacement(
         ModelPlacement.local,
@@ -1175,11 +1139,7 @@ void main() {
     test('applyTierDefaults(remote) is a no-op, so it cannot undo the box',
         () async {
       final prefs = await notifier();
-      await prefs.useBoxOrigin(
-        baseUrl: url,
-        key: key,
-        hardwareTier: MachineTier.full,
-      );
+      await useBoxAt(prefs, url, key: key);
       await prefs.setStageTarget('triage', builtInFastId);
       final before = Map.of(prefs.state.stageTargets);
 
@@ -1192,11 +1152,7 @@ void main() {
     test('the placement and the address survive a wipe, like the other '
         'machine prefs', () async {
       final prefs = await notifier();
-      await prefs.useBoxOrigin(
-        baseUrl: url,
-        key: key,
-        hardwareTier: MachineTier.full,
-      );
+      await useBoxAt(prefs, url, key: key);
 
       await store.wipeAll();
 
@@ -1218,11 +1174,7 @@ void main() {
     test('a derived target is not a row: it cannot be added, edited or '
         'removed', () async {
       final prefs = await notifier();
-      await prefs.useBoxOrigin(
-        baseUrl: url,
-        key: key,
-        hardwareTier: MachineTier.full,
-      );
+      await useBoxAt(prefs, url, key: key);
 
       final prose = prefs.state.specById(boxProseId)!;
       expect(prose.isBox, isTrue);

@@ -8,7 +8,6 @@ import 'package:bond_inbox/data/setup_store.dart';
 import 'package:bond_inbox/models/setup_step.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart' show AppPrefs;
 import 'package:bond_inbox/providers/setup_provider.dart';
-import 'package:bond_inbox/services/llm/model_probe.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/models/download_state.dart';
 import 'package:bond_inbox/services/models/model_downloader.dart';
@@ -78,24 +77,26 @@ void main() {
   late List<MachineTier> tiersApplied;
 
   /// What `useBox` was called with, KEYS INCLUDED — this is a fake, the
-  /// "key" is the fictional string the test typed, and nothing real is here.
-  late List<({String baseUrl, String? key, MachineTier hardwareTier})> boxUses;
+  /// "keys" are the fictional strings the test typed, and nothing real is
+  /// here.
+  late List<
+      ({
+        String bigUrl,
+        String smallUrl,
+        String bigModel,
+        String smallModel,
+        String? bigKey,
+        String? smallKey,
+        MachineTier hardwareTier,
+      })> boxUses;
 
   /// What `usePlacement` was called with.
   late List<({ModelPlacement placement, MachineTier hardwareTier})>
       placementUses;
 
-  /// What **Check server** asked, with the bearer it was handed.
-  late List<({String url, String? bearer})> probes;
-  ModelProbeResult probeAnswer = const ModelProbeResult(reachable: true);
-
-  /// Set, holds every probe until completed: for the case where the address
-  /// is edited while a check is out.
-  Completer<ModelProbeResult>? probeHold;
-
-  /// What `storedBearer` answers, by target id. A fake's record, never a
-  /// real key.
-  Map<String, String> storedKeys = {};
+  /// Set, and the `useBox` fake refuses with an `ArgumentError` instead of
+  /// recording: the write the form would draw a sentence for.
+  late bool boxRefuses;
 
   String folder() => p.join(root.path, 'models');
 
@@ -154,26 +155,28 @@ void main() {
       supervisor: supervisor,
       paths: AppPaths(root),
       readPrefs: () => prefs,
-      setManagedServer: (on) async {
-        managed = on;
-        prefs = prefs.copyWith(managedServer: on);
-      },
       setModelsFolder: (path) async {
         foldersSet.add(path);
         prefs = prefs.copyWith(modelsFolder: path);
       },
       applyTierDefaults: (tier) async => tiersApplied.add(tier),
-      probe: (url, {bearer}) async {
-        probes.add((url: url, bearer: bearer));
-        final hold = probeHold;
-        if (hold != null) return hold.future;
-        return probeAnswer;
-      },
-      storedBearer: (id) => storedKeys[id],
-      useBox: ({required baseUrl, required key, required hardwareTier}) async {
+      useBox: ({
+        required bigUrl,
+        required smallUrl,
+        required bigModel,
+        required smallModel,
+        bigKey,
+        smallKey,
+        required hardwareTier,
+      }) async {
+        if (boxRefuses) throw ArgumentError('refused');
         boxUses.add((
-          baseUrl: baseUrl,
-          key: key,
+          bigUrl: bigUrl,
+          smallUrl: smallUrl,
+          bigModel: bigModel,
+          smallModel: smallModel,
+          bigKey: bigKey,
+          smallKey: smallKey,
           hardwareTier: hardwareTier,
         ));
         prefs = prefs.copyWith(modelPlacement: ModelPlacement.box);
@@ -242,10 +245,7 @@ void main() {
     tiersApplied = [];
     boxUses = [];
     placementUses = [];
-    probes = [];
-    probeAnswer = const ModelProbeResult(reachable: true);
-    probeHold = null;
-    storedKeys = {};
+    boxRefuses = false;
     manifest = publish();
     prefs = AppPrefs(modelsFolder: folder());
     supervisor = ModelServerSupervisor(
@@ -780,10 +780,9 @@ void main() {
 
     expect(await controller.finish(), isTrue);
 
-    // The tier this Mac is on, written once, and written before the managed
-    // preference that lets a worker resolve a target at all.
+    // The tier this Mac is on, written once, before the stored word that lets
+    // the gate past.
     expect(tiersApplied, [MachineTier.inbox]);
-    expect(managed, isTrue);
   });
 
   test('Finish on a full Mac applies the full tier', () async {
@@ -838,53 +837,42 @@ void main() {
       expect(controller.lowMemory, isTrue);
     });
 
-    test('Continue on the box uses it, and refuses with a field empty',
-        () async {
+    test('Continue on User defined hands the pair and the keys to useBox '
+        'with this Mac\'s tier and moves on', () async {
       final controller = build();
       await controller.init();
       controller.chooseBox();
-      controller.setBoxUrl('https://box.example.com/');
 
-      // No key: nothing is written and the step does not move.
-      await controller.continueFromWhere('  ');
+      // The form is what refuses, probes and discovers; a press that reaches
+      // here with nothing to write is a bug rather than a state.
+      await controller.continueFromWhere();
       expect(boxUses, isEmpty);
       expect(controller.state.step, SetupStep.welcome);
 
-      // No address either.
-      controller.setBoxUrl('   ');
-      await controller.continueFromWhere('sk-fixture-not-a-real-box-key');
-      expect(boxUses, isEmpty);
+      await controller.continueFromWhere(
+        servers: (
+          bigUrl: 'https://box.example.com/prose/v1/chat/completions',
+          smallUrl: 'https://box.example.com/bulk/v1/chat/completions',
+          bigModel: 'qwen3.8',
+          smallModel: 'qwen3-4b',
+          bigKey: 'sk-fixture-not-a-real-box-key',
+          smallKey: 'sk-fixture-not-a-real-box-key',
+        ),
+      );
 
-      controller.setBoxUrl('https://box.example.com/');
-      await controller.continueFromWhere('sk-fixture-not-a-real-box-key');
-
-      // Trimmed of its trailing slash by the controller, before `useBox`
-      // builds the two paths from it, and handed this Mac's own tier.
       expect(boxUses, [
         (
-          baseUrl: 'https://box.example.com',
-          key: 'sk-fixture-not-a-real-box-key',
+          bigUrl: 'https://box.example.com/prose/v1/chat/completions',
+          smallUrl: 'https://box.example.com/bulk/v1/chat/completions',
+          bigModel: 'qwen3.8',
+          smallModel: 'qwen3-4b',
+          bigKey: 'sk-fixture-not-a-real-box-key',
+          smallKey: 'sk-fixture-not-a-real-box-key',
           hardwareTier: MachineTier.full,
         )
       ]);
       expect(controller.state.step, SetupStep.models);
       expect(await store.get(SetupStore.setupKey), 'models');
-    });
-
-    test('an address that is not an origin writes nothing at all', () async {
-      // The form refuses it under the field before the press arrives; this is
-      // the second half of that rule, for the press that gets here anyway.
-      final controller = build();
-      await controller.init();
-      controller.chooseBox();
-      controller.setBoxUrl('box.example.com');
-
-      await controller.continueFromWhere('sk-fixture-not-a-real-box-key');
-      await controller.checkBox('sk-fixture-not-a-real-box-key');
-
-      expect(boxUses, isEmpty);
-      expect(probes, isEmpty);
-      expect(controller.state.step, SetupStep.welcome);
     });
 
     test('Continue on this Mac uses the LOCAL placement and moves on',
@@ -893,7 +881,7 @@ void main() {
       await controller.init();
 
       controller.chooseLocal();
-      await controller.continueFromWhere('');
+      await controller.continueFromWhere();
 
       expect(boxUses, isEmpty);
       // Not nothing: the write is what moves a box install back here, and on
@@ -919,7 +907,7 @@ void main() {
       expect(controller.tier, MachineTier.remote);
 
       controller.chooseLocal();
-      await controller.continueFromWhere('');
+      await controller.continueFromWhere();
 
       expect(placementUses,
           [(placement: ModelPlacement.local, hardwareTier: MachineTier.full)]);
@@ -943,131 +931,62 @@ void main() {
       await controller.init();
 
       controller.chooseLocal();
-      await controller.continueFromWhere('');
+      await controller.continueFromWhere();
 
       expect(placementUses,
           [(placement: ModelPlacement.local, hardwareTier: MachineTier.inbox)]);
     });
 
-    test('Check server asks BOTH slots with the typed key, writing first',
+    test('null keys pass through as null, which useBox reads as keep',
         () async {
-      probeAnswer = const ModelProbeResult(
-        reachable: true,
-        modelIds: ['qwen3.8'],
+      final controller = build();
+      await controller.init();
+      controller.chooseBox();
+
+      await controller.continueFromWhere(
+        servers: (
+          bigUrl: 'https://box.example.com/prose/v1/chat/completions',
+          smallUrl: 'https://box.example.com/bulk/v1/chat/completions',
+          bigModel: 'qwen3.8',
+          smallModel: 'qwen3-4b',
+          bigKey: null,
+          smallKey: null,
+        ),
       );
-      final controller = build();
-      await controller.init();
-      controller.chooseBox();
-      controller.setBoxUrl('https://box.example.com');
 
-      await controller.checkBox('sk-fixture-not-a-real-box-key');
-
-      expect(probes, [
-        (
-          url: 'https://box.example.com/prose/v1/chat/completions',
-          bearer: 'sk-fixture-not-a-real-box-key',
-        ),
-        (
-          url: 'https://box.example.com/bulk/v1/chat/completions',
-          bearer: 'sk-fixture-not-a-real-box-key',
-        ),
-      ]);
-      expect(controller.state.boxProbe?.reachable, isTrue);
-      expect(controller.state.boxBulkProbe?.reachable, isTrue);
-      expect(controller.state.boxProbing, isFalse);
-      // The key is a secret and never enters the state.
-      expect(controller.state.toString(),
-          isNot(contains('sk-fixture-not-a-real-box-key')));
-    });
-
-    test('a check that outlives an address edit writes nothing', () async {
-      final controller = build();
-      await controller.init();
-      controller.chooseBox();
-      controller.setBoxUrl('https://box.example.com');
-      probeHold = Completer<ModelProbeResult>();
-      final check = controller.checkBox('k');
-      expect(controller.state.boxProbing, isTrue);
-
-      controller.setBoxUrl('https://box2.example.com');
-      // The busy flag comes off with the edit, not with the stale answer.
-      expect(controller.state.boxProbing, isFalse);
-
-      probeHold!.complete(const ModelProbeResult(reachable: true));
-      await check;
-      // Both answers were about the old address, and neither lands.
-      expect(controller.state.boxProbe, isNull);
-      expect(controller.state.boxBulkProbe, isNull);
-      expect(controller.state.boxProbing, isFalse);
-    });
-
-    test('a blank key field sends the stored key, by id, and a typed key is '
-        'trimmed', () async {
-      final controller = build();
-      await controller.init();
-      controller.chooseBox();
-      controller.setBoxUrl('https://box.example.com');
-
-      // Nothing stored: the check goes without a key rather than inventing one.
-      await controller.checkBox('');
-      expect(probes.map((p) => p.bearer), [null, null]);
-      probes.clear();
-
-      prefs = prefs.copyWith(boxKeyStored: true);
-      storedKeys = {
-        boxProseId: 'sk-fixture-stored',
-        boxBulkId: 'sk-fixture-stored',
-      };
-      await controller.checkBox('   ');
-      expect(probes.map((p) => p.bearer),
-          ['sk-fixture-stored', 'sk-fixture-stored']);
-      probes.clear();
-
-      // A key just typed beats the stored one, whitespace and all.
-      await controller.checkBox('  sk-fixture-typed  ');
-      expect(probes.map((p) => p.bearer),
-          ['sk-fixture-typed', 'sk-fixture-typed']);
-    });
-
-    test('Continue with a stored key and a blank field keeps the key',
-        () async {
-      final controller = build();
-      await controller.init();
-      controller.chooseBox();
-      controller.setBoxUrl('https://box.example.com');
-
-      // No key anywhere: a blank field is refused, and nothing is written.
-      final before = controller.state.step;
-      await controller.continueFromWhere('   ');
-      expect(boxUses, isEmpty);
-      expect(controller.state.step, before);
-
-      prefs = prefs.copyWith(boxKeyStored: true);
-      await controller.continueFromWhere('');
       expect(boxUses, hasLength(1));
-      // Null, not the empty string: `useBox` reads null as "keep it".
-      expect(boxUses.single.key, isNull);
-      expect(boxUses.single.baseUrl, 'https://box.example.com');
+      // Null, not the empty string: a re-entry with the field blank keeps the
+      // key already in the keychain.
+      expect(boxUses.single.bigKey, isNull);
+      expect(boxUses.single.smallKey, isNull);
       expect(controller.state.step, SetupStep.models);
     });
 
-    test('editing the address drops BOTH results taken against the old one',
-        () async {
+    test('a useBox that throws leaves the step where it is', () async {
+      // Nothing is caught here: the throw goes back to the form, which is the
+      // thing that can draw the sentence under its own fields.
+      boxRefuses = true;
       final controller = build();
       await controller.init();
       controller.chooseBox();
-      controller.setBoxUrl('https://box.example.com');
-      await controller.checkBox('k');
-      expect(controller.state.boxProbe, isNotNull);
-      expect(controller.state.boxBulkProbe, isNotNull);
 
-      controller.setBoxUrl('https://box2.example.com');
+      await expectLater(
+        controller.continueFromWhere(
+          servers: (
+            bigUrl: 'https://box.example.com/prose/v1/chat/completions',
+            smallUrl: 'https://box.example.com/bulk/v1/chat/completions',
+            bigModel: 'qwen3.8',
+            smallModel: 'qwen3-4b',
+            bigKey: null,
+            smallKey: null,
+          ),
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
 
-      // A "Reachable" line under an address that has since been edited is a
-      // report about a different server, and half a report is worse than
-      // none.
-      expect(controller.state.boxProbe, isNull);
-      expect(controller.state.boxBulkProbe, isNull);
+      expect(boxUses, isEmpty);
+      expect(controller.state.step, SetupStep.welcome);
+      expect(await store.get(SetupStore.setupKey), isNull);
     });
 
     test('Finish on the box placement writes no tier defaults', () async {
@@ -1083,8 +1002,6 @@ void main() {
       // The placement RULE owns the stage map here. A tier write would put
       // stored entries over it, every one of them a local built-in.
       expect(tiersApplied, isEmpty);
-      // The managed server still goes on: it serves the embedding model.
-      expect(managed, isTrue);
     });
   });
 
@@ -1201,19 +1118,20 @@ void main() {
     expect(runner.starts.length, 1);
   });
 
-  test('Finish turns the managed server on, records done, and starts it',
-      () async {
+  test('Finish records done and starts the server', () async {
     // The weights have to be there: the supervisor refuses to launch while
     // any file the preset names is missing, which is the same rule that makes
     // the download step wait for all three.
     await seedComplete();
     await store.set(SetupStore.setupKey, SetupStep.done.name);
+    // On in a normal build: the define decides, and the supervisor's closure
+    // is how this suite says so.
+    managed = true;
     final controller = build();
     await controller.init();
 
     await controller.finish();
 
-    expect(managed, isTrue);
     expect(await store.get(SetupStore.setupKey), 'done');
     expect(controller.state.finishing, isFalse);
     // Fire-and-forget on `ServerBootstrap`'s reasoning, so the spawn lands

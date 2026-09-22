@@ -27,7 +27,7 @@ import 'setup_where_body.dart';
 /// The first run, laid out.
 ///
 /// This is the only file in the flow that touches a provider. Every step body
-/// is prop-only — the `SettingsLocalServerBody` discipline — so the host reads
+/// is prop-only — the settings bodies' discipline — so the host reads
 /// the controller once, decides what each step needs, and hands down values
 /// and closures. A null callback hides its control; nothing below this line
 /// knows what a `ref` is.
@@ -81,10 +81,9 @@ class _SetupFlowState extends ConsumerState<SetupFlow> {
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
-  /// Leaves ONLY on a finish that saved. A false answer means the managed
-  /// preference or the stored `done` did not land, and the step stays up with
-  /// the alert on it rather than handing over an inbox whose setup is not on
-  /// disk.
+  /// Leaves ONLY on a finish that saved. A false answer means the stored
+  /// `done` did not land, and the step stays up with the alert on it rather
+  /// than handing over an inbox whose setup is not on disk.
   Future<void> _finish() async {
     final saved = await _controller.finish();
     if (!mounted || !saved) return;
@@ -171,29 +170,47 @@ class _SetupFlowState extends ConsumerState<SetupFlow> {
           onContinue: next,
         );
       case SetupStep.where:
-        // The third step whose Continue is not the shared `next`: the press
-        // carries the typed access key, which lives in the body's own
-        // controller and in no state anywhere.
+        // The third step whose way forward is not the shared `next`. Under
+        // User defined it is the form's own Continue, which probes, discovers
+        // and writes before the controller moves the step; under Managed it
+        // is the step's button. The key lives in the form's controllers and
+        // in no state.
+        final prefs = ref.watch(appPrefsProvider);
         return SetupWhereBody(
           placement: state.placement,
-          boxUrl: state.boxUrl,
-          probeResult: state.boxProbe,
-          bulkProbeResult: state.boxBulkProbe,
-          twoSlots: true,
-          // A re-entry on a box install opens the key field empty with the
-          // stored hint and lets Continue through blank; the controller reads
-          // the same flag and hands `useBox` a null key, which keeps it.
-          keyStored: ref.watch(
-            appPrefsProvider.select((prefs) => prefs.boxKeyStored),
-          ),
-          probing: state.boxProbing,
+          bigUrl: prefs.effectiveBoxBigUrl,
+          smallUrl: prefs.effectiveBoxSmallUrl,
+          bigModel: prefs.effectiveBoxBigModel,
+          smallModel: prefs.effectiveBoxSmallModel,
+          bigKeyStored: prefs.boxBigKeyStored,
+          smallKeyStored: prefs.boxSmallKeyStored,
+          probe: _controller.probe,
+          storedBearer: _controller.storedBearer,
           onChoose: (choice) => choice == ModelPlacement.box
               ? _controller.chooseBox()
               : _controller.chooseLocal(),
-          onUrlChanged: _controller.setBoxUrl,
-          onCheck: (key) => unawaited(_controller.checkBox(key)),
-          onContinue: (key) =>
-              unawaited(_controller.continueFromWhere(key)),
+          onContinueManaged: () =>
+              unawaited(_controller.continueFromWhere()),
+          // RETURNED, not unawaited: the form catches a refused write and
+          // draws it under its fields.
+          onConnect: ({
+            required bigUrl,
+            required smallUrl,
+            required bigModel,
+            required smallModel,
+            bigKey,
+            smallKey,
+          }) =>
+              _controller.continueFromWhere(
+            servers: (
+              bigUrl: bigUrl,
+              smallUrl: smallUrl,
+              bigModel: bigModel,
+              smallModel: smallModel,
+              bigKey: bigKey,
+              smallKey: smallKey,
+            ),
+          ),
         );
       case SetupStep.models:
         return SetupModelsBody(

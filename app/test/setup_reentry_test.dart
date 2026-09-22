@@ -300,7 +300,7 @@ void main() {
     // pressed before it offers a way forward.
     await tapContinue(tester);
     await tapContinue(tester);
-    await tester.tap(find.byKey(SetupWhereBody.localCardKey));
+    await tester.tap(find.byKey(SetupWhereBody.managedCardKey));
     await settle(tester);
 
     // Models, Storage, Download, Sign in, Notifications, All set — seven more

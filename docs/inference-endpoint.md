@@ -225,8 +225,8 @@ https://box.example.com/prose/v1/chat/completions   model qwen3.8
 https://box.example.com/bulk/v1/chat/completions    model qwen3-4b
 ```
 
-`BOND_BOX_URL=https://box.example.com` in `.env` prefills the app's box
-address. The key is typed into the app and kept in the keychain. From a
+`BOND_BOX_URL=https://box.example.com` in `.env` fills in both addresses under
+**User defined**. The key is typed into the app and kept in the keychain. From a
 terminal:
 
 ```sh

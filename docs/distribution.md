@@ -151,11 +151,11 @@ produces lives under `~/Library/Application Support/com.bondinbox.app/`:
   file the next launch reaps (`router.json`), and `empty-cache/`, an empty
   directory the child is deliberately pointed at as `LLAMA_CACHE`.
 - `logs/llama-server.log` — the sidecar's own output, and the one folder a user
-  is ever asked to open and send. **Show log** on the Local server card opens
-  it.
-- `models/` — the GGUF files, tens of gigabytes of them, unless the user pointed
-  the card at a folder of their own. The only folder here worth deleting by
-  hand.
+  is ever asked to open and send. **Show log** under Settings, Models, offered
+  only after the server has failed, opens it.
+- `models/` — the GGUF files, tens of gigabytes of them, unless the user chose
+  another folder on the setup's Storage step. The only folder here worth
+  deleting by hand.
 
 That root is also a change of address. The app used to be sandboxed, which put
 its data inside `~/Library/Containers/com.bondinbox.app/`; it is not sandboxed

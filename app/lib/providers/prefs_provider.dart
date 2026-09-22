@@ -1959,39 +1959,6 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await usePlacement(ModelPlacement.box, hardwareTier: hardwareTier);
   }
 
-  /// [useBox] from ONE origin, the way the wizard still asks for it.
-  ///
-  /// The shape part one shipped: an origin that serves both roles under
-  /// `/prose` and `/bulk`, the two constants that box serves, and one key for
-  /// both. It stays until the wizard's Where step is rebuilt on the shared
-  /// form, so that each phase of this round leaves a tree that compiles.
-  ///
-  /// Throws [ArgumentError] on anything that is not an http or https origin,
-  /// exactly as the setter it replaced did.
-  Future<void> useBoxOrigin({
-    required String baseUrl,
-    String? key,
-    required MachineTier hardwareTier,
-  }) async {
-    final base = normalizeBoxBaseUrl(baseUrl);
-    if (!isBoxOrigin(base)) {
-      throw ArgumentError.value(
-        baseUrl,
-        'baseUrl',
-        'must be an http or https origin',
-      );
-    }
-    await useBox(
-      bigUrl: '$base/prose/v1/chat/completions',
-      smallUrl: '$base/bulk/v1/chat/completions',
-      bigModel: boxProseModel,
-      smallModel: boxBulkModel,
-      bigKey: key,
-      smallKey: key,
-      hardwareTier: hardwareTier,
-    );
-  }
-
   /// Records that the owner has read what a third-party draft target
   /// receives. Until it is true, [AppPrefs.specForStage] sends both drafting
   /// stages to [AppPrefs.draftFallbackSpec] instead.

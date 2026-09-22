@@ -439,28 +439,6 @@ void main() {
           isFalse);
     });
 
-    test('useBoxOrigin derives the same pair from one address', () async {
-      final tokens = MemoryTokenStore();
-      final prefs = await notifier(tokens: tokens);
-
-      await prefs.useBoxOrigin(
-        baseUrl: '  $url//  ',
-        key: key,
-        hardwareTier: MachineTier.full,
-      );
-
-      expect(prefs.state.boxBigUrl, bigUrl);
-      expect(prefs.state.boxSmallUrl, smallUrl);
-      // The two constants the compiled box serves, so neither is stored.
-      expect(prefs.state.boxBigModel, isEmpty);
-      expect(prefs.state.boxSmallModel, isEmpty);
-      expect(prefs.state.boxProseSpec.model, boxProseModel);
-      // One key to both ids, because one server serves both roles.
-      expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'], key);
-      expect(tokens.values['$llmTargetBearerKeyPrefix$boxBulkId'], key);
-      expect(prefs.state.modelPlacement, ModelPlacement.box);
-    });
-
     test('the draft fallback is never a third party', () async {
       final prefs = await notifier();
       await prefs.setCloudDraftsConsent(true);

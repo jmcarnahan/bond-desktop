@@ -248,9 +248,9 @@ enforce the ones that are commands.
   between placements: it drops the entries the app itself writes and keeps user
   `t-…` picks. `useBox({bigUrl, smallUrl, bigModel, smallModel, bigKey,
   smallKey, hardwareTier})` is `setBoxServers` plus `setBoxKey` (a token PER
-  ID, since two addresses can be two operators) plus `usePlacement(box)`;
-  `useBoxOrigin({baseUrl, key, hardwareTier})` is the one-origin door the
-  wizard still calls. `setBoxServers` refuses a big URL whose host
+  ID, since two addresses can be two operators) plus `usePlacement(box)`, and
+  it is the one door the Models page and the wizard both write through.
+  `setBoxServers` refuses a big URL whose host
   `isThirdPartyHost` while consent is false, and `draftFallbackSpec` is never
   third party for the same reason. THREE one-shot migrations run in
   `AppPrefsNotifier.read`, in this order: `box_targets_derived` (Round G's
@@ -301,6 +301,20 @@ enforce the ones that are commands.
   `defaultTargetIdForStage` and describes the modal target, and
   `RoleLine.withStatus` joins this Mac's own files onto the rows by ROUTER
   id.
+- The wizard's Where step (`screens/setup/setup_where_body.dart`,
+  `SetupWhereBody`) is two cards, `setup-where-managed` and
+  `setup-where-custom`, and nothing else: User defined renders the same
+  `ModelServersForm` with `connectLabel: 'Continue'` and `onThirdParty: null`,
+  so a vendor address is refused there with `thirdPartyRefusalText` and cloud
+  services stay a Settings decision. The form's press IS the step's way
+  forward, and there is no second Continue under it: `SetupFlow` returns
+  `continueFromWhere(servers:)` from `onConnect`, which writes through the
+  four-value `useBox` and moves to Models, and a throw comes back to the form,
+  which is the thing that can draw it. Under Managed the step's own Continue
+  calls `continueFromWhere()` with no payload, which is `usePlacement(local,
+  hardwareTier:)` with the HARDWARE tier. `SetupState` carries the placement
+  and nothing of the pair; the addresses, the discovered names and the keys
+  live in the form until its press.
 - Under `flutter test` `hardwareInfoProvider` answers `HardwareInfo.unknown` at
   its two-second timeout, so a real inbox in a widget test never offers **Reset
   per-step picks** (the unreadable-memory branch hides it by design) and the

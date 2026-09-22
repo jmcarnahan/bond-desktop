@@ -2023,15 +2023,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// Turns model work on or off for this session, and makes the four drains
   /// follow.
   ///
-  /// The settings host's `_setManagedServer` shape, and this screen is the
-  /// one place that can do
-  /// it for the same reason: the notifier holds a flag and knows nothing about
-  /// the queues, and the queues read the flag but are never told when it
-  /// moves. ON pumps triage and then the lanes, in that order and unawaited —
-  /// a drain is minutes of model time and a switch must not hang on it. OFF
-  /// calls `stop()` on all four, which is "finish the item in flight, then end
-  /// the drain": without it a fast drain that had already started would keep
-  /// dialling the model for as long as its backlog lasted.
+  /// A settings-host mutator's shape, and this screen is the one place that
+  /// can do it for the same reason: the notifier holds a flag and knows
+  /// nothing about the queues, and the queues read the flag but are never
+  /// told when it moves. ON pumps triage and then the lanes, in that order and
+  /// unawaited — a drain is minutes of model time and a switch must not hang
+  /// on it. OFF calls `stop()` on all four, which is "finish the item in
+  /// flight, then end the drain": without it a fast drain that had already
+  /// started would keep dialling the model for as long as its backlog lasted.
   ///
   /// The activity row goes in either way, before the pumps, so the panel shows
   /// who asked for the work that follows it. The PREFERENCE is written beside

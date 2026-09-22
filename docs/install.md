@@ -59,18 +59,19 @@ first, because there is nothing behind it.
    whether the models will run here. Too little memory for the writing model
    is a warning, not a refusal. (An Intel Mac never gets this far — macOS will
    not open the app there in the first place.)
-3. **Where the models run** — two cards. **GPU server · recommended** is
-   already chosen when your build came with the project's server address, and
-   the address is filled in. Paste the access key you were given, press
-   **Check server**, and two lines answer, one for the writing model and one
-   for the inbox model. **Continue** keeps the key in the macOS keychain and
-   nowhere else. **This Mac** is the other card: everything runs here and
-   nothing leaves the machine, at the cost of the larger download on the next
-   screens. On the GPU server only the embedding model is downloaded, because
-   it always runs on this Mac.
+3. **Where the models run** — two cards. **Managed · recommended** is Bond's
+   own: it downloads the models and runs them on this Mac, and nothing leaves
+   the machine, at the cost of the larger download on the next screens.
+   **User defined** is your own servers, and it opens a short form: **Big
+   model address**, **Small model address** and **Access key**. **Continue**
+   checks both servers, takes the model names they list, and keeps the key in
+   the macOS keychain and nowhere else. If your build came with server
+   addresses, User defined is already chosen with both filled in, so pasting
+   the key is all there is to do. Under User defined only the embedding model
+   is downloaded, because it always runs on this Mac.
 4. **Models** — the models this Mac will download, what each one does, how
-   big it is, and the licence it comes under. Three on This Mac, one on the
-   GPU server. Nothing downloads yet.
+   big it is, and the licence it comes under. Three on Managed, one on User
+   defined. Nothing downloads yet.
 5. **Storage** — where the weights will go, and whether they fit. **Change
    folder…** puts them somewhere else — an external disk, for instance. If
    there is not enough room, Bond says how much more it needs and will not
@@ -91,8 +92,8 @@ first, because there is nothing behind it.
    needs your attention. Saying yes moves on. Saying no keeps you on this
    screen once, with an **Open System Settings** button for changing your mind;
    the next **Continue** moves on.
-9. **All set** — what was set up, said back. **Finish** turns Bond's own model
-   server on and opens the inbox.
+9. **All set** — what was set up, said back. **Finish** starts Bond's own
+   model server and opens the inbox.
 
 The models take a minute or two to load the first time. The inbox is readable
 while that happens; the reading and sorting fill in behind it. Processing is
@@ -121,29 +122,30 @@ instead and everything else is still here.
 
 Everything the setup asked is under **Settings → Models**, from the avatar
 menu at the top of the inbox. The page asks one question, where the models
-run, and answers it with the same form the setup used:
+run, and answers it with two tabs, **Managed** and **User defined**. The tabs
+act: choosing Managed moves the work here at once, and choosing User defined
+opens the form, which writes nothing until **Connect**.
 
-- **GPU server · recommended** — the address and the access key. The key
-  field is empty on purpose once a key is stored; typing replaces it. **Check
-  server** asks both models. **Save** moves the work there.
-- **This Mac** — **Use this Mac** moves the work back here. Under it sits the
-  Local server card, and everything below is about that server:
-- **Bond runs the model server** — off puts Bond back to expecting servers
-  started by hand, which is a developer's setup rather than yours.
-- **Port** — change it if something else on your Mac already uses 8080.
-  **Pick a free port** finds one for you. Saving restarts the server.
-- **Models folder** — move the weights to another disk. Bond restarts the
-  server pointed at the new place; it does not move the files for you.
-- **Set up again** — runs the whole flow from the top. It keeps what is
-  expensive and still true: the models stay on disk and you stay signed in, so
-  those two screens are a **Continue** each. It is not a commitment: the first
-  screen carries **Back to the inbox**, which puts you back exactly where you
-  were. If a download is running it keeps running either way.
-
-Three lines under the form say which model answers for each role, the big
-model, the small model and embeddings, each with its own **Check**. Anything
-finer, the per-step picks and extra servers, is behind **Advanced** at the
-bottom of the page.
+- **Managed** is a status block, because there is nothing to fill in. One line
+  says what Bond's own server is doing, a bar fills while the models load, and
+  three rows, **Big model**, **Small model** and **Embeddings**, name each
+  model with its size and whether it is on disk and loaded. Each row has a
+  **Check**. **Show log** appears only when the server has failed, and hands
+  the log to the Mac's own viewer.
+- **User defined** is the same form the setup used, with **Connect** as its
+  word. A stored key leaves the field empty on purpose and typing replaces it;
+  **Remove key** is the only thing that forgets one. **Connect** asks both
+  servers which model they serve and takes the names they list, so nothing is
+  typed twice. A server that offers several shows a picker, and a second
+  **Connect** takes what is showing. The same three rows sit under the form,
+  naming the model each server listed and the server's address, each with its
+  **Check**.
+- **Set up again** — runs the whole flow from the top, and is how the models
+  folder changes and a download is retried. It keeps what is expensive and
+  still true: the models stay on disk and you stay signed in, so those two
+  screens are a **Continue** each. It is not a commitment: the first screen
+  carries **Back to the inbox**, which puts you back exactly where you were.
+  If a download is running it keeps running either way.
 
 ## Uninstalling
 

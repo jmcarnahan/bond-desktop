@@ -78,8 +78,7 @@ class SetupState {
   /// Null until the notifications step actually asked.
   final bool? notificationsGranted;
 
-  /// Finish is in flight: the managed preference is being written and the
-  /// server started.
+  /// Finish is in flight: the setup is being recorded and the server started.
   final bool finishing;
 
   /// The last Finish did not save. The All set step says so and offers the
@@ -95,29 +94,12 @@ class SetupState {
   /// The answer to **Where the models run**, or null until one is given. A
   /// quit on that step resumes there with this still null, so nothing was
   /// adopted and the step asks again.
+  ///
+  /// It is the WHOLE of what that step keeps. The two addresses, the two
+  /// discovered model names and the access key belong to the form and are in
+  /// no state anywhere: this object is state, state is what gets stored, and
+  /// a stored key would be a secret in `setup_state`.
   final ModelPlacement? placement;
-
-  /// The box address as typed, prefilled from the compiled `boxUrlDefault`.
-  ///
-  /// The ACCESS KEY is deliberately not here and never will be. This object is
-  /// state, state is what gets stored, and a stored key would be a secret in
-  /// `setup_state`. The key lives in the step body's own controller and is
-  /// handed to `useBox` by value at Continue.
-  final String boxUrl;
-
-  /// The WRITING slot's **Check server** answer, or null when none has been
-  /// asked for. Carries no token: see `ModelServerProbe.probe`.
-  final ModelProbeResult? boxProbe;
-
-  /// The INBOX slot's answer to the same press.
-  ///
-  /// Two fields rather than one, because the box serves both roles from one
-  /// host and a check that reported only the writing slot would call a box
-  /// with a dead inbox server healthy. They move together: one press asks
-  /// both, and clearing clears both.
-  final ModelProbeResult? boxBulkProbe;
-
-  final bool boxProbing;
 
   const SetupState({
     this.loaded = false,
@@ -138,10 +120,6 @@ class SetupState {
     this.finishFailed = false,
     this.canReturnToInbox = false,
     this.placement,
-    this.boxUrl = boxUrlDefault,
-    this.boxProbe,
-    this.boxBulkProbe,
-    this.boxProbing = false,
   });
 
   SetupState copyWith({
@@ -169,13 +147,6 @@ class SetupState {
     bool? canReturnToInbox,
     ModelPlacement? placement,
     bool clearPlacement = false,
-    String? boxUrl,
-    ModelProbeResult? boxProbe,
-    ModelProbeResult? boxBulkProbe,
-    // Clears BOTH slots' answers: one press asked them, and half a report is
-    // worse than none.
-    bool clearBoxProbe = false,
-    bool? boxProbing,
   }) =>
       SetupState(
         loaded: loaded ?? this.loaded,
@@ -199,11 +170,6 @@ class SetupState {
         finishFailed: finishFailed ?? this.finishFailed,
         canReturnToInbox: canReturnToInbox ?? this.canReturnToInbox,
         placement: clearPlacement ? null : (placement ?? this.placement),
-        boxUrl: boxUrl ?? this.boxUrl,
-        boxProbe: clearBoxProbe ? null : (boxProbe ?? this.boxProbe),
-        boxBulkProbe:
-            clearBoxProbe ? null : (boxBulkProbe ?? this.boxBulkProbe),
-        boxProbing: boxProbing ?? this.boxProbing,
       );
 
   @override
@@ -227,11 +193,7 @@ class SetupState {
       other.finishing == finishing &&
       other.finishFailed == finishFailed &&
       other.canReturnToInbox == canReturnToInbox &&
-      other.placement == placement &&
-      other.boxUrl == boxUrl &&
-      other.boxProbe == boxProbe &&
-      other.boxBulkProbe == boxBulkProbe &&
-      other.boxProbing == boxProbing;
+      other.placement == placement;
 
   static bool _sameDownloads(
     Map<String, DownloadProgress> a,
@@ -266,9 +228,7 @@ class SetupState {
         finishing,
         finishFailed,
         canReturnToInbox,
-        // Nested: `Object.hash` takes twenty arguments and the five fields the
-        // placement added are the twenty-first onward.
-        Object.hash(placement, boxUrl, boxProbe, boxBulkProbe, boxProbing),
+        placement,
       );
 
   @override
@@ -276,6 +236,19 @@ class SetupState {
       'complete: $downloadsComplete, signedIn: $signedIn, '
       'placement: ${placement?.name})';
 }
+
+/// What the Where step's form hands back on Continue: the pair as typed and
+/// as discovered from each server, and the keys as typed, or null to keep the
+/// ones already in the keychain. Held for the length of one call and in no
+/// state: see [SetupState.placement].
+typedef ModelServersPayload = ({
+  String bigUrl,
+  String smallUrl,
+  String bigModel,
+  String smallModel,
+  String? bigKey,
+  String? smallKey,
+});
 
 /// Drives the first run: which step, what each step probed, what it wrote.
 ///
@@ -299,7 +272,6 @@ class SetupController extends StateNotifier<SetupState> {
     required this.supervisor,
     required this.paths,
     required this.readPrefs,
-    required this.setManagedServer,
     required this.setModelsFolder,
     required this.applyTierDefaults,
     this.probe,
@@ -321,7 +293,6 @@ class SetupController extends StateNotifier<SetupState> {
   final ModelServerSupervisor supervisor;
   final AppPaths paths;
   final AppPrefs Function() readPrefs;
-  final Future<void> Function(bool) setManagedServer;
   final Future<void> Function(String) setModelsFolder;
 
   /// Writes this machine's tier defaults — the stage picks and the draft
@@ -330,30 +301,36 @@ class SetupController extends StateNotifier<SetupState> {
   /// rather than reaching for the provider.
   final Future<void> Function(MachineTier) applyTierDefaults;
 
-  /// Asks a model server what it serves, for **Check server** on the box.
-  /// Null takes the button off the step, the discipline every optional
-  /// control in this app follows.
+  /// Asks a model server what it serves. Handed DOWN, through [SetupFlow], to
+  /// the Where step's form, which is what discovers a model name on Connect.
+  /// Null takes that form's button off, the discipline every optional control
+  /// in this app follows.
   final Future<ModelProbeResult> Function(String url, {String? bearer})? probe;
 
-  /// Writes the box address, the one key and the box placement. The two
-  /// targets and the stage map are a RULE since Round H and are written
-  /// nowhere. A CLOSURE for the reason the three writes above are: the prefs
-  /// notifier's state is protected.
+  /// Writes the two addresses, the two discovered model names, a key per
+  /// server and the box placement. The two targets and the stage map are a
+  /// RULE since Round H and are written nowhere. A CLOSURE for the reason the
+  /// writes above are: the prefs notifier's state is protected.
   ///
-  /// [key] is a SECRET and passes straight through to the keychain. It is
-  /// never stored on this controller and never enters [SetupState]. Null
+  /// The two keys are SECRETS and pass straight through to the keychain. They
+  /// are never stored on this controller and never enter [SetupState]. Null
   /// means "keep the stored one": a re-entry with a key already in the
   /// keychain moves on with the field blank rather than asking for a second
-  /// paste, the simple Models page's own contract.
+  /// paste, the form's own contract.
   final Future<void> Function({
-    required String baseUrl,
-    required String? key,
+    required String bigUrl,
+    required String smallUrl,
+    required String bigModel,
+    required String smallModel,
+    String? bigKey,
+    String? smallKey,
     required MachineTier hardwareTier,
   }) useBox;
 
-  /// Looks up one target's stored token for a check made with the key field
-  /// blank. A LOOKUP, never the value, on the widgets' own rule; null when the
-  /// host has no keychain to ask, and the check then goes without a key.
+  /// Looks up one target's stored token for a probe made with the key field
+  /// blank. Handed down to the same form. A LOOKUP by id, never the value;
+  /// null when the host has no keychain to ask, and the probe then goes
+  /// without a key.
   final String? Function(String targetId)? storedBearer;
 
   /// Moves the install to a placement and clears out the stage entries the app
@@ -413,27 +390,16 @@ class SetupController extends StateNotifier<SetupState> {
     // "Set up again" opens the where step knowing which install this is, so
     // choosing This Mac there writes the undo.
     //
-    // ONLY the box is seeded, and since Round H that is a FRESH install on
-    // any build with a compiled address: `defaultModelPlacement` is the box
-    // whenever `BOND_BOX_URL` was passed. Preselecting the box answers
-    // nothing, because the box card keeps the way forward closed until the
-    // key field is answered; a preselected This Mac would put a live Continue
-    // under a question nobody had been asked. A local re-entry loses nothing
-    // by asking again: choosing This Mac there writes the same defaults it
-    // already has.
+    // ONLY User defined is seeded, and since Round H that is a FRESH install
+    // on any build with a compiled address: `defaultModelPlacement` is the
+    // box whenever `BOND_BOX_URL` was passed. Preselecting it answers
+    // nothing, because the form keeps the way forward behind its own press; a
+    // preselected Managed would put a live Continue under a question nobody
+    // had been asked. A Managed re-entry loses nothing by asking again:
+    // choosing Managed there writes the same defaults it already has.
     if (prefs.modelPlacement == ModelPlacement.box) {
       if (!mounted) return;
       state = state.copyWith(placement: ModelPlacement.box);
-    }
-    // The ADDRESS is the install's whenever one has been saved, and the
-    // build's otherwise ([SetupState.boxUrl] opens on `boxUrlDefault`). A
-    // re-entry that re-offered the compiled default would put back an address
-    // the owner had changed in Settings, on a Continue they read as agreeing
-    // to what was on the screen.
-    final saved = boxBaseFromProseUrl(prefs.effectiveBoxBigUrl);
-    if (saved.isNotEmpty && saved != state.boxUrl) {
-      if (!mounted) return;
-      state = state.copyWith(boxUrl: saved);
     }
     SetupStep step = SetupStep.welcome;
     MigrationReport? migration;
@@ -476,141 +442,61 @@ class SetupController extends StateNotifier<SetupState> {
 
   // ── Where the models run ─────────────────────────────────────────────────
 
-  /// Picks the GPU server. Nothing is written until Continue: the choice
-  /// reveals the three controls and nothing more.
+  /// Picks User defined. Nothing is written until the form's Continue: the
+  /// choice reveals the form and nothing more.
   void chooseBox() {
     if (!mounted) return;
     state = state.copyWith(placement: ModelPlacement.box);
   }
 
+  /// Picks Managed. Nothing is written until the step's own Continue.
   void chooseLocal() {
     if (!mounted) return;
     state = state.copyWith(placement: ModelPlacement.local);
   }
 
-  /// Records the typed address and drops any probe result taken against the
-  /// previous one: a "Reachable" line under a URL that has since been edited
-  /// is a report about a different server.
-  void setBoxUrl(String value) {
-    if (!mounted) return;
-    // A check that is out is about the OLD address: its answers are dropped
-    // when they land ([_checkSeq]), and the busy flag comes off now rather
-    // than when a report nobody wants arrives.
-    _checkSeq++;
-    state = state.copyWith(
-      boxUrl: value,
-      clearBoxProbe: true,
-      boxProbing: false,
-    );
-  }
-
-  /// Which **Check server** press is the current one. A press bumps it, an
-  /// address edit bumps it, and a check that comes back to a different number
-  /// writes nothing: two servers asked in sequence is long enough for a
-  /// person to have retyped the address in between.
-  int _checkSeq = 0;
-
-  /// Asks BOTH of the box's slots what they serve, with the typed key.
+  /// The step's Continue, from either card.
   ///
-  /// Both, because the box runs the writing model and the inbox model as two
-  /// servers behind one address, and a check that asked only the writing slot
-  /// would report a box whose inbox server is down as healthy. The writing
-  /// slot is asked first, so the line the reader looks at first is the one
-  /// that answers first.
+  /// Under User defined the FORM is the press: it has refused per field,
+  /// asked both servers what they serve and discovered the two names before
+  /// this runs, and what arrives here is the pair it means to write. The
+  /// refusals are the form's now, and a press that reaches here with nothing
+  /// to write is a bug rather than a state, so it writes nothing.
   ///
-  /// The address is checked the way every other door checks it: a string that
-  /// is not an origin is refused by the form before the press arrives, and
-  /// this returns without asking anything of a server it could not name.
+  /// Managed WRITES too, and that is not symmetry for its own sake. A wizard
+  /// re-entered through "Set up again" on an install that is already on
+  /// User defined would otherwise leave `model_placement = box` standing
+  /// while `finish()` applied this machine's tier defaults on top — an
+  /// install claiming to run locally with every stage still resolving to a
+  /// server it no longer means to use. [AppPrefsNotifier.usePlacement] is
+  /// called unconditionally rather than only when the stored answer was the
+  /// box: the entry sweep finds nothing to drop on a first run, and the tier
+  /// write is the one `finish()` was going to make anyway.
   ///
-  /// [key] is a SECRET: it goes onto the two requests' `Authorization` headers
-  /// and is not stored here, in [SetupState] or in either result. Nothing is
-  /// adopted by a check.
-  Future<void> checkBox(String key) async {
-    final probe = this.probe;
-    if (probe == null) return;
-    final base = normalizeBoxBaseUrl(state.boxUrl);
-    if (base.isEmpty || !isBoxOrigin(base)) return;
-    if (!mounted) return;
-    final seq = ++_checkSeq;
-    state = state.copyWith(boxProbing: true, clearBoxProbe: true);
-    // A key just typed beats the stored one; a blank field with a key in the
-    // keychain sends that key, looked up by id at the press and held nowhere.
-    final token = key.trim();
-    final stored = readPrefs().boxKeyStored;
-    String? bearer(String targetId) => token.isNotEmpty
-        ? token
-        : (stored ? storedBearer?.call(targetId) : null);
-    final prose = await _probeSlot(probe, '$base/prose/v1/chat/completions',
-        bearer: bearer(boxProseId));
-    final bulk = await _probeSlot(probe, '$base/bulk/v1/chat/completions',
-        bearer: bearer(boxBulkId));
-    if (!mounted || seq != _checkSeq) return;
-    state = state.copyWith(
-      boxProbing: false,
-      boxProbe: prose,
-      boxBulkProbe: bulk,
-    );
-  }
-
-  /// One slot's answer, with the guard both of them need.
-  ///
-  /// `ModelServerProbe` promises never to throw, and a settings-shaped
-  /// diagnostic must not be able to strand the wizard anyway.
-  Future<ModelProbeResult> _probeSlot(
-    Future<ModelProbeResult> Function(String url, {String? bearer}) probe,
-    String url, {
-    String? bearer,
-  }) async {
-    try {
-      return await probe(url, bearer: bearer);
-    } on Object {
-      return const ModelProbeResult(
-        reachable: false,
-        error: 'Could not check the server',
-      );
-    }
-  }
-
-  /// The step's Continue.
-  ///
-  /// On the box choice it REFUSES to advance with an empty address, an
-  /// address that is not an origin, or an empty key: the placement would then
-  /// name a server nothing could dial, and every stage would park. The form
-  /// says so under the field before the press gets here, and this is the
-  /// second half of that rule rather than a second rule.
-  ///
-  /// This Mac WRITES too, and that is not symmetry for its own sake. A wizard
-  /// re-entered through "Set up again" on an install that is already on the
-  /// box would otherwise leave `model_placement = box` standing while
-  /// `finish()` applied this machine's tier defaults on top — an install
-  /// claiming to run locally with every stage still resolving to a server it
-  /// no longer means to use. [AppPrefsNotifier.usePlacement] is called
-  /// unconditionally rather than only when the stored answer was the box: the
-  /// entry sweep finds nothing to drop on a first run, and the tier write is
-  /// the one `finish()` was going to make anyway.
-  ///
-  /// It KEEPS the address and the key, which is the one thing that changed
-  /// with Round H's spelling. Changing where the work runs is not forgetting
-  /// how to reach the box, and a tester who tries This Mac and goes back
-  /// should not have to paste the key again. The simple Models page's **Use
-  /// this Mac** already behaves this way.
+  /// It KEEPS the addresses and the keys. Changing where the work runs is not
+  /// forgetting how to reach the servers, and a tester who tries Managed and
+  /// goes back should not have to paste the key again. The Models page
+  /// behaves the same way.
   ///
   /// The tier is the HARDWARE's, read here rather than through [tier], which
   /// answers `remote` while the placement is still the box.
-  Future<void> continueFromWhere(String key) async {
+  ///
+  /// NOTHING is caught: a refused write propagates to the form, which is the
+  /// thing that can draw the sentence under its own fields.
+  Future<void> continueFromWhere({ModelServersPayload? servers}) async {
     final hardwareTier = machineTierFor(state.hardware?.memoryBytes ?? 0);
     if (placement == ModelPlacement.box) {
-      final base = normalizeBoxBaseUrl(state.boxUrl);
-      final token = key.trim();
-      if (base.isEmpty || !isBoxOrigin(base)) return;
-      // A blank field goes through only when a key is already in the
-      // keychain, and then as null, which `useBox` reads as "keep it". The
-      // form's Continue is live in exactly that state and no other, so the
-      // two halves of the rule agree.
-      if (token.isEmpty && !readPrefs().boxKeyStored) return;
+      // The form has refused, probed and discovered before this runs; a press
+      // that reaches here with nothing to write is a bug, not a state, and
+      // writes nothing.
+      if (servers == null) return;
       await useBox(
-        baseUrl: base,
-        key: token.isEmpty ? null : token,
+        bigUrl: servers.bigUrl,
+        smallUrl: servers.smallUrl,
+        bigModel: servers.bigModel,
+        smallModel: servers.smallModel,
+        bigKey: servers.bigKey,
+        smallKey: servers.smallKey,
         hardwareTier: hardwareTier,
       );
     } else {
@@ -653,7 +539,7 @@ class SetupController extends StateNotifier<SetupState> {
   /// Arriving at [SetupStep.done] records the step BEFORE it instead.
   /// `'done'` is the gate's sentinel and only [finish] may write it: a quit on
   /// the All set screen would otherwise let the next launch straight past the
-  /// gate with the managed server still off and no wizard left to turn it on.
+  /// gate with no wizard left to walk.
   /// A relaunch lands on Notifications, whose Continue re-asks — macOS answers
   /// a settled prompt instantly — and leads back to All set.
   Future<void> _goTo(SetupStep target) async {
@@ -936,8 +822,8 @@ class SetupController extends StateNotifier<SetupState> {
 
   Future<void> openNotificationSettings() => system.openNotificationSettings();
 
-  /// Turns the managed server on, marks the wizard finished, and starts the
-  /// server. True only when BOTH writes landed.
+  /// Writes this machine's defaults, marks the wizard finished, and starts
+  /// the server. True only when the stored word landed.
   ///
   /// It never throws, but it does REPORT. `'done'` is what the gate reads, so
   /// a Finish that got half way leaves a machine the wizard would be lying
@@ -949,18 +835,18 @@ class SetupController extends StateNotifier<SetupState> {
     }
     var saved = false;
     try {
-      // BEFORE the managed preference and before the server: the stage picks
-      // are what the first drain resolves a target through, and a machine
-      // with no writing model must not have six stages pointing at a server
-      // this tier never starts. A write that throws leaves the wizard on this
-      // screen with the button again, exactly as a half-written setup does.
+      // BEFORE the stored word and before the server: the stage picks are
+      // what the first drain resolves a target through, and a machine with no
+      // writing model must not have six stages pointing at a server this tier
+      // never starts. A write that throws leaves the wizard on this screen
+      // with the button again, exactly as a half-written setup does.
       // Only on the local placement. `applyTierDefaults` returns at once on
-      // [MachineTier.remote] anyway, and saying so here is what keeps the box
-      // adoption's stage map obviously untouched by the wizard's last step.
+      // [MachineTier.remote] anyway, and saying so here is what keeps the
+      // user-defined adoption's stage map obviously untouched by the wizard's
+      // last step.
       if (placement == ModelPlacement.local) {
         await applyTierDefaults(tier);
       }
-      await setManagedServer(true);
       // The stash exists only while the welcome step is offering a way back;
       // finishing is the end of that offer, and a leftover value would have
       // the NEXT first run think it had an inbox behind it.
@@ -1090,20 +976,28 @@ final setupControllerProvider =
     // that is hours in. Every preference here is consulted at the top of a
     // step, never cached.
     readPrefs: () => ref.read(appPrefsProvider),
-    // Nothing to write: whether this build runs its own server is a define
-    // now, not a preference. The callback stays until Phase 7 rewrites the
-    // wizard's last step, so the controller keeps one shape across the round.
-    setManagedServer: (_) async {},
     setModelsFolder: (path) =>
         ref.read(appPrefsProvider.notifier).setModelsFolder(path),
     applyTierDefaults: (tier) =>
         ref.read(appPrefsProvider.notifier).applyTierDefaults(tier),
     probe: ModelServerProbe().probe,
     storedBearer: ref.read(appPrefsProvider.notifier).bearerFor,
-    useBox: ({required baseUrl, required key, required hardwareTier}) =>
-        ref.read(appPrefsProvider.notifier).useBoxOrigin(
-              baseUrl: baseUrl,
-              key: key,
+    useBox: ({
+      required bigUrl,
+      required smallUrl,
+      required bigModel,
+      required smallModel,
+      bigKey,
+      smallKey,
+      required hardwareTier,
+    }) =>
+        ref.read(appPrefsProvider.notifier).useBox(
+              bigUrl: bigUrl,
+              smallUrl: smallUrl,
+              bigModel: bigModel,
+              smallModel: smallModel,
+              bigKey: bigKey,
+              smallKey: smallKey,
               hardwareTier: hardwareTier,
             ),
     usePlacement: (placement, {required hardwareTier}) => ref
