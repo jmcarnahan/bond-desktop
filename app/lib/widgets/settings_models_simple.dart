@@ -156,9 +156,10 @@ class RoleLine {
 /// The section this replaced asked sixteen questions and hid the one a person
 /// could answer. The question is **where the models run**; the answer is a
 /// segment and, on the GPU server, an address and a key pasted once. The three
-/// role lines are a report rather than a control, and every per-step pick,
-/// extra server, port and folder that used to be on top level is behind the
-/// **Advanced** fold, unchanged.
+/// role lines are a report rather than a control, and every per-step pick and
+/// extra server that used to be on top level is behind the **Advanced** fold,
+/// unchanged. The port and the models folder are on the Local server card,
+/// which the page draws under This Mac.
 ///
 /// PROP-ONLY, like every other body here: nothing reaches for a provider, the
 /// host resolves every fact and takes every write back as a closure, and the
@@ -260,8 +261,7 @@ class SettingsModelsSimple extends StatefulWidget {
   /// The Advanced fold's title and its one-line summary. The title is also the
   /// key the screen's open-sections set uses, so the two must stay in step.
   static const String advancedTitle = 'Advanced';
-  static const String advancedSummary =
-      'Per-step picks, extra servers, port and folder';
+  static const String advancedSummary = 'Per-step picks and extra servers';
 
   /// The segments, the fold and the local button, keyed for the reason every
   /// control in Settings is: the words on them are ordinary words that also
@@ -453,6 +453,15 @@ class _SettingsModelsSimpleState extends State<SettingsModelsSimple> {
     }
     if (old.boxUrl != widget.boxUrl && widget.boxUrl != _url) {
       _url = widget.boxUrl;
+    }
+    // A row that now asks a different server drops the answer it had: a green
+    // Checked line from the box would otherwise survive a switch to this Mac
+    // and read as a report about the wrong machine.
+    final before = {for (final line in old.roleLines) line.id: line.checkUrl};
+    for (final line in widget.roleLines) {
+      if (before.containsKey(line.id) && before[line.id] != line.checkUrl) {
+        _roleProbe.remove(line.id);
+      }
     }
   }
 

@@ -761,9 +761,11 @@ load, although its own walls were taken with the machine in swap.
 
 **…and one switch.** Model work runs only while **AI processing** is on. The
 switch is the first row of the sidebar's list header (`InboxScreen._listHeader`,
-keyed `processing-toggle`) and its state is `processingProvider` — session
-state, never persisted, **off at every launch**, so the owner can point stages
-at servers before anything is spent on the wrong one. It reaches the pipeline
+keyed `processing-toggle`) and its state is `processingProvider`, seeded from
+the remembered `processing_on` preference, which defaults ON since Round H: the
+default server is the right one by rule, and a wrong or missing server parks
+with a sentence rather than spending attempts. A tester who turns it off finds
+it off after a relaunch. It reaches the pipeline
 as ONE `enabled` closure per drain: `AiWorker` and `TriageQueue` each take
 `bool Function()? enabled` and read it on every launch decision, so an off
 lands on the item after the one already at the server. `pump()` returns at once

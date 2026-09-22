@@ -843,6 +843,27 @@ void main() {
       expect(asked, [('http://localhost:8081/v1/embeddings', null)]);
     });
 
+    testWidgets('a row that moves to another server drops its old answer',
+        (tester) async {
+      await open(
+        tester,
+        placement: ModelPlacement.box,
+        boxUrl: 'https://box.example.com',
+        boxKeyStored: true,
+        storedBearer: (_) => 'sk-fixture-stored',
+        probe: (url, {bearer}) async =>
+            const ModelProbeResult(reachable: true, modelIds: ['qwen3.8']),
+        roleLines: _boxLines(),
+      );
+      await press(tester, find.byKey(SettingsModelsSimple.roleCheckKey('big')));
+      expect(find.textContaining('Reachable'), findsOneWidget);
+
+      // The host moved the install to this Mac: the big row asks a different
+      // server now, and the box's green line must not be read as its answer.
+      await open(tester, roleLines: _localLines());
+      expect(find.textContaining('Reachable'), findsNothing);
+    });
+
     testWidgets('a host that cannot ask offers no Check anywhere',
         (tester) async {
       await open(tester, roleLines: _localLines());

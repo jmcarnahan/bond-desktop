@@ -686,9 +686,9 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
   Future<void> _clearAiResults() {
     // The message store owns five indexes and rebuilds them itself; the two
     // over `context_chunks` belong to the context store, and that one is
-    // reachable from here and not from there — the same split the inbox's sign-out (`onSignOut`)
-    // works to when it unlinks directories beside the wipe. Read before the
-    // first await, on [_resetPipeline]'s rule.
+    // reachable from here and not from there — the same split the inbox's
+    // sign-out works to when it unlinks directories beside the wipe. Read
+    // before the first await, on [_resetPipeline]'s rule.
     final context = ref.read(contextStoreProvider);
     return _resetPipeline((store) async {
       await store.clearDerived();
@@ -699,7 +699,7 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
   /// Settings' **Forget everything and re-sync**: the mailbox goes too, and
   /// the person stays.
   ///
-  /// Deliberately NOT the inbox's sign-out (`onSignOut`) with a wipe: the session, the two texts, the
+  /// Deliberately NOT the inbox's sign-out with a wipe: the session, the two
   /// sender rules and every setting survive, and so do the registered
   /// directories and their links. A sign-out unlinks those because the next
   /// account's threads are different threads; here the same account re-syncs
@@ -734,7 +734,7 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
   ///   microsecond before the quiesce and released into a table that no
   ///   longer holds the row.
   /// - Then the invalidates, which are the only thing that drops what the
-  ///   providers are still holding: the inbox's sign-out (`onSignOut`)'s five are not enough here,
+  ///   providers are still holding: the inbox sign-out's five are not enough
   ///   because nobody is leaving the screen — `StorylinesNotifier` alone
   ///   keeps an audit flag and live backstop timers that would fire against
   ///   deleted rows.
@@ -794,7 +794,7 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     await apply(store);
     await store.resetInterruptedWork();
     if (!mounted) return;
-    // The the inbox's sign-out (`onSignOut`) drops, and the rest a reset needs because the screen
+    // The sign-out's drops, and the rest a reset needs because the screen
     // stays open over them. Counted by the list below rather than in a
     // sentence: the last two counts here were both wrong by one.
     for (final provider in <ProviderOrFamily>[

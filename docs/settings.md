@@ -463,8 +463,9 @@ gets no Check anywhere on the page, the form's and the rows' alike, the same
 discipline every optional control here follows.
 
 **Advanced** is a `SettingsSection` inside the section, collapsed on arrival,
-titled `Advanced` and summarised `Per-step picks, extra servers, port and
-folder`. Its expansion lives in the screen's own open-sections set by title, so
+titled `Advanced` and summarised `Per-step picks and extra servers`. The port
+and the models folder are not in it: they are on the Local server card the page
+draws under This Mac. Its expansion lives in the screen's own open-sections set by title, so
 it collapses and re-opens exactly the way a section does and a person who left
 it open finds it open. Its body is every control below, unchanged from Round E
 and Round G apart from one relabelled button.
@@ -752,8 +753,11 @@ compare vectors from two different spaces. Changing it is a re-embed migration,
 not a setting — `EMBED_URL` at build time. The card shows the URL and a Check
 server button and nothing else.
 
-**Local server card.** `SettingsLocalServerBody`
-(`app/lib/widgets/settings_local_server_card.dart`). It is still injected as
+### The Local server card
+
+`SettingsLocalServerBody`
+(`app/lib/widgets/settings_local_server_card.dart`), on the page under **This
+Mac** rather than in the fold. It is still injected as
 `SettingsScreen.modelsHeader` rather than built by the section, so neither
 `settings_models_body.dart` nor the page above it knows anything about a
 supervisor: what is running is the host's answer to hand over. Round H moved

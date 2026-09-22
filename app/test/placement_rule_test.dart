@@ -123,6 +123,48 @@ void main() {
     });
   });
 
+  group('the placement round trip', () {
+    test('this Mac and back: routing follows the placement, a user pick '
+        'survives both, and the tier entries do not come along', () async {
+      const own = LlmTargetSpec(
+        id: 't-1a2b3c4d',
+        name: 'Studio box',
+        url: 'http://localhost:18100/v1/chat/completions',
+        model: 'qwen3-27b-fp8',
+      );
+      final made = await notifier(
+        initial: const AppPrefs(
+          modelPlacement: ModelPlacement.box,
+          boxUrl: url,
+          targets: [own],
+        ),
+      );
+      await made.setStageTarget('triage', 't-1a2b3c4d');
+
+      // To this Mac, on a small machine: the tier writes its six prose picks,
+      // membership goes to the small model by rule, and the user pick stays.
+      await made.usePlacement(ModelPlacement.local,
+          hardwareTier: MachineTier.inbox);
+      expect(made.state.modelPlacement, ModelPlacement.local);
+      expect(made.state.targetIdForStage('draft_reply'), builtInFastId);
+      expect(made.state.targetIdForStage('storyline_membership'),
+          builtInFastId);
+      expect(made.state.targetIdForStage('triage'), 't-1a2b3c4d');
+      expect(made.state.draftPolicy, tierDraftPolicy(MachineTier.inbox));
+
+      // And back: the tier's entries are dropped, the rule answers again, the
+      // user pick is still the user's, and drafts are worth prefetching.
+      await made.usePlacement(ModelPlacement.box,
+          hardwareTier: MachineTier.inbox);
+      expect(made.state.modelPlacement, ModelPlacement.box);
+      expect(made.state.targetIdForStage('draft_reply'), boxProseId);
+      expect(made.state.targetIdForStage('storyline_membership'), boxProseId);
+      expect(made.state.targetIdForStage('triage'), 't-1a2b3c4d');
+      expect(made.state.stageTargets.keys, ['triage']);
+      expect(made.state.draftPolicy, DraftPolicy.needsYou);
+    });
+  });
+
   group('the draft lane', () {
     test('is four wide on the box and prose_parallel wide here', () async {
       expect(onBox.specForStage('draft_reply')!.parallel, 4);
