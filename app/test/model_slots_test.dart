@@ -376,8 +376,8 @@ void main() {
         'clears', () {
       // `applyTierDefaults` builds its governed set from the UNION of every
       // tier's keys, so a stage named here would be cleared on a machine that
-      // has never seen the box. `adoptBox` owns the box's stage map, and this
-      // is what keeps the two from fighting.
+      // has never seen the box. The placement RULE owns the box's stage map,
+      // and this is what keeps the two from fighting.
       expect(tierStageDefaults(MachineTier.remote), isEmpty);
       expect(tierDraftPolicy(MachineTier.remote), DraftPolicy.needsYou);
     });
@@ -485,8 +485,8 @@ void main() {
       expect(placements, [ModelPlacement.local]);
     });
 
-    test('the box constants are the ids, names and models adoptBox writes',
-        () {
+    test('the box constants are the ids, names and models the derived specs '
+        'carry', () {
       expect(boxProseId, 'box-prose');
       expect(boxBulkId, 'box-bulk');
       expect(boxProseModel, 'qwen3.8');
@@ -503,7 +503,7 @@ void main() {
 
     test('a typed box address is trimmed and loses every trailing slash', () {
       // One function rather than the same two lines in the wizard, the
-      // Settings pane and `adoptBox`: three copies of the strip is three
+      // Settings page and `useBox`: three copies of the strip is three
       // places for `https://box.example.com//prose/…` to come from.
       expect(normalizeBoxBaseUrl('  https://box.example.com/  '),
           'https://box.example.com');

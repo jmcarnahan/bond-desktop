@@ -48,7 +48,7 @@ again.
 
 ## Setting up
 
-The first launch opens a setup flow. Eight screens, a counter in the corner,
+The first launch opens a setup flow. Nine screens, a counter in the corner,
 and a back arrow that is on every one of them — grey and unpressable on the
 first, because there is nothing behind it.
 
@@ -59,33 +59,45 @@ first, because there is nothing behind it.
    whether the models will run here. Too little memory for the writing model
    is a warning, not a refusal. (An Intel Mac never gets this far — macOS will
    not open the app there in the first place.)
-3. **Models** — the three models, what each one does, how big it is, and the
-   licence it comes under. Nothing downloads yet.
-4. **Storage** — where the weights will go, and whether they fit. **Change
+3. **Where the models run** — two cards. **GPU server · recommended** is
+   already chosen when your build came with the project's server address, and
+   the address is filled in. Paste the access key you were given, press
+   **Check server**, and two lines answer, one for the writing model and one
+   for the inbox model. **Continue** keeps the key in the macOS keychain and
+   nowhere else. **This Mac** is the other card: everything runs here and
+   nothing leaves the machine, at the cost of the larger download on the next
+   screens. On the GPU server only the embedding model is downloaded, because
+   it always runs on this Mac.
+4. **Models** — the models this Mac will download, what each one does, how
+   big it is, and the licence it comes under. Three on This Mac, one on the
+   GPU server. Nothing downloads yet.
+5. **Storage** — where the weights will go, and whether they fit. **Change
    folder…** puts them somewhere else — an external disk, for instance. If
    there is not enough room, Bond says how much more it needs and will not
    continue until there is. Bond also tries writing a file there while you
    look at the screen: a folder it cannot write to — a read-only disk, or one
    belonging to another account — says `Bond can't write to this folder.
    Choose another one.` and is not a folder it will go on from.
-5. **Download** — three progress bars, smallest first, with a rate and an
-   estimate. **You can quit.** Closing Bond mid-download is safe: the next
+6. **Download** — one progress bar per model, smallest first, with a rate and
+   an estimate. **You can quit.** Closing Bond mid-download is safe: the next
    launch comes back to this screen and picks up the same file where it
-   stopped. **Continue** waits for all three, because Bond's model server
-   will not start with one of them missing.
-6. **Sign in** — your browser opens on the Bond login. Sign in there and come
+   stopped. **Continue** waits for every bar, because Bond's model server
+   will not start with a file missing.
+7. **Sign in** — your browser opens on the Bond login. Sign in there and come
    back; Bond picks the session up on its own. If your workspace has never
    connected a Microsoft account, there is one more step in the browser and a
    button here to continue once you have finished it.
-7. **Notifications** — macOS asks whether Bond may notify you when a message
+8. **Notifications** — macOS asks whether Bond may notify you when a message
    needs your attention. Saying yes moves on. Saying no keeps you on this
    screen once, with an **Open System Settings** button for changing your mind;
    the next **Continue** moves on.
-8. **All set** — what was set up, said back. **Finish** turns Bond's own model
+9. **All set** — what was set up, said back. **Finish** turns Bond's own model
    server on and opens the inbox.
 
 The models take a minute or two to load the first time. The inbox is readable
-while that happens; the reading and sorting fill in behind it.
+while that happens; the reading and sorting fill in behind it. Processing is
+on from the start, and the switch that pauses it is at the top of the sidebar
+and under **Settings → Processing**. Bond remembers where you left it.
 
 ## Where things live
 
@@ -107,9 +119,15 @@ instead and everything else is still here.
 
 ## Changing things later
 
-Everything the setup asked is under **Settings → Models → Local server**, from
-the avatar menu at the top of the inbox:
+Everything the setup asked is under **Settings → Models**, from the avatar
+menu at the top of the inbox. The page asks one question, where the models
+run, and answers it with the same form the setup used:
 
+- **GPU server · recommended** — the address and the access key. The key
+  field is empty on purpose once a key is stored; typing replaces it. **Check
+  server** asks both models. **Save** moves the work there.
+- **This Mac** — **Use this Mac** moves the work back here. Under it sits the
+  Local server card, and everything below is about that server:
 - **Bond runs the model server** — off puts Bond back to expecting servers
   started by hand, which is a developer's setup rather than yours.
 - **Port** — change it if something else on your Mac already uses 8080.
@@ -121,6 +139,11 @@ the avatar menu at the top of the inbox:
   those two screens are a **Continue** each. It is not a commitment: the first
   screen carries **Back to the inbox**, which puts you back exactly where you
   were. If a download is running it keeps running either way.
+
+Three lines under the form say which model answers for each role, the big
+model, the small model and embeddings, each with its own **Check**. Anything
+finer, the per-step picks and extra servers, is behind **Advanced** at the
+bottom of the page.
 
 ## Uninstalling
 

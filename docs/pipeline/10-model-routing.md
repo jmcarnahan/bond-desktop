@@ -420,7 +420,8 @@ and a second zero in it would make "the lowest tier" a coin toss.
 `applyTierDefaults` builds the set of stages it governs from the union of every
 tier's keys, so a stage named there would be cleared on a machine that never
 saw the box. `applyTierDefaults` returns at once on `remote` for the same
-reason from the other side: `adoptBox` owns that placement's stage map.
+reason from the other side: the placement rule owns that placement's stage
+map, and `usePlacement` is the one door that moves between the two.
 
 `ModelManifest.forTier(MachineTier)` returns a RESOLVED manifest: the same
 class, holding only that tier's entries with its overrides merged in. The

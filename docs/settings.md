@@ -306,6 +306,19 @@ carry the same three keys in both places: `setup-box-url` for **Box address**,
 server**. Two copies of a form that takes a secret is exactly the kind of drift
 that ends with one of them logging it.
 
+The form also owns the one ADDRESS RULE, which is why neither host carries a
+copy of it. A press on **Save** or on **Check server** with an address that is
+not an origin, `isBoxOrigin` in `model_slots.dart`, is refused by the form
+itself: nothing is called, and an error `InlineAlert` appears directly under
+the address field reading `The address needs to start with http:// or https://
+and name a server.` Typing in the field clears it. It is the same rule
+`setBoxUrl` throws on, said before the press reaches it, because both presses
+are fire-and-forget and a throw past one of them is an unhandled error and, to
+the person, a button that did nothing. The button stays live over a bad address
+on purpose, so the press can say why it is refused rather than going quiet. The
+wizard's Where step gets the same refusal, in the same words, from the same
+widget.
+
 The address arrives prefilled from `AppPrefs.effectiveBoxUrl`, which is the
 stored address when there is one and the compiled `BOND_BOX_URL` otherwise. The
 key field opens EMPTY, always. When one is already in the keychain it carries
@@ -323,7 +336,13 @@ connection. The embedding model stays on this Mac.`
 **Check server asks BOTH slots.** The box serves both roles from one host, under
 `/prose` and `/bulk`, so one check that asked only the writing slot would miss an
 inbox slot that is down. The two answers render as two captioned `ProbeStatus`
-lines, **Writing model** first and **Inbox model** under it. The key that rides
+lines, **Writing model** first and **Inbox model** under it. Both captions are
+on screen from the first frame of a check, not only once the second answer
+lands, so nobody is handed a relabelled line halfway through one: the flag that
+says so is `SetupWhereBody.twoSlots`, and both hosts pass it. An address edited
+while a check is out turns the busy lines off at once and drops that check's
+answers when they land, in both hosts, because two servers asked in sequence is
+long enough for a person to have retyped the address. The key that rides
 those two requests is the one typed in front of the person when there is one and
 the stored one otherwise, looked up by id through `AppPrefsNotifier.bearerFor` at
 the moment of the press. It reaches two `Authorization` headers and nothing else:
@@ -345,25 +364,22 @@ the machine is still being read.
 and it is the first thing a stalled tester reads. It answers in this order, and
 the order is the order the jobs come in:
 
-1. A Save just refused: `The address needs to start with http:// or https://
-   and name a server.` It is the same rule `setBoxUrl` refuses on,
-   `isBoxOrigin` in `model_slots.dart`, checked before the press reaches it,
-   because the press is fire-and-forget and a refusal thrown past it would be
-   a Save that silently did nothing. Typing in the address field clears it.
-   This one shows on either placement, because the form is open under the GPU
-   server segment whatever the install is on.
-2. On this Mac, `Models run on this Mac.` and nothing else, because the
+A refused ADDRESS is not on this list. The form owns that rule and answers
+under the field it is about, so the status line goes on saying whatever it was
+saying.
+
+1. On this Mac, `Models run on this Mac.` and nothing else, because the
    server's own state sentence is in the card directly above and saying it
    twice would be the screen arguing with itself.
-3. `Access key needed. Paste it above and press Save.` on the GPU server with no
+2. `Access key needed. Paste it above and press Save.` on the GPU server with no
    key stored. Before any park, because a park about a refused key is answered
    by pasting one.
-4. `Processing is off. Turn it on under Processing, or in the sidebar, and the
+3. `Processing is off. Turn it on under Processing, or in the sidebar, and the
    work starts.` while the session's switch is off. Before any park, because a
    park sentence says work is retrying and nothing retries while the switch is
    off: the last parked fact stays in its provider after the drains stop, and
    the rail's own line guards the same way.
-5. A park this page can answer for, when something is waiting.
+4. A park this page can answer for, when something is waiting.
    `model_unavailable` reads `The box is not answering. Work is waiting and
    will retry each minute.`, `unauthorized` reads `The box refused the access
    key. Change it here.`, and `embed_unavailable` reads `The embedding model on
@@ -372,9 +388,9 @@ the order is the order the jobs come in:
    streams, and nothing polls the box to produce it. A park word this page
    cannot answer for, such as a sign-out, is left alone: the inbox already
    routes it.
-6. `Not checked yet. Press Check server.` when nothing has been asked this
+5. `Not checked yet. Press Check server.` when nothing has been asked this
    session.
-7. `Checked: both models answered`, after a check both slots came back from,
+6. `Checked: both models answered`, after a check both slots came back from,
    or `Checked: ` followed by the failing slot's own sentence after a check one
    of them did not.
 
@@ -1238,19 +1254,20 @@ flow that touches a provider. Every step body is prop-only, the
 `SettingsLocalServerBody` discipline: the host reads `setupControllerProvider`
 and hands down values and closures, and a null callback hides its control.
 One `PaneSurface`, whose title is the step's and whose trailing slot reads
-`Step N of 8`. The back arrow is `null` on the first step — which is why
+`Step N of 9`. The back arrow is `null` on the first step — which is why
 `PaneSurface.onBack` is nullable and renders DISABLED rather than absent.
 
 | # | Title | Primary button | What it does |
 |---|---|---|---|
 | 1 | Welcome to Bond | `Get started` | What Bond is; the container-migration line when there was one |
 | 2 | Your Mac | `Continue` | Chip, memory, macOS, and which models this Mac takes. Intel or Rosetta renders **no** button at all. At 40 GiB and up, one line saying it runs all three; below it, an alert naming the memory, saying the writing model is not downloaded here and that the writing stages run on the inbox model until a target is added under Settings, Models. Under 16 GiB the same alert gains one sentence about slower triage. All of it is a warning that still continues |
-| 3 | Models | `Continue` | The RESOLVED manifest's rows — name, role sentence, size, licence button, and any `notice` verbatim — and the total. Three rows and 23.8 GB on a full Mac — four files, because the writing model's row says `+ MTP head, 1.6 GB` under its size — two rows and 4.6 GB on an inbox one, and the first sentence says which |
-| 4 | Storage | `Continue` | The effective folder, **Change folder…**, and `checkDisk`. Dead until the preflight answers and passes; free space that could not be asked counts as passing, a folder that cannot be WRITTEN does not — `Bond can't write to this folder. Choose another one.` |
-| 5 | Download | `Continue` | One bar per MODEL this Mac's tier wants, smallest first — the writing model's MTP head rides on its model's bar rather than taking one of its own, so the bar counts both files and finishes once. Enabled only when EVERY file is done — see below |
-| 6 | Sign in | `Continue` | `SignInBody(showTitle: false)` when signed out (signing in advances, and there is no Continue); `You're signed in.` and a Continue when already signed in |
-| 7 | Notifications | `Continue` | The press IS the ask. Exactly one button, and the word `Allow` appears nowhere — macOS is about to put its own Allow up |
-| 8 | All set | `Finish` | Folder, port, account, notifications, then this Mac's tier defaults, `managedServer = true` and `setup = 'done'`, and only then the server |
+| 3 | Where the models run | `Continue` | The one question this round is about, and the wizard's own copy of the Settings form: `SetupWhereBody` with both cards. On a build carrying `BOND_BOX_URL` the **GPU server · recommended** card opens ALREADY CHOSEN, with **Box address** prefilled from the install's saved address or the compiled one, because `defaultModelPlacement` is the box whenever an address was compiled in. **This Mac** is never preselected: the box card keeps Continue closed until the **Access key** field is answered, where a preselected This Mac would put a live Continue under a question nobody had been asked. **Check server** asks BOTH slots and reports two captioned lines, **Writing model** and **Inbox model**, the captions up from the first frame. An address that is not an origin is refused under the field in the widget's own words, and nothing is written. On a re-entry with a key already in the keychain the field opens empty with the hint `Stored. Type to replace` and Continue is live with it blank; a blank field with no stored key is refused. Continue on the box calls `useBox(baseUrl:, key:, hardwareTier:)`: the address, the key under both keychain ids, or null to keep the stored one, the box placement, and no stored target or stage entry anywhere. A check made with the field blank sends the stored key, looked up by id at the press, and an address edited while a check is out drops that check's answers when they land. Continue on This Mac calls `usePlacement(local, hardwareTier:)` with this Mac's HARDWARE tier, never the effective one, which reads `remote` while the placement is still the box. It KEEPS the address and the key: changing where the work runs is not forgetting how to reach the box |
+| 4 | Models | `Continue` | The RESOLVED manifest's rows — name, role sentence, size, licence button, and any `notice` verbatim — and the total. Three rows and 23.8 GB on a full Mac — four files, because the writing model's row says `+ MTP head, 1.6 GB` under its size — two rows and 4.6 GB on an inbox one, and the first sentence says which |
+| 5 | Storage | `Continue` | The effective folder, **Change folder…**, and `checkDisk`. Dead until the preflight answers and passes; free space that could not be asked counts as passing, a folder that cannot be WRITTEN does not — `Bond can't write to this folder. Choose another one.` |
+| 6 | Download | `Continue` | One bar per MODEL this Mac's tier wants, smallest first — the writing model's MTP head rides on its model's bar rather than taking one of its own, so the bar counts both files and finishes once. Enabled only when EVERY file is done — see below |
+| 7 | Sign in | `Continue` | `SignInBody(showTitle: false)` when signed out (signing in advances, and there is no Continue); `You're signed in.` and a Continue when already signed in |
+| 8 | Notifications | `Continue` | The press IS the ask. Exactly one button, and the word `Allow` appears nowhere — macOS is about to put its own Allow up |
+| 9 | All set | `Finish` | Folder, port, account, notifications, then this Mac's tier defaults on the local placement only, `managedServer = true` and `setup = 'done'`, and only then the server. It does not touch processing: that is a remembered preference and it starts on |
 
 **`'done'` is written by Finish and by `returnToInbox`, and by nothing else.**
 The second writer never INVENTS the word: it only puts back a value
@@ -1305,20 +1322,22 @@ Continue moves on. A seeded denial is memoized in memory and nowhere else —
 the next launch asks again, which is what makes re-granting in System Settings
 work with no stored flag to clear.
 
-**Which tests pin which strings.** `setup_step_test.dart` — the eight titles,
+**Which tests pin which strings.** `setup_step_test.dart` — the nine titles,
 the stored names, the counter. `setup_welcome`/`device`/`models`/`storage`/
 `download`/`notifications` bodies are pinned by `setup_device_test.dart`,
 `setup_models_test.dart` (including the committed Gemma notice, read off the
 real asset), `setup_storage_test.dart`, `setup_download_test.dart` (both
 `describeRemaining` and `describeDownloadError` tables) and
 `setup_notifications_test.dart` (one button, `Allow` nowhere).
-`setup_flow_test.dart` walks all eight and pins `Step N of 8`, the persisted
-step and the disabled back arrow; `setup_gate_test.dart` pins which screen a
+`setup_flow_test.dart` walks all nine and pins `Step N of 9`, the persisted
+step and the disabled back arrow, and its `Where the models run` group pins the
+preselected box card, the two-slot check, the address refusal and what each
+answer writes; `setup_gate_test.dart` pins which screen a
 launch gets, the manifest bump included; `setup_controller_test.dart` and
 `setup_resume_test.dart` pin the behaviour under the screens — the resume at
 a `.part`'s byte offset, the folder change that ends a run, the restart after
 weights land; `setup_reentry_test.dart` pins what **Set up again** keeps and
-the way back out of it. The end-user walk-through of the same eight screens is
+the way back out of it. The end-user walk-through of the same nine screens is
 `docs/install.md`.
 
 ## Deliberate deferrals

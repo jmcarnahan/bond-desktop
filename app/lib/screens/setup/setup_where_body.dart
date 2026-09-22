@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
 
 import '../../services/llm/model_probe.dart' show ModelProbeResult;
-import '../../services/llm/model_slots.dart' show ModelPlacement;
+import '../../services/llm/model_slots.dart'
+    show ModelPlacement, isBoxOrigin, normalizeBoxBaseUrl;
 import '../../theme/tokens.dart';
+import '../../widgets/inline_alert.dart';
 import '../../widgets/model_slot_editor.dart' show ProbeStatus;
 import 'setup_controls.dart';
 
-/// Where the models run: the shared GPU box, or this Mac.
+/// Where the models run: the GPU server, or this Mac.
 ///
 /// ONE widget for two places. The wizard's third step renders it with both
 /// cards, and the simple Models page renders it inline with [showChoices]
@@ -22,6 +24,9 @@ import 'setup_controls.dart';
 /// [onCheck] and [onContinue] by value, and is in no provider, no
 /// [ModelProbeResult] and no stored state anywhere. It reaches the keychain
 /// through `AppPrefsNotifier.useBox` and nowhere else.
+///
+/// It also owns the ONE address rule, so the wizard and Settings refuse the
+/// same address in the same words. See [addressRefusalText].
 ///
 /// No dialogs: the choice is two cards in the flow, and in Settings the form
 /// is a block on the page rather than anything that floats.
@@ -39,11 +44,16 @@ class SetupWhereBody extends StatefulWidget {
   final ModelProbeResult? probeResult;
 
   /// The inbox slot's answer, for a host that checks both of the box's
-  /// servers. Non-null draws TWO captioned [ProbeStatus] lines in place of the
-  /// one; null leaves the single line exactly as the wizard has always drawn
-  /// it, which is what keeps this widget unchanged for its first host until
-  /// that host asks for the second check.
+  /// servers. The second of the two lines [twoSlots] draws.
   final ModelProbeResult? bulkProbeResult;
+
+  /// Whether this host checks BOTH of the box's servers.
+  ///
+  /// True draws the two captioned [ProbeStatus] lines from the first frame, so
+  /// the captions are on screen while a check is in flight rather than
+  /// appearing under the reader once the second answer lands. False draws the
+  /// single uncaptioned line, for a host that asks about one server.
+  final bool twoSlots;
 
   /// Whether a key for this address is already in the keychain.
   ///
@@ -83,6 +93,7 @@ class SetupWhereBody extends StatefulWidget {
     required this.onContinue,
     this.probeResult,
     this.bulkProbeResult,
+    this.twoSlots = false,
     this.keyStored = false,
     this.probing = false,
     this.showChoices = true,
@@ -103,9 +114,9 @@ class SetupWhereBody extends StatefulWidget {
   /// The box card's title. The word recommended rides a middle dot rather
   /// than a parenthesis: user-facing strings carry neither parentheticals nor
   /// em-dashes.
-  static const String boxTitle = 'Shared GPU box · recommended';
+  static const String boxTitle = 'GPU server · recommended';
   static const String boxBlurb =
-      'The inbox and writing steps run on the project’s GPU box, a machine '
+      'The inbox and writing steps run on the project’s GPU server, a machine '
       'the project rents in the cloud, so message text and drafts travel '
       'there over an encrypted connection. The embedding model stays on '
       'this Mac.';
@@ -122,6 +133,16 @@ class SetupWhereBody extends StatefulWidget {
   static const String proseProbeLabel = 'Writing model';
   static const String bulkProbeLabel = 'Inbox model';
 
+  /// What a press says when the address is not one the app can dial.
+  ///
+  /// The rule belongs to the FORM rather than to either host, so the wizard
+  /// and the Settings page refuse the same address in the same words. It is
+  /// the rule `setBoxUrl` throws on, said here before the press reaches it:
+  /// both presses are fire-and-forget, and a throw past one of them is an
+  /// unhandled error and, to the person, a button that did nothing.
+  static const String addressRefusalText =
+      'The address needs to start with http:// or https:// and name a server.';
+
   @override
   State<SetupWhereBody> createState() => _SetupWhereBodyState();
 }
@@ -135,13 +156,18 @@ class _SetupWhereBodyState extends State<SetupWhereBody> {
   late final TextEditingController _url =
       TextEditingController(text: widget.boxUrl);
 
+  /// A press refused for its address, until the address is typed in again.
+  /// A refusal about a string that has since been edited is a report about a
+  /// different address.
+  bool _refused = false;
+
   @override
   void initState() {
     super.initState();
     // Both fields drive the primary button's enabled state, so a rebuild per
     // keystroke is the point rather than a cost.
     _key.addListener(_onTyped);
-    _url.addListener(_onTyped);
+    _url.addListener(_onUrlTyped);
   }
 
   @override
@@ -158,7 +184,7 @@ class _SetupWhereBodyState extends State<SetupWhereBody> {
   @override
   void dispose() {
     _key.removeListener(_onTyped);
-    _url.removeListener(_onTyped);
+    _url.removeListener(_onUrlTyped);
     _key.dispose();
     _url.dispose();
     super.dispose();
@@ -168,13 +194,34 @@ class _SetupWhereBodyState extends State<SetupWhereBody> {
     if (mounted) setState(() {});
   }
 
+  void _onUrlTyped() {
+    if (mounted) setState(() => _refused = false);
+  }
+
   bool get _isBox => widget.placement == ModelPlacement.box;
+
+  /// Whether the typed address is one the app can dial. Both presses ask.
+  bool get _addressOk => isBoxOrigin(normalizeBoxBaseUrl(_url.text));
+
+  /// A press on the box choice, refused with a sentence when the address is
+  /// not an origin. [action] runs only on an address that passes, so neither
+  /// host is ever handed one it would have to throw on.
+  void _guarded(VoidCallback action) {
+    if (_isBox && !_addressOk) {
+      setState(() => _refused = true);
+      return;
+    }
+    action();
+  }
 
   /// Both fields filled, on the box choice. This Mac needs neither.
   ///
   /// A key already in the keychain answers the second half: the field opens
   /// empty on purpose, so demanding something in it would make a stored key
   /// impossible to keep while the address is changed.
+  ///
+  /// A BAD address does not come in here. The button stays live over one, so
+  /// that the press can say why it is refused rather than going quiet.
   bool get _canContinue => _isBox
       ? _url.text.trim().isNotEmpty &&
           (widget.keyStored || _key.text.trim().isNotEmpty)
@@ -216,6 +263,13 @@ class _SetupWhereBodyState extends State<SetupWhereBody> {
               hintText: 'https://box.example.com',
             ),
           ),
+          if (_refused) ...[
+            const SizedBox(height: BondSpacing.s8),
+            const InlineAlert(
+              severity: InlineAlertSeverity.error,
+              text: SetupWhereBody.addressRefusalText,
+            ),
+          ],
           const SizedBox(height: BondSpacing.s12),
           TextField(
             key: SetupWhereBody.keyFieldKey,
@@ -234,7 +288,7 @@ class _SetupWhereBodyState extends State<SetupWhereBody> {
                 key: SetupWhereBody.checkKey,
                 onPressed: widget.probing
                     ? null
-                    : () => check(_key.text.trim()),
+                    : () => _guarded(() => check(_key.text.trim())),
                 child: const Text('Check server'),
               ),
             ),
@@ -245,8 +299,9 @@ class _SetupWhereBodyState extends State<SetupWhereBody> {
         const SizedBox(height: BondSpacing.s24),
         SetupPrimaryButton(
           label: widget.continueLabel,
-          onPressed:
-              _canContinue ? () => widget.onContinue(_key.text.trim()) : null,
+          onPressed: _canContinue
+              ? () => _guarded(() => widget.onContinue(_key.text.trim()))
+              : null,
         ),
       ],
     );
@@ -258,8 +313,12 @@ class _SetupWhereBodyState extends State<SetupWhereBody> {
   /// The captions are the two roles rather than the two URL paths, because
   /// `/prose` and `/bulk` are wire spellings and the person reading this is
   /// deciding whether the writing model answered.
+  ///
+  /// [SetupWhereBody.twoSlots] decides the shape, never the answers: the
+  /// captions are up from the first frame of a check, so the reader is not
+  /// handed a relabelled line halfway through one.
   List<Widget> _probeLines() {
-    if (widget.bulkProbeResult == null) {
+    if (!widget.twoSlots) {
       return [ProbeStatus(probing: widget.probing, result: widget.probeResult)];
     }
     return [

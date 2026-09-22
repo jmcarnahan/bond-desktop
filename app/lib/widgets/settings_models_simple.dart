@@ -304,11 +304,6 @@ class SettingsModelsSimple extends StatefulWidget {
       'Processing is off. Turn it on under Processing, or in the sidebar, and '
       'the work starts.';
 
-  /// The status line after a Save that was refused for its address. The same
-  /// rule `setBoxUrl` refuses on, said here before the press reaches it.
-  static const String addressRefusalText =
-      'The address needs to start with http:// or https:// and name a server.';
-
   /// The status line on the GPU server with a key stored and no check run in
   /// this session.
   static const String notCheckedText =
@@ -433,15 +428,18 @@ class _SettingsModelsSimpleState extends State<SettingsModelsSimple> {
   /// echo of this frame's keystroke.
   late String _url = widget.boxUrl;
 
-  /// A Save refused for its address, until the address is typed in again.
-  String? _refusal;
-
   /// This session's answers from the form's **Check server**. Two of them,
   /// because the box serves both roles from one host and a check that asked
   /// only the writing slot would miss an inbox slot that is down.
   bool _probing = false;
   ModelProbeResult? _proseProbe;
   ModelProbeResult? _bulkProbe;
+
+  /// Which **Check server** press is the current one. An address edit bumps
+  /// it and turns the busy flag off, and a check that comes back to a
+  /// different number writes nothing: it was about a server nobody is asking
+  /// about any more.
+  int _checkSeq = 0;
 
   /// And the same per role row, keyed by [RoleLine.id].
   final Map<String, bool> _roleProbing = {};
@@ -534,9 +532,11 @@ class _SettingsModelsSimpleState extends State<SettingsModelsSimple> {
         probing: _probing,
         probeResult: _proseProbe,
         bulkProbeResult: _bulkProbe,
+        twoSlots: true,
         onUrlChanged: (value) => setState(() {
           _url = value;
-          _refusal = null;
+          _checkSeq++;
+          _probing = false;
           _proseProbe = null;
           _bulkProbe = null;
         }),
@@ -622,16 +622,16 @@ class _SettingsModelsSimpleState extends State<SettingsModelsSimple> {
 
   /// One line, always, and it is the first thing a stalled tester reads.
   ///
-  /// The order is the order the jobs come in. A refused Save answers the
-  /// press just made, on either placement, because the form is open under the
-  /// GPU server segment whatever the install is on. Then a missing key, then
-  /// the switch being off, and only then a park: a park about a refused key is
+  /// The order is the order the jobs come in. A missing key first, then the
+  /// switch being off, and only then a park: a park about a refused key is
   /// answered by pasting one, and a park sentence says work is retrying,
   /// which nothing does while the switch is off. On this Mac the card above
   /// already carries the server's own state sentence, so this line says only
   /// where the work runs rather than saying it twice.
+  ///
+  /// A refused ADDRESS is not on this line. The form owns that rule and says
+  /// so under the field it is about.
   String _statusLine() {
-    if (_refusal case final refusal?) return refusal;
     if (!_onBox) return SettingsModelsSimple.localStatusText;
     if (!widget.boxKeyStored) return SettingsModelsSimple.keyNeededText;
     if (!widget.processingOn) return SettingsModelsSimple.processingOffText;
@@ -674,6 +674,7 @@ class _SettingsModelsSimpleState extends State<SettingsModelsSimple> {
     String? bearer(String targetId) => typed.isNotEmpty
         ? typed
         : (widget.boxKeyStored ? widget.storedBearer?.call(targetId) : null);
+    final seq = ++_checkSeq;
     setState(() {
       _probing = true;
       _proseProbe = null;
@@ -689,7 +690,7 @@ class _SettingsModelsSimpleState extends State<SettingsModelsSimple> {
       '$base/bulk/v1/chat/completions',
       bearer(boxBulkId),
     );
-    if (!mounted) return;
+    if (!mounted || seq != _checkSeq) return;
     setState(() {
       _probing = false;
       _proseProbe = prose;
@@ -747,25 +748,22 @@ class _SettingsModelsSimpleState extends State<SettingsModelsSimple> {
   /// editor's precedent — which is the only way a key that has reached the
   /// keychain can be left alone by a form that never reads it back.
   ///
-  /// The address is checked HERE, by the same rule `setBoxUrl` refuses on,
-  /// because the press is fire-and-forget: a refusal thrown past it would be
-  /// an unhandled error and, to the person, a Save that did nothing. The
-  /// refusal goes on the status line instead, and typing clears it.
+  /// The address rule belongs to the FORM, which refuses a bad one under the
+  /// field before this is reached. The check here is belt and braces and
+  /// silent: `setBoxUrl` throws on the same rule, and the press is
+  /// fire-and-forget, so a throw past it would be an unhandled error and, to
+  /// the person, a Save that did nothing.
   Future<void> _save(String key) async {
     final use = widget.onUseBox;
     if (use == null) return;
     final base = normalizeBoxBaseUrl(_url);
     if (base.isEmpty) return;
-    if (!isBoxOrigin(base)) {
-      setState(() => _refusal = SettingsModelsSimple.addressRefusalText);
-      return;
-    }
+    if (!isBoxOrigin(base)) return;
     final typed = key.trim();
     if (typed.isEmpty && !widget.boxKeyStored) return;
     await use(base, typed.isEmpty ? null : typed);
     if (!mounted) return;
     setState(() {
-      _refusal = null;
       _probing = false;
       _proseProbe = null;
       _bulkProbe = null;

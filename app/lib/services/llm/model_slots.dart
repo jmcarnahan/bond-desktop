@@ -190,11 +190,10 @@ enum StageRole { big, small, embed }
 
 /// The two targets [ModelPlacement.box] writes, by fixed id.
 ///
-/// Fixed rather than generated so that adopting the box twice REPLACES the
-/// pair rather than stacking duplicates, and so `adoptLocal` knows exactly
-/// which two rows and which two keychain entries to remove. The names carry a
-/// middle dot rather than a dash because user-facing strings take no
-/// em-dashes.
+/// Fixed rather than generated so that the two derived specs, the two
+/// keychain entries and `usePlacement`'s sweep of the stage entries all name
+/// the same pair. The names carry a middle dot rather than a dash because
+/// user-facing strings take no em-dashes.
 const String boxProseId = 'box-prose';
 const String boxBulkId = 'box-bulk';
 const String boxProseName = 'GPU box · writing';
@@ -218,7 +217,7 @@ const String boxUrlDefault = String.fromEnvironment('BOND_BOX_URL');
 /// and with every trailing slash gone.
 ///
 /// One function rather than the same two lines in the wizard, the Settings
-/// pane and `adoptBox`: a pasted address arrives with whitespace and often
+/// page and `useBox`: a pasted address arrives with whitespace and often
 /// with a slash, and three copies of the strip is three places for
 /// `https://box.example.com//prose/v1/chat/completions` to come from. Returns
 /// the empty string for an empty input, which is what both callers read as

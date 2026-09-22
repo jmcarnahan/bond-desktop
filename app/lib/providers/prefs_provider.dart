@@ -1652,8 +1652,8 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     );
   }
 
-  /// The one write behind [setBoxUrl] and the local shim, so that "follow the
-  /// build" is a value this file can store and the public door still refuses
+  /// The one write behind [setBoxUrl], so that "follow the build" is the
+  /// empty value this file can store while the public door goes on refusing
   /// an empty address.
   Future<void> _writeBoxUrl(String stored) async {
     state = state.copyWith(boxUrl: stored);
@@ -1786,33 +1786,6 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await setBoxUrl(baseUrl);
     if (key != null && key.trim().isNotEmpty) await setBoxKey(key);
     await usePlacement(ModelPlacement.box, hardwareTier: hardwareTier);
-  }
-
-  /// The Round G spelling of [useBox], kept for one phase.
-  ///
-  /// The wizard, the Settings pane and their tests still call this pair;
-  /// Round H's Phase 3 moves those callers and DELETES both shims. It takes a
-  /// [hardwareTier] it did not take before, defaulted, because the two
-  /// remaining callers do not know one and nothing on the box placement reads
-  /// it.
-  Future<void> adoptBox({
-    required String baseUrl,
-    required String bearer,
-    MachineTier hardwareTier = MachineTier.full,
-  }) =>
-      useBox(baseUrl: baseUrl, key: bearer, hardwareTier: hardwareTier);
-
-  /// The Round G spelling of [usePlacement] onto this Mac, kept for one phase
-  /// beside [adoptBox] and deleted with it.
-  ///
-  /// It forgets the address and the key as well as the placement, which is
-  /// what its Round G self did when it removed the two rows and their keychain
-  /// entries. [usePlacement] alone keeps both, because changing where the work
-  /// runs is not the same as forgetting how to reach the box.
-  Future<void> adoptLocal(MachineTier tier) async {
-    await _writeBoxUrl('');
-    await clearBoxKey();
-    await usePlacement(ModelPlacement.local, hardwareTier: tier);
   }
 
   /// Records that the owner has read what a third-party draft target

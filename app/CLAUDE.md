@@ -56,10 +56,16 @@ enforce the ones that are commands.
   straddles the midnight-truncated floor; use hours for anything meant to be
   inside.
 - Model work runs only while the session's processing switch is on
-  (`processingProvider`, off at every launch). `AiWorker` and `TriageQueue`
-  each take an `enabled` closure and read it on every launch decision, so a
-  test that builds either one WITHOUT that argument is unaffected. Turning it
-  off also calls `stop()` on all four drains.
+  (`processingProvider`), which is SEEDED from the remembered `processing_on`
+  preference and defaults ON. `AiWorker` and `TriageQueue` each take an
+  `enabled` closure and read it on every launch decision, so a test that builds
+  either one WITHOUT that argument is unaffected. Turning it off also calls
+  `stop()` on all four drains; `_setProcessing` on the inbox writes the
+  preference LAST, after the drains are told, so a throwing write cannot leave
+  lanes running under a switch that reads off. An inbox-level test that drives
+  Clear AI results or Forget and re-sync seeds `processing_on = false` in its
+  store, because `_resetPipeline` throws `StateError('Turn processing off
+  first')` while the switch is on.
 - `--plain-name` on a live `make` target is a SUBSTRING filter, so a new live
   test's name must not contain another target's word (`storyline`, `triage`,
   `reply`, `gates`, `sweep`) or it runs under that target too.
@@ -206,18 +212,55 @@ enforce the ones that are commands.
   so a prefs write rebuilds no worker, and `llm_routing_test` pins all four
   queues identical across a `setStageTarget`. A null `LlmTarget.wire` means
   the client's own wire; `toTarget` stamps only Converse.
-- Stages resolve through the PLACEMENT as well as the stage map
-  (`AppPrefs.modelPlacement`, `ModelPlacement {box, local}`). `adoptBox` writes
-  two fixed-id targets and the whole map; `adoptLocal` removes them and applies
-  the machine tier's. So a test asserting which target a stage resolves to has
-  to say which placement it is in, and the effective manifest tier is
-  `effectiveTierProvider` (`remote` on the box) rather than
+- Stages resolve through the PLACEMENT as well as the stage map, and the
+  placement is a RULE rather than stored rows. One pref, `box_url` ('' meaning
+  the compiled `BOND_BOX_URL`), is the whole address; `AppPrefs.boxProseSpec`
+  and `boxBulkSpec` are DERIVED from it and never stored, which is why
+  `LlmTargetSpec.isBox` exists, why `isFixed = isBuiltIn || isBox` guards the
+  editors, and why `_targets()` drops the two box ids at load. The stage map's
+  default is `placementDefaultTargetId`: the six prose stages plus
+  `storyline_membership` on `box-prose`, the other seven bulk stages on
+  `box-bulk`, whenever the placement is box and an address exists, and the
+  slot's built-in otherwise. `targetIdForStage` is a stored override that
+  resolves, else that default. `usePlacement(p, hardwareTier:)` is the one door
+  between placements: it drops the entries the app itself writes and keeps user
+  `t-…` picks and the optional stage's entry. `useBox` is `setBoxUrl` plus
+  `setBoxKey` (one token under BOTH keychain ids) plus `usePlacement(box)`. The
+  one-shot `box_targets_derived` migration lifts Round G's stored pair. A test
+  asserting where a stage resolves says which placement it means
+  (`AppPrefs(modelPlacement: box, boxUrl: 'https://box.example.com')`, since
+  `boxUrlDefault` is empty under `flutter test`), and the effective manifest
+  tier is `effectiveTierProvider` (`remote` on the box) rather than
   `machineTierProvider`, which still answers what this Mac could run.
-- `adoptBox`'s PRESET ORDER is load-bearing and pinned by a test: bulk first,
-  then prose and confirm. `storyline_membership` is in both preset lists, so
-  the second call is what decides which model confirms, and the row of record
-  wants the 27B. Two presets rather than a hand-written stage map, because the
-  preset lists are pinned against `pipelineStages` and a literal map is not.
+- `storyline_membership` is the ONE stage whose role depends on the placement,
+  big on the box and small here, and `placementDefaultTargetId` is where that
+  lives. `setStageTarget` and `applyPreset` compare against the PLACEMENT
+  default, so picking `box-bulk` for it on the box stores an entry and picking
+  `box-prose` clears one; `applyTierDefaults` keeps the SLOT default because it
+  runs only on the local placement.
+- The Models page is ONE question with everything else folded away.
+  `SettingsModelsSimple` (`widgets/settings_models_simple.dart`) carries the
+  keys `settings-placement`, `settings-use-local`, `settings-models-status`,
+  `settings-models-advanced` and `settings-role-check-<big|small|embed>`.
+  `SetupWhereBody` is the ONE box form, rendered by the wizard's Where step and
+  by that page, with the keys `setup-box-url`, `setup-box-key` and
+  `setup-box-check`; it OWNS the address rule (`isBoxOrigin`, the same rule
+  `setBoxUrl` throws on) and refuses a bad address under the field rather than
+  letting either host throw past a fire-and-forget press. The Advanced fold's
+  body is `SettingsModelsBody`, so a test reaching a stage picker or a slot
+  editor through `SettingsScreen` opens the fold first
+  (`SettingsSection.toggleKey('Advanced')`). `RoleLine.fromPrefs` groups a
+  role's steps by `defaultTargetIdForStage` and describes the modal target.
+- Under `flutter test` `hardwareInfoProvider` answers `HardwareInfo.unknown` at
+  its two-second timeout, so a real inbox in a widget test never offers **Reset
+  per-step picks** (the unreadable-memory branch hides it by design) and the
+  tier is `AsyncLoading` for the first two seconds. A test that presses it
+  overrides `hardwareInfoProvider` with a readable machine and pumps past two
+  seconds in bounded steps.
+- Never run `make model` or `make fast` beside the app's managed server on one
+  Mac. Two 27Bs and two 4Bs wired with `mmap+mlock` is about 50 GB, and it
+  panicked a 64 GB Mac on 2026-09-21. Stop the make servers first
+  (`make stop fast-stop embed-stop`).
 - A probe of a target with a stored bearer PASSES it:
   `ModelServerProbe.probe(url, bearer:)`, resolved through
   `AppPrefsNotifier.bearerFor(id)` at the moment of the press. The widgets take

@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../models/setup_step.dart';
 import '../../providers/app_providers.dart';
+import '../../providers/prefs_provider.dart' show appPrefsProvider;
 import '../../providers/setup_provider.dart';
 import '../../services/attachments/file_dialogs.dart';
 import '../../services/llm/model_slots.dart';
@@ -177,6 +178,14 @@ class _SetupFlowState extends ConsumerState<SetupFlow> {
           placement: state.placement,
           boxUrl: state.boxUrl,
           probeResult: state.boxProbe,
+          bulkProbeResult: state.boxBulkProbe,
+          twoSlots: true,
+          // A re-entry on a box install opens the key field empty with the
+          // stored hint and lets Continue through blank; the controller reads
+          // the same flag and hands `useBox` a null key, which keeps it.
+          keyStored: ref.watch(
+            appPrefsProvider.select((prefs) => prefs.boxKeyStored),
+          ),
           probing: state.boxProbing,
           onChoose: (choice) => choice == ModelPlacement.box
               ? _controller.chooseBox()

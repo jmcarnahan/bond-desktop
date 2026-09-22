@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:bond_inbox/providers/app_providers.dart' show ParkedFact;
 import 'package:bond_inbox/providers/prefs_provider.dart' show AppPrefs;
 import 'package:bond_inbox/screens/setup/setup_controls.dart'
@@ -415,6 +417,64 @@ void main() {
     });
   });
 
+  group('a check in flight', () {
+    testWidgets('both captions are up before either answer lands',
+        (tester) async {
+      final hold = Completer<ModelProbeResult>();
+      await open(
+        tester,
+        placement: ModelPlacement.box,
+        boxUrl: 'https://box.example.com',
+        boxKeyStored: true,
+        storedBearer: (_) => 'sk-fixture-stored',
+        probe: (url, {bearer}) => hold.future,
+      );
+
+      await tester.tap(find.byKey(SetupWhereBody.checkKey));
+      await tester.pump();
+
+      // The two captions and two busy lines, from the first frame: a reader
+      // is not handed a relabelled line halfway through a check.
+      expect(find.text(SetupWhereBody.proseProbeLabel), findsOneWidget);
+      expect(find.text(SetupWhereBody.bulkProbeLabel), findsOneWidget);
+      expect(find.text('Checking…'), findsNWidgets(2));
+
+      hold.complete(const ModelProbeResult(reachable: true, modelIds: ['m']));
+      await tester.pumpAndSettle();
+      expect(find.text('Checking…'), findsNothing);
+    });
+
+    testWidgets('a check that outlives an address edit writes nothing',
+        (tester) async {
+      final hold = Completer<ModelProbeResult>();
+      await open(
+        tester,
+        placement: ModelPlacement.box,
+        boxUrl: 'https://box.example.com',
+        boxKeyStored: true,
+        storedBearer: (_) => 'sk-fixture-stored',
+        probe: (url, {bearer}) => hold.future,
+      );
+      await tester.tap(find.byKey(SetupWhereBody.checkKey));
+      await tester.pump();
+      expect(find.text('Checking…'), findsNWidgets(2));
+
+      await tester.enterText(
+        find.byKey(SetupWhereBody.urlKey),
+        'https://box2.example.com',
+      );
+      await tester.pump();
+      // The busy lines come off with the edit.
+      expect(find.text('Checking…'), findsNothing);
+
+      hold.complete(const ModelProbeResult(reachable: true, modelIds: ['m']));
+      await tester.pumpAndSettle();
+      // And the stale answers never land: the line still says not checked.
+      expect(status(tester), SettingsModelsSimple.notCheckedText);
+      expect(find.textContaining('Reachable'), findsNothing);
+    });
+  });
+
   group('this Mac', () {
     testWidgets('the card, the hardware line and the button are all here',
         (tester) async {
@@ -567,7 +627,7 @@ void main() {
       expect(status(tester), SettingsModelsSimple.keyNeededText);
     });
 
-    testWidgets('an address with no scheme is refused on the line, and '
+    testWidgets('an address with no scheme is refused under the field, and '
         'typing clears it', (tester) async {
       final saves = <String>[];
       await open(
@@ -585,14 +645,18 @@ void main() {
       await tester.pumpAndSettle();
       await press(tester, find.byKey(setupContinueKey));
 
+      // The form owns the rule and answers under the field it is about, so
+      // the status line goes on saying what it was saying.
       expect(saves, isEmpty);
-      expect(status(tester), SettingsModelsSimple.addressRefusalText);
+      expect(find.text(SetupWhereBody.addressRefusalText), findsOneWidget);
+      expect(status(tester), SettingsModelsSimple.notCheckedText);
 
       await tester.enterText(
         find.byKey(SetupWhereBody.urlKey),
         'https://box.example.com',
       );
       await tester.pumpAndSettle();
+      expect(find.text(SetupWhereBody.addressRefusalText), findsNothing);
       expect(status(tester), SettingsModelsSimple.notCheckedText);
     });
 

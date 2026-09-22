@@ -81,13 +81,21 @@ BOND_MCP_SERVER_URL=https://<the URL you were given>/mcp
 Leave the three `MICROSOFT_*` lines blank. They are only for "This device"
 mode (see the appendix), which needs an Entra app registration you control.
 
-If the project runs a shared GPU box, add `BOND_BOX_URL=https://box.example.com`
-with the hostname you were given. It only prefills a field: the address shows
-up already filled in on the wizard's "Where the models run" step and in
-Settings, Models, and you can change it there or leave the line out and type
-it. The access key is never compiled in. You type it in the app once and it is
-kept in the macOS keychain. A separate `BOND_BOX_KEY` line is read only by the
-bench recipes, which have no keychain to read from.
+Two defines decide where the models run. Both are optional and neither carries
+a secret:
+
+- `BOND_BOX_URL=https://box.example.com`, with the hostname you were given, for
+  a build that should open on the project's GPU server. It makes the GPU server
+  the build's default placement and prefills the address on the wizard's "Where
+  the models run" step and on Settings, Models, where you can change it. The
+  access key is never compiled in. You type it in the app once and it is kept in
+  the macOS keychain. A separate `BOND_BOX_KEY` line is read only by the bench
+  recipes, which have no keychain to read from.
+- `BOND_LLAMA_SERVER`, the path to a `llama-server` binary, for any dev build
+  that will start the local server. It is needed on the GPU server placement
+  too, because the embedding model always runs on this Mac. Without it the app
+  says `The model runtime is missing from this build`. It goes in `local.mk`
+  rather than `.env`, next to the other machine-local overrides below.
 
 **Smaller Macs.** Create a git-ignored `local.mk` next to the `Makefile` with
 whichever lines apply. Nothing else in the repo needs to change:
@@ -103,8 +111,9 @@ whichever lines apply. Nothing else in the repo needs to change:
 # MODEL_PORT = 8080
 # FAST_PORT  = 8082
 # EMBED_PORT = 8081
-# Lets Settings → Models → Local server run ONE bundled-style router from this
-# dev build, instead of the three servers you start by hand.
+# Lets the app run ONE bundled-style router from this dev build, instead of the
+# three servers you start by hand. Needed on the GPU server placement too: the
+# embedding model always runs here.
 # BOND_LLAMA_SERVER = /opt/homebrew/bin/llama-server
 # Skips the first-run setup wizard. Your models are in the Homebrew cache, not
 # in the app's own folder, so it would offer to download ~22 GB you already have.
@@ -170,15 +179,26 @@ make app-run
 
 The first build takes a few minutes.
 
-**The first launch opens the setup wizard** — eight screens that check the Mac,
-download the three models into the app's own folder (~22 GB), sign in, and turn
+**The first launch opens the setup wizard** — nine screens that check the Mac,
+ask where the models run, download what this Mac needs, sign in, and turn
 Bond's managed model server on. That is not what you want on this path: you
 have just started three servers by hand and the weights are already in
 `~/.cache/huggingface/hub/`. Add `BOND_DEV_SKIP_SETUP = 1` to `local.mk`
 (step 2) and rebuild, and the app goes straight to sign-in as it always has.
 Run the wizard instead if you want the bundled shape — it downloads its own
-copies and switches the app onto one router. `docs/install.md` walks the eight
+copies and switches the app onto one router. `docs/install.md` walks the
 screens; `docs/settings.md` (**First run**) is the reference.
+
+**What the third screen asks.** On a build with `BOND_BOX_URL` compiled in,
+**Where the models run** opens with **GPU server · recommended** already chosen
+and the address already filled in. Paste the access key you were given, press
+**Check server**, and two lines answer, **Writing model** and **Inbox model**.
+Press **Continue**. Nothing about the key is written anywhere but the macOS
+keychain, and the embedding model still runs on this Mac, so the download step
+that follows is the embedding model alone. **This Mac** is the second choice
+and the offline one: everything runs here and nothing leaves the machine. Either
+way, processing starts on by itself once the wizard finishes, so the inbox
+begins working without anybody finding a switch.
 
 With the wizard skipped, the app opens on a sign-in screen:
 
@@ -200,8 +220,11 @@ Two things you may see and can ignore:
   is under Settings → Notifications either way.
 
 To confirm the app sees the servers, open the avatar menu → **Settings** →
-**Models** and press **Check server** on each row. All three should report
-reachable with the model listed.
+**Models**. The page asks one question, where the models run, and lists three
+roles under it: the big model, the small model and embeddings. Press **Check**
+on each. All three should report reachable with the model listed. Everything
+else, the per-step picks, the extra servers, the port and the models folder,
+is behind the **Advanced** fold.
 
 ## 5. Day to day
 

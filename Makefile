@@ -905,9 +905,10 @@ omlx-stop:
 # Emits --dart-define=MS_CLIENT_ID/MS_TENANT_ID/MS_CLIENT_SECRET=... for each
 # value that can be read; emits nothing for any that cannot (sign-in then
 # refuses with a config error; a missing secret alone means public-client
-# behavior). BOND_BOX_URL rides along: it only prefills the box address in the
-# wizard and in Settings. The box's access key is NOT here. It is typed in the
-# app and kept in the keychain.
+# behavior). BOND_BOX_URL rides along: it makes the GPU server the build's
+# default placement and prefills the box address in the wizard and in
+# Settings. The box's access key is NOT here. It is typed in the app and kept
+# in the keychain.
 define APP_SECRET_DEFINE
 $$(CID=$$(grep -m1 '^MICROSOFT_CLIENT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
    TID=$$(grep -m1 '^MICROSOFT_TENANT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \

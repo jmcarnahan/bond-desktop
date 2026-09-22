@@ -1019,10 +1019,10 @@ void main() {
     test('the confirm is a RULE now, not the order of two preset calls',
         () async {
       // The pin this replaces was about ORDER: `storyline_membership` is in
-      // both preset lists, so whichever `adoptBox` call ran second owned it,
-      // and swapping the two lines dropped the confirm to the 4B with no code
-      // looking wrong. There is no order left to get wrong — the mapping is
-      // one function, and this is what it says.
+      // both preset lists, so whichever of Round G's two preset calls ran
+      // second owned it, and swapping the two lines dropped the confirm to
+      // the 4B with no code looking wrong. There is no order left to get
+      // wrong — the mapping is one function, and this is what it says.
       expect(
         placementDefaultTargetId(
           placement: ModelPlacement.box,
