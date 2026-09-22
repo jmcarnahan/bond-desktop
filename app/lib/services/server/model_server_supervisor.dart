@@ -38,6 +38,7 @@ class ModelServerSupervisor {
     required this.binaryPath,
     required this.buildPreset,
     required this.routerPort,
+    required this.onPortMoved,
     required this.managed,
     http.Client? httpClient,
     this.onReady,
@@ -77,6 +78,16 @@ class ModelServerSupervisor {
   final FutureOr<RouterPreset> Function() buildPreset;
 
   final int Function() routerPort;
+
+  /// Told, and AWAITED, whenever a launch has to move off the configured port.
+  ///
+  /// Wired to the preference so the move is persisted before the child is
+  /// spawned. The order is not a nicety: the pid record carries the port, the
+  /// clients dial the port the preference names, and [_adopt] refuses a record
+  /// whose port is not [routerPort]'s answer — so a launch that spawned first
+  /// and told afterwards would leave the three disagreeing, and the next
+  /// launch would reload every model rather than adopt.
+  final Future<void> Function(int port) onPortMoved;
 
   /// Whether the app owns the servers at all. A callback rather than a flag
   /// so the preference can change under a live supervisor.
@@ -152,6 +163,13 @@ class ModelServerSupervisor {
   static const int _recentMax = 200;
 
   bool _listeningSeen = false;
+
+  /// Whether this start has already moved off a port that would not bind.
+  ///
+  /// One retry per start, not per launch: it is set before the retry and
+  /// cleared where a socket was actually bound, so a machine losing every port
+  /// in turn ends in [ServerPortInUse] rather than in a loop.
+  bool _bindRetried = false;
   bool _stopping = false;
   bool _disposed = false;
   bool _polling = false;
@@ -235,6 +253,9 @@ class ModelServerSupervisor {
         _state is ServerReady) {
       return;
     }
+    // One bind retry per START, as the field says: a Start pressed after a
+    // port-in-use stop gets its own.
+    _bindRetried = false;
     _restarts = 0;
     await _launch(preflight: true);
   }
@@ -252,6 +273,7 @@ class ModelServerSupervisor {
     _restartTimer?.cancel();
     _restartTimer = null;
     _restarts = 0;
+    _bindRetried = false;
     _cancelTimers();
     await _terminate();
     await _cancelPipes();
@@ -331,12 +353,17 @@ class ModelServerSupervisor {
       }
     }
 
-    final port = routerPort();
+    var port = routerPort();
     if (!await runner.isPortFree(port)) {
       if (generation != _generation) return;
-      _emit(ServerPortInUse(port, holder: await runner.listenerOn(port)));
-      await _endActivity();
-      return;
+      // A busy port is not a question for the user. Somebody else holds it —
+      // another copy of this app, a `make model` from this morning — and the
+      // app can simply take one the kernel says is free, remember it, and
+      // start there. The persist is AWAITED: see [onPortMoved].
+      final moved = await runner.freePort();
+      await onPortMoved(moved);
+      if (generation != _generation) return;
+      port = moved;
     }
     if (generation != _generation) return;
 
@@ -469,6 +496,9 @@ class ModelServerSupervisor {
     if (generation != _generation) return;
     _startTimer?.cancel();
     _startTimer = null;
+    // A socket is bound, so the one bind retry is spent and available again
+    // for the next start.
+    _bindRetried = false;
     _port = port;
     final pid = _pid;
     if (pid == null) return;
@@ -645,12 +675,22 @@ class ModelServerSupervisor {
     final bindFailure = _recent.any((l) => l.contains("couldn't bind"));
 
     // A bind failure is not retried at any backoff, because nothing about
-    // waiting frees a port somebody else is holding, and the user can only
-    // act on it if the app names it.
+    // waiting frees a port somebody else is holding. It is retried ONCE on a
+    // fresh port, which is the live race the preflight cannot close: the port
+    // was free when this launch asked and taken by the time the child bound.
+    // A second failure is the state the user is shown, because two ports lost
+    // in a row is a machine doing something the app cannot name.
     if (port != null && bindFailure) {
       _generation++;
       await _terminate();
       await _cancelPipes();
+      if (!_bindRetried) {
+        _bindRetried = true;
+        final moved = await runner.freePort();
+        await onPortMoved(moved);
+        unawaited(_launch(preflight: false));
+        return;
+      }
       final holder = await runner.listenerOn(port);
       _emit(ServerPortInUse(port, holder: holder));
       await _endActivity();

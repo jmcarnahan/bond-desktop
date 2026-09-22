@@ -60,19 +60,20 @@ void main() {
         expect(stage.id, 'embeddings');
         continue;
       }
-      // An OPTIONAL stage runs another stage's task — `draft_improve` sends
-      // `DraftTask` — so it is a routing destination without a schema of
-      // its own, and the second exception this containment allows.
-      if (stage.optional) continue;
+      // `draft_improve` runs another stage's task — it sends `DraftTask` —
+      // so it is a routing destination without a schema of its own, and the
+      // second exception this containment allows.
+      if (stage.id == 'draft_improve') continue;
       expect(names, contains(stage.id), reason: stage.id);
     }
 
     // And the exemption is not a hole anybody can widen quietly: exactly one
-    // row is optional today, and a second one has to be argued for here.
+    // row has no task of its own, and a second one has to be argued for here.
     expect(
       {
         for (final stage in pipelineStages)
-          if (stage.optional) stage.id,
+          if (stage.slot != ModelSlot.embed && !names.contains(stage.id))
+            stage.id,
       },
       {'draft_improve'},
     );
@@ -119,9 +120,10 @@ void main() {
     // drain's hot path, and a stray stage id must cost a request on the small
     // server rather than the item.
     expect(stageSlot('nope'), ModelSlot.fast);
-    expect(stageIsOptional('draft_improve'), isTrue);
-    expect(stageIsOptional('draft_reply'), isFalse);
-    expect(stageIsOptional('nope'), isFalse);
+    // No row is optional any more: `draft_improve` was the one that was, and
+    // its entry was the feature being on, which the stage picker's deletion
+    // would have made unreachable.
+    expect(pipelineStages.where((stage) => stage.optional), isEmpty);
   });
 
   test('a slot names its built-in target, and embeddings name none', () {
@@ -135,20 +137,22 @@ void main() {
   test('the three presets are the stage table, not a second copy of it', () {
     Set<String> idsOn(ModelSlot slot) => {
           for (final stage in pipelineStages)
-            if (stage.slot == slot && !stage.optional) stage.id,
+            if (stage.slot == slot) stage.id,
         };
 
+    // `draft_improve` is in the prose preset since Round H: it stopped being
+    // optional, and a prose stage left out of the prose preset would be a
+    // stage the tier defaults could not reach on a Mac with no prose server.
     expect(proseStageIds.toSet(), idsOn(ModelSlot.prose));
+    expect(proseStageIds, contains('draft_improve'));
     expect(bulkStageIds.toSet(), idsOn(ModelSlot.fast));
     expect(confirmStageIds, ['storyline_membership']);
 
     for (final preset in [proseStageIds, confirmStageIds, bulkStageIds]) {
-      // No duplicates, and neither of the two rows a preset must never write:
-      // `embeddings` is not routed, and `draft_improve` is the one stage a
-      // person turns on deliberately.
+      // No duplicates, and never the one row a preset must not write:
+      // `embeddings` is not routed at all.
       expect(preset.toSet(), hasLength(preset.length));
       expect(preset, isNot(contains('embeddings')));
-      expect(preset, isNot(contains('draft_improve')));
       for (final id in preset) {
         expect(pipelineStages.map((s) => s.id), contains(id));
       }
@@ -362,9 +366,11 @@ void main() {
         () {
       final map = tierStageDefaults(MachineTier.inbox);
       expect(map.keys.toSet(), proseStageIds.toSet());
-      expect(map.length, 6);
+      expect(map.length, 7);
       expect(map.values.toSet(), {builtInFastId});
-      expect(map.containsKey('draft_improve'), isFalse);
+      // Improve a draft is one of them: it is a prose stage, and a Mac with no
+      // prose server must not be left dialling one.
+      expect(map['draft_improve'], builtInFastId);
       expect(map.containsKey('storyline_membership'), isFalse);
       for (final id in bulkStageIds) {
         expect(map.containsKey(id), isFalse, reason: id);
@@ -390,6 +396,7 @@ void main() {
       // written down. Pinned against `pipelineStages` the way the presets are,
       // so neither can drift from the stage table.
       expect(bigModelStageIds, [...proseStageIds, 'storyline_membership']);
+      expect(bigModelStageIds, contains('draft_improve'));
       expect(
         smallModelStageIds.toSet(),
         bulkStageIds.toSet().difference({'storyline_membership'}),
@@ -398,14 +405,14 @@ void main() {
       expect(smallModelStageIds,
           [for (final id in bulkStageIds) if (id != 'storyline_membership') id]);
 
-      // Together they cover every routable non-optional stage exactly once.
+      // Together they cover every routable stage exactly once.
       final both = [...bigModelStageIds, ...smallModelStageIds];
       expect(both.toSet(), hasLength(both.length));
       expect(
         both.toSet(),
         {
           for (final stage in pipelineStages)
-            if (stage.slot != ModelSlot.embed && !stage.optional) stage.id,
+            if (stage.slot != ModelSlot.embed) stage.id,
         },
       );
     });
@@ -418,8 +425,8 @@ void main() {
       for (final id in smallModelStageIds) {
         expect(roleOfStage(id), StageRole.small, reason: id);
       }
-      // The optional stage is in no list and is still the big model's: it is a
-      // second pass over a reply, and the role is about which model writes.
+      // A second pass over a reply is the big model's, like the pass that
+      // wrote it.
       expect(roleOfStage('draft_improve'), StageRole.big);
       expect(roleOfStage('embeddings'), StageRole.embed);
       // An id the stage table does not name has no role at all.
@@ -440,9 +447,8 @@ void main() {
 
       for (final stage in pipelineStages) {
         final id = stage.id;
-        if (stage.slot == ModelSlot.embed || stage.optional) {
-          // Not routed at all, and off until somebody picks: no default to
-          // give on either placement.
+        if (stage.slot == ModelSlot.embed) {
+          // Not routed at all: no default to give on either placement.
           expect(onBox(id), isNull, reason: id);
           expect(onThisMac(id), isNull, reason: id);
           continue;
@@ -461,7 +467,7 @@ void main() {
       // placement says, because two targets nothing can reach would park every
       // lane.
       for (final stage in pipelineStages) {
-        if (stage.slot == ModelSlot.embed || stage.optional) continue;
+        if (stage.slot == ModelSlot.embed) continue;
         expect(
           placementDefaultTargetId(
             placement: ModelPlacement.box,

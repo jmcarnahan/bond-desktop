@@ -960,6 +960,13 @@ endif
 ifneq ($(strip $(BOND_DEV_SKIP_SETUP)),)
 APP_LLM_DEFINES += --dart-define=BOND_DEV_SKIP_SETUP='$(BOND_DEV_SKIP_SETUP)'
 endif
+# Read by `managedServerDefault` (app/lib/services/llm/model_slots.dart) so a
+# developer who runs `make model fast embed` by hand keeps this app off its own
+# llama-server. Round H took that switch off the Models page, and this define
+# is what replaced it — same shape as the skip above, same `local.mk` line.
+ifneq ($(strip $(BOND_DEV_HAND_SERVERS)),)
+APP_LLM_DEFINES += --dart-define=BOND_DEV_HAND_SERVERS='$(BOND_DEV_HAND_SERVERS)'
+endif
 
 app-install:
 	@cd $(APP_DIR) && $(FLUTTER) pub get

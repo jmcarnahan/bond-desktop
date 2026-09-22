@@ -222,26 +222,54 @@ enforce the ones that are commands.
   so a prefs write rebuilds no worker, and `llm_routing_test` pins all four
   queues identical across a `setStageTarget`. A null `LlmTarget.wire` means
   the client's own wire; `toTarget` stamps only Converse.
+- `box` in code means the USER DEFINED placement, historically the GPU box:
+  the enum value (`ModelPlacement.box`), the prefs, the two ids `box-prose` and
+  `box-bulk` and the keychain entries all keep that word, and only the words on
+  screen say `Your server`.
 - Stages resolve through the PLACEMENT as well as the stage map, and the
-  placement is a RULE rather than stored rows. One pref, `box_url` ('' meaning
-  the compiled `BOND_BOX_URL`), is the whole address; `AppPrefs.boxProseSpec`
-  and `boxBulkSpec` are DERIVED from it and never stored, which is why
-  `LlmTargetSpec.isBox` exists, why `isFixed = isBuiltIn || isBox` guards the
-  editors, and why `_targets()` drops the two box ids at load. The stage map's
-  default is `placementDefaultTargetId`: the six prose stages plus
+  placement is a RULE rather than stored rows. FOUR prefs carry the pair:
+  `box_big_url` and `box_small_url` (chat-completions URLs) and `box_big_model`
+  and `box_small_model` (the names DISCOVERED from each server's `/v1/models`),
+  each '' meaning "follow the build", which derives both URLs from the compiled
+  `BOND_BOX_URL` under `/prose` and `/bulk` and both names from the two
+  constants that box serves. `hasBox` is BOTH effective URLs non-empty.
+  `AppPrefs.boxProseSpec` and `boxBulkSpec` are DERIVED from those four and
+  never stored, which is why `LlmTargetSpec.isBox` exists, why `isFixed =
+  isBuiltIn || isBox` guards the editors, and why `_targets()` drops the two
+  box ids at load; each spec's `wire` is `wireForHost(url)` and its `parallel`
+  is 4 only when that URL pref is empty (the compiled box is vLLM with four
+  sequences) and 1 for a stored address, which a one-slot llama-server would
+  queue past the prose client's ceiling. The stage map's default is
+  `placementDefaultTargetId`: the seven prose stages plus
   `storyline_membership` on `box-prose`, the other seven bulk stages on
-  `box-bulk`, whenever the placement is box and an address exists, and the
+  `box-bulk`, whenever the placement is box and both addresses exist, and the
   slot's built-in otherwise. `targetIdForStage` is a stored override that
   resolves, else that default. `usePlacement(p, hardwareTier:)` is the one door
   between placements: it drops the entries the app itself writes and keeps user
-  `t-…` picks and the optional stage's entry. `useBox` is `setBoxUrl` plus
-  `setBoxKey` (one token under BOTH keychain ids) plus `usePlacement(box)`. The
-  one-shot `box_targets_derived` migration lifts Round G's stored pair. A test
-  asserting where a stage resolves says which placement it means
-  (`AppPrefs(modelPlacement: box, boxUrl: 'https://box.example.com')`, since
-  `boxUrlDefault` is empty under `flutter test`), and the effective manifest
-  tier is `effectiveTierProvider` (`remote` on the box) rather than
-  `machineTierProvider`, which still answers what this Mac could run.
+  `t-…` picks. `useBox({bigUrl, smallUrl, bigModel, smallModel, bigKey,
+  smallKey, hardwareTier})` is `setBoxServers` plus `setBoxKey` (a token PER
+  ID, since two addresses can be two operators) plus `usePlacement(box)`;
+  `useBoxOrigin({baseUrl, key, hardwareTier})` is the one-origin door the
+  wizard still calls. `setBoxServers` refuses a big URL whose host
+  `isThirdPartyHost` while consent is false, and `draftFallbackSpec` is never
+  third party for the same reason. THREE one-shot migrations run in
+  `AppPrefsNotifier.read`, in this order: `box_targets_derived` (Round G's
+  stored pair into the `box_url` origin), `box_servers_derived` (that origin
+  into the two URLs), `stage_targets_cleared` (the per-step picks, which no
+  screen can show since the stage picker went). A test asserting where a stage
+  resolves says which placement it means (`AppPrefs(modelPlacement: box,
+  boxBigUrl: '…', boxSmallUrl: '…')`, since `boxUrlDefault` is empty under
+  `flutter test`), and the effective manifest tier is `effectiveTierProvider`
+  (`remote` on the box) rather than `machineTierProvider`, which still answers
+  what this Mac could run.
+- Whether the app runs its own llama-server is `managedServerDefault`, a
+  CONSTANT read off `--dart-define=BOND_DEV_HAND_SERVERS` the way
+  `SetupGate.skipDefine` reads its own, not a preference: `AppPrefs
+  .managedServer` keeps its field so a test can say `AppPrefs(managedServer:
+  false)` and assert the compiled URLs, and a bare `AppPrefs()` is on the
+  router. A busy port is not a question either — the supervisor takes a free
+  one and AWAITS `onPortMoved` (wired to `setRouterPort`) before it spawns, so
+  the preference, the pid record and the clients agree.
 - `storyline_membership` is the ONE stage whose role depends on the placement,
   big on the box and small here, and `placementDefaultTargetId` is where that
   lives. `setStageTarget` and `applyPreset` compare against the PLACEMENT
@@ -309,10 +337,13 @@ enforce the ones that are commands.
   sentence had a URL. The exception itself keeps the full sentence for the
   screen. `llm_error_redaction_test` pins the existing sites; a new place that
   writes an exception's text into a row must go through it as well.
-- `draft_improve` is the one `PipelineStageInfo.optional` row: a routing
-  destination with no schema of its own, so it runs `DraftTask` and its call
-  record is labelled `draft_reply`. `model_slots_test` pins the exempt set
-  literally.
+- `draft_improve` is a prose stage like the six beside it, routed by the
+  placement rule, and it is the one row with NO SCHEMA of its own: it runs
+  `DraftTask` and its call record is labelled `draft_reply`, which is the
+  exemption `model_slots_test` pins literally. It was the one
+  `PipelineStageInfo.optional` row until Round H, when the stage picker that
+  was the only way to turn it on was deleted; the field survives with no member
+  because the Advanced fold still branches on it.
 - The machine tier is `MachineTier` in `model_slots.dart`, chosen from
   `hw.memsize` by `machineTierFor` and never persisted, so a models folder
   carried to another Mac is re-read on the Mac it is on. It is applied twice,

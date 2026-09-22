@@ -272,26 +272,28 @@ one resolver rather than two guesses:
 
 **And the simple page's own wires**, added in Round H:
 
-- `boxUrl: prefs.effectiveBoxUrl` and `boxKeyStored: prefs.boxKeyStored`. The
-  first is the stored address when there is one and the compiled `BOND_BOX_URL`
-  otherwise, already resolved, so the form prefills and never asks twice. The
-  second is a presence flag and never the token.
+- `boxUrl: boxBaseFromProseUrl(prefs.effectiveBoxBigUrl)` and
+  `boxKeyStored: prefs.boxKeyStored`. The first is the ORIGIN behind the big
+  model's address, which is what this form still asks for while the shared
+  two-address form is being built, already resolved, so the form prefills and
+  never asks twice. The second is a presence flag and never the token.
 - `onUseBox` reads this Mac's hardware tier at the press and calls
-  `notifier.useBox(baseUrl:, key:, hardwareTier:)`; `onUseLocal` does the same
+  `notifier.useBoxOrigin(baseUrl:, key:, hardwareTier:)`, the one-origin door
+  the wizard and this page still call while the shared form is being built; `onUseLocal` does the same
   and calls `notifier.usePlacement(ModelPlacement.local, hardwareTier:)`. The
   tier is read at the press rather than closed over, so a press cannot write
   last frame's answer.
 - `roleLines` is `RoleLine.fromPrefs(prefs)`, one pure function beside the
   widget that the host calls and `settings_models_simple_test.dart` pins on
-  both placements. A role's steps are every non-optional stage the placement's
+  both placements. A role's steps are every stage the placement's
   rule sends to the same default target as its lead stage, `draft_reply` for
   the big model and `triage` for the small. Membership is read off
   `prefs.defaultTargetIdForStage` rather than off `roleOfStage`, because the two
   disagree on purpose: storyline membership is the big model's work on the box
   and the small model's on this Mac, so grouping by the enum would read every
-  local install as Custom. Optional stages are skipped, for the reason
-  `usePlacement` keeps their entries: an unrouted `draft_improve` is the Improve
-  button being off, not a step pointing elsewhere. The row describes the target
+  local install as Custom. `draft_improve` is one of the big model's steps
+  since Round H, when it stopped being optional, so a target on it reads as
+  Custom like a target on any other. The row describes the target
   most of the role's steps resolve to, compared by the spec `specForStage`
   answers rather than by the stored id, so a third-party pick with consent
   withheld reads as the fallback it actually reaches.
@@ -345,15 +347,16 @@ not an origin, `isBoxOrigin` in `model_slots.dart`, is refused by the form
 itself: nothing is called, and an error `InlineAlert` appears directly under
 the address field reading `The address needs to start with http:// or https://
 and name a server.` Typing in the field clears it. It is the same rule
-`setBoxUrl` throws on, said before the press reaches it, because both presses
+`setBoxServers` throws on, said before the press reaches it, because both presses
 are fire-and-forget and a throw past one of them is an unhandled error and, to
 the person, a button that did nothing. The button stays live over a bad address
 on purpose, so the press can say why it is refused rather than going quiet. The
 wizard's Where step gets the same refusal, in the same words, from the same
 widget.
 
-The address arrives prefilled from `AppPrefs.effectiveBoxUrl`, which is the
-stored address when there is one and the compiled `BOND_BOX_URL` otherwise. The
+The address arrives prefilled from the origin behind
+`AppPrefs.effectiveBoxBigUrl`, which is the stored address when there is one
+and the compiled `BOND_BOX_URL` otherwise. The
 key field opens EMPTY, always. When one is already in the keychain it carries
 the hint `Stored. Type to replace` and **Save** goes through with the field
 blank, which is the target editor's own contract: a token that has reached the
@@ -488,9 +491,10 @@ a stage actually goes is data in `stage_targets`, resolved per call through
 
 Each row's right-hand cell is a `DropdownButton<String>` keyed
 `SettingsModelsBody.stagePickerKey(stageId)` over every target, labelled with the
-target's name. An **optional** stage — `draft_improve` today — gets a first item
-`None` whose value is the empty string, and picking it reports null, which is
-what "the Improve button is not there" looks like in the data. `embeddings` keeps
+target's name. No row is OPTIONAL any more: the picker still draws a `None`
+first item for a stage whose `PipelineStageInfo.optional` is true, and
+`draft_improve`, the one row that was, became an ordinary prose stage in
+Round H. `embeddings` keeps
 its chip and model name and gets no picker for the reason it gets no editor:
 every stored vector carries a corpus tag, so there is nothing to choose between.
 A stored id that names a target which has since been removed falls back to the
@@ -768,14 +772,12 @@ a null callback hides its control. Everything it says is unchanged:
 
 It shows, top to bottom:
 
-- **`Bond runs the model server`** — the switch over `AppPrefs.managedServer`,
-  subtitled "One llama-server serves all three models from this Mac. Off, the
-  app expects servers you started yourself." It is the only control that stays
-  live when the preference is off; everything below it is disabled, not hidden,
-  so the row does not jump about while the server stops. Flipping it writes the
-  preference and then starts or stops the process — `_setManagedServer` on
-  `_SettingsHostState`, in that order, because `ensureRunning`/`stop` both ask
-  the preference and would read the old answer if they went first.
+- **`Bond runs the model server`** — a switch over nothing, and on its way out
+  with this card. `AppPrefs.managedServer` stopped being a preference in
+  Round H: it is `managedServerDefault`, true unless the build passed
+  `--dart-define=BOND_DEV_HAND_SERVERS=1`, which is how an engineer running
+  `make model fast embed` by hand says so. The switch now only starts or stops
+  the process (`_setManagedServer` on `_SettingsHostState`) and writes no row.
 - **The state**, as `ServerStateDescribe.summary`: `Stopped`, `Starting… on
   port 8080`, `Loading models (1 of 3) on port 8080`, `Ready on
   127.0.0.1:8080`, `Failed: <reason>`, `Port 8080 is in use[ by <holder>]`, and
@@ -923,7 +925,7 @@ with it.
 
 | Action | Keys | What goes | What stays |
 |---|---|---|---|
-| **Stop sending drafts anywhere** | `settings-stop-cloud-drafts{,-confirm,-keep}` | the `draft_reply` and `draft_improve` stage entries and `cloud_drafts_consent`, so Draft reply resolves to `Local prose` again, `draft_improve` resolves to nothing at all and the Improve a draft button goes with it, and the consent is withdrawn | every row, every target, every keychain bearer and every other stage entry |
+| **Stop sending drafts anywhere** | `settings-stop-cloud-drafts{,-confirm,-keep}` | the `draft_reply` and `draft_improve` stage entries and `cloud_drafts_consent`, so both drafting stages resolve to `AppPrefs.draftFallbackSpec` again, and the consent is withdrawn | every row, every target, every keychain bearer and every other stage entry |
 | **Clear AI results** | `settings-clear-ai-results{,-confirm,-keep}` | every triage verdict, summary, storyline, draft, digest and embedding — the sixteen `MessageStore.derivedTables`, the verdict columns on `messages` and `conversations`, and the stage markers on `attachments` and the library; the activity log is one of the sixteen, so today's **Cloud drafts** count starts again at zero, which the caption above the buttons says | mail, Teams messages, attachments, registered directories, the sign-in and every preference |
 | **Forget everything and re-sync** | `settings-forget-resync{,-confirm,-keep}` | everything above **and** the mailbox itself — `MessageStore.wipeAll(keepIdentity: true)`, cursors and bootstrap floors included | the sign-in, the about-me text, the Needs You rules, the sender rules, the registered directories and every setting |
 
@@ -938,9 +940,10 @@ first means they are already local by the moment consent goes. Consent first
 would leave two stage entries pointing off this machine with nothing but the
 resolver between them and a draft.
 
-The `draft_reply` stage falls back to the local prose target and
-`draft_improve` resolves to nothing at all, which is that stage's own rule, so
-the Improve button goes rather than quietly running on this machine. It is
+Both drafting stages fall back to `AppPrefs.draftFallbackSpec`: the
+user-defined big model on that placement and the local prose target here, and
+never a third-party address, since that is the operator the withdrawal just
+refused. It is
 **not** refused while processing is on, unlike the two resets it sits above:
 it writes preferences and touches no rows, so there is no drain it could race,
 and somebody who has just realised their drafts are leaving the machine should
@@ -1305,7 +1308,7 @@ One `PaneSurface`, whose title is the step's and whose trailing slot reads
 | 6 | Download | `Continue` | One bar per MODEL this Mac's tier wants, smallest first — the writing model's MTP head rides on its model's bar rather than taking one of its own, so the bar counts both files and finishes once. Enabled only when EVERY file is done — see below |
 | 7 | Sign in | `Continue` | `SignInBody(showTitle: false)` when signed out (signing in advances, and there is no Continue); `You're signed in.` and a Continue when already signed in |
 | 8 | Notifications | `Continue` | The press IS the ask. Exactly one button, and the word `Allow` appears nowhere — macOS is about to put its own Allow up |
-| 9 | All set | `Finish` | Folder, port, account, notifications, then this Mac's tier defaults on the local placement only, `managedServer = true` and `setup = 'done'`, and only then the server. It does not touch processing: that is a remembered preference and it starts on |
+| 9 | All set | `Finish` | Folder, port, account, notifications, then this Mac's tier defaults on the local placement only and `setup = 'done'`, and only then the server. Nothing writes `managedServer`: it is a build define since Round H. It does not touch processing either: that is a remembered preference and it starts on |
 
 **`'done'` is written by Finish and by `returnToInbox`, and by nothing else.**
 The second writer never INVENTS the word: it only puts back a value
@@ -1313,8 +1316,7 @@ The second writer never INVENTS the word: it only puts back a value
 it. Arriving at **All set**
 records `notifications` — the step BEFORE it — because `'done'` is the gate's
 sentinel: a quit on the last screen would otherwise let the next launch
-straight past the gate with `managedServer` still off and no wizard left to
-turn it on. A relaunch lands on Notifications instead, whose Continue re-asks
+straight past the gate with no wizard left to walk. A relaunch lands on Notifications instead, whose Continue re-asks
 (macOS answers a settled prompt instantly) and leads back to All set.
 `SetupController.finish` returns whether BOTH writes landed; false keeps the
 wizard on the screen with `Setup could not be saved. Try Finish again.` above

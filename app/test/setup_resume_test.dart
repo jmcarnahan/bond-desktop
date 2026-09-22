@@ -115,6 +115,7 @@ void main() {
       binaryPath: () => '/usr/bin/true',
       buildPreset: () => manifest.toPreset(folder()),
       routerPort: () => 8080,
+      onPortMoved: (_) async {},
       managed: () => false,
     );
   });

@@ -20,7 +20,7 @@ import 'package:bond_inbox/services/notify/desktop_notification_service.dart';
 import 'package:bond_inbox/services/notify/settled_event.dart';
 import 'package:bond_inbox/services/server/model_server_supervisor.dart';
 import 'package:bond_inbox/services/system/system_info.dart';
-import 'package:bond_inbox/widgets/model_slot_editor.dart' show ProbeStatus;
+import 'package:bond_inbox/widgets/probe_status.dart' show ProbeStatus;
 import 'package:bond_inbox/widgets/pane_surface.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -115,9 +115,11 @@ void main() {
       binaryPath: () => '/usr/bin/true',
       buildPreset: () => manifest.toPreset(folder()),
       routerPort: () => 8080,
+      onPortMoved: (_) async {},
       // Off, so Finish's fire-and-forget `ensureRunning` is the no-op it is
-      // on every machine that has not opted in yet. What Finish is tested for
-      // here is the PREFERENCE it writes.
+      // in a hand-servers build. Finish writes no preference about it since
+      // Round H: the build define decides, and the wizard's callback is a
+      // no-op closure until Phase 7 deletes it.
       managed: () => false,
     );
 
@@ -287,7 +289,9 @@ void main() {
 
     expect(finishes, 1);
     expect(await store.get(SetupStore.setupKey), 'done');
-    expect(container.read(appPrefsProvider).managedServer, isTrue);
+    // Not written by Finish: the build define decides, and the suite runs
+    // without the hand-servers define, so the constant answers true.
+    expect(container.read(appPrefsProvider).managedServer, managedServerDefault);
   });
 
   testWidgets('a 16 GB Mac is told what it gets, and offered two models',
@@ -441,7 +445,9 @@ void main() {
                 supervisor: supervisor,
                 paths: AppPaths(support),
                 readPrefs: () => prefs.state,
-                setManagedServer: prefs.setManagedServer,
+                // Nothing to write: whether the app runs its own server is a
+                // build define now, exactly as the provider wires it.
+                setManagedServer: (_) async {},
                 setModelsFolder: prefs.setModelsFolder,
                 applyTierDefaults: prefs.applyTierDefaults,
                 probe: probe,
@@ -450,7 +456,7 @@ void main() {
                   required key,
                   required hardwareTier,
                 }) =>
-                    prefs.useBox(
+                    prefs.useBoxOrigin(
                       baseUrl: baseUrl,
                       key: key,
                       hardwareTier: hardwareTier,
@@ -537,7 +543,8 @@ void main() {
       makeWithPrefs(
         initial: const AppPrefs(
           modelPlacement: ModelPlacement.box,
-          boxUrl: 'https://box.example.com',
+          boxBigUrl: 'https://box.example.com/prose/v1/chat/completions',
+          boxSmallUrl: 'https://box.example.com/bulk/v1/chat/completions',
         ),
       );
       await reachWhere(tester);
@@ -633,7 +640,8 @@ void main() {
       // The placement, the address, and the key in the keychain under BOTH
       // derived ids rather than in a preference.
       expect(prefs.state.modelPlacement, ModelPlacement.box);
-      expect(prefs.state.effectiveBoxUrl, 'https://box.example.com');
+      expect(prefs.state.effectiveBoxBigUrl,
+          'https://box.example.com/prose/v1/chat/completions');
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'],
           'sk-fixture-not-a-real-box-key');
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxBulkId'],
@@ -681,7 +689,7 @@ void main() {
       expect(find.text('Where the models run'), findsOneWidget,
           reason: 'a refused address does not advance the wizard');
       expect(prefs.state.modelPlacement, ModelPlacement.local);
-      expect(prefs.state.boxUrl, isEmpty);
+      expect(prefs.state.boxBigUrl, isEmpty);
       expect(tokens.values, isEmpty);
 
       // Typing clears it.
@@ -720,7 +728,7 @@ void main() {
       makeWithPrefs();
       // The install this wizard is re-entered on: the address, the key in the
       // keychain and the placement.
-      await prefs.useBox(
+      await prefs.useBoxOrigin(
         baseUrl: 'https://box.example.com',
         key: 'sk-fixture-not-a-real-box-key',
         hardwareTier: MachineTier.full,
@@ -743,7 +751,8 @@ void main() {
       // where the models run is not forgetting how to reach the box.
       expect(prefs.state.modelPlacement, ModelPlacement.local);
       expect(prefs.state.stageTargets, isEmpty);
-      expect(prefs.state.boxUrl, 'https://box.example.com');
+      expect(prefs.state.boxBigUrl,
+          'https://box.example.com/prose/v1/chat/completions');
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'],
           'sk-fixture-not-a-real-box-key');
 
@@ -754,7 +763,7 @@ void main() {
     testWidgets('a box install re-entered continues with the field blank and '
         'keeps its key', (tester) async {
       makeWithPrefs();
-      await prefs.useBox(
+      await prefs.useBoxOrigin(
         baseUrl: 'https://box.example.com',
         key: 'sk-fixture-not-a-real-box-key',
         hardwareTier: MachineTier.full,
@@ -766,7 +775,8 @@ void main() {
       // Still the box, still the same key under both ids, and the models
       // step is the box's one model.
       expect(prefs.state.modelPlacement, ModelPlacement.box);
-      expect(prefs.state.boxUrl, 'https://box.example.com');
+      expect(prefs.state.boxBigUrl,
+          'https://box.example.com/prose/v1/chat/completions');
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'],
           'sk-fixture-not-a-real-box-key');
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxBulkId'],

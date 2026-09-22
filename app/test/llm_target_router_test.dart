@@ -12,8 +12,11 @@ import 'package:flutter_test/flutter_test.dart';
 /// the one place where turning a switch on could silently take a server away
 /// from somebody who deliberately chose one.
 
-const AppPrefs _handStarted = AppPrefs();
-const AppPrefs _managed = AppPrefs(managedServer: true);
+/// The build that hands the servers over — `BOND_DEV_HAND_SERVERS` — said
+/// here as the field it sets, because the define is compiled and a test cannot
+/// pass one. [_managed] is what every shipped build reads.
+const AppPrefs _handStarted = AppPrefs(managedServer: false);
+const AppPrefs _managed = AppPrefs();
 
 void main() {
   test('unmanaged, every slot is exactly what it always was', () {
@@ -48,7 +51,6 @@ void main() {
 
   test('a stored override keeps its slot, and only its slot', () {
     const prefs = AppPrefs(
-      managedServer: true,
       fastLlmUrl: 'http://127.0.0.1:9000/v1/chat/completions',
       fastLlmModel: 'mlx-4b',
     );
@@ -68,13 +70,13 @@ void main() {
     // Only the model is stored, so the URL falls back to the compiled default
     // rather than to the router: the slot is not on the build's own values,
     // and the rule is about the PAIR.
-    const prefs = AppPrefs(managedServer: true, fastLlmModel: 'mlx-4b');
+    const prefs = AppPrefs(fastLlmModel: 'mlx-4b');
     expect(prefs.fastTarget.baseUrl, fastUrlDefault);
     expect(prefs.fastTarget.model, 'mlx-4b');
   });
 
   test('moving the port moves all three targets together', () {
-    const prefs = AppPrefs(managedServer: true, routerPort: 9310);
+    const prefs = AppPrefs(routerPort: 9310);
     expect(prefs.routerBase, 'http://127.0.0.1:9310');
     expect(
       prefs.fastTarget.baseUrl,
@@ -124,7 +126,7 @@ void main() {
     expect(_managed.isSlotDefault(ModelSlot.fast), isTrue);
     expect(_managed.isSlotDefault(ModelSlot.prose), isTrue);
     expect(_managed.isSlotDefault(ModelSlot.embed), isTrue);
-    const overridden = AppPrefs(managedServer: true, proseLlmUrl: 'http://x/y');
+    const overridden = AppPrefs(proseLlmUrl: 'http://x/y');
     expect(overridden.isSlotDefault(ModelSlot.prose), isFalse);
   });
 }

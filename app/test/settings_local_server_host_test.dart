@@ -59,6 +59,7 @@ class _RecordingSupervisor extends ModelServerSupervisor {
     required super.binaryPath,
     required super.buildPreset,
     required super.routerPort,
+    required super.onPortMoved,
     required super.managed,
   });
 
@@ -104,6 +105,7 @@ void main() {
           container?.read(appPrefsProvider).routerPort ??
           AppPrefs.defaultRouterPort,
       managed: () => container?.read(appPrefsProvider).managedServer ?? false,
+      onPortMoved: (_) async {},
     );
     container = null;
   });
@@ -153,46 +155,6 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
   }
 
-  Future<void> tapKey(WidgetTester tester, Key key) async {
-    final target = find.byKey(key);
-    await tester.ensureVisible(target);
-    await tester.pump();
-    await tester.tap(target);
-    await tester.pump();
-    await tester.pump();
-    await tester.pump();
-  }
-
-  testWidgets('the switch writes the preference before it asks for a server',
-      (tester) async {
-    await pumpInbox(tester);
-    await openModels(tester);
-
-    await tapKey(tester, SettingsLocalServerBody.managedKey);
-
-    expect(await store.getPref(managedServerKey), 'true');
-    // `managed=true` is the assertion, not the call itself: the supervisor
-    // asks the preference at the top of `ensureRunning`, so a host that
-    // started the server first would have left `false` here and spawned
-    // nothing at all.
-    expect(supervisor.calls, ['ensureRunning managed=true port=8080']);
-  });
-
-  testWidgets('turning it off stops the server against the new preference',
-      (tester) async {
-    await store.setPref(managedServerKey, 'true');
-    await pumpInbox(tester);
-    await openModels(tester);
-
-    await tapKey(tester, SettingsLocalServerBody.managedKey);
-
-    expect(await store.getPref(managedServerKey), 'false');
-    // The same ordering from the other side: `stop` emits `ServerDisabled`
-    // rather than `ServerStopped` only because the preference is already off
-    // when it runs.
-    expect(supervisor.calls, ['stop managed=false']);
-  });
-
   /// The port, through the closure the host handed the card.
   ///
   /// Not through the button: once the Models section is expanded the card is
@@ -203,7 +165,6 @@ void main() {
   /// the host does when it is called.
   testWidgets('a saved port lands in prefs, and the restart is onto it',
       (tester) async {
-    await store.setPref(managedServerKey, 'true');
     await pumpInbox(tester);
     await openModels(tester);
 

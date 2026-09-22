@@ -5,7 +5,7 @@ import '../../services/llm/model_slots.dart'
     show ModelPlacement, isBoxOrigin, normalizeBoxBaseUrl;
 import '../../theme/tokens.dart';
 import '../../widgets/inline_alert.dart';
-import '../../widgets/model_slot_editor.dart' show ProbeStatus;
+import '../../widgets/probe_status.dart' show ProbeStatus;
 import 'setup_controls.dart';
 
 /// Where the models run: the GPU server, or this Mac.
@@ -137,7 +137,7 @@ class SetupWhereBody extends StatefulWidget {
   ///
   /// The rule belongs to the FORM rather than to either host, so the wizard
   /// and the Settings page refuse the same address in the same words. It is
-  /// the rule `setBoxUrl` throws on, said here before the press reaches it:
+  /// the rule `setBoxServers` throws on, said here before the press reaches it:
   /// both presses are fire-and-forget, and a throw past one of them is an
   /// unhandled error and, to the person, a button that did nothing.
   static const String addressRefusalText =

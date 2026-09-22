@@ -26,7 +26,7 @@ the client or anything watching it (see **Runtime overrides** below).
 | `storyline_recap` | `Local prose` | `make model` |
 | `reply_decision` | `Local prose` | `make model` |
 | `draft_reply` | `Local prose` | `make model` |
-| `draft_improve` | none until picked | nothing — the button is hidden |
+| `draft_improve` | `Local prose` | `make model` |
 | `embeddings` | not routed | `make embed` |
 
 **A small Mac starts from a different map.** The table above is the FULL tier,
@@ -34,13 +34,13 @@ which is a machine with 40 GiB of memory or more, and also a machine whose
 memory could not be read at all: `machineTierFor` answers `full` for zero bytes,
 the never-refuse rule `HardwareInfo.unknown` states, so nothing is withheld over
 a fact the app failed to read. Below the threshold the machine is the INBOX
-tier: the writing model is neither downloaded nor started, and six of the seven
-prose-slot rows above, every one but `draft_improve`, start on `Local fast`
-instead, meaning `storyline_group`, `storyline_name`, `storyline_refresh`,
-`storyline_recap`, `reply_decision` and `draft_reply`. `draft_improve` is the
-seventh and no tier writes it, for the reason no preset writes it either: it is
-the one stage a person picks explicitly, and a tier that turned it on would be
-consent by accident. `AppPrefsNotifier.applyTierDefaults` is the one writer of
+tier: the writing model is neither downloaded nor started, and all seven
+prose-slot rows above start on `Local fast` instead, meaning `storyline_group`,
+`storyline_name`, `storyline_refresh`, `storyline_recap`, `reply_decision`,
+`draft_reply` and `draft_improve`. `draft_improve` joined them in Round H, when
+it stopped being optional: a prose stage left behind would be dialling a
+writing server this tier never starts.
+`AppPrefsNotifier.applyTierDefaults` is the one writer of
 that map, called by the setup wizard at Finish and again whenever somebody
 presses **Use this Mac's defaults** under Settings, Models. It writes the way a
 preset does, so an entry equal to a stage's own default is removed rather than
@@ -58,10 +58,9 @@ wholesale:
 
 | Stage group | Target | Model |
 |-------------|--------|-------|
-| the eight bulk stages | `GPU box · inbox` (`box-bulk`) | `qwen3-4b` |
-| the six prose stages | `GPU box · writing` (`box-prose`) | `qwen3.8` |
-| `storyline_membership`, the confirm | `GPU box · writing` (`box-prose`) | `qwen3.8` |
-| `draft_improve` | none until picked | nothing |
+| the seven bulk stages | `Your server · small model` (`box-bulk`) | the small server's own model |
+| the seven prose stages | `Your server · big model` (`box-prose`) | the big server's own model |
+| `storyline_membership`, the confirm | `Your server · big model` (`box-prose`) | the big server's own model |
 | `embeddings` | not routed, and stays on this Mac | `make embed` |
 
 `storyline_membership` appears twice on purpose: it is a fast-slot stage
@@ -72,15 +71,29 @@ Until Round H the outcome depended on the ORDER of two preset calls, because
 the stage is in both `bulkStageIds` and `confirmStageIds`; it is now a rule
 nothing can reorder.
 
-**The placement rule.** Nothing in the table above is stored. The box's two
-targets are DERIVED from one preference, `box_url`, whose empty value means
-"follow the build's `BOND_BOX_URL`", by `AppPrefs.boxProseSpec` and
-`AppPrefs.boxBulkSpec` exactly as the two built-ins are derived from the four
-slot prefs. Which target a stage resolves to when nothing is stored for it is
+**The placement rule.** Nothing in the table above is stored. The pair is
+DERIVED from four preferences — `box_big_url` and `box_small_url`, two
+chat-completions URLs, and `box_big_model` and `box_small_model`, the model
+names DISCOVERED from each server's own `/v1/models` — by
+`AppPrefs.boxProseSpec` and `AppPrefs.boxBulkSpec`, exactly as the two
+built-ins are derived from the four slot prefs. An empty value means "follow
+the build": the compiled `BOND_BOX_URL` still derives both URLs under `/prose`
+and `/bulk`, and the two constants that box serves are the model names, so a
+tester who pastes only a key is where they always were. `hasBox` is both URLs
+resolving non-empty, because a rule that sent the big stages to an address and
+the small ones nowhere would park half the pipeline. The WIRE is read off each
+host (`wireForHost`), so a Bedrock endpoint speaks Converse without anybody
+choosing a protocol, and the request WIDTH is four for an address that follows
+the build — the compiled box is two vLLM servers started with four sequences
+each — and one for any stored address, because a one-slot llama-server queues
+the other three past the prose client's ninety-second ceiling and reads as
+broken.
+
+Which target a stage resolves to when nothing is stored for it is
 `placementDefaultTargetId(placement:, hasBox:, stageId:)` in `model_slots.dart`:
 on the box with an address to dial, `bigModelStageIds` answer `box-prose` and
 `smallModelStageIds` answer `box-bulk`; everywhere else the answer is the
-slot's built-in. `bigModelStageIds` is the six prose stages plus the confirm,
+slot's built-in. `bigModelStageIds` is the seven prose stages plus the confirm,
 `smallModelStageIds` is the other seven bulk stages, and `model_slots_test`
 pins both against `pipelineStages` so neither can drift from the stage table.
 
@@ -90,16 +103,24 @@ picking `box-bulk` for the confirm on the box writes an entry and picking
 `AppPrefsNotifier.usePlacement` drops every entry whose value is one the app
 itself could have written, either box id, a slot's built-in or an inbox-tier
 pick, and keeps everything else, because a hand-picked target is a choice
-somebody made. An optional stage's entry is kept whatever it names, since that
-entry is the feature being on.
+somebody made.
 
-An install that adopted the box under Round G carries two real `llm_targets`
-rows and fifteen `stage_targets` entries. `AppPrefsNotifier.read` lifts the origin out
-of the writing row into `box_url`, drops the pair, drops the entries that now
-equal what the rule answers anyway, and writes `box_targets_derived = 1` so it
-runs at most once. The keychain is untouched: the entries are still
-`llm_target_bearer:box-prose` and `:box-bulk`, which is what the derived specs
-ask for, so nobody types the key again.
+Since Round H there is no screen that WRITES one. The stage picker went with
+the Advanced fold, so the entries a person could have stored are the ones a
+migration cleared: `stage_targets_cleared = 1` empties the map once, and
+`llm_targets` rows are left where they are, inert because nothing names them.
+
+`AppPrefsNotifier.read` carries three one-shots, in this order and no other.
+`box_targets_derived = 1` lifts a Round G install's two `llm_targets` rows into
+the `box_url` origin and drops the pair. `box_servers_derived = 1` splits that
+origin into `box_big_url` and `box_small_url` and empties `box_url`, which is
+kept as a constant for these two migrations and written by nothing.
+`stage_targets_cleared = 1` empties the map. All three are plain prefs and
+deliberately not in `MessageStore.derivedOneShotPrefs`: that list is what a
+wipe re-runs, and none of them guards a corpus. The keychain is untouched
+throughout: the entries are still `llm_target_bearer:box-prose` and
+`:box-bulk`, which is what the derived specs ask for, so nobody types a key
+again.
 
 **What travels, on that placement.** Message text, attachment text and drafts
 go to the owner's own AWS instance over TLS, keyed with an api-key that lives
@@ -138,9 +159,12 @@ grouping and runs only under `StorylineTuning.groupingMode ==
 GroupingMode.model`, which is not what ships — it has a stage row, a client
 and a default so that pointing it somewhere is a setting rather than a code
 change the day it does (see [06-storylines.md](06-storylines.md#grouping)).
-`draft_improve` is the one OPTIONAL stage: it has no target until the user
-picks one, it runs `DraftTask` rather than a task of its own, and its
-button is hidden until then.
+`draft_improve` is routed like every other prose stage since Round H. It runs
+`DraftTask` rather than a task of its own, which is why `model_slots_test`
+exempts it from the check that every row has a task behind it, and the Improve
+button is always there. It was OPTIONAL until Round H — no target until
+somebody picked one, its entry being the feature turned on — and the only way
+to write that entry was the stage picker the same round deleted.
 
 Changing a stage's DEFAULT is one row in `pipelineStages`
 (`app/lib/services/llm/model_slots.dart`) and an edit here; changing where a
@@ -166,8 +190,8 @@ and without interrupting work in flight.
   default rather than throwing; a removed target takes its stage entries with
   it in the same write. The three presets on the add screen — prose stages,
   storyline confirm, all bulk stages — are `proseStageIds`,
-  `confirmStageIds` and `bulkStageIds` in `model_slots.dart`, and neither
-  `draft_improve` nor `embeddings` is in any of them.
+  `confirmStageIds` and `bulkStageIds` in `model_slots.dart`, and `embeddings`
+  is in none of them because it is not routed at all.
 - **A bearer lives in the keychain.** `llm_target_bearer:<id>` via
   `SecureTokenStore`; the JSON carries only the boolean `bearer`, a presence
   flag. It is read once per launch into a private cache on `AppPrefsNotifier`
@@ -185,8 +209,10 @@ and without interrupting work in flight.
   or by the public name AWS gave it, and mail going there is not mail going to
   a vendor. Loopback is deliberately not the test either: the box also arrives
   on an `ssh` tunnel at `localhost:18100`. Such a target on `draft_reply` or
-  `draft_improve` needs `cloud_drafts_consent`; without it `draft_reply`
-  resolves back to `Local prose` and `draft_improve` resolves to nothing. The
+  `draft_improve` needs `cloud_drafts_consent`; without it both resolve to
+  `AppPrefs.draftFallbackSpec`, which is the user-defined big model on that
+  placement and `Local prose` here — and never a third-party address, since
+  that is the operator the consent just refused. The
   check lives in `AppPrefs.specForStage`, where the target is RESOLVED, so a
   stage map restored from a backup cannot route a draft off the machine on its
   own. Every other stage may be pointed anywhere without asking.
@@ -302,20 +328,23 @@ nothing changed behaves exactly as this page has always described.
   tail. Reaching ready RESETS the count: a launch that came up has proved it
   can, so a server that crashes once a week and recovers gets the whole ladder
   every time rather than being given up on for good on its fourth crash. A
-  `couldn't bind` line is the exception that is never retried — no amount of
-  waiting frees a port somebody else is holding.
+  `couldn't bind` line is not retried at any backoff — no amount of waiting
+  frees a port somebody else is holding — but it IS retried once on a fresh
+  port, which is the race the preflight cannot close: the port answered free
+  and was taken by the time the child bound it. A second bind failure is
+  `ServerPortInUse`, the one case that state survives for.
 - **Three ids, one origin.** The preset names its models for the ROLE rather
   than the checkpoint — `bond-prose`, `bond-bulk`, `bond-embed`
   (`model_slots.dart`) — because the router routes on the model name alone.
   Swapping which GGUF fills a role is then a change to the preset and to
   nothing else: no stored target, no request and no test learns the new
   checkpoint's name.
-- **How `targetFor` routes.** With `managed_server` on, a slot whose override
-  is EMPTY — both the URL and the model — answers
+- **How `targetFor` routes.** With the app running its own server, a slot whose
+  override is EMPTY — both the URL and the model — answers
   `http://127.0.0.1:<router_port>/v1/chat/completions` with its router id.
   A slot with a stored override keeps it. That asymmetry is deliberate: an
   override is somebody deliberately pointing the app at a server they run, and
-  turning the managed server on must not silently take it away. Clearing the
+  the app's own server must not silently take it away. Clearing the
   override is what hands the slot back to the router. In managed mode the
   editors' "Default" is that router target too (`AppPrefs.slotBaseline`), so
   pressing Save without editing writes an empty override and the slot keeps
@@ -331,9 +360,8 @@ nothing changed behaves exactly as this page has always described.
 - **Whose job it is to start it.** `EmbeddingsClient` also takes a
   `describeUnavailable` closure. Unmanaged, a refused connection reads
   `is not reachable — run: make embed`; managed, it reads
-  `is not running — see Settings › Models › Local server`, because naming a
-  Makefile target would send the user back to a workflow they have opted out
-  of.
+  `is not running — see Settings, Models`, because naming a Makefile target
+  would send the user back to a workflow they have opted out of.
 - **`LLAMA_CACHE`.** The child is pointed at an EMPTY directory
   (`servers/empty-cache`). `--no-models-autoload` stops the router loading
   models it was not asked for, but it still LISTS everything in the Hugging
@@ -364,13 +392,22 @@ nothing changed behaves exactly as this page has always described.
   adopting the Homebrew server a `BOND_LLAMA_SERVER` session left behind and
   reporting Ready for it; the port check is what stops a record written before
   a port change being adopted while every client dials the new one.
-- **Off by default.** `managed_server` reads false for an absent key, and the
-  compiled slot defaults stay `localhost:8080` / `8082` / `8081`, so the
-  three-server `make model | fast | embed` workflow is byte-identical until
-  somebody opts in. The port (`router_port`, default 8080) and the models
-  folder (`models_folder`, empty = the app's own
+- **On unless the BUILD says otherwise.** `AppPrefs.managedServer` stopped
+  being a preference in Round H: there is no `managed_server` row, no setter
+  and no switch. It defaults to `managedServerDefault` in `model_slots.dart`,
+  which is true unless the build passed
+  `--dart-define=BOND_DEV_HAND_SERVERS=1` — read as a VALUE, on
+  `BOND_DEV_SKIP_SETUP`'s precedent, so `=0` means what somebody who wrote it
+  meant. That define is for the engineers who run `make model fast embed` by
+  hand: with it, the compiled slot defaults stay `localhost:8080` / `8082` /
+  `8081` and the three-server workflow is byte-identical. The Makefile passes
+  it exactly as it passes the skip. The port (`router_port`, default 8080) and
+  the models folder (`models_folder`, empty = the app's own
   `~/Library/Application Support/com.bondinbox.app/models`) survive `wipeAll`
-  with the four slot prefs and for the same reason.
+  with the four slot prefs and for the same reason. A port that is BUSY is not
+  a question for the user: the supervisor asks the runner for a free one, tells
+  the host through `onPortMoved` — wired to `setRouterPort` and awaited, so the
+  preference, the pid record and the clients agree — and starts there.
 
 ### The manifest
 

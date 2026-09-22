@@ -258,6 +258,7 @@ void main() {
           manifest.forTier(machineTierFor(system.hardwareInfo.memoryBytes))
               .toPreset(folder()),
       routerPort: () => 8080,
+      onPortMoved: (_) async {},
       managed: () => managed,
     );
   });

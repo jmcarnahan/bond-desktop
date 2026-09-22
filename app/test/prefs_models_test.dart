@@ -15,7 +15,10 @@ import 'fixtures/test_db.dart';
 /// default is a fact about this machine's `local.mk`, so resolving it on read
 /// would freeze today's dart-define into the database and make a changed one
 /// invisible. Empty is stored as empty, and only [AppPrefs.fastTarget] and
-/// [AppPrefs.proseTarget] turn it into the compiled default.
+/// [AppPrefs.proseTarget] turn it into the build's baseline: the managed
+/// router's target in every shipped build, and the compiled default only in a
+/// build that says `BOND_DEV_HAND_SERVERS`. `slotBaseline` is that answer,
+/// which is why the cases below compare against it rather than a constant.
 
 void main() {
   late BondDatabase db;
@@ -45,8 +48,8 @@ void main() {
     expect(await store.getPref(proseLlmModelKey), isNull);
 
     final prefs = ref.read(appPrefsProvider);
-    expect(prefs.fastTarget, fastSlotDefault);
-    expect(prefs.proseTarget, proseSlotDefault);
+    expect(prefs.fastTarget, prefs.slotBaseline(ModelSlot.fast));
+    expect(prefs.proseTarget, prefs.slotBaseline(ModelSlot.prose));
     expect(prefs.isSlotDefault(ModelSlot.fast), isTrue);
     expect(prefs.isSlotDefault(ModelSlot.prose), isTrue);
   });
@@ -90,7 +93,8 @@ void main() {
           model: 'mlx-4b',
         );
 
-    expect(ref.read(appPrefsProvider).proseTarget, proseSlotDefault);
+    expect(ref.read(appPrefsProvider).proseTarget,
+        ref.read(appPrefsProvider).slotBaseline(ModelSlot.prose));
     expect(ref.read(appPrefsProvider).isSlotDefault(ModelSlot.prose), isTrue);
   });
 
@@ -104,7 +108,8 @@ void main() {
     );
     await notifier.setFastLlmTarget(url: '', model: '');
 
-    expect(ref.read(appPrefsProvider).fastTarget, fastSlotDefault);
+    expect(ref.read(appPrefsProvider).fastTarget,
+        ref.read(appPrefsProvider).slotBaseline(ModelSlot.fast));
     // The assertion that pins the difference from `mcpServerUrl`: what is
     // STORED is empty, not the resolved default string.
     final store = MessageStore(db);
@@ -120,7 +125,8 @@ void main() {
 
     final ref = await container();
 
-    expect(ref.read(appPrefsProvider).fastTarget, fastSlotDefault);
+    expect(ref.read(appPrefsProvider).fastTarget,
+        ref.read(appPrefsProvider).slotBaseline(ModelSlot.fast));
     expect(ref.read(appPrefsProvider).isSlotDefault(ModelSlot.fast), isTrue);
   });
 
@@ -148,7 +154,8 @@ void main() {
     );
     await notifier.clearSlotTarget(ModelSlot.prose);
 
-    expect(ref.read(appPrefsProvider).proseTarget, proseSlotDefault);
+    expect(ref.read(appPrefsProvider).proseTarget,
+        ref.read(appPrefsProvider).slotBaseline(ModelSlot.prose));
     expect(await MessageStore(db).getPref(proseLlmUrlKey), '');
   });
 
@@ -168,7 +175,7 @@ void main() {
     await notifier.clearSlotTarget(ModelSlot.embed);
 
     final prefs = ref.read(appPrefsProvider);
-    expect(prefs.targetFor(ModelSlot.embed), embedSlotDefault);
+    expect(prefs.targetFor(ModelSlot.embed), prefs.slotBaseline(ModelSlot.embed));
     expect(prefs.isSlotDefault(ModelSlot.embed), isTrue);
     // And the other two still answer their own overrides.
     expect(prefs.targetFor(ModelSlot.fast), prefs.fastTarget);

@@ -714,7 +714,7 @@ void main() {
 
     test('a small Mac whose big steps run on the 4B says so', () {
       // The name follows the TARGET the role resolves to, never the role: an
-      // inbox-tier Mac points its six prose steps at Local fast, and a row
+      // inbox-tier Mac points its seven prose steps at Local fast, and a row
       // that said 27B there would be naming a model the Mac is not running.
       expect(
         SettingsModelsSimple.roleDetail(role: StageRole.big, spec: _localFast),
@@ -881,6 +881,8 @@ void main() {
 
   group('the rows the host builds', () {
     const url = 'https://box.example.com';
+    const bigUrl = '$url/prose/v1/chat/completions';
+    const smallUrl = '$url/bulk/v1/chat/completions';
     const own = LlmTargetSpec(
       id: 't-1a2b3c4d',
       name: 'Studio box',
@@ -908,7 +910,8 @@ void main() {
     test('a box install reads the two the box serves, with the key by id', () {
       const prefs = AppPrefs(
         modelPlacement: ModelPlacement.box,
-        boxUrl: url,
+        boxBigUrl: bigUrl,
+        boxSmallUrl: smallUrl,
         boxKeyStored: true,
       );
       final rows = RoleLine.fromPrefs(prefs);
@@ -923,7 +926,11 @@ void main() {
       // No key in the keychain: the rows still point at the box, and Check
       // sends nothing rather than a token nobody stored.
       final bare = RoleLine.fromPrefs(
-        const AppPrefs(modelPlacement: ModelPlacement.box, boxUrl: url),
+        const AppPrefs(
+          modelPlacement: ModelPlacement.box,
+          boxBigUrl: bigUrl,
+          boxSmallUrl: smallUrl,
+        ),
       );
       expect(row(bare, 'big').bearerId, isNull);
     });
@@ -932,7 +939,8 @@ void main() {
         'and its Check still asks the prose target', () {
       const prefs = AppPrefs(
         modelPlacement: ModelPlacement.box,
-        boxUrl: url,
+        boxBigUrl: bigUrl,
+        boxSmallUrl: smallUrl,
         stageTargets: {'storyline_membership': boxBulkId},
       );
       final rows = RoleLine.fromPrefs(prefs);
@@ -971,18 +979,18 @@ void main() {
       expect(row(rows, 'big').checkUrl, own.url);
     });
 
-    test('an optional stage never makes a role Custom', () {
+    test('a pick on Improve a draft counts like any other prose step', () {
+      // It used to be exempt: an optional stage was not a member of any role,
+      // so a target on it could not make a row read Custom. Round H made it a
+      // prose stage, so it is one of the seven the big row describes.
       const prefs = AppPrefs(
         targets: [own],
         stageTargets: {'draft_improve': 't-1a2b3c4d'},
       );
-      expect(
-        row(RoleLine.fromPrefs(prefs), 'big').detail,
-        'Qwen3.8 27B on this Mac',
-      );
+      expect(row(RoleLine.fromPrefs(prefs), 'big').detail, custom1);
     });
 
-    test('a small Mac’s six prose steps on the 4B read as the 4B', () {
+    test('a small Mac’s seven prose steps on the 4B read as the 4B', () {
       final prefs =
           AppPrefs(stageTargets: tierStageDefaults(MachineTier.inbox));
       final rows = RoleLine.fromPrefs(prefs);
@@ -1001,7 +1009,8 @@ void main() {
       );
       const prefs = AppPrefs(
         modelPlacement: ModelPlacement.box,
-        boxUrl: url,
+        boxBigUrl: bigUrl,
+        boxSmallUrl: smallUrl,
         targets: [cloud],
         stageTargets: {'draft_reply': 'cloud-1'},
       );

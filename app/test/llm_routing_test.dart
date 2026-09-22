@@ -325,13 +325,20 @@ void main() {
       // test's tearDown has already closed.
       await container.read(appPrefsProvider.notifier).ready;
 
-      expect(container.read(stageLlmClientProvider('draft_reply')).baseUrl,
-          LlmClient.defaultBaseUrl);
-      expect(container.read(stageLlmClientProvider('triage')).baseUrl,
-          LlmClient.fastBaseUrl);
-      // Not the same server, and not the same object — two servers is the
-      // point, and one stage accidentally aliasing the other would route
-      // every label back onto the 27B.
+      // The app runs its own server unless the build hands them over, so a
+      // slot on the build's own values is the ROUTER's target: one port, and
+      // the model is what says which of its models a stage asks for.
+      final prefs = container.read(appPrefsProvider);
+      final draft = container.read(stageLlmClientProvider('draft_reply'));
+      final triage = container.read(stageLlmClientProvider('triage'));
+      expect(draft.baseUrl, prefs.routerProseTarget.baseUrl);
+      expect(draft.model, routerProseId);
+      expect(triage.baseUrl, prefs.routerBulkTarget.baseUrl);
+      expect(triage.model, routerBulkId);
+      // Two models, and not the same object — one stage accidentally aliasing
+      // the other would route every label back onto the 27B.
+      expect(draft.model, isNot(triage.model));
+      // And a build that hands the servers over still has two servers.
       expect(LlmClient.fastBaseUrl, isNot(LlmClient.defaultBaseUrl));
       expect(
         identical(container.read(stageLlmClientProvider('draft_reply')),
@@ -439,7 +446,8 @@ void main() {
       await container.read(appPrefsProvider.notifier).ready;
 
       final client = container.read(stageLlmClientProvider('triage'));
-      expect(client.baseUrl, LlmClient.fastBaseUrl);
+      expect(client.baseUrl,
+          container.read(appPrefsProvider).routerBulkTarget.baseUrl);
 
       await container.read(appPrefsProvider.notifier).setFastLlmTarget(
             url: 'http://127.0.0.1:9/v1/chat/completions',
@@ -476,8 +484,9 @@ void main() {
       expect(prose.baseUrl, 'http://127.0.0.1:9/v1/chat/completions');
       expect(prose.model, 'mlx-27b');
       // Two slots, not one setting: moving prose must not move the bulk work.
-      expect(fast.baseUrl, LlmClient.fastBaseUrl);
-      expect(fast.model, LlmClient.fastModel);
+      final bulk = container.read(appPrefsProvider).routerBulkTarget;
+      expect(fast.baseUrl, bulk.baseUrl);
+      expect(fast.model, bulk.model);
       // And two ceilings. Prose runs one long call — a draft at every input
       // cap — so it gets the number sized to that; the bulk client's calls
       // answer in seconds, so its 120 costs nothing and stays.
@@ -495,7 +504,9 @@ void main() {
 
       final triage = container.read(stageLlmClientProvider('triage'));
       final extraction = container.read(stageLlmClientProvider('extraction'));
-      expect(triage.baseUrl, LlmClient.fastBaseUrl);
+      final bulkUrl =
+          container.read(appPrefsProvider).routerBulkTarget.baseUrl;
+      expect(triage.baseUrl, bulkUrl);
 
       await prefs.upsertTarget(
         const LlmTargetSpec(
@@ -511,7 +522,7 @@ void main() {
       // moves and its neighbour on the same slot does not.
       expect(triage.baseUrl, 'http://127.0.0.1:9/v1/chat/completions');
       expect(triage.model, 'qwen3-4b');
-      expect(extraction.baseUrl, LlmClient.fastBaseUrl);
+      expect(extraction.baseUrl, bulkUrl);
       // And still the same instances, for the reason above.
       expect(identical(container.read(stageLlmClientProvider('triage')), triage),
           isTrue);

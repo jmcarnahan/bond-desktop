@@ -4,7 +4,6 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/widgets/icon_rail.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/system/system_info.dart' show HardwareInfo;
@@ -221,9 +220,13 @@ void main() {
     // is what "follow the build" is stored as.
     expect(await store.getPref(fastLlmUrlKey), '');
     expect(await store.getPref(fastLlmModelKey), '');
+    // And a slot on the build's own values is the ROUTER's target, because
+    // this build runs its own server — which is what the compiled default
+    // means on every install that passes no `BOND_DEV_HAND_SERVERS`.
+    final expected = container.read(appPrefsProvider).routerBulkTarget;
     final triage = container.read(stageLlmClientProvider('triage'));
-    expect(triage.baseUrl, LlmClient.fastBaseUrl);
-    expect(triage.model, fastModelDefault);
+    expect(triage.baseUrl, expected.baseUrl);
+    expect(triage.model, expected.model);
   });
 
   testWidgets('About shows what the two providers resolved', (tester) async {
@@ -308,7 +311,7 @@ void main() {
     // A box install with no key, made the way the wizard and the page make
     // one, then one hand pick moving membership onto the small model.
     final notifier = container.read(appPrefsProvider.notifier);
-    await notifier.useBox(
+    await notifier.useBoxOrigin(
       baseUrl: 'https://box.example.com',
       hardwareTier: MachineTier.full,
     );

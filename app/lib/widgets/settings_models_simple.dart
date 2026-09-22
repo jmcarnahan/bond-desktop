@@ -19,7 +19,7 @@ import '../services/llm/model_slots.dart'
         normalizeBoxBaseUrl,
         pipelineStages;
 import '../theme/tokens.dart';
-import 'model_slot_editor.dart' show ProbeStatus;
+import 'probe_status.dart' show ProbeStatus;
 import 'settings_models_body.dart' show SettingsModelsBody;
 import 'settings_section.dart';
 import 'settings_segments.dart';
@@ -67,15 +67,14 @@ class RoleLine {
   /// them. The host calls this and hands the result down; a test calls it on
   /// an [AppPrefs] it built.
   ///
-  /// A role's steps are every non-optional stage the placement's rule sends
-  /// to the same default target as the role's LEAD stage, `draft_reply` for
-  /// the big model and `triage` for the small. Membership is read off
+  /// A role's steps are every stage the placement's rule sends to the same
+  /// default target as the role's LEAD stage, `draft_reply` for the big model
+  /// and `triage` for the small. Membership is read off
   /// `defaultTargetIdForStage` rather than off `roleOfStage`, and the two
   /// disagree on purpose: storyline membership is the big model's work on the
   /// box and the small model's on this Mac, so grouping by the enum would read
-  /// every local install as Custom. Optional stages are skipped for the reason
-  /// `usePlacement` keeps their entries: an unrouted `draft_improve` is the
-  /// Improve button being off, not a step pointing elsewhere.
+  /// every local install as Custom. `draft_improve` is one of the big model's
+  /// steps like the reply it improves on; nothing is optional any more.
   ///
   /// The row describes the target MOST of the role's steps resolve to, and the
   /// count is how many do not, so one odd step reads as one wherever it sits,
@@ -92,9 +91,7 @@ class RoleLine {
       final byDefault = prefs.defaultTargetIdForStage(lead);
       final members = [
         for (final stage in pipelineStages)
-          if (!stage.optional &&
-              prefs.defaultTargetIdForStage(stage.id) == byDefault)
-            stage.id,
+          if (prefs.defaultTargetIdForStage(stage.id) == byDefault) stage.id,
       ];
       final specs = {for (final m in members) m: prefs.specForStage(m)};
       final counts = <String?, int>{};
@@ -759,7 +756,7 @@ class _SettingsModelsSimpleState extends State<SettingsModelsSimple> {
   ///
   /// The address rule belongs to the FORM, which refuses a bad one under the
   /// field before this is reached. The check here is belt and braces and
-  /// silent: `setBoxUrl` throws on the same rule, and the press is
+  /// silent: `setBoxServers` throws on the same rule, and the press is
   /// fire-and-forget, so a throw past it would be an unhandled error and, to
   /// the person, a Save that did nothing.
   Future<void> _save(String key) async {

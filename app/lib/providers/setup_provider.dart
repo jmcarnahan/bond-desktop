@@ -430,7 +430,7 @@ class SetupController extends StateNotifier<SetupState> {
     // re-entry that re-offered the compiled default would put back an address
     // the owner had changed in Settings, on a Continue they read as agreeing
     // to what was on the screen.
-    final saved = prefs.effectiveBoxUrl;
+    final saved = boxBaseFromProseUrl(prefs.effectiveBoxBigUrl);
     if (saved.isNotEmpty && saved != state.boxUrl) {
       if (!mounted) return;
       state = state.copyWith(boxUrl: saved);
@@ -1090,8 +1090,10 @@ final setupControllerProvider =
     // that is hours in. Every preference here is consulted at the top of a
     // step, never cached.
     readPrefs: () => ref.read(appPrefsProvider),
-    setManagedServer: (on) =>
-        ref.read(appPrefsProvider.notifier).setManagedServer(on),
+    // Nothing to write: whether this build runs its own server is a define
+    // now, not a preference. The callback stays until Phase 7 rewrites the
+    // wizard's last step, so the controller keeps one shape across the round.
+    setManagedServer: (_) async {},
     setModelsFolder: (path) =>
         ref.read(appPrefsProvider.notifier).setModelsFolder(path),
     applyTierDefaults: (tier) =>
@@ -1099,7 +1101,7 @@ final setupControllerProvider =
     probe: ModelServerProbe().probe,
     storedBearer: ref.read(appPrefsProvider.notifier).bearerFor,
     useBox: ({required baseUrl, required key, required hardwareTier}) =>
-        ref.read(appPrefsProvider.notifier).useBox(
+        ref.read(appPrefsProvider.notifier).useBoxOrigin(
               baseUrl: baseUrl,
               key: key,
               hardwareTier: hardwareTier,

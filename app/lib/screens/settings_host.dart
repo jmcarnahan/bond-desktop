@@ -20,7 +20,8 @@ import '../services/llm/model_probe.dart';
 // [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
 // re-exports them; `pipelineStages` is not re-exported, and the settings host
 // needs it to ask where every stage currently points.
-import '../services/llm/model_slots.dart' show ModelPlacement, pipelineStages;
+import '../services/llm/model_slots.dart'
+    show ModelPlacement, boxBaseFromProseUrl, pipelineStages;
 import '../services/llm/needs_you_task.dart'
     show needsYouDefaultRules, needsYouOutputContract, needsYouRulesCap;
 import '../widgets/settings_local_server_card.dart';
@@ -408,7 +409,10 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       modelPlacement: prefs.modelPlacement,
       // The stored address when there is one and the compiled one otherwise,
       // already resolved — the form prefills from it and never asks twice.
-      boxUrl: prefs.effectiveBoxUrl,
+      // The ORIGIN behind the big model's address, which is what the form
+      // still asks for: the page's one address field is a `/prose` and
+      // `/bulk` pair until Phase 6 gives it two.
+      boxUrl: boxBaseFromProseUrl(prefs.effectiveBoxBigUrl),
       boxKeyStored: prefs.boxKeyStored,
       // The whole fact, not just the two words the old block could answer
       // for: the page decides which reasons it can speak to, and it can speak
@@ -431,7 +435,7 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
         if (!mounted) return;
         final tier = await ref.read(machineTierProvider.future);
         if (!mounted) return;
-        await notifier.useBox(
+        await notifier.useBoxOrigin(
           baseUrl: baseUrl,
           key: key,
           hardwareTier: tier,
@@ -507,7 +511,8 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
         // Resolved here rather than in the card: empty means "the app's own
         // folder", and only this side knows where that is.
         modelsFolder: prefs.effectiveModelsFolder(paths),
-        onManagedChanged: (on) => unawaited(_setManagedServer(on)),
+        // No switch: whether this build runs its own server is a define now.
+        onManagedChanged: null,
         onPortSaved: (port) => unawaited(_setRouterPort(port)),
         onPickFreePort: supervisor.pickFreePort,
         onChooseFolder: () => unawaited(_chooseModelsFolder()),
@@ -828,23 +833,6 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     widget.onForgetThumbnails();
   }
 
-  /// Turns the managed server on or off, and makes the process follow.
-  ///
-  /// The preference and the process are two writes, and this host is the one
-  /// place that can do both: [AppPrefsNotifier] holds a store and knows
-  /// nothing about a supervisor, and the supervisor reads the preference but
-  /// is never told when it moves. The order matters — the pref first, because
-  /// `ensureRunning` and `stop` both ask `managed()` and would read the old
-  /// answer if they went first.
-  Future<void> _setManagedServer(bool on) async {
-    final supervisor = ref.read(modelServerSupervisorProvider);
-    await ref.read(appPrefsProvider.notifier).setManagedServer(on);
-    if (on) {
-      await supervisor.ensureRunning();
-    } else {
-      await supervisor.stop();
-    }
-  }
 
   /// Moves the port, and restarts onto it. A running server cannot change the
   /// socket it is bound to, so the restart IS the setting taking effect;

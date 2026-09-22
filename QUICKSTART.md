@@ -118,6 +118,11 @@ whichever lines apply. Nothing else in the repo needs to change:
 # Skips the first-run setup wizard. Your models are in the Homebrew cache, not
 # in the app's own folder, so it would offer to download ~22 GB you already have.
 # BOND_DEV_SKIP_SETUP = 1
+# Leaves the servers to you. The app runs its own llama-server by default since
+# Round H, and this is how a machine that already has `make model fast embed`
+# up says so: the two chat slots stay on the ports above instead of following
+# the app's router. Read as a value, so `= 0` turns it back off.
+# BOND_DEV_HAND_SERVERS = 1
 ```
 
 ## 3. Models and servers
@@ -183,8 +188,10 @@ The first build takes a few minutes.
 ask where the models run, download what this Mac needs, sign in, and turn
 Bond's managed model server on. That is not what you want on this path: you
 have just started three servers by hand and the weights are already in
-`~/.cache/huggingface/hub/`. Add `BOND_DEV_SKIP_SETUP = 1` to `local.mk`
-(step 2) and rebuild, and the app goes straight to sign-in as it always has.
+`~/.cache/huggingface/hub/`. Add `BOND_DEV_SKIP_SETUP = 1` and
+`BOND_DEV_HAND_SERVERS = 1` to `local.mk` (step 2) and rebuild: the app goes
+straight to sign-in as it always has, and it leaves your three servers alone
+rather than starting one of its own.
 Run the wizard instead if you want the bundled shape — it downloads its own
 copies and switches the app onto one router. `docs/install.md` walks the
 screens; `docs/settings.md` (**First run**) is the reference.

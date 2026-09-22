@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io' show Directory;
+import 'dart:io' show Directory, File;
 
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -59,6 +59,7 @@ import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_people_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
 import '../services/message_search.dart';
+import '../services/models/managed_model_status.dart';
 import '../services/models/model_downloader.dart';
 import '../services/models/model_manifest.dart';
 import '../services/server/llama_binary.dart';
@@ -86,6 +87,7 @@ import '../widgets/app_rail.dart' show RailSection;
 import 'navigation_provider.dart';
 import 'notify_routing.dart';
 import 'prefs_provider.dart';
+import 'setup_provider.dart' show setupRestartProvider;
 
 /// One [GraphAuth] for the whole app. Sharing the instance is what makes the
 /// in-memory access token and the single-flight refresh guard mean anything —
@@ -402,6 +404,11 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
         .forTier(await ref.read(effectiveTierProvider.future))
         .toPreset(ref.read(appPrefsProvider).effectiveModelsFolder(paths)),
     routerPort: () => ref.read(appPrefsProvider).routerPort,
+    // A port the app had to move to is REMEMBERED, and remembered before the
+    // child is spawned: the preference is what the clients dial and what the
+    // next launch's adoption compares its record against.
+    onPortMoved: (port) =>
+        ref.read(appPrefsProvider.notifier).setRouterPort(port),
     managed: () => ref.read(appPrefsProvider).managedServer,
     beginActivity: system.beginActivity,
     endActivity: system.endActivity,
@@ -451,6 +458,63 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
 final serverStateProvider = StreamProvider<ServerState>(
   (ref) => ref.watch(modelServerSupervisorProvider).states,
 );
+
+/// The three models this Mac would run, with what each costs and whether it
+/// is on disk.
+///
+/// The Managed block's three rows are this plus one live fact, and the live
+/// fact is not here: `ServerLoading.loaded` moves while somebody is looking at
+/// the page, so the widget joins it from [serverStateProvider] and this future
+/// stays a reading of the DISK. Three `stat` calls per invalidation, not per
+/// frame, which is why the ledger check keeps its `existsSync` — a file can be
+/// deleted under a row the ledger still calls done.
+///
+/// Re-read on exactly two events: **Set up again**, through
+/// [setupRestartProvider], because a download can have re-run; and the server
+/// reaching ready, because that is when weights that landed during a wizard
+/// have certainly been read. Watched through a `select` onto a bool so the
+/// states on the way there — one per model as each loads — do not re-run it.
+///
+/// The RESOLVED manifest, so the list is what this install actually wants: two
+/// models on a machine under the full tier's floor, and on the user-defined
+/// placement the embedding model alone, since the other two run on somebody's
+/// server. The inbox tier has no writing model, so the big row describes the
+/// file that does the writing there, which is the small one.
+final managedModelsStatusProvider =
+    FutureProvider<List<ManagedModelStatus>>((ref) async {
+  ref.watch(setupRestartProvider);
+  ref.watch(
+    serverStateProvider.select((state) => state.valueOrNull is ServerReady),
+  );
+  final paths = ref.watch(appPathsProvider);
+  final tier = await ref.watch(effectiveTierProvider.future);
+  final manifest = ref.watch(modelManifestProvider).forTier(tier);
+  final ledger = await ref.watch(setupStoreProvider).downloadLedger();
+  final folder = ref.read(appPrefsProvider).effectiveModelsFolder(paths);
+
+  final rows = <ManagedModelStatus>[];
+  // The router id is the FILE's own id: the same resolved manifest builds the
+  // router preset, so `ServerLoading.loaded` is keyed by exactly these. On the
+  // inbox tier the big row's file is the bulk file, and its id has to be the
+  // bulk id or the row would read "not loaded" for ever on every small Mac.
+  void add(String roleId, ModelFile? file) {
+    if (file == null) return;
+    rows.add(ManagedModelStatus(
+      roleId: roleId,
+      displayName: file.displayName,
+      bytes: file.downloadBytes,
+      onDisk: ledger.isCurrent(file) &&
+          File(p.join(folder, file.relativePath)).existsSync(),
+      routerId: file.id,
+    ));
+  }
+
+  final bulk = manifest.byRoleOrNull(ModelRole.bulk);
+  add('big', manifest.byRoleOrNull(ModelRole.prose) ?? bulk);
+  add('small', bulk);
+  add('embed', manifest.byRoleOrNull(ModelRole.embed));
+  return rows;
+});
 
 /// The thing that fills the models folder.
 ///
@@ -965,7 +1029,7 @@ final embeddingsClientProvider = Provider<EmbeddingsClient>(
     // does, the fix is a card in Settings and naming a Makefile target would
     // send them to a workflow they have opted out of.
     describeUnavailable: () => ref.read(appPrefsProvider).managedServer
-        ? 'is not running — see Settings › Models › Local server'
+        ? 'is not running — see Settings, Models'
         : null,
     // One row per distinct reason, which is what the client's own dedupe
     // already guarantees. `read` and not `watch`: the callback outlives this

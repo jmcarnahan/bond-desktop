@@ -86,6 +86,7 @@ void main() {
       binaryPath: () => binary,
       buildPreset: () => preset,
       routerPort: () => server.port,
+      onPortMoved: (_) async {},
       managed: () => true,
       onReady: () => readyCalls++,
       healthInterval: const Duration(milliseconds: 10),

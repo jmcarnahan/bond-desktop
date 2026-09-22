@@ -34,7 +34,10 @@ class SettingsLocalServerBody extends StatefulWidget {
   /// folder" into a path, so this card never has to know what empty means.
   final String modelsFolder;
 
-  final void Function(bool on) onManagedChanged;
+  /// Null draws NO switch: since Round H whether the app runs its own server
+  /// is a build define rather than a preference, and this card is deleted in
+  /// the next phase; until then a host with nothing to write passes null.
+  final void Function(bool on)? onManagedChanged;
   final void Function(int port) onPortSaved;
 
   /// Asks the kernel for a port nothing holds. Null takes the button off.
@@ -55,7 +58,7 @@ class SettingsLocalServerBody extends StatefulWidget {
     required this.managed,
     required this.port,
     required this.modelsFolder,
-    required this.onManagedChanged,
+    this.onManagedChanged,
     required this.onPortSaved,
     this.onPickFreePort,
     this.onChooseFolder,
@@ -164,25 +167,26 @@ class _SettingsLocalServerBodyState extends State<SettingsLocalServerBody> {
           style: BondType.body.copyWith(fontWeight: FontWeight.w600),
         ),
         const SizedBox(height: BondSpacing.s4),
-        SwitchListTile(
-          key: SettingsLocalServerBody.managedKey,
-          contentPadding: EdgeInsets.zero,
-          dense: true,
-          value: _managed,
-          title: Text(
-            'Bond runs the model server',
-            style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+        if (widget.onManagedChanged case final onManagedChanged?)
+          SwitchListTile(
+            key: SettingsLocalServerBody.managedKey,
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _managed,
+            title: Text(
+              'Bond runs the model server',
+              style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+            ),
+            subtitle: Text(
+              'One llama-server serves all three models from this Mac. Off, the '
+              'app expects servers you started yourself.',
+              style: BondType.caption,
+            ),
+            onChanged: (value) {
+              setState(() => _managed = value);
+              onManagedChanged(value);
+            },
           ),
-          subtitle: Text(
-            'One llama-server serves all three models from this Mac. Off, the '
-            'app expects servers you started yourself.',
-            style: BondType.caption,
-          ),
-          onChanged: (value) {
-            setState(() => _managed = value);
-            widget.onManagedChanged(value);
-          },
-        ),
         const SizedBox(height: BondSpacing.s8),
         ..._statusLines(),
         const SizedBox(height: BondSpacing.s16),
