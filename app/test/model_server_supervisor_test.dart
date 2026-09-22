@@ -602,6 +602,101 @@ void main() {
     expect(supervisor.state, const ServerStopped());
   });
 
+  /// The preset is a function of the PLACEMENT as well as the folder, and the
+  /// placement moves while the app is running: choosing User defined leaves
+  /// this Mac serving the embedding model alone, and choosing Managed puts the
+  /// two chat models back. `ensureRunning` answers "it is up" to all of that,
+  /// which is why the placement writers call this instead.
+  group('ensurePreset', () {
+    /// What Managed asks this machine for.
+    RouterPreset three() => RouterPreset(
+          modelsFolder: models.path,
+          models: const [
+            RouterModelSpec(
+              id: 'bond-embed',
+              repo: 'org/embed',
+              file: 'embed.gguf',
+            ),
+            RouterModelSpec(id: 'bond-bulk', repo: 'org/bulk', file: 'bulk.gguf'),
+            RouterModelSpec(
+              id: 'bond-prose',
+              repo: 'org/prose',
+              file: 'prose.gguf',
+            ),
+          ],
+        );
+
+    /// What is left here under the user-defined placement.
+    RouterPreset one() => RouterPreset(
+          modelsFolder: models.path,
+          models: const [
+            RouterModelSpec(
+              id: 'bond-embed',
+              repo: 'org/embed',
+              file: 'embed.gguf',
+            ),
+          ],
+        );
+
+    setUp(() async {
+      preset = three();
+      for (final model in preset.models) {
+        final path = preset.modelPath(model);
+        await Directory(p.dirname(path)).create(recursive: true);
+        await File(path).writeAsString('gguf');
+      }
+      // A superset of either preset: readiness reads only the ids the preset
+      // names, so one map serves the set before and the set after.
+      server.loaded = {for (final id in preset.modelIds) id: true};
+    });
+
+    test('ensurePreset restarts a live server whose model set changed',
+        () async {
+      await supervisor.ensureRunning();
+      await waitFor((s) => s is ServerReady);
+      expect(runner.starts, hasLength(1));
+
+      preset = one();
+      await supervisor.ensurePreset();
+      await waitUntil(() => runner.starts.length == 2);
+
+      expect(runner.starts, hasLength(2));
+      final written = await supervisor.presetFile.readAsString();
+      expect(written, contains('[bond-embed]'));
+      expect(written, isNot(contains('[bond-prose]')));
+      expect(written, isNot(contains('[bond-bulk]')));
+    });
+
+    test('ensurePreset leaves a live server alone when the set is unchanged',
+        () async {
+      await supervisor.ensureRunning();
+      await waitFor((s) => s is ServerReady);
+
+      await supervisor.ensurePreset();
+
+      expect(runner.starts, hasLength(1));
+      expect(supervisor.state, isA<ServerReady>());
+    });
+
+    test('ensurePreset starts a stopped server', () async {
+      expect(supervisor.state, const ServerStopped());
+
+      await supervisor.ensurePreset();
+      await waitFor((s) => s is ServerReady);
+
+      expect(runner.starts, hasLength(1));
+    });
+
+    test('ensurePreset is a no-op for a hand-servers build', () async {
+      managed = false;
+
+      await supervisor.ensurePreset();
+
+      expect(supervisor.state, const ServerDisabled());
+      expect(runner.starts, isEmpty);
+    });
+  });
+
   test('pickFreePort asks the runner', () async {
     runner.nextFreePort = 51234;
     expect(await supervisor.pickFreePort(), 51234);

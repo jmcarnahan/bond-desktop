@@ -303,7 +303,12 @@ enforce the ones that are commands.
   screen shows it. `RoleLine.fromPrefs` groups a role's steps by
   `defaultTargetIdForStage` and describes the modal target, and
   `RoleLine.withStatus` joins this Mac's own files onto the rows by ROUTER
-  id.
+  id. A placement write is followed by `supervisor.ensurePreset()`, from the
+  host after either mode and from the wizard's Finish, which restarts the
+  router only when the preset hash changed; `managedModelsStatusProvider`
+  lists the MACHINE tier's files with an `inUse` flag off the effective
+  tier's manifest, and the page shows the unused ones under User defined
+  under **Also on this Mac, not in use** as `on disk · not loaded`.
 - The wizard's Where step (`screens/setup/setup_where_body.dart`,
   `SetupWhereBody`) is two cards, `setup-where-managed` and
   `setup-where-custom`, and nothing else: User defined renders the same

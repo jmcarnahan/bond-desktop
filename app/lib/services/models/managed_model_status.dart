@@ -29,11 +29,20 @@ class ManagedModelStatus {
 
   final String routerId;
 
+  /// Whether the placement's preset includes this file.
+  ///
+  /// False for the two chat models under the user-defined placement, where
+  /// this Mac serves the embedding model alone. That is exactly the state the
+  /// page has to say out loud: the weights are still on the disk, and nothing
+  /// is holding them in memory.
+  final bool inUse;
+
   const ManagedModelStatus({
     required this.roleId,
     required this.displayName,
     required this.bytes,
     required this.onDisk,
     required this.routerId,
+    required this.inUse,
   });
 }

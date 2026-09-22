@@ -114,6 +114,8 @@ void main() {
     expect(rows[1].onDisk, isTrue);
     expect(rows[2].onDisk, isTrue);
     expect(rows[2].displayName, embed.displayName);
+    // Managed serves everything this Mac's tier resolved.
+    expect([for (final row in rows) row.inUse], [true, true, true]);
   });
 
   test('a ledger row over a file somebody deleted is not on disk', () async {
@@ -171,9 +173,11 @@ void main() {
     expect(rows[0].routerId, bulk.id);
     expect(rows[1].routerId, bulk.id);
     expect(rows[0].routerId, isNot(routerProseId));
+    expect([for (final row in rows) row.inUse], [true, true, true]);
   });
 
-  test('the user-defined placement has the embedding row alone', () async {
+  test('the user-defined placement lists all three and marks only the '
+      'embedding row in use', () async {
     final manifest = testManifest();
 
     final rows = await containerFor(
@@ -181,10 +185,12 @@ void main() {
       placement: ModelPlacement.box,
     ).read(managedModelsStatusProvider.future);
 
-    // The two chat models run on somebody's server there, so this Mac holds
-    // one file and the page has one local row.
-    expect([for (final row in rows) row.roleId], ['embed']);
-    expect(rows.single.routerId, routerEmbedId);
+    // The two chat models run on somebody's server there, and their weights
+    // are still on this disk: the rows stay, and `inUse` is what says the
+    // router is not asked to hold them.
+    expect([for (final row in rows) row.roleId], ['big', 'small', 'embed']);
+    expect([for (final row in rows) row.inUse], [false, false, true]);
+    expect(rows.last.routerId, routerEmbedId);
   });
 
   test('Set up again re-reads it', () async {

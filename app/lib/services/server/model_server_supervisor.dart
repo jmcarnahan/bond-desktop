@@ -239,6 +239,40 @@ class ModelServerSupervisor {
     await start();
   }
 
+  /// Starts the server, or RESTARTS it when the set of models it should serve
+  /// has changed under it.
+  ///
+  /// The preset is a function of the placement and the folder, and both move
+  /// while the app runs: choosing User defined drops the two chat models out
+  /// of memory, choosing Managed puts them back. [ensureRunning] returns at
+  /// once on a live server whatever it is serving, which is right at launch
+  /// and wrong after a switch, so this is what the placement writers call. A
+  /// server that is not up goes through [ensureRunning] as before; one that
+  /// is up and whose preset hash still matches is left alone; anything else
+  /// is a restart. A start already in flight is left to finish, because its
+  /// own [buildPreset] reads the preferences after the write that brought us
+  /// here.
+  Future<void> ensurePreset() async {
+    if (!managed()) {
+      _emit(const ServerDisabled());
+      return;
+    }
+    final live = _state is ServerStarting ||
+        _state is ServerLoading ||
+        _state is ServerReady;
+    if (!live) {
+      await ensureRunning();
+      return;
+    }
+    final current = _preset;
+    // A start in flight has no preset recorded yet; it reads the new
+    // preferences itself when it builds one.
+    if (current == null) return;
+    final wanted = await buildPreset();
+    if (wanted.hash == current.hash) return;
+    await restart();
+  }
+
   Future<void> start() async {
     // Asked here as well as in [ensureRunning], because the only thing keeping
     // an unmanaged app from spawning a server today is a disabled control on

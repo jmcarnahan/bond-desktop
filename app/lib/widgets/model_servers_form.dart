@@ -531,6 +531,13 @@ class _ModelServersFormState extends State<ModelServersForm> {
       _smallProbe = smallResult;
       _bigIds = bigIds;
       _smallIds = smallIds;
+      // A server that still lists the name this install already uses is not
+      // asking a question. Without this a re-Connect against a server serving
+      // several models would refuse the first press and ask for a choice that
+      // was already made, while the picker sat there showing the answer.
+      _bigPick ??= bigIds.contains(widget.bigModel) ? widget.bigModel : null;
+      _smallPick ??=
+          smallIds.contains(widget.smallModel) ? widget.smallModel : null;
     });
     // A server that did not answer stops the press where it is: the line
     // under its own field says what happened, and nothing is written.

@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
@@ -12,6 +15,7 @@ import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:bond_inbox/screens/settings_host.dart';
 import 'package:bond_inbox/services/attachments/file_dialogs.dart';
 import 'package:bond_inbox/services/llm/model_probe.dart';
+import 'package:bond_inbox/services/server/model_server_supervisor.dart';
 import 'package:bond_inbox/widgets/model_servers_form.dart';
 import 'package:bond_inbox/widgets/settings_models_page.dart';
 import 'package:bond_inbox/widgets/settings_screen.dart';
@@ -19,7 +23,9 @@ import 'package:bond_inbox/widgets/settings_section.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 
+import 'fixtures/fake_process_runner.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/test_manifest.dart';
 
@@ -106,12 +112,60 @@ void main() {
   late MessageStore store;
   late ProviderContainer container;
 
-  setUp(() {
+  /// The app's own server, for the one case about the placement moving it.
+  ///
+  /// Everything it needs on disk is made HERE rather than in a test body: a
+  /// `testWidgets` body runs inside a fake-async zone where a real filesystem
+  /// future never completes, and awaiting one there hangs the run.
+  late Directory support;
+  late String modelsFolder;
+  late FakeProcessRunner runner;
+  late ModelServerSupervisor supervisor;
+
+  setUp(() async {
     db = testDb();
     store = MessageStore(db);
+    support = await Directory.systemTemp.createTemp('models-host');
+    modelsFolder = p.join(support.path, 'models');
+    runner = FakeProcessRunner();
+    // Every file the fixture's own manifest names, so a launch under either
+    // placement passes the preflight.
+    final all = testManifest().toPreset(modelsFolder);
+    for (final model in all.models) {
+      final path = all.modelPath(model);
+      await Directory(p.dirname(path)).create(recursive: true);
+      await File(path).writeAsString('gguf');
+    }
+    supervisor = ModelServerSupervisor(
+      runner: runner,
+      supportDir: support,
+      // A binary that resolves, so a start that did not happen is the
+      // placement's doing rather than a missing executable's.
+      binaryPath: () => '/usr/bin/true',
+      // The rule `effectiveTierProvider` applies, read SYNCHRONOUSLY off the
+      // preferences: the placement is what moves the tier, and awaiting that
+      // provider's future here would deadlock — it completes in the widget
+      // test's fake-async zone, which cannot advance while `runAsync` is
+      // holding the body.
+      buildPreset: () => testManifest()
+          .forTier(
+            container.read(appPrefsProvider).modelPlacement ==
+                    ModelPlacement.box
+                ? MachineTier.remote
+                : MachineTier.full,
+          )
+          .toPreset(modelsFolder),
+      routerPort: () => 8080,
+      onPortMoved: (_) async {},
+      managed: () => true,
+    );
   });
 
-  tearDown(() => db.close());
+  tearDown(() async {
+    await supervisor.dispose();
+    await db.close();
+    if (support.existsSync()) await support.delete(recursive: true);
+  });
 
   Future<void> pumpInbox(WidgetTester tester, {Updater? updater}) async {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
@@ -160,6 +214,7 @@ void main() {
   Future<void> pumpHost(
     WidgetTester tester, {
     required ModelServerProbe probe,
+    bool withServer = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 1600));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -171,6 +226,12 @@ void main() {
         initialAppPrefsProvider.overrideWithValue(prefs),
         syncServiceProvider.overrideWithValue(_FakeSync()),
         modelManifestProvider.overrideWithValue(testManifest()),
+        // The app's own server, for the case that watches it follow the
+        // placement. Left alone everywhere else: the other cases are about
+        // preferences and clients, and a supervisor over a fake runner would
+        // only add filesystem work to them.
+        if (withServer)
+          modelServerSupervisorProvider.overrideWithValue(supervisor),
         // Connect and Managed both read the machine tier AT THE PRESS, and
         // left alone the channel answers `HardwareInfo.unknown` two seconds
         // later: a press would land after the case had finished looking.
@@ -292,6 +353,85 @@ void main() {
     expect(identical(before, after), isTrue);
     expect(after.baseUrl, smallUrl);
     expect(after.model, 'qwen3-4b');
+  });
+
+  /// The server this Mac runs follows the placement, not only the launch.
+  ///
+  /// The two halves of decision 29: choosing User defined leaves the embedding
+  /// model alone here, and choosing Managed puts this Mac's whole set back.
+  /// Real filesystem work either way, so the start goes inside `runAsync` and
+  /// each restart is waited for with the run-and-pump pair — `runAsync` lets
+  /// the real event loop deliver the result and the pump flushes the
+  /// continuation waiting for it in the fake-async queue.
+  testWidgets('a placement switch restarts the local server onto the '
+      "placement's set", (tester) async {
+    const bigUrl = 'https://box.example.com/prose/v1/chat/completions';
+    const smallUrl = 'https://box.example.com/bulk/v1/chat/completions';
+    final probe = _ScriptedProbe(const {
+      bigUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3-27b-fp8']),
+      smallUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3-4b']),
+    });
+    await pumpHost(tester, probe: probe, withServer: true);
+    await tester.runAsync(() => supervisor.ensureRunning());
+    await tester.pump();
+    expect(runner.starts, hasLength(1));
+
+    await openHostSection(tester, 'Models');
+    await tester.tap(find.text(SettingsModelsPage.userDefinedLabel));
+    await tester.pump();
+    await tester.pump();
+    await tester.enterText(find.byKey(ModelServersForm.bigUrlKey), bigUrl);
+    await tester.enterText(find.byKey(ModelServersForm.smallUrlKey), smallUrl);
+    await tester.pump();
+    await tapKey(tester, ModelServersForm.connectKey);
+    for (var i = 0; i < 4; i++) {
+      await tester.pump(const Duration(milliseconds: 200));
+    }
+    for (var i = 0; i < 100 && runner.starts.length < 2; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump();
+    }
+
+    expect(container.read(appPrefsProvider).modelPlacement, ModelPlacement.box);
+    expect(runner.starts, hasLength(2));
+    var written = await tester.runAsync(
+      () => supervisor.presetFile.readAsString(),
+    );
+    expect(written, contains('[$routerEmbedId]'));
+    expect(written, isNot(contains('[$routerProseId]')));
+    expect(written, isNot(contains('[$routerBulkId]')));
+
+    await tester.tap(find.text(SettingsModelsPage.managedLabel));
+    for (var i = 0; i < 4; i++) {
+      await tester.pump(const Duration(milliseconds: 200));
+    }
+    for (var i = 0; i < 100 && runner.starts.length < 3; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump();
+    }
+
+    expect(
+      container.read(appPrefsProvider).modelPlacement,
+      ModelPlacement.local,
+    );
+    expect(runner.starts, hasLength(3));
+    written = await tester.runAsync(
+      () => supervisor.presetFile.readAsString(),
+    );
+    expect(written, contains('[$routerEmbedId]'));
+    expect(written, contains('[$routerProseId]'));
+    expect(written, contains('[$routerBulkId]'));
+
+    // The last restart armed a start timeout and a health poll in the test's
+    // own fake-async queue, and the binding refuses to end a test with a timer
+    // pending. Both are cancelled at the top of `dispose`, before any await,
+    // so letting it go and pumping once is enough; `tearDown` still awaits it.
+    unawaited(supervisor.dispose());
+    await tester.pump();
   });
 
   testWidgets('Managed re-applies the rule', (tester) async {

@@ -124,7 +124,9 @@ Everything the setup asked is under **Settings → Models**, from the avatar
 menu at the top of the inbox. The page asks one question, where the models
 run, and answers it with two tabs, **Managed** and **User defined**. The tabs
 act: choosing Managed moves the work here at once, and choosing User defined
-opens the form, which writes nothing until **Connect**.
+opens the form, which writes nothing until **Connect**. Switching to User
+defined also unloads the two chat models from this Mac, and switching back
+reloads them; the rows say which state each model is in.
 
 - **Managed** is a status block, because there is nothing to fill in. One line
   says what Bond's own server is doing, a bar fills while the models load, and
@@ -137,7 +139,8 @@ opens the form, which writes nothing until **Connect**.
   **Remove key** is the only thing that forgets one. **Connect** asks both
   servers which model they serve and takes the names they list, so nothing is
   typed twice. A server that offers several shows a picker, and a second
-  **Connect** takes what is showing. The same three rows sit under the form,
+  **Connect** takes what is showing, unless one of the names it lists is the
+  one this install already uses, which connects on the first press. The same three rows sit under the form,
   naming the model each server listed and the server's address, each with its
   **Check**.
 - **Set up again** — runs the whole flow from the top, and is how the models

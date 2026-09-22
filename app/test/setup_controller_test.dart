@@ -1119,6 +1119,49 @@ void main() {
     expect(runner.starts.length, 1);
   });
 
+  test('Finish after a placement change restarts the server onto the new set',
+      () async {
+    // The other half of the same rule: the folder did not move and nothing
+    // was downloaded, but the PLACEMENT did, and the router is still holding
+    // the two chat models a user-defined install has no use for.
+    await seedComplete();
+    managed = true;
+    var tier = MachineTier.full;
+    final earlier = supervisor;
+    addTearDown(earlier.dispose);
+    supervisor = ModelServerSupervisor(
+      runner: runner,
+      supportDir: root,
+      binaryPath: () => '/usr/bin/true',
+      // What the placement asks this Mac for, which is what the wizard's box
+      // step moves.
+      buildPreset: () => manifest.forTier(tier).toPreset(folder()),
+      routerPort: () => 8080,
+      onPortMoved: (_) async {},
+      managed: () => managed,
+    );
+    await store.set(SetupStore.setupKey, SetupStep.notifications.name);
+    final controller = build();
+    await controller.init();
+    await supervisor.ensureRunning();
+    expect(runner.starts.length, 1);
+
+    controller.chooseBox();
+    tier = MachineTier.remote;
+    await controller.finish();
+
+    await waitUntil(
+      () => runner.starts.length == 2,
+      reason: 'the server to be restarted onto the embedding model alone',
+    );
+    // Onto the RIGHT set: the preset the second start wrote names the
+    // embedding model and neither chat model.
+    final written = await supervisor.presetFile.readAsString();
+    expect(written, contains('[$routerEmbedId]'));
+    expect(written, isNot(contains('[$routerProseId]')));
+    expect(written, isNot(contains('[$routerBulkId]')));
+  });
+
   test('Finish records done and starts the server', () async {
     // The weights have to be there: the supervisor refuses to launch while
     // any file the preset names is missing, which is the same rule that makes

@@ -128,6 +128,7 @@ ManagedModelStatus _status(
   required String routerId,
   int bytes = 20 * 1024 * 1024 * 1024,
   bool onDisk = true,
+  bool inUse = true,
 }) =>
     ManagedModelStatus(
       roleId: roleId,
@@ -135,6 +136,7 @@ ManagedModelStatus _status(
       bytes: bytes,
       onDisk: onDisk,
       routerId: routerId,
+      inUse: inUse,
     );
 
 void main() {
@@ -155,6 +157,7 @@ void main() {
     VoidCallback? onShowLog,
     bool wireForm = true,
     List<RoleLine> roleLines = const [],
+    List<String> idleModelLines = const [],
     ParkedFact? parked,
     // An indeterminate bar never stops animating, so the two cases that put
     // one up pump by hand rather than waiting for a tree that will not settle.
@@ -190,6 +193,7 @@ void main() {
             onSetUpAgain: onSetUpAgain,
             onShowLog: onShowLog,
             roleLines: roleLines,
+            idleModelLines: idleModelLines,
             parked: parked,
           ),
         ),
@@ -731,7 +735,10 @@ void main() {
             placement: ModelPlacement.local,
           );
 
-      expect(row(join(const ServerStopped()), 'big').state, 'on disk');
+      expect(
+        row(join(const ServerStopped()), 'big').state,
+        'on disk · not loaded',
+      );
       expect(
         row(join(const ServerReady(port: 8080, pid: 42)), 'big').state,
         'on disk · loaded',
@@ -755,7 +762,7 @@ void main() {
           })),
           'big',
         ).state,
-        'on disk',
+        'on disk · not loaded',
       );
     });
 
@@ -840,6 +847,153 @@ void main() {
       expect(row(rows, 'big').bearerId, boxProseId);
       expect(row(rows, 'small').detail, 'qwen3-4b at box.example.com');
       expect(row(rows, 'small').bearerId, boxBulkId);
+    });
+  });
+
+  group('the models this Mac holds and the placement does not use', () {
+    /// The three files a full Mac downloaded, under the user-defined
+    /// placement: the chat models are still on the disk and nothing is asked
+    /// to hold them.
+    List<ManagedModelStatus> idleStatuses() => [
+          _status('big', 'Qwen3.8 27B', routerId: routerProseId, inUse: false),
+          _status(
+            'small',
+            'Qwen3 4B Instruct',
+            routerId: routerBulkId,
+            inUse: false,
+          ),
+          _status(
+            'embed',
+            'Qwen3 Embedding 0.6B',
+            routerId: routerEmbedId,
+            bytes: 1234567890,
+          ),
+        ];
+
+    test('idleOnThisMac describes the unused files and nothing else', () {
+      // The server this Mac is left running holds the embedding model alone,
+      // so the two chat models read as on disk and not loaded.
+      final lines = RoleLine.idleOnThisMac(
+        idleStatuses(),
+        const ServerLoading(
+          port: 8080,
+          pid: 42,
+          loaded: {routerEmbedId: true},
+        ),
+      );
+
+      expect(lines, [
+        'Qwen3.8 27B · 20.0 GB · on disk · not loaded',
+        'Qwen3 4B Instruct · 20.0 GB · on disk · not loaded',
+      ]);
+    });
+
+    test('an idle file is not loaded even once the small server is Ready', () {
+      // The steady state under User defined: the embedding-only router came
+      // up and reports Ready. Ready means every model in ITS preset is
+      // resident, and the two chat models are not in it.
+      final lines = RoleLine.idleOnThisMac(
+        idleStatuses(),
+        const ServerReady(port: 8080, pid: 42),
+      );
+
+      expect(lines, [
+        'Qwen3.8 27B · 20.0 GB · on disk · not loaded',
+        'Qwen3 4B Instruct · 20.0 GB · on disk · not loaded',
+      ]);
+    });
+
+    test('a file that was never downloaded is not listed as held', () {
+      final lines = RoleLine.idleOnThisMac(
+        [
+          _status(
+            'big',
+            'Qwen3.8 27B',
+            routerId: routerProseId,
+            inUse: false,
+            onDisk: false,
+          ),
+          _status(
+            'small',
+            'Qwen3 4B Instruct',
+            routerId: routerBulkId,
+            inUse: false,
+          ),
+        ],
+        const ServerReady(port: 8080, pid: 42),
+      );
+
+      expect(lines, ['Qwen3 4B Instruct · 20.0 GB · on disk · not loaded']);
+    });
+
+    test('a small Mac whose two rows share one file reads it once', () {
+      // The inbox tier has no writing model, so the big row describes the
+      // bulk file too. One file, one line.
+      final lines = RoleLine.idleOnThisMac(
+        [
+          _status('big', 'Qwen3 4B Instruct',
+              routerId: routerBulkId, inUse: false),
+          _status('small', 'Qwen3 4B Instruct',
+              routerId: routerBulkId, inUse: false),
+        ],
+        const ServerStopped(),
+      );
+
+      expect(lines, ['Qwen3 4B Instruct · 20.0 GB · on disk · not loaded']);
+    });
+
+    test('idleOnThisMac says nothing while the host is still reading', () {
+      expect(RoleLine.idleOnThisMac(null, const ServerStopped()), isEmpty);
+    });
+
+    testWidgets(
+        'under User defined the two chat models this Mac holds read as on '
+        'disk and not loaded', (tester) async {
+      await open(
+        tester,
+        placement: ModelPlacement.box,
+        boxKeyStored: true,
+        serverState: const ServerLoading(
+          port: 8080,
+          pid: 42,
+          loaded: {routerEmbedId: true},
+        ),
+        idleModelLines: RoleLine.idleOnThisMac(
+          idleStatuses(),
+          const ServerLoading(
+            port: 8080,
+            pid: 42,
+            loaded: {routerEmbedId: true},
+          ),
+        ),
+      );
+
+      expect(find.byKey(SettingsModelsPage.idleModelsKey), findsOneWidget);
+      expect(find.text(SettingsModelsPage.idleModelsTitle), findsOneWidget);
+      expect(
+        find.text('Qwen3.8 27B · 20.0 GB · on disk · not loaded'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Qwen3 4B Instruct · 20.0 GB · on disk · not loaded'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('Managed has no such block, whatever it is handed',
+        (tester) async {
+      await open(
+        tester,
+        idleModelLines: const ['Qwen3.8 27B · 20.0 GB · on disk · not loaded'],
+      );
+
+      expect(find.byKey(SettingsModelsPage.idleModelsKey), findsNothing);
+    });
+
+    testWidgets('no idle files, no block', (tester) async {
+      await open(tester, placement: ModelPlacement.box, boxKeyStored: true);
+
+      expect(find.byKey(SettingsModelsPage.idleModelsKey), findsNothing);
     });
   });
 

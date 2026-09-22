@@ -339,6 +339,16 @@ otherwise** below, which is the same fact from the supervisor's side.
   resident, and reports a `ServerState`. `ServerBootstrap`
   (`app/lib/widgets/server_bootstrap.dart`) wraps the whole app and calls
   `ensureRunning()` once at launch — a no-op while the preference is off.
+- **The router follows the placement at RUNTIME, not only at launch.** The
+  preset is a function of the placement: Managed asks for this Mac's whole
+  tier, User defined for the embedding model alone. `ensureRunning` answers "it
+  is already up" whatever a live server is serving, which is right at launch
+  and wrong after a switch, so `ensurePreset()` is what the placement writers
+  call — `SettingsHost` after either write and the wizard's `finish()`. It
+  starts a server that is down, leaves one whose preset hash still matches
+  alone, and restarts anything else. Without it, Managed → User defined left
+  about 22 GB of chat models mapped and User defined → Managed parked the work
+  until the next relaunch.
 - **The restart budget is per failing launch, not per session.** A crash is
   retried on a 1 / 4 / 16 s backoff and then reported as `failed` with the log
   tail. Reaching ready RESETS the count: a launch that came up has proved it

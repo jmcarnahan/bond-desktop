@@ -338,6 +338,37 @@ void main() {
       expect(connected.single.smallModel, 'qwen3-4b');
     });
 
+    testWidgets('a server that still lists the stored name connects on the '
+        'first press, with the picker showing it', (tester) async {
+      // A re-Connect on an install that already chose: the server offers
+      // several ids and one of them is the name this install uses, which is
+      // an answer rather than a question.
+      await open(
+        tester,
+        bigModel: 'qwen3.8',
+        probe: fake(const {
+          _bigUrl: ModelProbeResult(
+            reachable: true,
+            modelIds: ['qwen3-8b', 'qwen3.8'],
+          ),
+          _smallUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3-4b']),
+        }),
+      );
+      await connect(tester);
+
+      expect(connected.single.bigModel, 'qwen3.8');
+      expect(connected.single.smallModel, 'qwen3-4b');
+      // The picker is still there, because the server still lists more than
+      // one, and it shows what was used.
+      final picker = find.byKey(ModelServersForm.bigModelKey);
+      expect(picker, findsOneWidget);
+      expect(tester.widget<DropdownButton<String>>(picker).value, 'qwen3.8');
+      expect(
+        find.textContaining(ModelServersForm.chooseModelText),
+        findsNothing,
+      );
+    });
+
     testWidgets('a server that did not answer connects nothing',
         (tester) async {
       await open(

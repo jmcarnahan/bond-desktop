@@ -486,7 +486,7 @@ Under Managed each row is joined with this Mac's own facts by
 MANIFEST's `displayName`, the size is what the checkpoint cost to fetch
 (weights plus any sidecar), and the state is `not downloaded` when the bytes
 are not there, `on disk · loaded` when the router says it is resident, and `on
-disk` otherwise. Loaded is read by ROUTER id rather than by role, which is why
+disk · not loaded` otherwise. Loaded is read by ROUTER id rather than by role, which is why
 `ManagedModelStatus` carries one: on a small Mac the big row's file IS the bulk
 file, and a row that looked itself up by `bond-prose` would read as never
 loaded there.
@@ -496,6 +496,29 @@ discovered model name and the address's host — and have no size or state,
 because those models are on somebody else's machine. The embedding row is
 built the Managed way under either mode, because that model is here whatever
 the rest of the pipeline is doing.
+
+**The server follows the placement.** Choosing User defined restarts the app's
+own server onto the embedding model alone, so the two chat models leave this
+Mac's memory; choosing Managed restarts it onto this Mac's whole set and the
+bar and the rows show the load. One call does it,
+`ModelServerSupervisor.ensurePreset`, made by the host after either placement
+write and by the wizard's Finish. It restarts only when the preset hash
+changed, so a Finish that moved nothing leaves a model that took a minute to
+map exactly where it is.
+
+**Also on this Mac, not in use.** Under User defined, a block keyed
+`settings-idle-models` sits after the three rows and before Set up again, with
+one line per model this Mac holds that the placement does not serve:
+`Qwen3.8 27B · 20.9 GB · on disk · not loaded`. The name, the size and the
+state are the row's own three facts, from the statuses
+`managedModelsStatusProvider` marks `inUse: false`. Only files ON DISK are
+listed, one line per FILE (a small Mac's big and small rows share the bulk
+file), and an idle file is `not loaded` by definition: `Ready` means every
+model in the small server's own preset is resident, and these are not in it.
+The lines say `not loaded` rather than disappearing because a person who has
+just switched wants to see the memory come back and the download stay.
+Managed never draws the block, and neither does a user-defined install with
+nothing idle.
 
 A role whose steps do not all resolve to one target reads `Custom · N steps
 point elsewhere`, singular at one. N is counted against the target most of the

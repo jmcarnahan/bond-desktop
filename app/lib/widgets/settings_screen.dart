@@ -276,6 +276,10 @@ class SettingsScreen extends StatefulWidget {
   /// The three read-only role rows, resolved by the host. Empty draws none.
   final List<RoleLine> roleLines;
 
+  /// The models this Mac holds that the placement is not serving, resolved by
+  /// the host. Drawn under User defined only, and empty draws none.
+  final List<String> idleModelLines;
+
   /// Why the pipeline is parked and how much is waiting, for the Models
   /// page's status line. Null is the ordinary state.
   final ParkedFact? parked;
@@ -519,6 +523,7 @@ class SettingsScreen extends StatefulWidget {
     this.onShowLog,
     this.serverState = const ServerStopped(),
     this.roleLines = const [],
+    this.idleModelLines = const [],
     this.parked,
     this.onCloudDraftsConsent,
     this.cloudDraftsStanding = false,
@@ -1165,6 +1170,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     onSetUpAgain: widget.onSetUpAgain,
     onShowLog: widget.onShowLog,
     roleLines: widget.roleLines,
+    idleModelLines: widget.idleModelLines,
     parked: widget.parked,
   );
 

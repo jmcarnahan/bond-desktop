@@ -228,14 +228,49 @@ class RoleLine {
   /// status carries one: on a small Mac the big row's file IS the bulk file,
   /// and a row that looked itself up by `bond-prose` would read as never
   /// loaded there.
+  ///
+  /// A file the placement does not use is NOT loaded by definition. `Ready`
+  /// means every model in the preset is resident, and under User defined the
+  /// preset is the embedding model alone, so a `Ready` read as "everything is
+  /// loaded" would call the idle 27B resident the moment that small server
+  /// came up, which is the steady state and the opposite of the fact.
   static String _diskState(ManagedModelStatus status, ServerState state) {
     if (!status.onDisk) return 'not downloaded';
+    if (!status.inUse) return 'on disk · not loaded';
     final loaded = switch (state) {
       ServerReady() => true,
       ServerLoading(loaded: final map) => map[status.routerId] == true,
       _ => false,
     };
-    return loaded ? 'on disk · loaded' : 'on disk';
+    return loaded ? 'on disk · loaded' : 'on disk · not loaded';
+  }
+
+  /// The files this Mac holds that the placement does not use, one line each,
+  /// for the block under User defined.
+  ///
+  /// The two chat models keep their weights when the work moves to somebody
+  /// else's servers, and the page says so rather than dropping the rows: a
+  /// person who has just switched wants to watch the memory come back and to
+  /// see that the download is still there to come back to. Empty while the
+  /// statuses are still being read, which is the same silence [withStatus]
+  /// keeps.
+  ///
+  /// ON DISK only: the heading says this Mac holds the file, and an install
+  /// that chose User defined in the wizard never downloaded the chat models.
+  /// One line per FILE, not per role: on a small Mac the big row and the
+  /// small row are the same bulk file, and it should read once.
+  static List<String> idleOnThisMac(
+    List<ManagedModelStatus>? statuses,
+    ServerState serverState,
+  ) {
+    if (statuses == null) return [];
+    final seen = <String>{};
+    return [
+      for (final status in statuses)
+        if (!status.inUse && status.onDisk && seen.add(status.routerId))
+          '${status.displayName} · ${formatBytes(status.bytes)} · '
+              '${_diskState(status, serverState)}',
+    ];
   }
 }
 
@@ -340,6 +375,12 @@ class SettingsModelsPage extends StatefulWidget {
   /// what a host that resolved no targets has.
   final List<RoleLine> roleLines;
 
+  /// The models this Mac holds that the placement is not serving, from
+  /// [RoleLine.idleOnThisMac]. Drawn under User defined only, where they are
+  /// the answer to "what happened to my 27B": the weights are on the disk and
+  /// nothing is holding them in memory. Empty draws no block.
+  final List<String> idleModelLines;
+
   /// Why the pipeline is parked and how much is waiting, for the status line.
   /// Null is the ordinary state and reads as nothing parked.
   final ParkedFact? parked;
@@ -365,6 +406,7 @@ class SettingsModelsPage extends StatefulWidget {
     this.onSetUpAgain,
     this.onShowLog,
     this.roleLines = const [],
+    this.idleModelLines = const [],
     this.parked,
   });
 
@@ -379,6 +421,7 @@ class SettingsModelsPage extends StatefulWidget {
   static const Key progressKey = ValueKey('settings-models-progress');
   static const Key showLogKey = ValueKey('settings-show-log');
   static const Key setUpAgainKey = ValueKey('settings-set-up-again');
+  static const Key idleModelsKey = ValueKey('settings-idle-models');
 
   /// One role row's **Check**. Three buttons carry the same word, so a test
   /// that tapped by label would tap whichever came first.
@@ -450,6 +493,10 @@ class SettingsModelsPage extends StatefulWidget {
 
   static const String showLogLabel = 'Show log';
   static const String setUpAgainLabel = 'Set up again';
+
+  /// The heading over the models this Mac holds and the placement does not
+  /// serve.
+  static const String idleModelsTitle = 'Also on this Mac, not in use';
 
   /// The two chat models this build runs on this Mac, in the words a person
   /// recognises, BY TARGET rather than by role: a small Mac runs its seven
@@ -649,6 +696,22 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
         if (widget.roleLines.isNotEmpty) ...[
           const SizedBox(height: BondSpacing.s24),
           for (final line in widget.roleLines) _roleRow(line),
+        ],
+        if (_onBox && widget.idleModelLines.isNotEmpty) ...[
+          const SizedBox(height: BondSpacing.s24),
+          Column(
+            key: SettingsModelsPage.idleModelsKey,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                SettingsModelsPage.idleModelsTitle,
+                style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: BondSpacing.s4),
+              for (final line in widget.idleModelLines)
+                Text(line, style: BondType.caption),
+            ],
+          ),
         ],
         if (widget.onSetUpAgain case final again?) ...[
           const SizedBox(height: BondSpacing.s16),

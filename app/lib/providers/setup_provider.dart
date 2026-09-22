@@ -866,11 +866,15 @@ class SetupController extends StateNotifier<SetupState> {
       // manifest bump that rewrote the files under the same names, would both
       // leave the router serving what it mmap'd before. Which is why the
       // Settings card does folder-then-restart too.
+      //
+      // Everything else goes through `ensurePreset`: a re-entry that changed
+      // the placement with the weights already on disk is neither a download
+      // nor a folder move, and the server still has to follow it.
       if (_downloadedThisRun ||
           readPrefs().effectiveModelsFolder(paths) != _folderAtInit) {
         unawaited(supervisor.restart());
       } else {
-        unawaited(supervisor.ensureRunning());
+        unawaited(supervisor.ensurePreset());
       }
     } on Object catch (e) {
       debugPrint('setup: finish did not complete: $e');

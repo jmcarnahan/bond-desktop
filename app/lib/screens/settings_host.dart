@@ -329,6 +329,9 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
         serverState: serverState,
         placement: prefs.modelPlacement,
       ),
+      // The same statuses, read the other way round: the files this Mac holds
+      // that the placement is not serving.
+      idleModelLines: RoleLine.idleOnThisMac(statuses, serverState),
       // This Mac's HARDWARE tier, not the effective one, and READ at the
       // press rather than closed over, so a press cannot write last frame's
       // answer.
@@ -352,12 +355,21 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
           smallKey: smallKey,
           hardwareTier: tier,
         );
+        // The write moved the placement and the app's own server follows it:
+        // under User defined this Mac serves the embedding model alone, so
+        // the two chat models leave memory. Fire and forget on
+        // `ServerBootstrap`'s reasoning — a load is tens of seconds and the
+        // press has to return.
+        unawaited(supervisor.ensurePreset());
       },
       onUseManaged: () async {
         if (!mounted) return;
         final tier = await ref.read(machineTierProvider.future);
         if (!mounted) return;
         await notifier.usePlacement(ModelPlacement.local, hardwareTier: tier);
+        // Same rule the other way: this Mac's set comes back, and the bar and
+        // the three rows show the load. Fire and forget for the same reason.
+        unawaited(supervisor.ensurePreset());
       },
       onRemoveKey: notifier.clearBoxKey,
       // Clears the wizard's own bookkeeping — everything in `setup_state`

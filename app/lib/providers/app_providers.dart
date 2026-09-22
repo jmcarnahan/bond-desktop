@@ -476,11 +476,13 @@ final serverStateProvider = StreamProvider<ServerState>(
 /// have certainly been read. Watched through a `select` onto a bool so the
 /// states on the way there — one per model as each loads — do not re-run it.
 ///
-/// The RESOLVED manifest, so the list is what this install actually wants: two
-/// models on a machine under the full tier's floor, and on the user-defined
-/// placement the embedding model alone, since the other two run on somebody's
-/// server. The inbox tier has no writing model, so the big row describes the
-/// file that does the writing there, which is the small one.
+/// The list is this MACHINE's tier, and [ManagedModelStatus.inUse] says which
+/// of those files the placement actually serves: two models on a machine under
+/// the full tier's floor, and under the user-defined placement all three rows
+/// with the embedding one alone in use, since the other two run on somebody's
+/// server while their weights stay on this disk. The inbox tier has no writing
+/// model, so the big row describes the file that does the writing there, which
+/// is the small one.
 final managedModelsStatusProvider =
     FutureProvider<List<ManagedModelStatus>>((ref) async {
   ref.watch(setupRestartProvider);
@@ -488,8 +490,17 @@ final managedModelsStatusProvider =
     serverStateProvider.select((state) => state.valueOrNull is ServerReady),
   );
   final paths = ref.watch(appPathsProvider);
-  final tier = await ref.watch(effectiveTierProvider.future);
+  final tier = await ref.watch(machineTierProvider.future);
   final manifest = ref.watch(modelManifestProvider).forTier(tier);
+  // What the placement's own preset is built from. The same manifest under the
+  // effective tier, which answers `remote` on the user-defined placement, so
+  // the ids it lists are exactly the files this Mac is asked to hold.
+  final served = ref
+      .watch(modelManifestProvider)
+      .forTier(await ref.watch(effectiveTierProvider.future))
+      .models
+      .map((file) => file.id)
+      .toSet();
   final ledger = await ref.watch(setupStoreProvider).downloadLedger();
   final folder = ref.read(appPrefsProvider).effectiveModelsFolder(paths);
 
@@ -507,6 +518,7 @@ final managedModelsStatusProvider =
       onDisk: ledger.isCurrent(file) &&
           File(p.join(folder, file.relativePath)).existsSync(),
       routerId: file.id,
+      inUse: served.contains(file.id),
     ));
   }
 
