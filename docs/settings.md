@@ -392,6 +392,15 @@ order is the protection, because `setBoxServers` refuses a third-party big
 address while the flag is false. **Not now** and **Back** close the pane and
 write nothing.
 
+**A third-party small address is refused outright.** The consent is about
+drafts on the big model; the small model reads every message body for
+triage and the rest, and no cloud service serves that role from any screen
+(Round E decision 9). A vendor or Bedrock host in the small field is refused
+under it with `The small model runs on a server of your own. Cloud services
+can serve the big model only.` before any server is asked, whatever the
+consent flag says, and `setBoxServers` refuses the same address as its last
+line.
+
 `onThirdParty` is null in two cases, and then the form refuses the address
 under the field instead of asking: `Cloud services are connected under
 Settings after setup.` The wizard is one. The other is a screen wired with
@@ -998,7 +1007,7 @@ One `PaneSurface`, whose title is the step's and whose trailing slot reads
 | # | Title | Primary button | What it does |
 |---|---|---|---|
 | 1 | Welcome to Bond | `Get started` | What Bond is; the container-migration line when there was one |
-| 2 | Your Mac | `Continue` | Chip, memory, macOS, and which models this Mac takes. Intel or Rosetta renders **no** button at all. At 40 GiB and up, one line saying it runs all three; below it, an alert naming the memory, saying the writing model is not downloaded here and that the writing stages run on the inbox model until a target is added under Settings, Models. Under 16 GiB the same alert gains one sentence about slower triage. All of it is a warning that still continues |
+| 2 | Your Mac | `Continue` | Chip, memory, macOS, and which models this Mac takes. Intel or Rosetta renders **no** button at all. At 40 GiB and up, one line saying it runs all three; below it, an alert naming the memory, saying the writing model is not downloaded here and that the writing stages run on the inbox model unless Bond is pointed at the user's own servers under Settings, Models. Under 16 GiB the same alert gains one sentence about slower triage. All of it is a warning that still continues |
 | 3 | Where the models run | the form's `Continue` | The one question this round is about, answered by the same form Settings renders. `SetupWhereBody` is two cards and nothing else: **Managed · recommended** keyed `setup-where-managed` and **User defined** keyed `setup-where-custom`. User defined renders `ModelServersForm` with `connectLabel: 'Continue'` and `onThirdParty: null`, so its press IS the way forward and there is no second Continue under it. On a build carrying `BOND_BOX_URL` the User defined card opens ALREADY CHOSEN with both addresses filled in, because `defaultModelPlacement` is the box whenever an address was compiled in. **Managed** is never preselected: the form keeps the way forward behind its own press, where a preselected Managed would put a live Continue under a question nobody had been asked. The press probes BOTH addresses with the typed key, or with the stored one looked up by id when the field is blank, takes the model names the servers list, refuses an address under its own field in the form's own words, and refuses a vendor's address with `Cloud services are connected under Settings after setup.` — there is no consent pane behind a wizard, and cloud services are a Settings decision. It then calls `continueFromWhere(servers:)`, which is the four-value `useBox`: the two addresses, the two discovered names, a key per id or null to keep the stored one, the box placement, and no stored target or stage entry anywhere, and then the models step. A re-entry with a key already in the keychain continues with the field blank and keeps it. Managed's own Continue calls `continueFromWhere()` with no payload, which is `usePlacement(local, hardwareTier:)` with this Mac's HARDWARE tier, never the effective one, which reads `remote` while the placement is still the box. It KEEPS the addresses and the key: changing where the work runs is not forgetting how to reach the servers |
 | 4 | Models | `Continue` | The RESOLVED manifest's rows — name, role sentence, size, licence button, and any `notice` verbatim — and the total. Three rows and 23.8 GB on a full Mac — four files, because the writing model's row says `+ MTP head, 1.6 GB` under its size — two rows and 4.6 GB on an inbox one, and the first sentence says which |
 | 5 | Storage | `Continue` | The effective folder, **Change folder…**, and `checkDisk`. Dead until the preflight answers and passes; free space that could not be asked counts as passing, a folder that cannot be WRITTEN does not — `Bond can't write to this folder. Choose another one.` |

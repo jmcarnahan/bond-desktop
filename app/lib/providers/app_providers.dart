@@ -130,9 +130,9 @@ final sessionStartProvider = Provider<DateTime?>((ref) => null);
 /// It gates the four drains and nothing else. Mail and Teams keep syncing
 /// while it is off — the inbox stays current, the models stay idle — and the
 /// two things that dial a server without being a drain keep working too:
-/// Settings' Check server probe, which is how a target is chosen in the first
-/// place, and the query embedding behind the Find field, which a person is
-/// waiting on.
+/// the Models page's Check and Connect probes, which is how a server is
+/// checked in the first place, and the query embedding behind the Find field,
+/// which a person is waiting on.
 final processingProvider =
     StateNotifierProvider<ProcessingNotifier, bool>(
   (ref) => ProcessingNotifier(ref.read(appPrefsProvider).processingOn),
@@ -315,8 +315,9 @@ final machineTierProvider = FutureProvider<MachineTier>((ref) async {
 /// What this install actually runs, placement included.
 ///
 /// [machineTierProvider] answers what this MAC could run, off its memory
-/// alone, and stays the right question for the Settings fact line and for
-/// **Use this Mac's defaults**. This one answers what it WILL run: on
+/// alone, and stays the right question for the Settings fact line and for its
+/// two callers, the wizard's Finish and `usePlacement(local, hardwareTier:)`.
+/// This one answers what it WILL run: on
 /// [ModelPlacement.box] the inbox and writing stages are on the box and only
 /// the embedding model is served here, which is [MachineTier.remote]. The
 /// manifest resolves to one file, so the downloader fetches one, the managed

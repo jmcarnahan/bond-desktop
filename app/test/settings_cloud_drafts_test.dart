@@ -181,7 +181,8 @@ void main() {
           tester.widget<Switch>(find.byKey(SettingsScreen.cloudStandingKey));
       expect(toggle.onChanged, isNull);
       expect(
-        find.text('Pick a target for Improve a draft under Models first.'),
+        find.text(
+            'Improve a draft has no server to run on. Check the Models section.'),
         findsOneWidget,
       );
     });

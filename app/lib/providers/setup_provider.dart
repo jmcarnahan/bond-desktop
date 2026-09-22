@@ -334,7 +334,7 @@ class SetupController extends StateNotifier<SetupState> {
   final String? Function(String targetId)? storedBearer;
 
   /// Moves the install to a placement and clears out the stage entries the app
-  /// itself wrote. This Mac's answer to **Where the models run**, wired so
+  /// itself wrote. Managed's answer to **Where the models run**, wired so
   /// that both answers have one shape.
   final Future<void> Function(
     ModelPlacement placement, {
@@ -388,7 +388,7 @@ class SetupController extends StateNotifier<SetupState> {
     // compares the ledger against [resolvedManifest], and on a box install
     // that is the embedding model alone. It also means a re-entry through
     // "Set up again" opens the where step knowing which install this is, so
-    // choosing This Mac there writes the undo.
+    // choosing Managed there writes the undo.
     //
     // ONLY User defined is seeded, and since Round H that is a FRESH install
     // on any build with a compiled address: `defaultModelPlacement` is the

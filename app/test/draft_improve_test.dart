@@ -434,7 +434,7 @@ void main() {
 
       expect(
         await handler.improve('email', 'm1'),
-        'Pick a target for Improve a draft under Settings, Models first.',
+        'Improve a draft has no server to run on. Check Settings, Models.',
       );
       expect(improveLlm.calls.length, 0);
       final row = await lastImproveRow();

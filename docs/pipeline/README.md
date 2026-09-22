@@ -51,8 +51,8 @@ measures the whole thing end to end.
 remembered preference that starts ON (Round H; before it, off at every launch)
 and gates all four drains through one `enabled` closure each, so turning it off
 leaves a launch reading and storing mail without spending a token.
-Sync, the read-ack queue, Settings' Check server probe and the Find field's
-query embedding all keep working while it is off. The switch, what it touches
+Sync, the read-ack queue, the Models page's Check and Connect probes and the
+Find field's query embedding all keep working while it is off. The switch, what it touches
 and what it deliberately does not are in
 [10-model-routing.md](10-model-routing.md).
 
@@ -123,12 +123,13 @@ labels, the scorer and the populations a number is quoted on — is described in
 | Storyline recap | Local prose | `:8080` |
 | Reply decision | Local prose | `:8080` |
 | Draft generation | Local prose | `:8080` |
-| Improve a draft (optional; no target until picked) | none | none |
+| Improve a draft | Local prose | `:8080` |
 | Embeddings | embed | `:8081` Qwen3-Embedding-0.6B (`make embed`) |
 
-Every chat stage can be re-pointed at any target in Settings → Models; the
-mapping above is the default, and what a stage resolves to is data in
-`stage_targets` rather than wiring in the code. Embeddings is the exception and
+The PLACEMENT decides where a chat stage goes, Managed or User defined, and
+the mapping above is what Managed resolves to. The per-stage picks under it
+are still data in `stage_targets` rather than wiring in the code, but no
+screen has written one since Round H. Embeddings is the exception and
 is not routed at all. See
 [10-model-routing.md](10-model-routing.md#runtime-overrides).
 

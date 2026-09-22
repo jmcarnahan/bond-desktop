@@ -366,6 +366,35 @@ void main() {
       expect(prefs.state.boxProseSpec.wire, LlmWire.bedrockConverse);
     });
 
+    test('and a third-party small address whatever the consent says',
+        () async {
+      // The consent is about drafts on the big model. The small model reads
+      // every message body, and no cloud service serves that role from any
+      // screen, so the guard here does not read the flag at all.
+      final prefs = await notifier();
+      await prefs.setCloudDraftsConsent(true);
+
+      for (final vendor in [
+        'https://api.openai.com/v1/chat/completions',
+        'https://bedrock-runtime.us-east-2.amazonaws.com/openai/v1/'
+            'chat/completions',
+      ]) {
+        await expectLater(
+          prefs.setBoxServers(
+            bigUrl: bigUrl,
+            smallUrl: vendor,
+            bigModel: 'big',
+            smallModel: 'small',
+          ),
+          throwsA(isA<ArgumentError>()
+              .having((e) => e.name, 'name', 'smallUrl')),
+          reason: vendor,
+        );
+      }
+      expect(prefs.state.boxBigUrl, isEmpty);
+      expect(prefs.state.boxSmallUrl, isEmpty);
+    });
+
     test('a value that equals the build is stored as empty', () async {
       final prefs = await notifier();
 

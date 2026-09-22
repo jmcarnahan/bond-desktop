@@ -163,6 +163,15 @@ class ModelServersForm extends StatefulWidget {
   static const String saveFailedText =
       'The servers could not be saved. Try again.';
 
+  /// A vendor's address on the SMALL field, refused whatever the consent
+  /// says. The consent pane is about drafts on the big model; the small
+  /// model reads every message body for triage and the rest, and no cloud
+  /// service serves that role from any screen (Round E decision 9, Round
+  /// H decision 28).
+  static const String smallThirdPartyRefusalText =
+      'The small model runs on a server of your own. Cloud services can '
+      'serve the big model only.';
+
   /// A vendor's address where no consent pane can be opened, which is the
   /// wizard. Cloud services are a Settings decision, taken once, after the
   /// install works at all.
@@ -466,7 +475,12 @@ class _ModelServersFormState extends State<ModelServersForm> {
     final smallUrl = _smallUrl.text.trim();
 
     final bigRefusal = _refuse(bigUrl);
-    final smallRefusal = _refuse(smallUrl);
+    // The small address never goes to a vendor: the consent pane covers the
+    // big model's drafts and nothing covers inbox work leaving for one.
+    final smallRefusal = _refuse(smallUrl) ??
+        (isThirdPartyHost(smallUrl) || _isConverse(smallUrl)
+            ? ModelServersForm.smallThirdPartyRefusalText
+            : null);
     if (bigRefusal != null || smallRefusal != null) {
       setState(() {
         _bigRefusal = bigRefusal;

@@ -210,9 +210,9 @@ class SettingsScreen extends StatefulWidget {
   /// still renders if [onShowActivityLogChanged] is wired.
   final VoidCallback? onOpenActivityLog;
 
-  /// Asks a server what it serves, for the editors' 'Check server'. Null takes
-  /// the button off every editor and the embeddings card — the editors still
-  /// work, with the model as a typed name — on the same discipline as every
+  /// Asks a server what it serves, for the Models page's **Check** on the
+  /// three role rows and for the form's **Connect**. Null takes the Check off
+  /// every row and takes Connect off the form, on the same discipline as every
   /// other optional control here: a host that cannot ask does not offer to.
   final Future<ModelProbeResult> Function(String url, {String? bearer})? probeServer;
 
@@ -221,7 +221,7 @@ class SettingsScreen extends StatefulWidget {
   final String? Function(String targetId)? storedBearer;
 
   /// Where this install's model work runs: the segment the Models page opens
-  /// on, its collapsed summary, and what the fold's Reset caption promises.
+  /// on, and what its collapsed summary says.
   final ModelPlacement modelPlacement;
 
   /// The four user-defined values to prefill the Models form with, already
@@ -2250,7 +2250,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       const SizedBox(height: BondSpacing.s4),
       Text(
         target == null
-            ? 'Pick a target for Improve a draft under Models first.'
+            ? 'Improve a draft has no server to run on. Check the Models '
+                'section.'
             : 'After the local draft is written, the same prompt goes to '
                 '$target and its answer replaces the draft. Counts toward the '
                 'daily cap under Processing.',

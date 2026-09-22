@@ -436,10 +436,9 @@ class LlmTargetSpec {
   /// Whether this target is DERIVED rather than stored, by either route.
   ///
   /// The question every caller that guards a write actually has: a derived
-  /// spec has no row in `llm_targets` to update, so `upsertTarget` and
-  /// `removeTarget` refuse it, the targets list offers it no Edit or Remove,
-  /// and the Drafts-in-flight control writes the slot pref instead of the
-  /// spec.
+  /// spec has no row in `llm_targets` to update, so this flag is what
+  /// `upsertTarget` and `removeTarget` guard on, and both refuse it; the
+  /// Drafts-in-flight control writes the slot pref instead of the spec.
   bool get isFixed => isBuiltIn || isBox;
 
   /// Whether somebody else's company operates the machine this dials. The
@@ -729,10 +728,10 @@ class PipelineStageInfo {
   /// NO ROW SETS IT since Round H. `draft_improve` was the one that did, and
   /// its entry was the feature being on; with the stage picker gone the only
   /// way to write one went too, so Improve a draft is a prose stage like the
-  /// rest and is routed by the rule. The field stays because the Advanced
-  /// fold still branches on it until that fold is deleted, and because a
-  /// future stage that is genuinely off until somebody asks for it would want
-  /// exactly this.
+  /// rest and is routed by the rule. The field stays, with no member and
+  /// nothing branching on it, because a future stage that is genuinely off
+  /// until somebody asks for it would want exactly this, and
+  /// `model_slots_test` pins that no current row sets it.
   final bool optional;
 
   const PipelineStageInfo({
@@ -869,8 +868,8 @@ enum MachineTier {
   full,
 
   /// The embedding model and the inbox model only. The writing stages run on
-  /// the inbox model until a person adds a target under Settings, Models, and
-  /// drafts are on demand rather than prefetched.
+  /// the inbox model unless the install is pointed at the user's own servers,
+  /// and drafts are on demand rather than prefetched.
   inbox,
 
   /// The embedding model alone: every other stage is on the shared GPU box.

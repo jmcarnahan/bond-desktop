@@ -251,8 +251,11 @@ enforce the ones that are commands.
   ID, since two addresses can be two operators) plus `usePlacement(box)`, and
   it is the one door the Models page and the wizard both write through.
   `setBoxServers` refuses a big URL whose host
-  `isThirdPartyHost` while consent is false, and `draftFallbackSpec` is never
-  third party for the same reason. THREE one-shot migrations run in
+  `isThirdPartyHost` while consent is false, refuses a third-party SMALL URL
+  whatever the flag says (the consent covers drafts on the big model; the
+  small model reads every message body and no cloud service serves that
+  role from any screen), and `draftFallbackSpec` is never third party for
+  the same reason. THREE one-shot migrations run in
   `AppPrefsNotifier.read`, in this order: `box_targets_derived` (Round G's
   stored pair into the `box_url` origin), `box_servers_derived` (that origin
   into the two URLs), `stage_targets_cleared` (the per-step picks, which no
@@ -316,11 +319,9 @@ enforce the ones that are commands.
   and nothing of the pair; the addresses, the discovered names and the keys
   live in the form until its press.
 - Under `flutter test` `hardwareInfoProvider` answers `HardwareInfo.unknown` at
-  its two-second timeout, so a real inbox in a widget test never offers **Reset
-  per-step picks** (the unreadable-memory branch hides it by design) and the
-  tier is `AsyncLoading` for the first two seconds. A test that presses it
-  overrides `hardwareInfoProvider` with a readable machine and pumps past two
-  seconds in bounded steps.
+  its two-second timeout, so the tier is `AsyncLoading` for the first two
+  seconds. A test that needs a readable machine overrides
+  `hardwareInfoProvider` with one and pumps past two seconds in bounded steps.
 - Never run `make model` or `make fast` beside the app's managed server on one
   Mac. Two 27Bs and two 4Bs wired with `mmap+mlock` is about 50 GB, and it
   panicked a 64 GB Mac on 2026-09-21. Stop the make servers first

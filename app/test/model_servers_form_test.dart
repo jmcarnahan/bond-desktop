@@ -514,9 +514,86 @@ void main() {
       expect(connected, isEmpty);
       expect(find.textContaining('Reachable'), findsNothing);
     });
+
+    testWidgets('editing an address after a Connect drops the listing and the '
+        'picker it belonged to', (tester) async {
+      await open(
+        tester,
+        probe: fake(const {
+          _bigUrl: ModelProbeResult(
+            reachable: true,
+            modelIds: ['qwen3.8', 'qwen3-8b'],
+          ),
+          _smallUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3-4b']),
+        }),
+      );
+      await connect(tester);
+
+      // Two ids, so the first press discovered a list and waited.
+      expect(find.byKey(ModelServersForm.bigModelKey), findsOneWidget);
+      expect(find.text('Reachable · 2 models'), findsOneWidget);
+
+      await type(tester, ModelServersForm.bigUrlKey, _localUrl);
+
+      // The listing belonged to the old address, and so did the picker.
+      expect(find.byKey(ModelServersForm.bigModelKey), findsNothing);
+      expect(find.textContaining('Reachable'), findsNothing);
+      expect(connected, isEmpty);
+
+      await connect(tester);
+
+      // The name written is the one the NEW server listed.
+      expect(connected.single.bigUrl, _localUrl);
+      expect(connected.single.bigModel, 'a-model');
+      expect(connected.single.smallModel, 'qwen3-4b');
+    });
+
+    testWidgets('a probe landing after the form is gone does nothing',
+        (tester) async {
+      final hold = Completer<ModelProbeResult>();
+      await open(tester, probe: (url, {bearer}) => hold.future);
+
+      await tester.tap(find.byKey(ModelServersForm.connectKey));
+      await tester.pump();
+
+      // The host took the form off screen while both servers were being asked.
+      await tester.pumpWidget(const SizedBox());
+      hold.complete(
+        const ModelProbeResult(reachable: true, modelIds: ['qwen3.8']),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(connected, isEmpty);
+    });
   });
 
   group('somebody else’s service', () {
+    testWidgets('a vendor on the small address is refused outright, and the '
+        'host is not asked', (tester) async {
+      var asks = 0;
+      await open(
+        tester,
+        smallUrl: _openAiUrl,
+        onThirdParty: (spec, resume) async => asks++,
+      );
+      await type(tester, ModelServersForm.keyKey, 'sk-fixture-vendor-key');
+      await tester.tap(find.byKey(ModelServersForm.connectKey));
+      await tester.pumpAndSettle();
+
+      // Refused under its own field before any server is asked: the consent
+      // pane covers drafts on the big model, and nothing covers inbox work
+      // leaving for a vendor.
+      expect(
+        find.text(ModelServersForm.smallThirdPartyRefusalText),
+        findsOneWidget,
+      );
+      expect(asks, 0);
+      expect(asked, isEmpty);
+      expect(connected, isEmpty);
+      expect(rendered(tester), everyElement(isNot(contains('sk-fixture'))));
+    });
+
     testWidgets('a vendor on the big address asks the host first, and the '
         'connect is its callback', (tester) async {
       final asks = <LlmTargetSpec>[];

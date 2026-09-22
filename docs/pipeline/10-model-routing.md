@@ -41,8 +41,9 @@ prose-slot rows above start on `Local fast` instead, meaning `storyline_group`,
 it stopped being optional: a prose stage left behind would be dialling a
 writing server this tier never starts.
 `AppPrefsNotifier.applyTierDefaults` is the one writer of
-that map, called by the setup wizard at Finish and again whenever somebody
-presses **Use this Mac's defaults** under Settings, Models. It writes the way a
+that map, called by the wizard's Finish on the Managed placement and by every
+`usePlacement(local, hardwareTier:)` — which is what the Models page's
+**Managed** segment and the wizard's **Managed** card call. It writes the way a
 preset does, so an entry equal to a stage's own default is removed rather than
 stored and a fresh install on a big Mac still holds an empty object.
 
@@ -147,9 +148,12 @@ The two built-in targets are the two slots this app has always had, named:
 | `Local fast` (`local-fast`) | `FAST_LLAMA_URL` → `http://localhost:8082/v1/chat/completions`, `FAST_LLAMA_MODEL` → `qwen3.8` | `make fast` (Qwen3-4B-Instruct) — note **8082**, not 8081 |
 | embeddings (`embeddingsClientProvider`) | `EMBED_URL` → `http://localhost:8081/v1/embeddings` | `make embed` (Qwen3-Embedding-0.6B, `--pooling last`) |
 
-All are `--dart-define`-overridable, and the two chat slots are also
-overridable at runtime in **Settings → Models**; adopting a bakeoff winner is
-config in `local.mk` or a setting, not code (see `docs/model-bakeoff.md`).
+All are `--dart-define`-overridable. The two chat slots' overrides survive as
+DATA — the four slot prefs `fast_llm_url`, `fast_llm_model`, `prose_llm_url`
+and `prose_llm_model` — and no screen has written them since Round H, when the
+slot editors went; `BOND_DEV_HAND_SERVERS` is how a dev build says the servers
+are started by hand. Adopting a bakeoff winner is config in `local.mk`, not
+code (see `docs/model-bakeoff.md`).
 llama-server ignores the model name field, but MLX-style runtimes route on it
 — which is why each target carries its own name (`model_slots.dart`).
 
@@ -170,30 +174,37 @@ to write that entry was the stage picker the same round deleted.
 
 Changing a stage's DEFAULT is one row in `pipelineStages`
 (`app/lib/services/llm/model_slots.dart`) and an edit here; changing where a
-stage goes on one machine is Settings → Models, and costs no code at all.
+stage goes on one machine is the PLACEMENT, Managed or User defined, on the
+Models page, and the per-stage picks under it are data the tests and the
+benches write.
 `model_slots_test.dart` is what keeps the table honest against the handler
 list and against the three presets.
 
 ## Runtime overrides
 
-The tables above are what a build is COMPILED with. Any stage can be pointed
-at any target while the app runs, from Settings → Models, without a restart
-and without interrupting work in flight.
+The tables above are what a build is COMPILED with. The routing DATA below —
+`stage_targets`, `llm_targets` and the four slot prefs — still resolves exactly
+as described, and the notifier API still writes it without a restart and
+without interrupting work in flight. Since Round H no SCREEN writes any of it:
+what a person changes at runtime is the placement, Managed or User defined, and
+the pair of addresses a user-defined install names.
 
 - **Per stage, from data.** Targets are a LIST: `llm_targets` holds the specs
   the user added (`LlmTargetSpec {id, name, url, model, wire, bearer,
   parallel, streams}`, JSON), and the two built-ins `local-fast` /
   `local-prose` are DERIVED from the four slot prefs below and never stored —
-  one source of truth, so the two slot editors and the managed router keep
-  meaning what they meant. The map `stage_targets` (stage id → target id)
+  one source of truth, which is what kept the slot editors and the managed
+  router meaning the same thing while both existed. The map `stage_targets`
+  (stage id → target id)
   holds NON-DEFAULT entries only, so a fresh install is an empty object and
   resolves byte-identically to the two-slot app. An entry naming a target that
   no longer exists, or a row that does not parse, falls back to the stage's
   default rather than throwing; a removed target takes its stage entries with
-  it in the same write. The three presets on the add screen — prose stages,
+  it in the same write. The three presets `applyPreset` writes — prose stages,
   storyline confirm, all bulk stages — are `proseStageIds`,
-  `confirmStageIds` and `bulkStageIds` in `model_slots.dart`, and `embeddings`
-  is in none of them because it is not routed at all.
+  `confirmStageIds` and `bulkStageIds` in `model_slots.dart`; they are an API
+  and a test fixture now, because the add screen that offered them went in
+  Round H. `embeddings` is in none of them because it is not routed at all.
 - **A bearer lives in the keychain.** `llm_target_bearer:<id>` via
   `SecureTokenStore`; the JSON carries only the boolean `bearer`, a presence
   flag. It is read once per launch into a private cache on `AppPrefsNotifier`
@@ -314,8 +325,11 @@ one plain POST.
 
 Everything above describes the app talking to servers somebody else started.
 It can also start its own — ONE llama-server in router mode, serving every
-model this Mac's tier wants — and that mode is off by default, so a build with
-nothing changed behaves exactly as this page has always described.
+model this Mac's tier wants — and since Round H that is what a build with
+nothing changed does: `managedServerDefault` is `!handServersBuild`, so the
+router is ON unless the build passed
+`--dart-define=BOND_DEV_HAND_SERVERS=1`. See **On unless the BUILD says
+otherwise** below, which is the same fact from the supervisor's side.
 
 - **The supervisor.** `ModelServerSupervisor`
   (`app/lib/services/server/model_server_supervisor.dart`), behind
@@ -347,10 +361,10 @@ nothing changed behaves exactly as this page has always described.
   A slot with a stored override keeps it. That asymmetry is deliberate: an
   override is somebody deliberately pointing the app at a server they run, and
   the app's own server must not silently take it away. Clearing the
-  override is what hands the slot back to the router. In managed mode the
-  editors' "Default" is that router target too (`AppPrefs.slotBaseline`), so
-  pressing Save without editing writes an empty override and the slot keeps
-  following the router across a port change.
+  override is what hands the slot back to the router. `AppPrefs.slotBaseline`
+  still answers that router target under managed mode and the compiled URL
+  otherwise, so whatever reads a slot's baseline follows the router across a
+  port change; nothing on screen reaches it now.
 - **Embeddings, two targets.** The embed slot is still not switchable, and it
   now has two targets that are never the same thing.
   `targetFor(ModelSlot.embed)` is for DISPLAY and its model is the corpus tag
@@ -622,8 +636,9 @@ what Bond is would be the app asking for credentials as its opening line.
   the recoverable answer. The step is written BEFORE the step is entered, so a
   quit mid-probe resumes on the screen the user was looking at; a write that
   fails costs one step, not the button press.
-- **Eight steps.** Welcome, Your Mac, Models, Storage, Download, Sign in,
-  Notifications, All set. `docs/settings.md` (**First run**) has the table and
+- **Nine steps.** Welcome, Your Mac, Where the models run, Models, Storage,
+  Download, Sign in, Notifications, All set. `docs/settings.md` (**First run**)
+  has the table and
   the strings; `docs/install.md` is the same walk for a non-engineer.
 - **Continue on the download step waits for EVERY file**, not for
   `ModelManifest.usableIds`. `_launch` refuses to start while any file the
@@ -631,12 +646,14 @@ what Bond is would be the app asking for credentials as its opening line.
   and finishing early would leave a non-engineer looking at an idle inbox with
   no progress bar left to explain it. The rest of the app still uses
   `usableIds`; this is the wizard's rule, not the router's.
-- **Finish is what turns managed mode on, and the only thing that writes
+- **Finish applies this Mac's tier defaults, and is the only thing that writes
   `'done'`.** Arriving at All set records `notifications`, the step before it:
   `'done'` is the gate's sentinel, and a quit on the last screen would
-  otherwise let the next launch past the gate with `managedServer` still off.
-  `SetupController.finish` writes `managedServer = true`, records
-  `setup = 'done'`, and returns whether both landed — a false answer keeps the
+  otherwise let the next launch past the gate with no wizard left to walk.
+  `SetupController.finish` applies the tier defaults on the Managed placement
+  only, records `setup = 'done'`, and returns whether that landed — nothing
+  writes `managedServer`, which has been a build define since Round H. A false
+  answer keeps the
   wizard on the screen with `Setup could not be saved. Try Finish again.`
   rather than handing over an inbox whose setup is not on disk. Only a finish
   that saved asks for the server, FIRE-AND-FORGET on `ServerBootstrap`'s
@@ -650,7 +667,8 @@ what Bond is would be the app asking for credentials as its opening line.
   three-server `make model | fast | embed` workflow, whose models live in the
   Homebrew cache rather than this app's folder. A define rather than a
   preference because it describes the build; `local.mk` passes it through.
-- **"Set up again"** (Settings → Models → Local server) clears `setup_state`
+- **"Set up again"** (Settings → Models, the link at the foot of the section,
+  key `settings-set-up-again`) clears `setup_state`
   except `SetupStore.keptOnRestart` — the migration record and the download
   ledger — and bumps the counter the gate watches. The models stay on disk and
   the session stays signed in, so those two steps are a Continue each.
@@ -825,9 +843,9 @@ finishing its last item lifts the stop rather than waiting for the next poll:
 promised.
 
 What keeps running while it is off: mail and Teams sync, the read-ack queue,
-Settings → Models → **Check server** (a probe, not a pump, and it is how a
-target gets chosen in the first place), and the query embedding behind the Find
-field, which a person is waiting on. The composer's **Draft reply** is disabled
+Settings → Models → **Check** on a role row, or **Connect** on the form (a
+probe, not a pump, and it is how a server gets checked in the first place), and
+the query embedding behind the Find field, which a person is waiting on. The composer's **Draft reply** is disabled
 with the tooltip `Processing is off`, because asking while off writes a work
 row that nothing would claim. The switch writes one activity row, kind
 `processing`, status `on` or `off`.

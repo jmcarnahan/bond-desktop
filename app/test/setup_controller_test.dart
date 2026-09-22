@@ -891,7 +891,8 @@ void main() {
       expect(controller.state.step, SetupStep.models);
     });
 
-    test('a box install re-run choosing This Mac ends up local', () async {
+    test('a user-defined install re-run choosing Managed ends up local',
+        () async {
       // The re-entry case. Without the write, "Set up again" on a box install
       // would leave `model_placement = box` standing, and every stage
       // resolving to the box by the rule, while `finish()` applied this

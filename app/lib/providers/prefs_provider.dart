@@ -41,8 +41,8 @@ export '../models/home_sort.dart'
 
 /// So the settings screen reaches a slot's value and its name through one
 /// import — the prefs are where both are composed. [LlmTargetSpec] and
-/// [LlmWire] ride along for the same reason: the Targets list reads and writes
-/// them through this file.
+/// [LlmWire] ride along for the same reason: the tests and the benches read
+/// and write them through this file; no screen does since Round H.
 export '../services/llm/model_slots.dart'
     show LlmTarget, LlmTargetSpec, LlmWire, ModelSlot;
 
@@ -502,9 +502,9 @@ class AppPrefs {
   /// The built-in fast target, as a spec.
   ///
   /// DERIVED from [fastTarget] rather than stored, which is the whole of why
-  /// targets-as-data did not fork the model settings: the four slot prefs, the
-  /// two slot editors, [slotBaseline] and the managed router all still mean
-  /// exactly what they meant, and this is a second view of them.
+  /// targets-as-data did not fork the model settings: the four slot prefs,
+  /// [slotBaseline] and the managed router all still mean exactly what they
+  /// meant, and this is a second view of them.
   LlmTargetSpec get fastSpec => LlmTargetSpec(
         id: builtInFastId,
         name: builtInFastName,
@@ -1006,8 +1006,9 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// One target's stored token, or null when there is none.
   ///
   /// The ONLY door onto [_bearers] besides [targetForStage], and it exists
-  /// for exactly one caller: **Check server**, which must reach a keyed
-  /// endpoint rather than report its 401. One token, by id, for one request.
+  /// for exactly two callers, both through `storedBearer`: the role rows'
+  /// **Check** and the form's **Connect**, which must reach a keyed endpoint
+  /// rather than report its 401. One token, by id, for one request.
   /// What comes back never enters widget state, a `ProbeStatus`, a log line,
   /// an activity row or a test expectation. Null when nothing is stored and
   /// in every build with no keychain, which is every `flutter test` that
@@ -1760,11 +1761,14 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// define reaches it.
   ///
   /// Throws [ArgumentError] on an address that is not an http or https URL,
-  /// and on a big address whose host belongs to a third party while
-  /// [AppPrefs.cloudDraftsConsent] is false. The form in front of this one
-  /// refuses both before the press arrives; the guards are a last line, and
-  /// what they stop is a target nothing can dial and drafts leaving this
-  /// machine for an operator nobody agreed to.
+  /// on a big address whose host belongs to a third party while
+  /// [AppPrefs.cloudDraftsConsent] is false, and on a SMALL address whose
+  /// host belongs to a third party at all: the consent covers drafts on the
+  /// big model, and no cloud service serves the small role from any screen,
+  /// because that role reads every message body. The form in front of this
+  /// one refuses all three before the press arrives; the guards are a last
+  /// line, and what they stop is a target nothing can dial and message text
+  /// leaving this machine for an operator nobody agreed to.
   Future<void> setBoxServers({
     required String bigUrl,
     required String smallUrl,
@@ -1783,6 +1787,15 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
         big,
         'bigUrl',
         'a third-party server needs cloud drafts consent first',
+      );
+    }
+    if (isThirdPartyHost(small) ||
+        wireForHost(small) == LlmWire.bedrockConverse) {
+      throw ArgumentError.value(
+        small,
+        'smallUrl',
+        'the small model runs on a server of your own; a third-party '
+        'service can serve the big model only',
       );
     }
     final compiled = normalizeBoxBaseUrl(boxUrlDefault);

@@ -542,8 +542,8 @@ class DraftHandler extends WorkHandler {
         if (target == null) {
           status = 'skipped';
           detail['reason'] = 'unrouted';
-          return 'Pick a target for Improve a draft under Settings, Models '
-              'first.';
+          return 'Improve a draft has no server to run on. Check '
+              'Settings, Models.';
         }
 
         final row = await _store.getMessageRow(source, messageId);

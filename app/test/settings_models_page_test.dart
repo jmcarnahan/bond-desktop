@@ -656,6 +656,31 @@ void main() {
       expect(find.textContaining('Reachable'), findsNothing);
     });
 
+    testWidgets('a Check landing after the page is gone does nothing',
+        (tester) async {
+      final hold = Completer<ModelProbeResult>();
+      await open(
+        tester,
+        placement: ModelPlacement.box,
+        boxKeyStored: true,
+        storedBearer: (_) => 'sk-fixture-stored',
+        probe: (url, {bearer}) => hold.future,
+        roleLines: _boxLines(),
+      );
+
+      await tester.tap(find.byKey(SettingsModelsPage.roleCheckKey('big')));
+      await tester.pump();
+
+      // The host left Settings while the answer was still out.
+      await tester.pumpWidget(const SizedBox());
+      hold.complete(
+        const ModelProbeResult(reachable: true, modelIds: ['qwen3.8']),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('a host that cannot ask offers no Check anywhere',
         (tester) async {
       await open(tester, roleLines: _localLines());

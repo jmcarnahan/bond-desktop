@@ -104,7 +104,7 @@ reads it.
 |---|---|
 | Task | `ReplyDecisionTask` — `app/lib/services/llm/reply_decision_task.dart` |
 | Schema | `reply_decision` |
-| Slot | **prose / 27B** by default (`stageLlmClientProvider('reply_decision')`, a client of its own since 2026-09-19 so the decision and the draft can point at different targets; re-pointable in Settings → Models, see [10-model-routing.md](10-model-routing.md)) |
+| Slot | **prose / 27B** by default (`stageLlmClientProvider('reply_decision')`, a client of its own since 2026-09-19 so the decision and the draft can point at different targets; routed by the placement rule, and the per-stage pick is data with no screen since Round H, see [10-model-routing.md](10-model-routing.md)) |
 | Params | temperature 0, maxTokens 256 |
 
 The 27B reads the actual conversation and answers exactly one question: does
@@ -122,7 +122,7 @@ explains why it asks only one question. A "no" closes the draft stage
 |---|---|
 | Task | `DraftTask` — `app/lib/services/llm/draft_task.dart` |
 | Schema | `draft_reply` |
-| Slot | **prose / 27B** by default (`stageLlmClientProvider('draft_reply')`; re-pointable in Settings → Models; a third-party target here asks for consent once, see [10-model-routing.md](10-model-routing.md)) |
+| Slot | **prose / 27B** by default (`stageLlmClientProvider('draft_reply')`; routed by the placement rule, and the per-stage pick is data with no screen since Round H; a third-party target here asks for consent once, see [10-model-routing.md](10-model-routing.md)) |
 | Params | temperature 0, maxTokens 768 (`DraftHandler.draftMaxTokens`) |
 
 Writes a first-person reply on the owner's behalf: an evidence sentence, one

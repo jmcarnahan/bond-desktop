@@ -93,7 +93,8 @@ void main() {
       'This Mac has $memory of memory. It runs the inbox models, the '
       'embedding model and the 4B. The writing model (Qwen3.8 27B) is built '
       'for 40.0 GB or more and is not downloaded here; writing stages run on '
-      'the inbox model until you add a target under Settings, Models.';
+      'the inbox model unless you point Bond at your own servers under '
+      'Settings, Models.';
 
   testWidgets('a machine that has not answered yet says it is checking',
       (tester) async {

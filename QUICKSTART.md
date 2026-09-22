@@ -231,15 +231,15 @@ Two things you may see and can ignore:
 To confirm the app sees the servers, open the avatar menu → **Settings** →
 **Models**. The page asks one question, where the models run, and lists three
 roles under it: the big model, the small model and embeddings. Press **Check**
-on each. All three should report reachable with the model listed. Everything
-else, the per-step picks, the extra servers, the port and the models folder,
-is behind the **Advanced** fold.
+on each. All three should report reachable with the model listed.
 
 ## 5. Day to day
 
-The servers are independent of the app. They survive app restarts and the
-weights are memory-mapped, so a second start is fast. After a reboot, or after
-`make stop`, bring them back yourself; the app does not start them.
+On the hand-started path, `BOND_DEV_HAND_SERVERS = 1` in `local.mk`, the
+servers are independent of the app. They survive app restarts and the weights
+are memory-mapped, so a second start is fast. After a reboot, or after
+`make stop`, bring them back yourself; the app does not start them. Without
+that define the app runs its own llama-server and none of this is needed.
 
 ```sh
 make status
@@ -255,13 +255,15 @@ Stop them when you need the memory back:
 make stop fast-stop embed-stop
 ```
 
-Or let the app run them for you: with `BOND_LLAMA_SERVER` set in `local.mk`
-(step 2), **Settings → Models → Local server** turns on one llama-server that
-serves all three models, and starts and stops it with the app. It is off by
-default, and turning it off puts you back on `make model fast embed` exactly as
-above. **Set up again** on that card re-runs the first-run wizard from the top
-— it keeps the models already on disk and the session already signed in, so
-those two screens are a Continue each.
+Or let the app run them for you, which is what it does BY DEFAULT: with
+`BOND_LLAMA_SERVER` set in `local.mk` (step 2), the app runs one llama-server
+that serves all three models, and starts and stops it with the app. What puts
+you back on `make model fast embed` exactly as above is
+`BOND_DEV_HAND_SERVERS = 1` in `local.mk` (step 2), which is a build define
+rather than a setting. **Set up again**, at the foot of Settings → Models,
+re-runs the first-run wizard from the top — it keeps the models already on
+disk and the session already signed in, so those two screens are a Continue
+each.
 
 Rebuild the app after a `git pull`:
 
@@ -275,9 +277,9 @@ make app-run
 **A port is busy.** `make model` (and `fast`, `embed`) refuse to reuse a port
 held by anything that is not a `llama-server`; they print the pid and command.
 Either free the port or move ours in `local.mk` (step 2). Then point the app at
-the new port: for the prose and bulk slots, Settings → Models → edit the Server
-URL and Save. The embeddings URL is fixed at build time, so a moved embeddings
-port means one rebuild:
+the new port: under **User defined**, edit the two addresses in Settings →
+Models and press **Connect**. The embeddings URL is fixed at build time, so a
+moved embeddings port means one rebuild:
 
 ```sh
 make app-run EMBED_URL=http://localhost:9081/v1/embeddings
@@ -336,9 +338,10 @@ work that needs it until it comes back. Start the missing one.
   (the preset it writes, the pid file the next launch reaps, and an empty cache
   directory the child is deliberately pointed at)
 - Models the app downloads for itself:
-  `~/Library/Application Support/com.bondinbox.app/models/`, or wherever
-  **Change folder…** on that card points. Separate from the Homebrew cache
-  above, which is what `make model` fills.
+  `~/Library/Application Support/com.bondinbox.app/models/`, or the folder
+  chosen on the setup's Storage step (reach it again through **Set up
+  again**). Separate from the Homebrew cache above, which is what `make model`
+  fills.
 - App data (database, attachments, settings):
   `~/Library/Application Support/com.bondinbox.app/`. A build made before the
   app dropped the sandbox kept the same files under

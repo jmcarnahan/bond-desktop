@@ -11,7 +11,10 @@ import 'package:flutter_test/flutter_test.dart';
 /// line naming where it actually looked is the one that resolves a "not
 /// reachable" against a server that is demonstrably up.
 ///
-/// One stateless widget over two props, so this file pumps it alone.
+/// One stateless widget over two props, so this file pumps it alone. The
+/// guard that feeds it lives in the same library, so its two rules are pinned
+/// here too: a probe that breaks its promise becomes one sentence rather than
+/// a crash, and an empty access key is sent as no key at all.
 void main() {
   Future<void> pump(
     WidgetTester tester, {
@@ -90,5 +93,33 @@ void main() {
       find.text('Asked https://box.example.com/prose/v1/models'),
       findsOneWidget,
     );
+  });
+
+  group('guardedProbe', () {
+    test('a probe that throws is reported, not thrown', () async {
+      final result = await guardedProbe(
+        (url, {bearer}) async => throw StateError('boom'),
+        'https://box.example.com/v1/chat/completions',
+        null,
+      );
+
+      expect(result.reachable, isFalse);
+      expect(result.error, 'Could not check the server');
+    });
+
+    test('an empty bearer is sent as none, and a real one rides', () async {
+      final sent = <String?>[];
+      Future<ModelProbeResult> probe(String url, {String? bearer}) async {
+        sent.add(bearer);
+        return const ModelProbeResult(reachable: true);
+      }
+
+      const url = 'https://box.example.com/v1/chat/completions';
+      await guardedProbe(probe, url, '');
+      await guardedProbe(probe, url, 'sk-fixture-bearer');
+      await guardedProbe(probe, url, null);
+
+      expect(sent, [null, 'sk-fixture-bearer', null]);
+    });
   });
 }
