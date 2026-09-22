@@ -731,17 +731,24 @@ void main() {
         () async {
       // The wiring nothing else can be asked about: a lane built without the
       // `enabled` closure would run the moment anything pumped it, and the
-      // switch at the top of the rail would be a control over nothing. The
-      // switch defaults OFF, so a drain that took work here is a lane that
-      // was wired without it.
+      // switch at the top of the rail would be a control over nothing.
+      //
+      // The switch is a REMEMBERED preference that starts on since Round H, so
+      // this writes it off FIRST and reads it back: a drain that took work
+      // here is a lane that was wired without the closure.
+      await store.setPref(processingOnKey, 'false');
       final container = ProviderContainer(
-        overrides: [dbProvider.overrideWithValue(db)],
+        overrides: [
+          dbProvider.overrideWithValue(db),
+          initialAppPrefsProvider
+              .overrideWithValue(await AppPrefsNotifier.read(store)),
+        ],
       );
       addTearDown(container.dispose);
       await container.read(appPrefsProvider.notifier).ready;
 
       expect(container.read(processingProvider), isFalse,
-          reason: 'every launch starts off');
+          reason: 'the preference said off, and the switch is seeded from it');
 
       await store.upsertMessage({
         'source': 'email',

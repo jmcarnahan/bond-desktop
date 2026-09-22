@@ -312,6 +312,10 @@ void main() {
     // either way.
     await seedDropped('Weekly roundup');
     await pumpScreen(tester, overrides: [
+      // Said out loud, like its sibling below: the switch is a remembered
+      // preference that starts ON since Round H, so a test about the off half
+      // says which half it is.
+      processingProvider.overrideWith((ref) => ProcessingNotifier()),
       restoreServiceProvider.overrideWith((ref) => RestoreService(
             ref.watch(messageStoreProvider),
             progress: ref.watch(pipelineProgressProvider),

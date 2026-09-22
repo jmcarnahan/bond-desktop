@@ -110,10 +110,20 @@ final sessionStartProvider = Provider<DateTime?>((ref) => null);
 
 /// Whether this session is allowed to run model work at all.
 ///
-/// SESSION state, on [sessionStartProvider]'s precedent, and deliberately not
-/// a preference: every launch starts OFF so the owner can point the stages at
-/// the servers they mean to use before anything is spent on the wrong one. A
-/// stored answer would make that impossible to get back to.
+/// A REMEMBERED preference that starts on, seeded here from
+/// [AppPrefs.processingOn]. It was session state until Round H, off at every
+/// launch so the owner could point the stages at the right servers before
+/// anything was spent on the wrong one. The placement rule answers that now:
+/// the default server IS the measured one, and a missing key or a dead address
+/// parks with a sentence instead of spending attempts. Turning it off still
+/// stands the models down for the rest of the session, and it is remembered,
+/// so a machine left off comes back off.
+///
+/// `read` and never `watch`. A watch would rebuild this notifier on every
+/// unrelated preference write and reset the switch mid-drain, which is
+/// [_enabledReader]'s reasoning exactly. It is safe because `main()` awaits
+/// `AppPrefsNotifier.read` before `runApp` and injects the result through
+/// `initialAppPrefsProvider`, so the state is populated at the first read.
 ///
 /// It gates the four drains and nothing else. Mail and Teams keep syncing
 /// while it is off — the inbox stays current, the models stay idle — and the
@@ -123,12 +133,16 @@ final sessionStartProvider = Provider<DateTime?>((ref) => null);
 /// waiting on.
 final processingProvider =
     StateNotifierProvider<ProcessingNotifier, bool>(
-  (ref) => ProcessingNotifier(),
+  (ref) => ProcessingNotifier(ref.read(appPrefsProvider).processingOn),
 );
 
 /// The switch's state, and the one thing that moves it.
+///
+/// [initial] stays an optional POSITIONAL parameter: two test overrides
+/// construct this notifier bare to say "off, whatever the preferences hold",
+/// and the seed belongs to the provider above rather than to the class.
 class ProcessingNotifier extends StateNotifier<bool> {
-  ProcessingNotifier() : super(false);
+  ProcessingNotifier([super.initial = false]);
 
   void set(bool on) => state = on;
 }
@@ -402,11 +416,27 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
         // caller chains — see [pumpTriageThenWorkers]. Every lane, because a
         // server coming back is news to all three and the fast lane's own
         // `onDrained` would only reach the others if it had work of its own.
+        //
+        // Behind `ready` FIRST, which is new in Round H and is what closes the
+        // bearer window: the keychain prefetch is a round trip after `main`
+        // injects the preferences, and with processing starting on this pump
+        // could beat it and send one unauthenticated request per stage. One
+        // await on a future that is normally already complete.
+        //
+        // And pumped EITHER WAY. `ready` can reject now that the read path
+        // writes (the Round G migration), and an unhandled rejection here
+        // would cost the supervisor its first pump for the whole session; a
+        // prefs load that failed is one 401 the user can see, not a pipeline
+        // that never starts.
+        Future<void> pump() => pumpTriageThenWorkers(
+              triage: () => ref.read(triageQueueProvider).pump(),
+              workers: () => ref.read(aiWorkersProvider).pumpAll(),
+            );
         unawaited(
-          pumpTriageThenWorkers(
-            triage: () => ref.read(triageQueueProvider).pump(),
-            workers: () => ref.read(aiWorkersProvider).pumpAll(),
-          ),
+          ref.read(appPrefsProvider.notifier).ready.then(
+                (_) => pump(),
+                onError: (Object _, StackTrace _) => pump(),
+              ),
         );
       } catch (_) {}
     },

@@ -139,6 +139,12 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
+    // The processing switch is a remembered preference that starts ON since
+    // Round H, and every test in this file asserts on the work a press
+    // ENQUEUED. With the lanes running, a drain claims the row before the
+    // assertion reads it, so this file states the off half once, here; the
+    // two tests that want a pass actually running turn it on themselves.
+    await store.setPref(processingOnKey, 'false');
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
@@ -357,8 +363,8 @@ void main() {
       await seedWithRemoval();
 
       await openStoryline(tester, 'Website redesign');
-      // The processing switch, off at every launch. This test is about a pass
-      // that is RUNNING, and `auditNow` arms a two-minute backstop that only
+      // The processing switch, which `pumpInbox` seeded off. This test is
+      // about a pass that is RUNNING, and `auditNow` arms a backstop that only
       // the lane reporting back cancels — with the lane switched off nothing
       // reports, and the timer outlives the widget tree.
       container.read(processingProvider.notifier).set(true);

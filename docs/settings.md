@@ -704,16 +704,22 @@ Drafts in flight use.
 
 ## Processing
 
-Whether this session runs model work at all, and the two ways to throw away
+Whether this install runs model work at all, and the two ways to throw away
 what it has already produced. In both scopes, because all three are questions
 about the model rather than about the app.
 
 **AI processing** is the same switch as the one at the top of the sidebar,
 drawn here as a `Switch` keyed `settings-processing-toggle` beside its name and
-the word `On` or `Off`. It is session state and never persisted — every launch
-starts off — and flipping it here moves the sidebar behind the pane, so the
-host hears about it the instant it moves rather than on the way out. Mail and
-Teams keep syncing while it is off; only the models stand down. See
+the word `On` or `Off`. It is REMEMBERED and it starts on: a fresh install goes
+to work the moment the wizard finishes, and a machine somebody stood down comes
+back down. The preference is `processing_on`, and it was session state, off at
+every launch, until Round H; what made it session state was the risk of
+spending the first minutes on the wrong server, and the placement rule closes
+that, because the default server is now the measured one. Turning it off still
+stands every drain down for the rest of the session. Flipping it here moves the
+sidebar behind the pane, so the host hears about it the instant it moves rather
+than on the way out. Mail and Teams keep syncing while it is off; only the
+models stand down. See
 [pipeline/10-model-routing.md](pipeline/10-model-routing.md).
 
 Under it are three controls, a revoke and two resets, each an inline two-step

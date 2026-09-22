@@ -258,8 +258,14 @@ void main() {
     });
   });
 
-  testWidgets('a stored id nothing carries falls back without throwing',
+  testWidgets('a stored id nothing carries shows the hint rather than throwing',
       (tester) async {
+    // `DropdownButton` asserts on a value that is not among its items, and the
+    // host's map can name a target that has since been removed. What the
+    // picker does about that is show its hint: since Round H it computes no
+    // default of its own, because the host passes the id
+    // `AppPrefs.targetIdForStage` RESOLVED, and a second guess here would have
+    // drawn `Local fast` under a stage the app sends to the GPU box.
     await open(
       tester,
       stages: const [
@@ -274,6 +280,31 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
+    final picker = tester.widget<DropdownButton<String>>(
+      find.byKey(SettingsModelsBody.stagePickerKey('triage')),
+    );
+    expect(picker.value, isNull);
+    expect(find.text('None'), findsWidgets);
+  });
+
+  testWidgets('the resolved id the host passes is what the picker shows',
+      (tester) async {
+    // The other half, and the one that matters on the box: the host resolves
+    // through the placement rule, so a stage with nothing stored arrives here
+    // already named.
+    await open(
+      tester,
+      stages: const [
+        PipelineStageInfo(
+          id: 'triage',
+          label: 'Triage',
+          description: 'Urgency, category, summary, action items',
+          slot: ModelSlot.fast,
+        ),
+      ],
+      stageTargetIds: const {'triage': builtInFastId},
+    );
+
     final picker = tester.widget<DropdownButton<String>>(
       find.byKey(SettingsModelsBody.stagePickerKey('triage')),
     );

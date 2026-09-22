@@ -155,6 +155,39 @@ const String builtInProseName = 'Local prose';
 /// this Mac.
 enum ModelPlacement { box, local }
 
+/// Where a fresh install runs its model work: the shared GPU box when this
+/// build was compiled with an address for one, and this Mac otherwise.
+///
+/// The box is the default because it is the measured best answer for every
+/// stage but embeddings, and because a placement nobody has to find is a
+/// placement a tester actually uses. A build with no [boxUrlDefault] has no
+/// box to name, which includes the test suite and a plain `flutter run`, so
+/// there the default stays local.
+///
+/// `length > 0` rather than `isNotEmpty` for one reason and no other: a
+/// constant expression may read a string's length and may not call
+/// `isNotEmpty`, and this value has to be const so the prefs default can be
+/// one too.
+const ModelPlacement defaultModelPlacement =
+    boxUrlDefault.length > 0 ? ModelPlacement.box : ModelPlacement.local;
+
+/// Which of the three models a stage's work belongs to.
+///
+/// The simple Models page asks one question and answers it in three lines,
+/// and this is the vocabulary those lines are drawn in. Coarser than
+/// [ModelSlot] on purpose: a slot says which local server a stage would dial,
+/// a role says which MODEL does the work wherever it runs, which is what
+/// lets `storyline_membership` sit on the big model on the box and on the
+/// small one here without a fourth name for it.
+///
+/// Not `ModelRole`, which `model_manifest.dart` already spells
+/// `{embed, bulk, prose}` for the three files a machine downloads. The two
+/// mean nearly the same thing and cannot be merged: the manifest imports this
+/// file, so this file cannot import the manifest's enum back. A stage has a
+/// STAGE role, a downloaded file has a model role, and a screen that wants
+/// both says which it means.
+enum StageRole { big, small, embed }
+
 /// The two targets [ModelPlacement.box] writes, by fixed id.
 ///
 /// Fixed rather than generated so that adopting the box twice REPLACES the
@@ -300,6 +333,25 @@ class LlmTargetSpec {
   });
 
   bool get isBuiltIn => id == builtInFastId || id == builtInProseId;
+
+  /// Whether this is one of the two targets the GPU box placement derives
+  /// from the stored address.
+  ///
+  /// Beside [isBuiltIn] rather than folded into it, because the two words
+  /// mean different things: a built-in is edited in the two slot editors and
+  /// says so on its row, and a box target is edited by changing the one
+  /// address. Widening [isBuiltIn] would put "Edited above, under Fast and
+  /// Prose" under a row no editor above it reaches.
+  bool get isBox => id == boxProseId || id == boxBulkId;
+
+  /// Whether this target is DERIVED rather than stored, by either route.
+  ///
+  /// The question every caller that guards a write actually has: a derived
+  /// spec has no row in `llm_targets` to update, so `upsertTarget` and
+  /// `removeTarget` refuse it, the targets list offers it no Edit or Remove,
+  /// and the Drafts-in-flight control writes the slot pref instead of the
+  /// spec.
+  bool get isFixed => isBuiltIn || isBox;
 
   /// Whether somebody else's company operates the machine this dials. The
   /// consent rule's whole question — see [thirdPartyHosts].
@@ -489,6 +541,84 @@ const List<String> bulkStageIds = [
   'context_select',
   'storyline_membership',
 ];
+
+/// The stages the BIG model does on the box: every prose-slot stage the
+/// presets name, plus the storyline confirm.
+///
+/// The confirm is a fast-slot stage everywhere else and the one exception the
+/// placement rule carries, because Round D and Round G both measured the 27B
+/// worth its cost there and the box has the 27B sitting idle between drafts.
+/// Built from [proseStageIds] so it cannot drift from the stage table, and
+/// pinned against `pipelineStages` in `model_slots_test` the way the presets
+/// are.
+const List<String> bigModelStageIds = [...proseStageIds, 'storyline_membership'];
+
+/// The stages the SMALL model does: the bulk set with the confirm taken out.
+///
+/// Written out rather than computed, because a const list may spread and may
+/// not loop. `model_slots_test` pins it as exactly [bulkStageIds] minus
+/// `storyline_membership`, which is what keeps the two halves of the rule
+/// covering every stage exactly once.
+const List<String> smallModelStageIds = [
+  'triage',
+  'needs_you',
+  'extraction',
+  'attachment_digest',
+  'context_file_digest',
+  'context_brief',
+  'context_select',
+];
+
+/// Which model does [stageId]'s work, or null for an id no stage table row
+/// names.
+///
+/// The three-role view of the stage table, for the page that shows one line
+/// per role. `draft_improve` is [StageRole.big] although it is in no preset:
+/// it is a second pass over a reply, and the role is about which model writes
+/// rather than about which preset would write it.
+StageRole? roleOfStage(String stageId) {
+  for (final stage in pipelineStages) {
+    if (stage.id != stageId) continue;
+    if (stage.slot == ModelSlot.embed) return StageRole.embed;
+    if (stage.slot == ModelSlot.prose || bigModelStageIds.contains(stageId)) {
+      return StageRole.big;
+    }
+    return StageRole.small;
+  }
+  return null;
+}
+
+/// Which target [stageId] resolves to when nothing is stored for it — THE
+/// PLACEMENT RULE.
+///
+/// The one function that says where a stage goes by default, and the reason
+/// the GPU box can be the default with nothing written to the database: on
+/// [ModelPlacement.box] with an address to dial, the big stages answer
+/// [boxProseId] and the small ones [boxBulkId], and everywhere else the answer
+/// is the slot's built-in exactly as it was before placements existed.
+///
+/// Null where there is no default to give: `embeddings` is not routed at all,
+/// and an optional stage has no target until somebody picks one. [hasBox] is
+/// passed rather than read, because the address lives in the prefs and this
+/// file may not import upward.
+String? placementDefaultTargetId({
+  required ModelPlacement placement,
+  required bool hasBox,
+  required String stageId,
+}) {
+  if (stageIsOptional(stageId)) return null;
+  final slot = stageSlot(stageId);
+  if (slot == ModelSlot.embed) return null;
+  if (placement == ModelPlacement.box && hasBox) {
+    if (bigModelStageIds.contains(stageId)) return boxProseId;
+    if (smallModelStageIds.contains(stageId)) return boxBulkId;
+    // An id no role list names is an id no stage table row names either, and
+    // [stageSlot] has already answered fast for it. It falls through to the
+    // built-in rather than to a box target, which is the cheap wrong answer
+    // rather than the expensive one.
+  }
+  return defaultTargetIdFor(slot);
+}
 
 /// One pipeline stage, as the settings screen names it.
 ///

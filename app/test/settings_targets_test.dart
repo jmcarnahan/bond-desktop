@@ -36,6 +36,26 @@ const _box = LlmTargetSpec(
   parallel: 4,
 );
 
+/// The two the GPU box placement derives from one address. Fixed like the
+/// built-ins and edited nowhere near the slot editors.
+const _boxProse = LlmTargetSpec(
+  id: boxProseId,
+  name: boxProseName,
+  url: 'https://box.example.com/prose/v1/chat/completions',
+  model: boxProseModel,
+  hasBearer: true,
+  parallel: 4,
+);
+
+const _boxBulk = LlmTargetSpec(
+  id: boxBulkId,
+  name: boxBulkName,
+  url: 'https://box.example.com/bulk/v1/chat/completions',
+  model: boxBulkModel,
+  hasBearer: true,
+  parallel: 4,
+);
+
 const _bedrock = LlmTargetSpec(
   id: 't-99887766',
   name: 'Bedrock Opus',
@@ -128,6 +148,30 @@ void main() {
     // The user's own target keeps both.
     expect(find.byKey(SettingsTargetsBody.editKey(_box.id)), findsOneWidget);
     expect(find.byKey(SettingsTargetsBody.removeKey(_box.id)), findsOneWidget);
+  });
+
+  testWidgets('the GPU box rows are derived too, and say where they are edited',
+      (tester) async {
+    // Derived, but not from the slot prefs: a box target comes from the one
+    // address, so it offers no Edit and no Remove either and its note sends
+    // the reader somewhere else. `isBuiltIn` keeps its narrower meaning, and
+    // the row is what would show it if the predicate had been widened.
+    await open(tester, targets: const [_fast, _prose, _boxProse, _boxBulk]);
+
+    for (final id in [boxProseId, boxBulkId]) {
+      expect(find.byKey(SettingsTargetsBody.editKey(id)), findsNothing);
+      expect(find.byKey(SettingsTargetsBody.removeKey(id)), findsNothing);
+      // No Check server either, but only because this open wired no probe:
+      // a derived target is still a server somebody wants to test, and the
+      // button appears the moment a probe is handed in.
+      expect(find.byKey(SettingsTargetsBody.checkKey(id)), findsNothing,
+          reason: 'no probe was wired into this open');
+    }
+    expect(
+      find.text('Edited above, under Where the models run'),
+      findsNWidgets(2),
+    );
+    expect(find.text('Edited above, under Fast and Prose'), findsNWidgets(2));
   });
 
   testWidgets('Edit hands the host the spec it was pressed on', (tester) async {

@@ -504,13 +504,12 @@ void main() {
         ],
         child: const MaterialApp(home: InboxScreen()),
       ));
-      // The switch is OFF at every launch and its branch outranks every park,
-      // which is the point of the last case in this group. Every other case
-      // here is about a pipeline somebody is actually running.
-      if (processing) {
-        scopeOf(tester).read(processingProvider.notifier).set(true);
-        await tester.pump();
-      }
+      // Set either way rather than only on, because the switch is a
+      // remembered preference that starts ON since Round H: leaving it alone
+      // no longer means off, and its branch outranks every park, which is the
+      // point of the last case in this group.
+      scopeOf(tester).read(processingProvider.notifier).set(processing);
+      await tester.pump();
       // Three bare pumps: this screen owns a sixty-second periodic timer and
       // a settle would never come back.
       await tester.pump();

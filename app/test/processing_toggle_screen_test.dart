@@ -27,9 +27,15 @@ import 'fixtures/test_db.dart';
 /// The processing switch, as the assembled screen carries it.
 ///
 /// `processing_toggle_test.dart` is about the two drains; this file is about
-/// the four facts only the screen can answer: the switch is OFF on a fresh
-/// launch, turning it on pumps triage before the lanes, the composer's draft
-/// button goes inert while it is off, and every throw of it is recorded.
+/// the four facts only the screen can answer: what the switch reads on a
+/// launch, that turning it on pumps triage before the lanes, that the
+/// composer's draft button goes inert while it is off, and that every throw of
+/// it is recorded.
+///
+/// Since Round H the switch is a remembered preference that starts ON, so
+/// [pumpScreen] seeds it OFF by default: every test below but the first is
+/// about what a THROW of the switch does, and starting from off is what makes
+/// the throw the subject.
 
 class _Tokens implements TokenStore {
   final Map<String, String> values = {};
@@ -149,6 +155,7 @@ void main() {
     WidgetTester tester, {
     List<Override> extra = const [],
     RailSection section = RailSection.people,
+    bool processingOn = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1400, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -161,6 +168,10 @@ void main() {
     // The app's default backend is MCP, whose session would answer the scope
     // question by asking a server that is not there.
     await store.setPref(backendModeKey, backendModeSdk);
+    // The remembered switch, written before the read that seeds the provider.
+    // A fresh install leaves this key absent and comes up ON, which is what
+    // the first test below pumps.
+    if (!processingOn) await store.setPref(processingOnKey, 'false');
     final prefs = await AppPrefsNotifier.read(store);
 
     await tester.pumpWidget(ProviderScope(
@@ -238,14 +249,29 @@ void main() {
         ),
       );
 
-  testWidgets('the switch starts off on every launch', (tester) async {
+  testWidgets('the switch starts on for a fresh install and off when the '
+      'preference says off', (tester) async {
+    // A fresh install has no `processing_on` row at all, and comes up working:
+    // the placement rule means the default server is the measured one, so the
+    // reason the switch used to start off — minutes spent on the wrong server
+    // before anyone had pointed it at the right one — is gone.
+    await seedThread();
+    await pumpScreen(tester, processingOn: true);
+
+    expect(toggle(), findsOneWidget);
+    expect(tester.widget<Switch>(toggle()).value, isTrue);
+    expect(find.text('On'), findsOneWidget);
+  });
+
+  testWidgets('and comes back off on the launch after somebody turned it off',
+      (tester) async {
+    // The other half of remembering it. `pumpScreen` writes the preference
+    // off, which is what the previous session's throw of the switch left
+    // behind.
     await seedThread();
     await pumpScreen(tester);
 
-    expect(toggle(), findsOneWidget);
-    expect(tester.widget<Switch>(toggle()).value, isFalse,
-        reason: 'a launch that started working before the owner had pointed '
-            'it at a server is the whole reason this switch exists');
+    expect(tester.widget<Switch>(toggle()).value, isFalse);
     expect(find.text('Off'), findsOneWidget);
   });
 
@@ -306,6 +332,22 @@ void main() {
     // Newest first, so the off is the head: one row per throw, and the status
     // is the whole of what the row says.
     expect(rows, ['off', 'on']);
+    // And the throw is REMEMBERED, which is what the next launch reads.
+    expect(await store.getPref(processingOnKey), 'false');
+  });
+
+  testWidgets('a throw of the switch is written to the preference',
+      (tester) async {
+    // The other direction, from off. The notifier moves first so the switch
+    // flips under the finger, and the preference follows it.
+    await seedThread();
+    await pumpScreen(tester, extra: recorders(<String>[]));
+    expect(await store.getPref(processingOnKey), 'false');
+
+    await throwSwitch(tester);
+
+    expect(tester.widget<Switch>(toggle()).value, isTrue);
+    expect(await store.getPref(processingOnKey), 'true');
   });
 
   testWidgets('the composer cannot be asked for a draft while off',

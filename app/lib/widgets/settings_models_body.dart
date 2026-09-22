@@ -11,8 +11,9 @@ import '../services/llm/model_slots.dart'
         ModelPlacement,
         ModelSlot,
         PipelineStageInfo,
+        boxProseId,
+        builtInProseId,
         builtInProseName,
-        defaultTargetIdFor,
         draftStageIds,
         slotDefaults;
 import '../services/system/system_info.dart' show HardwareInfo;
@@ -720,7 +721,7 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
           const SizedBox(height: BondSpacing.s4),
           Text(
             key: SettingsModelsBody.stageGatedKey(stage.id),
-            'Sends to $builtInProseName until you allow cloud drafts',
+            'Sends to ${_gatedFallbackName()} until you allow cloud drafts',
             style: BondType.caption,
           ),
         ],
@@ -730,6 +731,23 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
         ],
       ],
     );
+  }
+
+  /// What the app dials INSTEAD while a draft stage is gated.
+  ///
+  /// `AppPrefs.specForStage` follows the placement now, so a box install's
+  /// gated draft lands on the box's writing target rather than on a local port
+  /// with nothing behind it. Resolved out of the list the host handed us, so
+  /// the sentence names what the picker names; the built-in's name is the last
+  /// resort and the answer on every local install.
+  String _gatedFallbackName() {
+    final wanted = widget.modelPlacement == ModelPlacement.box
+        ? boxProseId
+        : builtInProseId;
+    for (final spec in widget.targets) {
+      if (spec.id == wanted) return spec.name;
+    }
+    return builtInProseName;
   }
 
   /// Whether this row NAMES one target and the app dials another.
@@ -755,18 +773,20 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
   ///
   /// `DropdownButton` throws on a value that is not among its items, and the
   /// host's map can name a target that has since been removed or one this
-  /// build has never heard of. The fall-back ladder is the stored id, then the
-  /// stage's own default, then nothing at all — never an exception on a
-  /// settings screen.
+  /// build has never heard of. The ladder is the id the host RESOLVED, then
+  /// the optional stage's own None, then nothing at all — never an exception
+  /// on a settings screen.
+  ///
+  /// It computes no default of its own any more. The host passes
+  /// `AppPrefs.targetIdForStage`, which is the placement rule applied, and a
+  /// second guess here would have shown `Local fast` under a stage the app
+  /// sends to the box.
   String? _pickerValue(PipelineStageInfo stage) {
-    bool known(String? id) =>
-        id != null && widget.targets.any((spec) => spec.id == id);
-
     final stored = widget.stageTargetIds[stage.id];
-    if (known(stored)) return stored;
-    if (stage.optional) return '';
-    final fallback = defaultTargetIdFor(stage.slot);
-    return known(fallback) ? fallback : null;
+    if (stored != null && widget.targets.any((spec) => spec.id == stored)) {
+      return stored;
+    }
+    return stage.optional ? '' : null;
   }
 
   /// What a pick means.

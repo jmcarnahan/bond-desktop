@@ -382,6 +382,109 @@ void main() {
       expect(tierDraftPolicy(MachineTier.remote), DraftPolicy.needsYou);
     });
 
+    test('the two role lists are the stage table, split where the box splits '
+        'it', () {
+      // The placement rule's halves. `storyline_membership` is a fast-slot
+      // stage everywhere else and the big model's on the box, which is the
+      // one exception the rule carries, and these two lists are where it is
+      // written down. Pinned against `pipelineStages` the way the presets are,
+      // so neither can drift from the stage table.
+      expect(bigModelStageIds, [...proseStageIds, 'storyline_membership']);
+      expect(
+        smallModelStageIds.toSet(),
+        bulkStageIds.toSet().difference({'storyline_membership'}),
+      );
+      // Order preserved, so the lists read as the stage table does.
+      expect(smallModelStageIds,
+          [for (final id in bulkStageIds) if (id != 'storyline_membership') id]);
+
+      // Together they cover every routable non-optional stage exactly once.
+      final both = [...bigModelStageIds, ...smallModelStageIds];
+      expect(both.toSet(), hasLength(both.length));
+      expect(
+        both.toSet(),
+        {
+          for (final stage in pipelineStages)
+            if (stage.slot != ModelSlot.embed && !stage.optional) stage.id,
+        },
+      );
+    });
+
+    test('a stage names the model that does its work, not the slot it would '
+        'dial', () {
+      for (final id in bigModelStageIds) {
+        expect(roleOfStage(id), StageRole.big, reason: id);
+      }
+      for (final id in smallModelStageIds) {
+        expect(roleOfStage(id), StageRole.small, reason: id);
+      }
+      // The optional stage is in no list and is still the big model's: it is a
+      // second pass over a reply, and the role is about which model writes.
+      expect(roleOfStage('draft_improve'), StageRole.big);
+      expect(roleOfStage('embeddings'), StageRole.embed);
+      // An id the stage table does not name has no role at all.
+      expect(roleOfStage('nope'), isNull);
+    });
+
+    test('the placement rule answers every stage on both placements', () {
+      String? onBox(String id) => placementDefaultTargetId(
+            placement: ModelPlacement.box,
+            hasBox: true,
+            stageId: id,
+          );
+      String? onThisMac(String id) => placementDefaultTargetId(
+            placement: ModelPlacement.local,
+            hasBox: true,
+            stageId: id,
+          );
+
+      for (final stage in pipelineStages) {
+        final id = stage.id;
+        if (stage.slot == ModelSlot.embed || stage.optional) {
+          // Not routed at all, and off until somebody picks: no default to
+          // give on either placement.
+          expect(onBox(id), isNull, reason: id);
+          expect(onThisMac(id), isNull, reason: id);
+          continue;
+        }
+        expect(onBox(id), bigModelStageIds.contains(id) ? boxProseId : boxBulkId,
+            reason: id);
+        expect(onThisMac(id), defaultTargetIdFor(stage.slot), reason: id);
+      }
+
+      // The confirm is the whole reason this is a rule rather than an ORDER of
+      // two preset calls: the big model on the box, the small one here.
+      expect(onBox('storyline_membership'), boxProseId);
+      expect(onThisMac('storyline_membership'), builtInFastId);
+
+      // No address to dial is the same answer as this Mac, whatever the
+      // placement says, because two targets nothing can reach would park every
+      // lane.
+      for (final stage in pipelineStages) {
+        if (stage.slot == ModelSlot.embed || stage.optional) continue;
+        expect(
+          placementDefaultTargetId(
+            placement: ModelPlacement.box,
+            hasBox: false,
+            stageId: stage.id,
+          ),
+          defaultTargetIdFor(stage.slot),
+          reason: stage.id,
+        );
+      }
+    });
+
+    test('a build with no compiled address defaults to this Mac', () {
+      // `defaultModelPlacement` is const-evaluated from `boxUrlDefault`, which
+      // is empty under `flutter test`, so the whole suite runs local unless a
+      // test says otherwise.
+      expect(defaultModelPlacement, ModelPlacement.local);
+      // And it is genuinely const: this list would not compile otherwise, and
+      // `AppPrefs`'s default parameter could not name it.
+      const placements = [defaultModelPlacement];
+      expect(placements, [ModelPlacement.local]);
+    });
+
     test('the box constants are the ids, names and models adoptBox writes',
         () {
       expect(boxProseId, 'box-prose');

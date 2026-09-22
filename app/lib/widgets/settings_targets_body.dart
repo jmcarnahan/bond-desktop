@@ -161,6 +161,9 @@ class _SettingsTargetsBodyState extends State<SettingsTargetsBody> {
           const SizedBox(height: BondSpacing.s4),
           if (spec.isBuiltIn)
             Text('Edited above, under Fast and Prose', style: BondType.caption),
+          if (spec.isBox)
+            Text('Edited above, under Where the models run',
+                style: BondType.caption),
           OverflowBar(
             alignment: MainAxisAlignment.start,
             spacing: BondSpacing.s8,
@@ -173,7 +176,9 @@ class _SettingsTargetsBodyState extends State<SettingsTargetsBody> {
                       : () => unawaited(_check(spec)),
                   child: const Text('Check server'),
                 ),
-              if (!spec.isBuiltIn) ..._rowActions(spec, removing: removing),
+              // Both derived kinds, not just the built-ins: a box target
+              // has no row in `llm_targets` to edit or remove either.
+              if (!spec.isFixed) ..._rowActions(spec, removing: removing),
             ],
           ),
           ProbeStatus(probing: _probingId == spec.id, result: _probes[spec.id]),

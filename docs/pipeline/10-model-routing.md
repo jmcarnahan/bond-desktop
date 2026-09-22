@@ -46,15 +46,14 @@ presses **Use this Mac's defaults** under Settings, Models. It writes the way a
 preset does, so an entry equal to a stage's own default is removed rather than
 stored and a fresh install on a big Mac still holds an empty object.
 
-**The shared GPU box is a PLACEMENT, the one recommended and offered first.**
+**The shared GPU box is a PLACEMENT, and since Round H it is the DEFAULT one.**
 `ModelPlacement` (`box` or `local`, stored in `model_placement`) is a machine
 preference, not a reading of the hardware: the same Mac can be pointed at the
-box today and at its own servers tomorrow. It is offered first in two places,
-the wizard's **Where the models run** step and one press in Settings, but the
-shipped default value is `local`: `AppPrefs.modelPlacement` defaults to `local`,
-the wizard's step starts with neither card chosen, and the box card wants an
-address and a pasted key, so a machine runs on its own servers until that card
-or the Settings button is used. On the box placement the map above is replaced
+box today and at its own servers tomorrow. `AppPrefs.modelPlacement` defaults
+to `defaultModelPlacement`, which is `box` in any build compiled with a
+`BOND_BOX_URL` and `local` in every build without one, the test suite included.
+The address is prefilled and the access key is typed once; nothing secret is
+compiled into a build. On the box placement the map above is replaced
 wholesale:
 
 | Stage group | Target | Model |
@@ -65,13 +64,42 @@ wholesale:
 | `draft_improve` | none until picked | nothing |
 | `embeddings` | not routed, and stays on this Mac | `make embed` |
 
-`storyline_membership` appears twice on purpose: it is in both `bulkStageIds`
-and `confirmStageIds`, and `adoptBox` applies the bulk preset FIRST and the
-prose-and-confirm preset SECOND, which is what leaves the confirm on the
-writing model. That is the row of record, 84 of 98 with 8% wrong accepts.
-`llm_targets_test.dart` pins the order, because swapping the two calls drops
-the confirm to the 4B and moves the storyline numbers with no code looking
-wrong.
+`storyline_membership` appears twice on purpose: it is a fast-slot stage
+everywhere else, and on the box it goes to the writing model. That is the row
+of record, 84 of 98 with 8% wrong accepts against the 4B's, and the box has the
+27B sitting idle between drafts, so the better answer is also the free one.
+Until Round H the outcome depended on the ORDER of two preset calls, because
+the stage is in both `bulkStageIds` and `confirmStageIds`; it is now a rule
+nothing can reorder.
+
+**The placement rule.** Nothing in the table above is stored. The box's two
+targets are DERIVED from one preference, `box_url`, whose empty value means
+"follow the build's `BOND_BOX_URL`", by `AppPrefs.boxProseSpec` and
+`AppPrefs.boxBulkSpec` exactly as the two built-ins are derived from the four
+slot prefs. Which target a stage resolves to when nothing is stored for it is
+`placementDefaultTargetId(placement:, hasBox:, stageId:)` in `model_slots.dart`:
+on the box with an address to dial, `bigModelStageIds` answer `box-prose` and
+`smallModelStageIds` answer `box-bulk`; everywhere else the answer is the
+slot's built-in. `bigModelStageIds` is the six prose stages plus the confirm,
+`smallModelStageIds` is the other seven bulk stages, and `model_slots_test`
+pins both against `pipelineStages` so neither can drift from the stage table.
+
+What IS stored is an override: a `stage_targets` entry outranks the rule, so
+picking `box-bulk` for the confirm on the box writes an entry and picking
+`box-prose` there removes one. Switching placement with
+`AppPrefsNotifier.usePlacement` drops every entry whose value is one the app
+itself could have written, either box id, a slot's built-in or an inbox-tier
+pick, and keeps everything else, because a hand-picked target is a choice
+somebody made. An optional stage's entry is kept whatever it names, since that
+entry is the feature being on.
+
+An install that adopted the box under Round G carries two real `llm_targets`
+rows and fifteen `stage_targets` entries. `AppPrefsNotifier.read` lifts the origin out
+of the writing row into `box_url`, drops the pair, drops the entries that now
+equal what the rule answers anyway, and writes `box_targets_derived = 1` so it
+runs at most once. The keychain is untouched: the entries are still
+`llm_target_bearer:box-prose` and `:box-bulk`, which is what the derived specs
+ask for, so nobody types the key again.
 
 **What travels, on that placement.** Message text, attachment text and drafts
 go to the owner's own AWS instance over TLS, keyed with an api-key that lives

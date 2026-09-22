@@ -2092,7 +2092,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// dialling the model for as long as its backlog lasted.
   ///
   /// The activity row goes in either way, before the pumps, so the panel shows
-  /// who asked for the work that follows it.
+  /// who asked for the work that follows it. The PREFERENCE is written beside
+  /// the notifier and after it, so the switch flips under the finger and the
+  /// next launch comes back the way this one was left.
   Future<void> _setProcessing(bool on) async {
     ref.read(processingProvider.notifier).set(on);
     await ref
@@ -2108,12 +2110,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         triage: () => ref.read(triageQueueProvider).pump(),
         workers: () => ref.read(aiWorkersProvider).pumpAll(),
       ));
-      return;
+    } else {
+      // The queue, then the three lanes as one — see [AiWorkers.stopAll] for
+      // why triage is named separately.
+      ref.read(triageQueueProvider).stop();
+      ref.read(aiWorkersProvider).stopAll();
     }
-    // The queue, then the three lanes as one — see [AiWorkers.stopAll] for why
-    // triage is named separately.
-    ref.read(triageQueueProvider).stop();
-    ref.read(aiWorkersProvider).stopAll();
+    // The preference LAST, after the drains have been told: it is what the
+    // NEXT launch reads, and a write that throws must not leave the lanes
+    // running under a switch that already reads off.
+    await ref.read(appPrefsProvider.notifier).setProcessingOn(on);
   }
 
   /// Settings' **Clear AI results**: every verdict, summary, storyline, draft
@@ -2673,14 +2679,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // The width is the DRAFT TARGET's since Round E, not the prose slot's: a
       // GPU box has slots this Mac does not. The old pref is still what the
       // built-in prose target's width is stored in, which is why the write
-      // below forks on `isBuiltIn` rather than always writing the spec.
+      // below forks on `isFixed` rather than always writing the spec — and it
+      // reads `isFixed` rather than `isBuiltIn` because a derived box spec has
+      // no row either, so `upsertTarget` would throw on it.
       proseParallel:
           prefs.specForStage('draft_reply')?.parallel ?? prefs.proseParallel,
       proseParallelTargetName: prefs.specForStage('draft_reply')?.name,
       onProseParallelChanged: (width) {
         final spec = prefs.specForStage('draft_reply');
         unawaited(
-          spec == null || spec.isBuiltIn
+          spec == null || spec.isFixed
               ? notifier.setProseParallel(width)
               : notifier.upsertTarget(spec.copyWith(parallel: width)),
         );

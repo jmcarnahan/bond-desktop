@@ -1270,10 +1270,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   );
 
   /// How many servers the user ADDED. The collapsed summary counts those and
-  /// not the two built-ins, so a machine with neither reads exactly as it did
-  /// before routing was data.
+  /// neither the two built-ins nor the box's two, so a machine that added
+  /// nothing reads exactly as it did before routing was data.
   int get _userTargetCount =>
-      widget.targets.where((spec) => !spec.isBuiltIn).length;
+      widget.targets.where((spec) => !spec.isFixed).length;
 
   void _closeSubpane() => setState(() => _subpane = null);
 
