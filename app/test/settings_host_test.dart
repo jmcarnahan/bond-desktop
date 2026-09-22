@@ -217,7 +217,11 @@ void main() {
       'triage_status': 'pending',
     });
     await store.enqueueWork('extract', 'email', 'm1');
-    expect(await store.workCounts('extract'), {'pending': 1});
+    // Finished, so the row before the reset and the row after it are
+    // distinguishable: `clearDerived` empties the work table and then queues
+    // the rerun itself, so a `pending` row on the far side is the reset's.
+    await store.writeWork('extract', 'email', 'm1', status: 'done');
+    expect(await store.workCounts('extract'), {'done': 1});
 
     settleGate = Completer<void>();
     await pumpHost(tester);
@@ -228,16 +232,18 @@ void main() {
     await tapKey(tester, SettingsScreen.clearAiResultsConfirmKey);
 
     expect(settleWaits, 1);
-    // Still there: the reset is parked on the inbox's own pull flags, which
-    // is the whole point of the seam.
-    expect(await store.workCounts('extract'), {'pending': 1});
+    // Still there, still finished: the reset is parked on the inbox's own
+    // pull flags, which is the whole point of the seam.
+    expect(await store.workCounts('extract'), {'done': 1});
 
     settleGate!.complete();
     for (var i = 0; i < 6; i++) {
       await tester.pump();
     }
 
-    expect(await store.workCounts('extract'), isEmpty);
+    // The finished row is gone with the rest of the derived tables, and the
+    // message is back on the queue — the reset's own enqueue, not a sync's.
+    expect(await store.workCounts('extract'), {'pending': 1});
     expect(thumbnailsForgotten, 1);
   });
 

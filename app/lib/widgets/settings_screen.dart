@@ -1457,9 +1457,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       Text(
         'Deletes every triage verdict, summary, storyline, draft and '
         'embedding. Mail, Teams messages, attachments, directories and your '
-        'settings stay. The next syncs re-queue the mailbox a slice at a time '
-        'and processing redoes it under the models now configured. '
-        '$_resetTakesTime',
+        'settings stay. Everything already synced is queued again, however '
+        'far back it goes, and processing redoes it under the models now '
+        'configured. $_resetTakesTime',
         style: BondType.caption,
       ),
       const SizedBox(height: BondSpacing.s8),

@@ -710,10 +710,17 @@ memory. The draft handler is the fourth because `DraftHandler.improve` is a
 button press rather than queue work, so the draft lane's own quiesce knows
 nothing about it.
 
-Neither reset queues the mailbox. The next sync's own backlog calls are what
-refill the pipeline, one `backlogEnqueueCap` slice a poll, which is why the
-first button's caption says the mailbox is re-queued a slice at a time — see
-[pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md).
+**Clear AI results queues the whole rerun itself**, in the transaction that
+empties the tables: extraction, the needs-you judgement and the embedding for
+every kept message of every source, unpaced and regardless of **How far back
+to sync**, plus one `attachment_text` row per attachment left pending. That is
+why its caption promises everything already synced rather than a slice a poll.
+The sync's own backlog calls are bounded by the lookback floor — right for a
+poll, wrong for a reset, which is the one path that re-pends mail older than
+the window — and they still run on every pass, idempotent over what the reset
+filed. **Forget everything and re-sync** queues nothing: it deletes the
+mailbox, so the next poll fetches the window again and ingest queues what it
+brings. See [pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md).
 
 **What the owner decided by hand survives a clear.** A message they restored
 keeps its `gate_override`, and one they ignored keeps `gate_reason = 'user'`
@@ -724,15 +731,17 @@ survive too (`outbound`, `backlog`, and Teams' `auto_generated` and
 claim.
 
 **Everything comes back on its own**, each by the path that would have
-written it the first time. Mail, chats, storylines, drafts and embeddings ride
-the sync's backlog calls; the library rides the reconcile, which is requeued
-per directory on every sync. Attachments are the one case the clear has to
-queue for itself, in the same transaction: `attachment_text` is enqueued at
-ingest, by a detail fetch and by Restore, and a message already stored with a
-body reaches none of the three, so the clear writes one `attachment_text` work
-row per attachment left `pending` and the digest follows the text pass. A
-refusal is not re-queued, because "too large" and "not text" are verdicts
-about the file rather than about the model that read it.
+written it the first time. Extraction, the needs-you judgement and the
+per-message embedding are queued by the clear itself, for every kept message
+and whatever its date; storylines ride the sync's `requeueSweep()`, drafts are
+written when a thread next asks for one, and the library rides the reconcile,
+which is requeued per directory on every sync. Attachments are the one kind
+with no backlog call anywhere: `attachment_text` is enqueued at ingest, by a
+detail fetch and by Restore, and a message already stored with a body reaches
+none of the three, so the clear writes one `attachment_text` work row per
+attachment left `pending` and the digest follows the text pass. A refusal is
+not re-queued, because "too large" and "not text" are verdicts about the file
+rather than about the model that read it.
 
 **A marker that outlives its rows is the trap** the clear has to avoid, and
 three of them are handled inside the same transaction. `message_progress` is

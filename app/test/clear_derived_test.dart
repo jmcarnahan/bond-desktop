@@ -36,9 +36,9 @@ import 'fixtures/vec_test_db.dart';
 /// `clearDerived` is the interesting one and most of this file: it has to
 /// empty everything the pipeline wrote, keep everything it was written ABOUT,
 /// and leave the mailbox in the state a first sync would have left it in —
-/// pending, unjudged, and re-queued by the next poll rather than by a new
-/// enqueue path. `wipeAll(keepIdentity: true)` is the bigger one, and what it
-/// has to prove is that the person survives it.
+/// pending, unjudged, and queued again for every stage by the reset itself,
+/// whatever the lookback. `wipeAll(keepIdentity: true)` is the bigger one,
+/// and what it has to prove is that the person survives it.
 ///
 /// The third subject is `quiesce()`: the reason a reset may delete the rows a
 /// drain is holding claims on.
@@ -486,9 +486,10 @@ void main() {
         // because nothing downstream ever inserts into it. Its own test is
         // below.
         if (table == 'message_progress') continue;
-        // The other exception, and the one enqueue this reset owes itself:
-        // `work_items` is emptied and then holds the attachment text the
-        // sync has no backlog call for. Its own test is below.
+        // The other exception: `work_items` is emptied and then holds the
+        // rerun this reset queues for itself — the attachment text the sync
+        // has no backlog call for, and the three per-message kinds it does.
+        // Their own tests are below.
         if (table == 'work_items') continue;
         expect(await rows(table), 0, reason: '$table is the pipeline\'s own');
       }
@@ -496,9 +497,12 @@ void main() {
       expect(
         await store.workCounts('attachment_text'),
         {'pending': 1},
-        reason: 'the only work a clear queues for itself',
+        reason: 'the work no backlog call anywhere would queue',
       );
-      expect(await store.workCounts('extract'), isEmpty);
+      // And the one seeded message back on all three per-message queues.
+      expect(await store.workCounts('extract'), {'pending': 1});
+      expect(await store.workCounts('needs_you'), {'pending': 1});
+      expect(await store.workCounts('embed_message'), {'pending': 1});
       for (final table in MessageStore.syncedTables) {
         expect(
           await rows(table),
@@ -984,17 +988,114 @@ void main() {
       expect(await rows('context_chunks'), 0);
     });
 
-    test('the next sync re-enqueues every kept message', () async {
-      await seedMessage('m1');
-      await seedMessage('m2', conversationKey: 'conv-2');
+    test(
+        'queues extraction, needs-you and embedding for every kept message '
+        'itself, whatever the window', () async {
+      // Two years before any lookback this app offers, and that is the case:
+      // the sync's backlog calls pass the lookback FLOOR as their `sinceIso`,
+      // so a corpus pulled down under a wide window and narrowed since is
+      // invisible to them. It is exactly what a reset re-pends, and if the
+      // reset left the queueing to the sync these rows would be triaged once
+      // and then never extracted, judged or embedded again.
+      await seedMessage('m1', receivedAt: '2024-01-15T09:00:00Z');
+      await seedMessage(
+        'm2',
+        conversationKey: 'conv-2',
+        receivedAt: '2024-02-20T09:00:00Z',
+      );
+      // The other source, so the loop over `SELECT DISTINCT source` is a loop
+      // rather than decoration: the enqueues take one source at a time.
+      await seedMessage(
+        't1',
+        source: 'teams',
+        conversationKey: 'chat-1',
+        receivedAt: '2024-04-01T09:00:00Z',
+      );
+      // And one message the gate kept: `backlog` is an ingest verdict, so the
+      // reset leaves it `skipped` and the three statements' triage filter
+      // leaves it alone.
+      await seedMessage(
+        'm3',
+        conversationKey: 'conv-3',
+        receivedAt: '2024-03-01T09:00:00Z',
+        triageStatus: 'skipped',
+        gateReason: 'backlog',
+      );
+      // And one with no timestamp at all: `COALESCE(received_at, '')` is what
+      // keeps it inside a floor of '', where the sync's real floor would
+      // still leave it out.
+      await seedMessage('m4', conversationKey: 'conv-4');
+      await db.customStatement(
+        "UPDATE messages SET received_at = NULL WHERE source_message_id = 'm4'",
+      );
+      // The window as narrow as the app allows, written under the key
+      // `prefs_provider.dart` spells, to say out loud that the reset reads it
+      // nowhere.
+      await store.setPref('mail_lookback_days', '1');
       await store.enqueueWork('extract', 'email', 'm1');
       await store.writeWork('extract', 'email', 'm1', status: 'done');
 
       await store.clearDerived();
-      expect(await rows('work_items'), 0);
 
-      // No new enqueue path: the sync's own idempotent backlog calls are what
-      // refill the queue, one `backlogEnqueueCap` slice a poll.
+      // No sync, and none needed: this is the reset's own enqueue. Counted
+      // over both sources, since `workCounts` reads mail alone by default.
+      for (final kind in ['extract', 'needs_you', 'embed_message']) {
+        expect(
+          await store.workCounts(kind, sources: const ['email', 'teams']),
+          {'pending': 4},
+          reason: kind,
+        );
+        expect(await store.workCounts(kind), {'pending': 3}, reason: kind);
+      }
+      // The gated message is on none of the three.
+      for (final kind in ['extract', 'needs_you', 'embed_message']) {
+        final gated = await db
+            .customSelect(
+              'SELECT COUNT(*) AS n FROM work_items '
+              'WHERE task_kind = ? AND entity_id = ?',
+              variables: args([kind, 'm3']),
+            )
+            .getSingle();
+        expect(gated.data['n'], 0, reason: '$kind queued a gated message');
+      }
+      // And the Teams message is on all three, under its own source.
+      final teams = await db
+          .customSelect(
+            "SELECT task_kind FROM work_items WHERE source = 'teams' "
+            'ORDER BY task_kind',
+            variables: args([]),
+          )
+          .get();
+      expect(
+        [for (final row in teams) row.data['task_kind'] as String],
+        ['embed_message', 'extract', 'needs_you'],
+      );
+
+      // Pressed twice: the transaction empties `work_items` before it files
+      // the rerun, so the second press writes the same rows again rather
+      // than a second copy of them.
+      await store.clearDerived();
+
+      for (final kind in ['extract', 'needs_you', 'embed_message']) {
+        expect(
+          await store.workCounts(kind, sources: const ['email', 'teams']),
+          {'pending': 4},
+          reason: kind,
+        );
+      }
+    });
+
+    test('and the next sync adds nothing to what the reset already filed',
+        () async {
+      // Inside the one-day window this time, so the sync's own backlog calls
+      // really do run over these two rows and really are ignored — which is
+      // the claim. Out-of-window mail would prove nothing here.
+      await seedMessage('m1');
+      await seedMessage('m2', conversationKey: 'conv-2');
+
+      await store.clearDerived();
+      expect(await store.workCounts('extract'), {'pending': 2});
+
       final tokens = _InMemoryTokenStore();
       tokens.values['refresh_token'] = 'rt-initial';
       tokens.values['granted_scopes'] = _grantedScopes;
@@ -1010,8 +1111,8 @@ void main() {
       expect(await store.workCounts('extract'), {'pending': 2});
       expect(await store.workCounts('needs_you'), {'pending': 2});
       expect(await store.workCounts('embed_message'), {'pending': 2});
-      // And the sweep, which is the sync's durable trigger for the clustering
-      // pass the clear just emptied.
+      // And the sweep, which the reset does NOT queue: it is the sync's own
+      // durable trigger for the clustering pass the clear just emptied.
       expect((await store.workCounts('storyline_sweep'))['pending'], 1);
     });
   });

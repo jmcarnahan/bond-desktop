@@ -2394,7 +2394,7 @@ FROM messages
 WHERE source = ? AND direction = 'inbound'
   AND triage_status IN (${_placeholders(triageStatuses.length)})
   ${gateReasons == null ? '' : 'AND gate_reason IN (${_placeholders(gateReasons.length)})'}
-  AND received_at >= ?
+  AND COALESCE(received_at, '') >= ?
   AND NOT EXISTS (SELECT 1 FROM work_items w
     WHERE w.task_kind = ? AND w.source = messages.source
       AND w.entity_id = messages.source_message_id)
@@ -2999,6 +2999,11 @@ RETURNING *
         if (!keepIdentity) 'sender_prefs',
       ];
 
+  /// Every row: a reset is not paced, the sync is. The cap [clearDerived]
+  /// hands the three backlog enqueues, which take "the next [cap] not-yet-
+  /// queued messages" — a pace for a poll and a ceiling for nothing else.
+  static const int _allRows = 0x7fffffff;
+
   /// Throws away everything the pipeline decided and keeps everything it was
   /// decided ABOUT. The reset behind Settings' **Clear AI results**.
   ///
@@ -3024,12 +3029,22 @@ RETURNING *
   ///    a gate that was wrong is only undone once the row it gated is back.
   /// 3. [_rebuildDerivedIndexes], outside for the reason [wipeAll] gives: a
   ///    DELETE does not reach inside a virtual table.
-  /// 4. Nothing. The caller re-queues NOTHING, because nothing needs it:
-  ///    `SyncService._syncMail` calls `enqueueExtractBacklog`,
-  ///    `enqueueNeedsYouBacklog`, `enqueueEmbedBacklog` and [requeueSweep] on
-  ///    every pass, all `OR IGNORE`-idempotent over the floor, and the triage
-  ///    drain claims `pending` rows on its own. A large mailbox refills at
-  ///    `backlogEnqueueCap` a poll, which is what the button's caption says.
+  /// 4. The rerun, queued by this method inside that first transaction
+  ///    rather than left to the sync: the attachment text pass, and then the
+  ///    three per-message kinds — extraction, the needs-you judgement and the
+  ///    embedding — for every kept message of every source, unpaced and with
+  ///    no window. `SyncService._syncMail` still calls the same three and
+  ///    [requeueSweep] on every pass and they are `OR IGNORE`-idempotent over
+  ///    what this filed, but they are not enough on their own: their
+  ///    `sinceIso` is the LOOKBACK FLOOR, which is right for them, since new
+  ///    mail arrives inside the window. A reset is the one path that re-pends
+  ///    messages OUTSIDE it — a corpus synced under a wider window and
+  ///    narrowed since — and left to the sync those messages were triaged and
+  ///    then never extracted, judged or embedded again. The triage drain
+  ///    claims the re-pended rows on its own, as it always did, and the
+  ///    worker still refuses an extract or needs-you item whose message
+  ///    triage has not spoken about ([claimPendingWork]), so the order the
+  ///    stages run in is unchanged.
   ///
   /// The `messages` reset keys on WHAT WROTE the verdict, which is the one
   /// subtle part. `gate_override` is never touched — it is the owner's own
@@ -3153,13 +3168,15 @@ FROM messages
         '  updated_at = ?',
         variables: _args([now]),
       );
-      // And the work rows that put those two passes back on a queue, which is
-      // the one place this reset has to enqueue for itself. Everything else
-      // rides the sync's own idempotent backlog calls; `attachment_text` has
-      // none — it is enqueued at ingest, by a detail fetch and by Restore
+      // And the work rows that put those two passes back on a queue. This
+      // kind has no backlog call anywhere to fall back on: `attachment_text`
+      // is enqueued at ingest, by a detail fetch and by Restore
       // (`sync_service.dart`, `teams_sync.dart`, `restore_service.dart`), and
       // a message already stored with a body reaches none of the three. The
-      // digest follows: its handler is queued by the text pass.
+      // digest follows: its handler is queued by the text pass. The three
+      // per-message kinds do have backlog calls, and the loop below runs them
+      // here rather than leaving them to the sync, for the reason given
+      // there.
       //
       // `text_status = 'pending'` is exactly the eligible set. A refusal is
       // `skipped` with a reason — `attachmentTextPolicy` wrote it at ingest,
@@ -3179,6 +3196,56 @@ FROM messages
         "FROM attachments WHERE text_status = 'pending'",
         variables: _args([now, now]),
       );
+
+      // The whole rerun, queued HERE rather than left to the sync. The sync's
+      // own backlog calls are bounded by the lookback floor, and that is right
+      // for them: new mail arrives inside the window. A reset is the one path
+      // that re-pends messages OUTSIDE it — a corpus synced under a wider
+      // window and narrowed since — and left to the sync those messages were
+      // triaged and then never extracted, judged or embedded again. So every
+      // source gets the three per-message kinds for every kept message,
+      // whatever its date, in one statement each.
+      //
+      // `sinceIso: ''` is the floor removed rather than widened: the three
+      // statements compare `COALESCE(received_at, '') >= ?`, and '' sorts
+      // below every ISO stamp, so it is true of every row, a row with no
+      // timestamp included (a real floor still excludes such a row, exactly
+      // as before). [_allRows] is the pace removed the same way — a reset is
+      // not paced, a poll is. A second press is idempotent because this
+      // transaction EMPTIED `work_items` a few statements up, so the three
+      // file the same rows again rather than a second copy; `OR IGNORE` and
+      // the not-yet-queued filter matter to the sync's later passes, not
+      // here. The gated rows are left out by the statements' own triage
+      // filter (the
+      // UPDATE above is what leaves a kept ingest verdict `skipped` and
+      // everything else `pending`), and the worker still refuses an extract or
+      // needs-you item whose message triage has not spoken about
+      // ([claimPendingWork]), so the order the stages run in is unchanged.
+      //
+      // Inside this transaction on purpose, and it is the same transaction:
+      // drift routes every query made in the zone the body runs in through the
+      // transaction's executor, so these enqueues see the re-pended `messages`
+      // rows above and the emptied `work_items`, and a failure anywhere rolls
+      // the queue back with the reset that earned it.
+      final sources = [
+        for (final row in await db
+            .customSelect('SELECT DISTINCT source FROM messages')
+            .get())
+          row.data['source'] as String,
+      ];
+      for (final source in sources) {
+        await enqueueExtractBacklog(
+          cap: _allRows,
+          sinceIso: '',
+          source: source,
+        );
+        await enqueueNeedsYouBacklog(
+          cap: _allRows,
+          sinceIso: '',
+          source: source,
+        );
+        await enqueueEmbedBacklog(cap: _allRows, sinceIso: '', source: source);
+      }
 
       await db.customUpdate(
         'UPDATE context_dirs SET brief_json = NULL, brief_hash = NULL, '
@@ -7788,7 +7855,7 @@ SELECT 'embed_message', source, source_message_id, 'pending', 0, NULL, NULL,
 FROM messages
 WHERE source = ? AND direction = 'inbound'
   AND triage_status IN ('pending', 'processing', 'triaged')
-  AND received_at >= ?
+  AND COALESCE(received_at, '') >= ?
   AND NOT EXISTS (SELECT 1 FROM work_items w
     WHERE w.task_kind = 'embed_message' AND w.source = messages.source
       AND w.entity_id = messages.source_message_id)

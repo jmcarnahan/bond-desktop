@@ -220,6 +220,13 @@ enforce the ones that are commands.
   three. The four vec0 tables are NOT in the lists: each index class resets
   its own in `clearDerived`'s rebuild tail, and a fifth index must be added
   there by hand.
+- `clearDerived` queues extraction, needs-you and the per-message embedding
+  for every kept message ITSELF, for every source and unbounded by the
+  lookback, because the sync's backlog calls pass the lookback floor as their
+  `sinceIso` and a reset is the one path that re-pends messages outside it.
+  Leaving it to the sync is what left a narrowed window's older mail triaged
+  and then never extracted, judged or embedded. A new per-message stage is
+  added to that loop or it is skipped after every clear.
 - Stages resolve their client through `stageLlmClientProvider(stageId)`, whose
   resolver reads `ref.read(appPrefsProvider.notifier).targetForStage(stageId)`
   at request time. Nothing in `lib/` watches `appPrefsProvider` for a target,
