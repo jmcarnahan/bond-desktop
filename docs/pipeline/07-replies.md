@@ -243,8 +243,8 @@ it is routed like them too: the big model, wherever the placement says that
 is. It was the one `PipelineStageInfo.optional` row until then, meaning no
 target until somebody picked one and no Improve button before they did — and
 the stage picker that was the only way to pick one went with the Advanced
-fold, so the feature would have gone with it. A third-party target on it still
-needs the one-time cloud-drafts consent before
+fold, which Round H deleted, so the feature would have gone with it. A
+third-party target on it still needs the one-time cloud-drafts consent before
 `AppPrefs.specForStage('draft_improve')` will resolve to it — the same rule
 `draft_reply` gets, and the resolver is where it is enforced (see
 [10-model-routing.md](10-model-routing.md)). Without that consent Improve goes

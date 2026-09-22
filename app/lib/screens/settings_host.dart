@@ -18,15 +18,11 @@ import '../providers/storylines_provider.dart';
 import '../services/attachments/file_dialogs.dart';
 import '../services/llm/model_probe.dart';
 // [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
-// re-exports them; `pipelineStages` is not re-exported, and the settings host
-// needs it to ask where every stage currently points.
-import '../services/llm/model_slots.dart'
-    show ModelPlacement, boxBaseFromProseUrl, pipelineStages;
+// re-exports them; the placement enum is not re-exported.
+import '../services/llm/model_slots.dart' show ModelPlacement;
 import '../services/llm/needs_you_task.dart'
     show needsYouDefaultRules, needsYouOutputContract, needsYouRulesCap;
-import '../widgets/settings_local_server_card.dart';
-import '../widgets/settings_models_body.dart' show SettingsModelsBody;
-import '../widgets/settings_models_simple.dart' show RoleLine;
+import '../widgets/settings_models_page.dart' show RoleLine;
 import '../widgets/settings_screen.dart';
 
 /// The settings surface, and every mutator only settings calls.
@@ -175,26 +171,16 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     // Null until the channel answers, and null forever in a widget test —
     // which is why every update prop below is a ternary rather than a `!`.
     final updates = ref.watch(updaterStatusProvider).valueOrNull;
-    // Watched so the card follows a load through to ready without anybody
-    // touching the pane; the supervisor's own field is the fallback for the
-    // frame before the stream's first value lands, so the card never renders
-    // a blank where a state belongs.
+    // Watched so the status block follows a load through to ready without
+    // anybody touching the pane; the supervisor's own field is the fallback
+    // for the frame before the stream's first value lands, so the page never
+    // renders a blank where a state belongs.
     final serverState = ref.watch(serverStateProvider).valueOrNull ??
         ref.read(modelServerSupervisorProvider).state;
+    // Read ONCE, because the rows are one join over both: a second watch of
+    // the same provider is a second subscription for one answer.
+    final statuses = ref.watch(managedModelsStatusProvider).valueOrNull;
     final supervisor = ref.read(modelServerSupervisorProvider);
-    final paths = ref.read(appPathsProvider);
-    // Both watched, both null only until the channel answers. Neither stays
-    // null: `ChannelSystemInfo.hardware()` catches a missing plugin and a
-    // platform error alike and answers `HardwareInfo.unknown`, so in a widget
-    // test these resolve to zero bytes rather than never resolving. One future
-    // behind both, so they cannot settle a frame apart. The tier is derived
-    // from this Mac's memory on every read and stored nowhere, so a models
-    // folder carried to another Mac gets that Mac's answer.
-    final hardware = ref.watch(hardwareInfoProvider).valueOrNull;
-    final machineTier = ref.watch(machineTierProvider).valueOrNull;
-    // Read once: the width, its caption's name and whether the control is
-    // offered at all are three questions about the same resolved target.
-    final draftSpec = prefs.specForStage('draft_reply');
     return SettingsScreen(
       scope: widget.scope,
       onBack: widget.onBack,
@@ -311,147 +297,78 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
         // actually stop being this user's.
         _reloadAfterBackendChange();
       },
-      // The effective targets, defaults already resolved: the editors open on
-      // real values rather than on the empty strings that mean "follow the
-      // build" in the database.
-      slotTargets: {
-        for (final slot in ModelSlot.values) slot: prefs.targetFor(slot),
-      },
-      slotIsDefault: {
-        for (final slot in ModelSlot.values) slot: prefs.isSlotDefault(slot),
-      },
-      // What each editor treats as "Default", which is the ROUTER target while
-      // the app runs its own server: handing it the compiled default instead
-      // would turn a Save on an untouched editor into an override equal to
-      // today's router URL, detaching the slot from the router for good.
-      compiledDefaults: {
-        for (final slot in ModelSlot.values) slot: prefs.slotBaseline(slot),
-      },
       probeServer: _probe.probe,
       // A LOOKUP by id, never the token: the closure reads one bearer out of
-      // the notifier's cache at the moment Check server is pressed, hands it
-      // to the probe and drops it. Nothing holds it.
+      // the notifier's cache at the moment a Check or a Connect is pressed,
+      // hands it to the probe and drops it. Nothing holds it.
       storedBearer: (id) => ref.read(appPrefsProvider.notifier).bearerFor(id),
-      onSlotTargetChanged: (slot, {required url, required model}) =>
-          unawaited(switch (slot) {
-            ModelSlot.fast => notifier.setFastLlmTarget(url: url, model: model),
-            ModelSlot.prose => notifier.setProseLlmTarget(
-              url: url,
-              model: model,
-            ),
-            // Display only — the screen offers no editor for it, and a write
-            // that arrived here anyway must not invent one.
-            ModelSlot.embed => Future<void>.value(),
-          }),
-      onSlotReset: (slot) => unawaited(notifier.clearSlotTarget(slot)),
-      // Every server a stage may be pointed at, and where each stage points
-      // now. Built by the prefs so the picker's items and its selection come
-      // from one resolver rather than from two guesses.
-      targets: prefs.allTargets,
-      stageTargetIds: {
-        for (final stage in pipelineStages)
-          stage.id: prefs.targetIdForStage(stage.id),
-      },
-      cloudDraftsConsent: prefs.cloudDraftsConsent,
-      // The spec first and the presets after it, in that order: `applyPreset`
-      // refuses a target id it cannot find, and until the upsert lands this
-      // one is not in the list.
-      onTargetSaved: (
-        spec, {
-        String? bearer,
-        bool prose = false,
-        bool confirm = false,
-        bool bulk = false,
-      }) async {
-        await notifier.upsertTarget(spec, bearer: bearer);
-        if (!prose && !confirm && !bulk) return;
-        await notifier.applyPreset(
-          targetId: spec.id,
-          prose: prose,
-          confirm: confirm,
-          bulk: bulk,
-        );
-      },
-      onTargetRemoved: notifier.removeTarget,
-      // Both watched, both null only until the channel answers. Neither stays
-      // null: `ChannelSystemInfo.hardware()` catches a missing plugin and a
-      // platform error alike and answers `HardwareInfo.unknown`, so in a
-      // widget test these resolve to zero bytes rather than never resolving —
-      // which is the case the section renders as "memory could not be read",
-      // with nothing to press. One future behind both, so they cannot settle a
-      // frame apart. The tier is derived from this Mac's memory on every read
-      // and stored nowhere, so a models folder carried to another Mac gets
-      // that Mac's answer.
-      hardware: hardware,
-      machineTier: machineTier,
-      // Always wired, and disabled on the section while the tier is unknown
-      // rather than taken off it: the button is a fact about this machine and
-      // it should not appear a frame late. The tier is READ at the press, not
-      // closed over, so a press cannot write last frame's answer. The section
-      // re-renders off `prefs` above, so the pickers show the new picks the
-      // moment this returns — the same confirmation a slot Save gets, and the
-      // section has no snackbar for either.
-      onApplyTierDefaults: () async {
-        if (!mounted) return;
-        final tier = await ref.read(machineTierProvider.future);
-        if (!mounted) return;
-        // Through the PLACEMENT, read at the press, rather than the tier
-        // alone: on the GPU server the picks go back to the box's defaults,
-        // and `applyTierDefaults` with this Mac's tier would move the six
-        // prose steps onto the local 4B on a small Mac. On this Mac
-        // `usePlacement(local)` ends in the same `applyTierDefaults` call
-        // this used to make, after dropping the entries the app itself wrote.
-        await notifier.usePlacement(
-          ref.read(appPrefsProvider).modelPlacement,
-          hardwareTier: tier,
-        );
-      },
       modelPlacement: prefs.modelPlacement,
-      // The stored address when there is one and the compiled one otherwise,
-      // already resolved — the form prefills from it and never asks twice.
-      // The ORIGIN behind the big model's address, which is what the form
-      // still asks for: the page's one address field is a `/prose` and
-      // `/bulk` pair until Phase 6 gives it two.
-      boxUrl: boxBaseFromProseUrl(prefs.effectiveBoxBigUrl),
+      // The four values the form opens on, already resolved: the stored ones
+      // where there are stored ones, the build's otherwise. Never a key.
+      boxBigUrl: prefs.effectiveBoxBigUrl,
+      boxSmallUrl: prefs.effectiveBoxSmallUrl,
+      boxBigModel: prefs.effectiveBoxBigModel,
+      boxSmallModel: prefs.effectiveBoxSmallModel,
       boxKeyStored: prefs.boxKeyStored,
+      boxBigKeyStored: prefs.boxBigKeyStored,
+      boxSmallKeyStored: prefs.boxSmallKeyStored,
+      // The app's own server. Watched, so a load that finishes behind an open
+      // Settings pane moves the bar and the three rows without the reader
+      // touching anything.
+      serverState: serverState,
       // The whole fact, not just the two words the old block could answer
       // for: the page decides which reasons it can speak to, and it can speak
       // to the embedding server's as well now.
       parked: ref.watch(parkedProvider).valueOrNull,
-      // Resolved by one pure function beside the widget, so the grouping rule
-      // is pinned by a test that never pumps this screen.
-      roleLines: RoleLine.fromPrefs(prefs),
-      hardwareLine: SettingsModelsBody.hardwareLine(hardware, machineTier),
-      // On the GPU server the managed process runs the embedding model alone,
-      // and its state is the one thing the box's own status line cannot say.
-      embedServerLine: 'Embedding model: ${SettingsLocalServerBody.summary(
-        serverState,
-        managed: prefs.managedServer,
-      )}',
-      // This Mac's HARDWARE tier, not the effective one: the tier is read at
-      // the press rather than closed over, so a press cannot write last
-      // frame's answer.
-      onUseBox: (baseUrl, key) async {
+      // Resolved by two pure functions beside the widget, so both the
+      // grouping rule and the join with this Mac's own files are pinned by
+      // tests that never pump this screen.
+      roleLines: RoleLine.withStatus(
+        RoleLine.fromPrefs(prefs),
+        statuses: statuses,
+        serverState: serverState,
+        placement: prefs.modelPlacement,
+      ),
+      // This Mac's HARDWARE tier, not the effective one, and READ at the
+      // press rather than closed over, so a press cannot write last frame's
+      // answer.
+      onUseBox: ({
+        required bigUrl,
+        required smallUrl,
+        required bigModel,
+        required smallModel,
+        bigKey,
+        smallKey,
+      }) async {
         if (!mounted) return;
         final tier = await ref.read(machineTierProvider.future);
         if (!mounted) return;
-        await notifier.useBoxOrigin(
-          baseUrl: baseUrl,
-          key: key,
+        await notifier.useBox(
+          bigUrl: bigUrl,
+          smallUrl: smallUrl,
+          bigModel: bigModel,
+          smallModel: smallModel,
+          bigKey: bigKey,
+          smallKey: smallKey,
           hardwareTier: tier,
         );
       },
-      onUseLocal: () async {
+      onUseManaged: () async {
         if (!mounted) return;
         final tier = await ref.read(machineTierProvider.future);
         if (!mounted) return;
         await notifier.usePlacement(ModelPlacement.local, hardwareTier: tier);
       },
-      onStageTargetChanged: (stageId, targetId) => unawaited(
-        targetId == null
-            ? notifier.clearStageTarget(stageId)
-            : notifier.setStageTarget(stageId, targetId),
-      ),
+      onRemoveKey: notifier.clearBoxKey,
+      // Clears the wizard's own bookkeeping — everything in `setup_state`
+      // but the migration record and the download ledger — and bumps the
+      // counter `SetupGate` watches. The inbox unmounts and the wizard opens
+      // at the top, with the models still on disk and the session still
+      // signed in, so those two steps are a Continue each.
+      onSetUpAgain: () => unawaited(restartSetup(ref)),
+      // The log is a file, and the operating system's own viewer is the
+      // right reader for it — this app has no log pane and does not want one.
+      onShowLog: () => unawaited(launchUrl(Uri.file(supervisor.logFile.path))),
       onCloudDraftsConsent: () => notifier.setCloudDraftsConsent(true),
       // The grant's order reversed, and that order is the protection.
       // `AppPrefs.specForStage` sends a third-party draft target back to the
@@ -477,59 +394,6 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       cloudDraftsDailyCap: prefs.cloudDraftsDailyCap,
       onCloudDraftsDailyCapChanged: (value) =>
           unawaited(notifier.setCloudDraftsDailyCap(value)),
-      // The width is the DRAFT TARGET's since Round E, not the prose slot's: a
-      // GPU box has slots this Mac does not. The old pref is still what the
-      // built-in prose target's width is stored in, which is why the write
-      // below forks on `isFixed` rather than always writing the spec — and it
-      // reads `isFixed` rather than `isBuiltIn` because a derived box spec has
-      // no row either, so `upsertTarget` would throw on it.
-      proseParallel: draftSpec?.parallel ?? prefs.proseParallel,
-      proseParallelTargetName: draftSpec?.name,
-      // Not offered at all on the box, by decision: a derived box spec is
-      // fixed at four, the width is the SERVER's slot count rather than a
-      // preference, and a control that wrote nowhere would be a lie about a
-      // number this install does not own.
-      onProseParallelChanged: draftSpec != null && draftSpec.isBox
-          ? null
-          : (width) {
-              unawaited(
-                draftSpec == null || draftSpec.isFixed
-                    ? notifier.setProseParallel(width)
-                    : notifier.upsertTarget(
-                        draftSpec.copyWith(parallel: width),
-                      ),
-              );
-            },
-      localServerSummary: SettingsLocalServerBody.summary(
-        serverState,
-        managed: prefs.managedServer,
-      ),
-      modelsHeader: SettingsLocalServerBody(
-        state: serverState,
-        managed: prefs.managedServer,
-        port: prefs.routerPort,
-        // Resolved here rather than in the card: empty means "the app's own
-        // folder", and only this side knows where that is.
-        modelsFolder: prefs.effectiveModelsFolder(paths),
-        // No switch: whether this build runs its own server is a define now.
-        onManagedChanged: null,
-        onPortSaved: (port) => unawaited(_setRouterPort(port)),
-        onPickFreePort: supervisor.pickFreePort,
-        onChooseFolder: () => unawaited(_chooseModelsFolder()),
-        onStart: () => unawaited(supervisor.ensureRunning()),
-        onStop: () => unawaited(supervisor.stop()),
-        onRestart: () => unawaited(supervisor.restart()),
-        // The log is a file, and the operating system's own viewer is the
-        // right reader for it — this app has no log pane and does not want
-        // one.
-        onShowLog: () => unawaited(launchUrl(Uri.file(supervisor.logFile.path))),
-        // Clears the wizard's own bookkeeping — everything in `setup_state`
-        // but the migration record and the download ledger — and bumps the
-        // counter `SetupGate` watches. The inbox unmounts and the wizard opens
-        // at the top, with the models still on disk and the session still
-        // signed in, so those two steps are a Continue each.
-        onSetUpAgain: () => unawaited(restartSetup(ref)),
-      ),
       lastMailSyncIso: stamps?.mailIso,
       lastTeamsSyncIso: stamps?.teamsIso,
       lastSweepIso: stamps?.sweepIso,
@@ -833,33 +697,6 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     widget.onForgetThumbnails();
   }
 
-
-  /// Moves the port, and restarts onto it. A running server cannot change the
-  /// socket it is bound to, so the restart IS the setting taking effect;
-  /// nothing restarts when there is nothing running.
-  Future<void> _setRouterPort(int port) async {
-    final supervisor = ref.read(modelServerSupervisorProvider);
-    await ref.read(appPrefsProvider.notifier).setRouterPort(port);
-    if (!mounted) return;
-    if (ref.read(appPrefsProvider).managedServer) {
-      await supervisor.restart();
-    }
-  }
-
-  /// Points the server at another folder of model files, through the same open
-  /// panel every other folder in this app is chosen with. Cancelling changes
-  /// nothing, and the restart follows for [_setRouterPort]'s reason: the
-  /// preset names absolute paths, and a running server has already read it.
-  Future<void> _chooseModelsFolder() async {
-    final path = await widget.fileDialogs.chooseDirectory();
-    if (path == null || !mounted) return;
-    final supervisor = ref.read(modelServerSupervisorProvider);
-    await ref.read(appPrefsProvider.notifier).setModelsFolder(path);
-    if (!mounted) return;
-    if (ref.read(appPrefsProvider).managedServer) {
-      await supervisor.restart();
-    }
-  }
 
   /// Repaints the list after the backend under it was replaced.
   ///

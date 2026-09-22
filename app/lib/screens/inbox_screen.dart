@@ -113,7 +113,7 @@ import 'settings_host.dart';
 ///
 /// "Retrying each minute" is the inbox's own poll and the supervisor's
 /// `onReady`, and it is the only cadence this sentence may claim: nothing
-/// polls the box's health.
+/// polls a user-defined server's health.
 String railProgressLine({
   required bool on,
   required int remaining,
@@ -128,22 +128,24 @@ String railProgressLine({
   switch (reason) {
     case 'model_unavailable':
       return onBox
-          ? 'GPU box unreachable · $waiting waiting · retrying each minute'
+          ? 'Your server is not answering · $waiting waiting · retrying each '
+              'minute'
           : 'Model server unreachable · $waiting waiting · retrying each '
               'minute';
-    // The same sentence on BOTH placements, because the embedding server is
-    // on this Mac either way: the box placement moves every generating stage
-    // and leaves embeddings local, so "GPU box unreachable" would name a
-    // machine that is answering fine.
+    // The same sentence under BOTH modes, because the embedding server is on
+    // this Mac either way: the user-defined mode moves every generating stage
+    // and leaves embeddings local, so "your server is not answering" would
+    // name a machine that is answering fine.
     case 'embed_unavailable':
       return 'Embedding server unreachable · $waiting waiting · retrying each '
           'minute';
     // Named for the machine that refused, like the arm above it: a local
     // server behind a reverse proxy can answer 401 too, and telling that
-    // person to go and look at a GPU box would send them to the wrong place.
+    // person to go and look at a server they named would send them to the
+    // wrong place.
     case 'unauthorized':
       return onBox
-          ? 'GPU box refused the access key · $waiting waiting'
+          ? 'Your server refused the access key · $waiting waiting'
           : 'Model server refused the access key · $waiting waiting';
     default:
       return 'Triaging $remaining remaining…';

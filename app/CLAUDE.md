@@ -158,9 +158,9 @@ enforce the ones that are commands.
   all three together; a new segmented control is `SettingsSegments<T>`.
 - The settings SURFACE is `SettingsHost` (`screens/settings_host.dart`), not
   the inbox: it owns the probe and every writer only settings calls
-  (`_saveNeedsYouRules`, the two resets and `_resetPipeline`, the three server
-  mutators, `_reloadAfterBackendChange`, `_connectionStatus`,
-  `_connectMicrosoft`), and the inbox binds it once for both rungs in
+  (`_saveNeedsYouRules`, the two resets and `_resetPipeline`,
+  `_reloadAfterBackendChange`, `_connectionStatus`, `_connectMicrosoft`), and
+  the inbox binds it once for both rungs in
   `_settingsHost`. A new settings-only mutator goes on the host. Two methods
   stay on the inbox as injected seams and only these two: `_setProcessing`,
   because the sidebar's own switch calls it, and `_waitForPullsToSettle` with
@@ -276,19 +276,31 @@ enforce the ones that are commands.
   default, so picking `box-bulk` for it on the box stores an entry and picking
   `box-prose` clears one; `applyTierDefaults` keeps the SLOT default because it
   runs only on the local placement.
-- The Models page is ONE question with everything else folded away.
-  `SettingsModelsSimple` (`widgets/settings_models_simple.dart`) carries the
-  keys `settings-placement`, `settings-use-local`, `settings-models-status`,
-  `settings-models-advanced` and `settings-role-check-<big|small|embed>`.
-  `SetupWhereBody` is the ONE box form, rendered by the wizard's Where step and
-  by that page, with the keys `setup-box-url`, `setup-box-key` and
-  `setup-box-check`; it OWNS the address rule (`isBoxOrigin`, the same rule
-  `setBoxUrl` throws on) and refuses a bad address under the field rather than
-  letting either host throw past a fire-and-forget press. The Advanced fold's
-  body is `SettingsModelsBody`, so a test reaching a stage picker or a slot
-  editor through `SettingsScreen` opens the fold first
-  (`SettingsSection.toggleKey('Advanced')`). `RoleLine.fromPrefs` groups a
-  role's steps by `defaultTargetIdForStage` and describes the modal target.
+- The Models page is ONE question, where the models run, answered by two
+  modes and nothing else. `SettingsModelsPage`
+  (`widgets/settings_models_page.dart`) carries the keys `settings-mode`,
+  `settings-models-status`, `settings-models-progress`, `settings-show-log`,
+  `settings-set-up-again` and `settings-role-check-<big|small|embed>`; the
+  section renders only when `onUseBox` is wired. **Managed** is a status block
+  fed by `serverStateProvider` and `managedModelsStatusProvider`; **User
+  defined** renders `ModelServersForm` (`widgets/model_servers_form.dart`),
+  the ONE form for named servers, with the keys `servers-big-url`,
+  `servers-small-url`, `servers-key`, `servers-small-key`,
+  `servers-big-model`, `servers-small-model`, `servers-connect` and
+  `servers-remove-key`. The form OWNS both address rules (`isBoxOrigin`, the
+  same rule `setBoxServers` throws on, and a path that must contain `/v1/`
+  unless `wireForHost` answers Converse) and refuses under the field rather
+  than letting a host throw past a fire-and-forget press; the model name is
+  DISCOVERED from `/v1/models` rather than typed, a second key field appears
+  only when the two addresses name different hosts, and a third-party big
+  address raises `onThirdParty` so `SettingsScreen` can open the consent pane
+  and call the form's own `resume` on Continue. The Advanced fold, the slot
+  editors, the stage picker, the targets list and the Local server card were
+  DELETED in Round H; the routing data they edited is still there and no
+  screen shows it. `RoleLine.fromPrefs` groups a role's steps by
+  `defaultTargetIdForStage` and describes the modal target, and
+  `RoleLine.withStatus` joins this Mac's own files onto the rows by ROUTER
+  id.
 - Under `flutter test` `hardwareInfoProvider` answers `HardwareInfo.unknown` at
   its two-second timeout, so a real inbox in a widget test never offers **Reset
   per-step picks** (the unreadable-memory branch hides it by design) and the
@@ -343,12 +355,13 @@ enforce the ones that are commands.
   exemption `model_slots_test` pins literally. It was the one
   `PipelineStageInfo.optional` row until Round H, when the stage picker that
   was the only way to turn it on was deleted; the field survives with no member
-  because the Advanced fold still branches on it.
+  and nothing branches on it any more.
 - The machine tier is `MachineTier` in `model_slots.dart`, chosen from
   `hw.memsize` by `machineTierFor` and never persisted, so a models folder
-  carried to another Mac is re-read on the Mac it is on. It is applied twice,
-  by the wizard at Finish and by **Use this Mac's defaults**, and unknown
-  memory resolves to `full` because unknown never refuses.
+  carried to another Mac is re-read on the Mac it is on. It is applied by the
+  wizard at Finish and by every `usePlacement(local, hardwareTier:)`, which is
+  what the Models page's **Managed** segment calls; unknown memory resolves to
+  `full` because unknown never refuses.
 - The manifest and the Makefile are two worlds joined by
   `manifest_makefile_parity_test.dart`, so a change to any of them edits both
   or fails the test: the three repos, the quant either from a `:quant` suffix

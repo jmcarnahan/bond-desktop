@@ -128,7 +128,8 @@ const String _readGrant =
 
 void main() {
   group('the sentence', () {
-    test('a parked box names the box, and a parked local server does not', () {
+    test('a parked user-defined server is named as theirs, and a parked local '
+        'one is not', () {
       expect(
         railProgressLine(
           on: true,
@@ -137,7 +138,7 @@ void main() {
           waiting: 3,
           onBox: true,
         ),
-        'GPU box unreachable · 3 waiting · retrying each minute',
+        'Your server is not answering · 3 waiting · retrying each minute',
       );
       expect(
         railProgressLine(
@@ -164,10 +165,11 @@ void main() {
           waiting: 2,
           onBox: true,
         ),
-        'GPU box refused the access key · 2 waiting',
+        'Your server refused the access key · 2 waiting',
       );
       // A local server behind a reverse proxy answers 401 too, and sending
-      // that person to look at a GPU box would be the wrong address.
+      // that person to look at a server they named would be the wrong
+      // address.
       expect(
         railProgressLine(
           on: true,
@@ -182,8 +184,8 @@ void main() {
 
     test('a dead embedding server reads the same on both placements', () {
       // The box placement moves every generating stage and leaves embeddings
-      // on this Mac, so "GPU box unreachable" would be naming a machine that
-      // is answering fine. One sentence, both placements.
+      // on this Mac, so "Your server is not answering" would be naming a
+      // machine that is answering fine. One sentence, both modes.
       for (final onBox in [true, false]) {
         expect(
           railProgressLine(
@@ -534,7 +536,9 @@ void main() {
       );
 
       expect(
-        find.text('GPU box unreachable · 3 waiting · retrying each minute'),
+        find.text(
+          'Your server is not answering · 3 waiting · retrying each minute',
+        ),
         findsOneWidget,
       );
     });
@@ -552,7 +556,7 @@ void main() {
         find.text('Model server unreachable · 3 waiting · retrying each minute'),
         findsOneWidget,
       );
-      expect(find.textContaining('GPU box'), findsNothing);
+      expect(find.textContaining('Your server'), findsNothing);
     });
 
     testWidgets('renders the refused-key sentence', (tester) async {
@@ -564,7 +568,7 @@ void main() {
       );
 
       expect(
-        find.text('GPU box refused the access key · 2 waiting'),
+        find.text('Your server refused the access key · 2 waiting'),
         findsOneWidget,
       );
     });
@@ -575,17 +579,18 @@ void main() {
 
       await feed(tester, const TriageProgress({'pending': 4}));
       expect(find.text('Triaging 4 remaining…'), findsOneWidget);
-      expect(find.textContaining('GPU box'), findsNothing);
+      expect(find.textContaining('Your server'), findsNothing);
 
       await feed(
         tester,
         const TriageProgress({'pending': 4}, parkedReason: 'session'),
       );
       expect(find.text('Triaging 4 remaining…'), findsOneWidget);
-      expect(find.textContaining('GPU box'), findsNothing);
+      expect(find.textContaining('Your server'), findsNothing);
     });
 
-    testWidgets('processing being off outranks a parked box', (tester) async {
+    testWidgets('processing being off outranks a parked server',
+        (tester) async {
       await pumpRail(
         tester,
         placement: ModelPlacement.box,
@@ -599,7 +604,7 @@ void main() {
       );
 
       expect(find.text('Processing is off · 3 waiting'), findsOneWidget);
-      expect(find.textContaining('GPU box'), findsNothing);
+      expect(find.textContaining('Your server'), findsNothing);
     });
 
     testWidgets('an empty queue says nothing at all', (tester) async {
@@ -631,7 +636,9 @@ void main() {
       await tester.pump();
 
       expect(
-        find.text('GPU box unreachable · 3 waiting · retrying each minute'),
+        find.text(
+          'Your server is not answering · 3 waiting · retrying each minute',
+        ),
         findsOneWidget,
       );
     });

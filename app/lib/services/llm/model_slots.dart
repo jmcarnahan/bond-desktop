@@ -256,6 +256,36 @@ String boxBaseFromProseUrl(String url) {
       : '';
 }
 
+/// `localhost:8082` out of a full completions URL — the part a person reads
+/// to tell two servers apart, without the `/v1/chat/completions` every one
+/// of them ends in.
+///
+/// A URL that does not parse is returned WHOLE. Something typed into the
+/// field is still the answer to "where does this point", and hiding it
+/// behind a blank would leave the summary lying about a slot that is
+/// genuinely misconfigured.
+String hostPort(String url) {
+  final uri = Uri.tryParse(url);
+  if (uri == null || uri.host.isEmpty) return url;
+  return uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
+}
+
+/// Whether [url] names this machine, by the three spellings a person types.
+///
+/// The Models page asks it before saying an access key is needed: a server
+/// somebody runs on their own Mac needs none, and telling them to paste one
+/// would be an instruction with nothing to follow it. It is NOT a test of who
+/// operates the server — [isThirdPartyHost] answers that, and deliberately
+/// reads nothing into loopback, because the shared box arrives over an `ssh`
+/// tunnel at `localhost:18100`.
+bool isLoopbackHost(String url) {
+  final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
+  return host == 'localhost' ||
+      host == '127.0.0.1' ||
+      host == '::1' ||
+      host == '[::1]';
+}
+
 /// Hosts whose operator is a third party: a target here on `draft_reply` or
 /// `draft_improve` needs the one-time consent (decision 9).
 ///

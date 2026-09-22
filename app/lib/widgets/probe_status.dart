@@ -4,6 +4,31 @@ import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../theme/tokens.dart';
 import 'inline_alert.dart';
 
+/// One look at a server, guarded, for every Check and Connect on this screen.
+///
+/// The probe promises never to throw, and a diagnostics call must not be able
+/// to crash a settings screen anyway — so the one sentence a broken promise
+/// renders as lives HERE, beside the widget that draws it, rather than in a
+/// copy per caller. An empty bearer is sent as none: an `Authorization: Bearer`
+/// with nothing after it is a header a server is entitled to reject.
+Future<ModelProbeResult> guardedProbe(
+  Future<ModelProbeResult> Function(String url, {String? bearer}) probe,
+  String url,
+  String? bearer,
+) async {
+  try {
+    return await probe(
+      url,
+      bearer: bearer == null || bearer.isEmpty ? null : bearer,
+    );
+  } on Object {
+    return const ModelProbeResult(
+      reachable: false,
+      error: 'Could not check the server',
+    );
+  }
+}
+
 /// What the last look at a server found, in one line.
 ///
 /// Three outcomes render apart because they mean three different things to

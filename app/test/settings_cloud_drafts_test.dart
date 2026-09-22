@@ -1,8 +1,8 @@
 import 'package:bond_inbox/screens/consent_screen.dart'
     show CloudDraftsConsentPane;
+import 'package:bond_inbox/services/llm/model_probe.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
-import 'package:bond_inbox/widgets/settings_models_body.dart';
-import 'package:bond_inbox/widgets/settings_models_simple.dart';
+import 'package:bond_inbox/widgets/model_servers_form.dart';
 import 'package:bond_inbox/widgets/settings_screen.dart';
 import 'package:bond_inbox/widgets/settings_section.dart';
 import 'package:flutter/material.dart';
@@ -29,27 +29,10 @@ class _RouteCounter extends NavigatorObserver {
   }
 }
 
-const _bedrock = LlmTargetSpec(
-  id: 't-99887766',
-  name: 'Bedrock Opus',
-  url: 'https://bedrock-runtime.example.com/',
-  model: 'us.example.opus',
-  wire: LlmWire.bedrockConverse,
-);
-
-const _fast = LlmTargetSpec(
-  id: builtInFastId,
-  name: builtInFastName,
-  url: 'http://localhost:8082/v1/chat/completions',
-  model: 'qwen3-4b',
-);
-
-const _prose = LlmTargetSpec(
-  id: builtInProseId,
-  name: builtInProseName,
-  url: 'http://localhost:8080/v1/chat/completions',
-  model: 'qwen3-27b',
-);
+/// Somebody else's service on the big model's address, which is the one
+/// thing that opens the pane. The only place this name appears.
+const _openAiUrl = 'https://api.openai.com/v1/chat/completions';
+const _smallUrl = 'https://box.example.com/bulk/v1/chat/completions';
 
 void main() {
   late _RouteCounter routes;
@@ -71,6 +54,19 @@ void main() {
     int cloudDraftsDailyCap = 50,
     ValueChanged<int>? onCloudDraftsDailyCapChanged,
     bool models = false,
+    ModelPlacement placement = ModelPlacement.local,
+    String boxBigUrl = '',
+    String boxSmallUrl = '',
+    Future<ModelProbeResult> Function(String, {String? bearer})? probe,
+    Future<void> Function({
+      required String bigUrl,
+      required String smallUrl,
+      required String bigModel,
+      required String smallModel,
+      String? bigKey,
+      String? smallKey,
+    })? onUseBox,
+    Future<void> Function()? onCloudDraftsConsent,
     // A second pump into the SAME tree, to change a prop under a screen that
     // is already up: the sections keep their own open state across it, so
     // tapping the toggle again would close the one just opened.
@@ -99,12 +95,24 @@ void main() {
           cloudDraftsDailyCap: cloudDraftsDailyCap,
           onCloudDraftsDailyCapChanged: onCloudDraftsDailyCapChanged ??
               (value) => capWrites.add(value),
-          // Wired only for the consent case: the Models section needs a slot
-          // editor behind it before it will render at all.
-          onSlotTargetChanged:
-              models ? (_, {required url, required model}) {} : null,
-          targets: models ? const [_fast, _prose, _bedrock] : const [],
-          onStageTargetChanged: models ? (_, _) {} : null,
+          // Wired only for the consent case: the Models section needs a way
+          // to connect behind it before it will render at all.
+          modelPlacement: placement,
+          boxBigUrl: boxBigUrl,
+          boxSmallUrl: boxSmallUrl,
+          probeServer: probe,
+          onUseBox: models
+              ? (onUseBox ??
+                  ({
+                    required bigUrl,
+                    required smallUrl,
+                    required bigModel,
+                    required smallModel,
+                    bigKey,
+                    smallKey,
+                  }) async {})
+              : null,
+          onCloudDraftsConsent: onCloudDraftsConsent,
         ),
       ),
     ));
@@ -388,36 +396,57 @@ void main() {
   });
 
   group('the consent pane', () {
-    testWidgets('quotes the cap in force, not a hardcoded fifty',
-        (tester) async {
+    /// The Models section open on a user-defined install whose BIG address is
+    /// somebody else's service, with both servers answering one model each.
+    Future<void> openConsent(
+      WidgetTester tester, {
+      required List<String> order,
+      int cloudDraftsDailyCap = 50,
+      Object? connectThrows,
+      bool wireConsent = true,
+    }) async {
       await open(
         tester,
         section: 'Models',
         models: true,
-        cloudDraftsDailyCap: 200,
+        placement: ModelPlacement.box,
+        boxBigUrl: _openAiUrl,
+        boxSmallUrl: _smallUrl,
+        cloudDraftsDailyCap: cloudDraftsDailyCap,
+        probe: (url, {bearer}) async => ModelProbeResult(
+          reachable: true,
+          modelIds: [url == _openAiUrl ? 'gpt-x' : 'qwen3-4b'],
+        ),
+        onCloudDraftsConsent:
+            wireConsent ? () async => order.add('consent') : null,
+        onUseBox: ({
+          required bigUrl,
+          required smallUrl,
+          required bigModel,
+          required smallModel,
+          bigKey,
+          smallKey,
+        }) async {
+          order.add('connect');
+          if (connectThrows != null) throw connectThrows;
+        },
       );
 
-      // The stage table is one fold down since Round H: the Models section
-      // opens on the simple page, and the pickers are its Advanced content.
-      final advanced = find.byKey(
-        SettingsSection.toggleKey(SettingsModelsSimple.advancedTitle),
-      );
-      await tester.ensureVisible(advanced);
+      final connect = find.byKey(ModelServersForm.connectKey);
+      await tester.ensureVisible(connect);
       await tester.pumpAndSettle();
-      await tester.tap(advanced);
+      await tester.tap(connect);
       await tester.pumpAndSettle();
+    }
 
-      // A third-party target on a draft stage is the one pick that asks first.
-      final picker =
-          find.byKey(SettingsModelsBody.stagePickerKey('draft_reply'));
-      await tester.ensureVisible(picker);
-      await tester.pumpAndSettle();
-      await tester.tap(picker);
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Bedrock Opus').last);
-      await tester.pumpAndSettle();
+    testWidgets('Connect to a vendor asks first, and quotes the cap in force',
+        (tester) async {
+      final order = <String>[];
+      await openConsent(tester, order: order, cloudDraftsDailyCap: 200);
 
       expect(find.byType(CloudDraftsConsentPane), findsOneWidget);
+      expect(find.text('Send drafts to $boxProseName?'), findsOneWidget);
+      expect(find.text(CloudDraftsConsentPane.scopeLine), findsOneWidget);
       expect(
         find.text(
           'At most 200 drafts a day go to a third-party target. You can '
@@ -425,11 +454,84 @@ void main() {
         ),
         findsOneWidget,
       );
-      // A pane inside the screen and not a popup over it. The route count is
-      // not the check here — a dropdown's own menu is a route — so the claim
-      // is the one the house rule actually makes.
+      // Nothing is written by the question itself.
+      expect(order, isEmpty);
+      // A pane inside the screen and not a popup over it.
       expect(find.byType(Dialog), findsNothing);
       expect(find.byType(AlertDialog), findsNothing);
+    });
+
+    testWidgets('Continue records the consent BEFORE it connects',
+        (tester) async {
+      final order = <String>[];
+      await openConsent(tester, order: order);
+
+      await tester.tap(find.byKey(CloudDraftsConsentPane.continueKey));
+      await tester.pumpAndSettle();
+
+      // That order is the protection: `setBoxServers` refuses a third-party
+      // big address while the flag is false, so a connect made first would
+      // throw rather than write.
+      expect(order, ['consent', 'connect']);
+      // And the pane closed onto the sections it replaced.
+      expect(find.byType(CloudDraftsConsentPane), findsNothing);
+      expect(find.text('Models'), findsOneWidget);
+    });
+
+    testWidgets('a connect that refuses keeps the pane open and says why',
+        (tester) async {
+      // The form is unmounted by the pane that replaced it, so it has
+      // nowhere to draw its own sentence: a pane that closed here would put
+      // the person back on an unchanged section with nothing said.
+      final order = <String>[];
+      await openConsent(
+        tester,
+        order: order,
+        connectThrows: ArgumentError.value(
+          _openAiUrl,
+          'bigUrl',
+          'a third-party server needs cloud drafts consent first',
+        ),
+      );
+
+      await tester.tap(find.byKey(CloudDraftsConsentPane.continueKey));
+      await tester.pumpAndSettle();
+
+      expect(order, ['consent', 'connect']);
+      expect(find.byType(CloudDraftsConsentPane), findsOneWidget);
+      expect(find.byKey(CloudDraftsConsentPane.errorKey), findsOneWidget);
+      expect(
+        find.text('a third-party server needs cloud drafts consent first'),
+        findsOneWidget,
+      );
+
+      // And leaving drops the sentence with the pane.
+      await tester.tap(find.byKey(CloudDraftsConsentPane.notNowKey));
+      await tester.pumpAndSettle();
+      expect(find.byKey(CloudDraftsConsentPane.errorKey), findsNothing);
+    });
+
+    testWidgets('a screen that cannot record consent refuses the address '
+        'instead of asking', (tester) async {
+      final order = <String>[];
+      await openConsent(tester, order: order, wireConsent: false);
+
+      // A pane whose Continue wrote no consent would hand the connect
+      // straight back to a refusal, so the question is not asked at all.
+      expect(find.byType(CloudDraftsConsentPane), findsNothing);
+      expect(find.text(ModelServersForm.thirdPartyRefusalText), findsOneWidget);
+      expect(order, isEmpty);
+    });
+
+    testWidgets('Not now writes nothing at all', (tester) async {
+      final order = <String>[];
+      await openConsent(tester, order: order);
+
+      await tester.tap(find.byKey(CloudDraftsConsentPane.notNowKey));
+      await tester.pumpAndSettle();
+
+      expect(order, isEmpty);
+      expect(find.byType(CloudDraftsConsentPane), findsNothing);
     });
   });
 

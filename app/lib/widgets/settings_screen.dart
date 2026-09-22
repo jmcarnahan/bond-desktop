@@ -17,20 +17,19 @@ import '../providers/prefs_provider.dart'
 import '../screens/consent_screen.dart' show CloudDraftsConsentPane;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart';
-import '../services/system/system_info.dart' show HardwareInfo;
+import '../services/server/server_state.dart';
 import '../theme/tokens.dart';
 import 'attachment_format.dart' show formatBytes;
 import 'inline_alert.dart';
+import 'model_servers_form.dart' show ModelServersForm;
 import 'needs_you_rules_editor.dart';
 import 'pane_surface.dart';
 import 'settings_connection_section.dart';
 import 'settings_context_section.dart';
 import 'settings_lookback_field.dart';
-import 'settings_models_body.dart';
-import 'settings_models_simple.dart';
+import 'settings_models_page.dart';
 import 'settings_section.dart';
 import 'settings_segments.dart';
-import 'settings_target_editor.dart' show LlmTargetEditor;
 import 'time_format.dart' show relativeTime;
 
 /// Which sub-pane of Settings is on screen. Null is the sections themselves.
@@ -42,16 +41,24 @@ sealed class _Subpane {
   const _Subpane();
 }
 
-/// Add when [initial] is null, edit otherwise.
-class _TargetEditorPane extends _Subpane {
-  final LlmTargetSpec? initial;
-  const _TargetEditorPane(this.initial);
-}
-
+/// The one question a third-party address raises, and the connect it is
+/// standing in front of.
+///
+/// [resume] is the form's own closure: Continue records the consent and then
+/// calls it, which is the SAME connect the person pressed, with the same
+/// values. Not now calls nothing, and nothing is written either way.
+///
+/// Those values include the ACCESS KEY the person typed, captured by the
+/// closure, so for as long as this pane is open the key is reachable from the
+/// screen's own state. It is in no field, no log and nothing rendered, and
+/// every way out of the pane — Continue, Not now, Back — drops this object
+/// and the closure with it. That is the one residence outside the form's two
+/// controllers, and it exists because a consent that could not finish the
+/// connect it interrupted would be a question asked for nothing.
 class _ConsentPane extends _Subpane {
-  final String stageId;
   final LlmTargetSpec target;
-  const _ConsentPane(this.stageId, this.target);
+  final Future<void> Function() resume;
+  const _ConsentPane(this.target, this.resume);
 }
 
 /// How much of Settings a host is asking for.
@@ -203,23 +210,6 @@ class SettingsScreen extends StatefulWidget {
   /// still renders if [onShowActivityLogChanged] is wired.
   final VoidCallback? onOpenActivityLog;
 
-  /// Where each slot points NOW, with "follow the build" already resolved by
-  /// the host into the build's own values.
-  final Map<ModelSlot, LlmTarget> slotTargets;
-
-  /// Whether each slot is still on those build values — what the editors
-  /// render as `Default` rather than as `Custom`.
-  final Map<ModelSlot, bool> slotIsDefault;
-
-  /// What this build was compiled with, per slot. Deliberately NOT named
-  /// `slotDefaults`: a field of that name would shadow the const map of the
-  /// same name in the constructor's own default expression below.
-  final Map<ModelSlot, LlmTarget> compiledDefaults;
-
-  /// The authored stage → slot table the section displays. A parameter so a
-  /// test can hand it a short one; the app always passes [pipelineStages].
-  final List<PipelineStageInfo> stages;
-
   /// Asks a server what it serves, for the editors' 'Check server'. Null takes
   /// the button off every editor and the embeddings card — the editors still
   /// work, with the model as a typed name — on the same discipline as every
@@ -234,24 +224,54 @@ class SettingsScreen extends StatefulWidget {
   /// on, its collapsed summary, and what the fold's Reset caption promises.
   final ModelPlacement modelPlacement;
 
-  /// The GPU server address to prefill the Models form with: the stored one
-  /// when there is one, the compiled one otherwise. Never a key.
-  final String boxUrl;
+  /// The four user-defined values to prefill the Models form with, already
+  /// resolved by the host: the stored ones where there are stored ones, the
+  /// build's otherwise. Never a key.
+  final String boxBigUrl;
+  final String boxSmallUrl;
+  final String boxBigModel;
+  final String boxSmallModel;
 
-  /// Whether a key for it is in the keychain. A presence flag, never the
-  /// token — it is what opens the key field empty with a hint and lets Save
-  /// through with it blank.
+  /// Whether a key is in the keychain, for either server and for each.
+  /// Presence flags, never the token: the first is what offers **Remove
+  /// key**, and the two below are what hint that typing replaces something.
   final bool boxKeyStored;
+  final bool boxBigKeyStored;
+  final bool boxSmallKeyStored;
 
-  /// Save on that form: the typed address, and the typed key or null when one
-  /// is already stored and was not retyped. **Null takes the form off the
-  /// Models page**, this screen's usual discipline. [key] is a SECRET and
-  /// passes straight through.
-  final Future<void> Function(String baseUrl, String? key)? onUseBox;
+  /// **Connect** on that form: the two addresses, the two names discovered
+  /// from the servers themselves, and a key per server where one was typed.
+  /// **Null hides the whole Models section**, the same discipline every other
+  /// optional section follows: a host that cannot store a change must not
+  /// offer the controls that make one. The keys are SECRETS and pass straight
+  /// through.
+  final Future<void> Function({
+    required String bigUrl,
+    required String smallUrl,
+    required String bigModel,
+    required String smallModel,
+    String? bigKey,
+    String? smallKey,
+  })? onUseBox;
 
-  /// **Use this Mac**: puts the install back on this Mac's own models. Null
-  /// takes that button off.
-  final Future<void> Function()? onUseLocal;
+  /// **Managed**: puts the install back on this Mac's own models. Null leaves
+  /// that segment inert.
+  final Future<void> Function()? onUseManaged;
+
+  /// Forgets both stored keys. Null takes **Remove key** off the form.
+  final Future<void> Function()? onRemoveKey;
+
+  /// Reruns the wizard, which is how the models folder changes and a download
+  /// is retried. Null takes the link off the foot of the section.
+  final VoidCallback? onSetUpAgain;
+
+  /// Opens the model server's log in the operating system's own viewer. Null
+  /// takes **Show log** off the failure line.
+  final VoidCallback? onShowLog;
+
+  /// Where the app's own llama-server stands, for the Managed status line,
+  /// the loading bar and the collapsed summary.
+  final ServerState serverState;
 
   /// The three read-only role rows, resolved by the host. Empty draws none.
   final List<RoleLine> roleLines;
@@ -260,82 +280,9 @@ class SettingsScreen extends StatefulWidget {
   /// page's status line. Null is the ordinary state.
   final ParkedFact? parked;
 
-  /// The embedding server's own state, as one line under that status on the
-  /// GPU server placement. Null leaves it off.
-  final String? embedServerLine;
-
-  /// What this Mac is, in one sentence — `SettingsModelsBody.hardwareLine`.
-  /// Null while the host is still reading the machine.
-  final String? hardwareLine;
-
-  /// Fired by a slot editor's Save. **Null hides the whole Models section**,
-  /// the same discipline every other optional section follows: a host that
-  /// cannot store a change must not offer the controls that make one.
-  final void Function(ModelSlot slot, {required String url, required String model})?
-      onSlotTargetChanged;
-
-  /// Fired by 'Use build defaults'. Null leaves the button inert rather than
-  /// hiding the section — the section's premise is [onSlotTargetChanged].
-  final void Function(ModelSlot slot)? onSlotReset;
-
-  /// How many drafts the prose server may be writing at once.
-  final int proseParallel;
-
-  /// Fired by the **Drafts in flight** segments. Null takes that one control
-  /// off the Models section and leaves the rest of it exactly as it was.
-  final void Function(int width)? onProseParallelChanged;
-
-  /// Whose width **Drafts in flight** is about — the name of the target the
-  /// `draft_reply` stage resolves to. Null names the built-in prose target,
-  /// which is what a host with no stage map has.
-  final String? proseParallelTargetName;
-
-  /// Every server a stage may be pointed at, built-ins first —
-  /// `AppPrefs.allTargets`. Empty leaves the Models section rendering exactly
-  /// as it did before routing was data.
-  final List<LlmTargetSpec> targets;
-
-  /// Which target id each stage resolves to now, by stage id.
-  final Map<String, String?> stageTargetIds;
-
-  /// Whether the owner has read what a third-party draft target receives.
-  final bool cloudDraftsConsent;
-
-  /// Fired by the target editor's Save, with the typed bearer and the three
-  /// presets. **Null hides Add and Edit** and leaves the Targets list a
-  /// read-only report, the same discipline every optional control here
-  /// follows.
-  final Future<void> Function(
-    LlmTargetSpec spec, {
-    String? bearer,
-    bool prose,
-    bool confirm,
-    bool bulk,
-  })? onTargetSaved;
-
-  /// Fired by a row's confirmed Remove. Null takes Remove off the rows.
-  final Future<void> Function(String id)? onTargetRemoved;
-
-  /// What this Mac is, for the Models section's fact line. Null while the
-  /// host is still reading it.
-  final HardwareInfo? hardware;
-
-  /// Which tier this Mac is in. Null while the host is still reading it, and
-  /// what leaves **Use this Mac's defaults** disabled until it arrives.
-  final MachineTier? machineTier;
-
-  /// Fired by that button: the host writes the tier's stage picks and its
-  /// draft policy. **Null takes the fact line and the button off the Models
-  /// section**, the same discipline every optional control here follows.
-  final Future<void> Function()? onApplyTierDefaults;
-
-  /// Fired by a stage's picker. Null keeps the stage table's chips and offers
-  /// no pickers at all.
-  final void Function(String stageId, String? targetId)? onStageTargetChanged;
-
-  /// Fired by the consent pane's Continue, before the stage is written. Null
-  /// leaves the pane's Continue writing the stage alone, which is the shape a
-  /// host that stores no consent flag has.
+  /// Fired by the consent pane's Continue, BEFORE the connect it is standing
+  /// in front of. Null leaves the pane's Continue connecting alone, which is
+  /// the shape a host that stores no consent flag has.
   final Future<void> Function()? onCloudDraftsConsent;
 
   /// Whether a draft for an urgent message that needs the owner is improved
@@ -363,14 +310,6 @@ class SettingsScreen extends StatefulWidget {
   /// Fired by the Daily cap field on commit. Null leaves the field off and the
   /// line a read-only report.
   final ValueChanged<int>? onCloudDraftsDailyCapChanged;
-
-  /// The host's Local server card, drawn on the Models page under **This
-  /// Mac**. Null leaves the page without one.
-  final Widget? modelsHeader;
-
-  /// That card's one-liner, prefixed onto the collapsed Models summary. Null
-  /// keeps the summary the three slots alone.
-  final String? localServerSummary;
 
   /// When mail, Teams and the storyline sweep last ran. Null means never, and
   /// reads as 'never' rather than as a blank.
@@ -563,39 +502,24 @@ class SettingsScreen extends StatefulWidget {
     this.onNeedsYouRulesSaved,
     this.storylineNewestFirst = false,
     this.onStorylineNewestFirstChanged,
-    this.slotTargets = slotDefaults,
-    this.slotIsDefault = const {
-      ModelSlot.fast: true,
-      ModelSlot.prose: true,
-      ModelSlot.embed: true,
-    },
-    this.compiledDefaults = slotDefaults,
-    this.stages = pipelineStages,
     this.probeServer,
     this.storedBearer,
-    this.onSlotTargetChanged,
-    this.onSlotReset,
-    this.proseParallel = 1,
-    this.onProseParallelChanged,
-    this.proseParallelTargetName,
-    this.targets = const [],
-    this.stageTargetIds = const {},
-    this.cloudDraftsConsent = false,
-    this.onTargetSaved,
-    this.onTargetRemoved,
-    this.hardware,
-    this.machineTier,
-    this.onApplyTierDefaults,
     this.modelPlacement = ModelPlacement.local,
-    this.boxUrl = '',
+    this.boxBigUrl = '',
+    this.boxSmallUrl = '',
+    this.boxBigModel = '',
+    this.boxSmallModel = '',
     this.boxKeyStored = false,
+    this.boxBigKeyStored = false,
+    this.boxSmallKeyStored = false,
     this.onUseBox,
-    this.onUseLocal,
+    this.onUseManaged,
+    this.onRemoveKey,
+    this.onSetUpAgain,
+    this.onShowLog,
+    this.serverState = const ServerStopped(),
     this.roleLines = const [],
     this.parked,
-    this.embedServerLine,
-    this.hardwareLine,
-    this.onStageTargetChanged,
     this.onCloudDraftsConsent,
     this.cloudDraftsStanding = false,
     this.onCloudDraftsStandingChanged,
@@ -603,8 +527,6 @@ class SettingsScreen extends StatefulWidget {
     this.cloudDraftsToday,
     this.cloudDraftsDailyCap = AppPrefs.defaultCloudDraftsDailyCap,
     this.onCloudDraftsDailyCapChanged,
-    this.modelsHeader,
-    this.localServerSummary,
     this.lastMailSyncIso,
     this.lastTeamsSyncIso,
     this.lastSweepIso,
@@ -740,6 +662,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// expansion state lives here, so swapping only the child is what brings a
   /// person back to the Models section still open at the row they left.
   _Subpane? _subpane;
+
+  /// Why the consent pane's Continue did not land, or null. The consent is
+  /// recorded first and the connect made second, so the second half can
+  /// refuse on its own — and when it does the pane stays open carrying this
+  /// rather than closing onto an unchanged section.
+  String? _consentError;
 
   /// Whether the wipe button has been armed — see [_signOutBlock]. Reset by
   /// 'Keep' and by the wipe completing, never by a rebuild: an armed button is
@@ -940,25 +868,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (_subpane case final subpane?) {
       return PaneSurface(
         title: switch (subpane) {
-          _TargetEditorPane(initial: null) => 'Add target',
-          _TargetEditorPane() => 'Edit target',
           _ConsentPane() => 'Cloud drafts',
         },
         onBack: _closeSubpane,
         onHome: onHome,
         child: switch (subpane) {
-          _TargetEditorPane(:final initial) => LlmTargetEditor(
-              initial: initial,
-              probe: widget.probeServer,
-              storedBearer: widget.storedBearer,
-              onSave: _saveTarget,
-              onCancel: _closeSubpane,
-            ),
-          _ConsentPane(:final stageId, :final target) => CloudDraftsConsentPane(
+          _ConsentPane(:final target, :final resume) => CloudDraftsConsentPane(
               targetName: target.name,
-              stageLabel: _stageLabel(stageId),
               dailyCap: widget.cloudDraftsDailyCap,
-              onContinue: () => unawaited(_acceptCloudDrafts(stageId, target)),
+              error: _consentError,
+              onContinue: () => unawaited(_acceptCloudDrafts(resume)),
               // Back and Not now are the same answer, and neither writes.
               onNotNow: _closeSubpane,
             ),
@@ -1032,15 +951,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
           onSignIn: widget.onSignIn,
           onSignOutOfServer: widget.onSignOutOfServer,
         ),
-      if (widget.onSlotTargetChanged != null)
+      if (widget.onUseBox != null)
         _section(
           'Models',
-          SettingsModelsSimple.summary(
+          SettingsModelsPage.summary(
             placement: widget.modelPlacement,
-            boxUrl: widget.boxUrl,
-            server: widget.localServerSummary,
+            serverLine: SettingsModelsPage.serverLine(widget.serverState),
+            bigUrl: widget.boxBigUrl,
+            smallUrl: widget.boxSmallUrl,
           ),
-          _modelsSimple(),
+          _modelsPage(),
         ),
       _section('Needs You', _needsYouSummary(), _needsYouBody()),
       // After Needs You because it is the next question that pile raises —
@@ -1207,104 +1127,74 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // ── Models ────────────────────────────────────────────────────────────────
 
-  /// The Models section: one question, three answers, and one fold.
+  /// The Models section: one question, two answers, and nothing else.
   ///
-  /// The section's body is the SIMPLE page since Round H; the eight blocks it
-  /// used to open on are its Advanced fold's content, built by [_modelsBody]
-  /// below with the placement controls and the header unwired, because the
-  /// page above now owns both.
-  Widget _modelsSimple() => SettingsModelsSimple(
+  /// The body is the whole of [SettingsModelsPage]. The eight blocks this
+  /// section used to open on, and the Advanced fold they were folded into,
+  /// are gone rather than hidden: the routing DATA they edited is still
+  /// there, and no screen shows it.
+  Widget _modelsPage() => SettingsModelsPage(
     modelPlacement: widget.modelPlacement,
-    boxUrl: widget.boxUrl,
-    boxKeyStored: widget.boxKeyStored,
     processingOn: widget.processingOn,
+    serverState: widget.serverState,
+    boxBigUrl: widget.boxBigUrl,
+    boxSmallUrl: widget.boxSmallUrl,
+    boxBigModel: widget.boxBigModel,
+    boxSmallModel: widget.boxSmallModel,
+    boxKeyStored: widget.boxKeyStored,
+    boxBigKeyStored: widget.boxBigKeyStored,
+    boxSmallKeyStored: widget.boxSmallKeyStored,
     probe: widget.probeServer,
     storedBearer: widget.storedBearer,
     onUseBox: widget.onUseBox,
-    onUseLocal: widget.onUseLocal,
+    onUseManaged: widget.onUseManaged,
+    onRemoveKey: widget.onRemoveKey,
+    // The consent pane belongs to THIS screen, not to the page: it replaces
+    // the sections, it has a back arrow, and the sections' own open state
+    // lives here. The page raises the question and the screen asks it.
+    //
+    // Null when there is nobody to record the answer, so the form refuses a
+    // vendor's address under the field instead. A pane whose Continue wrote
+    // no consent would hand the connect straight back to `setBoxServers`,
+    // which refuses a third-party address while the flag is false: a question
+    // that can only be answered wrong is worse than no question.
+    onThirdParty: widget.onCloudDraftsConsent == null
+        ? null
+        : (spec, resume) async =>
+            setState(() => _subpane = _ConsentPane(spec, resume)),
+    onSetUpAgain: widget.onSetUpAgain,
+    onShowLog: widget.onShowLog,
     roleLines: widget.roleLines,
     parked: widget.parked,
-    localServer: widget.modelsHeader,
-    hardwareLine: widget.hardwareLine,
-    embedServerLine: widget.embedServerLine,
-    advanced: _modelsBody(),
-    // In the screen's own open-sections set, by title, so Advanced collapses
-    // and re-opens exactly the way a section does and a person who left it
-    // open finds it open.
-    advancedOpen: _open.contains(SettingsModelsSimple.advancedTitle),
-    onToggleAdvanced: () => _toggle(SettingsModelsSimple.advancedTitle),
   );
 
-  Widget _modelsBody() => SettingsModelsBody(
-    slotTargets: widget.slotTargets,
-    isDefault: widget.slotIsDefault,
-    compiledDefaults: widget.compiledDefaults,
-    stages: widget.stages,
-    probe: widget.probeServer,
-    storedBearer: widget.storedBearer,
-    onSave: widget.onSlotTargetChanged!,
-    onReset: widget.onSlotReset ?? (_) {},
-    proseParallel: widget.proseParallel,
-    onProseParallelChanged: widget.onProseParallelChanged,
-    proseParallelTargetName:
-        widget.proseParallelTargetName ?? builtInProseName,
-    targets: widget.targets,
-    stageTargetIds: widget.stageTargetIds,
-    cloudDraftsConsent: widget.cloudDraftsConsent,
-    onStageTargetChanged: widget.onStageTargetChanged,
-    onAddTarget: widget.onTargetSaved == null
-        ? null
-        : () => setState(() => _subpane = const _TargetEditorPane(null)),
-    onEditTarget: widget.onTargetSaved == null
-        ? null
-        : (spec) => setState(() => _subpane = _TargetEditorPane(spec)),
-    onRemoveTarget: widget.onTargetRemoved,
-    hardware: widget.hardware,
-    machineTier: widget.machineTier,
-    modelPlacement: widget.modelPlacement,
-    onApplyTierDefaults: widget.onApplyTierDefaults,
-    onConsentNeeded: (stageId, target) =>
-        setState(() => _subpane = _ConsentPane(stageId, target)),
-  );
+  void _closeSubpane() => setState(() {
+        _subpane = null;
+        _consentError = null;
+      });
 
-  void _closeSubpane() => setState(() => _subpane = null);
-
-  /// The stage's own word, for the consent pane's first line. The id itself is
-  /// a schema name and is not what a person calls the thing.
-  String _stageLabel(String stageId) {
-    for (final stage in widget.stages) {
-      if (stage.id == stageId) return stage.label;
-    }
-    return stageId;
-  }
-
-  Future<void> _saveTarget(
-    LlmTargetSpec spec, {
-    String? bearer,
-    bool prose = false,
-    bool confirm = false,
-    bool bulk = false,
-  }) async {
-    await widget.onTargetSaved?.call(
-      spec,
-      bearer: bearer,
-      prose: prose,
-      confirm: confirm,
-      bulk: bulk,
-    );
-    if (!mounted) return;
-    _closeSubpane();
-  }
-
-  /// Continue: the consent is recorded FIRST and the stage written after it.
+  /// Continue: the consent is recorded FIRST and the connect made after it.
   ///
-  /// That order is the whole protection. `AppPrefs.specForStage` sends a
-  /// third-party draft target back to the local one while the flag is false,
-  /// so a stage written before the flag would resolve locally until something
-  /// else happened to rebuild it.
-  Future<void> _acceptCloudDrafts(String stageId, LlmTargetSpec target) async {
+  /// That order is the whole protection. `AppPrefsNotifier.setBoxServers`
+  /// refuses a third-party big address while the flag is false, so a connect
+  /// made before the flag would throw rather than write.
+  ///
+  /// The connect can still refuse — the form is unmounted by the pane that
+  /// replaced it, so it has nowhere to draw its own sentence — and a pane
+  /// that closed on a failed write would put the person back on an unchanged
+  /// section with nothing said. So a throw KEEPS the pane open and puts the
+  /// reason on it.
+  Future<void> _acceptCloudDrafts(Future<void> Function() resume) async {
     await widget.onCloudDraftsConsent?.call();
-    widget.onStageTargetChanged?.call(stageId, target.id);
+    try {
+      await resume();
+    } on Object catch (e) {
+      if (!mounted) return;
+      setState(() => _consentError = e is ArgumentError
+          ? e.message.toString()
+          : ModelServersForm.saveFailedText);
+      return;
+    }
     if (!mounted) return;
     _closeSubpane();
   }

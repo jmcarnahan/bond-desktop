@@ -105,10 +105,12 @@ itself could have written, either box id, a slot's built-in or an inbox-tier
 pick, and keeps everything else, because a hand-picked target is a choice
 somebody made.
 
-Since Round H there is no screen that WRITES one. The stage picker went with
-the Advanced fold, so the entries a person could have stored are the ones a
-migration cleared: `stage_targets_cleared = 1` empties the map once, and
-`llm_targets` rows are left where they are, inert because nothing names them.
+Since Round H there is no screen that WRITES one, and none that SHOWS one: the
+stage picker went with the Advanced fold, which Round H's second half deleted
+along with the slot editors, the targets list and the Local server card. The
+entries a person could have stored are the ones a migration cleared:
+`stage_targets_cleared = 1` empties the map once, and `llm_targets` rows are
+left where they are, inert because nothing names them.
 
 `AppPrefsNotifier.read` carries three one-shots, in this order and no other.
 `box_targets_derived = 1` lifts a Round G install's two `llm_targets` rows into
@@ -688,17 +690,21 @@ what Bond is would be the app asking for credentials as its opening line.
 
   | reason | placement | sentence |
   |---|---|---|
-  | `model_unavailable` | box | `GPU box unreachable · N waiting · retrying each minute` |
+  | `model_unavailable` | box | `Your server is not answering · N waiting · retrying each minute` |
   | `model_unavailable` | local | `Model server unreachable · N waiting · retrying each minute` |
-  | `unauthorized` | box | `GPU box refused the access key · N waiting` |
+  | `unauthorized` | box | `Your server refused the access key · N waiting` |
   | `unauthorized` | local | `Model server refused the access key · N waiting` |
   | `session` | either | today's `Triaging N remaining…` |
 
-  Processing being off still wins over all five. Settings, Models carries the
-  same fact as one line under the placement block. **What clears it is the next
-  pump**: the reason is dropped at the top of `pump()` and again on the first
-  item that gets through, so the line goes away because work got done rather
-  than on a timer. Pumps come from the inbox's own sixty-second poll and from
+  Processing being off still wins over all five. The Models page carries the
+  same fact as one line, but not all of it and not under both modes: under
+  **User defined** it answers all three parks in its own words, and under
+  **Managed** it answers the embedding one alone, because the other two are
+  about a server whose own state sentence is the next thing on that page.
+  **What clears it is the next pump**: the reason is dropped at the top of
+  `pump()` and again on the first item that gets through, so the line goes
+  away because work got done rather than on a timer. Pumps come from the
+  inbox's own sixty-second poll and from
   `ModelServerSupervisor.onReady`, which is the only cadence the sentence
   claims. A refused key claims no retry at all, because retrying will not help
   until somebody fixes it. `N` is the WHOLE pipeline's backlog, triage and the
@@ -843,11 +849,15 @@ is what keeps "the sync's pump completed" meaning "and the drafts are done".
 **How wide the draft lane runs is a property of the draft TARGET.**
 `DraftHandler.concurrency` is a closure over
 `AppPrefs.specForStage('draft_reply')?.parallel`, and `AiWorker` re-reads it on
-every launch decision — so Settings → Models → **Drafts in flight** moves the
-next draft rather than the next launch. On the built-in prose target that
-width IS `AppPrefs.proseParallel` (`prose_parallel`, 1–8, default 1), so a
-machine that has added no target reads exactly the number it always read; a
-draft pointed at a GPU-served target reads that target's own width instead.
+every launch decision — so pointing the stage somewhere else moves the next
+draft rather than the next launch. On the built-in prose target that width IS
+`AppPrefs.proseParallel` (`prose_parallel`, 1–8, default 1), so a machine that
+has added no target reads exactly the number it always read; a draft pointed
+at a user-defined server reads that spec's own width, which is four only for
+an address that follows the build and one for any stored address. Since Round
+H no screen shows the number: **Drafts in flight** went with the Advanced
+fold, and the width is the server's rather than a preference anybody is asked
+about.
 `DraftHandler` takes a second closure beside it, `streams`, over the same
 resolved spec: a target that cannot stream — one on the Converse wire has
 nothing to stream at all — makes the plain call and publishes nothing to the

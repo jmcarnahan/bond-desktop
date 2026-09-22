@@ -2,6 +2,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart' show ModelPlacement;
+import 'package:bond_inbox/services/server/server_state.dart';
 import 'package:bond_inbox/widgets/settings_screen.dart';
 import 'package:bond_inbox/widgets/settings_section.dart';
 import 'package:flutter/material.dart';
@@ -918,16 +919,17 @@ void main() {
     });
   });
 
-  /// The Models section's own collapsed line. It says where the models RUN,
-  /// which is the one question the section asks; what the three slots are
-  /// pointed at moved into its Advanced fold with everything else, and
-  /// `settings_models_test.dart` is what pins that.
+  /// The Models section's own collapsed line. It says WHICH MODE the install
+  /// is in and the one fact about it: the app's own server's state under
+  /// Managed, the hosts under User defined.
   group('the Models summary', () {
     Future<void> openModels(
       WidgetTester tester, {
       required ModelPlacement placement,
-      String boxUrl = '',
-      String? localServerSummary,
+      ServerState serverState = const ServerStopped(),
+      String boxBigUrl = '',
+      String boxSmallUrl = '',
+      bool wireModels = true,
     }) async {
       await tester.binding.setSurfaceSize(const Size(900, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -940,40 +942,56 @@ void main() {
             onAboutMeChanged: (_) {},
             onBack: () {},
             modelPlacement: placement,
-            boxUrl: boxUrl,
-            localServerSummary: localServerSummary,
-            onSlotTargetChanged: (_, {required url, required model}) {},
+            serverState: serverState,
+            boxBigUrl: boxBigUrl,
+            boxSmallUrl: boxSmallUrl,
+            onUseBox: !wireModels
+                ? null
+                : ({
+                    required bigUrl,
+                    required smallUrl,
+                    required bigModel,
+                    required smallModel,
+                    bigKey,
+                    smallKey,
+                  }) async {},
           ),
         ),
       ));
       await tester.pumpAndSettle();
     }
 
-    testWidgets('on this Mac it carries the local server’s own state',
+    testWidgets('Managed carries the server’s own state', (tester) async {
+      await openModels(
+        tester,
+        placement: ModelPlacement.local,
+        serverState: const ServerReady(port: 8080, pid: 42),
+      );
+
+      expect(find.text('Models'), findsOneWidget);
+      expect(find.text('Managed · Running'), findsOneWidget);
+    });
+
+    testWidgets('User defined names the host the work goes to', (tester) async {
+      await openModels(
+        tester,
+        placement: ModelPlacement.box,
+        boxBigUrl: 'https://box.example.com/prose/v1/chat/completions',
+        boxSmallUrl: 'https://box.example.com/bulk/v1/chat/completions',
+      );
+
+      expect(find.text('User defined · box.example.com'), findsOneWidget);
+    });
+
+    testWidgets('a host that cannot connect anywhere has no section at all',
         (tester) async {
       await openModels(
         tester,
         placement: ModelPlacement.local,
-        localServerSummary: 'Ready on 127.0.0.1:8080',
+        wireModels: false,
       );
 
-      expect(find.text('Models'), findsOneWidget);
-      expect(find.text('This Mac · Ready on 127.0.0.1:8080'), findsOneWidget);
-    });
-
-    testWidgets('on the GPU server it names the host and where embeddings '
-        'stay', (tester) async {
-      await openModels(
-        tester,
-        placement: ModelPlacement.box,
-        boxUrl: 'https://box.example.com',
-        localServerSummary: 'Ready on 127.0.0.1:8080',
-      );
-
-      expect(
-        find.text('GPU server · box.example.com · embeddings on this Mac'),
-        findsOneWidget,
-      );
+      expect(find.text('Models'), findsNothing);
     });
   });
 }

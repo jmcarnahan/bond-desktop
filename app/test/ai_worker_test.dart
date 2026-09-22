@@ -451,10 +451,10 @@ void main() {
     });
 
     test('a dead embedding server parks naming the embedding server', () async {
-      // The two slots are placed separately: the box can be serving every
-      // generating stage while the local embedding server is the one that is
-      // down, and a rail saying "GPU box unreachable" would send the person to
-      // the wrong machine.
+      // The two slots are placed separately: a user-defined server can be
+      // serving every generating stage while the local embedding server is
+      // the one that is down, and a rail saying "Your server is not
+      // answering" would send the person to the wrong machine.
       await store.enqueueWork('extract', 'email', 'a');
       final handler = ScriptedHandler(
         'extract',

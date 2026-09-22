@@ -1626,8 +1626,9 @@ void main() {
     });
 
     test('it reads the closure, every time it is asked', () {
-      // The width is a SETTING — Settings › Models › Drafts in flight — and
-      // `AiWorker._drainAll` asks before each launch. A handler that cached
+      // The width is a fact about wherever `draft_reply` points, resolved at
+      // the press, and `AiWorker._drainAll` asks before each launch. A
+      // handler that cached
       // the number would leave a change waiting for the next launch of the
       // app; `ai_worker_lanes_test.dart` pins the other half, that the worker
       // re-reads it mid-drain.
