@@ -2169,8 +2169,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   /// Whether the owner has replaced the app's own rules. It reads the WIDGET
   /// prop rather than editor-local state, so a Save inside the editor only
-  /// moves this line because the host rebuilds — which is why `_settings()` in
-  /// `inbox_screen.dart` watches the prefs rather than reading them.
+  /// moves this line because the host rebuilds — which is why `SettingsHost`
+  /// watches the prefs rather than reading them.
   bool get _rulesAreCustom => widget.needsYouRules.trim().isNotEmpty;
 
   String _needsYouSummary() {

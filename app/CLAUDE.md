@@ -156,6 +156,16 @@ enforce the ones that are commands.
 - Settings section titles and summary strings are pinned by
   `settings_screen_test.dart` and by the table in `docs/settings.md` — move
   all three together; a new segmented control is `SettingsSegments<T>`.
+- The settings SURFACE is `SettingsHost` (`screens/settings_host.dart`), not
+  the inbox: it owns the probe and every writer only settings calls
+  (`_saveNeedsYouRules`, the two resets and `_resetPipeline`, the three server
+  mutators, `_reloadAfterBackendChange`, `_connectionStatus`,
+  `_connectMicrosoft`), and the inbox binds it once for both rungs in
+  `_settingsHost`. A new settings-only mutator goes on the host. Two methods
+  stay on the inbox as injected seams and only these two: `_setProcessing`,
+  because the sidebar's own switch calls it, and `_waitForPullsToSettle` with
+  its `_quietTimeout`, because it reads the `_mailPulling`/`_teamsPulling`
+  flags the inbox's syncs write.
 - The clustering card is ONE recipe (`clusteringCardForConversationRow` in
   `clustering_card.dart`, whose `ClusteringCardVariant` holds the five cards
   and `shippedClusteringCard` names the one that ships) behind

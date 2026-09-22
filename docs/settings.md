@@ -8,7 +8,12 @@ hosted the way the activity log is: a `bool _showingSettings` on
 `_main()` ladder. There is no router and no `Navigator.push` — nothing is
 stacked on top of anything.
 
-**Two ways in**, and one builder behind both (`_settingsScreen`):
+The screen's own host is `SettingsHost`
+(`app/lib/screens/settings_host.dart`), a `ConsumerStatefulWidget` of its own
+since Round H Phase 4. It owns the probe and every writer only settings calls;
+the inbox binds it in one place and keeps the inbox.
+
+**Two ways in**, and one binding behind both (`_settingsHost`):
 
 - **The avatar menu's Settings.** The icon rail's account button
   (`IconRail.accountMenuKey`) opens a `PopupMenuButton` whose items are the
@@ -206,7 +211,7 @@ underneath and the section re-asks, so the user sees what their own click did.
 
 ## Host wiring
 
-`_settings()` in `app/lib/screens/inbox_screen.dart` builds it, and
+`SettingsHost` in `app/lib/screens/settings_host.dart` builds it, and
 **`ref.watch(appPrefsProvider)`, not `ref.read`**. The Needs You summary reads
 the stored rules to say whether they are custom, so a Save inside the screen
 only moves that line because the host rebuilds. Optimising the watch back to a
@@ -216,6 +221,33 @@ Every closure that touches `ref` keeps its `mounted` guard. The work behind them
 outlives the pane — a sign-in still out in the browser, a sign-out from the rail
 — and a dead host must answer with nothing rather than with "ref after
 dispose".
+
+**What the host owns, and the two seams it does not.** Everything only
+settings calls lives on `_SettingsHostState`: `_saveNeedsYouRules`,
+`_clearAiResults`, `_forgetAndResync`, `_resetPipeline`, `_setManagedServer`,
+`_setRouterPort`, `_chooseModelsFolder`, `_reloadAfterBackendChange`,
+`_connectionStatus` and `_connectMicrosoft`. A new settings-only writer goes
+here, not on the inbox.
+
+What the inbox still answers arrives as the host's twelve required
+constructor parameters — `scope`, `onBack`, `onHome`, `onCloseSettings`,
+`fileDialogs`, `onSetProcessing`, `waitForPullsToSettle`, `onRefreshNow`,
+`onSignOut`, `onOpenActivityLog`, `onForgetThumbnails`, `onToast` — plus the
+optional `probe` a test hands in.
+Two of those are seams rather than conveniences, and they are the reason the
+methods behind them did NOT move:
+
+- `_setProcessing` stays on `_InboxScreenState` because the sidebar's own
+  switch (`_processingToggle`) calls it too, and one switch is one writer. The
+  host binds it to `SettingsScreen.onProcessingChanged`.
+- `_waitForPullsToSettle`, with its `_quietTimeout`, stays because it reads
+  `_mailPulling` and `_teamsPulling`, the two flags `_notePulling` writes as
+  the inbox's own syncs go out and come back. `_resetPipeline` awaits it
+  before it deletes anything.
+
+`onCloseSettings` is a third, smaller one: the SDK permissions table's **Sign
+in again** leaves the pane without moving the section, which is not `onBack` —
+on the AI rung Back goes home.
 
 **The Models section's own wires**, added 2026-09-19 with routing-as-data. The
 host reads them off the prefs so the picker's items and its selection come from
@@ -277,9 +309,10 @@ one resolver rather than two guesses:
   rather than a preference, and a control that wrote nowhere would be a lie
   about a number this install does not own.
 
-`pipelineStages` is imported directly in `inbox_screen.dart`: `prefs_provider.dart`
-re-exports `ModelSlot`, `LlmTarget`, `LlmTargetSpec` and `LlmWire` but not the
-stage table, and the host needs it to ask where every stage currently points.
+`pipelineStages` is imported directly in `settings_host.dart`:
+`prefs_provider.dart` re-exports `ModelSlot`, `LlmTarget`, `LlmTargetSpec` and
+`LlmWire` but not the stage table, and the host needs it to ask where every
+stage currently points.
 
 ## Models
 
@@ -737,7 +770,7 @@ It shows, top to bottom:
   live when the preference is off; everything below it is disabled, not hidden,
   so the row does not jump about while the server stops. Flipping it writes the
   preference and then starts or stops the process — `_setManagedServer` on
-  `_InboxScreenState`, in that order, because `ensureRunning`/`stop` both ask
+  `_SettingsHostState`, in that order, because `ensureRunning`/`stop` both ask
   the preference and would read the old answer if they went first.
 - **The state**, as `ServerStateDescribe.summary`: `Stopped`, `Starting… on
   port 8080`, `Loading models (1 of 3) on port 8080`, `Ready on
@@ -805,9 +838,10 @@ right.
 summary, and the card renders on the page under **This Mac** rather than in the
 fold.
 
-**The probe's lifetime is the screen's.** `_InboxScreenState` holds one
-`ModelServerProbe` and closes it in `dispose`. A client per button press would
-leak a connection pool per press, and this is a button a user can hammer.
+**The probe's lifetime is the host's.** `_SettingsHostState` holds one
+`ModelServerProbe`, built on first use and closed in `dispose`. A client per
+button press would leak a connection pool per press, and this is a button a
+user can hammer.
 
 ## Suggested replies
 
@@ -1032,7 +1066,7 @@ one, and the table above is pinned verbatim by tests either way.
 
 The four stamps — `Mail`, `Mail reconcile`, `Teams`, `Storyline sweep` — come
 from `syncStampsProvider` (`app/lib/providers/activity_provider.dart`), which
-`_settings()` **watches** — it re-reads on every recorded event, so a sync
+`SettingsHost` **watches** — it re-reads on every recorded event, so a sync
 landing behind an open Settings pane moves the numbers in it. `Mail reconcile`
 sits directly under `Mail` because it qualifies it: the 24-hour re-enumeration
 that catches what the delta feed skipped runs on its own cadence, and a mail
