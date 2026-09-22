@@ -1640,10 +1640,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// pipeline.
   Future<void> setBoxUrl(String value) async {
     final base = normalizeBoxBaseUrl(value);
-    final origin = Uri.tryParse(base);
-    if (origin == null ||
-        (origin.scheme != 'http' && origin.scheme != 'https') ||
-        origin.host.isEmpty) {
+    if (!isBoxOrigin(base)) {
       throw ArgumentError.value(
         value,
         'baseUrl',

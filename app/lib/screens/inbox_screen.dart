@@ -83,6 +83,8 @@ import '../widgets/preview/preview_kind.dart' show openRefused;
 import '../widgets/quick_replies.dart';
 import '../widgets/room_header.dart';
 import '../widgets/settings_local_server_card.dart';
+import '../widgets/settings_models_body.dart' show SettingsModelsBody;
+import '../widgets/settings_models_simple.dart' show RoleLine;
 import '../widgets/settings_screen.dart';
 import '../widgets/side_panel.dart';
 import '../widgets/sort_menu.dart';
@@ -2425,6 +2427,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         ref.read(modelServerSupervisorProvider).state;
     final supervisor = ref.read(modelServerSupervisorProvider);
     final paths = ref.read(appPathsProvider);
+    // Both watched, both null only until the channel answers. Neither stays
+    // null: `ChannelSystemInfo.hardware()` catches a missing plugin and a
+    // platform error alike and answers `HardwareInfo.unknown`, so in a widget
+    // test these resolve to zero bytes rather than never resolving. One future
+    // behind both, so they cannot settle a frame apart. The tier is derived
+    // from this Mac's memory on every read and stored nowhere, so a models
+    // folder carried to another Mac gets that Mac's answer.
+    final hardware = ref.watch(hardwareInfoProvider).valueOrNull;
+    final machineTier = ref.watch(machineTierProvider).valueOrNull;
+    // Read once: the width, its caption's name and whether the control is
+    // offered at all are three questions about the same resolved target.
+    final draftSpec = prefs.specForStage('draft_reply');
     return SettingsScreen(
       scope: scope,
       onBack: onBack,
@@ -2612,8 +2626,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // frame apart. The tier is derived from this Mac's memory on every read
       // and stored nowhere, so a models folder carried to another Mac gets
       // that Mac's answer.
-      hardware: ref.watch(hardwareInfoProvider).valueOrNull,
-      machineTier: ref.watch(machineTierProvider).valueOrNull,
+      hardware: hardware,
+      machineTier: machineTier,
       // Always wired, and disabled on the section while the tier is unknown
       // rather than taken off it: the button is a fact about this machine and
       // it should not appear a frame late. The tier is READ at the press, not
@@ -2625,26 +2639,54 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         if (!mounted) return;
         final tier = await ref.read(machineTierProvider.future);
         if (!mounted) return;
-        await notifier.applyTierDefaults(tier);
+        // Through the PLACEMENT, read at the press, rather than the tier
+        // alone: on the GPU server the picks go back to the box's defaults,
+        // and `applyTierDefaults` with this Mac's tier would move the six
+        // prose steps onto the local 4B on a small Mac. On this Mac
+        // `usePlacement(local)` ends in the same `applyTierDefaults` call
+        // this used to make, after dropping the entries the app itself wrote.
+        await notifier.usePlacement(
+          ref.read(appPrefsProvider).modelPlacement,
+          hardwareTier: tier,
+        );
       },
       modelPlacement: prefs.modelPlacement,
-      // Only the two words the box can answer for. `embed_unavailable` is a
-      // local server under this placement and `session` is a sign-out, and
-      // neither is a sentence for the box's block to be putting on screen.
-      boxParkedReason: switch (ref.watch(parkedProvider).valueOrNull?.reason) {
-        'model_unavailable' => 'model_unavailable',
-        'unauthorized' => 'unauthorized',
-        _ => null,
-      },
-      onAdoptBox: (baseUrl, key) =>
-          notifier.adoptBox(baseUrl: baseUrl, bearer: key),
-      // This Mac's HARDWARE tier, not the effective one: going back to local
-      // means going back to what this machine can run.
-      onAdoptLocal: () async {
+      // The stored address when there is one and the compiled one otherwise,
+      // already resolved — the form prefills from it and never asks twice.
+      boxUrl: prefs.effectiveBoxUrl,
+      boxKeyStored: prefs.boxKeyStored,
+      // The whole fact, not just the two words the old block could answer
+      // for: the page decides which reasons it can speak to, and it can speak
+      // to the embedding server's as well now.
+      parked: ref.watch(parkedProvider).valueOrNull,
+      // Resolved by one pure function beside the widget, so the grouping rule
+      // is pinned by a test that never pumps this screen.
+      roleLines: RoleLine.fromPrefs(prefs),
+      hardwareLine: SettingsModelsBody.hardwareLine(hardware, machineTier),
+      // On the GPU server the managed process runs the embedding model alone,
+      // and its state is the one thing the box's own status line cannot say.
+      embedServerLine: 'Embedding model: ${SettingsLocalServerBody.summary(
+        serverState,
+        managed: prefs.managedServer,
+      )}',
+      // This Mac's HARDWARE tier, not the effective one: the tier is read at
+      // the press rather than closed over, so a press cannot write last
+      // frame's answer.
+      onUseBox: (baseUrl, key) async {
         if (!mounted) return;
         final tier = await ref.read(machineTierProvider.future);
         if (!mounted) return;
-        await notifier.adoptLocal(tier);
+        await notifier.useBox(
+          baseUrl: baseUrl,
+          key: key,
+          hardwareTier: tier,
+        );
+      },
+      onUseLocal: () async {
+        if (!mounted) return;
+        final tier = await ref.read(machineTierProvider.future);
+        if (!mounted) return;
+        await notifier.usePlacement(ModelPlacement.local, hardwareTier: tier);
       },
       onStageTargetChanged: (stageId, targetId) => unawaited(
         targetId == null
@@ -2682,17 +2724,23 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // below forks on `isFixed` rather than always writing the spec — and it
       // reads `isFixed` rather than `isBuiltIn` because a derived box spec has
       // no row either, so `upsertTarget` would throw on it.
-      proseParallel:
-          prefs.specForStage('draft_reply')?.parallel ?? prefs.proseParallel,
-      proseParallelTargetName: prefs.specForStage('draft_reply')?.name,
-      onProseParallelChanged: (width) {
-        final spec = prefs.specForStage('draft_reply');
-        unawaited(
-          spec == null || spec.isFixed
-              ? notifier.setProseParallel(width)
-              : notifier.upsertTarget(spec.copyWith(parallel: width)),
-        );
-      },
+      proseParallel: draftSpec?.parallel ?? prefs.proseParallel,
+      proseParallelTargetName: draftSpec?.name,
+      // Not offered at all on the box, by decision: a derived box spec is
+      // fixed at four, the width is the SERVER's slot count rather than a
+      // preference, and a control that wrote nowhere would be a lie about a
+      // number this install does not own.
+      onProseParallelChanged: draftSpec != null && draftSpec.isBox
+          ? null
+          : (width) {
+              unawaited(
+                draftSpec == null || draftSpec.isFixed
+                    ? notifier.setProseParallel(width)
+                    : notifier.upsertTarget(
+                        draftSpec.copyWith(parallel: width),
+                      ),
+              );
+            },
       localServerSummary: SettingsLocalServerBody.summary(
         serverState,
         managed: prefs.managedServer,

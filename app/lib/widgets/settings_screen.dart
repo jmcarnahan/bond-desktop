@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show FilteringTextInputFormatter;
 
+import '../providers/app_providers.dart' show ParkedFact;
 import '../providers/context_provider.dart' show ContextDirRow;
 import '../providers/prefs_provider.dart'
     show
@@ -14,7 +15,6 @@ import '../providers/prefs_provider.dart'
         defaultMcpServerUrl,
         mcpDeployedUrl;
 import '../screens/consent_screen.dart' show CloudDraftsConsentPane;
-import '../screens/setup/setup_where_body.dart' show SetupWhereBody;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart';
 import '../services/system/system_info.dart' show HardwareInfo;
@@ -27,6 +27,7 @@ import 'settings_connection_section.dart';
 import 'settings_context_section.dart';
 import 'settings_lookback_field.dart';
 import 'settings_models_body.dart';
+import 'settings_models_simple.dart';
 import 'settings_section.dart';
 import 'settings_segments.dart';
 import 'settings_target_editor.dart' show LlmTargetEditor;
@@ -51,12 +52,6 @@ class _ConsentPane extends _Subpane {
   final String stageId;
   final LlmTargetSpec target;
   const _ConsentPane(this.stageId, this.target);
-}
-
-/// The box address and the access key, on the way to adopting the shared GPU
-/// box. A pane with a back arrow, never a dialog.
-class _BoxPane extends _Subpane {
-  const _BoxPane();
 }
 
 /// How much of Settings a host is asking for.
@@ -235,23 +230,43 @@ class SettingsScreen extends StatefulWidget {
   /// header. A LOOKUP, never the value: no secret is held in widget state.
   final String? Function(String targetId)? storedBearer;
 
-  /// Where this install's model work runs, for the Models section's placement
-  /// line and its one button.
+  /// Where this install's model work runs: the segment the Models page opens
+  /// on, its collapsed summary, and what the fold's Reset caption promises.
   final ModelPlacement modelPlacement;
 
-  /// Adopts the shared GPU box with the address and the key from the pane.
-  /// **Null takes the adopt button off the section**, this screen's usual
-  /// discipline. [key] is a SECRET and passes straight through.
-  final Future<void> Function(String baseUrl, String key)? onAdoptBox;
+  /// The GPU server address to prefill the Models form with: the stored one
+  /// when there is one, the compiled one otherwise. Never a key.
+  final String boxUrl;
 
-  /// Puts the install back on this Mac's own models. What the same button
-  /// does when the placement is already the box.
-  final Future<void> Function()? onAdoptLocal;
+  /// Whether a key for it is in the keychain. A presence flag, never the
+  /// token — it is what opens the key field empty with a hint and lets Save
+  /// through with it blank.
+  final bool boxKeyStored;
 
-  /// Why the pipeline is parked, when the reason is one the BOX placement can
-  /// answer for. One sentence in the Models section, on the same fact the rail
-  /// reads. See [SettingsModelsBody.boxParkedReason].
-  final String? boxParkedReason;
+  /// Save on that form: the typed address, and the typed key or null when one
+  /// is already stored and was not retyped. **Null takes the form off the
+  /// Models page**, this screen's usual discipline. [key] is a SECRET and
+  /// passes straight through.
+  final Future<void> Function(String baseUrl, String? key)? onUseBox;
+
+  /// **Use this Mac**: puts the install back on this Mac's own models. Null
+  /// takes that button off.
+  final Future<void> Function()? onUseLocal;
+
+  /// The three read-only role rows, resolved by the host. Empty draws none.
+  final List<RoleLine> roleLines;
+
+  /// Why the pipeline is parked and how much is waiting, for the Models
+  /// page's status line. Null is the ordinary state.
+  final ParkedFact? parked;
+
+  /// The embedding server's own state, as one line under that status on the
+  /// GPU server placement. Null leaves it off.
+  final String? embedServerLine;
+
+  /// What this Mac is, in one sentence — `SettingsModelsBody.hardwareLine`.
+  /// Null while the host is still reading the machine.
+  final String? hardwareLine;
 
   /// Fired by a slot editor's Save. **Null hides the whole Models section**,
   /// the same discipline every other optional section follows: a host that
@@ -349,8 +364,8 @@ class SettingsScreen extends StatefulWidget {
   /// line a read-only report.
   final ValueChanged<int>? onCloudDraftsDailyCapChanged;
 
-  /// Drawn at the top of the Models section — the host's Local server card.
-  /// Null leaves the section exactly as it was before there was one.
+  /// The host's Local server card, drawn on the Models page under **This
+  /// Mac**. Null leaves the page without one.
   final Widget? modelsHeader;
 
   /// That card's one-liner, prefixed onto the collapsed Models summary. Null
@@ -572,9 +587,14 @@ class SettingsScreen extends StatefulWidget {
     this.machineTier,
     this.onApplyTierDefaults,
     this.modelPlacement = ModelPlacement.local,
-    this.onAdoptBox,
-    this.onAdoptLocal,
-    this.boxParkedReason,
+    this.boxUrl = '',
+    this.boxKeyStored = false,
+    this.onUseBox,
+    this.onUseLocal,
+    this.roleLines = const [],
+    this.parked,
+    this.embedServerLine,
+    this.hardwareLine,
     this.onStageTargetChanged,
     this.onCloudDraftsConsent,
     this.cloudDraftsStanding = false,
@@ -720,14 +740,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// expansion state lives here, so swapping only the child is what brings a
   /// person back to the Models section still open at the row they left.
   _Subpane? _subpane;
-
-  /// The box pane's three values. The address and the probe result live here
-  /// because the pane is opened and closed inside this State; the ACCESS KEY
-  /// does not, and never will: it lives in [SetupWhereBody]'s own controller
-  /// and arrives here only as the argument of one call.
-  late String _boxUrl = boxUrlDefault;
-  ModelProbeResult? _boxProbe;
-  bool _boxProbing = false;
 
   /// Whether the wipe button has been armed — see [_signOutBlock]. Reset by
   /// 'Keep' and by the wipe completing, never by a rebuild: an armed button is
@@ -931,7 +943,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _TargetEditorPane(initial: null) => 'Add target',
           _TargetEditorPane() => 'Edit target',
           _ConsentPane() => 'Cloud drafts',
-          _BoxPane() => 'Shared GPU box',
         },
         onBack: _closeSubpane,
         onHome: onHome,
@@ -950,25 +961,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onContinue: () => unawaited(_acceptCloudDrafts(stageId, target)),
               // Back and Not now are the same answer, and neither writes.
               onNotNow: _closeSubpane,
-            ),
-          // The SAME widget the wizard's Where the models run step renders,
-          // with the choice already made: one form, one set of keys, and no
-          // second copy of a field that takes a secret.
-          _BoxPane() => SetupWhereBody(
-              placement: ModelPlacement.box,
-              boxUrl: _boxUrl,
-              probeResult: _boxProbe,
-              probing: _boxProbing,
-              showChoices: false,
-              continueLabel: 'Use this box',
-              onUrlChanged: (value) => setState(() {
-                _boxUrl = value;
-                _boxProbe = null;
-              }),
-              onCheck: widget.probeServer == null
-                  ? null
-                  : (key) => unawaited(_checkBox(key)),
-              onContinue: (key) => unawaited(_adoptBox(key)),
             ),
         },
       );
@@ -1043,12 +1035,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (widget.onSlotTargetChanged != null)
         _section(
           'Models',
-          SettingsModelsBody.summary(
-            widget.slotTargets,
+          SettingsModelsSimple.summary(
+            placement: widget.modelPlacement,
+            boxUrl: widget.boxUrl,
             server: widget.localServerSummary,
-            userTargets: _userTargetCount,
           ),
-          _modelsBody(),
+          _modelsSimple(),
         ),
       _section('Needs You', _needsYouSummary(), _needsYouBody()),
       // After Needs You because it is the next question that pile raises —
@@ -1215,8 +1207,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // ── Models ────────────────────────────────────────────────────────────────
 
+  /// The Models section: one question, three answers, and one fold.
+  ///
+  /// The section's body is the SIMPLE page since Round H; the eight blocks it
+  /// used to open on are its Advanced fold's content, built by [_modelsBody]
+  /// below with the placement controls and the header unwired, because the
+  /// page above now owns both.
+  Widget _modelsSimple() => SettingsModelsSimple(
+    modelPlacement: widget.modelPlacement,
+    boxUrl: widget.boxUrl,
+    boxKeyStored: widget.boxKeyStored,
+    processingOn: widget.processingOn,
+    probe: widget.probeServer,
+    storedBearer: widget.storedBearer,
+    onUseBox: widget.onUseBox,
+    onUseLocal: widget.onUseLocal,
+    roleLines: widget.roleLines,
+    parked: widget.parked,
+    localServer: widget.modelsHeader,
+    hardwareLine: widget.hardwareLine,
+    embedServerLine: widget.embedServerLine,
+    advanced: _modelsBody(),
+    // In the screen's own open-sections set, by title, so Advanced collapses
+    // and re-opens exactly the way a section does and a person who left it
+    // open finds it open.
+    advancedOpen: _open.contains(SettingsModelsSimple.advancedTitle),
+    onToggleAdvanced: () => _toggle(SettingsModelsSimple.advancedTitle),
+  );
+
   Widget _modelsBody() => SettingsModelsBody(
-    header: widget.modelsHeader,
     slotTargets: widget.slotTargets,
     isDefault: widget.slotIsDefault,
     compiledDefaults: widget.compiledDefaults,
@@ -1243,37 +1262,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     hardware: widget.hardware,
     machineTier: widget.machineTier,
     modelPlacement: widget.modelPlacement,
-    boxParkedReason: widget.boxParkedReason,
-    onOpenBoxPane: widget.onAdoptBox == null
-        ? null
-        : () => setState(() {
-              // Adopting from this Mac starts at the compiled address: there
-              // is no stored pair to read one out of.
-              _boxUrl = boxUrlDefault;
-              _subpane = const _BoxPane();
-            }),
-    // The same pane, opened with the address already filled in, because the
-    // only thing being changed is the key. `adoptBox` replaces the pair and
-    // the keychain entry under the same two fixed ids, so re-adopting with the
-    // same address IS the key change.
-    onChangeBoxKey: widget.onAdoptBox == null
-        ? null
-        : () => setState(() {
-              final stored = _storedBoxBase;
-              if (stored.isNotEmpty) _boxUrl = stored;
-              _subpane = const _BoxPane();
-            }),
-    onAdoptLocal: widget.onAdoptLocal,
     onApplyTierDefaults: widget.onApplyTierDefaults,
     onConsentNeeded: (stageId, target) =>
         setState(() => _subpane = _ConsentPane(stageId, target)),
   );
-
-  /// How many servers the user ADDED. The collapsed summary counts those and
-  /// neither the two built-ins nor the box's two, so a machine that added
-  /// nothing reads exactly as it did before routing was data.
-  int get _userTargetCount =>
-      widget.targets.where((spec) => !spec.isFixed).length;
 
   void _closeSubpane() => setState(() => _subpane = null);
 
@@ -1314,68 +1306,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await widget.onCloudDraftsConsent?.call();
     widget.onStageTargetChanged?.call(stageId, target.id);
     if (!mounted) return;
-    _closeSubpane();
-  }
-
-  /// **Check server** on the box pane, with the typed key.
-  ///
-  /// The box origin behind the stored writing target, or empty when this
-  /// install has never adopted a box. The URL alone: a target's BEARER is in
-  /// the keychain and never comes near this screen.
-  String get _storedBoxBase {
-    for (final spec in widget.targets) {
-      if (spec.id == boxProseId) return boxBaseFromProseUrl(spec.url);
-    }
-    return '';
-  }
-
-  /// The key goes onto one request's `Authorization` header and is not stored
-  /// here, in the result or anywhere else. Guarded, on the slot editors'
-  /// shape: the probe promises never to throw, and a diagnostics call must not
-  /// be able to crash a settings screen anyway.
-  Future<void> _checkBox(String key) async {
-    final probe = widget.probeServer;
-    if (probe == null) return;
-    final base = normalizeBoxBaseUrl(_boxUrl);
-    if (base.isEmpty) return;
-    setState(() {
-      _boxProbing = true;
-      _boxProbe = null;
-    });
-    ModelProbeResult result;
-    try {
-      result = await probe(
-        '$base/prose/v1/chat/completions',
-        bearer: key.isEmpty ? null : key,
-      );
-    } on Object {
-      result = const ModelProbeResult(
-        reachable: false,
-        error: 'Could not check the server',
-      );
-    }
-    if (!mounted) return;
-    setState(() {
-      _boxProbing = false;
-      _boxProbe = result;
-    });
-  }
-
-  /// Adopts the box and closes the pane. A press with an empty address or an
-  /// empty key does nothing: the widget disables the button in that state, and
-  /// this is the same refusal read from the other side.
-  Future<void> _adoptBox(String key) async {
-    final adopt = widget.onAdoptBox;
-    if (adopt == null) return;
-    final base = normalizeBoxBaseUrl(_boxUrl);
-    final token = key.trim();
-    if (base.isEmpty || token.isEmpty) return;
-    await adopt(base, token);
-    if (!mounted) return;
-    setState(() {
-      _boxProbe = null;
-      _boxProbing = false;
-    });
     _closeSubpane();
   }
 

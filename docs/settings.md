@@ -74,7 +74,7 @@ body has the same shape in `settings_models_body.dart`.
 |---|---|---|
 | About me | always | the saved text, whitespace collapsed to one line, cut at 80 characters with `…`; `Not written yet` when empty |
 | Microsoft connection | any of `onBackendModeChanged`, `connectionStatus`, `hasScope`, `onSignIn` is wired | `MCP` or `This device`, then (MCP only) `Deployed` / `Local` / `Custom`, then `Checking…` / `Not signed in` / `Signed in as <label>` / `Signed in`, joined by ` · ` |
-| Models | `onSlotTargetChanged` wired | `[<local server summary> · ]Fast <model> @ <host:port> · Prose <model> @ <host:port> · Embeddings <host:port>[ · N more targets]` — the prefix is present only when the host wires the Local server card (`localServerSummary`), and the suffix only when the user has ADDED targets (`1 more target` at one, the two built-ins never counted), so a screen with neither reads exactly as it always did |
+| Models | `onSlotTargetChanged` wired | `GPU server · <host> · embeddings on this Mac` on the box placement, `This Mac · <local server summary>` on this Mac, and `This Mac` alone when the host wires no server card. The line says where the work RUNS; where the three slots point moved into the section's Advanced fold with everything else |
 | Needs You | always | the threshold wording, plus ` · custom rules` or ` · default rules` when `onNeedsYouRulesSaved` is wired, plus ` · judging N message(s)` while `needsYouRejudging` (the whole needs-you queue, from `needsYouPendingProvider`) is above zero — "judging", not "re-judging", because the count cannot tell a Save's rows from a sync's |
 | Suggested replies | `onDraftPolicyChanged` wired (both scopes) | `For messages that need you` / `For every reply-worthy message` / `Only when asked` |
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
@@ -238,15 +238,193 @@ one resolver rather than two guesses:
   `setProseParallel` for a built-in target and `upsertTarget(spec.copyWith(
   parallel: width))` for any other. See **Drafts in flight** below.
 
+**And the simple page's own wires**, added in Round H:
+
+- `boxUrl: prefs.effectiveBoxUrl` and `boxKeyStored: prefs.boxKeyStored`. The
+  first is the stored address when there is one and the compiled `BOND_BOX_URL`
+  otherwise, already resolved, so the form prefills and never asks twice. The
+  second is a presence flag and never the token.
+- `onUseBox` reads this Mac's hardware tier at the press and calls
+  `notifier.useBox(baseUrl:, key:, hardwareTier:)`; `onUseLocal` does the same
+  and calls `notifier.usePlacement(ModelPlacement.local, hardwareTier:)`. The
+  tier is read at the press rather than closed over, so a press cannot write
+  last frame's answer.
+- `roleLines` is `RoleLine.fromPrefs(prefs)`, one pure function beside the
+  widget that the host calls and `settings_models_simple_test.dart` pins on
+  both placements. A role's steps are every non-optional stage the placement's
+  rule sends to the same default target as its lead stage, `draft_reply` for
+  the big model and `triage` for the small. Membership is read off
+  `prefs.defaultTargetIdForStage` rather than off `roleOfStage`, because the two
+  disagree on purpose: storyline membership is the big model's work on the box
+  and the small model's on this Mac, so grouping by the enum would read every
+  local install as Custom. Optional stages are skipped, for the reason
+  `usePlacement` keeps their entries: an unrouted `draft_improve` is the Improve
+  button being off, not a step pointing elsewhere. The row describes the target
+  most of the role's steps resolve to, compared by the spec `specForStage`
+  answers rather than by the stored id, so a third-party pick with consent
+  withheld reads as the fallback it actually reaches.
+- `processingOn: ref.watch(processingProvider)`, the same value the Processing
+  section's switch shows, so the status line can say the switch is off instead
+  of repeating a park.
+- `parked: ref.watch(parkedProvider).valueOrNull`, the whole fact rather than
+  the two words the old placement block could answer for. The page decides
+  which reasons it can speak to.
+- `hardwareLine: SettingsModelsBody.hardwareLine(hardware, machineTier)` and
+  `embedServerLine`, which is the string `Embedding model: ` followed by
+  `SettingsLocalServerBody.summary`.
+- `onProseParallelChanged` is null when the resolved draft target `isBox`. A
+  derived box target is fixed at four, the width is that server's slot count
+  rather than a preference, and a control that wrote nowhere would be a lie
+  about a number this install does not own.
+
 `pipelineStages` is imported directly in `inbox_screen.dart`: `prefs_provider.dart`
 re-exports `ModelSlot`, `LlmTarget`, `LlmTargetSpec` and `LlmWire` but not the
 stage table, and the host needs it to ask where every stage currently points.
 
 ## Models
 
-Which model each step of the pipeline uses, and the two slots the user may
-move. The body lives in its own file — `app/lib/widgets/settings_models_body.dart`
-— because `settings_screen.dart` was already thirteen hundred lines.
+**One question, and everything else behind one fold.** The section a tester
+opens asks where the models run, reports three answers, and keeps the sixteen
+controls that used to be on top level in an **Advanced** fold below them. The
+page is `app/lib/widgets/settings_models_simple.dart`; the fold's body is the
+section this replaced, `app/lib/widgets/settings_models_body.dart`, rendered
+with its placement block and its header unwired because the page above now owns
+both.
+
+**Where the models run.** The heading, then `SettingsSegments<ModelPlacement>`
+keyed `settings-placement` with two labels: **GPU server · recommended** and
+**This Mac**. The segment opens on the placement this install is on and is local
+state from there, so it moves under the finger. Choosing one writes NOTHING, and
+the caption says so: `Choosing here changes nothing yet. Save, or Use this Mac,
+is what moves the work.`
+
+**Under GPU server, the one box form.** It is `SetupWhereBody` with
+`showChoices: false` and the primary button relabelled **Save**, which is the
+same widget the first-run wizard's Where step renders, so the three controls
+carry the same three keys in both places: `setup-box-url` for **Box address**,
+`setup-box-key` for **Access key**, obscured, and `setup-box-check` for **Check
+server**. Two copies of a form that takes a secret is exactly the kind of drift
+that ends with one of them logging it.
+
+The address arrives prefilled from `AppPrefs.effectiveBoxUrl`, which is the
+stored address when there is one and the compiled `BOND_BOX_URL` otherwise. The
+key field opens EMPTY, always. When one is already in the keychain it carries
+the hint `Stored. Type to replace` and **Save** goes through with the field
+blank, which is the target editor's own contract: a token that has reached the
+keychain is never read back onto a screen, so "unchanged" has to be a state the
+empty field can be in. With no key stored, Save waits for one, disabled rather
+than absent. Save hands the host the normalised address and either the typed key
+or null, and null is what the host reads as "keep the stored one".
+
+Under the form sits the one caption a tester needs before pasting anything:
+`Message text and drafts travel to the project’s GPU server over an encrypted
+connection. The embedding model stays on this Mac.`
+
+**Check server asks BOTH slots.** The box serves both roles from one host, under
+`/prose` and `/bulk`, so one check that asked only the writing slot would miss an
+inbox slot that is down. The two answers render as two captioned `ProbeStatus`
+lines, **Writing model** first and **Inbox model** under it. The key that rides
+those two requests is the one typed in front of the person when there is one and
+the stored one otherwise, looked up by id through `AppPrefsNotifier.bearerFor` at
+the moment of the press. It reaches two `Authorization` headers and nothing else:
+not a probe result, not a log line, not a widget field.
+
+**Under This Mac**, the button **Use this Mac**, keyed `settings-use-local`,
+then the Local server card and then one line saying what this Mac is. The button
+is above the card because it is the answer to the question the segments asked and
+the card is the detail underneath it, and it goes inert rather than absent once
+the install is already here: a way forward that vanished would read as a dead
+end. Pressing it calls `usePlacement(ModelPlacement.local)` with this Mac's
+HARDWARE tier, which removes the entries the app itself wrote and applies the
+tier's own picks. The hardware line is
+`SettingsModelsBody.hardwareLine`: `This Mac: Apple M1 Max, 64.0 GB, runs all
+three models`, or `This Mac: memory could not be read`, or nothing at all while
+the machine is still being read.
+
+**The status line**, keyed `settings-models-status`, is always exactly one line,
+and it is the first thing a stalled tester reads. It answers in this order, and
+the order is the order the jobs come in:
+
+1. A Save just refused: `The address needs to start with http:// or https://
+   and name a server.` It is the same rule `setBoxUrl` refuses on,
+   `isBoxOrigin` in `model_slots.dart`, checked before the press reaches it,
+   because the press is fire-and-forget and a refusal thrown past it would be
+   a Save that silently did nothing. Typing in the address field clears it.
+   This one shows on either placement, because the form is open under the GPU
+   server segment whatever the install is on.
+2. On this Mac, `Models run on this Mac.` and nothing else, because the
+   server's own state sentence is in the card directly above and saying it
+   twice would be the screen arguing with itself.
+3. `Access key needed. Paste it above and press Save.` on the GPU server with no
+   key stored. Before any park, because a park about a refused key is answered
+   by pasting one.
+4. `Processing is off. Turn it on under Processing, or in the sidebar, and the
+   work starts.` while the session's switch is off. Before any park, because a
+   park sentence says work is retrying and nothing retries while the switch is
+   off: the last parked fact stays in its provider after the drains stop, and
+   the rail's own line guards the same way.
+5. A park this page can answer for, when something is waiting.
+   `model_unavailable` reads `The box is not answering. Work is waiting and
+   will retry each minute.`, `unauthorized` reads `The box refused the access
+   key. Change it here.`, and `embed_unavailable` reads `The embedding model on
+   this Mac is not answering. Work is waiting and will retry each minute.` It
+   is the same fact the inbox rail reads, from the drains' own progress
+   streams, and nothing polls the box to produce it. A park word this page
+   cannot answer for, such as a sign-out, is left alone: the inbox already
+   routes it.
+6. `Not checked yet. Press Check server.` when nothing has been asked this
+   session.
+7. `Checked: both models answered`, after a check both slots came back from,
+   or `Checked: ` followed by the failing slot's own sentence after a check one
+   of them did not.
+
+On the GPU server one more small line sits under the status:
+`Embedding model: ` followed by the local server's own summary. That process is
+running the embedding model alone on this placement, and its state is the one
+thing the box's status line cannot say.
+
+**Three role lines.** **Big model**, **Small model** and **Embeddings**, each a
+title and one phrase. On the box the two chat roles read `qwen3.8 on the GPU
+server` and `qwen3-4b on the GPU server`, the model name the box's own vLLM
+servers serve. On this Mac they read `Qwen3.8 27B on this Mac` and `Qwen3 4B on
+this Mac`, named by the built-in target the role resolves to rather than by the
+role, so a small Mac whose six prose steps run on the 4B reads `Qwen3 4B` for
+the big model too. Embeddings reads `Qwen3 Embedding 0.6B on this Mac` on either
+placement, because that model is here whatever the rest of the pipeline is
+doing. A role pointed at somebody's own target names the model and the host it
+dials. A role whose steps do not all resolve to one target reads `Custom · N
+steps point elsewhere · see Advanced`, singular at one, and points at the one
+place that can show which ones. N is counted against the target most of the
+role's steps share, so one odd step reads as one wherever it sits, the lead
+stage included, and the row's Check asks the shared target rather than the odd
+one.
+
+The two local chat names are a const map in `settings_models_simple.dart`,
+keyed by built-in target, with the embedding name one constant beside it, rather
+than a read of `assets/models/manifest.json`. The manifest does carry a
+`displayName` per file, but `modelManifestProvider` throws unless a host
+overrides it and no inbox test overrides it, so reaching for it from the
+settings wiring would turn every one of those tests red for a label. The
+manifest spells the small one `Qwen3 4B Instruct`; this page says `Qwen3 4B`.
+
+Each row carries a **Check**, keyed `settings-role-check-big`, `-small` and
+`-embed`, which probes that role's own resolved URL with that target's stored
+token and renders a `ProbeStatus` beneath the row. A host that wires no probe
+gets no Check anywhere on the page, the form's and the rows' alike, the same
+discipline every optional control here follows.
+
+**Advanced** is a `SettingsSection` inside the section, collapsed on arrival,
+titled `Advanced` and summarised `Per-step picks, extra servers, port and
+folder`. Its expansion lives in the screen's own open-sections set by title, so
+it collapses and re-opens exactly the way a section does and a person who left
+it open finds it open. Its body is every control below, unchanged from Round E
+and Round G apart from one relabelled button.
+
+### Advanced
+
+The fold's body is `SettingsModelsBody`, the section Round E and Round G built,
+rendered with `header: null` and with no placement controls. Everything below is
+what it has always said.
 
 **The stage table is AUTHORED**, not derived, and since Round E each row has a
 **picker**. `pipelineStages` in `app/lib/services/llm/model_slots.dart` is the
@@ -278,71 +456,14 @@ that every key is a `pipelineStages` id and that no value contains `@`, `http`,
 `.com` or a newline. A stage the ledger never measured renders no line at all,
 which is the honest state rather than a blank one.
 
-**Where the models run.** Above the Targets list and below the two slot
-editors, the section opens with the placement. One heading, **Where the models
-run**, one line naming the placement this install is on, and one button that is
-always the other one.
-
-On this Mac the line reads `Everything runs on this Mac.` and the button reads
-**Use the shared GPU box**. On the box it reads `The inbox and writing steps run
-on the shared GPU box. The embedding model runs here.` and the button reads
-**Use this Mac's models**. Both spellings carry the key
-`settings-adopt-box`, because it is one control with two destinations.
-
-**Use the shared GPU box** opens a pane titled **Shared GPU box** — a pane with
-a back arrow, never a dialog. It is the same widget the wizard's **Where the
-models run** step renders, so the three controls carry the same three keys in
-both places: `setup-box-url` (**Box address**, hinting `https://box.example.com`),
-`setup-box-key` (**Access key**, obscured) and `setup-box-check` (**Check
-server**). The way forward is disabled until both fields have something in them:
-adopting a box with no address or no key would write two targets that cannot be
-dialled and a placement that parks everything.
-
-Saving calls `AppPrefsNotifier.adoptBox`, which writes, in one go:
-
-- two targets at fixed ids, `box-prose` at `<address>/prose/v1/chat/completions`
-  on `qwen3.8` and `box-bulk` at `<address>/bulk/v1/chat/completions` on
-  `qwen3-4b`, both four wide and both streaming;
-- the one access key, in the keychain under `llm_target_bearer:box-prose` and
-  `llm_target_bearer:box-bulk`, and in no preference anywhere;
-- the stage map: the eight bulk stages on `box-bulk`, the six prose stages and
-  storyline confirm on `box-prose`. Confirm is in both preset lists and the
-  prose preset runs second, which is what leaves it on the writing model, the
-  row of record;
-- suggested replies set to For messages that need you;
-- the placement itself, in `model_placement`, which survives a wipe like every
-  other machine preference.
-
-Adopting twice replaces the pair rather than stacking it, because the two ids
-are fixed. The local inbox and writing models STOP: on this placement the
-managed server starts the embedding model alone, which is the whole point of
-pointing the other stages at the box.
-
-**Use this Mac's models** calls `adoptLocal` and needs no pane. It removes both
-targets, both keychain entries and every stage entry pointing at either, then
-applies this Mac's own tier defaults, so a big Mac is back to an empty stage map
-and a small one is back to the inbox tier's six picks.
-
-**Check server** sends the key. A probe of a target with a stored bearer looks
-it up by id through `AppPrefsNotifier.bearerFor` and passes it on that one
-request; the box pane passes the key that is typed in front of it. Without
-this, a keyed endpoint would answer HTTP 401 and read as a broken server. The
-key reaches the `Authorization` header and nothing else: not a probe result, not
-a log line, not a widget field.
-
-When the pipeline is parked because the box is not answering, one more line sits
-under the placement: `The box is not answering. Work is waiting and will retry
-each minute.` It is the same fact the inbox rail reads, from the drains' own
-progress streams, and nothing polls the box to produce it.
-
-**This Mac, and its defaults.** Below the placement block sit one fact line and
-one button. The line reads `This Mac:` followed by
-the chip, the memory and what the machine runs: `runs all three models` at 40
-GiB of memory or more, `runs the inbox models` below that. It is about the
-MACHINE and reads `machineTierProvider`, which never answers `remote`, so it
-says the same thing on either placement. Where the work actually goes is the
-placement line above it. The button is **Use
-this Mac's defaults**, keyed `settings-tier-defaults`, and the caption under it
+**Reset per-step picks.** One button, keyed `settings-tier-defaults`. What this
+Mac IS is said once, on the page above this fold, out of
+`SettingsModelsBody.hardwareLine`: the chip, the memory and what the machine
+runs, which is `runs all three models` at 40 GiB of memory or more and `runs the
+inbox models` below that. That line is about the MACHINE and reads
+`machineTierProvider`, which never answers `remote`, so it says the same thing on
+either placement. Where the work actually goes is the question the segments
+above it ask. The caption under the button
 names exactly what a press rewrites. On a small Mac that is naming, refresh,
 recap, grouping, the reply decision and drafts, all moved to `Local fast`, with
 suggested replies moved to Only when asked. On a big Mac it is those same six
@@ -353,20 +474,30 @@ replies. Nothing else moves: the eight bulk stages, storyline confirm among
 them, Improve a draft, the targets themselves, the cloud-drafts consent and
 every bearer are untouched, and a second press changes nothing.
 
+On the GPU server placement the press is `usePlacement(ModelPlacement.box)`
+rather than this Mac's tier defaults, because the machine's tier is not what the
+picks go back to there: every step the app itself pointed goes back to the box,
+suggested replies back to For messages that need you, and a step pointed at a
+server you added keeps it. The caption reads `Puts every step back on the GPU
+server and sets drafts to For messages that need you. A step pointed at a server
+you added keeps it.` On this Mac the host makes the same `usePlacement` call
+with the local placement, which drops the entries the app itself wrote and ends
+in `applyTierDefaults`.
+
 A Mac whose memory could not be read gets neither. The system channel usually
 answers `unknown` rather than failing, and when it throws anything else or
 goes quiet past the two-second probe timeout the hardware read is a rejection
 while the tier, read off the same future, still resolves to the full tier by
 the never-refuse rule. Either way the machine is unreadable, and writing
-defaults chosen from a number nobody read is not something to offer: the line reads `This Mac: memory could not be read` and
-there is no button, with a caption pointing at the stage table above.
+defaults chosen from a number nobody read is not something to offer: the page
+above reads `This Mac: memory could not be read` and the fold offers no button,
+with a caption pointing at the stage table above it.
 
 It is not a two-step, unlike Remove and Clear AI results, because nothing is
 destroyed. The six picks it overwrites are six rows a person can see in the
 table above, and any of them can be re-picked on the spot. While the app is
 still reading the machine the button is disabled and its caption reads `Reading
-this Mac…`; a host that cannot write the change offers neither the line nor the
-button. The tier is read from this Mac's memory each time it is asked for and
+this Mac…`; a host that cannot write the change gets no button at all. The tier is read from this Mac's memory each time it is asked for and
 stored nowhere, so a models folder carried to another Mac gets that Mac's
 answer. The wizard writes the same defaults once at Finish, through the same
 `AppPrefsNotifier.applyTierDefaults`.
@@ -530,7 +661,10 @@ rather than the next launch of the app. It is here rather than in a section of
 its own because it is a fact about the SERVER, and it does not touch the
 collapsed summary, which names where the three slots point and how many targets
 were added. Optional, like every other control here: a host that wires no
-`onProseParallelChanged` gets no segments.
+`onProseParallelChanged` gets no segments, and since Round H the host wires none
+on the GPU server placement. A derived box target is fixed at four, that number
+is the box's own slot count rather than a preference this install owns, and a
+control that wrote nowhere would be a lie about it.
 Drafts only — a recap and a refresh both write the storyline they are about and
 stay at one (`docs/pipeline/10-model-routing.md`). Measured 2026-09-17: a second
 local slot on this Mac's 27B did not pay (width 2 slower end to end than width
@@ -569,14 +703,15 @@ compare vectors from two different spaces. Changing it is a re-embed migration,
 not a setting — `EMBED_URL` at build time. The card shows the URL and a Check
 server button and nothing else.
 
-**Local server card.** The first thing in the section, above the stage table
-and separated from it by a divider, is `SettingsLocalServerBody`
-(`app/lib/widgets/settings_local_server_card.dart`). It is injected as
-`SettingsScreen.modelsHeader` rather than built by the section, so
-`settings_models_body.dart` keeps knowing nothing about a supervisor: the
-section is about where model calls go, and what is running is the host's answer
-to hand over. It is prop-only like everything else here, and a null callback
-hides its control.
+**Local server card.** `SettingsLocalServerBody`
+(`app/lib/widgets/settings_local_server_card.dart`). It is still injected as
+`SettingsScreen.modelsHeader` rather than built by the section, so neither
+`settings_models_body.dart` nor the page above it knows anything about a
+supervisor: what is running is the host's answer to hand over. Round H moved
+where it is DRAWN, from the top of this fold to the simple page under **This
+Mac**, because that is the placement it belongs to and the fold is not where
+somebody goes to start a server. It is prop-only like everything else here, and
+a null callback hides its control. Everything it says is unchanged:
 
 It shows, top to bottom:
 
@@ -650,8 +785,9 @@ everything but the switch and **Set up again** is dead while the preference is
 off — that one stays live because it acts on the wizard rather than on a
 process, and a switch that is off is one of the states the wizard exists to put
 right.
-`settings_models_test.dart` pins the join: the server's line leads the collapsed
-summary, and the card renders above the stage table.
+`settings_models_test.dart` pins the join: the server's line closes the collapsed
+summary, and the card renders on the page under **This Mac** rather than in the
+fold.
 
 **The probe's lifetime is the screen's.** `_InboxScreenState` holds one
 `ModelServerProbe` and closes it in `dispose`. A client per button press would

@@ -130,31 +130,14 @@ class SettingsModelsBody extends StatefulWidget {
   /// must not offer the control that makes one.
   final Future<void> Function()? onApplyTierDefaults;
 
-  /// Where this install's model work runs today, for the line and the button
-  /// above **Use this Mac's defaults**.
-  final ModelPlacement modelPlacement;
-
-  /// Opens the pane that takes the box address and the access key. Null takes
-  /// the adopt button off, this section's usual discipline.
-  final VoidCallback? onOpenBoxPane;
-
-  /// Puts the install back on this Mac's own models. What the same button
-  /// does when the placement is already the box.
-  final Future<void> Function()? onAdoptLocal;
-
-  /// Why the pipeline is parked, when the reason is one the BOX placement can
-  /// answer for: `model_unavailable` or `unauthorized`, and null for neither.
-  /// One sentence under the placement line, on the same fact the rail reads.
+  /// Where this install's model work runs today.
   ///
-  /// The reason rather than a bool, because the two park differently and the
-  /// sentences send a person to two different places: one waits for a machine
-  /// to come back, the other needs a key typed again right here.
-  final String? boxParkedReason;
-
-  /// Opens the box pane with the address prefilled and the key field empty,
-  /// for a key that was rotated. Null takes the button off, this section's
-  /// usual discipline.
-  final VoidCallback? onChangeBoxKey;
+  /// Round H moved the placement CONTROL to the simple page above this fold;
+  /// what is left of the placement here is two reads: which target a gated
+  /// draft stage falls back to, which is a different answer on the box (see
+  /// [_gatedFallbackName]), and what **Reset per-step picks** puts the picks
+  /// back to (see [boxResetCaption]).
+  final ModelPlacement modelPlacement;
 
   const SettingsModelsBody({
     super.key,
@@ -182,72 +165,54 @@ class SettingsModelsBody extends StatefulWidget {
     this.machineTier,
     this.onApplyTierDefaults,
     this.modelPlacement = ModelPlacement.local,
-    this.onOpenBoxPane,
-    this.onAdoptLocal,
-    this.boxParkedReason,
-    this.onChangeBoxKey,
   });
 
-  /// The collapsed summary — where the three slots point, in one line.
-  ///
-  /// Static so the screen can build it without this widget existing: a
-  /// collapsed section renders its summary and nothing else, and a summary
-  /// that needed the body would defeat the whole shape.
-  /// [server] is the local server's own one-liner, prefixed when there is one.
-  /// Null leaves the summary byte-identical to what it has always said, which
-  /// is what a host that wires no server card gets.
-  ///
-  /// [userTargets] is how many servers the user has ADDED, and it is appended
-  /// only when there are some. A machine with the two built-ins and nothing
-  /// else reads exactly as it did before routing was data, which is what
-  /// `settings_models_test.dart` pins.
-  static String summary(
-    Map<ModelSlot, LlmTarget> slotTargets, {
-    String? server,
-    int userTargets = 0,
-  }) {
-    final fast = _resolve(slotTargets, ModelSlot.fast);
-    final prose = _resolve(slotTargets, ModelSlot.prose);
-    final embed = _resolve(slotTargets, ModelSlot.embed);
-    final slots = 'Fast ${fast.model} @ ${hostPort(fast.baseUrl)} · '
-        'Prose ${prose.model} @ ${hostPort(prose.baseUrl)} · '
-        'Embeddings ${hostPort(embed.baseUrl)}';
-    final line = server == null ? slots : '$server · $slots';
-    if (userTargets <= 0) return line;
-    return userTargets == 1
-        ? '$line · 1 more target'
-        : '$line · $userTargets more targets';
-  }
-
-  /// The key on **Use this Mac's defaults**. Keyed rather than found by label
+  /// The key on **Reset per-step picks**. Keyed rather than found by label
   /// for the reason every control here is: the section carries several
   /// buttons and a test that tapped by words would tap whichever came first.
   static const Key tierDefaultsKey = ValueKey('settings-tier-defaults');
 
-  /// The one button that moves the placement. It reads **Use the shared GPU
-  /// box** on this Mac and **Use this Mac's models** on the box, because
-  /// there are two placements and the press is always the other one.
-  static const Key adoptBoxKey = ValueKey('settings-adopt-box');
+  /// The caption under **Reset per-step picks** on the GPU server placement,
+  /// where the host's press is `usePlacement(box)` rather than this Mac's tier
+  /// defaults: the machine's tier is not what the picks go back to there, and
+  /// the two tier sentences would name moves that are not going to happen.
+  static const String boxResetCaption =
+      'Puts every step back on the GPU server and sets drafts to For messages '
+      'that need you. A step pointed at a server you added keeps it.';
 
-  /// The heading above both buttons.
-  static const String whereHeading = 'Where the models run';
+  /// What this Mac is, in one sentence, or null while the machine is still
+  /// being read.
+  ///
+  /// A static here rather than a line in the body since Round H, because the
+  /// simple page above this fold is where it is now DRAWN and this file is
+  /// still where the three spellings live. `This Mac: Apple M1 Max, 64.0 GB,
+  /// runs all three models` when the read landed, and the unreadable sentence
+  /// when it did not.
+  ///
+  /// Zero bytes is `HardwareInfo.unknown`'s memory, and the channel usually
+  /// ANSWERS with it rather than failing: a `MissingPluginException` and a
+  /// `PlatformException` both degrade to it. Anything else it throws rejects
+  /// the hardware future while the tier, read off the SAME future, still
+  /// resolves `full` by the never-refuse rule. So a resolved tier beside a
+  /// null hardware means the read failed or timed out, and it is the zero case
+  /// in every way that matters: a machine whose memory could not be read must
+  /// not be offered a button that would write defaults chosen from a number
+  /// nobody has. While BOTH are null the machine is still being read, and that
+  /// is the null answer.
+  static String? hardwareLine(HardwareInfo? hardware, MachineTier? tier) {
+    if (tier == null) return null;
+    if (hardware == null || hardware.memoryBytes <= 0) {
+      return 'This Mac: memory could not be read';
+    }
+    return 'This Mac: ${hardware.chip}, ${formatBytes(hardware.memoryBytes)}, '
+        '${_tierWord(tier)}';
+  }
 
-  /// The sentence under the placement line when the box is not answering.
-  static const String boxParkedText =
-      'The box is not answering. Work is waiting and will retry each minute.';
-
-  /// The same line when the box ANSWERED and refused the key. A different
-  /// sentence because it is a different job: waiting fixes the first and
-  /// nothing but a new key fixes this one, and the pane that takes one is the
-  /// button directly under it.
-  static const String boxUnauthorizedText =
-      'The box refused the access key. Change it here.';
-
-  /// The key on **Change the access key**, beside the placement button. Keyed
-  /// like every other control in this section, because two outlined buttons
-  /// sit side by side here and a test that tapped by words would tap
-  /// whichever came first.
-  static const Key changeBoxKeyKey = ValueKey('settings-change-box-key');
+  static String _tierWord(MachineTier tier) => switch (tier) {
+        MachineTier.full => 'runs all three models',
+        MachineTier.inbox => 'runs the inbox models',
+        MachineTier.remote => 'runs the embedding model',
+      };
 
   /// The key on one stage's target picker. Every picker carries the same
   /// words, so a test that tapped by label would be tapping whichever came
@@ -291,14 +256,6 @@ class SettingsModelsBody extends StatefulWidget {
     if (uri == null || uri.host.isEmpty) return url;
     return uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
   }
-
-  /// The compiled default is the last resort, not an empty target: a host that
-  /// passed an incomplete map still gets a summary that names a real server.
-  static LlmTarget _resolve(
-    Map<ModelSlot, LlmTarget> slotTargets,
-    ModelSlot slot,
-  ) =>
-      slotTargets[slot] ?? slotDefaults[slot]!;
 
   @override
   State<SettingsModelsBody> createState() => _SettingsModelsBodyState();
@@ -383,16 +340,8 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
           const SizedBox(height: BondSpacing.s16),
           ..._draftsInFlight(onChanged),
         ],
-        // TWO wirings, read apart. The placement block and the tier-defaults
-        // button are different controls writing different things, and a host
-        // that can move one but not the other must get exactly the one it can
-        // write rather than neither.
-        if (_placementWired) ...[
-          const SizedBox(height: BondSpacing.s24),
-          ..._whereModelsRun(),
-        ],
         if (widget.onApplyTierDefaults case final apply?) ...[
-          SizedBox(height: _placementWired ? BondSpacing.s16 : BondSpacing.s24),
+          const SizedBox(height: BondSpacing.s24),
           ..._thisMac(apply),
         ],
         if (widget.onAddTarget != null) ...[
@@ -468,127 +417,28 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
     ];
   }
 
-  /// Whether this host can move the placement at all. Either direction is
-  /// enough: a host that can adopt the box but not go back still has a button
-  /// worth drawing, and a host that can do neither gets no block.
-  bool get _placementWired =>
-      widget.onOpenBoxPane != null || widget.onAdoptLocal != null;
-
-  /// Where the models run: the heading, the placement this install is on, the
-  /// parked line when the box is not answering, and the one button that is
-  /// always the other placement.
+  /// One press that points every step at what this placement's defaults say,
+  /// and the caption naming exactly what it rewrites.
   ///
-  /// Above **Use this Mac's defaults**, because it is the larger question:
-  /// which models this Mac runs only matters once the answer here is this Mac.
-  List<Widget> _whereModelsRun() {
-    final onBox = widget.modelPlacement == ModelPlacement.box;
-    final parkedText = switch (widget.boxParkedReason) {
-      'model_unavailable' => SettingsModelsBody.boxParkedText,
-      'unauthorized' => SettingsModelsBody.boxUnauthorizedText,
-      // Every other park word is about something that is not the box — the
-      // local embedding server, a sign-out — and this block must not claim it.
-      _ => null,
-    };
-    return [
-      Text(
-        SettingsModelsBody.whereHeading,
-        style: BondType.small.copyWith(fontWeight: FontWeight.w600),
-      ),
-      const SizedBox(height: BondSpacing.s4),
-      Text(
-        onBox
-            ? 'The inbox and writing steps run on the shared GPU box. The '
-                'embedding model runs here.'
-            : 'Everything runs on this Mac.',
-        style: BondType.caption,
-      ),
-      if (onBox && parkedText != null) ...[
-        const SizedBox(height: BondSpacing.s4),
-        Text(
-          parkedText,
-          style: BondType.caption.copyWith(color: BondColors.error),
-        ),
-      ],
-      // One button, and the press is always the OTHER placement. Adopting the
-      // box needs an address and a key, so it opens a pane; going back to this
-      // Mac needs nothing and writes at once. One of the two is wired or this
-      // block does not render at all, so the button is never dead.
-      const SizedBox(height: BondSpacing.s8),
-      Align(
-        alignment: Alignment.centerLeft,
-        child: Wrap(
-          spacing: BondSpacing.s8,
-          runSpacing: BondSpacing.s8,
-          children: [
-            OutlinedButton(
-              key: SettingsModelsBody.adoptBoxKey,
-              onPressed: onBox
-                  ? (widget.onAdoptLocal == null
-                      ? null
-                      : () => unawaited(widget.onAdoptLocal!()))
-                  : widget.onOpenBoxPane,
-              child: Text(
-                onBox ? "Use this Mac's models" : 'Use the shared GPU box',
-              ),
-            ),
-            // Only on the box, and not only when parked. A key is rotated on
-            // the box's side and this install finds out by being refused, so
-            // the door to type the new one has to be standing open before
-            // anything parks — and once something has, the sentence above
-            // points straight at it.
-            if (onBox && widget.onChangeBoxKey != null)
-              OutlinedButton(
-                key: SettingsModelsBody.changeBoxKeyKey,
-                onPressed: widget.onChangeBoxKey,
-                child: const Text('Change the access key'),
-              ),
-          ],
-        ),
-      ),
-      const SizedBox(height: BondSpacing.s4),
-      Text(
-        onBox
-            ? 'Puts every step back on this Mac and starts the local models '
-                'again.'
-            : 'Points the inbox and writing steps at the box and stops the '
-                'local inbox and writing models.',
-        style: BondType.caption,
-      ),
-    ];
-  }
-
-  /// What this Mac is, and one press that points the pipeline at what it can
-  /// actually run.
+  /// Above the Targets list, because it is about the machine rather than about
+  /// a server somebody added: the tier is read from this Mac's memory every
+  /// time it is asked for and stored nowhere, so a models folder carried to
+  /// another Mac gets that Mac's answer. It is not a two-step: nothing is
+  /// destroyed, and any stage can be re-picked in the table above.
   ///
-  /// Below the placement block and above the Targets list, because it is about
-  /// the machine rather than about a server somebody added: the tier is read
-  /// from this Mac's memory every time it is asked for and stored nowhere, so
-  /// a models folder carried to another Mac gets that Mac's answer. The
-  /// caption names the stages the press rewrites, and it is not a two-step:
-  /// nothing is destroyed, and any stage can be re-picked in the table above.
+  /// What this Mac IS is no longer said here. Round H draws that sentence on
+  /// the simple page above this fold, out of the same
+  /// [SettingsModelsBody.hardwareLine], so the fold does not repeat it one
+  /// screen below itself. A machine whose memory could not be read still gets
+  /// no button, because writing defaults chosen from a number nobody has is
+  /// not something to offer.
   List<Widget> _thisMac(Future<void> Function() apply) {
     final hardware = widget.hardware;
     final tier = widget.machineTier;
-
-    // Zero bytes is `HardwareInfo.unknown`'s memory, and the channel usually
-    // ANSWERS with it rather than failing: a `MissingPluginException` and a
-    // `PlatformException` both degrade to it. Anything else it throws rejects
-    // the hardware future while the tier, read off the SAME future, still
-    // resolves `full` by the never-refuse rule. So a resolved tier beside a
-    // null hardware means the read failed or timed out, and it is the zero
-    // case in every way that matters here: a machine whose memory could not be
-    // read must not be offered a button that would write defaults chosen from
-    // a number nobody has. Both get the fact and nothing to press. While BOTH
-    // are null the machine is still being read, and that is the branch below.
     final unreadable =
         tier != null && (hardware == null || hardware.memoryBytes <= 0);
     if (unreadable) {
       return [
-        Text(
-          'This Mac: memory could not be read',
-          style: BondType.small.copyWith(fontWeight: FontWeight.w600),
-        ),
-        const SizedBox(height: BondSpacing.s4),
         Text(
           'Point each step at a target by hand in the table above.',
           style: BondType.caption,
@@ -597,19 +447,12 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
     }
 
     return [
-      if (hardware != null && tier != null)
-        Text(
-          'This Mac: ${hardware.chip}, ${formatBytes(hardware.memoryBytes)}, '
-          '${_tierWord(tier)}',
-          style: BondType.small.copyWith(fontWeight: FontWeight.w600),
-        ),
-      const SizedBox(height: BondSpacing.s8),
       Align(
         alignment: Alignment.centerLeft,
         child: OutlinedButton(
           key: SettingsModelsBody.tierDefaultsKey,
           onPressed: tier == null ? null : () => unawaited(apply()),
-          child: const Text("Use this Mac's defaults"),
+          child: const Text('Reset per-step picks'),
         ),
       ),
       const SizedBox(height: BondSpacing.s4),
@@ -617,28 +460,29 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
     ];
   }
 
-  String _tierWord(MachineTier tier) => switch (tier) {
-        MachineTier.full => 'runs all three models',
-        MachineTier.inbox => 'runs the inbox models',
-        MachineTier.remote => 'runs the embedding model',
-      };
-
   /// What a press rewrites, in the words the controls it moves actually carry:
   /// the draft policy's own label from `DraftPolicyLabel`, and the built-in
   /// targets' own names. Each caption NAMES the six stages rather than
   /// pointing at them, because only one of the two is ever on screen and
   /// "those six" on a big Mac would refer to a sentence nobody can see.
-  String _tierCaption(MachineTier? tier) => switch (tier) {
-        null => 'Reading this Mac…',
-        MachineTier.inbox =>
-          'Points naming, refresh, recap, grouping, the reply decision and '
-              'drafts at Local fast and sets drafts to Only when asked.',
-        MachineTier.full =>
-          'Clears the six prose stage picks back to Local prose and sets '
-              'drafts to For messages that need you.',
-        MachineTier.remote =>
-          'The inbox and writing steps run on the shared GPU box.',
-      };
+  String _tierCaption(MachineTier? tier) {
+    if (tier == null) return 'Reading this Mac…';
+    // The placement before the tier: on the box the press does not apply this
+    // Mac's tier at all, so its sentences would be the wrong promise.
+    if (widget.modelPlacement == ModelPlacement.box) {
+      return SettingsModelsBody.boxResetCaption;
+    }
+    return switch (tier) {
+      MachineTier.inbox =>
+        'Points naming, refresh, recap, grouping, the reply decision and '
+            'drafts at Local fast and sets drafts to Only when asked.',
+      MachineTier.full =>
+        'Clears the six prose stage picks back to Local prose and sets '
+            'drafts to For messages that need you.',
+      MachineTier.remote =>
+        'The inbox and writing steps run on the shared GPU box.',
+    };
+  }
 
   /// One authored row: what the stage is, what it does, and which target
   /// answers it.

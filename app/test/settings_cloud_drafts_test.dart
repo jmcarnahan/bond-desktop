@@ -2,6 +2,7 @@ import 'package:bond_inbox/screens/consent_screen.dart'
     show CloudDraftsConsentPane;
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/widgets/settings_models_body.dart';
+import 'package:bond_inbox/widgets/settings_models_simple.dart';
 import 'package:bond_inbox/widgets/settings_screen.dart';
 import 'package:bond_inbox/widgets/settings_section.dart';
 import 'package:flutter/material.dart';
@@ -395,6 +396,16 @@ void main() {
         models: true,
         cloudDraftsDailyCap: 200,
       );
+
+      // The stage table is one fold down since Round H: the Models section
+      // opens on the simple page, and the pickers are its Advanced content.
+      final advanced = find.byKey(
+        SettingsSection.toggleKey(SettingsModelsSimple.advancedTitle),
+      );
+      await tester.ensureVisible(advanced);
+      await tester.pumpAndSettle();
+      await tester.tap(advanced);
+      await tester.pumpAndSettle();
 
       // A third-party target on a draft stage is the one pick that asks first.
       final picker =

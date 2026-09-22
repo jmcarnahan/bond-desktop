@@ -234,6 +234,18 @@ String normalizeBoxBaseUrl(String raw) {
 /// The box ORIGIN behind a stored [boxProseId] target's URL, or the empty
 /// string when [url] is not one this app wrote.
 ///
+/// Whether [base], already through [normalizeBoxBaseUrl], is an origin the
+/// box can be dialled at: an http or https scheme and a host. The ONE rule
+/// `AppPrefsNotifier.setBoxUrl` refuses on and the forms check before pressing
+/// it, so a refusal is a sentence on the page rather than an error thrown past
+/// a fire-and-forget Save.
+bool isBoxOrigin(String base) {
+  final origin = Uri.tryParse(base);
+  return origin != null &&
+      (origin.scheme == 'http' || origin.scheme == 'https') &&
+      origin.host.isNotEmpty;
+}
+
 /// [normalizeBoxBaseUrl] read backwards, and the reason it is a function: the
 /// Settings pane prefills its address field from the pair already stored so
 /// that somebody whose access key was rotated types the key alone, and

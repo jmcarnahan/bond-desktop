@@ -9,8 +9,8 @@ import 'setup_controls.dart';
 /// Where the models run: the shared GPU box, or this Mac.
 ///
 /// ONE widget for two places. The wizard's third step renders it with both
-/// cards, and the Settings sub-pane behind **Use the shared GPU box** renders
-/// it with [showChoices] false, so the address field, the key field and
+/// cards, and the simple Models page renders it inline with [showChoices]
+/// false under its GPU server segment, so the address field, the key field and
 /// **Check server** carry the same three keys and behave the same way in both.
 /// Two copies of a form that takes a secret is exactly the kind of drift that
 /// ends with one of them logging it.
@@ -21,10 +21,10 @@ import 'setup_controls.dart';
 /// stateful. The key lives in a [TextEditingController] here, is handed to
 /// [onCheck] and [onContinue] by value, and is in no provider, no
 /// [ModelProbeResult] and no stored state anywhere. It reaches the keychain
-/// through `adoptBox` and nowhere else.
+/// through `AppPrefsNotifier.useBox` and nowhere else.
 ///
-/// No dialogs: the choice is two cards in the flow and the Settings version is
-/// a pane with a back link.
+/// No dialogs: the choice is two cards in the flow, and in Settings the form
+/// is a block on the page rather than anything that floats.
 class SetupWhereBody extends StatefulWidget {
   /// The choice so far, or null while nothing has been picked. Null renders
   /// both cards unselected and leaves the way forward disabled.
@@ -35,16 +35,32 @@ class SetupWhereBody extends StatefulWidget {
   final String boxUrl;
 
   /// The last **Check server** answer, or null when none has been asked for.
+  /// The WRITING slot's, once a host asks for two.
   final ModelProbeResult? probeResult;
+
+  /// The inbox slot's answer, for a host that checks both of the box's
+  /// servers. Non-null draws TWO captioned [ProbeStatus] lines in place of the
+  /// one; null leaves the single line exactly as the wizard has always drawn
+  /// it, which is what keeps this widget unchanged for its first host until
+  /// that host asks for the second check.
+  final ModelProbeResult? bulkProbeResult;
+
+  /// Whether a key for this address is already in the keychain.
+  ///
+  /// True opens the key field EMPTY with the hint `Stored. Type to replace`
+  /// and lets the way forward through with it blank, on the target editor's
+  /// precedent: a token that has reached the keychain is never read back onto
+  /// a screen, so "unchanged" has to be a state the empty field can be in.
+  final bool keyStored;
 
   /// A check is out. The button reads as busy and the result is stale.
   final bool probing;
 
-  /// Whether to draw the two placement cards. False in the Settings pane,
-  /// which was opened by a button that already made the choice.
+  /// Whether to draw the two placement cards. False in Settings, where the
+  /// segments above the form have already asked the question.
   final bool showChoices;
 
-  /// The primary button's label. 'Continue' in the wizard, 'Use this box' in
+  /// The primary button's label. 'Continue' in the wizard, 'Save' in
   /// Settings.
   final String continueLabel;
 
@@ -66,6 +82,8 @@ class SetupWhereBody extends StatefulWidget {
     required this.boxUrl,
     required this.onContinue,
     this.probeResult,
+    this.bulkProbeResult,
+    this.keyStored = false,
     this.probing = false,
     this.showChoices = true,
     this.continueLabel = 'Continue',
@@ -75,7 +93,7 @@ class SetupWhereBody extends StatefulWidget {
   });
 
   /// The two cards and the three controls, by key, so a walk of the wizard and
-  /// a walk of the Settings pane read the same.
+  /// a walk of the Settings page read the same.
   static const Key boxCardKey = ValueKey('setup-where-box');
   static const Key localCardKey = ValueKey('setup-where-local');
   static const Key urlKey = ValueKey('setup-box-url');
@@ -94,6 +112,15 @@ class SetupWhereBody extends StatefulWidget {
   static const String localTitle = 'This Mac';
   static const String localBlurb =
       'Everything runs here and nothing leaves the machine.';
+
+  /// What the key field says when one is already in the keychain. The target
+  /// editor's own words, because it is the same promise: the stored token is
+  /// never read back, and typing replaces it.
+  static const String keyStoredHint = 'Stored. Type to replace';
+
+  /// The two captions over a two-slot check.
+  static const String proseProbeLabel = 'Writing model';
+  static const String bulkProbeLabel = 'Inbox model';
 
   @override
   State<SetupWhereBody> createState() => _SetupWhereBodyState();
@@ -144,8 +171,13 @@ class _SetupWhereBodyState extends State<SetupWhereBody> {
   bool get _isBox => widget.placement == ModelPlacement.box;
 
   /// Both fields filled, on the box choice. This Mac needs neither.
+  ///
+  /// A key already in the keychain answers the second half: the field opens
+  /// empty on purpose, so demanding something in it would make a stored key
+  /// impossible to keep while the address is changed.
   bool get _canContinue => _isBox
-      ? _url.text.trim().isNotEmpty && _key.text.trim().isNotEmpty
+      ? _url.text.trim().isNotEmpty &&
+          (widget.keyStored || _key.text.trim().isNotEmpty)
       : widget.placement != null;
 
   @override
@@ -189,7 +221,10 @@ class _SetupWhereBodyState extends State<SetupWhereBody> {
             key: SetupWhereBody.keyFieldKey,
             controller: _key,
             obscureText: true,
-            decoration: const InputDecoration(labelText: 'Access key'),
+            decoration: InputDecoration(
+              labelText: 'Access key',
+              hintText: widget.keyStored ? SetupWhereBody.keyStoredHint : null,
+            ),
           ),
           if (widget.onCheck case final check?) ...[
             const SizedBox(height: BondSpacing.s12),
@@ -204,7 +239,7 @@ class _SetupWhereBodyState extends State<SetupWhereBody> {
               ),
             ),
             const SizedBox(height: BondSpacing.s8),
-            ProbeStatus(probing: widget.probing, result: widget.probeResult),
+            ..._probeLines(),
           ],
         ],
         const SizedBox(height: BondSpacing.s24),
@@ -215,6 +250,25 @@ class _SetupWhereBodyState extends State<SetupWhereBody> {
         ),
       ],
     );
+  }
+
+  /// What a check reports: one line for the one server a host asked about, or
+  /// two captioned ones when it asked about both of the box's slots.
+  ///
+  /// The captions are the two roles rather than the two URL paths, because
+  /// `/prose` and `/bulk` are wire spellings and the person reading this is
+  /// deciding whether the writing model answered.
+  List<Widget> _probeLines() {
+    if (widget.bulkProbeResult == null) {
+      return [ProbeStatus(probing: widget.probing, result: widget.probeResult)];
+    }
+    return [
+      Text(SetupWhereBody.proseProbeLabel, style: BondType.caption),
+      ProbeStatus(probing: widget.probing, result: widget.probeResult),
+      const SizedBox(height: BondSpacing.s8),
+      Text(SetupWhereBody.bulkProbeLabel, style: BondType.caption),
+      ProbeStatus(probing: widget.probing, result: widget.bulkProbeResult),
+    ];
   }
 
   Widget _card({
