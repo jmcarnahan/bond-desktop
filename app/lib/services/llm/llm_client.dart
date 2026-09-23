@@ -106,9 +106,9 @@ class LlmUnauthorizedException extends LlmUnavailableException {
 /// arm keeps catching it and the drains park exactly as they did. What it adds
 /// is WHICH SLOT died. The two slots are separately placed — the box serves
 /// every generating stage while embeddings stay on this Mac — so a park that
-/// says only `model_unavailable` puts "GPU box unreachable" in the rail when
-/// the truth is a local embedding server that is not running. The drains tell
-/// it apart by type and record the reason `embed_unavailable`.
+/// says only `model_unavailable` puts "Your server is not answering" in the
+/// rail when the truth is a local embedding server that is not running. The
+/// drains tell it apart by type and record the reason `embed_unavailable`.
 class EmbedUnavailableException extends LlmUnavailableException {
   const EmbedUnavailableException(super.message);
 }

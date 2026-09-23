@@ -22,9 +22,16 @@ void main() {
   late BondDatabase db;
   late MessageStore store;
 
-  setUp(() {
+  setUp(() async {
     db = testDb();
     store = MessageStore(db);
+    // An install that has already been through Round H's one-shots. This file
+    // is about the steady state of the routing data; the migrations
+    // themselves, including the clear that empties `stage_targets` once, are
+    // `placement_rule_test`'s.
+    await store.setPref(boxTargetsDerivedKey, '1');
+    await store.setPref(boxServersDerivedKey, '1');
+    await store.setPref(stageTargetsClearedKey, '1');
   });
 
   tearDown(() => db.close());
@@ -101,8 +108,14 @@ void main() {
 
     test('the built-ins follow the slot prefs they are made of', () async {
       final prefs = await notifier();
-      expect(prefs.state.fastSpec.url, fastSlotDefault.baseUrl);
-      expect(prefs.state.proseSpec.url, proseSlotDefault.baseUrl);
+      // The app runs its own server unless the build says otherwise, so an
+      // untouched slot reads as the router's target; the compiled defaults are
+      // what a hand-started build sees.
+      expect(prefs.state.fastSpec.url, prefs.state.routerBulkTarget.baseUrl);
+      expect(prefs.state.proseSpec.url, prefs.state.routerProseTarget.baseUrl);
+      const handStarted = AppPrefs(managedServer: false);
+      expect(handStarted.fastSpec.url, fastSlotDefault.baseUrl);
+      expect(handStarted.proseSpec.url, proseSlotDefault.baseUrl);
 
       await prefs.setFastLlmTarget(
         url: 'http://127.0.0.1:9/v1/chat/completions',
@@ -237,10 +250,18 @@ void main() {
       await relaunched.setStageTarget('draft_reply', 'gpu-1');
       expect(relaunched.targetForStage('draft_reply').bearer,
           'sk-fixture-not-a-real-token');
-      expect(tokens.reads, ['${llmTargetBearerKeyPrefix}gpu-1']);
+      // The stored row's id because it claims a token, and the two box ids
+      // unconditionally: the derived specs have no row to carry a presence
+      // flag on, so the keychain is the only thing that knows.
+      expect(tokens.reads.toSet(), {
+        '${llmTargetBearerKeyPrefix}gpu-1',
+        '$llmTargetBearerKeyPrefix$boxProseId',
+        '$llmTargetBearerKeyPrefix$boxBulkId',
+      });
     });
 
-    test('nothing is read when no target claims one', () async {
+    test('only the box ids are read when no stored target claims one',
+        () async {
       final tokens = MemoryTokenStore();
       final prefs = await notifier(tokens);
       await prefs.upsertTarget(box);
@@ -249,9 +270,13 @@ void main() {
       addTearDown(relaunched.dispose);
       await relaunched.ready;
 
-      // Every fresh install, and every existing one: the keychain is not
-      // touched at all.
-      expect(tokens.reads, isEmpty);
+      // A row that claims no token is not asked about. The two box ids are,
+      // always, and two misses cost two absent entries.
+      expect(tokens.reads.toSet(), {
+        '$llmTargetBearerKeyPrefix$boxProseId',
+        '$llmTargetBearerKeyPrefix$boxBulkId',
+      });
+      expect(relaunched.state.boxKeyStored, isFalse);
     });
 
     test('an edit that sends no token keeps the stored one', () async {
@@ -397,12 +422,17 @@ void main() {
       expect(prefs.state.targetIdForStage('embeddings'), isNull);
     });
 
-    test('an optional stage has no target until one is picked', () async {
+    test('Improve a draft is routed by the rule, like every other stage',
+        () async {
+      // It used to be the one OPTIONAL stage: no target until somebody picked
+      // one, and the entry was the feature being on. The only way to write one
+      // was the stage picker, which Round H deleted, so the feature would have
+      // gone with it.
       final prefs = await notifier();
       await prefs.upsertTarget(box);
 
-      expect(prefs.state.targetIdForStage('draft_improve'), isNull);
-      expect(prefs.state.specForStage('draft_improve'), isNull);
+      expect(prefs.state.targetIdForStage('draft_improve'), builtInProseId);
+      expect(prefs.state.specForStage('draft_improve')!.id, builtInProseId);
 
       await prefs.setStageTarget('draft_improve', 'gpu-1');
 
@@ -410,17 +440,16 @@ void main() {
       expect(prefs.targetForStage('draft_improve').baseUrl, box.url);
 
       await prefs.clearStageTarget('draft_improve');
-      expect(prefs.state.specForStage('draft_improve'), isNull);
+      expect(prefs.state.specForStage('draft_improve')!.id, builtInProseId);
     });
 
-    test('an optional stage stores even its slot default', () async {
+    test('and writing it its own default stores nothing, like the rest',
+        () async {
       final prefs = await notifier();
 
-      // The entry IS the feature being turned on, so the non-defaults-only
-      // rule does not apply to it.
       await prefs.setStageTarget('draft_improve', builtInProseId);
 
-      expect(prefs.state.stageTargets, {'draft_improve': builtInProseId});
+      expect(prefs.state.stageTargets, isEmpty);
     });
   });
 
@@ -445,7 +474,8 @@ void main() {
       }
     });
 
-    test('none of them touches draft_improve or embeddings', () async {
+    test('none of them touches embeddings, and prose carries Improve along',
+        () async {
       final prefs = await notifier();
       await prefs.upsertTarget(box);
 
@@ -456,9 +486,11 @@ void main() {
         bulk: true,
       );
 
-      expect(prefs.state.stageTargets.keys, isNot(contains('draft_improve')));
+      // Not routed at all, so no preset may name it.
       expect(prefs.state.stageTargets.keys, isNot(contains('embeddings')));
-      expect(prefs.state.specForStage('draft_improve'), isNull);
+      // And Improve a draft goes where the writing stages go, which is what
+      // stopping being optional means.
+      expect(prefs.state.stageTargets['draft_improve'], 'gpu-1');
     });
 
     test('a preset onto a built-in clears rather than stores', () async {
@@ -488,12 +520,12 @@ void main() {
         await prefs.applyPreset(targetId: target.id, prose: true);
 
         // The other five prose stages are written either way: what the
-        // consent is about is what leaves the machine in a DRAFT.
+        // consent is about is what leaves the machine in a DRAFT, and both
+        // drafting stages are skipped without it.
         expect(
           prefs.state.stageTargets.keys.toSet(),
-          proseStageIds.where((id) => id != 'draft_reply').toSet(),
+          proseStageIds.where((id) => !draftStageIds.contains(id)).toSet(),
         );
-        expect(prefs.state.stageTargets.containsKey('draft_improve'), isFalse);
 
         await prefs.setCloudDraftsConsent(true);
         await prefs.applyPreset(targetId: target.id, prose: true);
@@ -553,7 +585,9 @@ void main() {
       for (final id in prefs.state.stageTargets.values) {
         expect(id, builtInFastId);
       }
-      expect(prefs.state.stageTargets.containsKey('draft_improve'), isFalse);
+      // `draft_improve` is one of them now, so Improve runs on the small
+      // model here rather than dialling a prose server this tier never starts.
+      expect(prefs.state.stageTargets['draft_improve'], builtInFastId);
       expect(prefs.state.specForStage('draft_reply')!.id, builtInFastId);
       expect(prefs.state.draftPolicy, DraftPolicy.onDemand);
     });
@@ -602,23 +636,24 @@ void main() {
       expect(prefs.state.draftPolicy, DraftPolicy.needsYou);
     });
 
-    test('no tier names an optional stage', () async {
-      // What lets `applyTierDefaults` drop the `stageIsOptional` guard its two
-      // siblings carry: an optional stage's entry IS its feature being turned
-      // on, and no machine's size may turn one on.
+    test('no tier names a stage that is not routed', () async {
+      // Embeddings are not routed at all — a vector carries the tag of the
+      // model that wrote it — so a tier that named one would be pointing a
+      // stage nothing resolves.
       for (final tier in MachineTier.values) {
         for (final stageId in tierStageDefaults(tier).keys) {
-          expect(stageIsOptional(stageId), isFalse, reason: stageId);
           expect(stageSlot(stageId), isNot(ModelSlot.embed), reason: stageId);
         }
       }
     });
 
-    test('the full tier clears the six and nothing else', () async {
+    test('the full tier clears the seven and nothing else', () async {
       final prefs = await notifier();
       await prefs.upsertTarget(box);
-      // One of each kind the tier must not touch: the optional stage, a bulk
-      // stage and the confirm stage, all pointed somewhere by hand.
+      // Two the tier must not touch — a bulk stage and the confirm stage —
+      // and two it governs, all pointed somewhere by hand. `draft_improve` is
+      // one of the seven prose stages since Round H, so the tier rewrites it
+      // with the rest of them.
       await prefs.setStageTarget('draft_improve', 'gpu-1');
       await prefs.setStageTarget('triage', 'gpu-1');
       await prefs.setStageTarget('storyline_membership', 'gpu-1');
@@ -627,16 +662,15 @@ void main() {
       await prefs.applyTierDefaults(MachineTier.full);
 
       expect(prefs.state.stageTargets, {
-        'draft_improve': 'gpu-1',
         'triage': 'gpu-1',
         'storyline_membership': 'gpu-1',
       });
-      // The optional stage's feature is still ON, which is the thing a stray
-      // clear would silently switch off.
-      expect(prefs.state.specForStage('draft_improve')!.id, 'gpu-1');
+      // Improve a draft is never off: cleared back to the rule means the
+      // prose default, not nothing.
+      expect(prefs.state.specForStage('draft_improve')!.id, builtInProseId);
     });
 
-    test('the inbox tier leaves the same three alone', () async {
+    test('the inbox tier leaves the other two alone', () async {
       final prefs = await notifier();
       await prefs.upsertTarget(box);
       await prefs.setStageTarget('draft_improve', 'gpu-1');
@@ -645,7 +679,10 @@ void main() {
 
       await prefs.applyTierDefaults(MachineTier.inbox);
 
-      expect(prefs.state.stageTargets['draft_improve'], 'gpu-1');
+      // The prose stages go to the small model on a Mac with no prose server,
+      // Improve a draft among them — which is the whole reason it had to stop
+      // being optional rather than simply losing its picker.
+      expect(prefs.state.stageTargets['draft_improve'], builtInFastId);
       expect(prefs.state.stageTargets['triage'], 'gpu-1');
       expect(prefs.state.stageTargets['storyline_membership'], 'gpu-1');
       expect(prefs.state.stageTargets['storyline_recap'], builtInFastId);
@@ -711,15 +748,15 @@ void main() {
       expect(prefs.state.specForStage('draft_reply')!.id, 'cloud-2');
     });
 
-    test('draft_improve resolves to nothing instead of falling back',
-        () async {
+    test('draft_improve falls back where draft_reply does', () async {
       final prefs = await notifier();
       await prefs.upsertTarget(bedrock);
       await prefs.setStageTarget('draft_improve', 'cloud-1');
 
-      // The button is hidden rather than quietly pointed at the local model:
-      // "Improve with Cloud prose" that ran locally would be a lie.
-      expect(prefs.state.specForStage('draft_improve'), isNull);
+      // It used to resolve to NOTHING here, which was the feature being off.
+      // Improve a draft is always available since Round H, so a pick the
+      // consent refuses lands on the same fallback drafts do.
+      expect(prefs.state.specForStage('draft_improve')!.id, builtInProseId);
 
       await prefs.setCloudDraftsConsent(true);
       expect(prefs.state.specForStage('draft_improve')!.id, 'cloud-1');
@@ -772,10 +809,9 @@ void main() {
       expect(prefs.state.stageTargets.containsKey('draft_reply'), isFalse);
       expect(prefs.state.stageTargets.containsKey('draft_improve'), isFalse);
       expect(prefs.state.cloudDraftsConsent, isFalse);
-      // Drafts are local again, and Improve is gone rather than quietly
-      // pointed at this machine.
+      // Both drafting stages are local again.
       expect(prefs.state.specForStage('draft_reply')!.id, builtInProseId);
-      expect(prefs.state.specForStage('draft_improve'), isNull);
+      expect(prefs.state.specForStage('draft_improve')!.id, builtInProseId);
 
       // The target the person added survives, with its keychain bearer and
       // its other stage: the control withdraws consent, it does not throw
@@ -859,59 +895,71 @@ void main() {
     // A fictional string, and the only "key" anywhere in this file.
     const key = 'sk-fixture-not-a-real-box-key';
 
-    test('adoptBox writes the two targets, one key, and the placement',
-        () async {
-      final tokens = MemoryTokenStore();
-      final prefs = await notifier(tokens);
+    /// The pair the wizard used to derive from one origin, spelled out: this
+    /// group is about what the placement does once written, not about the
+    /// form.
+    Future<void> useBoxAt(AppPrefsNotifier prefs, String base, {String? key}) =>
+        prefs.useBox(
+          bigUrl: '$base/prose/v1/chat/completions',
+          smallUrl: '$base/bulk/v1/chat/completions',
+          bigModel: boxProseModel,
+          smallModel: boxBulkModel,
+          bigKey: key,
+          smallKey: key,
+          hardwareTier: MachineTier.full,
+        );
 
-      await prefs.adoptBox(baseUrl: url, bearer: key);
+    test('one address gives the two derived targets', () async {
+      final prefs = await notifier();
+
+      await useBoxAt(prefs, url, key: key);
 
       final prose = prefs.state.specById(boxProseId)!;
       final bulk = prefs.state.specById(boxBulkId)!;
       expect(prose.name, boxProseName);
       expect(prose.url, 'https://box.example.com/prose/v1/chat/completions');
       expect(prose.model, boxProseModel);
-      expect(prose.parallel, 4);
+      // ONE at a time on a stored address: a one-slot llama-server queues the
+      // other three past the prose client's ceiling. Four is for an address
+      // that follows the build, whose server was started with four sequences.
+      expect(prose.parallel, 1);
       expect(prose.streams, isTrue);
       expect(bulk.name, boxBulkName);
       expect(bulk.url, 'https://box.example.com/bulk/v1/chat/completions');
       expect(bulk.model, boxBulkModel);
-      expect(bulk.parallel, 4);
+      expect(bulk.parallel, 1);
       expect(bulk.streams, isTrue);
 
       expect(prefs.state.modelPlacement, ModelPlacement.box);
       expect(prefs.state.draftPolicy, DraftPolicy.needsYou);
-    });
 
-    test('a trailing slash on the address does not double up', () async {
-      final prefs = await notifier();
-      await prefs.adoptBox(baseUrl: '  https://box.example.com///  ',
-          bearer: key);
-
-      expect(prefs.state.specById(boxProseId)!.url,
-          'https://box.example.com/prose/v1/chat/completions');
+      // DERIVED, which is the whole of Round H: no row was written, and the
+      // stage map stayed empty because the rule answers every stage.
+      expect(prefs.state.targets, isEmpty);
+      expect(await store.getPref(llmTargetsKey), isNull);
+      expect(prefs.state.stageTargets, isEmpty);
     });
 
     test('an address that is not an http origin is refused', () async {
-      // The last line rather than the validation: the Settings pane and the
-      // wizard both disable their way forward on an empty field. What this
-      // stops is two targets nothing can dial and a placement that parks the
-      // whole pipeline.
+      // The last line rather than the validation: the form refuses the same
+      // address under its own field before the press gets here. What this
+      // stops is two derived targets nothing can dial and a placement that
+      // parks the whole pipeline.
       final prefs = await notifier();
 
-      for (final bad in ['', '   ', 'box.example.com', 'ftp://box', '///']) {
+      for (final bad in ['box.example.com', 'ftp://box']) {
         await expectLater(
-          prefs.adoptBox(baseUrl: bad, bearer: key),
-          throwsA(isA<ArgumentError>()
-              .having((e) => e.name, 'name', 'baseUrl')
-              .having((e) => e.message, 'message',
-                  contains('http or https origin'))),
+          useBoxAt(prefs, bad, key: key),
+          throwsA(isA<ArgumentError>().having(
+              (e) => e.message, 'message', contains('http or https URL'))),
           reason: bad,
         );
       }
 
-      // Nothing was written by any of them.
-      expect(prefs.state.targets, isEmpty);
+      // Nothing was written by any of them: the refusal is in front of the
+      // placement and the keychain both.
+      expect(prefs.state.boxBigUrl, isEmpty);
+      expect(prefs.state.boxSmallUrl, isEmpty);
       expect(prefs.state.modelPlacement, ModelPlacement.local);
       expect(prefs.state.stageTargets, isEmpty);
     });
@@ -920,7 +968,7 @@ void main() {
         () async {
       final prefs = await notifier();
 
-      await prefs.adoptBox(baseUrl: 'http://localhost:18100', bearer: key);
+      await useBoxAt(prefs, 'http://localhost:18100', key: key);
 
       expect(prefs.state.specById(boxProseId)!.url,
           'http://localhost:18100/prose/v1/chat/completions');
@@ -930,113 +978,169 @@ void main() {
       final tokens = MemoryTokenStore();
       final prefs = await notifier(tokens);
 
-      await prefs.adoptBox(baseUrl: url, bearer: key);
+      await useBoxAt(prefs, url, key: key);
 
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'], key);
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxBulkId'], key);
       for (final value in await prefValues()) {
         expect(value, isNot(contains(key)));
       }
-      // What the table carries is the presence flag, twice.
+      // What the state carries is one boolean, and the derived specs read it.
+      expect(prefs.state.boxKeyStored, isTrue);
       expect(prefs.state.specById(boxProseId)!.hasBearer, isTrue);
       expect(prefs.state.specById(boxBulkId)!.hasBearer, isTrue);
       // And the one door onto the cache answers for both.
       expect(prefs.bearerFor(boxProseId), key);
       expect(prefs.bearerFor(boxBulkId), key);
       expect(prefs.bearerFor('nobody'), isNull);
+
+      // Forgetting it takes both entries and the flag.
+      await prefs.clearBoxKey();
+      expect(prefs.state.boxKeyStored, isFalse);
+      expect(tokens.values, isEmpty);
+      expect(prefs.bearerFor(boxProseId), isNull);
     });
 
     test('the confirm lands on the 27B and the other seven on the 4B',
         () async {
       final prefs = await notifier();
+      await useBoxAt(prefs, url, key: key);
 
-      await prefs.adoptBox(baseUrl: url, bearer: key);
+      String? at(String stageId) => prefs.state.targetIdForStage(stageId);
 
-      final map = prefs.state.stageTargets;
-      expect(map['storyline_membership'], boxProseId,
+      expect(at('storyline_membership'), boxProseId,
           reason: 'the row of record puts the confirm on the 27B');
       for (final id in bulkStageIds) {
         if (id == 'storyline_membership') continue;
-        expect(map[id], boxBulkId, reason: id);
+        expect(at(id), boxBulkId, reason: id);
       }
       for (final id in proseStageIds) {
-        expect(map[id], boxProseId, reason: id);
+        expect(at(id), boxProseId, reason: id);
       }
-      // The one stage no preset writes: a routing destination somebody picks
-      // on purpose, never turned on by adopting a server.
-      expect(map.containsKey('draft_improve'), isFalse);
+      // Improve a draft is a prose stage like the rest since Round H, so it
+      // lands on the big model with them.
+      expect(at('draft_improve'), boxProseId);
+      // The one stage that is not routed at all.
+      expect(at('embeddings'), isNull);
       // A box hostname is NOT third party, so the drafts guard does not fire
-      // and `draft_reply` is written like every other prose stage.
-      expect(map['draft_reply'], boxProseId);
+      // and `draft_reply` resolves like every other prose stage.
+      expect(at('draft_reply'), boxProseId);
+      // And none of it is stored.
+      expect(prefs.state.stageTargets, isEmpty);
     });
 
-    test('the preset ORDER is bulk first, then prose and confirm', () async {
-      // The pin. `storyline_membership` is in both preset lists, so whichever
-      // call runs second owns it. Swap the two lines in `adoptBox` and the
-      // confirm silently drops to the 4B, moving the storyline numbers with
-      // no code looking wrong. This test is the only thing that notices.
-      final prefs = await notifier();
-      await prefs.adoptBox(baseUrl: url, bearer: key);
-      expect(prefs.state.stageTargets['storyline_membership'], boxProseId);
-
-      // Read the other way round too: applying them in the WRONG order on the
-      // same two targets leaves the confirm on the 4B, which is the outcome
-      // `adoptBox` is ordered to avoid.
-      await prefs.applyPreset(targetId: boxProseId, prose: true, confirm: true);
-      await prefs.applyPreset(targetId: boxBulkId, bulk: true);
-      expect(prefs.state.stageTargets['storyline_membership'], boxBulkId);
-    });
-
-    test('adopting twice replaces the pair rather than stacking it', () async {
-      final prefs = await notifier();
-
-      await prefs.adoptBox(baseUrl: url, bearer: key);
-      await prefs.adoptBox(baseUrl: 'https://box2.example.com', bearer: key);
-
-      expect(prefs.state.targets.where((t) => t.id == boxProseId), hasLength(1));
-      expect(prefs.state.targets.where((t) => t.id == boxBulkId), hasLength(1));
-      expect(prefs.state.specById(boxBulkId)!.url,
-          'https://box2.example.com/bulk/v1/chat/completions');
-    });
-
-    test('adoptLocal removes both targets, both keys and every stage entry',
+    test('the confirm is a RULE now, not the order of two preset calls',
         () async {
-      final tokens = MemoryTokenStore();
-      final prefs = await notifier(tokens);
-      await prefs.adoptBox(baseUrl: url, bearer: key);
+      // The pin this replaces was about ORDER: `storyline_membership` is in
+      // both preset lists, so whichever of Round G's two preset calls ran
+      // second owned it, and swapping the two lines dropped the confirm to
+      // the 4B with no code looking wrong. There is no order left to get
+      // wrong — the mapping is one function, and this is what it says.
+      expect(
+        placementDefaultTargetId(
+          placement: ModelPlacement.box,
+          hasBox: true,
+          stageId: 'storyline_membership',
+        ),
+        boxProseId,
+      );
+      expect(
+        placementDefaultTargetId(
+          placement: ModelPlacement.local,
+          hasBox: true,
+          stageId: 'storyline_membership',
+        ),
+        builtInFastId,
+      );
+      // A preset onto the box still behaves, because a preset writes an
+      // OVERRIDE and the rule is what it is measured against.
+      final prefs = await notifier();
+      await useBoxAt(prefs, url, key: key);
+      await prefs.applyPreset(targetId: boxBulkId, bulk: true);
+      expect(prefs.state.targetIdForStage('storyline_membership'), boxBulkId,
+          reason: 'a preset onto the small model is an override and is kept');
+      await prefs.applyPreset(targetId: boxProseId, prose: true, confirm: true);
+      expect(prefs.state.targetIdForStage('storyline_membership'), boxProseId);
+      expect(prefs.state.stageTargets.containsKey('storyline_membership'),
+          isFalse,
+          reason: 'back on the rule, so the entry goes rather than being '
+              'stored');
+    });
 
-      await prefs.adoptLocal(MachineTier.full);
+    test('this Mac takes back every entry the app wrote and keeps the rest',
+        () async {
+      final prefs = await notifier();
+      await prefs.upsertTarget(box);
+      await useBoxAt(prefs, url, key: key);
+      // Two entries the app itself could have written and two the owner
+      // chose, one of which the tier's own pass rewrites on the way back.
+      await prefs.setStageTarget('storyline_membership', boxBulkId);
+      await prefs.setStageTarget('triage', builtInFastId);
+      await prefs.setStageTarget('context_brief', 'gpu-1');
+      await prefs.setStageTarget('draft_improve', 'gpu-1');
+
+      await prefs.usePlacement(
+        ModelPlacement.local,
+        hardwareTier: MachineTier.full,
+      );
 
       expect(prefs.state.modelPlacement, ModelPlacement.local);
-      expect(prefs.state.specById(boxProseId), isNull);
-      expect(prefs.state.specById(boxBulkId), isNull);
-      expect(tokens.values.containsKey('$llmTargetBearerKeyPrefix$boxProseId'),
-          isFalse);
-      expect(tokens.values.containsKey('$llmTargetBearerKeyPrefix$boxBulkId'),
-          isFalse);
-      expect(prefs.bearerFor(boxProseId), isNull);
-      // The full tier writes nothing, so a machine that adopted the box and
-      // changed its mind is back to a fresh install's empty map.
-      expect(prefs.state.stageTargets, isEmpty);
+      // The box entry and the built-in one are gone; the bulk stage the owner
+      // chose is not. A placement switch is not permission to undo a choice.
+      // `draft_improve` is the exception and not an undoing: the switch ends
+      // in `applyTierDefaults`, which rewrites every prose stage, and Improve
+      // is one of them now.
+      expect(prefs.state.stageTargets, {'context_brief': 'gpu-1'});
       expect(prefs.state.draftPolicy, DraftPolicy.needsYou);
+      // Every unpicked stage is back on its slot's built-in.
+      expect(prefs.state.targetIdForStage('triage'), builtInFastId);
+      expect(prefs.state.targetIdForStage('storyline_membership'),
+          builtInFastId);
+      expect(prefs.state.targetIdForStage('draft_reply'), builtInProseId);
     });
 
-    test('adoptLocal on a small Mac restores the inbox tier, not an empty map',
-        () async {
+    test('this Mac on a small machine restores the inbox tier, not an empty '
+        'map', () async {
       final prefs = await notifier();
-      await prefs.adoptBox(baseUrl: url, bearer: key);
+      await useBoxAt(prefs, url, key: key);
 
-      await prefs.adoptLocal(MachineTier.inbox);
+      await prefs.usePlacement(
+        ModelPlacement.local,
+        hardwareTier: MachineTier.inbox,
+      );
 
       expect(prefs.state.stageTargets,
           {for (final id in proseStageIds) id: builtInFastId});
       expect(prefs.state.draftPolicy, DraftPolicy.onDemand);
     });
 
-    test('applyTierDefaults(remote) is a no-op, so it cannot undo adoptBox',
+    test('the address and the key survive a switch to this Mac', () async {
+      // Changing where the work runs is not the same as forgetting how to
+      // reach the box: the simple page offers both cards, and coming back
+      // must not ask for the key again.
+      final tokens = MemoryTokenStore();
+      final prefs = await notifier(tokens);
+      await useBoxAt(prefs, url, key: key);
+
+      await prefs.usePlacement(
+        ModelPlacement.local,
+        hardwareTier: MachineTier.full,
+      );
+
+      expect(prefs.state.boxBigUrl, '$url/prose/v1/chat/completions');
+      expect(prefs.state.boxSmallUrl, '$url/bulk/v1/chat/completions');
+      expect(prefs.state.boxKeyStored, isTrue);
+      expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'], key);
+      // Still in the list, still not routed to.
+      expect(prefs.state.specById(boxProseId), isNotNull);
+      expect(prefs.state.targetIdForStage('draft_reply'), builtInProseId);
+    });
+
+    test('applyTierDefaults(remote) is a no-op, so it cannot undo the box',
         () async {
       final prefs = await notifier();
-      await prefs.adoptBox(baseUrl: url, bearer: key);
+      await useBoxAt(prefs, url, key: key);
+      await prefs.setStageTarget('triage', builtInFastId);
       final before = Map.of(prefs.state.stageTargets);
 
       await prefs.applyTierDefaults(MachineTier.remote);
@@ -1045,22 +1149,46 @@ void main() {
       expect(prefs.state.draftPolicy, DraftPolicy.needsYou);
     });
 
-    test('the placement survives a wipe, like the other machine prefs',
-        () async {
+    test('the placement and the address survive a wipe, like the other '
+        'machine prefs', () async {
       final prefs = await notifier();
-      await prefs.adoptBox(baseUrl: url, bearer: key);
+      await useBoxAt(prefs, url, key: key);
 
       await store.wipeAll();
 
       final after = await AppPrefsNotifier.read(store);
       expect(after.modelPlacement, ModelPlacement.box);
+      expect(after.boxBigUrl, '$url/prose/v1/chat/completions');
+      expect(after.hasBox, isTrue);
       expect(after.specById(boxProseId), isNotNull);
     });
 
     test('a fresh install is on this Mac', () async {
       final prefs = await notifier();
       expect(prefs.state.modelPlacement, ModelPlacement.local);
+      expect(prefs.state.hasBox, isFalse);
+      expect(prefs.state.specById(boxProseId), isNull);
       expect(await store.getPref(modelPlacementKey), isNull);
+    });
+
+    test('a derived target is not a row: it cannot be added, edited or '
+        'removed', () async {
+      final prefs = await notifier();
+      await useBoxAt(prefs, url, key: key);
+
+      final prose = prefs.state.specById(boxProseId)!;
+      expect(prose.isBox, isTrue);
+      expect(prose.isFixed, isTrue);
+      // And NOT built-in: that word means "edited in the two slot editors",
+      // and the row's own note says so.
+      expect(prose.isBuiltIn, isFalse);
+
+      await expectLater(
+        prefs.upsertTarget(prose.copyWith(model: 'something-else')),
+        throwsArgumentError,
+      );
+      await prefs.removeTarget(boxProseId);
+      expect(prefs.state.specById(boxProseId), isNotNull);
     });
   });
 

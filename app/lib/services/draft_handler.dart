@@ -179,10 +179,12 @@ class DraftHandler extends WorkHandler {
 
   /// How wide the prose server was started, read at every launch decision.
   ///
-  /// A CLOSURE and not a number, because the width is a SETTING
-  /// (`AppPrefs.proseParallel`, Settings › Models › Drafts in flight) and the
-  /// worker re-reads `concurrency` before launching each item — so moving the
-  /// control moves the next draft rather than waiting for a relaunch.
+  /// A CLOSURE and not a number, because the width is a fact about wherever
+  /// `draft_reply` currently points — the resolved draft spec's `parallel`,
+  /// which is four for a server that follows the build and one for any
+  /// address somebody stored or for this Mac's own — and the worker re-reads
+  /// `concurrency` before launching each item, so pointing the stage
+  /// somewhere else moves the next draft rather than waiting for a relaunch.
   ///
   /// One when nobody says otherwise, which is what every test, every bench and
   /// a single-slot llama-server gets. Drafts are the one prose kind that may
@@ -540,8 +542,8 @@ class DraftHandler extends WorkHandler {
         if (target == null) {
           status = 'skipped';
           detail['reason'] = 'unrouted';
-          return 'Pick a target for Improve a draft under Settings, Models '
-              'first.';
+          return 'Improve a draft has no server to run on. Check '
+              'Settings, Models.';
         }
 
         final row = await _store.getMessageRow(source, messageId);

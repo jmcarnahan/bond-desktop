@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../providers/prefs_provider.dart' show AppPrefs;
 import '../theme/tokens.dart';
+import '../widgets/inline_alert.dart';
 
 /// What leaves this machine when a draft is written somewhere else, asked once
 /// and answered by the person.
@@ -21,11 +22,14 @@ class CloudDraftsConsentPane extends StatelessWidget {
   /// machine they named, not about a category.
   final String targetName;
 
-  /// Which stage this would answer, from `pipelineStages`.
-  final String stageLabel;
-
   /// How many drafts a day may go to a third-party target at all.
   final int dailyCap;
+
+  /// Why the last Continue did not land, or null. Continue writes the consent
+  /// and then does the thing the consent was for, and that second half can
+  /// refuse — so the pane stays open and says why, rather than returning the
+  /// person to an unchanged screen with no explanation.
+  final String? error;
 
   final VoidCallback onContinue;
   final VoidCallback onNotNow;
@@ -33,15 +37,24 @@ class CloudDraftsConsentPane extends StatelessWidget {
   const CloudDraftsConsentPane({
     super.key,
     required this.targetName,
-    required this.stageLabel,
     this.dailyCap = AppPrefs.defaultCloudDraftsDailyCap,
+    this.error,
     required this.onContinue,
     required this.onNotNow,
   });
 
+  /// What this target would be answering, which is the whole big model now
+  /// rather than one stage: the picker that could point a single step
+  /// somewhere went with the Advanced fold, and the address a person types is
+  /// the address every prose step reaches.
+  static const String scopeLine =
+      'It would answer every step on the big model: drafts, replies, recaps '
+      'and the rest.';
+
   static const Key continueKey = ValueKey('consent-continue');
   static const Key notNowKey = ValueKey('consent-not-now');
   static const Key measuredKey = ValueKey('consent-measured');
+  static const Key errorKey = ValueKey('consent-error');
 
   @override
   Widget build(BuildContext context) {
@@ -52,8 +65,8 @@ class CloudDraftsConsentPane extends StatelessWidget {
         children: [
           Text('Send drafts to $targetName?', style: BondType.titleSm),
           const SizedBox(height: BondSpacing.s8),
-          Text(
-            'This target would answer the $stageLabel stage.',
+          const Text(
+            scopeLine,
             style: BondType.small,
           ),
           const SizedBox(height: BondSpacing.s4),
@@ -100,6 +113,14 @@ class CloudDraftsConsentPane extends StatelessWidget {
             'can change the cap under Settings, Processing.',
             style: BondType.small,
           ),
+          if (error case final message?) ...[
+            const SizedBox(height: BondSpacing.s16),
+            InlineAlert(
+              key: errorKey,
+              severity: InlineAlertSeverity.error,
+              text: message,
+            ),
+          ],
           const SizedBox(height: BondSpacing.s24),
           OverflowBar(
             alignment: MainAxisAlignment.end,

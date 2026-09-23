@@ -7,7 +7,7 @@ import 'setup_controls.dart';
 
 /// Step one: what this app is, and what setting it up costs.
 ///
-/// PROP-ONLY, the `SettingsLocalServerBody` discipline: no provider is read
+/// PROP-ONLY, the settings bodies' discipline: no provider is read
 /// here, the host resolves everything and takes the one action back as a
 /// closure. That is what lets every sentence on this screen be pinned by a
 /// test that builds nothing but this widget.

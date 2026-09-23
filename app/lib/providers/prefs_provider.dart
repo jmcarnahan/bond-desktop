@@ -41,8 +41,8 @@ export '../models/home_sort.dart'
 
 /// So the settings screen reaches a slot's value and its name through one
 /// import — the prefs are where both are composed. [LlmTargetSpec] and
-/// [LlmWire] ride along for the same reason: the Targets list reads and writes
-/// them through this file.
+/// [LlmWire] ride along for the same reason: the tests and the benches read
+/// and write them through this file; no screen does since Round H.
 export '../services/llm/model_slots.dart'
     show LlmTarget, LlmTargetSpec, LlmWire, ModelSlot;
 
@@ -155,14 +155,74 @@ class AppPrefs {
   /// work, not anything about the mailbox that was wiped.
   final DraftPolicy draftPolicy;
 
-  /// Where this install's model work runs. [ModelPlacement.local] by default:
-  /// a fresh install runs everything on this Mac until somebody adopts the
-  /// box, in the wizard or under Settings, Models.
+  /// Where this install's model work runs. [defaultModelPlacement] by
+  /// default, which is the GPU box in any build compiled with an address for
+  /// one and this Mac in every other.
   ///
   /// Read by `effectiveTierProvider`, which answers [MachineTier.remote] here
-  /// so the manifest resolves to the embedding model alone, and by the rail's
-  /// parked line, which names the box rather than a local server.
+  /// so the manifest resolves to the embedding model alone, by the rail's
+  /// parked line, which names the box rather than a local server, and — since
+  /// Round H — by [defaultTargetIdForStage], which is what makes the box a
+  /// rule rather than a set of rows somebody pressed a button to write.
   final ModelPlacement modelPlacement;
+
+  /// The BIG model's address, a chat-completions URL, or EMPTY for "whatever
+  /// this build was compiled with".
+  ///
+  /// The user-defined placement is two addresses and two model names since
+  /// Round H, because the one server we shipped against is not the only shape
+  /// a person can have: two llama-servers on two machines are as ordinary as
+  /// one router serving both roles under `/prose` and `/bulk`.
+  ///
+  /// Empty is stored as empty, on [fastLlmUrl]'s rule and for its reason: the
+  /// compiled address is a fact about the build, and freezing today's value
+  /// into the database would make a changed [boxUrlDefault] invisible to
+  /// anyone who had once opened the wizard. [effectiveBoxBigUrl] is the one
+  /// place that resolves it.
+  final String boxBigUrl;
+
+  /// The SMALL model's address, on [boxBigUrl]'s rule. The same string as
+  /// [boxBigUrl] is allowed and ordinary: one server can serve both roles.
+  final String boxSmallUrl;
+
+  /// What the big server calls its model on the wire, DISCOVERED from the
+  /// server's own `/v1/models` rather than typed, or empty to follow the
+  /// build's constant.
+  final String boxBigModel;
+
+  /// What the small server calls its model, on [boxBigModel]'s rule.
+  final String boxSmallModel;
+
+  /// Whether the box's access key is in the keychain. NOT the key, and NOT
+  /// persisted: the notifier sets it from the keychain when the prefetch
+  /// returns, and it is false until then.
+  ///
+  /// False-until-answered is deliberate. The prefetch is a round trip that the
+  /// first drain can beat, and a derived spec that claimed a bearer it does
+  /// not yet hold would send one unauthenticated request per stage. Honest
+  /// here means the spec says `hasBearer: false` inside that window, and the
+  /// supervisor's first pump waits for `ready` besides.
+  final bool boxKeyStored;
+
+  /// Whether the BIG server's key is in the keychain, and the SMALL server's.
+  ///
+  /// [boxKeyStored] is either of them, which is what every routing question
+  /// asks; these two are what the form's two hints ask, because the addresses
+  /// may name two operators and a key for one is never sent to the other.
+  /// Neither is persisted, on [boxKeyStored]'s rule.
+  final bool boxBigKeyStored;
+  final bool boxSmallKeyStored;
+
+  /// Whether the model work runs at all.
+  ///
+  /// ON by default and REMEMBERED, unlike the session switch it replaced: a
+  /// fresh install starts working the moment the wizard finishes, and somebody
+  /// who turns it off finds it off after a relaunch. What made it a session
+  /// flag was the risk of spending the first minutes on the wrong server, and
+  /// the placement rule closes that: the default server is the measured one,
+  /// and a missing key or a dead address parks with a sentence rather than
+  /// spending attempts.
+  final bool processingOn;
 
   /// How the People directory is ordered. [PeopleSort.recent] by default,
   /// which is the order [peopleRooms] already hands it in: the person who
@@ -217,17 +277,22 @@ class AppPrefs {
   /// `make model | fast | embed` workflow is untouched. Turning it on is an
   /// opt-in in Settings, and it is what makes the three router targets live.
   ///
-  /// Like [routerPort] and [modelsFolder] it survives a `wipeAll` — that
-  /// deletes only the keys it names, and none of these three is mailbox data:
-  /// which server this machine runs is a fact about the machine, not about
-  /// whoever is signed in.
+  /// NOT STORED since Round H: it defaults to [managedServerDefault], which a
+  /// build define decides, and there is no setter and no row. The switch that
+  /// wrote one is gone from the Models page, and an engineer who runs the
+  /// servers by hand says so with `BOND_DEV_HAND_SERVERS`. It stays a
+  /// constructor field so a test can say `AppPrefs(managedServer: false)` and
+  /// assert the compiled URLs.
   final bool managedServer;
 
   /// The port the managed router listens on.
   ///
   /// Stored rather than picked fresh each launch so an adopted server from the
-  /// previous run is findable, and so a user who moved off a port another
-  /// program wanted keeps that choice. Clamped to 1024..65535 on both the read
+  /// previous run is findable. Since Round H the SUPERVISOR writes it as well:
+  /// a launch that finds the port taken moves to a free one and remembers it
+  /// here before spawning, so the preference, the pid record and the clients
+  /// agree, and the app stays on that port until something moves it again.
+  /// No control on screen sets it any more. Clamped to 1024..65535 on both the read
   /// and the write: below 1024 needs root, and a stored value outside the range
   /// would make every start fail with a message about a socket.
   final int routerPort;
@@ -320,7 +385,15 @@ class AppPrefs {
     this.storylineNewestFirst = false,
     this.needsYouSort = NeedsYouSort.priority,
     this.draftPolicy = DraftPolicy.needsYou,
-    this.modelPlacement = ModelPlacement.local,
+    this.modelPlacement = defaultModelPlacement,
+    this.boxBigUrl = '',
+    this.boxSmallUrl = '',
+    this.boxBigModel = '',
+    this.boxSmallModel = '',
+    this.boxKeyStored = false,
+    this.boxBigKeyStored = false,
+    this.boxSmallKeyStored = false,
+    this.processingOn = true,
     this.peopleSort = PeopleSort.recent,
     this.roomSort = RoomSort.newest,
     this.notifyStyle = NotifyStyle.native,
@@ -331,7 +404,7 @@ class AppPrefs {
     this.proseLlmModel = '',
     this.mailLookbackDays = syncFloorDays,
     this.teamsLookbackDays = syncFloorDays,
-    this.managedServer = false,
+    this.managedServer = managedServerDefault,
     this.routerPort = defaultRouterPort,
     this.modelsFolder = '',
     this.proseParallel = defaultProseParallel,
@@ -429,9 +502,9 @@ class AppPrefs {
   /// The built-in fast target, as a spec.
   ///
   /// DERIVED from [fastTarget] rather than stored, which is the whole of why
-  /// targets-as-data did not fork the model settings: the four slot prefs, the
-  /// two slot editors, [slotBaseline] and the managed router all still mean
-  /// exactly what they meant, and this is a second view of them.
+  /// targets-as-data did not fork the model settings: the four slot prefs,
+  /// [slotBaseline] and the managed router all still mean exactly what they
+  /// meant, and this is a second view of them.
   LlmTargetSpec get fastSpec => LlmTargetSpec(
         id: builtInFastId,
         name: builtInFastName,
@@ -450,8 +523,91 @@ class AppPrefs {
         parallel: proseParallel,
       );
 
-  /// Every target a stage may be pointed at, the two built-ins first.
-  List<LlmTargetSpec> get allTargets => [fastSpec, proseSpec, ...targets];
+  /// The origin the build was compiled with, as the two derived URLs are
+  /// built from it. Empty in the test suite and in any build that passed no
+  /// define.
+  static String get _compiledBase => normalizeBoxBaseUrl(boxUrlDefault);
+
+  /// The BIG model's address as a request will dial it: the stored URL when
+  /// there is one, and the build's own `/prose` derivation otherwise.
+  String get effectiveBoxBigUrl => boxBigUrl.isNotEmpty
+      ? normalizeBoxBaseUrl(boxBigUrl)
+      : (_compiledBase.isEmpty
+          ? ''
+          : '$_compiledBase/prose/v1/chat/completions');
+
+  /// The SMALL model's address, on [effectiveBoxBigUrl]'s rule and the
+  /// build's `/bulk` derivation.
+  String get effectiveBoxSmallUrl => boxSmallUrl.isNotEmpty
+      ? normalizeBoxBaseUrl(boxSmallUrl)
+      : (_compiledBase.isEmpty
+          ? ''
+          : '$_compiledBase/bulk/v1/chat/completions');
+
+  /// What the big server is asked for, and the small one: the discovered name
+  /// when there is one, and the constant the compiled box serves otherwise.
+  String get effectiveBoxBigModel =>
+      boxBigModel.isEmpty ? boxProseModel : boxBigModel;
+
+  String get effectiveBoxSmallModel =>
+      boxSmallModel.isEmpty ? boxBulkModel : boxSmallModel;
+
+  /// Whether this install knows where BOTH models run.
+  ///
+  /// The whole of what the placement rule needs to know about the
+  /// user-defined pair, and both halves of it, because a rule that sent the
+  /// big stages to an address and the small ones nowhere would park half the
+  /// pipeline. False in the test suite and in any build that passed no define,
+  /// which is why [defaultModelPlacement] resolves to this Mac there.
+  bool get hasBox =>
+      effectiveBoxBigUrl.isNotEmpty && effectiveBoxSmallUrl.isNotEmpty;
+
+  /// The box's inbox target, as a spec.
+  ///
+  /// DERIVED from the four pair prefs on [fastSpec]'s rule, and that is the
+  /// change Round H is: the box used to be two rows in `llm_targets` that a
+  /// button wrote, so a fresh install was on this Mac until somebody found the
+  /// button. One address in, two targets out, nothing stored.
+  ///
+  /// The width is four only for an address that FOLLOWS THE BUILD: the
+  /// compiled box is two vLLM servers started with four sequences each, which
+  /// is a fact about that machine. A stored address is one request at a time,
+  /// because a one-slot llama-server queues the other three past the prose
+  /// client's ninety-second ceiling and reads as a server that is broken.
+  ///
+  /// The WIRE is read off the host, so a Bedrock endpoint typed into the form
+  /// speaks Converse without anybody choosing a protocol; [hasBearer] follows
+  /// [boxKeyStored] and is honest about the window before the keychain has
+  /// answered.
+  LlmTargetSpec get boxBulkSpec => LlmTargetSpec(
+        id: boxBulkId,
+        name: boxBulkName,
+        url: effectiveBoxSmallUrl,
+        model: effectiveBoxSmallModel,
+        wire: wireForHost(effectiveBoxSmallUrl),
+        hasBearer: boxKeyStored,
+        parallel: boxSmallUrl.isEmpty ? 4 : 1,
+      );
+
+  /// The box's writing target, on [boxBulkSpec]'s rule.
+  LlmTargetSpec get boxProseSpec => LlmTargetSpec(
+        id: boxProseId,
+        name: boxProseName,
+        url: effectiveBoxBigUrl,
+        model: effectiveBoxBigModel,
+        wire: wireForHost(effectiveBoxBigUrl),
+        hasBearer: boxKeyStored,
+        parallel: boxBigUrl.isEmpty ? 4 : 1,
+      );
+
+  /// Every target a stage may be pointed at: the two built-ins, the box's two
+  /// when there is an address for them, and the ones the user added.
+  List<LlmTargetSpec> get allTargets => [
+        fastSpec,
+        proseSpec,
+        if (hasBox) ...[boxBulkSpec, boxProseSpec],
+        ...targets,
+      ];
 
   /// One target by id, or null when nothing carries it.
   LlmTargetSpec? specById(String id) {
@@ -461,8 +617,21 @@ class AppPrefs {
     return null;
   }
 
+  /// Where a stage goes when nothing is stored for it — the placement rule,
+  /// read through this install's address and placement.
+  ///
+  /// The one door between [placementDefaultTargetId] and everything that asks
+  /// a routing question, so that the rule is stated once and the three methods
+  /// that mean "equal to the default, so store nothing" all mean the same
+  /// thing by it.
+  String? defaultTargetIdForStage(String stageId) => placementDefaultTargetId(
+        placement: modelPlacement,
+        hasBox: hasBox,
+        stageId: stageId,
+      );
+
   /// Which target id a stage resolves to: the stored entry when it names a
-  /// target that still exists, and the slot's default otherwise.
+  /// target that still exists, and the placement's default otherwise.
   ///
   /// Null for `embeddings`, which is not routed at all, and for an optional
   /// stage with no valid entry — that is what "the feature is off" looks like
@@ -470,21 +639,18 @@ class AppPrefs {
   String? targetIdForStage(String stageId) {
     final stored = stageTargets[stageId];
     if (stored != null && specById(stored) != null) return stored;
-    if (stageIsOptional(stageId)) return null;
-    final slot = stageSlot(stageId);
-    if (slot == ModelSlot.embed) return null;
-    return defaultTargetIdFor(slot);
+    return defaultTargetIdForStage(stageId);
   }
 
   /// The spec a stage will dial, with the consent rule applied.
   ///
-  /// A THIRD-PARTY target on `draft_reply` without [cloudDraftsConsent]
-  /// resolves to the prose default instead, and on `draft_improve` to null —
-  /// the two stages whose prompt carries the message, the thread tail and
-  /// whatever the directories contributed. Consent is checked HERE rather than
-  /// only on the screen that sets it so that a stage map restored from a
-  /// backup, or edited by hand, cannot route a draft off this machine on its
-  /// own. Never null for a non-optional chat stage.
+  /// A THIRD-PARTY target on either drafting stage without
+  /// [cloudDraftsConsent] resolves to [draftFallbackSpec] instead — the two
+  /// stages whose prompt carries the message, the thread tail and whatever the
+  /// directories contributed. Consent is checked HERE rather than only on the
+  /// screen that sets it so that a stage map restored from a backup, or edited
+  /// by hand, cannot route a draft off this machine on its own. Never null for
+  /// a chat stage.
   LlmTargetSpec? specForStage(String stageId) {
     final id = targetIdForStage(stageId);
     if (id == null) return null;
@@ -492,10 +658,29 @@ class AppPrefs {
     if (spec == null) return null;
     final gated = draftStageIds.contains(stageId);
     if (gated && spec.isThirdParty && !cloudDraftsConsent) {
-      return stageIsOptional(stageId) ? null : proseSpec;
+      return draftFallbackSpec;
     }
     return spec;
   }
+
+  /// Where a gated draft goes instead: the box's writing target on the box,
+  /// and the built-in prose target here.
+  ///
+  /// It FOLLOWS THE PLACEMENT, which it did not before Round H. A box install
+  /// that withdrew cloud-drafts consent used to have its drafts fall back to a
+  /// local port with no server behind it, and the lane parked. The fallback
+  /// has to be somewhere the work can actually run.
+  ///
+  /// And never to a THIRD PARTY. A big address under Bedrock or a vendor is
+  /// exactly what the consent gate refused, so falling back onto it would send
+  /// the draft to the operator the owner declined; this Mac's own prose target
+  /// is the honest answer there.
+  LlmTargetSpec get draftFallbackSpec =>
+      modelPlacement == ModelPlacement.box &&
+              hasBox &&
+              !boxProseSpec.isThirdParty
+          ? boxProseSpec
+          : proseSpec;
 
   /// The folder the router is pointed at: the user's choice, or the app's own
   /// `models/` under Application Support when they have not made one.
@@ -520,6 +705,14 @@ class AppPrefs {
     NeedsYouSort? needsYouSort,
     DraftPolicy? draftPolicy,
     ModelPlacement? modelPlacement,
+    String? boxBigUrl,
+    String? boxSmallUrl,
+    String? boxBigModel,
+    String? boxSmallModel,
+    bool? boxKeyStored,
+    bool? boxBigKeyStored,
+    bool? boxSmallKeyStored,
+    bool? processingOn,
     PeopleSort? peopleSort,
     RoomSort? roomSort,
     NotifyStyle? notifyStyle,
@@ -553,6 +746,14 @@ class AppPrefs {
         needsYouSort: needsYouSort ?? this.needsYouSort,
         draftPolicy: draftPolicy ?? this.draftPolicy,
         modelPlacement: modelPlacement ?? this.modelPlacement,
+        boxBigUrl: boxBigUrl ?? this.boxBigUrl,
+        boxSmallUrl: boxSmallUrl ?? this.boxSmallUrl,
+        boxBigModel: boxBigModel ?? this.boxBigModel,
+        boxSmallModel: boxSmallModel ?? this.boxSmallModel,
+        boxKeyStored: boxKeyStored ?? this.boxKeyStored,
+        boxBigKeyStored: boxBigKeyStored ?? this.boxBigKeyStored,
+        boxSmallKeyStored: boxSmallKeyStored ?? this.boxSmallKeyStored,
+        processingOn: processingOn ?? this.processingOn,
         peopleSort: peopleSort ?? this.peopleSort,
         roomSort: roomSort ?? this.roomSort,
         notifyStyle: notifyStyle ?? this.notifyStyle,
@@ -599,9 +800,10 @@ const String proseLlmModelKey = 'prose_llm_model';
 const String mailLookbackDaysKey = 'mail_lookback_days';
 const String teamsLookbackDaysKey = 'teams_lookback_days';
 
-/// The managed server's three keys. Not in `wipeAll`'s list, deliberately:
-/// see [AppPrefs.managedServer].
-const String managedServerKey = 'managed_server';
+/// The managed server's two remaining keys. Not in `wipeAll`'s list,
+/// deliberately: which server this machine runs is a fact about the machine.
+/// Whether the app runs one at all is no longer stored — see
+/// [AppPrefs.managedServer] and `managedServerDefault`.
 const String routerPortKey = 'router_port';
 const String modelsFolderKey = 'models_folder';
 
@@ -626,6 +828,52 @@ const String cloudDraftsConsentKey = 'cloud_drafts_consent';
 /// for their reason: whether this Mac reaches the shared GPU box is not a fact
 /// about whoever is signed in.
 const String modelPlacementKey = 'model_placement';
+
+/// The user-defined pair: two chat-completions URLs and the two model names
+/// discovered behind them, each empty for "follow the build". Machine
+/// configuration like [modelPlacementKey] beside them and out of `wipeAll`'s
+/// list for its reason.
+const String boxBigUrlKey = 'box_big_url';
+const String boxSmallUrlKey = 'box_small_url';
+const String boxBigModelKey = 'box_big_model';
+const String boxSmallModelKey = 'box_small_model';
+
+/// The ONE origin the four keys above replaced, kept for the two migrations
+/// that read it and written by nothing. Round G stored the box as an origin
+/// and derived both URLs from it; Round H splits it in two.
+const String boxUrlKey = 'box_url';
+
+/// Whether model work runs. Machine configuration on the same rule: a person
+/// who stood the models down did so about this Mac, not about the mailbox.
+const String processingOnKey = 'processing_on';
+
+/// The one-shot flag over the Round G box rows, written once by
+/// [AppPrefsNotifier.read] after it has lifted a stored pair into
+/// [boxUrlKey].
+///
+/// A PLAIN pref and deliberately NOT in `MessageStore.derivedOneShotPrefs`:
+/// that list is what `wipeAll` and `clearDerived` delete so a walk runs again
+/// over a corpus they emptied, and this flag guards no corpus. A wipe leaves
+/// no stored rows to migrate, so re-running it would be work over nothing.
+const String boxTargetsDerivedKey = 'box_targets_derived';
+
+/// The one-shot flag over the [boxUrlKey] split, written once by
+/// [AppPrefsNotifier.read] after it has turned a stored origin into the two
+/// URLs the pair is made of now.
+///
+/// A PLAIN pref on [boxTargetsDerivedKey]'s rule and for its reason: it guards
+/// no corpus, and a wipe leaves no address to split.
+const String boxServersDerivedKey = 'box_servers_derived';
+
+/// The one-shot flag over the per-step picks, written once by
+/// [AppPrefsNotifier.read] after it has emptied [stageTargetsKey].
+///
+/// Round H deleted the stage picker, and a pick stored by the screen that is
+/// gone would route a stage somewhere nothing on screen could show. The
+/// `llm_targets` rows are left where they are: with no entry naming one they
+/// are inert, and deleting them would ask for a keychain sweep for no visible
+/// payoff. A PLAIN pref on [boxTargetsDerivedKey]'s rule.
+const String stageTargetsClearedKey = 'stage_targets_cleared';
 
 /// The two cloud-draft rules the consent stands in front of. Machine
 /// configuration like the three keys above and out of `wipeAll`'s list for
@@ -698,20 +946,26 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     state = prefs;
   }
 
-  /// Fills the bearer cache from the keychain, once.
+  /// Fills the bearer cache from the keychain, once, and records whether the
+  /// box's key is among what came back.
   ///
-  /// A no-op with no keychain and a no-op when no target claims a token, which
-  /// is every fresh install and every existing one. Guarded whole: a keychain
-  /// that refuses costs the header on the next request — one 401 the user can
-  /// see and act on — and never the launch.
+  /// A no-op with no keychain. Guarded whole: a keychain that refuses costs
+  /// the header on the next request — one 401 the user can see and act on —
+  /// and never the launch.
+  ///
+  /// The two box ids are asked for UNCONDITIONALLY, unlike the stored rows,
+  /// because the derived specs have no row to carry a presence flag on: the
+  /// keychain is the only thing that knows, and a miss is one absent entry the
+  /// per-id try already swallows.
   Future<void> _loadBearers() async {
     final tokens = _tokens;
     if (tokens == null) return;
-    final wanted = [
+    final wanted = <String>{
       for (final spec in state.targets)
         if (spec.hasBearer) spec.id,
-    ];
-    if (wanted.isEmpty) return;
+      boxProseId,
+      boxBulkId,
+    };
     for (final id in wanted) {
       // The try sits INSIDE the loop: one key the keychain refuses costs that
       // one target its header, not every target after it in the list.
@@ -723,6 +977,19 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
         // exception carries a key name and nothing else worth a log line.
       }
     }
+    // The flags move only now, which is what makes the window honest: until
+    // this line every derived box spec has said `hasBearer: false`. Either
+    // entry counts for [AppPrefs.boxKeyStored], because a keychain that kept
+    // one and lost the other still holds a key; the two per-id flags are what
+    // the form's hints read, since the two addresses may name two operators.
+    if (!mounted) return;
+    final big = _bearers.containsKey(boxProseId);
+    final small = _bearers.containsKey(boxBulkId);
+    state = state.copyWith(
+      boxKeyStored: big || small,
+      boxBigKeyStored: big,
+      boxSmallKeyStored: small,
+    );
   }
 
   /// Where a stage's next request goes, bearer included.
@@ -739,8 +1006,9 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// One target's stored token, or null when there is none.
   ///
   /// The ONLY door onto [_bearers] besides [targetForStage], and it exists
-  /// for exactly one caller: **Check server**, which must reach a keyed
-  /// endpoint rather than report its 401. One token, by id, for one request.
+  /// for exactly two callers, both through `storedBearer`: the role rows'
+  /// **Check** and the form's **Connect**, which must reach a keyed endpoint
+  /// rather than report its 401. One token, by id, for one request.
   /// What comes back never enters widget state, a `ProbeStatus`, a log line,
   /// an activity row or a test expectation. Null when nothing is stored and
   /// in every build with no keychain, which is every `flutter test` that
@@ -752,6 +1020,13 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// falls back to the default rather than throwing: a bad preference must not
   /// be able to stop the app from starting.
   static Future<AppPrefs> read(MessageStore store) async {
+    // The THREE one-shots, in this order and no other. The Round G derive
+    // needs the old `box-prose` row and writes [boxUrlKey]; the split reads
+    // what it wrote; the clear runs last, because both of the others can leave
+    // stage entries behind and the clear is what empties the lot.
+    await _deriveBoxTargets(store);
+    await _splitBoxServers(store);
+    await _clearStageTargets(store);
     final raw = await store.getPref(attentionThresholdKey);
     return AppPrefs(
       attentionThreshold: (raw == null ? null : double.tryParse(raw)) ??
@@ -785,8 +1060,16 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       modelPlacement: _enumOrDefault(
         ModelPlacement.values,
         await store.getPref(modelPlacementKey),
-        ModelPlacement.local,
+        defaultModelPlacement,
       ),
+      boxBigUrl: _slotValue(await store.getPref(boxBigUrlKey)),
+      boxSmallUrl: _slotValue(await store.getPref(boxSmallUrlKey)),
+      boxBigModel: _slotValue(await store.getPref(boxBigModelKey)),
+      boxSmallModel: _slotValue(await store.getPref(boxSmallModelKey)),
+      // Defaults ON, so the read is [contextSelectExpand]'s inverse: only the
+      // one spelling the setter writes reads as off, and an absent key leaves
+      // a fresh install working.
+      processingOn: await store.getPref(processingOnKey) != 'false',
       peopleSort: _enumOrDefault(
         PeopleSort.values,
         await store.getPref(peopleSortKey),
@@ -814,11 +1097,6 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       proseLlmModel: _slotValue(await store.getPref(proseLlmModelKey)),
       mailLookbackDays: _lookback(await store.getPref(mailLookbackDaysKey)),
       teamsLookbackDays: _lookback(await store.getPref(teamsLookbackDaysKey)),
-      // Only the string this notifier writes reads as on — an absent key, a
-      // hand-edited value, a build that meant something else — all of them
-      // leave the app expecting hand-started servers, which is the state every
-      // existing install is in.
-      managedServer: await store.getPref(managedServerKey) == 'true',
       routerPort: _routerPort(await store.getPref(routerPortKey)),
       modelsFolder: _slotValue(await store.getPref(modelsFolderKey)),
       proseParallel: _proseParallel(await store.getPref(proseParallelKey)),
@@ -834,6 +1112,111 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       cloudDraftsDailyCap:
           _cloudDraftsDailyCap(await store.getPref(cloudDraftsDailyCapKey)),
     );
+  }
+
+  /// Turns a Round G install's two stored box rows into the one address the
+  /// placement rule derives them from. Runs at most once per install.
+  ///
+  /// Round G adopted the box by WRITING two `llm_targets` rows and fifteen
+  /// `stage_targets` entries. Round H derives both from [boxUrlKey] and the
+  /// placement, so a surviving pair would shadow the derived specs: the id
+  /// would appear twice in [AppPrefs.allTargets] and the stage picker asserts
+  /// on a duplicate dropdown value. This lifts the origin out of the writing
+  /// row, drops the pair, and drops every stage entry that now equals what the
+  /// rule answers anyway — a hand-picked target is not one of those and
+  /// survives.
+  ///
+  /// The KEYCHAIN is untouched: the two entries are still keyed
+  /// `llm_target_bearer:box-prose` and `:box-bulk`, which is exactly what the
+  /// derived specs ask for, so nobody has to type the key again.
+  ///
+  /// The only writer in this otherwise read-only path, and it is here rather
+  /// than at a call site because every door onto the prefs goes through
+  /// [read]: `main()` before the first frame, the notifier's own load, and the
+  /// tests. There is no other hook.
+  static Future<void> _deriveBoxTargets(MessageStore store) async {
+    if (await store.getPref(boxTargetsDerivedKey) == '1') return;
+    final decoded = _json(await store.getPref(llmTargetsKey));
+    if (decoded is List) {
+      final kept = <Map<String, Object?>>[];
+      var base = '';
+      var found = false;
+      for (final row in decoded) {
+        final spec = LlmTargetSpec.tryParse(row);
+        if (spec == null) {
+          // A row this build cannot read is kept VERBATIM rather than dropped:
+          // this is a migration of the two box rows, not a cleanup of the
+          // list, and a newer build's row is not ours to lose.
+          if (row is Map<String, Object?>) kept.add(row);
+          continue;
+        }
+        if (!spec.isBox) {
+          kept.add(spec.toJson());
+          continue;
+        }
+        found = true;
+        if (spec.id == boxProseId) base = boxBaseFromProseUrl(spec.url);
+      }
+      if (found) {
+        // Only when it differs from what this build already carries: storing
+        // the compiled address would freeze today's define into the database,
+        // which is the thing [AppPrefs.boxBigUrl]'s empty means to avoid.
+        if (base.isNotEmpty && base != normalizeBoxBaseUrl(boxUrlDefault)) {
+          await store.setPref(boxUrlKey, base);
+        }
+        await store.setPref(llmTargetsKey, jsonEncode(kept));
+        // The fifteen entries the Round G adopt wrote are not dropped here any
+        // more: [_clearStageTargets] runs straight after this in the same
+        // `read` and empties the map whole, so a narrower drop would be work
+        // the next statement undoes.
+      }
+    }
+    await store.setPref(boxTargetsDerivedKey, '1');
+  }
+
+
+  /// Turns a stored box ORIGIN into the two addresses the pair is made of.
+  /// Runs at most once per install.
+  ///
+  /// Round G, and part one of Round H, kept one origin and derived
+  /// `/prose/v1/chat/completions` and `/bulk/v1/chat/completions` from it.
+  /// Part two lets a person name two servers, so the derivation moves out of
+  /// the getters and into the data: the origin is split here, once, and
+  /// [boxUrlKey] is emptied so nothing reads it again.
+  ///
+  /// A NO-OP for every install that followed the build, which is every install
+  /// that never typed an address: there is nothing stored to split, and the
+  /// two getters go on deriving from the compiled default exactly as before.
+  static Future<void> _splitBoxServers(MessageStore store) async {
+    if (await store.getPref(boxServersDerivedKey) == '1') return;
+    final stored = _slotValue(await store.getPref(boxUrlKey));
+    if (stored.isNotEmpty) {
+      final base = normalizeBoxBaseUrl(stored);
+      await store.setPref(boxBigUrlKey, '$base/prose/v1/chat/completions');
+      await store.setPref(boxSmallUrlKey, '$base/bulk/v1/chat/completions');
+      // Emptied rather than dropped: `app_prefs` has no delete a reader above
+      // here can call, and an empty value is exactly what every reader of this
+      // table means by absent.
+      await store.setPref(boxUrlKey, '');
+    }
+    await store.setPref(boxServersDerivedKey, '1');
+  }
+
+  /// Empties the per-step picks, once.
+  ///
+  /// The stage picker was the only way to write one and Round H deleted it, so
+  /// a surviving entry would send a stage to a server no screen in the app
+  /// mentions — and outrank the placement rule while doing it. The user's own
+  /// `llm_targets` rows are deliberately left alone: nothing points at them
+  /// any more, which makes them inert rather than wrong.
+  static Future<void> _clearStageTargets(MessageStore store) async {
+    if (await store.getPref(stageTargetsClearedKey) == '1') return;
+    // Emptied only when there is something to empty, so a fresh install
+    // writes the flag and nothing else.
+    if ((await store.getPref(stageTargetsKey) ?? '').isNotEmpty) {
+      await store.setPref(stageTargetsKey, '');
+    }
+    await store.setPref(stageTargetsClearedKey, '1');
   }
 
   /// A stored cap, or fifty. [_proseParallel]'s rule and its reason: a number
@@ -852,6 +1235,12 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// derived and a stored copy would shadow the live slot prefs; and a
   /// duplicate id keeps the first, because the alternative is two rows one
   /// stage map entry cannot choose between.
+  ///
+  /// A row claiming a BOX id is dropped for the built-ins' reason, and it is
+  /// the belt to [_deriveBoxTargets]' braces: a pair that survived the
+  /// migration — restored from a backup, or written by a build in between —
+  /// would put the same id in [AppPrefs.allTargets] twice, and the stage
+  /// picker asserts on a duplicate dropdown value.
   static List<LlmTargetSpec> _targets(String? raw) {
     final decoded = _json(raw);
     if (decoded is! List) return const [];
@@ -859,7 +1248,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     final specs = <LlmTargetSpec>[];
     for (final row in decoded) {
       final spec = LlmTargetSpec.tryParse(row);
-      if (spec == null || spec.isBuiltIn) continue;
+      if (spec == null || spec.isFixed) continue;
       if (!seen.add(spec.id)) continue;
       specs.add(spec);
     }
@@ -1120,20 +1509,6 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _store.setPref(teamsLookbackDaysKey, clamped.toString());
   }
 
-  /// Whether the app runs the model server itself.
-  ///
-  /// The state change is the whole mechanism for the TARGETS — every one of
-  /// them is composed above from this flag — but starting or stopping the
-  /// process is the caller's job, not this notifier's: prefs know nothing
-  /// about a supervisor, and the screen that flips this switch is the one
-  /// place that can also say "and start it".
-  ///
-  /// State first, then the write, like every setter above.
-  Future<void> setManagedServer(bool value) async {
-    state = state.copyWith(managedServer: value);
-    await _store.setPref(managedServerKey, value.toString());
-  }
-
   /// Moves the managed router's port. Clamped on the way in as well as on the
   /// way out — [_routerPort] guards the read, and this guards a caller that
   /// hands over a number no control on screen could have produced.
@@ -1174,14 +1549,16 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   ///
   /// The keychain first and the pref after it, because a spec that claims a
   /// token the keychain refused would send an unauthenticated request every
-  /// time. Throws on a built-in id: those two are derived from the slot prefs
-  /// and are edited through the slot editors.
+  /// time. Throws on a DERIVED id: the two built-ins come from the slot prefs
+  /// and are edited through the slot editors, and the two box targets come
+  /// from [boxUrlKey] and are edited by changing that one address.
   Future<void> upsertTarget(LlmTargetSpec spec, {String? bearer}) async {
-    if (spec.isBuiltIn) {
+    if (spec.isFixed) {
       throw ArgumentError.value(
         spec.id,
         'spec.id',
-        'the built-in targets are derived from the slot prefs',
+        'the derived targets are not rows: edit the slot prefs or the box '
+            'address',
       );
     }
     final key = '$llmTargetBearerKeyPrefix${spec.id}';
@@ -1215,10 +1592,12 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// as defaults, because a stale entry would silently re-point those stages
   /// the day somebody added a target with the same id back.
   ///
-  /// A no-op for a built-in id — they cannot be removed — and for an id
-  /// nothing carries.
+  /// A no-op for a DERIVED id — neither the two built-ins nor the two box
+  /// targets are rows, so there is nothing to remove — and for an id nothing
+  /// carries.
   Future<void> removeTarget(String id) async {
     if (id == builtInFastId || id == builtInProseId) return;
+    if (id == boxProseId || id == boxBulkId) return;
     if (!state.targets.any((spec) => spec.id == id)) return;
 
     _bearers.remove(id);
@@ -1240,9 +1619,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// Points one stage at one target.
   ///
   /// Writing the stage's own DEFAULT removes the entry instead of storing it,
-  /// so the map holds non-defaults only and a fresh install stays empty. An
-  /// OPTIONAL stage is the exception: there the entry IS the feature being
-  /// turned on, so it is stored even when it names the slot's default target.
+  /// so the map holds non-defaults only and a fresh install stays empty.
   ///
   /// A no-op for an unknown target id and for `embeddings`, which is not
   /// routed at all.
@@ -1250,11 +1627,11 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     if (stageId == 'embeddings') return;
     if (state.specById(targetId) == null) return;
 
-    final slot = stageSlot(stageId);
-    final optional = stageIsOptional(stageId);
-    final isDefault =
-        slot != ModelSlot.embed && targetId == defaultTargetIdFor(slot);
-    if (isDefault && !optional) return clearStageTarget(stageId);
+    // The PLACEMENT's default, not the slot's: on the box, picking `box-bulk`
+    // for the storyline confirm is a real override and has to be stored,
+    // while picking `box-prose` there is the rule and stores nothing.
+    final isDefault = targetId == state.defaultTargetIdForStage(stageId);
+    if (isDefault) return clearStageTarget(stageId);
 
     if (state.stageTargets[stageId] == targetId) return;
     final map = {...state.stageTargets, stageId: targetId};
@@ -1262,8 +1639,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _writeStageTargets(map);
   }
 
-  /// Puts a stage back on its default target — and, for an optional stage,
-  /// turns its feature off again.
+  /// Puts a stage back on its default target.
   Future<void> clearStageTarget(String stageId) async {
     if (!state.stageTargets.containsKey(stageId)) return;
     final map = {...state.stageTargets}..remove(stageId);
@@ -1304,10 +1680,10 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       // theirs, and a preset that silently reset it would be a second
       // surprise on top of the one this guard exists to prevent.
       if (skipDrafts && draftStageIds.contains(stageId)) continue;
-      final slot = stageSlot(stageId);
-      final isDefault =
-          slot != ModelSlot.embed && targetId == defaultTargetIdFor(slot);
-      if (isDefault && !stageIsOptional(stageId)) {
+      // The placement's default, on [setStageTarget]'s rule and for its
+      // reason.
+      final isDefault = targetId == state.defaultTargetIdForStage(stageId);
+      if (isDefault) {
         map.remove(stageId);
       } else {
         map[stageId] = targetId;
@@ -1332,11 +1708,13 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// It overwrites a pick the owner made on one of those six: the button's
   /// caption says which stages it rewrites, and nothing is destroyed because
   /// any stage can be re-picked from the same section. The bulk stages, the
-  /// confirm stage, `draft_improve`, the targets themselves, the consent and
-  /// the bearers are all untouched. Calling it twice changes nothing.
+  /// confirm stage, the targets themselves, the consent and the bearers are
+  /// all untouched. `draft_improve` is one of the seven prose stages since
+  /// Round H, so the inbox tier moves it onto the small model with the rest of
+  /// them. Calling it twice changes nothing.
   Future<void> applyTierDefaults(MachineTier tier) async {
-    // [MachineTier.remote] is a PLACEMENT, and [adoptBox] owns its stage map.
-    // Falling through would clear every governed stage back to a local
+    // [MachineTier.remote] is a PLACEMENT, and [usePlacement] owns its stage
+    // map. Falling through would clear every governed stage back to a local
     // built-in, because `wanted[stageId]` is null for all of them there — the
     // box's picks would be undone by the very call meant to leave them alone.
     if (tier == MachineTier.remote) return;
@@ -1348,13 +1726,12 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     for (final stageId in governed) {
       final slot = stageSlot(stageId);
       if (slot == ModelSlot.embed) continue;
+      // The SLOT's default and deliberately not the placement's, unlike
+      // [setStageTarget] and [applyPreset]: this method runs only on the local
+      // placement, and reading the placement's default here would have it
+      // remove box entries it was never meant to see.
       final fallback = defaultTargetIdFor(slot);
       final targetId = wanted[stageId] ?? fallback;
-      // No `stageIsOptional` guard, unlike [setStageTarget] and [applyPreset]:
-      // an optional stage's entry IS the feature being turned on, and a tier
-      // that named one would be turning it on for a machine's size rather than
-      // because somebody asked. No tier names one, `llm_targets_test` pins
-      // that, and removing on the default is the right read either way.
       if (targetId == fallback) {
         map.remove(stageId);
       } else {
@@ -1375,104 +1752,229 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _store.setPref(modelPlacementKey, value.name);
   }
 
-  /// Points this install at the shared GPU box: two targets, one key, the
-  /// stage map, the draft policy and the placement, in one call.
+  /// Records where the two models run: two addresses and the two model names
+  /// discovered behind them. Empty is not an answer for either address.
   ///
-  /// [baseUrl] is the box's root, `https://box.example.com`; the two
-  /// completions URLs are derived from it, because the two path prefixes are
-  /// the endpoint's contract rather than anything a person should have to
-  /// type. [bearer] is a SECRET: it reaches the keychain under both target
-  /// ids through [upsertTarget] and goes nowhere else. Adopting twice
-  /// REPLACES the pair rather than stacking duplicates, because the ids are
-  /// fixed.
+  /// What is STORED is the empty string wherever the value equals what this
+  /// build already derives, which is [AppPrefs.boxBigUrl]'s whole meaning: an
+  /// install that agrees with its build follows the build, and a changed
+  /// define reaches it.
   ///
-  /// Two presets rather than a stage map written out here, deliberately: the
-  /// preset sets are pinned against `pipelineStages` by `model_slots_test`,
-  /// and a map written in this method would be a second copy of the stage
-  /// table that nothing keeps honest. The cost is one extra `stage_targets`
-  /// write, once.
-  ///
-  /// NOT ATOMIC, and it cannot be: the two targets, the stage map, the draft
-  /// policy and the placement are four preference writes. A throw partway
-  /// leaves the earlier ones standing, which is an install with one box target
-  /// and no placement rather than a corrupt one, and a second adopt repairs it
-  /// because both target ids are fixed and both presets are idempotent.
-  ///
-  /// Throws [ArgumentError] on a [baseUrl] that is not an http or https origin.
-  /// Both doors in front of this one already refuse an empty field, so the
-  /// guard is a last line rather than the validation: what it stops is two
-  /// targets nothing can dial and a placement that parks the whole pipeline.
-  Future<void> adoptBox({
-    required String baseUrl,
-    required String bearer,
+  /// Throws [ArgumentError] on an address that is not an http or https URL,
+  /// on a big address whose host belongs to a third party while
+  /// [AppPrefs.cloudDraftsConsent] is false, and on a SMALL address whose
+  /// host belongs to a third party at all: the consent covers drafts on the
+  /// big model, and no cloud service serves the small role from any screen,
+  /// because that role reads every message body. The form in front of this
+  /// one refuses all three before the press arrives; the guards are a last
+  /// line, and what they stop is a target nothing can dial and message text
+  /// leaving this machine for an operator nobody agreed to.
+  Future<void> setBoxServers({
+    required String bigUrl,
+    required String smallUrl,
+    required String bigModel,
+    required String smallModel,
   }) async {
-    final base = normalizeBoxBaseUrl(baseUrl);
-    final origin = Uri.tryParse(base);
-    if (origin == null ||
-        (origin.scheme != 'http' && origin.scheme != 'https') ||
-        origin.host.isEmpty) {
+    final big = normalizeBoxBaseUrl(bigUrl);
+    final small = normalizeBoxBaseUrl(smallUrl);
+    for (final url in [big, small]) {
+      if (!isBoxOrigin(url)) {
+        throw ArgumentError.value(url, 'url', 'must be an http or https URL');
+      }
+    }
+    if (isThirdPartyHost(big) && !state.cloudDraftsConsent) {
       throw ArgumentError.value(
-        baseUrl,
-        'baseUrl',
-        'must be an http or https origin',
+        big,
+        'bigUrl',
+        'a third-party server needs cloud drafts consent first',
       );
     }
-
-    await upsertTarget(
-      LlmTargetSpec(
-        id: boxProseId,
-        name: boxProseName,
-        url: '$base/prose/v1/chat/completions',
-        model: boxProseModel,
-        parallel: 4,
-        streams: true,
-      ),
-      bearer: bearer,
+    if (isThirdPartyHost(small) ||
+        wireForHost(small) == LlmWire.bedrockConverse) {
+      throw ArgumentError.value(
+        small,
+        'smallUrl',
+        'the small model runs on a server of your own; a third-party '
+        'service can serve the big model only',
+      );
+    }
+    final compiled = normalizeBoxBaseUrl(boxUrlDefault);
+    final storedBig =
+        big == '$compiled/prose/v1/chat/completions' && compiled.isNotEmpty
+            ? ''
+            : big;
+    final storedSmall =
+        small == '$compiled/bulk/v1/chat/completions' && compiled.isNotEmpty
+            ? ''
+            : small;
+    final storedBigModel = bigModel.trim() == boxProseModel ? '' : bigModel.trim();
+    final storedSmallModel =
+        smallModel.trim() == boxBulkModel ? '' : smallModel.trim();
+    state = state.copyWith(
+      boxBigUrl: storedBig,
+      boxSmallUrl: storedSmall,
+      boxBigModel: storedBigModel,
+      boxSmallModel: storedSmallModel,
     );
-    await upsertTarget(
-      LlmTargetSpec(
-        id: boxBulkId,
-        name: boxBulkName,
-        url: '$base/bulk/v1/chat/completions',
-        model: boxBulkModel,
-        parallel: 4,
-        streams: true,
-      ),
-      bearer: bearer,
-    );
-
-    // ORDER IS LOAD BEARING. `storyline_membership` is in BOTH [bulkStageIds]
-    // and [confirmStageIds], so whichever preset runs second owns it. The box
-    // row of record puts the confirm on the 27B (84 of 98, 8% wrong accepts),
-    // so prose-and-confirm runs SECOND and leaves it on the writing slot.
-    // Swap these two lines and the confirm silently drops to the 4B with no
-    // code looking wrong, which is what the pinning test in
-    // `llm_targets_test.dart` exists to catch.
-    await applyPreset(targetId: boxBulkId, bulk: true);
-    await applyPreset(targetId: boxProseId, prose: true, confirm: true);
-
-    await setModelPlacement(ModelPlacement.box);
-    await setDraftPolicy(DraftPolicy.needsYou);
+    await _store.setPref(boxBigUrlKey, storedBig);
+    await _store.setPref(boxSmallUrlKey, storedSmall);
+    await _store.setPref(boxBigModelKey, storedBigModel);
+    await _store.setPref(boxSmallModelKey, storedSmallModel);
   }
 
-  /// Puts this install back on its own models: the placement, both box
-  /// targets and their keychain entries gone, and [tier]'s defaults applied.
+  /// Puts an access key in the keychain, PER SERVER.
   ///
-  /// [removeTarget] already drops each id's token and every stage pointed at
-  /// it, so the bulk stages fall back to the built-in fast target before
-  /// [applyTierDefaults] re-writes the prose picks. The placement moves FIRST
-  /// so that a rebuild racing the removals reads this Mac rather than a box
-  /// with no targets behind it.
-  Future<void> adoptLocal(MachineTier tier) async {
-    await setModelPlacement(ModelPlacement.local);
-    await removeTarget(boxProseId);
-    await removeTarget(boxBulkId);
-    await applyTierDefaults(tier);
+  /// A SECRET: it reaches the keychain, the private bearer cache and the
+  /// `Authorization` header, and nothing else. What [state] gains is three
+  /// booleans.
+  ///
+  /// One token per id, because the two addresses may name two operators and a
+  /// key for one must never be sent to the other. The form passes the same
+  /// token twice when the two addresses share a host, which is the ordinary
+  /// case: one server serving both roles under two path prefixes.
+  ///
+  /// A no-op on an omitted or empty token, so a Connect with a blank field
+  /// cannot replace a good key with nothing.
+  Future<void> setBoxKey({String? big, String? small}) async {
+    var bigStored = state.boxBigKeyStored;
+    var smallStored = state.boxSmallKeyStored;
+    for (final entry in [(boxProseId, big), (boxBulkId, small)]) {
+      final token = entry.$2?.trim() ?? '';
+      if (token.isEmpty) continue;
+      _bearers[entry.$1] = token;
+      await _writeToken('$llmTargetBearerKeyPrefix${entry.$1}', token);
+      if (entry.$1 == boxProseId) {
+        bigStored = true;
+      } else {
+        smallStored = true;
+      }
+    }
+    state = state.copyWith(
+      boxKeyStored: bigStored || smallStored,
+      boxBigKeyStored: bigStored,
+      boxSmallKeyStored: smallStored,
+    );
+  }
+
+  /// Forgets the box's key, both entries at once.
+  ///
+  /// A no-op when there is nothing to forget, which is every install that
+  /// never typed one. Not an optimisation: a keychain write is a platform
+  /// channel round trip, and making the first run take two of them to delete
+  /// nothing is how a wizard step stops advancing within the pumps its test
+  /// gives it.
+  Future<void> clearBoxKey() async {
+    final stored = state.boxKeyStored ||
+        _bearers.containsKey(boxProseId) ||
+        _bearers.containsKey(boxBulkId);
+    // Decided from the cache, not the keychain, and NOT behind `ready`: a
+    // clear that lands before the prefetch returns would keep a stored key,
+    // but the only caller that early is code, never a button, and waiting for
+    // `ready` here holds the wizard's This Mac choice behind the whole prefs
+    // load, which is dozens of store reads. The cache is the honest answer
+    // for every press a person can make.
+    if (!stored) return;
+    for (final id in [boxProseId, boxBulkId]) {
+      _bearers.remove(id);
+      await _writeToken('$llmTargetBearerKeyPrefix$id', null);
+    }
+    state = state.copyWith(
+      boxKeyStored: false,
+      boxBigKeyStored: false,
+      boxSmallKeyStored: false,
+    );
+  }
+
+  /// Remembers whether model work runs. State first and the write after it,
+  /// like every setter here.
+  Future<void> setProcessingOn(bool value) async {
+    state = state.copyWith(processingOn: value);
+    await _store.setPref(processingOnKey, value.toString());
+  }
+
+  /// Moves this install between the two placements, and clears out the stage
+  /// entries the app itself wrote.
+  ///
+  /// The placement is a RULE since Round H, so moving it re-answers every
+  /// stage that has no entry of its own. What would spoil that is a stored
+  /// entry the app wrote under the old placement: it outranks the rule, so a
+  /// machine that had been on the box would keep dialling it stage by stage.
+  ///
+  /// An entry is dropped exactly when its value is one the app itself could
+  /// have written: either box id, the slot's own built-in, or what the inbox
+  /// tier writes (the box rule's own answers are the two box ids, so they
+  /// need no clause of their own). A hand-picked `local-prose` on a bulk stage
+  /// is in none of those and survives, as does every user target — those are
+  /// choices somebody made, and a placement switch is not permission to undo
+  /// them.
+  ///
+  /// [hardwareTier] is what THIS MAC could run, never the effective tier: on
+  /// the way back to local the tier's own picks are applied, and the effective
+  /// tier reads [MachineTier.remote] right up until the placement moves.
+  Future<void> usePlacement(
+    ModelPlacement placement, {
+    required MachineTier hardwareTier,
+  }) async {
+    await setModelPlacement(placement);
+
+    final inboxTier = tierStageDefaults(MachineTier.inbox);
+    final kept = <String, String>{};
+    state.stageTargets.forEach((stageId, targetId) {
+      final slot = stageSlot(stageId);
+      final appWrote = targetId == boxBulkId ||
+          targetId == boxProseId ||
+          (slot != ModelSlot.embed && targetId == defaultTargetIdFor(slot)) ||
+          targetId == inboxTier[stageId];
+      if (!appWrote) kept[stageId] = targetId;
+    });
+    if (!_sameMap(kept, state.stageTargets)) {
+      state = state.copyWith(stageTargets: kept);
+      await _writeStageTargets(kept);
+    }
+
+    if (placement == ModelPlacement.local) {
+      await applyTierDefaults(hardwareTier);
+    } else {
+      // The box runs the writing model the ledger measured, so prefetched
+      // drafts are worth their cost there whatever this Mac could manage.
+      await setDraftPolicy(DraftPolicy.needsYou);
+    }
+  }
+
+  /// Points this install at the servers a person named: the two addresses,
+  /// the two discovered model names, a key for each server where one was
+  /// typed, and the placement.
+  ///
+  /// Preference writes and a keychain pair, and NOT atomic — it cannot be. A
+  /// throw partway leaves an address with no placement rather than a corrupt
+  /// install, and calling it again repairs that, because every step here is
+  /// idempotent.
+  ///
+  /// The two keys are optional so that somebody changing only an address keeps
+  /// the key they already stored; the door in front of this one decides which
+  /// of those two things is happening.
+  Future<void> useBox({
+    required String bigUrl,
+    required String smallUrl,
+    required String bigModel,
+    required String smallModel,
+    String? bigKey,
+    String? smallKey,
+    required MachineTier hardwareTier,
+  }) async {
+    await setBoxServers(
+      bigUrl: bigUrl,
+      smallUrl: smallUrl,
+      bigModel: bigModel,
+      smallModel: smallModel,
+    );
+    await setBoxKey(big: bigKey, small: smallKey);
+    await usePlacement(ModelPlacement.box, hardwareTier: hardwareTier);
   }
 
   /// Records that the owner has read what a third-party draft target
-  /// receives. Until it is true, [AppPrefs.specForStage] sends `draft_reply`
-  /// back to the local prose target and leaves `draft_improve` unrouted.
+  /// receives. Until it is true, [AppPrefs.specForStage] sends both drafting
+  /// stages to [AppPrefs.draftFallbackSpec] instead.
   Future<void> setCloudDraftsConsent(bool value) async {
     state = state.copyWith(cloudDraftsConsent: value);
     await _store.setPref(cloudDraftsConsentKey, value.toString());

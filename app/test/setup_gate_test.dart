@@ -155,6 +155,7 @@ void main() {
       binaryPath: () => '/usr/bin/true',
       buildPreset: () => testManifest().toPreset(support.path),
       routerPort: () => 8080,
+      onPortMoved: (_) async {},
       managed: () => false,
     );
   });

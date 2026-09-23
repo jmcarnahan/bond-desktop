@@ -8,7 +8,12 @@ hosted the way the activity log is: a `bool _showingSettings` on
 `_main()` ladder. There is no router and no `Navigator.push` — nothing is
 stacked on top of anything.
 
-**Two ways in**, and one builder behind both (`_settingsScreen`):
+The screen's own host is `SettingsHost`
+(`app/lib/screens/settings_host.dart`), a `ConsumerStatefulWidget` of its own
+since Round H Phase 4. It owns the probe and every writer only settings calls;
+the inbox binds it in one place and keeps the inbox.
+
+**Two ways in**, and one binding behind both (`_settingsHost`):
 
 - **The avatar menu's Settings.** The icon rail's account button
   (`IconRail.accountMenuKey`) opens a `PopupMenuButton` whose items are the
@@ -66,7 +71,7 @@ server preset and field, three held futures, the session snapshot, a sign-in
 flag and its error — and its collapsed summary is built from that state, so the
 state lives with the summary rather than a screen away from it. The screen stays
 prop-only and passes the thirteen connection props straight through. The Models
-body has the same shape in `settings_models_body.dart`.
+page has the same shape in `settings_models_page.dart`.
 
 ## The sections, in order
 
@@ -74,7 +79,7 @@ body has the same shape in `settings_models_body.dart`.
 |---|---|---|
 | About me | always | the saved text, whitespace collapsed to one line, cut at 80 characters with `…`; `Not written yet` when empty |
 | Microsoft connection | any of `onBackendModeChanged`, `connectionStatus`, `hasScope`, `onSignIn` is wired | `MCP` or `This device`, then (MCP only) `Deployed` / `Local` / `Custom`, then `Checking…` / `Not signed in` / `Signed in as <label>` / `Signed in`, joined by ` · ` |
-| Models | `onSlotTargetChanged` wired | `[<local server summary> · ]Fast <model> @ <host:port> · Prose <model> @ <host:port> · Embeddings <host:port>[ · N more targets]` — the prefix is present only when the host wires the Local server card (`localServerSummary`), and the suffix only when the user has ADDED targets (`1 more target` at one, the two built-ins never counted), so a screen with neither reads exactly as it always did |
+| Models | `onUseBox` wired | `Managed · <the app's own server's state sentence>`, or `User defined · <big host>[ · <small host>]` with the two collapsed to one when they are the same host, or `User defined · no address yet` when neither address resolves |
 | Needs You | always | the threshold wording, plus ` · custom rules` or ` · default rules` when `onNeedsYouRulesSaved` is wired, plus ` · judging N message(s)` while `needsYouRejudging` (the whole needs-you queue, from `needsYouPendingProvider`) is above zero — "judging", not "re-judging", because the count cannot tell a Save's rows from a sync's |
 | Suggested replies | `onDraftPolicyChanged` wired (both scopes) | `For messages that need you` / `For every reply-worthy message` / `Only when asked` |
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
@@ -93,7 +98,7 @@ replies, Activity log, Storylines, Context directories and Processing, in this
 same order, and drops the rest.
 
 **These strings are pinned by tests** (`settings_screen_test.dart`,
-`settings_connection_test.dart`, `settings_models_test.dart`,
+`settings_connection_test.dart`, `settings_models_page_test.dart`,
 `settings_sync_about_test.dart`). This table and those tests must agree; when
 one moves, move both.
 
@@ -119,12 +124,12 @@ saved text back in the field and stays; Save writes and stays, and the saved
 text becomes the new baseline, so a second edit is dirty against the first save.
 Both buttons are disabled while the field is clean.
 
-**The two model editors commit on Save only**, exactly like the two texts. A
-slot's URL and its model name travel together in one write — a URL sent with the
-previous model's name against it is an HTTP 400 on an MLX runtime, which is
-fatal and never retried. Cancel puts the last saved pair back, `Use build
-defaults` puts the compiled pair back, and a failed server check never blocks
-either.
+**The Models form commits on Connect only.** Two addresses, two discovered
+model names and a key per server travel together in one write, because an
+address sent with the previous server's model name against it is an HTTP 400
+on an MLX runtime, which is fatal and never retried. That is also why the name
+is discovered rather than typed: Connect asks each server what it serves and
+writes what it answered.
 
 **Nothing is saved on dispose.** The dialog this replaced saved about-me on the
 way out, which needed a `scheduleMicrotask` to survive being unmounted by its
@@ -206,7 +211,7 @@ underneath and the section re-asks, so the user sees what their own click did.
 
 ## Host wiring
 
-`_settings()` in `app/lib/screens/inbox_screen.dart` builds it, and
+`SettingsHost` in `app/lib/screens/settings_host.dart` builds it, and
 **`ref.watch(appPrefsProvider)`, not `ref.read`**. The Needs You summary reads
 the stored rules to say whether they are custom, so a Save inside the screen
 only moves that line because the host rebuilds. Optimising the watch back to a
@@ -217,445 +222,361 @@ outlives the pane — a sign-in still out in the browser, a sign-out from the ra
 — and a dead host must answer with nothing rather than with "ref after
 dispose".
 
-**The Models section's own wires**, added 2026-09-19 with routing-as-data. The
-host reads them off the prefs so the picker's items and its selection come from
-one resolver rather than two guesses:
+**What the host owns, and the two seams it does not.** Everything only
+settings calls lives on `_SettingsHostState`: `_saveNeedsYouRules`,
+`_clearAiResults`, `_forgetAndResync`, `_resetPipeline`,
+`_reloadAfterBackendChange`, `_connectionStatus` and `_connectMicrosoft`. A new
+settings-only writer goes here, not on the inbox. The three server mutators
+went with the Local server card in Round H: the managed-server switch became a
+build define, the port moves itself, and the models folder changes through
+**Set up again**.
 
-- `targets: prefs.allTargets` and `stageTargetIds: {for (final stage in
-  pipelineStages) stage.id: prefs.targetIdForStage(stage.id)}`, with
-  `cloudDraftsConsent: prefs.cloudDraftsConsent`.
-- `onTargetSaved` awaits `notifier.upsertTarget(spec, bearer: bearer)` and THEN,
-  only when one of the three presets is set, `notifier.applyPreset(...)` — that
-  order because `applyPreset` refuses a target id it cannot find, and until the
-  upsert lands a new target is not in the list.
-- `onTargetRemoved: notifier.removeTarget`, which also deletes the keychain entry
-  and clears every stage that pointed at it, in one write.
-- `onStageTargetChanged` calls `clearStageTarget` for a null target id and
-  `setStageTarget` otherwise; `onCloudDraftsConsent` is
-  `notifier.setCloudDraftsConsent(true)`.
-- `proseParallel` and `proseParallelTargetName` come from
-  `prefs.specForStage('draft_reply')`, and `onProseParallelChanged` writes
-  `setProseParallel` for a built-in target and `upsertTarget(spec.copyWith(
-  parallel: width))` for any other. See **Drafts in flight** below.
+What the inbox still answers arrives as the host's twelve required
+constructor parameters — `scope`, `onBack`, `onHome`, `onCloseSettings`,
+`fileDialogs`, `onSetProcessing`, `waitForPullsToSettle`, `onRefreshNow`,
+`onSignOut`, `onOpenActivityLog`, `onForgetThumbnails`, `onToast` — plus the
+optional `probe` a test hands in.
+Two of those are seams rather than conveniences, and they are the reason the
+methods behind them did NOT move:
 
-`pipelineStages` is imported directly in `inbox_screen.dart`: `prefs_provider.dart`
-re-exports `ModelSlot`, `LlmTarget`, `LlmTargetSpec` and `LlmWire` but not the
-stage table, and the host needs it to ask where every stage currently points.
+- `_setProcessing` stays on `_InboxScreenState` because the sidebar's own
+  switch (`_processingToggle`) calls it too, and one switch is one writer. The
+  host binds it to `SettingsScreen.onProcessingChanged`.
+- `_waitForPullsToSettle`, with its `_quietTimeout`, stays because it reads
+  `_mailPulling` and `_teamsPulling`, the two flags `_notePulling` writes as
+  the inbox's own syncs go out and come back. `_resetPipeline` awaits it
+  before it deletes anything.
+
+`onCloseSettings` is a third, smaller one: the SDK permissions table's **Sign
+in again** leaves the pane without moving the section, which is not `onBack` —
+on the AI rung Back goes home.
+
+**The Models section's own wires.** The host reads them off the preferences,
+so the page's prefill and its report come from one resolver rather than from
+two guesses:
+
+- `modelPlacement: prefs.modelPlacement`, and the four values the form opens
+  on: `boxBigUrl: prefs.effectiveBoxBigUrl` and its three siblings
+  (`effectiveBoxSmallUrl`, `effectiveBoxBigModel`, `effectiveBoxSmallModel`),
+  each already resolved to the stored value where there is one and the build's
+  otherwise. Never a key.
+- `boxKeyStored`, `boxBigKeyStored` and `boxSmallKeyStored` are presence flags
+  and never the token: the first offers **Remove key**, the two below hint that
+  typing replaces something.
+- `onUseBox` reads this Mac's hardware tier AT THE PRESS and calls
+  `notifier.useBox(bigUrl:, smallUrl:, bigModel:, smallModel:, bigKey:,
+  smallKey:, hardwareTier:)`; `onUseManaged` does the same and calls
+  `notifier.usePlacement(ModelPlacement.local, hardwareTier:)`. The tier is
+  read at the press rather than closed over, so a press cannot write last
+  frame's answer. `onRemoveKey` is `notifier.clearBoxKey`.
+- `serverState` is `ref.watch(serverStateProvider)` with the supervisor's own
+  field as the fallback for the frame before the stream's first value lands,
+  and `managedModelsStatusProvider` is watched ONCE into a local beside it.
+  Both watched, so a load that finishes behind an open pane moves the bar and
+  the three rows without the reader touching anything. The statuses do not
+  reach the page as a prop: the host joins them onto `roleLines` below, so the
+  page draws rows rather than resolving them.
+- `roleLines` is `RoleLine.withStatus(RoleLine.fromPrefs(prefs), statuses:,
+  serverState:, placement:)`, two pure functions beside the widget that the
+  host calls and `settings_models_page_test.dart` pins under both modes. A
+  role's steps are every stage the placement's rule sends to the same default
+  target as its lead stage, `draft_reply` for the big model and `triage` for
+  the small. Membership is read off `prefs.defaultTargetIdForStage` rather than
+  off `roleOfStage`, because the two disagree on purpose: storyline membership
+  is the big model's work on a user-defined server and the small model's on
+  this Mac, so grouping by the enum would read every Managed install as Custom.
+  `draft_improve` is one of the big model's steps since Round H, when it
+  stopped being optional, so a target on it reads as Custom like a target on
+  any other. The row describes the target most of the role's steps resolve to,
+  compared by the spec `specForStage` answers rather than by the stored id, so
+  a third-party pick with consent withheld reads as the fallback it actually
+  reaches.
+- `processingOn: ref.watch(processingProvider)`, the same value the Processing
+  section's switch shows, so the status line can say the switch is off instead
+  of repeating a park.
+- `parked: ref.watch(parkedProvider).valueOrNull`, the whole fact rather than
+  the two words the old placement block could answer for. The page decides
+  which reasons it can speak to.
+- `onSetUpAgain` is `restartSetup(ref)` and `onShowLog` hands
+  `supervisor.logFile` to `launchUrl`. `onCloudDraftsConsent` is
+  `notifier.setCloudDraftsConsent(true)`, called by the consent pane before
+  the connect it is standing in front of.
+
+`managedModelsStatusProvider` reads `modelManifestProvider`, which THROWS
+unless a host overrides it. Nothing breaks in a widget test that does not —
+the future simply carries the error and `valueOrNull` is null, so the rows keep
+what the preferences said — but a test that wants the sizes and the disk
+states overrides it with `testManifest()`.
 
 ## Models
 
-Which model each step of the pipeline uses, and the two slots the user may
-move. The body lives in its own file — `app/lib/widgets/settings_models_body.dart`
-— because `settings_screen.dart` was already thirteen hundred lines.
+**One question, two answers, and nothing else on the page.** The section asks
+where the models run. *Managed* means this app runs the models on this Mac and
+there is nothing to configure, so the page is a status block. *User defined*
+means the person names two servers and pastes one access key, and **Connect**
+asks each server what it serves. The page is
+`app/lib/widgets/settings_models_page.dart`; the form both it and the first-run
+wizard render is `app/lib/widgets/model_servers_form.dart`.
 
-**The stage table is AUTHORED**, not derived, and since Round E each row has a
-**picker**. `pipelineStages` in `app/lib/services/llm/model_slots.dart` is the
-app telling the user what its own wiring is, and `model_slots_test.dart` is what
-keeps that table honest against the handler list. Sixteen rows: eight on the
-fast slot, seven on prose, one on embeddings. What changed is the meaning of the
-`slot` column — it is now each stage's **default target**, not its wiring. Where
-a stage actually goes is data in `stage_targets`, resolved per call through
-`stageLlmClientProvider`, and re-pointing one costs no code at all
-(`docs/pipeline/10-model-routing.md`).
+Round H deleted the **Advanced** fold, and the Local server card with it: the
+stage table, the two slot editors, the targets list and editor, the presets,
+**Drafts in flight**, the embeddings card, the port, the folder and the three
+lifecycle buttons are gone from every screen. The routing DATA is untouched —
+`stage_targets`, `llm_targets`, `applyPreset`, `setStageTarget`,
+`upsertTarget`, the four slot preferences and `prose_parallel` are all still
+there, still tested, still what the benches drive. Nothing shows them.
 
-Each row's right-hand cell is a `DropdownButton<String>` keyed
-`SettingsModelsBody.stagePickerKey(stageId)` over every target, labelled with the
-target's name. An **optional** stage — `draft_improve` today — gets a first item
-`None` whose value is the empty string, and picking it reports null, which is
-what "the Improve button is not there" looks like in the data. `embeddings` keeps
-its chip and model name and gets no picker for the reason it gets no editor:
-every stored vector carries a corpus tag, so there is nothing to choose between.
-A stored id that names a target which has since been removed falls back to the
-stage's own default rather than throwing — a `DropdownButton` asserts on a value
-that is not among its items, and a settings screen may not crash on stale data.
-A host that wires no `onStageTargetChanged` gets the chips the table always had.
+**Where the models run.** The heading, then `SettingsSegments<ModelPlacement>`
+keyed `settings-mode` with two labels: **Managed** and **User defined**, under
+the caption `Managed runs the models on this Mac. User defined sends the work
+to servers you name.`
 
-**The golden notes.** Under a picker, where the ledger has measured that stage,
-sits one caption from `stage_golden_notes.dart` — `Golden set: verdict 92 on the
-local 4B, 93 on the 27B` and six more. Numbers and model sizes only: this is a
-public repo and the golden set is real mail, so the table is pinned by a test
-that every key is a `pipelineStages` id and that no value contains `@`, `http`,
-`.com` or a newline. A stage the ledger never measured renders no line at all,
-which is the honest state rather than a blank one.
+**The segments ACT.** Choosing **Managed** on a user-defined install calls
+`usePlacement(ModelPlacement.local, hardwareTier:)` at once: there is nothing
+else to fill in, so there is nothing to press afterwards. Choosing **User
+defined** opens the form and writes NOTHING — the two addresses and the key
+are the rest of that answer, and **Connect** is where it is given. The segment
+still moves under the finger, and the status line directly under it says
+`Running on this Mac until you connect.` until it has been.
 
-**Where the models run.** Above the Targets list and below the two slot
-editors, the section opens with the placement. One heading, **Where the models
-run**, one line naming the placement this install is on, and one button that is
-always the other one.
+**The form.** Two addresses, one key, one press:
 
-On this Mac the line reads `Everything runs on this Mac.` and the button reads
-**Use the shared GPU box**. On the box it reads `The inbox and writing steps run
-on the shared GPU box. The embedding model runs here.` and the button reads
-**Use this Mac's models**. Both spellings carry the key
-`settings-adopt-box`, because it is one control with two destinations.
+| Control | Key | Label |
+|---|---|---|
+| Big model address | `servers-big-url` | **Big model address** |
+| Small model address | `servers-small-url` | **Small model address** |
+| Access key | `servers-key` | **Access key**, obscured |
+| Access key for the small model | `servers-small-key` | only when the two addresses name different hosts |
+| Model picker | `servers-big-model` / `servers-small-model` | only when that server lists several |
+| Model name | `servers-big-model-text` / `servers-small-model-text` | only under a Converse address |
+| Connect | `servers-connect` | **Connect** here, **Continue** in the wizard |
+| Remove key | `servers-remove-key` | only with a key stored |
 
-**Use the shared GPU box** opens a pane titled **Shared GPU box** — a pane with
-a back arrow, never a dialog. It is the same widget the wizard's **Where the
-models run** step renders, so the three controls carry the same three keys in
-both places: `setup-box-url` (**Box address**, hinting `https://box.example.com`),
-`setup-box-key` (**Access key**, obscured) and `setup-box-check` (**Check
-server**). The way forward is disabled until both fields have something in them:
-adopting a box with no address or no key would write two targets that cannot be
-dialled and a placement that parks everything.
+**The model name is DISCOVERED, never typed.** Connect probes each address's
+`/v1/models` with the key. One id: used, with nobody picking anything. Several:
+a `DropdownButton` appears under that address with the first id filled in, the
+caption says `This server lists several models. Choose one and press Connect
+again.`, and nothing is written until the second press. None, or a server that
+did not answer: that address's own `ProbeStatus` says so and nothing is
+written. The same address typed in both fields is the designed case for a
+one-router server: it lists every id under both, and the two pickers are how
+the two roles get their two names.
 
-Saving calls `AppPrefsNotifier.adoptBox`, which writes, in one go:
+**Two refusals, each under the field it is about**, both before any request
+leaves:
 
-- two targets at fixed ids, `box-prose` at `<address>/prose/v1/chat/completions`
-  on `qwen3.8` and `box-bulk` at `<address>/bulk/v1/chat/completions` on
-  `qwen3-4b`, both four wide and both streaming;
-- the one access key, in the keychain under `llm_target_bearer:box-prose` and
-  `llm_target_bearer:box-bulk`, and in no preference anywhere;
-- the stage map: the eight bulk stages on `box-bulk`, the six prose stages and
-  storyline confirm on `box-prose`. Confirm is in both preset lists and the
-  prose preset runs second, which is what leaves it on the writing model, the
-  row of record;
-- suggested replies set to For messages that need you;
-- the placement itself, in `model_placement`, which survives a wipe like every
-  other machine preference.
+- `The address needs to start with http:// or https:// and name a server.`
+  for anything `isBoxOrigin` refuses. The same rule `setBoxServers` throws on,
+  said before the press reaches it.
+- `The address needs to be the chat completions endpoint, ending in
+  /v1/chat/completions.` for an origin where an endpoint belongs. `isBoxOrigin`
+  reads the scheme and the host and nothing else, so this is the rule that
+  catches a bare `https://box.example.com`.
 
-Adopting twice replaces the pair rather than stacking it, because the two ids
-are fixed. The local inbox and writing models STOP: on this placement the
-managed server starts the embedding model alone, which is the whole point of
-pointing the other stages at the box.
+Typing in either field clears both, drops every answer from the last press and
+invalidates it: a press outlived by an edit writes nothing, on `_connectSeq`.
 
-**Use this Mac's models** calls `adoptLocal` and needs no pane. It removes both
-targets, both keychain entries and every stage entry pointing at either, then
-applies this Mac's own tier defaults, so a big Mac is back to an empty stage map
-and a small one is back to the inbox tier's six picks.
+**A Bedrock address is typed into rather than asked.** `wireForHost` reads the
+wire off the host, and a Converse service has no `/v1/models` to ask, so that
+address gets a plain **Model** field instead of a probe and a picker, and
+Connect refuses it with `Type the model name. This service does not list its
+models.` while it is empty.
 
-**Check server** sends the key. A probe of a target with a stored bearer looks
-it up by id through `AppPrefsNotifier.bearerFor` and passes it on that one
-request; the box pane passes the key that is typed in front of it. Without
-this, a keyed endpoint would answer HTTP 401 and read as a broken server. The
-key reaches the `Authorization` header and nothing else: not a probe result, not
-a log line, not a widget field.
+**A third-party big address asks first.** `isThirdPartyHost` names Bedrock,
+anthropic.com, openai.com and deepseek.com. When the big address is one of
+them the form raises `onThirdParty(spec, resume)` rather than connecting: the
+Models page passes it up to `SettingsScreen`, which opens the **Cloud drafts**
+consent pane in place of the sections. **Continue** records the consent and
+THEN calls `resume()`, which is the same connect with the same values — that
+order is the protection, because `setBoxServers` refuses a third-party big
+address while the flag is false. **Not now** and **Back** close the pane and
+write nothing.
 
-When the pipeline is parked because the box is not answering, one more line sits
-under the placement: `The box is not answering. Work is waiting and will retry
-each minute.` It is the same fact the inbox rail reads, from the drains' own
-progress streams, and nothing polls the box to produce it.
+**A third-party small address is refused outright.** The consent is about
+drafts on the big model; the small model reads every message body for
+triage and the rest, and no cloud service serves that role from any screen
+(Round E decision 9). A vendor or Bedrock host in the small field is refused
+under it with `The small model runs on a server of your own. Cloud services
+can serve the big model only.` before any server is asked, whatever the
+consent flag says, and `setBoxServers` refuses the same address as its last
+line.
 
-**This Mac, and its defaults.** Below the placement block sit one fact line and
-one button. The line reads `This Mac:` followed by
-the chip, the memory and what the machine runs: `runs all three models` at 40
-GiB of memory or more, `runs the inbox models` below that. It is about the
-MACHINE and reads `machineTierProvider`, which never answers `remote`, so it
-says the same thing on either placement. Where the work actually goes is the
-placement line above it. The button is **Use
-this Mac's defaults**, keyed `settings-tier-defaults`, and the caption under it
-names exactly what a press rewrites. On a small Mac that is naming, refresh,
-recap, grouping, the reply decision and drafts, all moved to `Local fast`, with
-suggested replies moved to Only when asked. On a big Mac it is those same six
-stage picks cleared back to `Local prose`, with suggested replies back to For
-messages that need you. Both captions use the words the controls they move
-actually carry, so the mode named here is the mode shown under Suggested
-replies. Nothing else moves: the eight bulk stages, storyline confirm among
-them, Improve a draft, the targets themselves, the cloud-drafts consent and
-every bearer are untouched, and a second press changes nothing.
+`onThirdParty` is null in two cases, and then the form refuses the address
+under the field instead of asking: `Cloud services are connected under
+Settings after setup.` The wizard is one. The other is a screen wired with
+`onUseBox` but no `onCloudDraftsConsent` — a pane whose Continue recorded no
+consent would hand the connect straight back to a refusal, and a question that
+can only be answered wrong is worse than no question.
 
-A Mac whose memory could not be read gets neither. The system channel usually
-answers `unknown` rather than failing, and when it throws anything else or
-goes quiet past the two-second probe timeout the hardware read is a rejection
-while the tier, read off the same future, still resolves to the full tier by
-the never-refuse rule. Either way the machine is unreadable, and writing
-defaults chosen from a number nobody read is not something to offer: the line reads `This Mac: memory could not be read` and
-there is no button, with a caption pointing at the stage table above.
+**A connect that does not land says so.** The form renders the reason under
+the form, keyed `servers-error`: the `ArgumentError`'s own message for a
+refusal, and `The servers could not be saved. Try again.` for anything else —
+`useBox` ends in a keychain write, which answers with a `PlatformException` on
+a locked keychain or a denied prompt, and unhandled that left the key field
+full and the screen silent. When the connect was resumed from the consent pane
+the form is unmounted and has nowhere to draw, so the throw is RETHROWN to the
+screen, which keeps the pane open and puts the sentence on it instead of
+returning the person to an unchanged section.
 
-It is not a two-step, unlike Remove and Clear AI results, because nothing is
-destroyed. The six picks it overwrites are six rows a person can see in the
-table above, and any of them can be re-picked on the spot. While the app is
-still reading the machine the button is disabled and its caption reads `Reading
-this Mac…`; a host that cannot write the change offers neither the line nor the
-button. The tier is read from this Mac's memory each time it is asked for and
-stored nowhere, so a models folder carried to another Mac gets that Mac's
-answer. The wizard writes the same defaults once at Finish, through the same
-`AppPrefsNotifier.applyTierDefaults`.
+**The key.** One field by default; a second appears the moment the two
+addresses name different hosts, because two hosts are two operators and a
+token for one must never ride a request to the other. With one host the one
+key is passed as both. The field opens EMPTY, always. When one is already in
+the keychain it carries the hint `Stored. Type to replace` and Connect goes
+through with the field blank. That is the rule, not a convenience: a token
+that has reached the keychain is never read back onto a screen, so
+"unchanged" has to be a state the empty field can be in. **A blank field keeps
+the stored key, and Remove key is the only thing that forgets one.**
 
-**Targets.** Below the two slot editors, under the heading **Targets**, is
-`SettingsTargetsBody` (`app/lib/widgets/settings_targets_body.dart`) — every
-server a stage may be pointed at, `AppPrefs.allTargets`, built-ins first. One row
-per target, keyed `llm-target-row-<id>`: the name, `hostPort(url)`, the model, a
-chip for the wire (`OpenAI` / `Converse`), a chip saying `Bearer set` or `No
-bearer`, and `Parallel N` when the width is not one. Beside them **Check server**
-(`llm-target-check-<id>`, the same probe closure the slot editors use, with a
-`ProbeStatus` under the row; a row whose chip says `Bearer set` has its stored
-key looked up by id and sent on that one request), and for a user's own target **Edit**
-(`llm-target-edit-<id>`) and **Remove** (`llm-target-remove-<id>`). Remove is the
-Processing section's two-step: the first press swaps the button for **Confirm
-remove** beside **Keep**, and the row's buttons go inert while the write is out.
-Under the rows, **Add target** (`llm-target-add`).
+The key lives in the form's two `TextEditingController`s and in ONE other
+place: the `resume` closure the form hands to the consent pane, which captures
+the typed values so Continue can finish the same connect. `SettingsScreen`
+holds that closure on `_ConsentPane` for as long as the pane is open, and
+every way out — Continue, Not now, Back — drops it. Nowhere else: it reaches
+the probes' `Authorization` headers and the one call, the controllers are
+emptied the moment a connect lands, and it is never in a widget field after a
+save, a probe result, a log line or a test name.
 
-The two built-ins have no Edit and no Remove. They are derived from the four slot
-prefs rather than stored, so their row carries the caption `Edited above, under
-Fast and Prose` and the two `ModelSlotEditor`s further up the section are where
-they change. `AppPrefsNotifier.removeTarget` refuses a built-in id on its own
-account as well, so the missing button is a courtesy rather than the protection.
+**The status line**, keyed `settings-models-status`, is always exactly one
+line, and it is the first thing a stalled tester reads. It answers in this
+order, and the order is the order the jobs come in:
 
-**Add and Edit are PANES**, not dialogs — the house rule. `SettingsScreen` holds
-which sub-pane is open as state and swaps its own child for a `PaneSurface`
-titled **Add target** or **Edit target**, so the sections and their expansion
-state are still there when the back arrow closes it. The body is
-`LlmTargetEditor` (`app/lib/widgets/settings_target_editor.dart`), prop-only like
-everything else here, with controls keyed `llm-target-name`, `-url`, `-model`,
-`-wire`, `-bearer`, `-parallel`, `-streams`, `-check`, `-save`, `-cancel`. Save
-waits for a name, a URL and a model, and for a URL that parses with a host;
-until then it is disabled with the reason as a caption under it. A probe never
-blocks a Save, on the slot editors' rule. A new target's id is `t-` and eight hex
-characters, never derived from the name: the stage map and the keychain entry are
-keyed on that string, and two targets a person happened to call the same thing
-would otherwise share a token.
+1. `Processing is off. Turn it on under Processing, or in the sidebar, and the
+   work starts.` while the session's switch is off. First, because a park
+   sentence says work is retrying and nothing retries while the switch is off:
+   the last parked fact stays in its provider after the drains stop, and the
+   rail's own line guards the same way.
+2. `Running on this Mac until you connect.` while the form is open over an
+   install that has not moved yet.
+3. A park this page can answer for, when something is waiting. Under **User
+   defined** all three: `model_unavailable` reads `Your server is not
+   answering. Work is waiting and will retry each minute.`, `unauthorized`
+   reads `Your server refused the access key. Change it here.`, and
+   `embed_unavailable` reads `The embedding model on this Mac is not
+   answering. Work is waiting and will retry each minute.` Under **Managed**
+   only the embedding one: the other two are about a server whose own line is
+   the next thing on this page, and the rail already says `Model server
+   unreachable`. A park word this page cannot answer for, such as a sign-out,
+   is left alone: the inbox already routes it.
+4. Under **Managed**, the server's own state: `Not running`, `Starting…`,
+   `Loading models · N of M`, `Running`, `Not running: <reason>`, `Port <p> is
+   in use[ by <holder>]`, or `Servers are started by hand for this build.` on a
+   build that passed `BOND_DEV_HAND_SERVERS`. Under **User defined**, `Access
+   key needed. Paste it and press Connect.` when EITHER address is somewhere
+   other than this machine and has no key of its own — per server, because two
+   hosts are two operators and a key stored for one says nothing about the
+   other — and `Connected to your servers.` otherwise. A loopback address
+   needs no key at all.
 
-**The bearer is a secret and is treated as one.** The field is obscured. On an
-edit it opens EMPTY with the hint `Stored. Type to replace`, because a token that
-has reached the keychain is never read back onto a screen — which is why
-"unchanged" has to be a state the empty field can be in. The three outcomes:
-typing a token sends it with `hasBearer` true; leaving the field empty sends
-`bearer: null` with `hasBearer` true, which keeps the stored one; **Remove
-bearer** (`llm-target-bearer-clear`) sends `bearer: null` with `hasBearer` false,
-which clears it. The value reaches the host once and appears in no key, no
-summary, no log and no row — the list says only `Bearer set` or `No bearer`.
+**A loading bar and a way to the log.** Under Managed, a
+`LinearProgressIndicator` keyed `settings-models-progress` sits under the
+status line: indeterminate while the process has not answered, and a real
+fraction from `ServerLoading.loaded` once the router is reporting model by
+model. No bar in any other state. **Show log**, keyed `settings-show-log`,
+appears only under a failure and hands the log file to the operating system's
+own viewer — this app has no log pane and does not want one.
 
-**The three presets**, on the ADD pane only, under **Use this target for**:
-*Prose stages* (`llm-target-preset-prose`, `proseStageIds` — storyline naming,
-refresh, recap and grouping, the reply decision and drafts), *Storyline confirm*
-(`llm-target-preset-confirm`, `storyline_membership`) and *All bulk stages*
-(`llm-target-preset-bulk`, the eight fast-slot rows). The first two are
-**pre-checked for every new target** and the user unticks. That is deliberate and
-it is not a guess about the host: the GPU box arrives over an ssh tunnel at
-`localhost:18100`, so "not loopback" would miss the one machine these presets
-exist for, and a Bedrock endpoint proxied onto loopback would read as local.
-Bulk is not pre-checked, because moving eight stages onto a paid target is not a
-default anybody should arrive at by pressing Save. They are absent on an EDIT: a
-preset is a write rather than a property of the target, so a checkbox showing the
-current grouping would need a fourth state. The host applies them with
-`AppPrefsNotifier.applyPreset` AFTER the upsert, because `applyPreset` refuses a
-target id it cannot find.
+**Three role rows.** **Big model**, **Small model** and **Embeddings**, each a
+title over one line. The line is the role's phrase, then its size and its
+state where there are any, joined by ` · `.
 
-**What *Prose stages* does on a Bedrock target, and what it sends.** Ticking it
-moves the six prose stages onto that model: storyline naming, storyline
-refresh, the storyline recap, the grouping stage, the reply decision and Draft
-reply, except that `applyPreset` holds `draft_reply` back on a third-party
-target while `cloud_drafts_consent` is false, so drafts keep being written
-locally until the consent pane has been answered, and the preset is not a way
-around it. Improve a draft is in no preset. What leaves the machine for a naming call is the thread cards of
-one cluster: each thread's subject, the display names of its participants and
-its triage summary; the naming card carries no topics. No message body,
-no attachment and no directory excerpt is in that prompt, which is why naming
-sits behind the prose preset rather than behind the drafts consent. This is the
-one place a cloud model measurably changes the filing, and the numbers, taken on
-the golden set on 2026-09-20 with the confirm and the embedding local in every
-row, are these:
+Under Managed each row is joined with this Mac's own facts by
+`RoleLine.withStatus`, from `managedModelsStatusProvider` and the supervisor:
+`Qwen3.8 27B on this Mac · 20.9 GB · on disk · loaded`. The name is the
+MANIFEST's `displayName`, the size is what the checkpoint cost to fetch
+(weights plus any sidecar), and the state is `not downloaded` when the bytes
+are not there, `on disk · loaded` when the router says it is resident, and `on
+disk · not loaded` otherwise. Loaded is read by ROUTER id rather than by role, which is why
+`ManagedModelStatus` carries one: on a small Mac the big row's file IS the bulk
+file, and a row that looked itself up by `bond-prose` would read as never
+loaded there.
 
-| namer | storyline.id | correct positives | forbidden hits |
-|---|---|---|---|
-| local 27B Q4_K_M with MTP | 45/98 | 5 | 4 |
-| the GPU box 27B-FP8 with MTP | 50/98 | 9 | 5 |
-| Bedrock Sonnet 5, pass 1 | 57/98 | 10 | 3 |
-| Bedrock Opus 5, pass 1 | 53/98 | 8 | 2 |
+Under User defined the two chat rows read `qwen3.8 at box.example.com` — the
+discovered model name and the address's host — and have no size or state,
+because those models are on somebody else's machine. The embedding row is
+built the Managed way under either mode, because that model is here whatever
+the rest of the pipeline is doing.
 
-A cloud pass is one of two reads and the two differ, because Converse carries no
-temperature: Opus 5's second pass filed 55 of 98 with 9 correct positives and 3
-forbidden hits, and Sonnet 5's second pass 54 of 98 with 12 and 8. The local and
-the box namers reproduce to the count.
+**The server follows the placement.** Choosing User defined restarts the app's
+own server onto the embedding model alone, so the two chat models leave this
+Mac's memory; choosing Managed restarts it onto this Mac's whole set and the
+bar and the rows show the load. One call does it,
+`ModelServerSupervisor.ensurePreset`, made by the host after either placement
+write and by the wizard's Finish. It restarts only when the preset hash
+changed, so a Finish that moved nothing leaves a model that took a minute to
+map exactly where it is.
 
-Nothing in the app picks a cloud namer for anybody. The measurement is a reason
-to offer the setting, not a default, and `docs/model-bakeoff.md` carries the
-second passes and the reading.
+**Also on this Mac, not in use.** Under User defined, a block keyed
+`settings-idle-models` sits after the three rows and before Set up again, with
+one line per model this Mac holds that the placement does not serve:
+`Qwen3.8 27B · 20.9 GB · on disk · not loaded`. The name, the size and the
+state are the row's own three facts, from the statuses
+`managedModelsStatusProvider` marks `inUse: false`. Only files ON DISK are
+listed, one line per FILE (a small Mac's big and small rows share the bulk
+file), and an idle file is `not loaded` by definition: `Ready` means every
+model in the small server's own preset is resident, and these are not in it.
+The lines say `not loaded` rather than disappearing because a person who has
+just switched wants to see the memory come back and the download stay.
+Managed never draws the block, and neither does a user-defined install with
+nothing idle.
 
-**Cloud drafts consent.** Picking a **third-party** target for `draft_reply` or
-`draft_improve` while `cloud_drafts_consent` is false writes NOTHING. Instead the
-screen opens a third pane, `PaneSurface` titled **Cloud drafts** over
-`CloudDraftsConsentPane` (`app/lib/screens/consent_screen.dart`), whose back
-arrow is the same answer as **Not now**. Third party means the `converse` wire or
-a host under `anthropic.com`, `openai.com` or `deepseek.com`, or a Bedrock
-runtime host, one starting `bedrock` and ending `.amazonaws.com`
-(`isThirdPartyHost`); AWS as a whole stopped being the test in Round G, because
-the shared GPU box is an instance the owner rents and runs. Loopback is not a
-signal in either direction. The flag
-is one flag, so a yes covers `draft_reply` and `draft_improve` alike, and the
-pane says so in its second line. No other
-stage ever asks — a triage or a storyline-name prompt carries a subject line and
-a summary, and a draft prompt carries the message, the tail of its thread and
-excerpts from the user's own directories.
+A role whose steps do not all resolve to one target reads `Custom · N steps
+point elsewhere`, singular at one. N is counted against the target most of the
+role's steps share, so one odd step reads as one wherever it sits, the lead
+stage included, and the row's Check asks the shared target rather than the odd
+one. There is no longer anywhere to go and look at which ones: the sentence
+says how many and stops.
 
-The pane says what goes and what never goes, shows the two measured numbers in a
-table (`Local 27B | 6 of 25 drafts passed`, `Opus 5 | 17 of 25 drafts passed`,
-measured on 25 replies from the golden set, 2026-09-17) and names the daily cap.
-The cap it names is the one in force — `cloud_drafts_daily_cap`, the field
-under Processing — not a number compiled into the pane, so the promise the
-person reads is the promise the ledger keeps.
-**I understand, continue** (`consent-continue`) records the consent FIRST and
-writes the stage after it — that order is the protection, because
-`AppPrefs.specForStage` sends a third-party draft target back to the local one
-while the flag is false, so a stage written first would resolve locally until
-something else rebuilt it. **Not now** (`consent-not-now`) and the back arrow
-write nothing. The prefs enforce the same rule independently of this screen, so a
-`stage_targets` restored from a backup or edited by hand cannot route a draft off
-the machine on its own.
+The two local chat names in `RoleLine.fromPrefs` are a const map in
+`settings_models_page.dart`, keyed by built-in target, with the embedding name
+one constant beside it. They are what a row says before the manifest has been
+read and on a row the statuses do not cover; `withStatus` replaces them with
+the manifest's own name the moment the host has it.
 
-**Two editors, one per switchable slot.** `ModelSlotEditor`
-(`app/lib/widgets/model_slot_editor.dart`) is prop-only: it takes the effective
-target, the compiled default, whether the slot is on that default, a probe
-closure and two callbacks. Both editors sit on one screen with identical button
-labels, so every control is keyed by slot — `ModelSlotEditor.saveKey(slot)` and
-friends. The probe closure is optional: a host that wires none gets editors with
-no **Check server** at all (and no check on the embeddings card), the model
-stays a typed name, and everything else works — the same discipline as every
-other optional control on the screen.
+Each row carries a **Check**, keyed `settings-role-check-big`, `-small` and
+`-embed`, which probes that role's own resolved URL with that target's stored
+token and renders a `ProbeStatus` beneath the row. A row that moves to another
+server drops the answer it had, so a green line from one machine is never read
+as a report about another. A host that wires no probe gets no Check anywhere
+on the page, and no Connect either, the same discipline every optional control
+here follows.
 
-**Save semantics.** Save is the only commit; nothing is written on dispose. A
-value equal to the compiled default is sent as the **empty string**, because
-empty means "follow the build" and is stored as empty — freezing today's
-dart-define into the database would make a changed `FAST_LLAMA_MODEL` invisible
-(see `prefs_models_test.dart`). The URL and the model name are always written
-together. While the **Local server** switch is on, "Default" in the two editors
-is the router target rather than the compiled one (`AppPrefs.slotBaseline`), so
-an unedited Save still leaves the slot following the router and a later port
-change still moves it. **A probe never blocks a Save**: somebody about to start
-a server has to be able to point the app at it first.
+**Set up again**, keyed `settings-set-up-again`, sits at the foot of the
+section. It is how the models folder changes and a download is retried, now
+that the Local server card is gone.
 
-**Drafts in flight** — a `SegmentedButton<int>` of 1 / 2 / 4 / 8 directly under
-the prose editor, captioned "For &lt;name&gt;. One per slot the server was started
-with (SLOTS in local.mk, --max-num-seqs on vLLM). Extra requests queue at the
-server rather than fail." Since Round E the width is the **draft target's**,
-not the prose slot's: the host passes the `draft_reply` stage's resolved
-`parallel` and its name, because a GPU-served box has slots this Mac does not
-and a caption still saying "the prose server" would be describing a machine the
-number no longer governs. Where the number is WRITTEN forks on the same
-resolution: for the built-in `Local prose` target it is `AppPrefs.proseParallel`
-(`prose_parallel`, 1–8, default 1) exactly as before, and for a user's target it
-is that spec's `parallel` through `upsertTarget`. `DraftHandler` reads it through
-a closure at every launch decision either way, so the change moves the next draft
-rather than the next launch of the app. It is here rather than in a section of
-its own because it is a fact about the SERVER, and it does not touch the
-collapsed summary, which names where the three slots point and how many targets
-were added. Optional, like every other control here: a host that wires no
-`onProseParallelChanged` gets no segments.
-Drafts only — a recap and a refresh both write the storyline they are about and
-stay at one (`docs/pipeline/10-model-routing.md`). Measured 2026-09-17: a second
-local slot on this Mac's 27B did not pay (width 2 slower end to end than width
-1); the default stays 1 locally, and 4 is the measured value for a GPU-served
-target.
+It stashes a `done` that was there into `SetupStore.previousSetupKey`, clears
+`setup_state` EXCEPT `SetupStore.keptOnRestart` — the container-migration
+record, the download ledger and that stash — and then bumps
+`setupRestartProvider`, which is what `SetupGate` re-decides on. The kept keys
+are the point: starting over must not re-copy a mailbox that is already here or
+re-download twenty-three gigabytes that already are. So the wizard opens at
+**Welcome to Bond** with the models still on disk and the session still signed
+in, and those two steps are a **Continue** each. The order matters and is
+pinned by `setup_reentry_test.dart`: the keys go first, because the gate
+re-reads the store the moment the counter moves.
 
-**Three probe outcomes, rendered apart.** `ModelServerProbe.probe` never throws
-and answers one of:
+**It is not a one-way door.** With the stash present the welcome step draws a
+secondary **Back to the inbox** under **Get started**
+(`SetupWelcomeBody.onReturnToInbox`, null on a first run — there is no inbox
+behind THAT wizard). Pressing it calls `SetupController.returnToInbox`, which
+writes `setup = 'done'` back, removes the stash and hands control to the gate
+through the same `onFinished` callback Finish uses. A download this run started
+is left running, on the controller's dispose reasoning: the run outlives the
+screen, and cancelling one an hour in would be a steeper price than the button
+implies. `finish()` removes the stash too, so a second run that was seen
+through to the end leaves nothing behind.
 
-- **A URL it refuses** — `probedUrl` is null and no request was made, because
-  nothing ending in `/v1/…` could be derived from it. That is a fault in the
-  field, so it renders as the URL `TextField`'s own `errorText`, never as a
-  claim about a server.
-- **Not reachable** — `probedUrl` set and a sentence in `error`. Renders as an
-  `InlineAlert` with `InlineAlertSeverity.error`, with `Asked <url>` under it.
-  That small print matters: "not reachable" against a server that is
-  demonstrably up is almost always a surprise about the derived listing URL.
-- **Reachable with an empty list** — a live server with nothing loaded. It says
-  `Reachable · nothing loaded yet` and keeps the typed model name. It is *not*
-  unreachable and must never read as if it were.
+**The probe's lifetime is the host's.** `_SettingsHostState` holds one
+`ModelServerProbe`, built on first use and closed in `dispose`. A client per
+button press would leak a connection pool per press, and this is a button a
+user can hammer.
 
-**Picker or field.** With a listing of one or more ids the model becomes a
-`DropdownButton<String>`; without one it stays a free `TextField` captioned
-"Check the server to pick from what it serves; llama.cpp ignores this name, MLX
-runtimes require it." A name already in the field that the server did not list
-stays selectable, labelled ` (not listed)` and captioned with what each runtime
-will do about it — llama.cpp ignores the field, an MLX runtime answers a fatal
-HTTP 400. Editing the URL drops the listing: a listing belongs to the URL it was
-asked of — and an answer that lands after the URL was edited away is dropped on
-arrival for the same reason.
-
-**Embeddings is read-only** and says so in the place somebody would go looking
-for the missing control: every stored vector is tagged with the embedding
-model's name (`EmbeddingsClient.modelTag`), so swapping it would silently
-compare vectors from two different spaces. Changing it is a re-embed migration,
-not a setting — `EMBED_URL` at build time. The card shows the URL and a Check
-server button and nothing else.
-
-**Local server card.** The first thing in the section, above the stage table
-and separated from it by a divider, is `SettingsLocalServerBody`
-(`app/lib/widgets/settings_local_server_card.dart`). It is injected as
-`SettingsScreen.modelsHeader` rather than built by the section, so
-`settings_models_body.dart` keeps knowing nothing about a supervisor: the
-section is about where model calls go, and what is running is the host's answer
-to hand over. It is prop-only like everything else here, and a null callback
-hides its control.
-
-It shows, top to bottom:
-
-- **`Bond runs the model server`** — the switch over `AppPrefs.managedServer`,
-  subtitled "One llama-server serves all three models from this Mac. Off, the
-  app expects servers you started yourself." It is the only control that stays
-  live when the preference is off; everything below it is disabled, not hidden,
-  so the row does not jump about while the server stops. Flipping it writes the
-  preference and then starts or stops the process — `_setManagedServer` on
-  `_InboxScreenState`, in that order, because `ensureRunning`/`stop` both ask
-  the preference and would read the old answer if they went first.
-- **The state**, as `ServerStateDescribe.summary`: `Stopped`, `Starting… on
-  port 8080`, `Loading models (1 of 3) on port 8080`, `Ready on
-  127.0.0.1:8080`, `Failed: <reason>`, `Port 8080 is in use[ by <holder>]`, and
-  `Off — servers are started by hand`. A failure or a held port renders as an
-  error `InlineAlert`, a start or a load as an attention one, everything else
-  as body text. Under a failure sit the **last 12 lines** of the server's log
-  in mono — the reason alone never explains a crash. Under a held port sits
-  `Pick a free port below, or stop the other program.` **The switch wins over
-  the supervisor**: with the preference off the card says `Off` whatever the
-  supervisor last reported, because stopping is asynchronous and a card still
-  saying `Ready` would be describing a server the app has already stopped
-  using.
-- **The port** — a digits-only field, **Pick a free port** (fills the field
-  from `ModelServerSupervisor.pickFreePort`, and saves nothing: a port that
-  moved because somebody pressed a button labelled *Pick* would be a surprise
-  restart), and **Save port**, live only when the number parses, sits in
-  1024..65535 and differs from the stored one. Out of range shows `Use a port
-  between 1024 and 65535`. Saving restarts the server, because a running
-  process cannot change the socket it is bound to.
-- **Models folder** — the effective path in mono (the host resolves "the app's
-  own folder" through `AppPrefs.effectiveModelsFolder`) and **Change folder…**,
-  which goes through the same `FileDialogs.chooseDirectory()` open panel every
-  other folder in this app is chosen with. Cancelling changes nothing; a change
-  restarts the server, because the preset names absolute paths.
-- **Start / Stop / Restart**, offered by state — Start for stopped, failed and
-  port-in-use; Stop for starting, loading and ready; Restart for loading and
-  ready — plus **Show log**, which hands the log file to the operating system's
-  own viewer (this app has no log pane and does not want one), and **Set up
-  again**, which runs the first-run wizard from the top.
-
-  **Set up again** stashes a `done` that was there into
-  `SetupStore.previousSetupKey`, clears `setup_state` EXCEPT
-  `SetupStore.keptOnRestart` — the container-migration record, the download
-  ledger and that stash — and then bumps `setupRestartProvider`, which is what
-  `SetupGate` re-decides on. The kept keys are the point: starting over must
-  not re-copy a mailbox that is already here or re-download twenty-three
-  gigabytes that already are. So the wizard opens at **Welcome to Bond** with
-  the models still on disk and the session still signed in, and those two
-  steps are a **Continue** each. The order matters and is pinned by
-  `setup_reentry_test.dart`: the keys go first, because the gate re-reads the
-  store the moment the counter moves.
-
-  **It is not a one-way door.** With the stash present the welcome step draws
-  a secondary **Back to the inbox** under **Get started**
-  (`SetupWelcomeBody.onReturnToInbox`, null on a first run — there is no inbox
-  behind THAT wizard). Pressing it calls `SetupController.returnToInbox`,
-  which writes `setup = 'done'` back, removes the stash and hands control to
-  the gate through the same `onFinished` callback Finish uses. A download this
-  run started is left running, on the controller's dispose reasoning: the run
-  outlives the screen, and cancelling one an hour in would be a steeper price
-  than the button implies. `finish()` removes the stash too, so a second run
-  that was seen through to the end leaves nothing behind.
-- The caption `Changing the port or the folder restarts the server. Work in
-  flight parks and resumes when it is back.`
-
-`app/test/settings_local_server_test.dart` pins every one of those strings —
-the nine state sentences, the switch's title and subtitle, the port error, the
-held-port advice, the caption — plus which buttons each state offers and that
-everything but the switch and **Set up again** is dead while the preference is
-off — that one stays live because it acts on the wizard rather than on a
-process, and a switch that is off is one of the states the wizard exists to put
-right.
-`settings_models_test.dart` pins the join: the server's line leads the collapsed
-summary, and the card renders above the stage table.
-
-**The probe's lifetime is the screen's.** `_InboxScreenState` holds one
-`ModelServerProbe` and closes it in `dispose`. A client per button press would
-leak a connection pool per press, and this is a button a user can hammer.
+**What pins all of this.** `model_servers_form_test.dart` for the form,
+`settings_models_page_test.dart` for the page, `probe_status_test.dart` for the
+three outcomes of a look at a server, `settings_models_host_test.dart` for the
+wires, and `settings_cloud_drafts_test.dart` for the consent pane through
+Connect.
 
 ## Suggested replies
 
@@ -699,21 +620,27 @@ daily cap under Processing."*
 The mechanism, the two pre-gates, the Improve button and the activity notes
 are in [pipeline/07-replies.md](pipeline/07-replies.md), "When a draft is
 written" and "Improve a draft". The policy control is
-`SettingsSegments<DraftPolicy>`, the same widget Notifications and Models ›
-Drafts in flight use.
+`SettingsSegments<DraftPolicy>`, the same widget Notifications and the Models
+page's two modes use.
 
 ## Processing
 
-Whether this session runs model work at all, and the two ways to throw away
+Whether this install runs model work at all, and the two ways to throw away
 what it has already produced. In both scopes, because all three are questions
 about the model rather than about the app.
 
 **AI processing** is the same switch as the one at the top of the sidebar,
 drawn here as a `Switch` keyed `settings-processing-toggle` beside its name and
-the word `On` or `Off`. It is session state and never persisted — every launch
-starts off — and flipping it here moves the sidebar behind the pane, so the
-host hears about it the instant it moves rather than on the way out. Mail and
-Teams keep syncing while it is off; only the models stand down. See
+the word `On` or `Off`. It is REMEMBERED and it starts on: a fresh install goes
+to work the moment the wizard finishes, and a machine somebody stood down comes
+back down. The preference is `processing_on`, and it was session state, off at
+every launch, until Round H; what made it session state was the risk of
+spending the first minutes on the wrong server, and the placement rule closes
+that, because the default server is now the measured one. Turning it off still
+stands every drain down for the rest of the session. Flipping it here moves the
+sidebar behind the pane, so the host hears about it the instant it moves rather
+than on the way out. Mail and Teams keep syncing while it is off; only the
+models stand down. See
 [pipeline/10-model-routing.md](pipeline/10-model-routing.md).
 
 Under it are three controls, a revoke and two resets, each an inline two-step
@@ -727,7 +654,7 @@ with it.
 
 | Action | Keys | What goes | What stays |
 |---|---|---|---|
-| **Stop sending drafts anywhere** | `settings-stop-cloud-drafts{,-confirm,-keep}` | the `draft_reply` and `draft_improve` stage entries and `cloud_drafts_consent`, so Draft reply resolves to `Local prose` again, `draft_improve` resolves to nothing at all and the Improve a draft button goes with it, and the consent is withdrawn | every row, every target, every keychain bearer and every other stage entry |
+| **Stop sending drafts anywhere** | `settings-stop-cloud-drafts{,-confirm,-keep}` | the `draft_reply` and `draft_improve` stage entries and `cloud_drafts_consent`, so both drafting stages resolve to `AppPrefs.draftFallbackSpec` again, and the consent is withdrawn | every row, every target, every keychain bearer and every other stage entry |
 | **Clear AI results** | `settings-clear-ai-results{,-confirm,-keep}` | every triage verdict, summary, storyline, draft, digest and embedding — the sixteen `MessageStore.derivedTables`, the verdict columns on `messages` and `conversations`, and the stage markers on `attachments` and the library; the activity log is one of the sixteen, so today's **Cloud drafts** count starts again at zero, which the caption above the buttons says | mail, Teams messages, attachments, registered directories, the sign-in and every preference |
 | **Forget everything and re-sync** | `settings-forget-resync{,-confirm,-keep}` | everything above **and** the mailbox itself — `MessageStore.wipeAll(keepIdentity: true)`, cursors and bootstrap floors included | the sign-in, the about-me text, the Needs You rules, the sender rules, the registered directories and every setting |
 
@@ -742,9 +669,10 @@ first means they are already local by the moment consent goes. Consent first
 would leave two stage entries pointing off this machine with nothing but the
 resolver between them and a draft.
 
-The `draft_reply` stage falls back to the local prose target and
-`draft_improve` resolves to nothing at all, which is that stage's own rule, so
-the Improve button goes rather than quietly running on this machine. It is
+Both drafting stages fall back to `AppPrefs.draftFallbackSpec`: the
+user-defined big model on that placement and the local prose target here, and
+never a third-party address, since that is the operator the withdrawal just
+refused. It is
 **not** refused while processing is on, unlike the two resets it sits above:
 it writes preferences and touches no rows, so there is no drain it could race,
 and somebody who has just realised their drafts are leaving the machine should
@@ -782,10 +710,17 @@ memory. The draft handler is the fourth because `DraftHandler.improve` is a
 button press rather than queue work, so the draft lane's own quiesce knows
 nothing about it.
 
-Neither reset queues the mailbox. The next sync's own backlog calls are what
-refill the pipeline, one `backlogEnqueueCap` slice a poll, which is why the
-first button's caption says the mailbox is re-queued a slice at a time — see
-[pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md).
+**Clear AI results queues the whole rerun itself**, in the transaction that
+empties the tables: extraction, the needs-you judgement and the embedding for
+every kept message of every source, unpaced and regardless of **How far back
+to sync**, plus one `attachment_text` row per attachment left pending. That is
+why its caption promises everything already synced rather than a slice a poll.
+The sync's own backlog calls are bounded by the lookback floor — right for a
+poll, wrong for a reset, which is the one path that re-pends mail older than
+the window — and they still run on every pass, idempotent over what the reset
+filed. **Forget everything and re-sync** queues nothing: it deletes the
+mailbox, so the next poll fetches the window again and ingest queues what it
+brings. See [pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md).
 
 **What the owner decided by hand survives a clear.** A message they restored
 keeps its `gate_override`, and one they ignored keeps `gate_reason = 'user'`
@@ -796,15 +731,17 @@ survive too (`outbound`, `backlog`, and Teams' `auto_generated` and
 claim.
 
 **Everything comes back on its own**, each by the path that would have
-written it the first time. Mail, chats, storylines, drafts and embeddings ride
-the sync's backlog calls; the library rides the reconcile, which is requeued
-per directory on every sync. Attachments are the one case the clear has to
-queue for itself, in the same transaction: `attachment_text` is enqueued at
-ingest, by a detail fetch and by Restore, and a message already stored with a
-body reaches none of the three, so the clear writes one `attachment_text` work
-row per attachment left `pending` and the digest follows the text pass. A
-refusal is not re-queued, because "too large" and "not text" are verdicts
-about the file rather than about the model that read it.
+written it the first time. Extraction, the needs-you judgement and the
+per-message embedding are queued by the clear itself, for every kept message
+and whatever its date; storylines ride the sync's `requeueSweep()`, drafts are
+written when a thread next asks for one, and the library rides the reconcile,
+which is requeued per directory on every sync. Attachments are the one kind
+with no backlog call anywhere: `attachment_text` is enqueued at ingest, by a
+detail fetch and by Restore, and a message already stored with a body reaches
+none of the three, so the clear writes one `attachment_text` work row per
+attachment left `pending` and the digest follows the text pass. A refusal is
+not re-queued, because "too large" and "not text" are verdicts about the file
+rather than about the model that read it.
 
 **A marker that outlives its rows is the trap** the clear has to avoid, and
 three of them are handled inside the same transaction. `message_progress` is
@@ -874,7 +811,7 @@ one, and the table above is pinned verbatim by tests either way.
 
 The four stamps — `Mail`, `Mail reconcile`, `Teams`, `Storyline sweep` — come
 from `syncStampsProvider` (`app/lib/providers/activity_provider.dart`), which
-`_settings()` **watches** — it re-reads on every recorded event, so a sync
+`SettingsHost` **watches** — it re-reads on every recorded event, so a sync
 landing behind an open Settings pane moves the numbers in it. `Mail reconcile`
 sits directly under `Mail` because it qualifies it: the 24-hour re-enumeration
 that catches what the delta feed skipped runs on its own cadence, and a mail
@@ -1092,23 +1029,24 @@ when the flow reports itself finished or when **Set up again** bumps the
 counter.
 
 `SetupFlow` (`app/lib/screens/setup/setup_flow.dart`) is the only file in the
-flow that touches a provider. Every step body is prop-only, the
-`SettingsLocalServerBody` discipline: the host reads `setupControllerProvider`
+flow that touches a provider. Every step body is prop-only, the settings
+bodies' discipline: the host reads `setupControllerProvider`
 and hands down values and closures, and a null callback hides its control.
 One `PaneSurface`, whose title is the step's and whose trailing slot reads
-`Step N of 8`. The back arrow is `null` on the first step — which is why
+`Step N of 9`. The back arrow is `null` on the first step — which is why
 `PaneSurface.onBack` is nullable and renders DISABLED rather than absent.
 
 | # | Title | Primary button | What it does |
 |---|---|---|---|
 | 1 | Welcome to Bond | `Get started` | What Bond is; the container-migration line when there was one |
-| 2 | Your Mac | `Continue` | Chip, memory, macOS, and which models this Mac takes. Intel or Rosetta renders **no** button at all. At 40 GiB and up, one line saying it runs all three; below it, an alert naming the memory, saying the writing model is not downloaded here and that the writing stages run on the inbox model until a target is added under Settings, Models. Under 16 GiB the same alert gains one sentence about slower triage. All of it is a warning that still continues |
-| 3 | Models | `Continue` | The RESOLVED manifest's rows — name, role sentence, size, licence button, and any `notice` verbatim — and the total. Three rows and 23.8 GB on a full Mac — four files, because the writing model's row says `+ MTP head, 1.6 GB` under its size — two rows and 4.6 GB on an inbox one, and the first sentence says which |
-| 4 | Storage | `Continue` | The effective folder, **Change folder…**, and `checkDisk`. Dead until the preflight answers and passes; free space that could not be asked counts as passing, a folder that cannot be WRITTEN does not — `Bond can't write to this folder. Choose another one.` |
-| 5 | Download | `Continue` | One bar per MODEL this Mac's tier wants, smallest first — the writing model's MTP head rides on its model's bar rather than taking one of its own, so the bar counts both files and finishes once. Enabled only when EVERY file is done — see below |
-| 6 | Sign in | `Continue` | `SignInBody(showTitle: false)` when signed out (signing in advances, and there is no Continue); `You're signed in.` and a Continue when already signed in |
-| 7 | Notifications | `Continue` | The press IS the ask. Exactly one button, and the word `Allow` appears nowhere — macOS is about to put its own Allow up |
-| 8 | All set | `Finish` | Folder, port, account, notifications, then this Mac's tier defaults, `managedServer = true` and `setup = 'done'`, and only then the server |
+| 2 | Your Mac | `Continue` | Chip, memory, macOS, and which models this Mac takes. Intel or Rosetta renders **no** button at all. At 40 GiB and up, one line saying it runs all three; below it, an alert naming the memory, saying the writing model is not downloaded here and that the writing stages run on the inbox model unless Bond is pointed at the user's own servers under Settings, Models. Under 16 GiB the same alert gains one sentence about slower triage. All of it is a warning that still continues |
+| 3 | Where the models run | the form's `Continue` | The one question this round is about, answered by the same form Settings renders. `SetupWhereBody` is two cards and nothing else: **Managed · recommended** keyed `setup-where-managed` and **User defined** keyed `setup-where-custom`. User defined renders `ModelServersForm` with `connectLabel: 'Continue'` and `onThirdParty: null`, so its press IS the way forward and there is no second Continue under it. On a build carrying `BOND_BOX_URL` the User defined card opens ALREADY CHOSEN with both addresses filled in, because `defaultModelPlacement` is the box whenever an address was compiled in. **Managed** is never preselected: the form keeps the way forward behind its own press, where a preselected Managed would put a live Continue under a question nobody had been asked. The press probes BOTH addresses with the typed key, or with the stored one looked up by id when the field is blank, takes the model names the servers list, refuses an address under its own field in the form's own words, and refuses a vendor's address with `Cloud services are connected under Settings after setup.` — there is no consent pane behind a wizard, and cloud services are a Settings decision. It then calls `continueFromWhere(servers:)`, which is the four-value `useBox`: the two addresses, the two discovered names, a key per id or null to keep the stored one, the box placement, and no stored target or stage entry anywhere, and then the models step. A re-entry with a key already in the keychain continues with the field blank and keeps it. Managed's own Continue calls `continueFromWhere()` with no payload, which is `usePlacement(local, hardwareTier:)` with this Mac's HARDWARE tier, never the effective one, which reads `remote` while the placement is still the box. It KEEPS the addresses and the key: changing where the work runs is not forgetting how to reach the servers |
+| 4 | Models | `Continue` | The RESOLVED manifest's rows — name, role sentence, size, licence button, and any `notice` verbatim — and the total. Three rows and 23.8 GB on a full Mac — four files, because the writing model's row says `+ MTP head, 1.6 GB` under its size — two rows and 4.6 GB on an inbox one, and the first sentence says which |
+| 5 | Storage | `Continue` | The effective folder, **Change folder…**, and `checkDisk`. Dead until the preflight answers and passes; free space that could not be asked counts as passing, a folder that cannot be WRITTEN does not — `Bond can't write to this folder. Choose another one.` |
+| 6 | Download | `Continue` | One bar per MODEL this Mac's tier wants, smallest first — the writing model's MTP head rides on its model's bar rather than taking one of its own, so the bar counts both files and finishes once. Enabled only when EVERY file is done — see below |
+| 7 | Sign in | `Continue` | `SignInBody(showTitle: false)` when signed out (signing in advances, and there is no Continue); `You're signed in.` and a Continue when already signed in |
+| 8 | Notifications | `Continue` | The press IS the ask. Exactly one button, and the word `Allow` appears nowhere — macOS is about to put its own Allow up |
+| 9 | All set | `Finish` | Folder, port, account, notifications, then this Mac's tier defaults on the local placement only and `setup = 'done'`, and only then the server. Nothing writes `managedServer`: it is a build define since Round H. It does not touch processing either: that is a remembered preference and it starts on |
 
 **`'done'` is written by Finish and by `returnToInbox`, and by nothing else.**
 The second writer never INVENTS the word: it only puts back a value
@@ -1116,8 +1054,7 @@ The second writer never INVENTS the word: it only puts back a value
 it. Arriving at **All set**
 records `notifications` — the step BEFORE it — because `'done'` is the gate's
 sentinel: a quit on the last screen would otherwise let the next launch
-straight past the gate with `managedServer` still off and no wizard left to
-turn it on. A relaunch lands on Notifications instead, whose Continue re-asks
+straight past the gate with no wizard left to walk. A relaunch lands on Notifications instead, whose Continue re-asks
 (macOS answers a settled prompt instantly) and leads back to All set.
 `SetupController.finish` returns whether BOTH writes landed; false keeps the
 wizard on the screen with `Setup could not be saved. Try Finish again.` above
@@ -1163,20 +1100,22 @@ Continue moves on. A seeded denial is memoized in memory and nowhere else —
 the next launch asks again, which is what makes re-granting in System Settings
 work with no stored flag to clear.
 
-**Which tests pin which strings.** `setup_step_test.dart` — the eight titles,
+**Which tests pin which strings.** `setup_step_test.dart` — the nine titles,
 the stored names, the counter. `setup_welcome`/`device`/`models`/`storage`/
 `download`/`notifications` bodies are pinned by `setup_device_test.dart`,
 `setup_models_test.dart` (including the committed Gemma notice, read off the
 real asset), `setup_storage_test.dart`, `setup_download_test.dart` (both
 `describeRemaining` and `describeDownloadError` tables) and
 `setup_notifications_test.dart` (one button, `Allow` nowhere).
-`setup_flow_test.dart` walks all eight and pins `Step N of 8`, the persisted
-step and the disabled back arrow; `setup_gate_test.dart` pins which screen a
+`setup_flow_test.dart` walks all nine and pins `Step N of 9`, the persisted
+step and the disabled back arrow, and its `Where the models run` group pins the
+two cards, the form preselected on a compiled address, the refusals under the
+field, and what each Continue writes; `setup_gate_test.dart` pins which screen a
 launch gets, the manifest bump included; `setup_controller_test.dart` and
 `setup_resume_test.dart` pin the behaviour under the screens — the resume at
 a `.part`'s byte offset, the folder change that ends a run, the restart after
 weights land; `setup_reentry_test.dart` pins what **Set up again** keeps and
-the way back out of it. The end-user walk-through of the same eight screens is
+the way back out of it. The end-user walk-through of the same nine screens is
 `docs/install.md`.
 
 ## Deliberate deferrals

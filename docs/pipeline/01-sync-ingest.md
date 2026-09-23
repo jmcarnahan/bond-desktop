@@ -45,19 +45,29 @@ custom `YYYY-MM-DD` date, with the calendar day the window reaches spelled out
 under it (see [../settings.md](../settings.md)).
 
 **After a clear.** Settings → Processing → **Clear AI results** empties the
-work table along with every other derived table and re-pends the messages the
-pipeline had gated, and it queues only the attachment work back for itself
-(there is no backlog call for `attachment_text`). It needs no other: these
-same three backlog calls and `requeueSweep()` run on **every** pass and are
-`OR IGNORE`-idempotent over the floor, so the next poll re-enqueues every kept
-message inside the lookback, `backlogEnqueueCap` rows per queue per pass, and
-the triage drain claims the re-pended rows on its own. A large mailbox
-therefore refills over several polls — the same pace, and for the same reason,
-as a first sync. The verdicts ingest wrote (`outbound`, `backlog`, and Teams'
-`auto_generated` and `teams_source`) survive the clear, because nothing in a
-later pass would write them again, and so does the owner's own `user` reason
-from Ignore; every other gate reason is re-derived at the next triage claim.
-See [../settings.md](../settings.md) → Processing.
+work table along with every other derived table, re-pends the messages the
+pipeline had gated, and queues the whole rerun itself, in the same
+transaction: one `attachment_text` row per attachment left `pending` (there is
+no backlog call for that kind anywhere), and then extraction, the needs-you
+judgement and the embedding for **every** kept message of every source in
+`messages` — unpaced and with no window, one statement per kind per source.
+The reset does not leave this to the sync, and that is the point. The three
+backlog calls pass the **lookback floor** as their `sinceIso`, which is right
+for a poll — new mail arrives inside the window — but a reset is the one path
+that re-pends messages *outside* it, a corpus pulled down under a wider window
+and narrowed since. Left to the sync, those messages were triaged and then
+never extracted, judged or embedded again. The sync's own paced calls and
+`requeueSweep()` still run on **every** pass and are `OR IGNORE`-idempotent
+over what the reset filed, so a poll after a clear adds only genuinely new
+mail; the triage drain claims the re-pended rows on its own; and the worker
+still refuses an extract or needs-you item whose message triage has not spoken
+about, so the order the stages run in is unchanged. The verdicts ingest wrote
+(`outbound`, `backlog`, and Teams' `auto_generated` and `teams_source`)
+survive the clear, because nothing in a later pass would write them again, and
+so does the owner's own `user` reason from Ignore; every other gate reason is
+re-derived at the next triage claim. Those kept verdicts leave their rows
+`skipped`, which is what keeps them off all three queues. See
+[../settings.md](../settings.md) → Processing.
 
 **Paging and re-entry.** A window-asking drain — first run, widen, 410
 recovery — sends its `min_received` floor on EVERY `sync_mail` page, not just

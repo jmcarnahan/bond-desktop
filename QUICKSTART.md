@@ -81,13 +81,23 @@ BOND_MCP_SERVER_URL=https://<the URL you were given>/mcp
 Leave the three `MICROSOFT_*` lines blank. They are only for "This device"
 mode (see the appendix), which needs an Entra app registration you control.
 
-If the project runs a shared GPU box, add `BOND_BOX_URL=https://box.example.com`
-with the hostname you were given. It only prefills a field: the address shows
-up already filled in on the wizard's "Where the models run" step and in
-Settings, Models, and you can change it there or leave the line out and type
-it. The access key is never compiled in. You type it in the app once and it is
-kept in the macOS keychain. A separate `BOND_BOX_KEY` line is read only by the
-bench recipes, which have no keychain to read from.
+Two defines decide where the models run. Both are optional and neither carries
+a secret:
+
+- `BOND_BOX_URL=https://box.example.com`, with the hostname you were given, for
+  a build that should open on your own servers. It makes **User defined** the
+  build's default placement and fills both addresses in,
+  `<the address>/prose/v1/chat/completions` for the big model and
+  `<the address>/bulk/v1/chat/completions` for the small one, on the wizard's
+  **Where the models run** step and under Settings, Models, where you can
+  change them. The access key is never compiled in. You type it in the app once
+  and it is kept in the macOS keychain. A separate `BOND_BOX_KEY` line is read
+  only by the bench recipes, which have no keychain to read from.
+- `BOND_LLAMA_SERVER`, the path to a `llama-server` binary, for any dev build
+  that will start the local server. It is needed under **User defined** too,
+  because the embedding model always runs on this Mac. Without it the app
+  says `The model runtime is missing from this build`. It goes in `local.mk`
+  rather than `.env`, next to the other machine-local overrides below.
 
 **Smaller Macs.** Create a git-ignored `local.mk` next to the `Makefile` with
 whichever lines apply. Nothing else in the repo needs to change:
@@ -103,12 +113,18 @@ whichever lines apply. Nothing else in the repo needs to change:
 # MODEL_PORT = 8080
 # FAST_PORT  = 8082
 # EMBED_PORT = 8081
-# Lets Settings → Models → Local server run ONE bundled-style router from this
-# dev build, instead of the three servers you start by hand.
+# Lets the app run ONE bundled-style router from this dev build, instead of the
+# three servers you start by hand. Needed under User defined too: the
+# embedding model always runs here.
 # BOND_LLAMA_SERVER = /opt/homebrew/bin/llama-server
 # Skips the first-run setup wizard. Your models are in the Homebrew cache, not
 # in the app's own folder, so it would offer to download ~22 GB you already have.
 # BOND_DEV_SKIP_SETUP = 1
+# Leaves the servers to you. The app runs its own llama-server by default since
+# Round H, and this is how a machine that already has `make model fast embed`
+# up says so: the two chat slots stay on the ports above instead of following
+# the app's router. Read as a value, so `= 0` turns it back off.
+# BOND_DEV_HAND_SERVERS = 1
 ```
 
 ## 3. Models and servers
@@ -170,15 +186,28 @@ make app-run
 
 The first build takes a few minutes.
 
-**The first launch opens the setup wizard** — eight screens that check the Mac,
-download the three models into the app's own folder (~22 GB), sign in, and turn
-Bond's managed model server on. That is not what you want on this path: you
+**The first launch opens the setup wizard** — nine screens that check the Mac,
+ask where the models run, download what this Mac needs, sign in, and start
+Bond's own model server. That is not what you want on this path: you
 have just started three servers by hand and the weights are already in
-`~/.cache/huggingface/hub/`. Add `BOND_DEV_SKIP_SETUP = 1` to `local.mk`
-(step 2) and rebuild, and the app goes straight to sign-in as it always has.
+`~/.cache/huggingface/hub/`. Add `BOND_DEV_SKIP_SETUP = 1` and
+`BOND_DEV_HAND_SERVERS = 1` to `local.mk` (step 2) and rebuild: the app goes
+straight to sign-in as it always has, and it leaves your three servers alone
+rather than starting one of its own.
 Run the wizard instead if you want the bundled shape — it downloads its own
-copies and switches the app onto one router. `docs/install.md` walks the eight
+copies and switches the app onto one router. `docs/install.md` walks the
 screens; `docs/settings.md` (**First run**) is the reference.
+
+**What the third screen asks.** **Where the models run** is two cards,
+**Managed · recommended** and **User defined**. On a build with `BOND_BOX_URL`
+compiled in, User defined opens already chosen with both addresses filled in.
+Paste the access key you were given and press **Continue**. The app asks each
+server which model it serves and takes the names they list, the key is kept in
+the macOS keychain and nowhere else, and the download step that follows is the
+embedding model alone, because that model always runs on this Mac. **Managed**
+is the offline choice: Bond downloads the models and runs them here, and
+nothing leaves the machine. Either way, processing starts on by itself once the
+wizard finishes, so the inbox begins working without anybody finding a switch.
 
 With the wizard skipped, the app opens on a sign-in screen:
 
@@ -200,14 +229,17 @@ Two things you may see and can ignore:
   is under Settings → Notifications either way.
 
 To confirm the app sees the servers, open the avatar menu → **Settings** →
-**Models** and press **Check server** on each row. All three should report
-reachable with the model listed.
+**Models**. The page asks one question, where the models run, and lists three
+roles under it: the big model, the small model and embeddings. Press **Check**
+on each. All three should report reachable with the model listed.
 
 ## 5. Day to day
 
-The servers are independent of the app. They survive app restarts and the
-weights are memory-mapped, so a second start is fast. After a reboot, or after
-`make stop`, bring them back yourself; the app does not start them.
+On the hand-started path, `BOND_DEV_HAND_SERVERS = 1` in `local.mk`, the
+servers are independent of the app. They survive app restarts and the weights
+are memory-mapped, so a second start is fast. After a reboot, or after
+`make stop`, bring them back yourself; the app does not start them. Without
+that define the app runs its own llama-server and none of this is needed.
 
 ```sh
 make status
@@ -223,13 +255,15 @@ Stop them when you need the memory back:
 make stop fast-stop embed-stop
 ```
 
-Or let the app run them for you: with `BOND_LLAMA_SERVER` set in `local.mk`
-(step 2), **Settings → Models → Local server** turns on one llama-server that
-serves all three models, and starts and stops it with the app. It is off by
-default, and turning it off puts you back on `make model fast embed` exactly as
-above. **Set up again** on that card re-runs the first-run wizard from the top
-— it keeps the models already on disk and the session already signed in, so
-those two screens are a Continue each.
+Or let the app run them for you, which is what it does BY DEFAULT: with
+`BOND_LLAMA_SERVER` set in `local.mk` (step 2), the app runs one llama-server
+that serves all three models, and starts and stops it with the app. What puts
+you back on `make model fast embed` exactly as above is
+`BOND_DEV_HAND_SERVERS = 1` in `local.mk` (step 2), which is a build define
+rather than a setting. **Set up again**, at the foot of Settings → Models,
+re-runs the first-run wizard from the top — it keeps the models already on
+disk and the session already signed in, so those two screens are a Continue
+each.
 
 Rebuild the app after a `git pull`:
 
@@ -243,9 +277,9 @@ make app-run
 **A port is busy.** `make model` (and `fast`, `embed`) refuse to reuse a port
 held by anything that is not a `llama-server`; they print the pid and command.
 Either free the port or move ours in `local.mk` (step 2). Then point the app at
-the new port: for the prose and bulk slots, Settings → Models → edit the Server
-URL and Save. The embeddings URL is fixed at build time, so a moved embeddings
-port means one rebuild:
+the new port: under **User defined**, edit the two addresses in Settings →
+Models and press **Connect**. The embeddings URL is fixed at build time, so a
+moved embeddings port means one rebuild:
 
 ```sh
 make app-run EMBED_URL=http://localhost:9081/v1/embeddings
@@ -304,9 +338,10 @@ work that needs it until it comes back. Start the missing one.
   (the preset it writes, the pid file the next launch reaps, and an empty cache
   directory the child is deliberately pointed at)
 - Models the app downloads for itself:
-  `~/Library/Application Support/com.bondinbox.app/models/`, or wherever
-  **Change folder…** on that card points. Separate from the Homebrew cache
-  above, which is what `make model` fills.
+  `~/Library/Application Support/com.bondinbox.app/models/`, or the folder
+  chosen on the setup's Storage step (reach it again through **Set up
+  again**). Separate from the Homebrew cache above, which is what `make model`
+  fills.
 - App data (database, attachments, settings):
   `~/Library/Application Support/com.bondinbox.app/`. A build made before the
   app dropped the sandbox kept the same files under

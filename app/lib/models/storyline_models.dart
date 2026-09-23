@@ -45,8 +45,13 @@ Set<String> _decodeSources(String? raw) {
 ///
 /// [status] stays a raw string rather than an enum: it is written by the
 /// service, read by the UI, and a value from a newer build must render as
-/// something rather than crash a list. The four it takes are
-/// `suggested` | `active` | `dismissed` | `archived`.
+/// something rather than crash a list. The five it takes are
+/// `suggested` | `possible` | `active` | `dismissed` | `archived`.
+///
+/// `possible` is the cluster the sweep built and the model declined: the
+/// namer would not vouch for it, the charter lint refused what it wrote, or
+/// the per-member confirms left too few. It is stored WITH its members and
+/// shown under its own fold, so a person decides what the model would not.
 @immutable
 class Storyline {
   final String id;
@@ -81,7 +86,8 @@ class Storyline {
 
   /// The dedupe key for the member set as it stands, maintained by every
   /// membership write. Null on a row that has no member set to describe — a
-  /// cluster the sweep tombstoned without ever storing one.
+  /// member-less tombstone an older build wrote for a cluster the model
+  /// declined, which is now filed as `possible` with its members instead.
   final String? memberHash;
 
   /// The membership as it stood the last time the refresh pass described this
@@ -143,6 +149,12 @@ class Storyline {
 
   bool get isSuggested => status == 'suggested';
 
+  /// A group the sweep built and the model declined to vouch for. It asks the
+  /// same Keep or Dismiss question a suggestion does, and it is answered the
+  /// same way, but its threads stay in the sweep's unassigned pool until
+  /// somebody keeps it.
+  bool get isPossible => status == 'possible';
+
   /// The recap's open questions and settled decisions, decoded. The recap
   /// pass writes both columns as JSON arrays of short strings and nothing but
   /// the storyline header reads them, so these getters are the only decoder —
@@ -180,6 +192,21 @@ class Storyline {
     );
   }
 }
+
+/// A storyline's stored status in the words a person would use.
+///
+/// The statuses are internal words and they leak: the message history names
+/// the status of every storyline a thread is filed in, so that one line has to
+/// read `Possible` rather than the column's own `possible`. Anything unmapped
+/// falls through exactly as it is stored, so a status added later reads
+/// awkwardly on that one line rather than disappearing from it.
+String storylineStatusLabel(String status) => switch (status) {
+      'active' => 'Active',
+      'suggested' => 'Suggested',
+      'possible' => 'Possible',
+      'dismissed' => 'Dismissed',
+      _ => status,
+    };
 
 /// One thread's membership in a storyline.
 ///

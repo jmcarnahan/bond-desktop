@@ -56,10 +56,16 @@ enforce the ones that are commands.
   straddles the midnight-truncated floor; use hours for anything meant to be
   inside.
 - Model work runs only while the session's processing switch is on
-  (`processingProvider`, off at every launch). `AiWorker` and `TriageQueue`
-  each take an `enabled` closure and read it on every launch decision, so a
-  test that builds either one WITHOUT that argument is unaffected. Turning it
-  off also calls `stop()` on all four drains.
+  (`processingProvider`), which is SEEDED from the remembered `processing_on`
+  preference and defaults ON. `AiWorker` and `TriageQueue` each take an
+  `enabled` closure and read it on every launch decision, so a test that builds
+  either one WITHOUT that argument is unaffected. Turning it off also calls
+  `stop()` on all four drains; `_setProcessing` on the inbox writes the
+  preference LAST, after the drains are told, so a throwing write cannot leave
+  lanes running under a switch that reads off. An inbox-level test that drives
+  Clear AI results or Forget and re-sync seeds `processing_on = false` in its
+  store, because `_resetPipeline` throws `StateError('Turn processing off
+  first')` while the switch is on.
 - `--plain-name` on a live `make` target is a SUBSTRING filter, so a new live
   test's name must not contain another target's word (`storyline`, `triage`,
   `reply`, `gates`, `sweep`) or it runs under that target too.
@@ -128,7 +134,11 @@ enforce the ones that are commands.
   what keeps `docs/pipeline/06-storylines.md`'s ordering true), the DRAFT lane
   (`draft` alone, at `AppPrefs.proseParallel` wide). A new handler goes on the
   lane whose server it calls, and order ACROSS lanes is enqueue-and-pump, not
-  list position.
+  list position. A handler that must wake the drain it runs INSIDE is handed
+  the worker through a `late final` local in the lane's body, never
+  `ref.read` of that lane's own provider: Riverpod asserts self-dependency on
+  a `read` as much as on a `watch`, so a debug build throws `A provider cannot
+  depend on itself` out of the handler mid-drain.
 - `requeueWork(refreshCreatedAt: true)` only where a person asked for the work
   NOW (Regenerate, Draft reply, the two Retries, Restore, a storyline action):
   the drain claims `created_at DESC`, so a bulk revive keeps its stamps rather
@@ -150,6 +160,16 @@ enforce the ones that are commands.
 - Settings section titles and summary strings are pinned by
   `settings_screen_test.dart` and by the table in `docs/settings.md` — move
   all three together; a new segmented control is `SettingsSegments<T>`.
+- The settings SURFACE is `SettingsHost` (`screens/settings_host.dart`), not
+  the inbox: it owns the probe and every writer only settings calls
+  (`_saveNeedsYouRules`, the two resets and `_resetPipeline`,
+  `_reloadAfterBackendChange`, `_connectionStatus`, `_connectMicrosoft`), and
+  the inbox binds it once for both rungs in
+  `_settingsHost`. A new settings-only mutator goes on the host. Two methods
+  stay on the inbox as injected seams and only these two: `_setProcessing`,
+  because the sidebar's own switch calls it, and `_waitForPullsToSettle` with
+  its `_quietTimeout`, because it reads the `_mailPulling`/`_teamsPulling`
+  flags the inbox's syncs write.
 - The clustering card is ONE recipe (`clusteringCardForConversationRow` in
   `clustering_card.dart`, whose `ClusteringCardVariant` holds the five cards
   and `shippedClusteringCard` names the one that ships) behind
@@ -167,12 +187,28 @@ enforce the ones that are commands.
   delegates so its twenty-two importers, six in `lib` and sixteen in `test`, did
   not change. A new pass goes in the file whose job it is, and the service gets
   a delegate only if callers outside already reach for it.
+- A cluster the models DECLINE is a `possible` storyline WITH its members, in
+  the rail under **Possible · N** with Keep and Dismiss, never a member-less
+  tombstone. `_filePossible` in `storyline_service.dart` is the one insert site
+  for all three reasons (namer, charter lint, too few confirm survivors);
+  `dismissedHashExistsAny` and `expireStaleSuggestions` read `possible` as well
+  as their old status, and every pool, assign, recruit, refresh, recap and
+  home-feed query names `('suggested','active')` and so leaves a possible
+  storyline's threads unassigned and costs it no model call — on purpose, until
+  somebody keeps it. `loadStorylines(withMembersOnly: true)` is what the
+  Dismissed fold reads, so the member-less tombstones older builds wrote stop
+  appearing there while still answering the hash check.
 - ONE THREAD, ONE LIVE STORYLINE. `recruit`'s candidate walk excludes the
   sweep's `assignedOrBlockedKeys` set, read once per lap, so a declared
   storyline cannot take a thread another storyline already holds. Measured:
   before the rule, 41 of 57 recruited threads on the declared bench had landed
   in more than one storyline. The cost is that a contested thread goes to the
-  first storyline to ask rather than the best match.
+  first storyline to ask rather than the best match. A `possible` storyline is
+  the one row whose members sit outside that set, so Keep is the one press that
+  could break the rule: `StorylineEdits.keepSuggestion` drops every member a
+  live storyline took meanwhile, re-hashes the survivors and dismisses the row
+  instead of activating it when fewer than `minClusterSize` are left, in one
+  transaction. A `suggested` row skips all of it.
 - The fast gate carries a YIELD TICKET beside its queue. A triage pump that
   finds work asks for the yield and enqueues its own drain in the same step;
   the worker reads the flag only where it would claim its next item, so the
@@ -200,24 +236,128 @@ enforce the ones that are commands.
   three. The four vec0 tables are NOT in the lists: each index class resets
   its own in `clearDerived`'s rebuild tail, and a fifth index must be added
   there by hand.
+- `clearDerived` queues extraction, needs-you and the per-message embedding
+  for every kept message ITSELF, for every source and unbounded by the
+  lookback, because the sync's backlog calls pass the lookback floor as their
+  `sinceIso` and a reset is the one path that re-pends messages outside it.
+  Leaving it to the sync is what left a narrowed window's older mail triaged
+  and then never extracted, judged or embedded. A new per-message stage is
+  added to that loop or it is skipped after every clear.
 - Stages resolve their client through `stageLlmClientProvider(stageId)`, whose
   resolver reads `ref.read(appPrefsProvider.notifier).targetForStage(stageId)`
   at request time. Nothing in `lib/` watches `appPrefsProvider` for a target,
   so a prefs write rebuilds no worker, and `llm_routing_test` pins all four
   queues identical across a `setStageTarget`. A null `LlmTarget.wire` means
   the client's own wire; `toTarget` stamps only Converse.
-- Stages resolve through the PLACEMENT as well as the stage map
-  (`AppPrefs.modelPlacement`, `ModelPlacement {box, local}`). `adoptBox` writes
-  two fixed-id targets and the whole map; `adoptLocal` removes them and applies
-  the machine tier's. So a test asserting which target a stage resolves to has
-  to say which placement it is in, and the effective manifest tier is
-  `effectiveTierProvider` (`remote` on the box) rather than
-  `machineTierProvider`, which still answers what this Mac could run.
-- `adoptBox`'s PRESET ORDER is load-bearing and pinned by a test: bulk first,
-  then prose and confirm. `storyline_membership` is in both preset lists, so
-  the second call is what decides which model confirms, and the row of record
-  wants the 27B. Two presets rather than a hand-written stage map, because the
-  preset lists are pinned against `pipelineStages` and a literal map is not.
+- `box` in code means the USER DEFINED placement, historically the GPU box:
+  the enum value (`ModelPlacement.box`), the prefs, the two ids `box-prose` and
+  `box-bulk` and the keychain entries all keep that word, and only the words on
+  screen say `Your server`.
+- Stages resolve through the PLACEMENT as well as the stage map, and the
+  placement is a RULE rather than stored rows. FOUR prefs carry the pair:
+  `box_big_url` and `box_small_url` (chat-completions URLs) and `box_big_model`
+  and `box_small_model` (the names DISCOVERED from each server's `/v1/models`),
+  each '' meaning "follow the build", which derives both URLs from the compiled
+  `BOND_BOX_URL` under `/prose` and `/bulk` and both names from the two
+  constants that box serves. `hasBox` is BOTH effective URLs non-empty.
+  `AppPrefs.boxProseSpec` and `boxBulkSpec` are DERIVED from those four and
+  never stored, which is why `LlmTargetSpec.isBox` exists, why `isFixed =
+  isBuiltIn || isBox` guards the editors, and why `_targets()` drops the two
+  box ids at load; each spec's `wire` is `wireForHost(url)` and its `parallel`
+  is 4 only when that URL pref is empty (the compiled box is vLLM with four
+  sequences) and 1 for a stored address, which a one-slot llama-server would
+  queue past the prose client's ceiling. The stage map's default is
+  `placementDefaultTargetId`: the seven prose stages plus
+  `storyline_membership` on `box-prose`, the other seven bulk stages on
+  `box-bulk`, whenever the placement is box and both addresses exist, and the
+  slot's built-in otherwise. `targetIdForStage` is a stored override that
+  resolves, else that default. `usePlacement(p, hardwareTier:)` is the one door
+  between placements: it drops the entries the app itself writes and keeps user
+  `t-…` picks. `useBox({bigUrl, smallUrl, bigModel, smallModel, bigKey,
+  smallKey, hardwareTier})` is `setBoxServers` plus `setBoxKey` (a token PER
+  ID, since two addresses can be two operators) plus `usePlacement(box)`, and
+  it is the one door the Models page and the wizard both write through.
+  `setBoxServers` refuses a big URL whose host
+  `isThirdPartyHost` while consent is false, refuses a third-party SMALL URL
+  whatever the flag says (the consent covers drafts on the big model; the
+  small model reads every message body and no cloud service serves that
+  role from any screen), and `draftFallbackSpec` is never third party for
+  the same reason. THREE one-shot migrations run in
+  `AppPrefsNotifier.read`, in this order: `box_targets_derived` (Round G's
+  stored pair into the `box_url` origin), `box_servers_derived` (that origin
+  into the two URLs), `stage_targets_cleared` (the per-step picks, which no
+  screen can show since the stage picker went). A test asserting where a stage
+  resolves says which placement it means (`AppPrefs(modelPlacement: box,
+  boxBigUrl: '…', boxSmallUrl: '…')`, since `boxUrlDefault` is empty under
+  `flutter test`), and the effective manifest tier is `effectiveTierProvider`
+  (`remote` on the box) rather than `machineTierProvider`, which still answers
+  what this Mac could run.
+- Whether the app runs its own llama-server is `managedServerDefault`, a
+  CONSTANT read off `--dart-define=BOND_DEV_HAND_SERVERS` the way
+  `SetupGate.skipDefine` reads its own, not a preference: `AppPrefs
+  .managedServer` keeps its field so a test can say `AppPrefs(managedServer:
+  false)` and assert the compiled URLs, and a bare `AppPrefs()` is on the
+  router. A busy port is not a question either — the supervisor takes a free
+  one and AWAITS `onPortMoved` (wired to `setRouterPort`) before it spawns, so
+  the preference, the pid record and the clients agree.
+- `storyline_membership` is the ONE stage whose role depends on the placement,
+  big on the box and small here, and `placementDefaultTargetId` is where that
+  lives. `setStageTarget` and `applyPreset` compare against the PLACEMENT
+  default, so picking `box-bulk` for it on the box stores an entry and picking
+  `box-prose` clears one; `applyTierDefaults` keeps the SLOT default because it
+  runs only on the local placement.
+- The Models page is ONE question, where the models run, answered by two
+  modes and nothing else. `SettingsModelsPage`
+  (`widgets/settings_models_page.dart`) carries the keys `settings-mode`,
+  `settings-models-status`, `settings-models-progress`, `settings-show-log`,
+  `settings-set-up-again` and `settings-role-check-<big|small|embed>`; the
+  section renders only when `onUseBox` is wired. **Managed** is a status block
+  fed by `serverStateProvider` and `managedModelsStatusProvider`; **User
+  defined** renders `ModelServersForm` (`widgets/model_servers_form.dart`),
+  the ONE form for named servers, with the keys `servers-big-url`,
+  `servers-small-url`, `servers-key`, `servers-small-key`,
+  `servers-big-model`, `servers-small-model`, `servers-connect` and
+  `servers-remove-key`. The form OWNS both address rules (`isBoxOrigin`, the
+  same rule `setBoxServers` throws on, and a path that must contain `/v1/`
+  unless `wireForHost` answers Converse) and refuses under the field rather
+  than letting a host throw past a fire-and-forget press; the model name is
+  DISCOVERED from `/v1/models` rather than typed, a second key field appears
+  only when the two addresses name different hosts, and a third-party big
+  address raises `onThirdParty` so `SettingsScreen` can open the consent pane
+  and call the form's own `resume` on Continue. The Advanced fold, the slot
+  editors, the stage picker, the targets list and the Local server card were
+  DELETED in Round H; the routing data they edited is still there and no
+  screen shows it. `RoleLine.fromPrefs` groups a role's steps by
+  `defaultTargetIdForStage` and describes the modal target, and
+  `RoleLine.withStatus` joins this Mac's own files onto the rows by ROUTER
+  id. A placement write is followed by `supervisor.ensurePreset()`, from the
+  host after either mode and from the wizard's Finish, which restarts the
+  router only when the preset hash changed; `managedModelsStatusProvider`
+  lists the MACHINE tier's files with an `inUse` flag off the effective
+  tier's manifest, and the page shows the unused ones under User defined
+  under **Also on this Mac, not in use** as `on disk · not loaded`.
+- The wizard's Where step (`screens/setup/setup_where_body.dart`,
+  `SetupWhereBody`) is two cards, `setup-where-managed` and
+  `setup-where-custom`, and nothing else: User defined renders the same
+  `ModelServersForm` with `connectLabel: 'Continue'` and `onThirdParty: null`,
+  so a vendor address is refused there with `thirdPartyRefusalText` and cloud
+  services stay a Settings decision. The form's press IS the step's way
+  forward, and there is no second Continue under it: `SetupFlow` returns
+  `continueFromWhere(servers:)` from `onConnect`, which writes through the
+  four-value `useBox` and moves to Models, and a throw comes back to the form,
+  which is the thing that can draw it. Under Managed the step's own Continue
+  calls `continueFromWhere()` with no payload, which is `usePlacement(local,
+  hardwareTier:)` with the HARDWARE tier. `SetupState` carries the placement
+  and nothing of the pair; the addresses, the discovered names and the keys
+  live in the form until its press.
+- Under `flutter test` `hardwareInfoProvider` answers `HardwareInfo.unknown` at
+  its two-second timeout, so the tier is `AsyncLoading` for the first two
+  seconds. A test that needs a readable machine overrides
+  `hardwareInfoProvider` with one and pumps past two seconds in bounded steps.
+- Never run `make model` or `make fast` beside the app's managed server on one
+  Mac. Two 27Bs and two 4Bs wired with `mmap+mlock` is about 50 GB, and it
+  panicked a 64 GB Mac on 2026-09-21. Stop the make servers first
+  (`make stop fast-stop embed-stop`).
 - A probe of a target with a stored bearer PASSES it:
   `ModelServerProbe.probe(url, bearer:)`, resolved through
   `AppPrefsNotifier.bearerFor(id)` at the moment of the press. The widgets take
@@ -256,15 +396,19 @@ enforce the ones that are commands.
   sentence had a URL. The exception itself keeps the full sentence for the
   screen. `llm_error_redaction_test` pins the existing sites; a new place that
   writes an exception's text into a row must go through it as well.
-- `draft_improve` is the one `PipelineStageInfo.optional` row: a routing
-  destination with no schema of its own, so it runs `DraftTask` and its call
-  record is labelled `draft_reply`. `model_slots_test` pins the exempt set
-  literally.
+- `draft_improve` is a prose stage like the six beside it, routed by the
+  placement rule, and it is the one row with NO SCHEMA of its own: it runs
+  `DraftTask` and its call record is labelled `draft_reply`, which is the
+  exemption `model_slots_test` pins literally. It was the one
+  `PipelineStageInfo.optional` row until Round H, when the stage picker that
+  was the only way to turn it on was deleted; the field survives with no member
+  and nothing branches on it any more.
 - The machine tier is `MachineTier` in `model_slots.dart`, chosen from
   `hw.memsize` by `machineTierFor` and never persisted, so a models folder
-  carried to another Mac is re-read on the Mac it is on. It is applied twice,
-  by the wizard at Finish and by **Use this Mac's defaults**, and unknown
-  memory resolves to `full` because unknown never refuses.
+  carried to another Mac is re-read on the Mac it is on. It is applied by the
+  wizard at Finish and by every `usePlacement(local, hardwareTier:)`, which is
+  what the Models page's **Managed** segment calls; unknown memory resolves to
+  `full` because unknown never refuses.
 - The manifest and the Makefile are two worlds joined by
   `manifest_makefile_parity_test.dart`, so a change to any of them edits both
   or fails the test: the three repos, the quant either from a `:quant` suffix

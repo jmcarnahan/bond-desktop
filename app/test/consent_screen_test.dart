@@ -12,8 +12,8 @@ void main() {
   Future<void> open(
     WidgetTester tester, {
     String targetName = 'Bedrock Opus',
-    String stageLabel = 'Draft generation',
     int dailyCap = 50,
+    String? error,
     VoidCallback? onContinue,
     VoidCallback? onNotNow,
   }) async {
@@ -23,8 +23,8 @@ void main() {
       home: Scaffold(
         body: CloudDraftsConsentPane(
           targetName: targetName,
-          stageLabel: stageLabel,
           dailyCap: dailyCap,
+          error: error,
           onContinue: onContinue ?? () {},
           onNotNow: onNotNow ?? () {},
         ),
@@ -33,13 +33,15 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('it names the target and the stage it would answer',
+  testWidgets('it names the target and what it would be answering',
       (tester) async {
     await open(tester);
 
     expect(find.text('Send drafts to Bedrock Opus?'), findsOneWidget);
+    // The whole big model, not one stage: the picker that could point a
+    // single step somewhere went with the Advanced fold.
     expect(
-      find.text('This target would answer the Draft generation stage.'),
+      find.text(CloudDraftsConsentPane.scopeLine),
       findsOneWidget,
     );
     // One flag covers both draft stages, and the pane says so: the scope of
@@ -49,6 +51,20 @@ void main() {
           'No other stage sends drafts anywhere.'),
       findsOneWidget,
     );
+  });
+
+  testWidgets('a refusal from the connect it is standing in front of renders '
+      'on the pane, and only when there is one', (tester) async {
+    await open(tester);
+    expect(find.byKey(CloudDraftsConsentPane.errorKey), findsNothing);
+
+    await open(tester, error: 'That server refused the address.');
+
+    expect(find.byKey(CloudDraftsConsentPane.errorKey), findsOneWidget);
+    expect(find.text('That server refused the address.'), findsOneWidget);
+    // The pane is still a pane: both ways out are still there.
+    expect(find.byKey(CloudDraftsConsentPane.continueKey), findsOneWidget);
+    expect(find.byKey(CloudDraftsConsentPane.notNowKey), findsOneWidget);
   });
 
   testWidgets('it says what goes and what never goes', (tester) async {

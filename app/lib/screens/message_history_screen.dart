@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart'
 
 import '../models/home_models.dart';
 import '../models/message_history.dart';
+import '../models/storyline_models.dart' show storylineStatusLabel;
 import '../theme/tokens.dart';
 import '../widgets/activity_log_panel.dart';
 import '../widgets/home_result.dart';
@@ -531,8 +532,17 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
     final evidence = membership.evidence?.trim() ?? '';
     final status = membership.status ?? '';
     // The storyline's own status, through the read's LEFT JOIN. Live is the
-    // pair a storyline is answerable in; anything else — dismissed, or gone
-    // altogether — is history and offers no Remove.
+    // pair a storyline is answerable in, and only a live membership offers
+    // Remove. A dismissed storyline, or one gone altogether, is history.
+    //
+    // A `possible` one is neither. It is a group the model built and would not
+    // vouch for, and the thread is in it while staying in the sweep's pool, so
+    // the line says so and stops there: the group is answered WHOLE, with the
+    // Keep and the Dismiss the rail's Possible fold carries, and pulling one
+    // thread out of a question nobody has said yes to yet would be answering
+    // something else. The status word is written out by
+    // [storylineStatusLabel] rather than interpolated raw — `possible` is a
+    // column value, `Possible` is English.
     final live = status == 'active' || status == 'suggested';
     final remove = widget.onRemoveFromStoryline;
     final confirming = armed == membership.storylineId;
@@ -548,7 +558,7 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
             '${title.isEmpty ? '(a storyline that no longer exists)' : title}'
             ' — ${evidence.isEmpty ? 'no evidence recorded' : evidence}'
             '${membership.addedByUser ? ' · filed by you' : ''}'
-            '${live || status.isEmpty ? '' : ' · $status'}',
+            '${live || status.isEmpty ? '' : ' · ${storylineStatusLabel(status)}'}',
             style: BondType.small,
           ),
           Row(
@@ -607,6 +617,8 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
     // The storyline's own status, the same read [_membershipEntry] makes and
     // for the same reason: a storyline that is dismissed or gone answers
     // nothing, so the sentence stands on its own and neither button is drawn.
+    // A `possible` one answers nothing either, and for the reason
+    // [_membershipEntry] gives: the whole group is still the question.
     final status = block.status ?? '';
     final live = status == 'active' || status == 'suggested';
 

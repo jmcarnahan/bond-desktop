@@ -47,7 +47,7 @@ export 'storyline_cards.dart';
 /// [GroupThreadsTask] which threads inside each neighbourhood are one project
 /// or event. Everything below the branch is identical: either way what comes
 /// out is a list of index lists, and `_propose` names it, confirms it and
-/// tombstones it exactly as before.
+/// files what the model declined exactly as before.
 ///
 /// The reason the second mode exists is a base rate, not a tuning miss. Over
 /// the golden pool there are 1,346 cross-effort pairs to 85 same-effort ones,
@@ -252,7 +252,7 @@ class StorylineTuning {
   ///
   /// A cluster under it is split at a higher threshold, and what is still
   /// under it at [clusterSplitCeiling] is dropped for the pass — no naming
-  /// call, and no tombstone either, because nothing was asked.
+  /// call, and nothing filed either, because nothing was asked.
   static const double clusterCoherenceFloor = 0.43;
 
   /// How much higher each re-clustering rung asks for. Small enough that a
@@ -331,8 +331,16 @@ class StorylineTuning {
   /// deterministic for the reason the store's order is.
   static const int poolCardsPerCall = 48;
 
-  /// How many unanswered suggestions may sit in the rail at once. A wall of
-  /// proposals is not a feature; it is a chore, and it gets dismissed as one.
+  /// How many unanswered questions the app may have sitting in the rail at
+  /// once: three, of either kind. A wall of proposals is not a feature; it is
+  /// a chore, and it gets dismissed as one.
+  ///
+  /// Both kinds, because both ask. The sweep's room count reads `suggested`
+  /// and `possible` rows created by the app, and a cluster filed as possible
+  /// spends a slot in the pass that files it the way a proposal does. A
+  /// declined cluster used to be an invisible tombstone and could fill nothing
+  /// up; since it became a row with members and two buttons, a pass whose
+  /// models declined everything would otherwise file every cluster it built.
   static const int maxPendingSuggestions = 3;
 
   /// All this floor asks is that there be something to pair: below two
@@ -353,9 +361,9 @@ class StorylineTuning {
   /// mailbox: a first sync queues thousands of extractions, and the pool the
   /// sweep draws from grows for as long as they drain. Clustering the first
   /// tenth of a mailbox proposes the storylines the first tenth happens to
-  /// hold, tombstones them when the model says no, and then cannot re-ask the
-  /// same question once the rest arrives, because the tombstone recognises the
-  /// cluster by its hash.
+  /// hold, files them as possible when the model says no, and then cannot
+  /// re-ask the same question once the rest arrives, because the hash on that
+  /// row recognises the cluster.
   ///
   /// All three floors are read from ONE [MessageStore.pipelinePulse] call:
   /// that query already returns pending and processing per `task_kind` AND the
@@ -489,12 +497,19 @@ typedef _MemberContext = ({
 });
 
 /// What one proposal did, as [StorylineService._propose] reports it to the
-/// sweep: whether a suggested storyline was written, how many members the
-/// confirms kept and turned away, how many finished threads the probe pulled
-/// in, whether the namer or the charter lint refused the cluster, how many
-/// outliers were dropped, and how many fragment siblings rode a survivor.
+/// sweep: whether a suggested storyline was written, whether the cluster was
+/// filed as a `possible` one instead, how many members the confirms kept and
+/// turned away, how many finished threads the probe pulled in, whether the
+/// namer or the charter lint refused the cluster, how many outliers were
+/// dropped, and how many fragment siblings rode a survivor.
+///
+/// [proposed] and [filed] are two flags rather than one word because the sweep
+/// spends its room on both and the activity row counts only the first: a
+/// filing is a question asked as surely as a proposal is, but it is not a
+/// storyline anybody offered.
 typedef _ProposeTally = ({
   bool proposed,
+  bool filed,
   int confirmed,
   int rejected,
   int joined,
@@ -519,7 +534,11 @@ typedef _Survivor = ({Map<String, Object?> row, String evidence});
 /// declined it, or kept fewer than [StorylineTuning.minClusterSize]),
 /// `lint` (the charter lint refused the name), `thin` (the confirms left
 /// fewer than [StorylineTuning.minClusterSize] survivors) and `answered`
-/// (a tombstone already held for this set and no model was asked).
+/// (a row already held this set's hash and no model was asked).
+///
+/// The last four are not thrown away: a cluster the model declined for any of
+/// those reasons is filed as a `possible` storyline with its members, for a
+/// person to keep or dismiss. See [StorylineService._filePossible].
 typedef SweepClusterObserver = void Function(
   List<({String source, String key})> threads,
   String outcome,
@@ -642,7 +661,7 @@ class StorylineService {
   /// golden sweep bench reads each cluster's gold purity BEFORE naming through
   /// it, which is the only way to tell a namer that declines pure groups from
   /// a clustering that builds mixed ones; the store keeps no record of a
-  /// declined cluster beyond its tombstone hash.
+  /// declined cluster beyond the `possible` row [_filePossible] writes.
   final SweepClusterObserver? _observeCluster;
 
   /// The user actions, which touch no model — see [StorylineEdits]. Every one
@@ -2163,11 +2182,11 @@ class StorylineService {
   /// work row, but the pass itself reads the pipeline's backlog once and
   /// defers, noted, while extraction, embedding or triage is still above its
   /// floor: a pool that is still filling would have this pass propose the
-  /// storylines the first tenth of a mailbox happens to hold, and tombstone
-  /// them before the rest arrived. Stale suggestions expire BEFORE that check,
-  /// or a mailbox that never settles would never expire anything and the
-  /// deadlock the expiry exists to break would survive it. The long form is in
-  /// `docs/pipeline/06-storylines.md`, *When the sweep runs*.
+  /// storylines the first tenth of a mailbox happens to hold, and file them
+  /// as possible before the rest arrived. Stale suggestions expire BEFORE
+  /// that check, or a mailbox that never settles would never expire anything
+  /// and the deadlock the expiry exists to break would survive it. The long
+  /// form is in `docs/pipeline/06-storylines.md`, *When the sweep runs*.
   Future<void> sweep() async {
     // Before the early returns, not after them, and that placement is the
     // whole point: this heals refreshes that were LOST, and the sweep returns
@@ -2201,8 +2220,18 @@ class StorylineService {
 
     if (await _settleGate()) return;
 
-    final pending =
-        (await _store.loadStorylines(statuses: const ['suggested'])).length;
+    // A `possible` storyline counts here exactly as a `suggested` one does.
+    // Both are unanswered questions sitting in the rail with a Keep and a
+    // Dismiss on them, and the reason there is a ceiling at all — a wall of
+    // them is a chore, and a chore gets cleared rather than read — does not
+    // care which of the two a row is. `created_by = 'auto'` because the
+    // ceiling is on what the APP asks: a storyline a person made and later
+    // restored is their own row and holds no slot.
+    final pending = (await _store.loadStorylines(
+      statuses: const ['suggested', 'possible'],
+    ))
+        .where((storyline) => storyline.createdBy == 'auto')
+        .length;
     final room = StorylineTuning.maxPendingSuggestions - pending;
     if (room <= 0) return;
 
@@ -2325,7 +2354,7 @@ class StorylineService {
     // largest first, ties by smallest member index — the order BOTH grouping
     // passes answer in, so the branch above does not change what `room` is
     // spent on. It is a pure function of the store's order either way, which
-    // is what the tombstones rest on.
+    // is what the cluster hashes rest on.
     final clusters = <List<int>>[
       ...seededGroups,
       for (final cluster in cosineClusters)
@@ -2336,12 +2365,25 @@ class StorylineService {
     final seriesSeeded = seededGroups.length;
     final seriesExcluded = series.excluded.length;
 
-    // Room is spent on PROPOSALS, not on clusters considered: the pass is
-    // deterministic and largest-first in either mode, so a dismissed cluster
-    // that merely consumed a slot would consume that same slot on every
-    // future sweep and permanently starve the genuinely new clusters ranked
-    // behind it.
+    // Room is spent on the QUESTIONS this pass asks — a proposal, or a
+    // cluster filed as possible — and not on clusters considered. A cluster
+    // that reached no model at all, because a hash already answered it, spends
+    // nothing: the pass is deterministic and largest-first in either mode, so
+    // a slot consumed by an answered cluster would be consumed again on every
+    // future sweep and would permanently starve the genuinely new clusters
+    // ranked behind it.
+    //
+    // A filing counts because the owner sees it. Before decision 31 a declined
+    // cluster wrote an invisible member-less tombstone and could not fill
+    // anything up; now it writes a rail row with members and two buttons, so a
+    // pass whose models declined every cluster it built would otherwise walk
+    // the whole list and hand back `Possible · 40`. The rest are not lost:
+    // their hashes were never written, so the next pass — once one of these
+    // is answered — builds them again and asks then.
     var proposed = 0;
+    // Kept apart from [proposed] rather than folded into it: `proposed` is
+    // what the activity row means by proposed, and a filing is not a proposal.
+    var filed = 0;
     var confirmed = 0;
     var rejected = 0;
     var joined = 0;
@@ -2363,7 +2405,7 @@ class StorylineService {
     // sweep's own taken-set keeps it out of the pool afterwards.
     final claimedByProbe = <String>{};
     for (final cluster in clusters) {
-      if (proposed >= room) break;
+      if (proposed + filed >= room) break;
       final tally = await _propose(
         [for (final index in cluster) rows[index]],
         [for (final index in cluster) vectors[index]],
@@ -2393,9 +2435,10 @@ class StorylineService {
         _outcomeOf(tally),
       );
       if (tally.proposed) proposed++;
-      // Summed across every cluster the pass named, the tombstoned ones
+      if (tally.filed) filed++;
+      // Summed across every cluster the pass named, the declined ones
       // included: the model's rejections are work it did and an answer it
-      // gave, and a cluster that was thrown out entirely is the most
+      // gave, and a cluster it would not vouch for at all is the most
       // interesting row this pass can write.
       confirmed += tally.confirmed;
       rejected += tally.rejected;
@@ -2426,8 +2469,9 @@ class StorylineService {
         // A number, always, and never a null or a string: the quiet-kind
         // check reads these as numerics, and a non-numeric here would make
         // every all-zero sweep loud again. That holds for the eight below too,
-        // `lint` included: the reason the lint gave is on the tombstone, and
-        // what this row carries is how many there were. The one deliberate
+        // `lint` included: the reason the lint gave is on the possible
+        // storyline it filed, and what this row carries is how many there
+        // were. The one deliberate
         // exception on this row is `deferred`, written by [_deferSweep]
         // instead of any of these, whose value is a STRING so that a deferred
         // pass is never suppressed as quiet.
@@ -2548,7 +2592,7 @@ class StorylineService {
   /// Read in the order the exits happen: a proposal beats everything, the
   /// namer's refusal and the lint's come before any confirm was spent, a
   /// cluster whose confirms ran but left too few is `thin`, and a cluster
-  /// that spent nothing was answered by a tombstone.
+  /// that spent nothing was answered by a hash already on file.
   static String _outcomeOf(_ProposeTally tally) {
     if (tally.proposed) return 'formed';
     if (tally.incoherent > 0) return 'incoherent';
@@ -2588,15 +2632,15 @@ class StorylineService {
   /// REPRESENTATIVE and never from the previous sibling, so one long-running
   /// subject cannot chain its way across months a fortnight at a time.
   ///
-  /// Pure over the row maps and their order, with no clock in it: the same list
-  /// twice gives the same answer, which is what the tombstones rest on. It is
-  /// ORDER-dependent by design, because the representative is the newest row
+  /// Pure over the row maps and their order, with no clock in it: the same
+  /// list twice gives the same answer, which is what the cluster hashes rest
+  /// on. It is ORDER-dependent by design, because the representative is the newest row
   /// and the pool is what decides which that is, so the property worth pinning
   /// is "the same list twice", never "any order of the same rows".
   ///
-  /// Public for that pin, on [catchAllsOf]'s precedent: a rule the tombstones
-  /// depend on is worth asking directly rather than only through a sweep that
-  /// would agree with it however wrong both were.
+  /// Public for that pin, on [catchAllsOf]'s precedent: a rule the cluster
+  /// hashes depend on is worth asking directly rather than only through a
+  /// sweep that would agree with it however wrong both were.
   @visibleForTesting
   static ({List<int> representatives, Map<int, List<int>> siblings})
       fragmentsOf(
@@ -2654,8 +2698,8 @@ class StorylineService {
   /// inbound message in all of them. That is a feed: a system writing to a
   /// mailbox, every issue looking like the last, which a naming call would
   /// happily describe as "vendor notifications" and a charter would then admit
-  /// forever. Its rows leave the pool for this pass, noted rather than
-  /// tombstoned, because nothing was asked of any model.
+  /// forever. Its rows leave the pool for this pass, noted rather than filed,
+  /// because nothing was asked of any model.
   ///
   /// Every other series is seeded: a recurring thing people take part in — a
   /// standup, an invoice run somebody replies to — which the cosine pass would
@@ -2790,6 +2834,7 @@ class StorylineService {
   }) async {
     const nothing = (
       proposed: false,
+      filed: false,
       confirmed: 0,
       rejected: 0,
       joined: 0,
@@ -2807,9 +2852,9 @@ class StorylineService {
         ),
     ];
     final clusterHash = _hashOfThreads(threads);
-    // Both recipes for the one candidate set: the tombstones an older build
-    // wrote hashed the bare keys and can never be rewritten, so recognition
-    // has to keep speaking that language too. See [_legacyHashOfThreads].
+    // Both recipes for the one candidate set: the rows an older build wrote
+    // hashed the bare keys and can never be rewritten, so recognition has to
+    // keep speaking that language too. See [_legacyHashOfThreads].
     if (await _store.dismissedHashExistsAny(
       [clusterHash, _legacyHashOfThreads(threads)],
     )) {
@@ -2827,7 +2872,7 @@ class StorylineService {
     // what the prompt's own sentence tells it to do. Measured on the golden
     // pool: eight clusters of eight came back false, four of them listing
     // every thread and the rest listing 4 of 7, 3 of 6, 2 of 3 and 1 of 3. So
-    // `false` means "not all of them", and tombstoning on it threw away every
+    // `false` means "not all of them", and refusing on it threw away every
     // cluster the sweep formed.
     //
     // What is left of the out is the two answers that name no group to keep:
@@ -2839,14 +2884,19 @@ class StorylineService {
     // model wrote for the group it kept, and `minClusterSize` is applied again
     // to the survivors.
     //
-    // The tombstone carries the ORIGINAL cluster's hash, so the identical set
-    // is recognised by `dismissedHashExistsAny` next pass and costs nothing.
+    // Filed rather than thrown away, and filed WHOLE: the namer declined the
+    // group it was shown, so the group it was shown is what a person gets to
+    // look at. The row carries the ORIGINAL cluster's hash, so the identical
+    // set is recognised by `dismissedHashExistsAny` next pass and costs
+    // nothing. `incoherent` counts it either way — the tally is about what the
+    // judging did, and what it did was decline.
     final dropped = rows.length - named.kept.length;
     if ((!result.coherent && result.outliers.isEmpty) ||
         named.kept.length < StorylineTuning.minClusterSize) {
-      await _tombstone(id, result, clusterHash);
+      await _filePossible(id, result, clusterHash, rows, siblings);
       return (
         proposed: false,
+        filed: true,
         confirmed: 0,
         rejected: 0,
         joined: 0,
@@ -2882,9 +2932,21 @@ class StorylineService {
       participants: storylineParticipants,
     );
     if (lintReason != null) {
-      await _tombstone(id, result, clusterHash);
+      // The namer's KEPT rows, not the whole cluster: the charter it could not
+      // write was for the group it kept, and the outliers it named are threads
+      // it said are not part of this at all. `lint` counts it as it always
+      // did — the counter says why the cluster was filed as possible, not that
+      // nothing was written.
+      await _filePossible(
+        id,
+        result,
+        clusterHash,
+        [for (final index in named.kept) rows[index]],
+        siblings,
+      );
       return (
         proposed: false,
+        filed: true,
         confirmed: 0,
         rejected: 0,
         joined: 0,
@@ -2932,12 +2994,18 @@ class StorylineService {
     // forked three ways clear a floor that exists to ask for three
     // conversations.
     if (judged.survivors.length < StorylineTuning.minClusterSize) {
-      await _tombstone(id, result, clusterHash);
+      // `rows` is already the namer's kept set — narrowed a few lines above —
+      // and that, not the survivors, is what is filed. The confirms are the
+      // small model's answer thread by thread; the question being handed to
+      // the person is the group the namer kept, and pruning it by an answer
+      // the person is not being shown would ask them about something else.
+      await _filePossible(id, result, clusterHash, rows, siblings);
       // No probe on this branch, and that is the point of saying so: a group
-      // the model just threw out must not go recruiting history to make
-      // itself big enough to ship.
+      // nobody has vouched for must not go recruiting history to make itself
+      // big enough to ship.
       return (
         proposed: false,
+        filed: true,
         confirmed: judged.survivors.length,
         rejected: judged.rejected,
         joined: 0,
@@ -2968,6 +3036,7 @@ class StorylineService {
 
     return (
       proposed: true,
+      filed: false,
       confirmed: judged.survivors.length,
       rejected: judged.rejected,
       joined: joined,
@@ -2992,9 +3061,9 @@ class StorylineService {
   ) async {
     // No cap on how many of these a cluster may spend, unlike [recruit]'s
     // eight. The cost is bounded by identity rather than by count: a cluster
-    // is confirmed once ever, because the hash checks above and the tombstone
-    // below mean the same set of threads never reaches this line twice — and
-    // the confirmations run on the small local model.
+    // is confirmed once ever, because the hash checks above and the row
+    // [_filePossible] writes mean the same set of threads never reaches this
+    // line twice — and the confirmations run on the small local model.
     final survivors = <_Survivor>[];
     var rejected = 0;
     for (final row in rows) {
@@ -3079,8 +3148,8 @@ class StorylineService {
       // covers the survivors AND the siblings that rode in on their verdicts,
       // because it describes who is STORED. `cluster_hash` stays over the
       // representatives alone, because it names the set the model was asked
-      // about — a fourth fragment arriving next week must not turn a
-      // tombstoned question into a new one.
+      // about — a fourth fragment arriving next week must not turn a question
+      // already answered into a new one.
       memberHash: memberHash,
       clusterHash: clusterHash,
     );
@@ -3333,41 +3402,175 @@ class StorylineService {
     );
   }
 
-  /// The `dismissed` row a refused cluster leaves behind, so the identical set
-  /// never costs a model call again.
+  /// Files a cluster the model declined as a `possible` storyline, WITH its
+  /// members, so a person decides what the model would not.
   ///
   /// One insert site, three reasons: the namer said these threads are not one
   /// storyline, the charter lint refused what it wrote, or the confirms left
-  /// fewer than [StorylineTuning.minClusterSize] survivors. The cluster is
-  /// deterministic and its members go straight back into the unassigned pool,
-  /// so without a row carrying its hash this same group would re-spend a
-  /// naming call and one confirmation per member on every sync, forever, to
-  /// reach the same answer. Dismissed is exactly the right status for that:
-  /// nothing renders it, and `dismissedHashExistsAny` stops the rebuilt
-  /// cluster before any model is dialled.
+  /// fewer than [StorylineTuning.minClusterSize] survivors. All three used to
+  /// write a member-less `dismissed` tombstone, and on the owner's own mailbox
+  /// that was the whole sweep: four groups a person would recognise, two
+  /// declined by the namer and two refused by the lint, and a rail reading
+  /// `Dismissed · 4` as though the owner had said no to each of them. The
+  /// model declining is not the user declining, and the four groups were real.
   ///
-  /// `member_hash` stays null on purpose: no member rows are ever written for
-  /// a tombstoned cluster, so there is no stored set for it to describe. The
-  /// cluster is the only identity this row has, and the only one anything can
-  /// rebuild.
+  /// So the row is stored the way a suggestion is — the same Keep and Dismiss,
+  /// the same 14-day clock in [MessageStore.expireStaleSuggestions] — with
+  /// three differences that all follow from nobody having vouched for it:
   ///
-  /// [clusterHash] is always the ORIGINAL cluster's, the question that was
-  /// asked, even when outliers had already been dropped: what must not be
-  /// asked twice is the group the sweep built.
-  Future<void> _tombstone(
+  /// * its status is `possible`, which no assign, recruit, refresh, recap or
+  ///   home-feed query names, so it costs no model call and stamps no message
+  ///   until somebody keeps it;
+  /// * its members stay in the sweep's unassigned pool, because
+  ///   [MessageStore.assignedOrBlockedKeys] counts `suggested` and `active`
+  ///   alone — the same threads are still free to be clustered into a group a
+  ///   person would recognise;
+  /// * and it answers [MessageStore.dismissedHashExistsAny], so the identical
+  ///   cluster is never re-asked. That is what the tombstone was for, and the
+  ///   hash does it just as well from a row the user can see.
+  ///
+  /// [rows] are the members to file, and which rows those are differs by
+  /// reason: the whole cluster when the namer declined it outright, and the
+  /// namer's kept rows when the lint or the confirms are what refused. The
+  /// confirms' own verdicts are deliberately not applied — the person is being
+  /// asked about the GROUP, not about the small model's answer on each thread.
+  ///
+  /// [siblings] are the pool rows that are FRAGMENTS of one of those rows,
+  /// keyed by its `'<source>\n<key>'` the way [_writeProposal] reads them, and
+  /// each rides its representative in here for the same reason it rides one
+  /// into a proposal: a fragment is not a second thread, it is the same thread
+  /// arriving twice. Without them a kept possible storyline would be a group
+  /// whose own forks sat outside it in the pool — not the storyline the
+  /// proposal path would have built from the same cluster. A sibling of a row
+  /// that is not being filed is written nowhere.
+  ///
+  /// `member_hash` is computed over exactly what is filed, with the same
+  /// recipe [_writeProposal] uses, so every later membership write keeps it
+  /// true. `refreshed_member_hash` is deliberately left null, unlike the
+  /// proposal path's: no description worth keeping was written here, so the
+  /// moment a person KEEPS this storyline it reads as stale and the refresh
+  /// pass describes it properly — which is the first point at which spending a
+  /// 27B call on it is worth anything. [clusterHash] is always the ORIGINAL
+  /// cluster's, the question that was asked, even when outliers had already
+  /// been dropped: what must not be asked twice is the group the sweep built.
+  ///
+  /// The title is the one thing the naming call cannot be trusted for here,
+  /// since this is the path where it declined: a rail row reading
+  /// [NameStorylineTask.fallbackTitle] says nothing about what the user is
+  /// looking at. So a real title is used when there is one, and otherwise the
+  /// subject the members most share — [fragmentKeyFor]'s folding, which is the
+  /// sweep's own idea of two threads carrying the same subject, resolved back
+  /// to the newest member's actual wording so the row reads as the mail does.
+  /// Counted over [rows] alone: a sibling carries its representative's subject
+  /// by construction, so counting the fragments would only weight a subject by
+  /// how many ways it forked.
+  Future<void> _filePossible(
     String id,
     NameResult result,
     String clusterHash,
+    List<Map<String, Object?>> rows,
+    Map<String, List<Map<String, Object?>>> siblings,
   ) async {
+    // Everything that will actually be written, built ONCE: the member loop
+    // below walks this list and the hash is taken over it, so the two cannot
+    // disagree. A row with no conversation key is no member of anything, and a
+    // hash that counted one would describe a set no later read can reproduce.
+    final members = <Map<String, Object?>>[];
+    for (final row in rows) {
+      final source = row['source'] as String? ?? _workSource;
+      final key = row['conversation_key'] as String? ?? '';
+      if (key.isEmpty) continue;
+      members.add(row);
+      final group = siblings[threadKey(source, key)];
+      if (group == null) continue;
+      for (final sibling in group) {
+        if ((sibling['conversation_key'] as String? ?? '').isEmpty) continue;
+        members.add(sibling);
+      }
+    }
+    final threads = [
+      for (final row in members)
+        (
+          source: row['source'] as String? ?? _workSource,
+          key: row['conversation_key'] as String? ?? '',
+        ),
+    ];
     await _store.insertStoryline(
       id: id,
-      title: result.title,
+      title: _possibleTitle(result, rows),
       summary: result.summary,
       charter: result.charter.isEmpty ? null : result.charter,
-      status: 'dismissed',
+      status: 'possible',
       createdBy: 'auto',
+      memberHash: _hashOfThreads(threads),
       clusterHash: clusterHash,
     );
+    for (final row in members) {
+      await _store.addStorylineMember(
+        id,
+        row['source'] as String? ?? _workSource,
+        row['conversation_key'] as String? ?? '',
+        addedBy: 'auto',
+        // The namer's own sentence about the group, which is the only reason
+        // anything said about these threads together. It is the same sentence
+        // on every member on purpose: what was judged here was the group, and
+        // claiming a per-thread reason the model never gave would be a
+        // provenance that is not true.
+        evidence: result.evidence.isEmpty ? null : result.evidence,
+      );
+      final lastMessageAt = row['last_message_at'] as String?;
+      if (lastMessageAt != null && lastMessageAt.isNotEmpty) {
+        await _store.touchStorylineActivity(id, lastMessageAt);
+      }
+    }
+  }
+
+  /// What a `possible` storyline is called in the rail.
+  ///
+  /// [NameResult.title] when the model actually wrote one. On this path it
+  /// often did not: [NameStorylineTask.fallbackTitle] is what the task
+  /// substitutes for an empty title, and that same word is one of the charter
+  /// lint's placeholders, so the commonest way into the lint refusal is
+  /// precisely a group with no name. Then the members answer instead: the
+  /// subject most of them share, folded by [fragmentKeyFor] so reply markers,
+  /// case and spacing do not split one subject into several, and rendered as
+  /// the newest member with that subject actually wrote it. Ties go to the
+  /// newest, and a cluster where every subject is empty keeps the task's
+  /// fallback, since something has to render.
+  static String _possibleTitle(
+    NameResult result,
+    List<Map<String, Object?>> rows,
+  ) {
+    final title = result.title.trim();
+    if (title.isNotEmpty && title != NameStorylineTask.fallbackTitle) {
+      return title;
+    }
+    final counts = <String, int>{};
+    final newest = <String, Map<String, Object?>>{};
+    for (final row in rows) {
+      final key = fragmentKeyFor(row['subject'] as String?);
+      if (key.isEmpty) continue;
+      counts[key] = (counts[key] ?? 0) + 1;
+      final held = newest[key];
+      final at = row['last_message_at'] as String? ?? '';
+      final heldAt = held?['last_message_at'] as String? ?? '';
+      if (held == null || at.compareTo(heldAt) > 0) newest[key] = row;
+    }
+    String? best;
+    for (final entry in counts.entries) {
+      if (best == null ||
+          entry.value > counts[best]! ||
+          (entry.value == counts[best]! &&
+              (newest[entry.key]!['last_message_at'] as String? ?? '')
+                      .compareTo(
+                          newest[best]!['last_message_at'] as String? ?? '') >
+                  0)) {
+        best = entry.key;
+      }
+    }
+    if (best == null) return result.title;
+    final subject = stripReFw(newest[best]!['subject'] as String?);
+    return subject.isEmpty ? result.title : subject;
   }
 
   // ── user actions ───────────────────────────────────────────────────────
@@ -3932,11 +4135,12 @@ class StorylineService {
   /// The recipe those writes used before the source was folded in: the bare
   /// conversation keys, otherwise identical.
   ///
-  /// Nothing writes it any more and nothing can rewrite what it wrote. A
-  /// cluster the model threw out entirely is tombstoned with no member rows at
-  /// all, so there is nothing left to re-hash it from: the old string on that
-  /// row is the only surviving record of what the user was spared, and it has
-  /// to keep answering for as long as the database does. Every dismissal check
+  /// Nothing writes it any more and nothing can rewrite what it wrote. The
+  /// builds that used it tombstoned a declined cluster with no member rows at
+  /// all, so there is nothing left to re-hash those rows from: the old string
+  /// on one is the only surviving record of what the user was spared, and it
+  /// has to keep answering for as long as the database does. Every dismissal
+  /// check
   /// therefore offers both recipes for the same candidate set — see
   /// [MessageStore.dismissedHashExistsAny] — and takes either.
   String _legacyHashOfThreads(

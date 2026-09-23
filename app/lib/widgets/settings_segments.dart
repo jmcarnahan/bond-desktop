@@ -5,12 +5,12 @@ import '../theme/tokens.dart';
 /// A row of segments with a sentence under it — the one shape every
 /// either/or/or setting on this screen takes.
 ///
-/// One widget rather than a third hand-rolled copy. Notifications, Suggested
-/// replies and Drafts in flight are the same control asking three different
-/// questions, and they were drifting apart in the small ways copies do: the
-/// gap under the buttons, whether the tick shows, whether the caption uses the
-/// caption style. A reader who has understood one of them has now understood
-/// all three.
+/// One widget rather than a third hand-rolled copy. Where the models run,
+/// Notifications and Suggested replies are the same control asking three
+/// different questions, and they were drifting apart in the small ways copies
+/// do: the gap under the buttons, whether the tick shows, whether the caption
+/// uses the caption style. A reader who has understood one of them has now
+/// understood all three.
 ///
 /// It owns no state. The selected value comes from the host on every build and
 /// the change goes straight back out through [onChanged], because each of

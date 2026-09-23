@@ -90,8 +90,8 @@ class SetupDeviceBody extends StatelessWidget {
       'This Mac has $memory of memory. It runs the inbox models, the '
       'embedding model and the 4B. The writing model ($proseName) is built '
       'for ${formatBytes(fullTierMinRamBytes)} or more and is not downloaded '
-      'here; writing stages run on the inbox model until you add a target '
-      'under Settings, Models.',
+      'here; writing stages run on the inbox model unless you point Bond at '
+      'your own servers under Settings, Models.',
     );
     if (underMeasuredFloor) {
       inboxText.write(

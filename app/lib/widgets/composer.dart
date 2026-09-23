@@ -459,8 +459,13 @@ class _ComposerState extends State<Composer> {
             if (widget.onGenerate != null) _generateButton(text.isNotEmpty),
             // Only beside a draft that exists: there is nothing to improve
             // until the local model has written something.
+            //
+            // FLEXIBLE, because the label carries a target's own name and this
+            // row sits in a side panel: Improve a draft is always routed since
+            // Round H, so the button is there on every draft and a long name
+            // has to shorten rather than overflow the row.
             if (widget.improveLabel != null && text.isNotEmpty)
-              _improveButton(),
+              Flexible(child: _improveButton()),
             const Spacer(),
             _sendButton(text.isNotEmpty, value.text),
           ],
@@ -516,7 +521,7 @@ class _ComposerState extends State<Composer> {
           ? null
           : widget.onImprove,
       icon: const Icon(Icons.auto_fix_high, size: 16),
-      label: Text(widget.improveLabel!),
+      label: Text(widget.improveLabel!, overflow: TextOverflow.ellipsis),
     );
     // Only while off, on the generate button's rule: a tooltip on a button
     // disabled for the obvious reason beside it would be noise.

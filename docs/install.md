@@ -48,7 +48,7 @@ again.
 
 ## Setting up
 
-The first launch opens a setup flow. Eight screens, a counter in the corner,
+The first launch opens a setup flow. Nine screens, a counter in the corner,
 and a back arrow that is on every one of them — grey and unpressable on the
 first, because there is nothing behind it.
 
@@ -59,33 +59,46 @@ first, because there is nothing behind it.
    whether the models will run here. Too little memory for the writing model
    is a warning, not a refusal. (An Intel Mac never gets this far — macOS will
    not open the app there in the first place.)
-3. **Models** — the three models, what each one does, how big it is, and the
-   licence it comes under. Nothing downloads yet.
-4. **Storage** — where the weights will go, and whether they fit. **Change
+3. **Where the models run** — two cards. **Managed · recommended** is Bond's
+   own: it downloads the models and runs them on this Mac, and nothing leaves
+   the machine, at the cost of the larger download on the next screens.
+   **User defined** is your own servers, and it opens a short form: **Big
+   model address**, **Small model address** and **Access key**. **Continue**
+   checks both servers, takes the model names they list, and keeps the key in
+   the macOS keychain and nowhere else. If your build came with server
+   addresses, User defined is already chosen with both filled in, so pasting
+   the key is all there is to do. Under User defined only the embedding model
+   is downloaded, because it always runs on this Mac.
+4. **Models** — the models this Mac will download, what each one does, how
+   big it is, and the licence it comes under. Three on Managed, one on User
+   defined. Nothing downloads yet.
+5. **Storage** — where the weights will go, and whether they fit. **Change
    folder…** puts them somewhere else — an external disk, for instance. If
    there is not enough room, Bond says how much more it needs and will not
    continue until there is. Bond also tries writing a file there while you
    look at the screen: a folder it cannot write to — a read-only disk, or one
    belonging to another account — says `Bond can't write to this folder.
    Choose another one.` and is not a folder it will go on from.
-5. **Download** — three progress bars, smallest first, with a rate and an
-   estimate. **You can quit.** Closing Bond mid-download is safe: the next
+6. **Download** — one progress bar per model, smallest first, with a rate and
+   an estimate. **You can quit.** Closing Bond mid-download is safe: the next
    launch comes back to this screen and picks up the same file where it
-   stopped. **Continue** waits for all three, because Bond's model server
-   will not start with one of them missing.
-6. **Sign in** — your browser opens on the Bond login. Sign in there and come
+   stopped. **Continue** waits for every bar, because Bond's model server
+   will not start with a file missing.
+7. **Sign in** — your browser opens on the Bond login. Sign in there and come
    back; Bond picks the session up on its own. If your workspace has never
    connected a Microsoft account, there is one more step in the browser and a
    button here to continue once you have finished it.
-7. **Notifications** — macOS asks whether Bond may notify you when a message
+8. **Notifications** — macOS asks whether Bond may notify you when a message
    needs your attention. Saying yes moves on. Saying no keeps you on this
    screen once, with an **Open System Settings** button for changing your mind;
    the next **Continue** moves on.
-8. **All set** — what was set up, said back. **Finish** turns Bond's own model
-   server on and opens the inbox.
+9. **All set** — what was set up, said back. **Finish** starts Bond's own
+   model server and opens the inbox.
 
 The models take a minute or two to load the first time. The inbox is readable
-while that happens; the reading and sorting fill in behind it.
+while that happens; the reading and sorting fill in behind it. Processing is
+on from the start, and the switch that pauses it is at the top of the sidebar
+and under **Settings → Processing**. Bond remembers where you left it.
 
 ## Where things live
 
@@ -107,20 +120,35 @@ instead and everything else is still here.
 
 ## Changing things later
 
-Everything the setup asked is under **Settings → Models → Local server**, from
-the avatar menu at the top of the inbox:
+Everything the setup asked is under **Settings → Models**, from the avatar
+menu at the top of the inbox. The page asks one question, where the models
+run, and answers it with two tabs, **Managed** and **User defined**. The tabs
+act: choosing Managed moves the work here at once, and choosing User defined
+opens the form, which writes nothing until **Connect**. Switching to User
+defined also unloads the two chat models from this Mac, and switching back
+reloads them; the rows say which state each model is in.
 
-- **Bond runs the model server** — off puts Bond back to expecting servers
-  started by hand, which is a developer's setup rather than yours.
-- **Port** — change it if something else on your Mac already uses 8080.
-  **Pick a free port** finds one for you. Saving restarts the server.
-- **Models folder** — move the weights to another disk. Bond restarts the
-  server pointed at the new place; it does not move the files for you.
-- **Set up again** — runs the whole flow from the top. It keeps what is
-  expensive and still true: the models stay on disk and you stay signed in, so
-  those two screens are a **Continue** each. It is not a commitment: the first
-  screen carries **Back to the inbox**, which puts you back exactly where you
-  were. If a download is running it keeps running either way.
+- **Managed** is a status block, because there is nothing to fill in. One line
+  says what Bond's own server is doing, a bar fills while the models load, and
+  three rows, **Big model**, **Small model** and **Embeddings**, name each
+  model with its size and whether it is on disk and loaded. Each row has a
+  **Check**. **Show log** appears only when the server has failed, and hands
+  the log to the Mac's own viewer.
+- **User defined** is the same form the setup used, with **Connect** as its
+  word. A stored key leaves the field empty on purpose and typing replaces it;
+  **Remove key** is the only thing that forgets one. **Connect** asks both
+  servers which model they serve and takes the names they list, so nothing is
+  typed twice. A server that offers several shows a picker, and a second
+  **Connect** takes what is showing, unless one of the names it lists is the
+  one this install already uses, which connects on the first press. The same three rows sit under the form,
+  naming the model each server listed and the server's address, each with its
+  **Check**.
+- **Set up again** — runs the whole flow from the top, and is how the models
+  folder changes and a download is retried. It keeps what is expensive and
+  still true: the models stay on disk and you stay signed in, so those two
+  screens are a **Continue** each. It is not a commitment: the first screen
+  carries **Back to the inbox**, which puts you back exactly where you were.
+  If a download is running it keeps running either way.
 
 ## Uninstalling
 

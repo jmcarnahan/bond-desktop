@@ -1,6 +1,8 @@
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
+import 'package:bond_inbox/services/llm/model_slots.dart' show ModelPlacement;
+import 'package:bond_inbox/services/server/server_state.dart';
 import 'package:bond_inbox/widgets/settings_screen.dart';
 import 'package:bond_inbox/widgets/settings_section.dart';
 import 'package:flutter/material.dart';
@@ -914,6 +916,82 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(reads, 3, reason: 'three scopes, asked once each');
+    });
+  });
+
+  /// The Models section's own collapsed line. It says WHICH MODE the install
+  /// is in and the one fact about it: the app's own server's state under
+  /// Managed, the hosts under User defined.
+  group('the Models summary', () {
+    Future<void> openModels(
+      WidgetTester tester, {
+      required ModelPlacement placement,
+      ServerState serverState = const ServerStopped(),
+      String boxBigUrl = '',
+      String boxSmallUrl = '',
+      bool wireModels = true,
+    }) async {
+      await tester.binding.setSurfaceSize(const Size(900, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SettingsScreen(
+            threshold: 0.5,
+            aboutMe: '',
+            onThresholdChanged: (_) {},
+            onAboutMeChanged: (_) {},
+            onBack: () {},
+            modelPlacement: placement,
+            serverState: serverState,
+            boxBigUrl: boxBigUrl,
+            boxSmallUrl: boxSmallUrl,
+            onUseBox: !wireModels
+                ? null
+                : ({
+                    required bigUrl,
+                    required smallUrl,
+                    required bigModel,
+                    required smallModel,
+                    bigKey,
+                    smallKey,
+                  }) async {},
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('Managed carries the server’s own state', (tester) async {
+      await openModels(
+        tester,
+        placement: ModelPlacement.local,
+        serverState: const ServerReady(port: 8080, pid: 42),
+      );
+
+      expect(find.text('Models'), findsOneWidget);
+      expect(find.text('Managed · Running'), findsOneWidget);
+    });
+
+    testWidgets('User defined names the host the work goes to', (tester) async {
+      await openModels(
+        tester,
+        placement: ModelPlacement.box,
+        boxBigUrl: 'https://box.example.com/prose/v1/chat/completions',
+        boxSmallUrl: 'https://box.example.com/bulk/v1/chat/completions',
+      );
+
+      expect(find.text('User defined · box.example.com'), findsOneWidget);
+    });
+
+    testWidgets('a host that cannot connect anywhere has no section at all',
+        (tester) async {
+      await openModels(
+        tester,
+        placement: ModelPlacement.local,
+        wireModels: false,
+      );
+
+      expect(find.text('Models'), findsNothing);
     });
   });
 }

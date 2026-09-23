@@ -27,6 +27,7 @@ class _WedgedSupervisor extends ModelServerSupervisor {
     required super.binaryPath,
     required super.buildPreset,
     required super.routerPort,
+    required super.onPortMoved,
     required super.managed,
   });
 
@@ -69,6 +70,7 @@ void main() {
       binaryPath: () => '/usr/bin/true',
       buildPreset: () => testPreset(support.path),
       routerPort: () => 8080,
+      onPortMoved: (_) async {},
       managed: () => managed,
     );
   });
@@ -131,6 +133,7 @@ void main() {
       binaryPath: () => '/usr/bin/true',
       buildPreset: () => testPreset(support.path),
       routerPort: () => 8080,
+      onPortMoved: (_) async {},
       managed: () => managed,
     );
     await mount(tester);

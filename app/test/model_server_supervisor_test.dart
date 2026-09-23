@@ -37,6 +37,16 @@ void main() {
   late ModelServerSupervisor supervisor;
   late List<String> activities;
   late int readyCalls;
+
+  /// The port the PREFERENCE names, and what the supervisor's own
+  /// `onPortMoved` writes into it — the same round trip the app makes, where
+  /// the move is persisted before the child is spawned and `routerPort()`
+  /// answers the new number from then on.
+  late int configuredPort;
+
+  /// Every step that has an order worth asserting: a move and a spawn, in the
+  /// sequence they happened.
+  late List<String> events;
   bool managed = true;
   String? binaryOverride;
 
@@ -76,7 +86,15 @@ void main() {
         supportDir: root,
         binaryPath: () => binaryOverride,
         buildPreset: () => preset,
-        routerPort: () => server.port,
+        routerPort: () => configuredPort,
+        onPortMoved: (port) async {
+          // An await inside, deliberately: the supervisor must not spawn until
+          // this future completes, and a synchronous body could not tell the
+          // difference.
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+          configuredPort = port;
+          events.add('moved:$port');
+        },
         managed: () => managed,
         onReady: () => readyCalls++,
         beginActivity: beginActivity ??
@@ -113,6 +131,8 @@ void main() {
 
     activities = [];
     readyCalls = 0;
+    events = [];
+    configuredPort = server.port;
     managed = true;
     binaryOverride = binary;
 
@@ -120,6 +140,7 @@ void main() {
     // on, so the supervisor's health polling reaches a real server. The port
     // is PARSED out of this line, which is what makes that possible.
     runner.onStart = (start) {
+      events.add('spawn');
       final process = FakeRunningProcess(pid: 5150);
       Future<void>.delayed(Duration.zero, () {
         process.emit('main: server is listening on '
@@ -214,7 +235,8 @@ void main() {
       supportDir: root,
       binaryPath: () => binaryOverride,
       buildPreset: () async => resolved,
-      routerPort: () => server.port,
+      routerPort: () => configuredPort,
+      onPortMoved: (port) async => configuredPort = port,
       managed: () => managed,
       healthInterval: const Duration(milliseconds: 10),
       startTimeout: const Duration(milliseconds: 800),
@@ -248,19 +270,32 @@ void main() {
     expect(record['startedAt'], isA<String>());
   });
 
-  test('a port somebody else holds is named, and nothing is spawned',
+  /// A busy port is not a question for the user any more: the launch takes one
+  /// the kernel says is free, remembers it, and starts there.
+  ///
+  /// The ORDER is the point. The record the next launch adopts carries the
+  /// port, the clients dial what the preference says, and `_adopt` refuses a
+  /// record whose port is not the configured one — so the move has to be
+  /// persisted before the child exists, not after.
+  test('a busy port is stepped over, and the move is remembered first',
       () async {
-    runner.busyPorts.add(server.port);
-    runner.listeners[server.port] = 'llama-server (pid 999)';
+    final busy = server.port + 1;
+    configuredPort = busy;
+    runner.busyPorts.add(busy);
+    runner.listeners[busy] = 'llama-server (pid 999)';
+    runner.nextFreePort = server.port;
 
     await supervisor.start();
+    await waitFor((s) => s is ServerReady);
 
-    expect(supervisor.state, isA<ServerPortInUse>());
-    final state = supervisor.state as ServerPortInUse;
-    expect(state.port, server.port);
-    expect(state.holder, 'llama-server (pid 999)');
-    expect(state.summary, 'Port ${server.port} is in use by llama-server (pid 999)');
-    expect(runner.starts, isEmpty);
+    expect(events, ['moved:${server.port}', 'spawn']);
+    expect(configuredPort, server.port);
+    expect(runner.starts, hasLength(1));
+    expect(runner.starts.single.arguments, contains('${server.port}'));
+
+    final record = jsonDecode(await supervisor.pidFile.readAsString())
+        as Map<String, dynamic>;
+    expect(record['port'], server.port);
   });
 
   test('a build with no runtime fails before anything else', () async {
@@ -313,8 +348,13 @@ void main() {
     expect(readyCalls, 0);
   });
 
-  test("couldn't bind is a port problem, and is never retried", () async {
+  /// The race the preflight cannot close: the port answered free, and was
+  /// taken by the time the child tried to bind it. One move, then the report.
+  test("couldn't bind moves once, and the second failure is named", () async {
+    final moved = server.port + 1;
+    runner.nextFreePort = moved;
     runner.listeners[server.port] = 'llama-server (pid 4242)';
+    runner.listeners[moved] = 'llama-server (pid 4343)';
     runner.onStart = (start) {
       final process = FakeRunningProcess(pid: runner.nextPid++);
       Future<void>.delayed(Duration.zero, () {
@@ -331,11 +371,15 @@ void main() {
     await supervisor.start();
     final state = await waitFor((s) => s is ServerPortInUse) as ServerPortInUse;
 
-    expect(state.port, server.port);
-    expect(state.holder, 'llama-server (pid 4242)');
-    // Nothing about waiting frees a port somebody else is holding.
+    // The port the SECOND attempt died on, and its holder.
+    expect(state.port, moved);
+    expect(state.holder, 'llama-server (pid 4343)');
+    expect(configuredPort, moved);
+    // One move and no more: two ports lost in a row is a machine doing
+    // something the app cannot name, and waiting frees neither.
     await Future<void>.delayed(const Duration(milliseconds: 60));
-    expect(runner.starts, hasLength(1));
+    expect(runner.starts, hasLength(2));
+    expect(events.where((e) => e.startsWith('moved')), hasLength(1));
   });
 
   /// The bind sniff reads THIS launch's lines, not the session's.
@@ -374,17 +418,14 @@ void main() {
     };
 
     await supervisor.start();
-    await waitFor((s) => s is ServerPortInUse);
-
-    await supervisor.start();
     final failed = await waitFor((s) => s is ServerFailed) as ServerFailed;
 
     // A plain exit, retried on the backoff like any other — not the port
     // report the stale line would have produced.
     expect(failed.reason, 'The model server exited (code 1)');
-    // The bind attempt, then the second run's first attempt and one per
-    // backoff entry.
+    // The bind attempt, the one move it is allowed, and one per backoff entry.
     expect(runner.starts, hasLength(5));
+    expect(events.where((e) => e.startsWith('moved')), hasLength(1));
   });
 
   /// The start timeout is the only thing that can end a child which binds
@@ -559,6 +600,101 @@ void main() {
 
     expect(activities, ['begin:Starting the model server', 'end:99']);
     expect(supervisor.state, const ServerStopped());
+  });
+
+  /// The preset is a function of the PLACEMENT as well as the folder, and the
+  /// placement moves while the app is running: choosing User defined leaves
+  /// this Mac serving the embedding model alone, and choosing Managed puts the
+  /// two chat models back. `ensureRunning` answers "it is up" to all of that,
+  /// which is why the placement writers call this instead.
+  group('ensurePreset', () {
+    /// What Managed asks this machine for.
+    RouterPreset three() => RouterPreset(
+          modelsFolder: models.path,
+          models: const [
+            RouterModelSpec(
+              id: 'bond-embed',
+              repo: 'org/embed',
+              file: 'embed.gguf',
+            ),
+            RouterModelSpec(id: 'bond-bulk', repo: 'org/bulk', file: 'bulk.gguf'),
+            RouterModelSpec(
+              id: 'bond-prose',
+              repo: 'org/prose',
+              file: 'prose.gguf',
+            ),
+          ],
+        );
+
+    /// What is left here under the user-defined placement.
+    RouterPreset one() => RouterPreset(
+          modelsFolder: models.path,
+          models: const [
+            RouterModelSpec(
+              id: 'bond-embed',
+              repo: 'org/embed',
+              file: 'embed.gguf',
+            ),
+          ],
+        );
+
+    setUp(() async {
+      preset = three();
+      for (final model in preset.models) {
+        final path = preset.modelPath(model);
+        await Directory(p.dirname(path)).create(recursive: true);
+        await File(path).writeAsString('gguf');
+      }
+      // A superset of either preset: readiness reads only the ids the preset
+      // names, so one map serves the set before and the set after.
+      server.loaded = {for (final id in preset.modelIds) id: true};
+    });
+
+    test('ensurePreset restarts a live server whose model set changed',
+        () async {
+      await supervisor.ensureRunning();
+      await waitFor((s) => s is ServerReady);
+      expect(runner.starts, hasLength(1));
+
+      preset = one();
+      await supervisor.ensurePreset();
+      await waitUntil(() => runner.starts.length == 2);
+
+      expect(runner.starts, hasLength(2));
+      final written = await supervisor.presetFile.readAsString();
+      expect(written, contains('[bond-embed]'));
+      expect(written, isNot(contains('[bond-prose]')));
+      expect(written, isNot(contains('[bond-bulk]')));
+    });
+
+    test('ensurePreset leaves a live server alone when the set is unchanged',
+        () async {
+      await supervisor.ensureRunning();
+      await waitFor((s) => s is ServerReady);
+
+      await supervisor.ensurePreset();
+
+      expect(runner.starts, hasLength(1));
+      expect(supervisor.state, isA<ServerReady>());
+    });
+
+    test('ensurePreset starts a stopped server', () async {
+      expect(supervisor.state, const ServerStopped());
+
+      await supervisor.ensurePreset();
+      await waitFor((s) => s is ServerReady);
+
+      expect(runner.starts, hasLength(1));
+    });
+
+    test('ensurePreset is a no-op for a hand-servers build', () async {
+      managed = false;
+
+      await supervisor.ensurePreset();
+
+      expect(supervisor.state, const ServerDisabled());
+      expect(runner.starts, isEmpty);
+    });
   });
 
   test('pickFreePort asks the runner', () async {

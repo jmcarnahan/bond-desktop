@@ -74,9 +74,13 @@ class UnreadableStore extends MessageStore {
   @override
   Future<List<Storyline>> loadStorylines({
     List<String> statuses = const ['suggested', 'active'],
+    bool withMembersOnly = false,
   }) async {
     if (broken) throw StateError('disk is gone');
-    return super.loadStorylines(statuses: statuses);
+    return super.loadStorylines(
+      statuses: statuses,
+      withMembersOnly: withMembersOnly,
+    );
   }
 
   @override
@@ -178,6 +182,10 @@ void main() {
     test('dismissed storylines ride on their own list', () async {
       await seedStoryline('sl-1', status: 'dismissed', title: 'Old thing');
       await seedStoryline('sl-2', status: 'active');
+      // A member on the dismissed row, because that list shows rows with
+      // members only: a member-less one is the app's own tombstone.
+      await seedConversation('c1');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
       final notifier = StorylinesNotifier(store, service);
 
       await notifier.load();
@@ -307,8 +315,68 @@ void main() {
       expect(await store.nextPendingWork('storyline_recruit'), isNull);
     });
 
+    test('the load carries the possible storylines apart from the live ones',
+        () async {
+      await seedStoryline('sl-live', status: 'active');
+      await seedStoryline('sl-maybe', status: 'possible', title: 'Roof work');
+      await seedConversation('c1');
+      await store.addStorylineMember('sl-maybe', 'email', 'c1',
+          addedBy: 'auto');
+      final notifier = StorylinesNotifier(store, service);
+
+      await notifier.load();
+
+      final state = notifier.state as StorylinesLoaded;
+      // Apart, and never mixed in: the rail draws them under a heading of
+      // their own, and the live list must not read as something the model is
+      // offering.
+      expect(state.storylines.map((s) => s.id), ['sl-live']);
+      expect(state.possible.map((s) => s.id), ['sl-maybe']);
+      expect(state.dismissed, isEmpty);
+    });
+
+    test('keeping a possible storyline moves it to the live list', () async {
+      await seedStoryline('sl-maybe', status: 'possible');
+      // With its members, because Keep reconciles a possible storyline against
+      // the live ones and dismisses a row left under `minClusterSize` rather
+      // than activating a storyline of one. Every filed row has at least two.
+      await seedConversation('c1');
+      await seedConversation('c2');
+      await store.addStorylineMember('sl-maybe', 'email', 'c1',
+          addedBy: 'auto');
+      await store.addStorylineMember('sl-maybe', 'email', 'c2',
+          addedBy: 'auto');
+      final notifier = StorylinesNotifier(store, service);
+      await notifier.load();
+      expect((notifier.state as StorylinesLoaded).possible, hasLength(1));
+
+      await notifier.keep('sl-maybe');
+
+      final state = notifier.state as StorylinesLoaded;
+      expect(state.possible, isEmpty);
+      expect(state.storylines.single.status, 'active');
+    });
+
+    test('the Dismissed list leaves out a member-less tombstone', () async {
+      // The app's own pre-decision-31 bookkeeping: a cluster the models
+      // declined, written as a `dismissed` row with nothing in it. It is not
+      // the owner's dismissal and Restore would bring back an empty
+      // storyline.
+      await seedStoryline('sl-tombstone', status: 'dismissed');
+      final notifier = StorylinesNotifier(store, service);
+
+      await notifier.load();
+
+      expect((notifier.state as StorylinesLoaded).dismissed, isEmpty);
+    });
+
     test('undismiss puts the question back on the live list', () async {
       await seedStoryline('sl-1', status: 'dismissed');
+      // A member, because the Dismissed list shows rows with members only: a
+      // member-less row is the app's own pre-decision-31 tombstone and there
+      // is nothing there to restore.
+      await seedConversation('c1');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
       final notifier = StorylinesNotifier(store, service);
       await notifier.load();
       expect((notifier.state as StorylinesLoaded).dismissed, hasLength(1));

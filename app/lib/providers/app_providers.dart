@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io' show Directory;
+import 'dart:io' show Directory, File;
 
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -59,6 +59,7 @@ import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_people_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
 import '../services/message_search.dart';
+import '../services/models/managed_model_status.dart';
 import '../services/models/model_downloader.dart';
 import '../services/models/model_manifest.dart';
 import '../services/server/llama_binary.dart';
@@ -86,6 +87,7 @@ import '../widgets/app_rail.dart' show RailSection;
 import 'navigation_provider.dart';
 import 'notify_routing.dart';
 import 'prefs_provider.dart';
+import 'setup_provider.dart' show setupRestartProvider;
 
 /// One [GraphAuth] for the whole app. Sharing the instance is what makes the
 /// in-memory access token and the single-flight refresh guard mean anything —
@@ -110,25 +112,39 @@ final sessionStartProvider = Provider<DateTime?>((ref) => null);
 
 /// Whether this session is allowed to run model work at all.
 ///
-/// SESSION state, on [sessionStartProvider]'s precedent, and deliberately not
-/// a preference: every launch starts OFF so the owner can point the stages at
-/// the servers they mean to use before anything is spent on the wrong one. A
-/// stored answer would make that impossible to get back to.
+/// A REMEMBERED preference that starts on, seeded here from
+/// [AppPrefs.processingOn]. It was session state until Round H, off at every
+/// launch so the owner could point the stages at the right servers before
+/// anything was spent on the wrong one. The placement rule answers that now:
+/// the default server IS the measured one, and a missing key or a dead address
+/// parks with a sentence instead of spending attempts. Turning it off still
+/// stands the models down for the rest of the session, and it is remembered,
+/// so a machine left off comes back off.
+///
+/// `read` and never `watch`. A watch would rebuild this notifier on every
+/// unrelated preference write and reset the switch mid-drain, which is
+/// [_enabledReader]'s reasoning exactly. It is safe because `main()` awaits
+/// `AppPrefsNotifier.read` before `runApp` and injects the result through
+/// `initialAppPrefsProvider`, so the state is populated at the first read.
 ///
 /// It gates the four drains and nothing else. Mail and Teams keep syncing
 /// while it is off — the inbox stays current, the models stay idle — and the
 /// two things that dial a server without being a drain keep working too:
-/// Settings' Check server probe, which is how a target is chosen in the first
-/// place, and the query embedding behind the Find field, which a person is
-/// waiting on.
+/// the Models page's Check and Connect probes, which is how a server is
+/// checked in the first place, and the query embedding behind the Find field,
+/// which a person is waiting on.
 final processingProvider =
     StateNotifierProvider<ProcessingNotifier, bool>(
-  (ref) => ProcessingNotifier(),
+  (ref) => ProcessingNotifier(ref.read(appPrefsProvider).processingOn),
 );
 
 /// The switch's state, and the one thing that moves it.
+///
+/// [initial] stays an optional POSITIONAL parameter: two test overrides
+/// construct this notifier bare to say "off, whatever the preferences hold",
+/// and the seed belongs to the provider above rather than to the class.
 class ProcessingNotifier extends StateNotifier<bool> {
-  ProcessingNotifier() : super(false);
+  ProcessingNotifier([super.initial = false]);
 
   void set(bool on) => state = on;
 }
@@ -299,8 +315,9 @@ final machineTierProvider = FutureProvider<MachineTier>((ref) async {
 /// What this install actually runs, placement included.
 ///
 /// [machineTierProvider] answers what this MAC could run, off its memory
-/// alone, and stays the right question for the Settings fact line and for
-/// **Use this Mac's defaults**. This one answers what it WILL run: on
+/// alone, and stays the right question for the Settings fact line and for its
+/// two callers, the wizard's Finish and `usePlacement(local, hardwareTier:)`.
+/// This one answers what it WILL run: on
 /// [ModelPlacement.box] the inbox and writing stages are on the box and only
 /// the embedding model is served here, which is [MachineTier.remote]. The
 /// manifest resolves to one file, so the downloader fetches one, the managed
@@ -388,6 +405,11 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
         .forTier(await ref.read(effectiveTierProvider.future))
         .toPreset(ref.read(appPrefsProvider).effectiveModelsFolder(paths)),
     routerPort: () => ref.read(appPrefsProvider).routerPort,
+    // A port the app had to move to is REMEMBERED, and remembered before the
+    // child is spawned: the preference is what the clients dial and what the
+    // next launch's adoption compares its record against.
+    onPortMoved: (port) =>
+        ref.read(appPrefsProvider.notifier).setRouterPort(port),
     managed: () => ref.read(appPrefsProvider).managedServer,
     beginActivity: system.beginActivity,
     endActivity: system.endActivity,
@@ -402,11 +424,27 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
         // caller chains — see [pumpTriageThenWorkers]. Every lane, because a
         // server coming back is news to all three and the fast lane's own
         // `onDrained` would only reach the others if it had work of its own.
+        //
+        // Behind `ready` FIRST, which is new in Round H and is what closes the
+        // bearer window: the keychain prefetch is a round trip after `main`
+        // injects the preferences, and with processing starting on this pump
+        // could beat it and send one unauthenticated request per stage. One
+        // await on a future that is normally already complete.
+        //
+        // And pumped EITHER WAY. `ready` can reject now that the read path
+        // writes (the Round G migration), and an unhandled rejection here
+        // would cost the supervisor its first pump for the whole session; a
+        // prefs load that failed is one 401 the user can see, not a pipeline
+        // that never starts.
+        Future<void> pump() => pumpTriageThenWorkers(
+              triage: () => ref.read(triageQueueProvider).pump(),
+              workers: () => ref.read(aiWorkersProvider).pumpAll(),
+            );
         unawaited(
-          pumpTriageThenWorkers(
-            triage: () => ref.read(triageQueueProvider).pump(),
-            workers: () => ref.read(aiWorkersProvider).pumpAll(),
-          ),
+          ref.read(appPrefsProvider.notifier).ready.then(
+                (_) => pump(),
+                onError: (Object _, StackTrace _) => pump(),
+              ),
         );
       } catch (_) {}
     },
@@ -421,6 +459,75 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
 final serverStateProvider = StreamProvider<ServerState>(
   (ref) => ref.watch(modelServerSupervisorProvider).states,
 );
+
+/// The three models this Mac would run, with what each costs and whether it
+/// is on disk.
+///
+/// The Managed block's three rows are this plus one live fact, and the live
+/// fact is not here: `ServerLoading.loaded` moves while somebody is looking at
+/// the page, so the widget joins it from [serverStateProvider] and this future
+/// stays a reading of the DISK. Three `stat` calls per invalidation, not per
+/// frame, which is why the ledger check keeps its `existsSync` — a file can be
+/// deleted under a row the ledger still calls done.
+///
+/// Re-read on exactly two events: **Set up again**, through
+/// [setupRestartProvider], because a download can have re-run; and the server
+/// reaching ready, because that is when weights that landed during a wizard
+/// have certainly been read. Watched through a `select` onto a bool so the
+/// states on the way there — one per model as each loads — do not re-run it.
+///
+/// The list is this MACHINE's tier, and [ManagedModelStatus.inUse] says which
+/// of those files the placement actually serves: two models on a machine under
+/// the full tier's floor, and under the user-defined placement all three rows
+/// with the embedding one alone in use, since the other two run on somebody's
+/// server while their weights stay on this disk. The inbox tier has no writing
+/// model, so the big row describes the file that does the writing there, which
+/// is the small one.
+final managedModelsStatusProvider =
+    FutureProvider<List<ManagedModelStatus>>((ref) async {
+  ref.watch(setupRestartProvider);
+  ref.watch(
+    serverStateProvider.select((state) => state.valueOrNull is ServerReady),
+  );
+  final paths = ref.watch(appPathsProvider);
+  final tier = await ref.watch(machineTierProvider.future);
+  final manifest = ref.watch(modelManifestProvider).forTier(tier);
+  // What the placement's own preset is built from. The same manifest under the
+  // effective tier, which answers `remote` on the user-defined placement, so
+  // the ids it lists are exactly the files this Mac is asked to hold.
+  final served = ref
+      .watch(modelManifestProvider)
+      .forTier(await ref.watch(effectiveTierProvider.future))
+      .models
+      .map((file) => file.id)
+      .toSet();
+  final ledger = await ref.watch(setupStoreProvider).downloadLedger();
+  final folder = ref.read(appPrefsProvider).effectiveModelsFolder(paths);
+
+  final rows = <ManagedModelStatus>[];
+  // The router id is the FILE's own id: the same resolved manifest builds the
+  // router preset, so `ServerLoading.loaded` is keyed by exactly these. On the
+  // inbox tier the big row's file is the bulk file, and its id has to be the
+  // bulk id or the row would read "not loaded" for ever on every small Mac.
+  void add(String roleId, ModelFile? file) {
+    if (file == null) return;
+    rows.add(ManagedModelStatus(
+      roleId: roleId,
+      displayName: file.displayName,
+      bytes: file.downloadBytes,
+      onDisk: ledger.isCurrent(file) &&
+          File(p.join(folder, file.relativePath)).existsSync(),
+      routerId: file.id,
+      inUse: served.contains(file.id),
+    ));
+  }
+
+  final bulk = manifest.byRoleOrNull(ModelRole.bulk);
+  add('big', manifest.byRoleOrNull(ModelRole.prose) ?? bulk);
+  add('small', bulk);
+  add('embed', manifest.byRoleOrNull(ModelRole.embed));
+  return rows;
+});
 
 /// The thing that fills the models folder.
 ///
@@ -935,7 +1042,7 @@ final embeddingsClientProvider = Provider<EmbeddingsClient>(
     // does, the fix is a card in Settings and naming a Makefile target would
     // send them to a workflow they have opted out of.
     describeUnavailable: () => ref.read(appPrefsProvider).managedServer
-        ? 'is not running — see Settings › Models › Local server'
+        ? 'is not running — see Settings, Models'
         : null,
     // One row per distinct reason, which is what the client's own dedupe
     // already guarantees. `read` and not `watch`: the callback outlives this
@@ -1077,7 +1184,16 @@ final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
 /// fast-server calls, so the worst case at that server is three plus one,
 /// which is `FAST_SLOTS`.
 final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
-  return _lane(
+  // Named before it is built, because one handler below has to reach it: the
+  // digest's requeue wakes the drain it is running inside, and a `ref.read` of
+  // THIS provider from inside its own body is what Riverpod's
+  // `_debugAssertCanDependOn` refuses — "A provider cannot depend on itself" —
+  // on a `read` as much as on a `watch`. Every debug build threw it out of the
+  // handler's `run` from the first digest that carried an ask. A late local is
+  // assigned by the time any handler runs and reads no provider at all; it is
+  // the same shape [_lane] uses for its own `onDrained`.
+  late final AiWorker worker;
+  worker = _lane(
     ref,
     handlers: [
       // First, and it drains completely before extraction starts. The verdict
@@ -1111,13 +1227,21 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         activityLog: ref.watch(activityLogProvider),
         progress: ref.watch(pipelineProgressProvider),
         // The draft lane, woken as the row is written rather than at the end
-        // of this drain — `AttachmentDigestHandler.onRequeue`'s shape, and the
-        // same `read`-inside-a-closure reasoning: a `watch` here would be a
-        // cycle through the provider being built, and a `read` from inside a
-        // drain is a read of a worker that already exists. On a sixty-message
-        // backlog this is the difference between a prefetch starting seconds
-        // after its extraction and minutes after it.
-        onDraftQueued: () => unawaited(ref.read(draftWorkerProvider).pump()),
+        // of this drain. A `read` inside the closure of a DIFFERENT lane's
+        // provider, which is allowed; a `watch` here would be a cycle through
+        // the provider being built, and a read of THIS lane's own provider
+        // would be the self-dependency the note at the top of this body is
+        // about. Guarded, on [_lane]'s own `onDrained` shape: the closure
+        // outlives this body and fires from inside a drain, where a
+        // torn-down container must cost nothing rather than fail the
+        // extraction row. On a sixty-message backlog this is the difference
+        // between a prefetch starting seconds after its extraction and
+        // minutes after it.
+        onDraftQueued: () {
+          try {
+            unawaited(ref.read(draftWorkerProvider).pump());
+          } catch (_) {}
+        },
         // When a reply is written ahead of being asked for — the user's
         // setting, read at the moment each message finishes rather than
         // captured here. `ref.read` inside the closure, never `watch`, in
@@ -1159,13 +1283,13 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(stageLlmClientProvider('attachment_digest')),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
-        // The worker this handler runs inside, read at CALL time — the same
-        // shape as needs-you's owner lookup. A `watch` here would be a cycle
-        // through the provider being built; a `read` from inside a drain is a
-        // read of a worker that already exists. `pump` on a running drain only
-        // sets a flag and hands back that drain's future, which is why it is
-        // not awaited: see [AttachmentDigestHandler].
-        onRequeue: () => unawaited(ref.read(aiWorkerProvider).pump()),
+        // The worker this handler runs inside — the late local above, never a
+        // `ref.read` of this lane's own provider: Riverpod asserts
+        // self-dependency on a `read` too, and the note at the top of this
+        // body says what that cost. `pump` on a running drain only sets a
+        // flag and hands back that drain's future, which is why it is not
+        // awaited: see [AttachmentDigestHandler].
+        onRequeue: () => unawaited(worker.pump()),
       ),
       // The owner's own directories, read here and nowhere else in the drain.
       // It talks to no chat model — the embedding server is its only server —
@@ -1259,6 +1383,7 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       }
     },
   );
+  return worker;
 });
 
 /// The STORYLINE lane's worker: the six passes, in the order their arguments

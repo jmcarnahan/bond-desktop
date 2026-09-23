@@ -100,15 +100,11 @@ void main() {
 
     final managed = EmbeddingsClient(
       baseUrl: dead,
-      describeUnavailable: () =>
-          'is not running — see Settings › Models › Local server',
+      describeUnavailable: () => 'is not running — see Settings, Models',
     );
     final result = await managed.embedResult('one');
     expect(result.outcome, EmbedOutcome.unavailable);
-    expect(
-      result.reason,
-      'is not running — see Settings › Models › Local server',
-    );
+    expect(result.reason, 'is not running — see Settings, Models');
   });
 
   test('a describer that answers null keeps the default sentence', () async {

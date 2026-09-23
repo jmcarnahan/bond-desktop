@@ -155,17 +155,49 @@ const String builtInProseName = 'Local prose';
 /// this Mac.
 enum ModelPlacement { box, local }
 
+/// Where a fresh install runs its model work: the shared GPU box when this
+/// build was compiled with an address for one, and this Mac otherwise.
+///
+/// The box is the default because it is the measured best answer for every
+/// stage but embeddings, and because a placement nobody has to find is a
+/// placement a tester actually uses. A build with no [boxUrlDefault] has no
+/// box to name, which includes the test suite and a plain `flutter run`, so
+/// there the default stays local.
+///
+/// `length > 0` rather than `isNotEmpty` for one reason and no other: a
+/// constant expression may read a string's length and may not call
+/// `isNotEmpty`, and this value has to be const so the prefs default can be
+/// one too.
+const ModelPlacement defaultModelPlacement =
+    boxUrlDefault.length > 0 ? ModelPlacement.box : ModelPlacement.local;
+
+/// Which of the three models a stage's work belongs to.
+///
+/// The simple Models page asks one question and answers it in three lines,
+/// and this is the vocabulary those lines are drawn in. Coarser than
+/// [ModelSlot] on purpose: a slot says which local server a stage would dial,
+/// a role says which MODEL does the work wherever it runs, which is what
+/// lets `storyline_membership` sit on the big model on the box and on the
+/// small one here without a fourth name for it.
+///
+/// Not `ModelRole`, which `model_manifest.dart` already spells
+/// `{embed, bulk, prose}` for the three files a machine downloads. The two
+/// mean nearly the same thing and cannot be merged: the manifest imports this
+/// file, so this file cannot import the manifest's enum back. A stage has a
+/// STAGE role, a downloaded file has a model role, and a screen that wants
+/// both says which it means.
+enum StageRole { big, small, embed }
+
 /// The two targets [ModelPlacement.box] writes, by fixed id.
 ///
-/// Fixed rather than generated so that adopting the box twice REPLACES the
-/// pair rather than stacking duplicates, and so `adoptLocal` knows exactly
-/// which two rows and which two keychain entries to remove. The names carry a
-/// middle dot rather than a dash because user-facing strings take no
-/// em-dashes.
+/// Fixed rather than generated so that the two derived specs, the two
+/// keychain entries and `usePlacement`'s sweep of the stage entries all name
+/// the same pair. The names carry a middle dot rather than a dash because
+/// user-facing strings take no em-dashes.
 const String boxProseId = 'box-prose';
 const String boxBulkId = 'box-bulk';
-const String boxProseName = 'GPU box · writing';
-const String boxBulkName = 'GPU box · inbox';
+const String boxProseName = 'Your server · big model';
+const String boxBulkName = 'Your server · small model';
 
 /// What each box slot calls its model on the wire: the 27B on the writing
 /// slot, the 4B on the inbox slot, as the box's two vLLM servers serve them.
@@ -185,7 +217,7 @@ const String boxUrlDefault = String.fromEnvironment('BOND_BOX_URL');
 /// and with every trailing slash gone.
 ///
 /// One function rather than the same two lines in the wizard, the Settings
-/// pane and `adoptBox`: a pasted address arrives with whitespace and often
+/// page and `useBox`: a pasted address arrives with whitespace and often
 /// with a slash, and three copies of the strip is three places for
 /// `https://box.example.com//prose/v1/chat/completions` to come from. Returns
 /// the empty string for an empty input, which is what both callers read as
@@ -201,6 +233,18 @@ String normalizeBoxBaseUrl(String raw) {
 /// The box ORIGIN behind a stored [boxProseId] target's URL, or the empty
 /// string when [url] is not one this app wrote.
 ///
+/// Whether [base], already through [normalizeBoxBaseUrl], is an origin the
+/// box can be dialled at: an http or https scheme and a host. The ONE rule
+/// `AppPrefsNotifier.setBoxServers` refuses on and the forms check before pressing
+/// it, so a refusal is a sentence on the page rather than an error thrown past
+/// a fire-and-forget Save.
+bool isBoxOrigin(String base) {
+  final origin = Uri.tryParse(base);
+  return origin != null &&
+      (origin.scheme == 'http' || origin.scheme == 'https') &&
+      origin.host.isNotEmpty;
+}
+
 /// [normalizeBoxBaseUrl] read backwards, and the reason it is a function: the
 /// Settings pane prefills its address field from the pair already stored so
 /// that somebody whose access key was rotated types the key alone, and
@@ -210,6 +254,36 @@ String boxBaseFromProseUrl(String url) {
   return url.endsWith(suffix)
       ? url.substring(0, url.length - suffix.length)
       : '';
+}
+
+/// `localhost:8082` out of a full completions URL — the part a person reads
+/// to tell two servers apart, without the `/v1/chat/completions` every one
+/// of them ends in.
+///
+/// A URL that does not parse is returned WHOLE. Something typed into the
+/// field is still the answer to "where does this point", and hiding it
+/// behind a blank would leave the summary lying about a slot that is
+/// genuinely misconfigured.
+String hostPort(String url) {
+  final uri = Uri.tryParse(url);
+  if (uri == null || uri.host.isEmpty) return url;
+  return uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
+}
+
+/// Whether [url] names this machine, by the three spellings a person types.
+///
+/// The Models page asks it before saying an access key is needed: a server
+/// somebody runs on their own Mac needs none, and telling them to paste one
+/// would be an instruction with nothing to follow it. It is NOT a test of who
+/// operates the server — [isThirdPartyHost] answers that, and deliberately
+/// reads nothing into loopback, because the shared box arrives over an `ssh`
+/// tunnel at `localhost:18100`.
+bool isLoopbackHost(String url) {
+  final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
+  return host == 'localhost' ||
+      host == '127.0.0.1' ||
+      host == '::1' ||
+      host == '[::1]';
 }
 
 /// Hosts whose operator is a third party: a target here on `draft_reply` or
@@ -250,6 +324,54 @@ bool isThirdPartyHost(String url) {
   }
   return false;
 }
+
+/// Which wire a server at [url] speaks, read off its HOST alone.
+///
+/// The user-defined pair carries no wire of its own: a person types an
+/// address and the app works out the rest, which is the whole of decision 16.
+/// A Bedrock runtime host is the one shape that is not OpenAI-compatible, and
+/// it is recognised here by exactly the rule [isThirdPartyHost] uses for it,
+/// so an address cannot be third party by one test and OpenAI by the other.
+LlmWire wireForHost(String url) {
+  final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
+  if (host.startsWith('bedrock') && host.endsWith('.amazonaws.com')) {
+    return LlmWire.bedrockConverse;
+  }
+  return LlmWire.openAi;
+}
+
+/// `--dart-define=BOND_DEV_HAND_SERVERS=1` leaves the servers to the
+/// developer.
+///
+/// The BUILD says whether this app runs its own llama-server, on
+/// `SetupGate.skipDefine`'s precedent and for its reason: an engineer who runs
+/// `make model fast embed` by hand has their models in the Homebrew cache and
+/// their servers already up, and that is a fact about their checkout rather
+/// than a preference anybody else should be shown. Round H took the switch off
+/// the Models page, so this is the only door left.
+const String handServersDefine =
+    String.fromEnvironment('BOND_DEV_HAND_SERVERS');
+
+/// Whether this build leaves the servers to the developer.
+///
+/// Any value but the three ways a build script says no turns it on, exactly as
+/// `SetupGate.skipsSetup` reads its own define — somebody who wrote `=0` to
+/// turn it back off gets the app's own server rather than the opposite of what
+/// they typed. `length > 0` rather than `isNotEmpty` because a constant
+/// expression may read a string's length and may not call a getter on it,
+/// which is [defaultModelPlacement]'s rule and its reason.
+const bool handServersBuild = handServersDefine.length > 0 &&
+    handServersDefine != '0' &&
+    handServersDefine != 'false' &&
+    handServersDefine != 'no';
+
+/// What `AppPrefs.managedServer` is when nothing says otherwise: the app runs
+/// its own server, unless the build above says the developer does.
+///
+/// A CONSTANT rather than a stored preference since Round H. What made it a
+/// preference was a switch on the Models page, and the page asks one question
+/// now: where the models run. Every shipped build answers true here.
+const bool managedServerDefault = !handServersBuild;
 
 /// One target the user can point a stage at.
 ///
@@ -300,6 +422,24 @@ class LlmTargetSpec {
   });
 
   bool get isBuiltIn => id == builtInFastId || id == builtInProseId;
+
+  /// Whether this is one of the two targets the GPU box placement derives
+  /// from the stored address.
+  ///
+  /// Beside [isBuiltIn] rather than folded into it, because the two words
+  /// mean different things: a built-in is edited in the two slot editors and
+  /// says so on its row, and a box target is edited by changing the one
+  /// address. Widening [isBuiltIn] would put "Edited above, under Fast and
+  /// Prose" under a row no editor above it reaches.
+  bool get isBox => id == boxProseId || id == boxBulkId;
+
+  /// Whether this target is DERIVED rather than stored, by either route.
+  ///
+  /// The question every caller that guards a write actually has: a derived
+  /// spec has no row in `llm_targets` to update, so this flag is what
+  /// `upsertTarget` and `removeTarget` guard on, and both refuse it; the
+  /// Drafts-in-flight control writes the slot pref instead of the spec.
+  bool get isFixed => isBuiltIn || isBox;
 
   /// Whether somebody else's company operates the machine this dials. The
   /// consent rule's whole question — see [thirdPartyHosts].
@@ -439,22 +579,17 @@ ModelSlot stageSlot(String stageId) {
   return ModelSlot.fast;
 }
 
-/// Whether the stage runs only once somebody has pointed it at a target. False
-/// for an id no row names.
-bool stageIsOptional(String stageId) {
-  for (final stage in pipelineStages) {
-    if (stage.id == stageId) return stage.optional;
-  }
-  return false;
-}
-
-/// The stages the **Use for prose stages** preset writes.
+/// The stages the **Use for prose stages** preset writes — every prose-slot
+/// row in the stage table.
 ///
 /// `storyline_group` is in it on purpose: it is a prose-slot stage, dark today
 /// behind `StorylineTuning.groupingMode`, and a user who points prose at a box
 /// should have it follow rather than be left behind the day the mode flips.
-/// `draft_improve` is in NO preset — it is the one stage a person picks
-/// explicitly, and a preset that turned it on would be consent by accident.
+/// `draft_improve` joined it in Round H: it used to be the one stage a person
+/// turned on by picking a target for it, and with the stage picker gone that
+/// would have made it a feature nothing could reach. It is a prose stage like
+/// the five above it now, and the consent gate still keeps both drafting
+/// stages off a third-party target nobody agreed to.
 const List<String> proseStageIds = [
   'storyline_group',
   'storyline_name',
@@ -462,6 +597,7 @@ const List<String> proseStageIds = [
   'storyline_recap',
   'reply_decision',
   'draft_reply',
+  'draft_improve',
 ];
 
 /// The two stages that write a reply in the owner's name, and the ONE place
@@ -490,6 +626,82 @@ const List<String> bulkStageIds = [
   'storyline_membership',
 ];
 
+/// The stages the BIG model does on the box: every prose-slot stage the
+/// presets name, plus the storyline confirm.
+///
+/// The confirm is a fast-slot stage everywhere else and the one exception the
+/// placement rule carries, because Round D and Round G both measured the 27B
+/// worth its cost there and the box has the 27B sitting idle between drafts.
+/// Built from [proseStageIds] so it cannot drift from the stage table, and
+/// pinned against `pipelineStages` in `model_slots_test` the way the presets
+/// are.
+const List<String> bigModelStageIds = [...proseStageIds, 'storyline_membership'];
+
+/// The stages the SMALL model does: the bulk set with the confirm taken out.
+///
+/// Written out rather than computed, because a const list may spread and may
+/// not loop. `model_slots_test` pins it as exactly [bulkStageIds] minus
+/// `storyline_membership`, which is what keeps the two halves of the rule
+/// covering every stage exactly once.
+const List<String> smallModelStageIds = [
+  'triage',
+  'needs_you',
+  'extraction',
+  'attachment_digest',
+  'context_file_digest',
+  'context_brief',
+  'context_select',
+];
+
+/// Which model does [stageId]'s work, or null for an id no stage table row
+/// names.
+///
+/// The three-role view of the stage table, for the page that shows one line
+/// per role. `draft_improve` is [StageRole.big] like the stage it improves on:
+/// the role is about which model writes, and a second pass over a reply is
+/// written by the same model that wrote the first.
+StageRole? roleOfStage(String stageId) {
+  for (final stage in pipelineStages) {
+    if (stage.id != stageId) continue;
+    if (stage.slot == ModelSlot.embed) return StageRole.embed;
+    if (stage.slot == ModelSlot.prose || bigModelStageIds.contains(stageId)) {
+      return StageRole.big;
+    }
+    return StageRole.small;
+  }
+  return null;
+}
+
+/// Which target [stageId] resolves to when nothing is stored for it — THE
+/// PLACEMENT RULE.
+///
+/// The one function that says where a stage goes by default, and the reason
+/// the GPU box can be the default with nothing written to the database: on
+/// [ModelPlacement.box] with an address to dial, the big stages answer
+/// [boxProseId] and the small ones [boxBulkId], and everywhere else the answer
+/// is the slot's built-in exactly as it was before placements existed.
+///
+/// Null where there is no default to give: `embeddings` is the one stage that
+/// is not routed at all. [hasBox] is passed rather than read, because the
+/// address lives in the prefs and this file may not import upward.
+String? placementDefaultTargetId({
+  required ModelPlacement placement,
+  required bool hasBox,
+  required String stageId,
+}) {
+  final slot = stageSlot(stageId);
+  if (slot == ModelSlot.embed) return null;
+  if (placement == ModelPlacement.box && hasBox) {
+    if (bigModelStageIds.contains(stageId)) return boxProseId;
+    if (smallModelStageIds.contains(stageId)) return boxBulkId;
+    // An id no role list names is an id no stage table row names either, and
+    // [stageSlot] has already answered fast for it. It falls through to the
+    // built-in rather than to a box target, which is the cheap wrong answer
+    // rather than the expensive one.
+  }
+  return defaultTargetIdFor(slot);
+}
+
 /// One pipeline stage, as the settings screen names it.
 ///
 /// AUTHORED, not derived, and since Round E the [slot] is the stage's DEFAULT
@@ -513,10 +725,13 @@ class PipelineStageInfo {
 
   /// Whether the stage has NO target until the user picks one.
   ///
-  /// An optional stage's feature is hidden until then, and it runs another
-  /// stage's task rather than one of its own — `draft_improve` sends
-  /// `DraftTask` — so `model_slots_test` exempts it from the check that
-  /// every row has a task behind it.
+  /// NO ROW SETS IT since Round H. `draft_improve` was the one that did, and
+  /// its entry was the feature being on; with the stage picker gone the only
+  /// way to write one went too, so Improve a draft is a prose stage like the
+  /// rest and is routed by the rule. The field stays, with no member and
+  /// nothing branching on it, because a future stage that is genuinely off
+  /// until somebody asks for it would want exactly this, and
+  /// `model_slots_test` pins that no current row sets it.
   final bool optional;
 
   const PipelineStageInfo({
@@ -625,10 +840,8 @@ const List<PipelineStageInfo> pipelineStages = [
   PipelineStageInfo(
     id: 'draft_improve',
     label: 'Improve a draft',
-    description:
-        'A second pass over a suggested reply, on a target the user picks',
+    description: 'A second pass over a suggested reply, on the big model',
     slot: ModelSlot.prose,
-    optional: true,
   ),
   PipelineStageInfo(
     id: 'embeddings',
@@ -655,8 +868,8 @@ enum MachineTier {
   full,
 
   /// The embedding model and the inbox model only. The writing stages run on
-  /// the inbox model until a person adds a target under Settings, Models, and
-  /// drafts are on demand rather than prefetched.
+  /// the inbox model unless the install is pointed at the user's own servers,
+  /// and drafts are on demand rather than prefetched.
   inbox,
 
   /// The embedding model alone: every other stage is on the shared GPU box.
@@ -702,8 +915,9 @@ MachineTier machineTierFor(int memoryBytes) {
 /// byte-identical to the two-slot app. [MachineTier.inbox] points every
 /// prose-slot stage at the built-in fast target, so nothing parks on a machine
 /// with no prose server; built from [proseStageIds] so it cannot drift from the
-/// stage table. `draft_improve` is optional and stays unset; the confirm and
-/// the bulk stages already default to the fast target.
+/// stage table, `draft_improve` included since Round H made it a prose stage
+/// like the others. The confirm and the bulk stages already default to the
+/// fast target.
 ///
 /// [MachineTier.remote] writes nothing, and MUST stay empty: `applyTierDefaults`
 /// builds its `governed` set from the union of every tier's keys, so a stage

@@ -1002,8 +1002,7 @@ void main() {
       expect(await statusOf('sl-edge'), 'suggested');
     });
 
-    test('the expired row is stamped and its tombstone still answers',
-        () async {
+    test('the expired row is stamped and its hash still answers', () async {
       await seedStoryline('sl-old', clusterHash: 'hash-of-the-cluster');
       await proposedAt('sl-old', '2026-08-20T00:00:00.000000Z');
       // The model carries no `updated_at`, so the column is read directly.
@@ -1027,16 +1026,101 @@ void main() {
 
       expect(await stampOf('sl-old'), isNot(before));
       expect(await statusOf('sl-old'), 'dismissed');
-      // The row was born carrying its tombstone, so the next sweep recognises
-      // the same cluster without spending a model call re-deriving it.
+      // The row was born carrying its cluster hash, so the next sweep
+      // recognises the same cluster without spending a model call re-deriving
+      // it.
       expect(
         await store.dismissedHashExistsAny(const ['hash-of-the-cluster']),
         isTrue,
       );
     });
 
+    test('a possible storyline nobody reviewed expires like a suggestion',
+        () async {
+      await seedStoryline('sl-maybe',
+          status: 'possible', clusterHash: 'hash-of-the-cluster');
+      await proposedAt('sl-maybe', '2026-08-20T00:00:00.000000Z');
+      await seedConversation('c1');
+      await store.addStorylineMember('sl-maybe', 'email', 'c1',
+          addedBy: 'auto');
+
+      expect(await store.expireStaleSuggestions(bound), 1);
+
+      expect(await statusOf('sl-maybe'), 'dismissed');
+      // With its members, which is what keeps it restorable and what puts it
+      // in the rail's Dismissed fold at all.
+      expect(await store.membersOf('sl-maybe'), hasLength(1));
+      expect(
+        await store.loadStorylines(
+          statuses: const ['dismissed'],
+          withMembersOnly: true,
+        ),
+        hasLength(1),
+      );
+    });
+
     test('nothing to expire is zero and no write', () async {
       expect(await store.expireStaleSuggestions(bound), 0);
+    });
+  });
+
+  /// The Dismissed fold's own read. Before a declined cluster became a
+  /// `possible` storyline the sweep wrote a member-less `dismissed` row for
+  /// every group the models refused, and the fold showed the app's own
+  /// bookkeeping as things the owner had said no to.
+  group('loadStorylines withMembersOnly', () {
+    test('the Dismissed list leaves out a member-less tombstone', () async {
+      await seedStoryline('sl-tombstone',
+          status: 'dismissed', clusterHash: 'hash-of-the-cluster');
+      await seedStoryline('sl-mine', status: 'dismissed', title: 'Roof work');
+      await seedConversation('c1');
+      await store.addStorylineMember('sl-mine', 'email', 'c1',
+          addedBy: 'auto');
+
+      final shown = await store.loadStorylines(
+        statuses: const ['dismissed'],
+        withMembersOnly: true,
+      );
+
+      expect(shown.map((s) => s.id), ['sl-mine']);
+      // Kept, not deleted: its hash still stops the same cluster being rebuilt
+      // and re-asked.
+      expect(await store.loadStorylines(statuses: const ['dismissed']),
+          hasLength(2));
+      expect(
+        await store.dismissedHashExistsAny(const ['hash-of-the-cluster']),
+        isTrue,
+      );
+    });
+
+    test('the default leaves every row where it is', () async {
+      await seedStoryline('sl-empty', status: 'active');
+
+      expect(await store.loadStorylines(), hasLength(1));
+    });
+  });
+
+  group('dismissedHashExistsAny reads possible too', () {
+    test('a cluster filed as possible is a question already asked', () async {
+      await seedStoryline('sl-maybe',
+          status: 'possible',
+          clusterHash: 'cluster-hash',
+          memberHash: 'member-hash');
+
+      expect(await store.dismissedHashExistsAny(const ['cluster-hash']),
+          isTrue);
+      expect(await store.dismissedHashExistsAny(const ['member-hash']),
+          isTrue);
+      expect(await store.dismissedHashExistsAny(const ['something-else']),
+          isFalse);
+    });
+
+    test('a live storyline is not one', () async {
+      await seedStoryline('sl-live',
+          status: 'suggested', clusterHash: 'cluster-hash');
+
+      expect(await store.dismissedHashExistsAny(const ['cluster-hash']),
+          isFalse);
     });
   });
 

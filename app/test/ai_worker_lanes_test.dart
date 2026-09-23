@@ -293,7 +293,7 @@ void main() {
   });
 
   test('a width closure is re-read on every launch decision', () async {
-    // What makes Settings › Drafts in flight live: `AiWorker._drainAll` asks
+    // What makes the draft lane's width live: `AiWorker._drainAll` asks
     // the handler for its concurrency before each launch, so a width raised
     // mid-drain moves the NEXT item rather than the next launch of the app.
     var width = 1;

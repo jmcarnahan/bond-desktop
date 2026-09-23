@@ -104,7 +104,7 @@ reads it.
 |---|---|
 | Task | `ReplyDecisionTask` — `app/lib/services/llm/reply_decision_task.dart` |
 | Schema | `reply_decision` |
-| Slot | **prose / 27B** by default (`stageLlmClientProvider('reply_decision')`, a client of its own since 2026-09-19 so the decision and the draft can point at different targets; re-pointable in Settings → Models, see [10-model-routing.md](10-model-routing.md)) |
+| Slot | **prose / 27B** by default (`stageLlmClientProvider('reply_decision')`, a client of its own since 2026-09-19 so the decision and the draft can point at different targets; routed by the placement rule, and the per-stage pick is data with no screen since Round H, see [10-model-routing.md](10-model-routing.md)) |
 | Params | temperature 0, maxTokens 256 |
 
 The 27B reads the actual conversation and answers exactly one question: does
@@ -122,7 +122,7 @@ explains why it asks only one question. A "no" closes the draft stage
 |---|---|
 | Task | `DraftTask` — `app/lib/services/llm/draft_task.dart` |
 | Schema | `draft_reply` |
-| Slot | **prose / 27B** by default (`stageLlmClientProvider('draft_reply')`; re-pointable in Settings → Models; a third-party target here asks for consent once, see [10-model-routing.md](10-model-routing.md)) |
+| Slot | **prose / 27B** by default (`stageLlmClientProvider('draft_reply')`; routed by the placement rule, and the per-stage pick is data with no screen since Round H; a third-party target here asks for consent once, see [10-model-routing.md](10-model-routing.md)) |
 | Params | temperature 0, maxTokens 768 (`DraftHandler.draftMaxTokens`) |
 
 Writes a first-person reply on the owner's behalf: an evidence sentence, one
@@ -224,7 +224,7 @@ conversation, which costs a parse of text the call was already receiving.
 |---|---|
 | Task | `DraftTask` again — no second prompt exists (`app/lib/services/llm/draft_task.dart`) |
 | Schema | `draft_reply` — so an improve call's `LlmCallRecord` carries that label |
-| Slot | **prose**, and **no default target** (`stageLlmClientProvider('draft_improve')`; the one optional row in `pipelineStages`; a third-party target asks for consent once) |
+| Slot | **prose**, routed by the placement rule like every other prose stage (`stageLlmClientProvider('draft_improve')`; a third-party target asks for consent once) |
 | Params | temperature 0, maxTokens 768, never streamed |
 
 The best draft the ledger has measured is not the one the local 27B writes. On
@@ -238,16 +238,20 @@ sends the draft that was just written back through the same prompt on a target
 the owner picked, and replaces it.
 
 **The stage.** `draft_improve` is a routable stage like the other fourteen
-(`pipelineStages`, `slot: prose`, label "Improve a draft"), with one
-difference: it is the only `PipelineStageInfo.optional` row, so its default is
-**no target at all**. A build nobody has configured has no Improve button. A
-third-party target on it needs the one-time cloud-drafts consent before
+(`pipelineStages`, `slot: prose`, label "Improve a draft"), and since Round H
+it is routed like them too: the big model, wherever the placement says that
+is. It was the one `PipelineStageInfo.optional` row until then, meaning no
+target until somebody picked one and no Improve button before they did — and
+the stage picker that was the only way to pick one went with the Advanced
+fold, which Round H deleted, so the feature would have gone with it. A
+third-party target on it still needs the one-time cloud-drafts consent before
 `AppPrefs.specForStage('draft_improve')` will resolve to it — the same rule
 `draft_reply` gets, and the resolver is where it is enforced (see
-[10-model-routing.md](10-model-routing.md)).
+[10-model-routing.md](10-model-routing.md)). Without that consent Improve goes
+to the same fallback a draft does.
 
 **The button.** The composer draws it beside Draft reply / Regenerate,
-labelled from the target's own name and only when there is a draft to improve.
+labelled from the target's own name, whenever there is a draft to improve.
 It calls `DraftHandler.improve(source, messageId)`, which gathers exactly what
 the draft gathered — the same thread window, the same retrieval, the same
 `DraftTask` bytes — and sends it to the improve target at temperature 0 with
@@ -263,7 +267,7 @@ come back, because the stored provenance names them.
 status `suggested`, and `context_json` carrying `improved_by: <target id>`
 beside the sources (`DraftProvenance.improvedBy`). The composer's caption
 appends "Improved with `<name>`" from that id. **Any failure keeps the local
-draft** and shows one line: an unrouted stage, a deleted message, no draft
+draft** and shows one line: a deleted message, no draft
 yet, an empty answer, a refused call, the cap. Improve records its own
 `draft_improve` activity row — `ok`, `error` or `skipped` with a reason —
 carrying the target id and, for a third-party one, `cloud: 1`.
