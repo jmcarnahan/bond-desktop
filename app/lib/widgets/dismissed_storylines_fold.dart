@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/storyline_models.dart';
+import '../services/llm/storyline_tasks.dart' show NameStorylineTask;
 import '../theme/tokens.dart';
 
 /// The storylines the user said no to, folded under the live ones.
@@ -123,7 +124,9 @@ class _DismissedStorylinesFoldState extends State<DismissedStorylinesFold> {
               children: [
                 Expanded(
                   child: Text(
-                    storyline.title.isEmpty ? '(untitled)' : storyline.title,
+                    storyline.title.isEmpty
+                        ? NameStorylineTask.fallbackTitle
+                        : storyline.title,
                     style: BondType.small.copyWith(
                       color: BondColors.onDarkSecondary,
                       fontWeight: FontWeight.w500,

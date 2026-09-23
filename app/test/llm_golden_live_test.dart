@@ -1347,6 +1347,17 @@ void main() {
             await service.keepSuggestion(storyline.id);
             keptSuggestions++;
           }
+          // The possible rows hold a slot of the sweep's room exactly as the
+          // suggestions do, so they need an answer too or this loop stops
+          // walking the mailbox after three declined clusters. The answer is
+          // Dismiss and not Keep: these are groups no model vouched for, and
+          // keeping them would inflate every number the run reports. A
+          // dismissal keeps both hashes, so the population `tombstoned` counts
+          // is exactly the one it counted before.
+          for (final storyline
+              in await store.loadStorylines(statuses: const ['possible'])) {
+            await service.dismissSuggestion(storyline.id);
+          }
           if (after == before) break;
         }
 
@@ -1439,8 +1450,12 @@ void main() {
           }
         }
 
+        // `possible` as well as `dismissed`: since decision 31 a cluster the
+        // namer, the lint or the confirms declined is FILED as a possible
+        // storyline with its members rather than tombstoned, and the count
+        // this row has always reported is how many the models threw out.
         final tombstoned = (await store.loadStorylines(
-          statuses: const ['dismissed'],
+          statuses: const ['dismissed', 'possible'],
         ))
             .where((storyline) => storyline.createdBy == 'auto')
             .length;
@@ -2019,15 +2034,15 @@ const LiveBench _vectorBench = LiveBench('golden-vector');
 Future<T> _decoded<T>(String path, Future<T> Function() load) =>
     _sweepBench.decodeOrFail(path, load);
 
-/// Every storyline row the sweep has written, live and tombstoned alike.
+/// Every storyline row the sweep has written, live and declined alike.
 ///
-/// The loop's progress test, and it counts dismissals on purpose: a pass whose
-/// clusters were all thrown out still did work, and the next pass may propose
-/// what it could not reach for. What ends the loop is a pass that writes
-/// nothing at all.
+/// The loop's progress test, and it counts the declined ones on purpose: a
+/// pass whose clusters were all thrown out still did work, and the next pass
+/// may propose what it could not reach for. What ends the loop is a pass that
+/// writes nothing at all.
 Future<int> _storylineCount(MessageStore store) async => (await store
-        .loadStorylines(statuses: const ['suggested', 'active', 'dismissed']))
-    .length;
+    .loadStorylines(
+        statuses: const ['suggested', 'possible', 'active', 'dismissed'])).length;
 
 /// Calls this collector saw, failures included — what a per-pass count and a
 /// calls-per-minute figure are both divided by. A failed call spent the wall

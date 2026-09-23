@@ -43,6 +43,7 @@ import '../services/llm/draft_task.dart' show DraftOption;
 // re-exports them; [ModelPlacement] is not re-exported, and the rail's AI
 // stop needs it to say whether the models run on the box.
 import '../services/llm/model_slots.dart' show ModelPlacement;
+import '../services/llm/storyline_tasks.dart' show NameStorylineTask;
 import '../services/profile_photos.dart' show photoKeyFor;
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
@@ -70,6 +71,7 @@ import '../widgets/people_directory_pane.dart';
 import '../widgets/people_rooms.dart';
 import '../widgets/person_panel.dart';
 import '../widgets/person_room_pane.dart';
+import '../widgets/possible_storylines_fold.dart';
 import '../widgets/preview/attachment_preview_panel.dart';
 import '../widgets/preview/attachment_viewer_pane.dart';
 import '../widgets/preview/pdf_preview.dart';
@@ -1162,8 +1164,29 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return state is StorylinesLoaded ? state.dismissed : const [];
   }
 
+  /// The groups the model found and would not vouch for. A third list beside
+  /// [_storylines] and [_dismissedStorylines], for the same reason those two
+  /// are apart: the rail draws it under a heading of its own, and a possible
+  /// storyline mixed into the live list would read as something the model is
+  /// offering.
+  List<Storyline> _possibleStorylines() {
+    final state = ref.watch(storylinesProvider);
+    return state is StorylinesLoaded ? state.possible : const [];
+  }
+
+  /// [_possibleStorylines] under the source pills, the way [_scopedStorylines]
+  /// narrows the live list.
+  List<Storyline> _scopedPossible() =>
+      storylinesBySource(_possibleStorylines(), _sourceFilter);
+
   Storyline? _storylineById(String id) {
     for (final storyline in _storylines()) {
+      if (storyline.id == id) return storyline;
+    }
+    // The possible list too, and unfiltered: the Possible fold's own rows open
+    // from here, and a storyline nobody has vouched for is exactly the one a
+    // reader wants to look inside before answering.
+    for (final storyline in _possibleStorylines()) {
       if (storyline.id == id) return storyline;
     }
     // Kept or dismissed from under the selection, or gone in a reload. The
@@ -1715,6 +1738,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       conversations: conversations,
       storylines: _scopedStorylines(),
       dismissed: _dismissedStorylines(),
+      possible: _possibleStorylines(),
       selectedId: _selectedId,
       selectedSource: _selectedSource,
       selectedStorylineId: _selectedStorylineId,
@@ -1774,6 +1798,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // the fold and re-joins the live list asking the same question.
       onRestoreStoryline: (id) =>
           ref.read(storylinesProvider.notifier).undismiss(id),
+      // The same two writes the suggestion rows make. Keeping one makes it
+      // active and takes its threads out of the sweep's pool; letting one go
+      // dismisses it with its members, so it lands in the fold below and can
+      // be restored.
+      onKeepPossible: (id) => ref.read(storylinesProvider.notifier).keep(id),
+      onDismissPossible: (id) {
+        // The row leaves the fold, so a selection pointing at it would render
+        // nothing — the same clear the suggestion rows do, for the same
+        // reason.
+        if (_selectedStorylineId == id || _addingToStorylineId == id) {
+          setState(() {
+            _selectedStorylineId = null;
+            _addingToStorylineId = null;
+          });
+        }
+        ref.read(storylinesProvider.notifier).dismiss(id);
+      },
+      // The live rows' own selection. Reading the threads is the whole point
+      // of opening one of these before answering.
+      onOpenPossible: _selectStoryline,
     );
   }
 
@@ -4995,13 +5039,23 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// Every storyline as a card. Suggestions carry their two answers on the
   /// row, so the whole section can be cleared without opening anything.
+  ///
+  /// The possible storylines come last, after the live ones, each saying what
+  /// it is: a group the model found and would not vouch for. They carry the
+  /// same two answers, because the rail's fold is a narrow place to decide
+  /// something and this pane has room to show the counts.
   Widget _storylinesOverview() {
-    final storylines = storylineRows(_scopedStorylines());
+    final storylines = [
+      ...storylineRows(_scopedStorylines()),
+      ..._scopedPossible(),
+    ];
     if (storylines.isEmpty) {
       // A pill emptied this pane, rather than the model never having grouped
       // anything: say which half is showing and offer the way back, the same
       // line every other narrowed pane ends with.
-      final notice = _storylines().isEmpty ? null : _scopeNotice();
+      final notice = (_storylines().isEmpty && _possibleStorylines().isEmpty)
+          ? null
+          : _scopeNotice();
       if (notice != null) return Center(child: notice);
       return Center(
         child: Text(
@@ -5046,7 +5100,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                       children: [
                         Text(
                           storyline.title.isEmpty
-                              ? '(untitled)'
+                              ? NameStorylineTask.fallbackTitle
                               : storyline.title,
                           style: BondType.body
                               .copyWith(fontWeight: FontWeight.w600),
@@ -5068,10 +5122,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                           '${storyline.openCount} open',
                           style: BondType.caption,
                         ),
+                        // Only on the rows nobody vouched for, and beside the
+                        // suggestion's silence rather than in place of it: a
+                        // suggestion is the model offering a group, and this
+                        // is the model admitting it could not tell.
+                        if (storyline.isPossible) ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            possibleStorylineCaption,
+                            key: possibleStorylineCaptionKeyFor(storyline.id),
+                            style: BondType.caption,
+                          ),
+                        ],
                       ],
                     ),
                   ),
-                  if (storyline.isSuggested) ...[
+                  if (storyline.isSuggested || storyline.isPossible) ...[
                     const SizedBox(width: BondSpacing.s8),
                     TextButton(
                       onPressed: () => notifier.keep(storyline.id),

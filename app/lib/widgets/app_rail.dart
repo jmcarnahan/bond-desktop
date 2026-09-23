@@ -5,12 +5,14 @@ import '../models/message_models.dart';
 import '../models/needs_you_sort.dart';
 import '../models/storyline_models.dart';
 import '../services/attention.dart';
+import '../services/llm/storyline_tasks.dart' show NameStorylineTask;
 import '../services/profile_photos.dart';
 import '../theme/tokens.dart';
 import 'bond_avatar.dart';
 import 'dismissed_storylines_fold.dart';
 import 'find_filter.dart';
 import 'people_rooms.dart';
+import 'possible_storylines_fold.dart';
 import 'processing_hint.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
@@ -208,10 +210,10 @@ String laterDayLabel(String dayKey, int count) {
 /// already sorts proposals newest-first and live ones by recent activity, and
 /// re-sorting here would be a second opinion about the same thing.
 ///
-/// Archived storylines never reach the rail and dismissed ones never reach
-/// THIS list; the store's default query returns neither. Dismissed storylines
-/// arrive separately, as [AppRail.dismissed], and the rail shows them only
-/// under a fold of their own.
+/// Archived storylines never reach the rail, and neither dismissed nor
+/// possible ones reach THIS list; the store's default query returns none of
+/// them. Those two arrive separately, as [AppRail.dismissed] and
+/// [AppRail.possible], and the rail shows each under a fold of its own.
 List<Storyline> storylineRows(List<Storyline> all) => [
       for (final s in all)
         if (s.isSuggested) s,
@@ -323,6 +325,15 @@ class AppRail extends StatefulWidget {
   /// because it is history rather than a queue — nothing here is asking for
   /// anything — but it is reachable, and every row in it can be restored.
   final List<Storyline> dismissed;
+
+  /// The groups the sweep built and the model declined to vouch for, folded
+  /// away between the live storylines and the dismissed ones.
+  ///
+  /// They ask the same Keep or Dismiss question a suggestion does, softly:
+  /// nothing vouched for these, so they sit under a heading of their own
+  /// rather than competing with the rows that are actually offering
+  /// something. See [PossibleStorylinesFold].
+  final List<Storyline> possible;
 
   /// The open thread, when one is open.
   final String? selectedId;
@@ -446,6 +457,13 @@ class AppRail extends StatefulWidget {
   /// Restore buttons inert.
   final void Function(String storylineId)? onRestoreStoryline;
 
+  /// The Possible fold's three: accept one, let one go, or open one to read
+  /// its threads first. Null leaves that control inert, the rule every other
+  /// row on this rail follows.
+  final void Function(String storylineId)? onKeepPossible;
+  final void Function(String storylineId)? onDismissPossible;
+  final void Function(String storylineId)? onOpenPossible;
+
   /// How the Needs You rows are ordered. The screen holds the preference and
   /// hands the same value to the overview and to [firstFindTarget], because
   /// the three have to draw one pile in one order — the `+N more` row opens
@@ -462,6 +480,7 @@ class AppRail extends StatefulWidget {
     required this.onSelectSection,
     this.storylines = const [],
     this.dismissed = const [],
+    this.possible = const [],
     this.selectedStorylineId,
     this.selectedLaterDay,
     this.laterCount = 0,
@@ -485,6 +504,9 @@ class AppRail extends StatefulWidget {
     this.filesKind = FilesKind.all,
     this.onSelectFilesKind,
     this.onRestoreStoryline,
+    this.onKeepPossible,
+    this.onDismissPossible,
+    this.onOpenPossible,
     this.needsYouSort = NeedsYouSort.priority,
   });
 
@@ -669,9 +691,21 @@ class _AppRailState extends State<AppRail> {
       rows: [
         for (final s in storylineRows(widget.storylines))
           if (storylineMatches(s, needle)) _storylineItem(s),
-        // Under the live rows, and behind a fold: what the user already said
-        // no to must not compete with what is still asking. Not narrowed by
-        // Find — a dismissed suggestion is not a place to go.
+        // Between the live rows and the dismissed ones, behind a fold of its
+        // own: the model found these groups and would not vouch for them, so
+        // they ask more quietly than a suggestion and more loudly than
+        // history. Not narrowed by Find, for the dismissed fold's reason.
+        if (widget.possible.isNotEmpty)
+          PossibleStorylinesFold(
+            possible: widget.possible,
+            onKeep: widget.onKeepPossible,
+            onDismiss: widget.onDismissPossible,
+            onOpen: widget.onOpenPossible,
+            fill: BondColors.rail,
+          ),
+        // Under both, and behind a fold: what the user already said no to must
+        // not compete with what is still asking. Not narrowed by Find — a
+        // dismissed suggestion is not a place to go.
         if (widget.dismissed.isNotEmpty)
           DismissedStorylinesFold(
             dismissed: widget.dismissed,
@@ -1221,7 +1255,7 @@ class _AppRailState extends State<AppRail> {
                   Expanded(
                     child: Text(
                       storyline.title.isEmpty
-                          ? '(untitled)'
+                          ? NameStorylineTask.fallbackTitle
                           : storyline.title,
                       style: BondType.small.copyWith(
                         color: color,

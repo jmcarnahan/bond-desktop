@@ -67,9 +67,11 @@ recap after the sweep. See [10-model-routing.md](10-model-routing.md).
    their own sections below. Pair-discovery
    runs on the sqlite-vec index when there is one and on Dart arithmetic when
    there is not, to the same clusters either way — its own section below.
-   Rejected clusters are tombstoned by immutable `cluster_hash` (schema v7) so
-   a dismissed suggestion stays dismissed even after membership drift. Three
-   reasons write one, listed once under *How the sweep finds its pairs*.
+   A cluster the models decline is filed as a `possible` storyline, with its
+   members, and recognised afterwards by its immutable `cluster_hash`
+   (schema v7) so the same question is never asked twice — the same hash that
+   keeps a dismissed suggestion dismissed after membership drift. Three
+   reasons file one, listed once under *How the sweep finds its pairs*.
    Finished
    threads are held out of the clustering and offered to the newborn storyline
    afterwards instead — "join, not seed", its own section below. It runs only
@@ -161,9 +163,10 @@ true rather than claiming a pass ran. Without the stamp the next sweep's
 catch-up would read the row as never described and spend a Refine call
 re-writing a description seconds old over a member set that has not moved. It is
 the same claim the v10 backfill makes about the storylines it found already
-described. A tombstoned cluster stamps nothing. It has no member rows to
-describe, for any of the three reasons listed under *How the sweep finds its
-pairs*.
+described. A cluster filed as `possible` stamps nothing: nobody has vouched
+for it, so there is nothing to claim was described, and the refresh pass reads
+`suggested` and `active` only. The three reasons one is filed are listed under
+*How the sweep finds its pairs*.
 
 **Triggers** — every path that can change what a storyline is about, all via
 `requeueWork` (never `enqueueWork`; `payload_json` is NULL, so nothing carries
@@ -192,7 +195,9 @@ other trigger fires on an event that has already gone by. The sweep returns
 early on nearly every pass (no room, nothing unassigned), so a catch-up at the
 bottom would almost never run. `staleRefreshStorylineIds` uses `IS NOT` rather
 than `!=` — `!=` answers NULL for the never-described rows that most need
-finding — and its NULL-on-both-sides case excludes the tombstone shape.
+finding — and its NULL-on-both-sides case excludes the member-less tombstone
+an older build wrote for a declined cluster, as that row's `dismissed` status
+already does.
 
 **Two branches.** Describing a storyline for the first time and re-describing
 one are different questions:
@@ -550,9 +555,29 @@ under the live storylines reading **Dismissed · *n***, shut on every build,
 holding one row per dismissed storyline with a single **Restore**. Restoring
 puts the status back to `suggested` — the state the row was in when the
 question was first put — so the same Keep / Dismiss pair comes back with it.
-That also lifts the tombstone: `dismissedHashExistsAny` keys on
-`status = 'dismissed'`, so a restored storyline's member set can be proposed
-again. Members were kept on dismissal, so nothing is rebuilt.
+That also lifts the block on re-proposing: `dismissedHashExistsAny` reads
+`dismissed` and `possible`, so a restored storyline's member set can be
+proposed again. Members were kept on dismissal, so nothing is rebuilt.
+
+The fold shows rows **with members only**. Before a declined cluster became a
+`possible` storyline, the sweep wrote a member-less `dismissed` row for every
+group the models refused, and on the owner's own mailbox that was all four
+groups the sweep found: the rail read **Dismissed · 4** as though the owner had
+turned each one down. Those rows still answer the hash check, so they are kept
+rather than deleted; they are simply not anybody's dismissal, and Restore would
+bring back a storyline with nothing in it.
+
+**Possible · *n*** is the fold above it, and it is where a declined cluster
+goes now. Same shape, shut on every build, one row per storyline — but each row
+carries **Keep** and **Dismiss** rather than Restore, and a tap on the title
+opens the storyline so the threads in it can be read first. Keeping makes it
+`active`, which is also the moment its threads leave the sweep's unassigned
+pool. Dismissing files it in the fold below, members and all, so it can be
+restored. Nobody answering is an answer too: a possible storyline expires on
+the suggestion's own 14-day clock into a dismissed row that keeps its members.
+The Storylines overview shows the same rows as cards after the live ones, each
+with the line *The model found this group but would not vouch for it. Keep it
+if it is a storyline, or let it go.*
 
 Refresh, audit and recap all report progress under their own kinds, and
 `StorylinesNotifier` listens for all of them, so a pass that rewrites a title,
@@ -848,8 +873,9 @@ thing meant to break it.
 September 2026 ran over a quarter-synced mailbox. A first sync queues thousands
 of extractions and the pool grows for as long as they drain, so clustering
 early proposes the storylines the first tenth of a mailbox happens to hold,
-then tombstones them when the model says no, and can never ask again once the
-rest arrives, because the tombstone recognises the cluster by its hash. So the
+then files them as possible when the model says no, and can never ask again
+once the rest arrives, because the hash on that row recognises the cluster. So
+the
 pass reads the backlog once and stands down while any of three floors is
 exceeded.
 
@@ -873,19 +899,24 @@ The triage count filters on no direction and needs none:
 the moment it is inserted, so a row still at `pending` is an inbound one
 waiting to be judged.
 
-**Suggestions expire.** At most `maxPendingSuggestions`, three, unanswered
-proposals may sit in the rail at once, and the sweep's room count is what
-enforces it. A suggestion nobody ever answers holds its slot for the life of
-the mailbox, so three of them and the room is zero on every future pass: the
-app quietly stops proposing anything at all, with no error anywhere. The expiry
-is what keeps the room moving. An automatic suggestion proposed more than
+**Suggestions expire, and so do possible storylines.** At most
+`maxPendingSuggestions`, three, unanswered questions the app asked may sit in
+the rail at once, and the sweep's room count is what enforces it. The count
+reads `suggested` and `possible` rows with `created_by = 'auto'`, because both
+kinds ask: a possible storyline is a rail row with a **Keep** and a **Dismiss**
+on it, and a wall of them is the same chore a wall of proposals is. A question
+nobody ever answers holds its slot for the life of the mailbox, so three of
+them and the room is zero on every future pass: the app quietly stops proposing
+anything at all, with no error anywhere. The expiry is what keeps the room
+moving. An automatic `suggested` or `possible` storyline proposed more than
 `suggestionTtlDays`, fourteen days, ago goes to `dismissed`, and the count
 lands on the activity row as `expired`. Nothing is rebuilt and nothing is
-deleted: the row becomes the tombstone it has carried since it was written, its
+deleted: the row keeps the hash it has carried since it was written, its
 members stay exactly as a dismissal leaves them, the threads return to the pool
 because `assignedOrBlockedKeys` counts suggested and active memberships only,
-and **Restore** lifts an expiry like any other dismissal. It never touches an
-`active` storyline, which somebody kept, and never one a person made.
+and **Restore** lifts an expiry like any other dismissal. A possible storyline
+expires WITH its members, which is what keeps it restorable. It never touches
+an `active` storyline, which somebody kept, and never one a person made.
 
 **What the pool is.** After the room count the pass reads every conversation
 that has a vector under the current model tag and leaves out the taken ones:
@@ -943,8 +974,8 @@ row, over the conversation's own counters maintained by both syncs through
 message in all of them. That is a feed: a system writing to a mailbox, every
 issue looking like the last. Naming it would write a charter that admits every
 future issue forever, so its threads are taken out of the pool for the pass and
-the row notes `series_excluded`. Nothing is tombstoned, because no model was
-asked anything. Both halves are required: a series nobody answered but several
+the row notes `series_excluded`. Nothing is filed, because no model was asked
+anything. Both halves are required: a series nobody answered but several
 people wrote is a group of correspondents, and a series one address wrote and
 somebody answered is a conversation whatever its subject looks like. A row
 whose `inbound_count` is zero is stale rather than unanswered and fails the
@@ -1015,7 +1046,7 @@ The two hashes now say different things about one storyline and both are
 deliberate. `member_hash` covers the survivors and their siblings, because it
 describes who is STORED. `cluster_hash` covers the representatives alone,
 because it names the set the model was asked about, and a fourth fragment
-arriving next week must not turn a tombstoned question into a new one.
+arriving next week must not turn a question already answered into a new one.
 
 The order against the series pre-pass is load-bearing. The pre-pass runs FIRST,
 on the raw rows, before anything is folded. A DATED series among fixed people is
@@ -1044,21 +1075,67 @@ after the confirms have spoken, so a three-thread proposal that loses one
 member still ships as a storyline of two. A seeded series is already at least
 `seriesMinSize`, so the propose floor never turns one away.
 
-### The three reasons a tombstone exists
+### The three reasons a cluster is filed as possible
 
-A `dismissed` row with `created_by = 'auto'`, a `cluster_hash` and no members
-is a tombstone: the record that this exact group of threads was asked about and
-the answer was no. There are exactly three reasons one is written, all in
-`_propose` and all through the same `_tombstone` helper. The namer named no
-group to keep, which is a `coherent: false` carrying no outliers or an outlier
-list that leaves fewer than two threads, noted `incoherent`. The charter lint
-refused what the namer wrote, noted `lint`. Or the per-member confirms left
-fewer than `minClusterSize` survivors. `member_hash` stays null in all three:
-no member rows are ever written for a tombstoned cluster, so there is no stored
-set for it to describe, and the cluster is the only identity the row has. A
-cluster the sweep merely dropped for sitting under the coherence floor or under
-`proposeMinClusterSize` leaves no tombstone at all, because nothing was asked
-about it.
+A `possible` row with `created_by = 'auto'`, a `cluster_hash`, a `member_hash`
+and its member rows is a group the sweep built and no model would vouch for.
+There are exactly three reasons one is written, all in `_propose` and all
+through the same `_filePossible` helper. The namer named no group to keep,
+which is a `coherent: false` carrying no outliers or an outlier list that
+leaves fewer than two threads, noted `incoherent`. The charter lint refused
+what the namer wrote, noted `lint`. Or the per-member confirms left fewer than
+`minClusterSize` survivors. Which rows are filed differs by reason: the whole
+cluster on the first, the namer's kept rows on the other two. The confirms' own
+verdicts are deliberately not applied, because the person is being asked about
+the group and not about the small model's answer thread by thread.
+
+All three used to write a member-less `dismissed` tombstone instead, and on the
+owner's own mailbox that was the entire sweep: four groups a person would
+recognise, two declined by the namer and two refused by the lint, and a rail
+reading **Dismissed · 4** as though the owner had said no to each. The model
+declining is not the user declining, so the row is now stored the way a
+suggestion is and a person decides.
+
+What that means in each direction:
+
+| | `possible` |
+|---|---|
+| the rail | under **Possible · *n***, with **Keep**, **Dismiss** and a tap that opens it |
+| the pool | its threads STAY unassigned — `assignedOrBlockedKeys` counts `suggested` and `active` alone, so the same threads are still free to cluster into something a person would recognise |
+| model cost | none — no assign, recruit, refresh, recap or home-feed query names the status |
+| the hash | `dismissedHashExistsAny` reads `possible` as well as `dismissed`, so the identical cluster is never re-asked |
+| `member_hash` | over exactly what was filed, by `_propose`'s own recipe, so every later membership write keeps it true |
+| the title | the namer's when it wrote one, and otherwise the subject the members most share, folded by `fragmentKeyFor` and rendered as the newest member wrote it — a rail row reading *Untitled storyline* says nothing about what is in it |
+| expiry | the suggestion's 14-day clock, into a `dismissed` row that keeps its members and can be restored |
+| Keep | `active`, which is when its threads leave the pool |
+
+A filing spends a slot of the pass's room, exactly as a proposal does, and the
+cluster loop stops when the proposals and the filings together reach it. While
+a declined cluster wrote an invisible tombstone it could fill nothing up, so
+the loop counted proposals alone; now that it writes a rail row with members, a
+pass whose models declined every cluster it built would otherwise walk the
+whole list and hand back **Possible · 40**. The clusters left behind are not
+lost: nothing wrote their hashes, so the next pass rebuilds them and asks about
+the next one as soon as a slot comes free. A cluster that reached no model at
+all, because a hash already answered it, spends nothing — it would otherwise
+consume the same slot on every future sweep and starve the genuinely new
+clusters ranked behind it.
+
+A cluster the sweep merely dropped for sitting under the coherence floor or
+under `proposeMinClusterSize` is filed nowhere at all, because nothing was
+asked about it.
+
+**Keeping one is not a bare status flip.** Its members stayed in the pool while
+it waited, so between the filing and the press a later sweep, a recruit or the
+per-thread assign may have put one of them into a live storyline. On **Keep**,
+`StorylineEdits.keepSuggestion` reads `assignedKeys` for every source the
+members span, drops every member a live storyline already holds, recomputes
+`member_hash` over the survivors and only then writes the status — all in one
+transaction, and `dismissed` rather than `active` when fewer than
+`minClusterSize` members are left, since the group the owner said yes to no
+longer exists and a tombstone keeps its hashes on file. A `suggested` row skips
+all of this: its members left the pool the moment it was proposed. This is what
+holds ONE THREAD, ONE LIVE STORYLINE at the one press that could break it.
 
 Clustering is two halves. **Measuring** the pairs is the half an index can do
 faster, and it does — `ConversationVectorIndex` (see `05-embeddings.md`),
@@ -1089,17 +1166,17 @@ cluster at the cap and a cluster whose mean pairwise cosine is under
 `clusterCoherenceFloor`, 0.43, are both re-clustered on their own members at
 0.05 higher, repeating up to `clusterSplitCeiling`, 0.68. A group that is
 nearly two groups comes apart at the seam. What is still under the floor at the top of that ladder is
-dropped for this pass: no naming call is spent on a blob, and no tombstone is
-written either, because nothing was ever asked about it. A group that is merely
+dropped for this pass: no naming call is spent on a blob, and nothing is filed
+either, because nothing was ever asked about it. A group that is merely
 large survives at the ceiling, since being at the cap is not a defect when
 everything in it is coherent.
 
 The whole thing is a pure function of the store's order and the similarities,
-and has to stay one: `cluster_hash` is what tombstones a dismissed suggestion,
-so the same threads must group the same way on every run for a dismissal to
-hold. A cluster that forms differently under a changed rule is a new question
-and costs one naming call and its confirms, once, after which its own tombstone
-holds. An old tombstone still answers for any identical member set.
+and has to stay one: `cluster_hash` is what recognises a group already asked
+about, so the same threads must group the same way on every run for a dismissal
+to hold. A cluster that forms differently under a changed rule is a new
+question and costs one naming call and its confirms, once, after which its own
+hash holds. An old tombstone still answers for any identical member set.
 
 **The two paths agree on the clusters, unconditionally, by design.** Each probe
 asks for as many neighbours as the *index* holds — not as many as there are
@@ -1139,7 +1216,9 @@ from 71% to 51% over fourteen groups rather than seven, and coverage is still
 The tally reads its own numbers off the sweep's activity rows: `incoherent`,
 `lint`, `series`, `series_excluded`, `outliers`, `fragments` and `folded` are
 summed over every `storyline_sweep` row the run recorded, so the printed row and
-the log tell one story rather than two. The run fails outright if any of those
+the log tell one story rather than two. The bench's `tombstoned` figure counts
+`created_by = 'auto'` rows at `dismissed` or `possible`, which is the same
+population it always counted: the clusters no model would vouch for. The run fails outright if any of those
 rows carries a `deferred` key: the bench store has no queue behind it, so the
 settle gate can never bite there, and a scored row that was really a deferral
 would read as a measurement of a pass that never ran. The golden pool holds no
@@ -1152,8 +1231,8 @@ never applied to them: on a pool that held a series the two numbers would say
 how far those clusters stand from the ones a sweep would form. The sweep
 bench's `charter lint` line changed meaning with them.
 Before the lint was wired it was the whole reading, counted over every live
-storyline and applied to none. Now that a lint hit tombstones a cluster before
-its confirms, what that line counts is what SURVIVED and would still be
+storyline and applied to none. Now that a lint hit files a cluster as possible
+before its confirms, what that line counts is what SURVIVED and would still be
 refused, and it should read zero; a non-zero entry there is a bug report rather
 than a measurement. `docs/model-bakeoff.md` carries the protocol, the knobs and
 the ledger.
@@ -1300,8 +1379,8 @@ the cosine pass and demotes it to a **neighbourhood finder** —
   still too wide at `clusterSplitCeiling`, are dropped unasked;
 - each returned group of at least `proposeMinClusterSize` becomes a cluster
   handed to `_propose` exactly as a cosine cluster is. The namer still runs,
-  the confirms still run, and the tombstone is still keyed on the member set —
-  so a group either pass proposes is recognised by a dismissal the other one
+  the confirms still run, and the hash is still keyed on the member set — so a
+  group either pass proposes is recognised by a dismissal the other one
   earned.
 
 `GroupingMode.pool` draws no neighbourhood at all. There is no similarity
@@ -1529,9 +1608,9 @@ a finished thread sitting between two newborn clusters could join both, which is
 a state no other automatic path can produce — `assignConversation` files a
 thread into its single best storyline and nothing else.
 
-Two further limits are worth naming. A tombstoned cluster probes nothing,
-whichever of the three reasons wrote it: a group the model just threw out must
-not go recruiting history to make itself big enough to ship. And when the probe
+Two further limits are worth naming. A cluster filed as possible probes
+nothing, whichever of the three reasons filed it: a group nobody has vouched
+for must not go recruiting history to make itself big enough to ship. And when the probe
 files anything, **both** member hash columns are recomputed over the final set,
 so `member_hash == refreshed_member_hash` still holds — the storyline is born
 described, and a probe join must not send it to `staleRefreshStorylineIds` and
@@ -1550,8 +1629,9 @@ judged, and a finished thread that was offered and turned away was never one.
 The sweep's row carries eleven numeric keys: `proposed`, `confirmed`,
 `rejected` and `joined`, and beside them `series` and `series_excluded` from
 the subject pre-pass, `incoherent` and `lint` for the clusters the namer and
-the charter lint refused, `outliers` for the threads the namer named as not
-belonging, and `fragments` and `folded` for the rows the fragment fold joined
+the charter lint refused — which is to say the clusters filed as `possible`
+for each of those two reasons, since a refusal is filed rather than thrown
+away — `outliers` for the threads the namer named as not belonging, and `fragments` and `folded` for the rows the fragment fold joined
 and the rows it folded at all. Every one is a number and never a null or a
 string, because the log's quiet-kind check reads them as numerics and a
 non-numeric would make every all-zero sweep loud again; the one string this
@@ -1572,7 +1652,8 @@ The dedupe hashes fold the source in for the same reason: `cluster_hash` and
 `member_hash` are taken over the sorted composites, so two groups that differ
 only by connector are two groups. Recognising a dismissal asks **both**
 recipes, though. Hashes written before the source was folded in can never be
-rewritten, and a tombstoned cluster has no member rows to rebuild it from, so
+rewritten, and the member-less tombstones those builds wrote for declined
+clusters have no member rows to rebuild them from, so
 `MessageStore.dismissedHashExistsAny` is handed the composite hash and the old
 bare-key hash for the same candidate set, and
 matches either against either column in one query. Every write uses the new
@@ -1714,15 +1795,15 @@ golden pool eight clusters of eight came back false, four of them listing every
 thread and the rest listing 4 of 7, 3 of 6, 2 of 3 and 1 of 3. So a false is
 read as "not all of them" rather than as a refusal.
 
-First, a cluster is tombstoned and noted `incoherent` on the two answers that
-name no group to keep: `coherent: false` carrying no outliers, which is the
+First, a cluster is filed as possible and noted `incoherent` on the two answers
+that name no group to keep: `coherent: false` carrying no outliers, which is the
 model declining outright, and a kept set of fewer than `minClusterSize`
 threads, which is the same refusal spelled as a list.
 
 Then `charterLint` in `storyline_lint.dart` reads the title and charter against
 the WHOLE cluster's participants, and a hit on any of its three verdicts, which
-are `placeholder`, `person` and `category`, tombstones the cluster and notes
-`lint`. The confirm stage cannot refuse what the charter allows, so a charter
+are `placeholder`, `person` and `category`, files the cluster as possible and
+notes `lint`. The confirm stage cannot refuse what the charter allows, so a charter
 that allows everything has to be caught before it is asked about, and the lint
 runs on the participant list as the sweep built it rather than on what survives
 the drop below.

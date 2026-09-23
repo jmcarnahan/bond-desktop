@@ -4751,14 +4751,29 @@ FROM storylines s''';
   /// something. `rowid DESC` is the final tie-break — two storylines written in
   /// the same microsecond would otherwise be free to swap places between
   /// reads, which reads on screen as the list shuffling itself.
+  ///
+  /// [withMembersOnly] drops every row with no member row behind it. The
+  /// Dismissed fold reads it, and that is what it is for: before the declined
+  /// cluster became a `possible` storyline, the sweep wrote a member-less
+  /// `dismissed` tombstone for every group the model refused, and the fold
+  /// showed the app's own bookkeeping as though the owner had said no to four
+  /// things. Those rows still have to answer the hash check, so they are kept
+  /// and not deleted; they are simply not the user's dismissals, and Restore
+  /// would put back a storyline with nothing in it.
   Future<List<Storyline>> loadStorylines({
     List<String> statuses = const ['suggested', 'active'],
+    bool withMembersOnly = false,
   }) async {
     if (statuses.isEmpty) return const [];
+    final members = withMembersOnly
+        ? 'AND EXISTS (SELECT 1 FROM storyline_members m '
+            'WHERE m.storyline_id = s.id) '
+        : '';
     final result = await db
         .customSelect(
           '$_storylineSelect '
           'WHERE s.status IN (${_placeholders(statuses.length)}) '
+          '$members'
           "ORDER BY (CASE WHEN s.status = 'suggested' THEN 0 ELSE 1 END), "
           "CASE WHEN s.status = 'suggested' THEN s.created_at END DESC, "
           "CASE WHEN s.status = 'suggested' THEN NULL ELSE s.last_activity_at END DESC, "
@@ -4769,14 +4784,21 @@ FROM storylines s''';
     return [for (final row in result) Storyline.fromRow(row.data)];
   }
 
-  /// Dismisses every automatic suggestion nobody ever answered: `suggested`,
-  /// `created_by = 'auto'`, and proposed before [olderThanIso]. Returns how
-  /// many there were.
+  /// Dismisses every automatic question nobody ever answered: `suggested` or
+  /// `possible`, `created_by = 'auto'`, and proposed before [olderThanIso].
+  /// Returns how many there were.
   ///
   /// The rail holds at most three unanswered suggestions at once, and a
   /// suggestion nobody answers holds its slot for ever: three of them and the
   /// sweep's room count is zero on every future pass, so the app quietly stops
   /// proposing anything at all. This is what keeps the room moving.
+  ///
+  /// A `possible` storyline is on the same clock for the same reason. It is a
+  /// question too — the cluster the model declined, filed for a person to
+  /// judge — and one nobody ever looks at should fold itself away rather than
+  /// sit in the rail for ever. It holds no slot in the room count, which reads
+  /// `suggested` alone, so the deadline is about the rail rather than about
+  /// the sweep's budget.
   ///
   /// Nothing is rebuilt and nothing is deleted. The row becomes the TOMBSTONE
   /// it has carried since it was written — its `cluster_hash` was stamped at
@@ -4784,9 +4806,9 @@ FROM storylines s''';
   /// very next sweep, so an expiry costs no model call later. Its members stay
   /// exactly as `dismissSuggestion` leaves them, which is what returns the
   /// threads to the pool: `assignedOrBlockedKeys` counts memberships of
-  /// `suggested` and `active` storylines only. And `restoreDismissed` lifts an
-  /// expiry like any other dismissal, because there is nothing to tell them
-  /// apart.
+  /// `suggested` and `active` storylines only. It is also what keeps an
+  /// expired `possible` row restorable — it expires with its members, so
+  /// Restore puts back the group the user was being asked about.
   ///
   /// Never an `active` storyline, which somebody kept, and never a storyline a
   /// person made: `created_by != 'auto'` is the owner's own filing and no
@@ -4795,7 +4817,7 @@ FROM storylines s''';
   Future<int> expireStaleSuggestions(String olderThanIso) {
     return db.customUpdate(
       "UPDATE storylines SET status = 'dismissed', updated_at = ? "
-      "WHERE status = 'suggested' AND created_by = 'auto' "
+      "WHERE status IN ('suggested', 'possible') AND created_by = 'auto' "
       'AND created_at < ?',
       variables: _args([_nowIso(), olderThanIso]),
     );
@@ -5338,6 +5360,12 @@ FROM storylines s''';
   /// Every thread the sweep must leave alone: already in a live storyline, or
   /// explicitly kept out of one. Blocks count because a thread the user pulled
   /// out of a group is not a thread to propose a new group around.
+  ///
+  /// `suggested` and `active` and nothing else, which is what leaves a
+  /// `possible` storyline's members IN the pool. That is the point of the
+  /// status: the model would not vouch for the group, so its threads are still
+  /// free to be clustered into something a person would recognise, and the
+  /// hash check is what stops the identical group being asked about twice.
   Future<Set<String>> assignedOrBlockedKeys(String source) async {
     final result = await db
         .customSelect(
@@ -5380,9 +5408,15 @@ FROM storylines s''';
     };
   }
 
-  /// Whether this exact set of threads has already been proposed and thrown
-  /// away. The sweep is deterministic, so without this a dismissed suggestion
+  /// Whether this exact set of threads is a question that has already been
+  /// asked. The sweep is deterministic, so without this a dismissed suggestion
   /// would be re-proposed identically on the very next sync.
+  ///
+  /// `possible` answers as well as `dismissed`, and that is not a widening of
+  /// the meaning: a cluster the model declined is filed as a `possible`
+  /// storyline and is sitting in the rail waiting for the owner, so rebuilding
+  /// it would spend a naming call and a confirm per member to ask a question
+  /// that is already on screen.
   ///
   /// Both columns answer, because a storyline can be dismissed under a set
   /// that is not the one it was proposed as. The `cluster_hash` arm recognises
@@ -5403,7 +5437,7 @@ FROM storylines s''';
     final placeholders = _placeholders(hashes.length);
     final result = await db
         .customSelect(
-          "SELECT 1 FROM storylines WHERE status = 'dismissed' "
+          "SELECT 1 FROM storylines WHERE status IN ('dismissed', 'possible') "
           'AND (cluster_hash IN ($placeholders) '
           'OR member_hash IN ($placeholders)) LIMIT 1',
           variables: _args([...hashes, ...hashes]),

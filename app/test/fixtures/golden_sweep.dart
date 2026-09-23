@@ -406,15 +406,16 @@ typedef JudgedCluster = ({List<String> threads, String outcome});
 /// The clusters behind [judged], one entry per distinct thread set.
 ///
 /// The keep-all loop re-runs the sweep until a pass proposes nothing, so a
-/// cluster the first pass tombstoned is rebuilt identically on the second and
+/// cluster the first pass declined is rebuilt identically on the second and
 /// reported again as `answered` — the same group, judged once and recognised
 /// afterwards. Counting both would say the sweep formed twice as many clusters
 /// as it did, so the reports are de-duplicated by their SORTED thread keys.
 ///
 /// The first report of a set wins, with one exception: an `answered` yields to
 /// the first report that says what the models actually decided, whichever pass
-/// carried it. A set that was only ever `answered` stays `answered` — the
-/// tombstone was written before this run and there is no verdict to recover.
+/// carried it. A set that was only ever `answered` stays `answered` — the row
+/// carrying its hash was written before this run and there is no verdict to
+/// recover.
 /// Output is in first-seen order.
 List<JudgedCluster> distinctClusters(Iterable<JudgedCluster> judged) {
   final order = <String>[];
@@ -1119,11 +1120,19 @@ class SweepTally {
   /// Live storylines at the end of the run.
   final int formed;
 
-  /// Clusters the model or the tombstone check threw out — `dismissed` rows
-  /// with `created_by = 'auto'`.
+  /// Clusters the model or the hash check threw out — `created_by = 'auto'`
+  /// rows whose status is `dismissed` or `possible`.
+  ///
+  /// `possible` counts because that is where a declined cluster goes since
+  /// decision 31: the namer, the charter lint or the confirms refused it, and
+  /// instead of a member-less tombstone the sweep files the group with its
+  /// members for a person to keep or dismiss. The word on the printed line
+  /// stays `tombstoned` so a row taken today reads against every row in the
+  /// ledger; what it counts is what it always counted, the clusters no model
+  /// would vouch for.
   final int tombstoned;
 
-  /// Clusters the charter lint tombstoned, summed off the sweep's own
+  /// Clusters the charter lint refused, summed off the sweep's own
   /// activity rows.
   final int lintRejected;
 

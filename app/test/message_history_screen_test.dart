@@ -494,6 +494,37 @@ void main() {
     expect(added, ['s2']);
   });
 
+  testWidgets('a possible storyline is named in English and offers no Remove',
+      (tester) async {
+    await _pump(
+      tester,
+      AsyncValue.data(_history(
+        memberships: const [
+          {
+            'storyline_id': 's1',
+            'title': 'Roof work',
+            'status': 'possible',
+            'added_by': 'auto',
+            'evidence': 'both threads are about the roof',
+          },
+        ],
+      )),
+      onRemoveFromStoryline: (_) {},
+    );
+
+    // `possible` is a column value. What the line says is a word.
+    expect(find.textContaining('· Possible'), findsOneWidget);
+    expect(find.textContaining('· possible'), findsNothing);
+    // And no Remove: the group is answered whole, with the Keep and the
+    // Dismiss the rail's Possible fold carries, so pulling one thread out of a
+    // question nobody has said yes to yet would be answering something else.
+    expect(find.byKey(MessageHistoryScreen.removeKey('s1')), findsNothing);
+    expect(
+      find.byKey(MessageHistoryScreen.charterKey('s1')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('a block on a storyline that is no longer live offers nothing',
       (tester) async {
     await _pump(

@@ -2,12 +2,15 @@ import 'package:bond_inbox/models/files_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/needs_you_sort.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
+import 'package:bond_inbox/services/llm/storyline_tasks.dart'
+    show NameStorylineTask;
 import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:bond_inbox/widgets/bond_avatar.dart';
 import 'package:bond_inbox/widgets/dismissed_storylines_fold.dart';
 import 'package:bond_inbox/widgets/find_filter.dart';
 import 'package:bond_inbox/widgets/people_rooms.dart';
+import 'package:bond_inbox/widgets/possible_storylines_fold.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -1413,6 +1416,10 @@ void main() {
       WidgetTester tester, {
       required List<Storyline> storylines,
       List<Storyline> dismissed = const [],
+      List<Storyline> possible = const [],
+      void Function(String)? onKeepPossible,
+      void Function(String)? onDismissPossible,
+      void Function(String)? onOpenPossible,
       String? selectedStorylineId,
       void Function(String)? onSelectStoryline,
       void Function(String)? onKeepSuggestion,
@@ -1433,6 +1440,10 @@ void main() {
         conversations: const [],
         storylines: storylines,
         dismissed: dismissed,
+        possible: possible,
+        onKeepPossible: onKeepPossible ?? (_) {},
+        onDismissPossible: onDismissPossible ?? (_) {},
+        onOpenPossible: onOpenPossible ?? (_) {},
         selectedId: null,
         selectedStorylineId: selectedStorylineId,
         selectedSection: RailSection.storylines,
@@ -1562,7 +1573,12 @@ void main() {
     testWidgets('an untitled storyline still renders a row', (tester) async {
       await pumpRail(tester, storylines: [_storyline(id: 'sl-1', title: '')]);
 
-      expect(find.text('(untitled)'), findsOneWidget);
+      // The namer's own fallback, spelled once in the whole tree: the rail,
+      // both folds and the overview card all read it off
+      // [NameStorylineTask.fallbackTitle], so a row with no name says the same
+      // thing wherever it is drawn — and says it without the parentheses the
+      // house rule bans from anything a person reads.
+      expect(find.text(NameStorylineTask.fallbackTitle), findsOneWidget);
     });
 
     testWidgets('nothing dismissed, no fold', (tester) async {
@@ -1591,6 +1607,91 @@ void main() {
       expect(find.byIcon(Icons.restore), findsOneWidget);
       // The only badge on the section is the live row's open count.
       expect(find.text('3'), findsOneWidget);
+    });
+
+    testWidgets(
+        'possible storylines fold under their own heading with Keep and '
+        'Dismiss', (tester) async {
+      final kept = <String>[];
+      final let = <String>[];
+      final opened = <String>[];
+      await pumpRail(
+        tester,
+        storylines: [_storyline(id: 'sl-1', title: 'Live')],
+        possible: [
+          _storyline(id: 'sl-7', title: 'Roof work', status: 'possible'),
+          _storyline(id: 'sl-8', title: 'Friday dinners', status: 'possible'),
+        ],
+        onKeepPossible: kept.add,
+        onDismissPossible: let.add,
+        onOpenPossible: opened.add,
+      );
+
+      // Shut, it is a heading and a count and nothing else.
+      expect(find.text('Possible · 2'), findsOneWidget);
+      expect(find.text('Roof work'), findsNothing);
+
+      await tester.tap(find.byKey(PossibleStorylinesFold.headerKey));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Roof work'), findsOneWidget);
+      expect(find.text('Friday dinners'), findsOneWidget);
+
+      await tester.tap(find.byKey(PossibleStorylinesFold.keepKey('sl-7')));
+      await tester.tap(find.byKey(PossibleStorylinesFold.dismissKey('sl-8')));
+      // The title itself opens the storyline, so the threads in it can be
+      // read before either answer.
+      await tester.tap(find.text('Roof work'));
+
+      expect(kept, ['sl-7']);
+      expect(let, ['sl-8']);
+      expect(opened, ['sl-7']);
+    });
+
+    testWidgets('an empty possible list draws no heading', (tester) async {
+      await pumpRail(tester, storylines: const []);
+
+      expect(find.textContaining('Possible'), findsNothing);
+    });
+
+    testWidgets('Possible sits above Dismissed', (tester) async {
+      await pumpRail(
+        tester,
+        storylines: const [],
+        possible: [
+          _storyline(id: 'sl-7', title: 'Roof work', status: 'possible'),
+        ],
+        dismissed: [
+          _storyline(id: 'sl-9', title: 'Office move', status: 'dismissed'),
+        ],
+      );
+
+      final possibleY = tester
+          .getTopLeft(find.byKey(PossibleStorylinesFold.headerKey))
+          .dy;
+      final dismissedY = tester
+          .getTopLeft(find.byKey(DismissedStorylinesFold.headerKey))
+          .dy;
+      expect(possibleY, lessThan(dismissedY));
+    });
+
+    testWidgets('the possible fold wears the rail\'s own fill too',
+        (tester) async {
+      await pumpRail(
+        tester,
+        storylines: const [],
+        possible: [
+          _storyline(id: 'sl-7', title: 'Roof work', status: 'possible'),
+        ],
+      );
+
+      final material = tester.widget<Material>(find
+          .ancestor(
+            of: find.byKey(PossibleStorylinesFold.headerKey),
+            matching: find.byType(Material),
+          )
+          .first);
+      expect(material.color, BondColors.rail);
     });
 
     testWidgets('the fold is painted with the rail\'s own fill', (tester) async {

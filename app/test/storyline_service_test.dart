@@ -2155,13 +2155,17 @@ void main() {
       await StorylineService(store, llm).sweep();
 
       expect(llm.callsFor('storyline_membership'), 3);
-      final tombstone =
-          (await store.loadStorylines(statuses: const ['dismissed'])).single;
-      expect(await store.membersOf(tombstone.id), isEmpty);
+      // Filed as possible rather than proposed: three medium yeses are not a
+      // storyline the app may put in front of someone as a suggestion, but the
+      // group is still the one the namer kept, so it is filed with those
+      // members for the owner to judge.
+      final possible =
+          (await store.loadStorylines(statuses: const ['possible'])).single;
+      expect(await store.membersOf(possible.id), hasLength(3));
       final hashes = (await db
               .customSelect(
                 'SELECT cluster_hash FROM storylines WHERE id = ?',
-                variables: [Variable(tombstone.id)],
+                variables: [Variable(possible.id)],
               )
               .getSingle())
           .data;
@@ -2195,25 +2199,25 @@ void main() {
 
       await service.sweep();
 
-      // A tombstone: named, hashed over the whole cluster, and empty. It
-      // exists so the identical cluster — its members went straight back into
-      // the unassigned pool — cannot be re-judged for ever.
-      final tombstone =
-          (await store.loadStorylines(statuses: const ['dismissed'])).single;
-      expect(tombstone.createdBy, 'auto');
-      expect(tombstone.title, 'Website redesign');
-      expect(await store.membersOf(tombstone.id), isEmpty);
+      // Filed as possible: named, hashed over the whole cluster, and carrying
+      // the members. It exists so the identical cluster — whose members stay
+      // in the unassigned pool — cannot be re-judged for ever.
+      final possible =
+          (await store.loadStorylines(statuses: const ['possible'])).single;
+      expect(possible.createdBy, 'auto');
+      expect(possible.title, 'Website redesign');
+      expect(await store.membersOf(possible.id), isNotEmpty);
       final hashes = (await db
               .customSelect(
                 'SELECT member_hash, cluster_hash FROM storylines WHERE id = ?',
-                variables: [Variable(tombstone.id)],
+                variables: [Variable(possible.id)],
               )
               .getSingle())
           .data;
-      // The cluster is this row's only identity: no member rows were written,
-      // so there is no stored set for `member_hash` to describe.
+      // Both: `cluster_hash` names the question the sweep asked, `member_hash`
+      // describes who is stored here.
       expect(hashes['cluster_hash'], isNotNull);
-      expect(hashes['member_hash'], null);
+      expect(hashes['member_hash'], isNotNull);
       expect(
           await store
               .dismissedHashExistsAny([hashes['cluster_hash']! as String]),
@@ -2447,6 +2451,68 @@ void main() {
 
       expect(llm.schemas, isEmpty);
       expect(await store.loadStorylines(), hasLength(3));
+    });
+
+    test('a sweep files no more possible rows than there is room for',
+        () async {
+      /// One thread's vector: a dimension shared with the rest of its cluster
+      /// and a dimension all its own. Five clusters of three, every pair
+      /// inside a cluster far above [StorylineTuning.clusterLinkThreshold] and
+      /// every pair across two of them at zero, which two dimensions cannot
+      /// express — a half circle has room for three groups that far apart and
+      /// no more.
+      List<double> clusterVector(int cluster, int member) => [
+            for (var i = 0; i < 5; i++) i == cluster ? 1.0 : 0.0,
+            for (var i = 0; i < 15; i++)
+              i == cluster * 3 + member ? 0.3 : 0.0,
+          ];
+
+      for (var cluster = 0; cluster < 5; cluster++) {
+        for (var member = 0; member < 3; member++) {
+          await seed(store, 'k$cluster$member',
+              vector: clusterVector(cluster, member),
+              lastMessageAt: '2026-08-2${9 - cluster}T0${3 - member}:00:00Z');
+        }
+      }
+      final llm = fakeLlm({
+        'storyline_name': [nameAnswer(coherent: false)],
+        'storyline_membership': [confirmAnswer()],
+      });
+      final service = StorylineService(store, llm);
+
+      await service.sweep();
+
+      // Three, not five. A filed possible storyline is an unanswered question
+      // sitting in the rail with two buttons on it, exactly as a proposal is,
+      // so it spends a slot of the same budget. Before this, a pass whose
+      // namer declined everything walked every cluster it had built and handed
+      // the owner a fold reading `Possible · 5`.
+      expect(
+        await store.loadStorylines(statuses: const ['possible']),
+        hasLength(3),
+      );
+      expect(llm.callsFor('storyline_name'), 3);
+
+      // And nothing at all while the rail is full: the room count stops the
+      // pass before it reads a vector.
+      await service.sweep();
+
+      expect(llm.callsFor('storyline_name'), 3);
+
+      // The fourth and the fifth are not lost. Nothing wrote their hashes, so
+      // the pass rebuilds them every time, and the moment one question is
+      // answered the next is asked — one, because one slot came free.
+      final answered =
+          (await store.loadStorylines(statuses: const ['possible'])).first;
+      await service.dismissSuggestion(answered.id);
+
+      await service.sweep();
+
+      expect(llm.callsFor('storyline_name'), 4);
+      expect(
+        await store.loadStorylines(statuses: const ['possible']),
+        hasLength(3),
+      );
     });
 
     test('clustering is deterministic — same mailbox, same groups', () async {
@@ -2935,7 +3001,7 @@ void main() {
           lastMessageAt: '2026-08-29T01:00:00Z');
     }
 
-    test('coherent false naming no outlier at all tombstones the cluster',
+    test('coherent false naming no outlier at all files the cluster as possible',
         () async {
       await seedTrio(store);
       final llm = fakeLlm({
@@ -2956,24 +3022,205 @@ void main() {
       expect(llm.callsFor('storyline_membership'), 0);
       expect(await store.loadStorylines(statuses: const ['suggested']),
           isEmpty);
-      final tombstone =
-          (await store.loadStorylines(statuses: const ['dismissed'])).single;
-      expect(await store.membersOf(tombstone.id), isEmpty);
+      // Declined, not thrown away: the whole cluster is filed for the owner to
+      // look at, with its members, because the model refusing is not the owner
+      // refusing.
+      final possible =
+          (await store.loadStorylines(statuses: const ['possible'])).single;
+      expect(
+        (await store.membersOf(possible.id))
+            .map((m) => m.conversationKey)
+            .toSet(),
+        {'q1', 'q2', 'q3'},
+      );
       expect(detail['incoherent'], 1);
       expect(detail['proposed'], 0);
 
-      // And the tombstone carries the cluster the sweep built, so the same
-      // three threads cost nothing at all next pass.
-      final clusterHash = (await db
-              .customSelect('SELECT cluster_hash FROM storylines WHERE id = ?',
-                  variables: [Variable(tombstone.id)])
+      // Both hashes: `member_hash` over what was filed, and `cluster_hash`
+      // over the group the sweep built, so the same three threads cost nothing
+      // at all next pass.
+      final hashes = (await db
+              .customSelect(
+                  'SELECT member_hash, cluster_hash FROM storylines '
+                  'WHERE id = ?',
+                  variables: [Variable(possible.id)])
               .getSingle())
-          .data['cluster_hash'];
-      expect(clusterHash, memberHashOf(['q1', 'q2', 'q3']));
+          .data;
+      expect(hashes['cluster_hash'], memberHashOf(['q1', 'q2', 'q3']));
+      expect(hashes['member_hash'], memberHashOf(['q1', 'q2', 'q3']));
 
       await StorylineService(store, llm).sweep();
 
       expect(llm.callsFor('storyline_name'), 1);
+    });
+
+    test('a possible storyline\'s threads stay in the pool', () async {
+      await seedTrio(store);
+      final llm = fakeLlm({
+        'storyline_name': [nameAnswer(coherent: false)],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      // Filed, but not assigned: only `suggested` and `active` memberships
+      // take a thread out of the sweep's pool, which is what leaves these
+      // three free to be clustered into a group a person would recognise.
+      expect(await store.assignedOrBlockedKeys('email'), isEmpty);
+
+      // And the hash check is the only thing stopping a re-ask. The IDENTICAL
+      // set is recognised; a set with one more thread in it is a different
+      // question and IS asked.
+      await seed(store, 'q4',
+          subject: 'Roof replacement gutters',
+          vector: vectorAt(0.85),
+          lastMessageAt: '2026-08-29T01:00:00Z');
+      await StorylineService(store, llm).sweep();
+
+      expect(llm.callsFor('storyline_name'), 2);
+    });
+
+    test('keeping a possible storyline nobody touched activates it whole',
+        () async {
+      await seedTrio(store);
+      final llm = fakeLlm({
+        'storyline_name': [nameAnswer(coherent: false)],
+        'storyline_membership': [confirmAnswer()],
+      });
+      final service = StorylineService(store, llm);
+      await service.sweep();
+      final possible =
+          (await store.loadStorylines(statuses: const ['possible'])).single;
+
+      await service.keepSuggestion(possible.id);
+
+      final kept =
+          (await store.loadStorylines(statuses: const ['active'])).single;
+      expect(kept.id, possible.id);
+      expect(await store.membersOf(kept.id), hasLength(3));
+      // The reconciliation the Keep runs found nothing to drop, so the hash
+      // is the one the filing wrote.
+      expect(kept.memberHash, memberHashOf(['q1', 'q2', 'q3']));
+      // And now its threads are spoken for.
+      expect(await store.assignedOrBlockedKeys('email'),
+          {'q1', 'q2', 'q3'});
+    });
+
+    test(
+        'keeping a possible storyline drops a thread a live storyline took '
+        'meanwhile', () async {
+      await seedTrio(store);
+      final llm = fakeLlm({
+        'storyline_name': [nameAnswer(coherent: false)],
+        'storyline_membership': [confirmAnswer()],
+      });
+      final service = StorylineService(store, llm);
+      await service.sweep();
+      final possible =
+          (await store.loadStorylines(statuses: const ['possible'])).single;
+      // Exactly what the status is FOR: q1 never left the pool, so anything
+      // may take it while this row waits for an answer. Here it is the owner
+      // starting a storyline of their own around it.
+      await service.createStoryline(
+        'Roofing crew',
+        source: 'email',
+        conversationKey: 'q1',
+      );
+
+      await service.keepSuggestion(possible.id);
+
+      // Kept, but never with a thread another live storyline already holds:
+      // ONE THREAD, ONE LIVE STORYLINE.
+      final kept = (await store.getStoryline(possible.id))!;
+      expect(kept.status, 'active');
+      expect(
+        (await store.membersOf(possible.id))
+            .map((m) => m.conversationKey)
+            .toSet(),
+        {'q2', 'q3'},
+      );
+      // The hash describes what is STORED, so the next membership write and
+      // the next sweep both read something true.
+      expect(kept.memberHash, memberHashOf(['q2', 'q3']));
+      expect(await store.storylineIdsFor('email', 'q1'), hasLength(1));
+    });
+
+    test(
+        'keeping a possible storyline with one thread left dismisses it '
+        'instead', () async {
+      await seedTrio(store);
+      final llm = fakeLlm({
+        'storyline_name': [nameAnswer(coherent: false)],
+        'storyline_membership': [confirmAnswer()],
+      });
+      final service = StorylineService(store, llm);
+      await service.sweep();
+      final possible =
+          (await store.loadStorylines(statuses: const ['possible'])).single;
+      await service.createStoryline(
+        'Roofing crew',
+        source: 'email',
+        conversationKey: 'q1',
+      );
+      await service.createStoryline(
+        'Permit office',
+        source: 'email',
+        conversationKey: 'q2',
+      );
+
+      await service.keepSuggestion(possible.id);
+
+      // One thread is not a group. The group the owner said yes to is gone, so
+      // the press lands as a tombstone rather than as a storyline of one — and
+      // a tombstone keeps both hashes, so the sweep does not rebuild the
+      // question it has already been asked.
+      final kept = (await store.getStoryline(possible.id))!;
+      expect(kept.status, 'dismissed');
+      expect(
+        (await store.membersOf(possible.id))
+            .map((m) => m.conversationKey)
+            .toSet(),
+        {'q3'},
+      );
+      expect(kept.memberHash, memberHashOf(['q3']));
+      expect(
+        await store.dismissedHashExistsAny([memberHashOf(['q1', 'q2', 'q3'])]),
+        isTrue,
+      );
+    });
+
+    test('dismissing a possible storyline leaves it restorable', () async {
+      await seedTrio(store);
+      final llm = fakeLlm({
+        'storyline_name': [nameAnswer(coherent: false)],
+        'storyline_membership': [confirmAnswer()],
+      });
+      final service = StorylineService(store, llm);
+      await service.sweep();
+      final possible =
+          (await store.loadStorylines(statuses: const ['possible'])).single;
+
+      await service.dismissSuggestion(possible.id);
+
+      // Members survive the dismissal, which is what puts the row in the
+      // rail's Dismissed fold at all: that list shows rows with members only.
+      expect(
+        await store.loadStorylines(
+          statuses: const ['dismissed'],
+          withMembersOnly: true,
+        ),
+        hasLength(1),
+      );
+      expect(await store.membersOf(possible.id), hasLength(3));
+
+      await service.restoreDismissed(possible.id);
+
+      // Back as a SUGGESTION, not as a possible: the owner has been through it
+      // by hand, so it is their question now rather than the model's refusal.
+      expect(
+        (await store.loadStorylines(statuses: const ['suggested'])).single.id,
+        possible.id,
+      );
     });
 
     test('an outlier is dropped and the rest are confirmed', () async {
@@ -3028,10 +3275,13 @@ void main() {
 
       // The other way the model can name no group to keep: one thread left is
       // not a storyline, so the answer says the same thing the empty outlier
-      // list said and costs the same nothing.
+      // list said and costs the same nothing. Filed WHOLE, outliers included:
+      // the namer declined the group it was shown, so the group it was shown
+      // is what the owner gets to look at.
       expect(llm.callsFor('storyline_membership'), 0);
-      expect((await store.loadStorylines(statuses: const ['dismissed'])),
-          hasLength(1));
+      final possible =
+          (await store.loadStorylines(statuses: const ['possible'])).single;
+      expect(await store.membersOf(possible.id), hasLength(3));
       expect(detail['incoherent'], 1);
       expect(detail['outliers'], 0);
     });
@@ -3046,9 +3296,9 @@ void main() {
       final detail = await sweepAndRecord(llm);
 
       // Four of the eight golden clusters answered exactly this way. What it
-      // keeps is nothing, so it is the same tombstone as the empty list.
+      // keeps is nothing, so it is filed the same way the empty list is.
       expect(llm.callsFor('storyline_membership'), 0);
-      expect((await store.loadStorylines(statuses: const ['dismissed'])),
+      expect((await store.loadStorylines(statuses: const ['possible'])),
           hasLength(1));
       expect(detail['incoherent'], 1);
       expect(detail['outliers'], 0);
@@ -3095,13 +3345,14 @@ void main() {
       expect(detail['proposed'], 1);
     });
 
-    test('a cluster the model could not name is refused by the lint', () async {
+    test('a cluster the model could not name is filed as possible by the lint',
+        () async {
       // `fallbackTitle` is 'Untitled storyline', and `untitled` is one of the
       // charter lint's placeholder words. That is not an accident to work
       // around: a proposal nobody could name is not one a person should be
-      // asked about, so it is tombstoned before its confirms are spent. The
-      // bootstrap path is where the fallback renders instead, because a
-      // storyline a person made exists whatever the model says.
+      // asked about as a suggestion, so no confirm is spent on it. It is still
+      // filed, with the rows the namer KEPT, because the group is real even
+      // where the name is not.
       await seedTrio(store);
       final llm = fakeLlm({
         'storyline_name': [nameAnswer(title: '')],
@@ -3113,9 +3364,18 @@ void main() {
       expect(llm.callsFor('storyline_membership'), 0);
       expect(await store.loadStorylines(statuses: const ['suggested']),
           isEmpty);
-      final tombstone =
-          (await store.loadStorylines(statuses: const ['dismissed'])).single;
-      expect(tombstone.title, 'Untitled storyline');
+      final possible =
+          (await store.loadStorylines(statuses: const ['possible'])).single;
+      expect(
+        (await store.membersOf(possible.id))
+            .map((m) => m.conversationKey)
+            .toSet(),
+        {'q1', 'q2', 'q3'},
+      );
+      // The members name it, not the task's fallback: a rail row reading
+      // 'Untitled storyline' says nothing about what is in it, and these three
+      // share no folded subject, so the newest one's wording wins.
+      expect(possible.title, 'Roof replacement quote');
       expect(detail['lint'], 1);
       expect(detail['incoherent'], 0);
     });
@@ -3139,8 +3399,10 @@ void main() {
       expect(llm.callsFor('storyline_membership'), 0);
       expect(await store.loadStorylines(statuses: const ['suggested']),
           isEmpty);
-      expect((await store.loadStorylines(statuses: const ['dismissed'])),
-          hasLength(1));
+      final possible =
+          (await store.loadStorylines(statuses: const ['possible'])).single;
+      // The namer DID write a title here, so that is what the row is called.
+      expect(possible.title, 'Misc');
       expect(detail['lint'], 1);
       expect(detail['incoherent'], 0);
     });
@@ -3530,13 +3792,19 @@ void main() {
 
       await StorylineService(store, llm).sweep();
 
-      // Every member rejected, so the cluster is tombstoned. A group the
-      // model just threw out must not go recruiting history to make itself
-      // big enough to ship — d1 is never asked.
+      // Every member rejected, so the cluster is filed as possible. A group
+      // nobody has vouched for must not go recruiting history to make itself
+      // big enough to ship — d1 is never asked, and it is not among the
+      // members either.
       expect(llm.callsFor('storyline_membership'), 3);
-      final tombstone =
-          (await store.loadStorylines(statuses: const ['dismissed'])).single;
-      expect(await store.membersOf(tombstone.id), isEmpty);
+      final possible =
+          (await store.loadStorylines(statuses: const ['possible'])).single;
+      expect(
+        (await store.membersOf(possible.id))
+            .map((m) => m.conversationKey)
+            .toSet(),
+        isNot(contains('d1')),
+      );
       expect(await store.loadStorylines(statuses: const ['suggested']),
           isEmpty);
     });
@@ -7165,9 +7433,9 @@ void main() {
     /// the status, the title, BOTH hashes, and the member set of every
     /// storyline the pass wrote — sorted, so nothing turns on the random ids.
     ///
-    /// `cluster_hash` is in here on purpose. It is the identity a dismissed
-    /// cluster is tombstoned under, and the reason the clustering function has
-    /// to be a pure function of its input: if the two paths grouped the same
+    /// `cluster_hash` is in here on purpose. It is the identity a group
+    /// already asked about is recognised by, and the reason the clustering
+    /// function has to be a pure function of its input: if the two paths grouped the same
     /// threads differently, this column is where it would show.
     Future<List<String>> decisionsOf(BondDatabase d, MessageStore s) async {
       final rows = await d
@@ -7221,8 +7489,10 @@ void main() {
       expect(
         indexed.map((d) => d.split(' | ').last).toList(),
         [
-          // The rejected cluster keeps no members — it is a tombstone.
-          '',
+          // The rejected cluster KEEPS its members — it is filed as possible
+          // for the owner to judge, not tombstoned — and `possible` sorts
+          // ahead of `suggested`, which is what puts it first.
+          'email/e1,email/e2,email/e3',
           'email/a1,email/a2,email/a3',
           'email/b1,email/b2,email/b3',
         ],
@@ -7231,7 +7501,7 @@ void main() {
       // grouped — into the third cluster, the one the model threw out. f1 and
       // f2 sit 0.002 below it and never became a cluster at all, which is why
       // exactly three groups were named and not four.
-      expect(indexed.where((d) => d.startsWith('dismissed')), hasLength(1));
+      expect(indexed.where((d) => d.startsWith('possible')), hasLength(1));
       expect(indexedLlm.callsFor('storyline_name'), 3);
       expect(indexedLlm.schemas, plainLlm.schemas);
       expect(indexedLlm.userMessages, plainLlm.userMessages);
@@ -7678,9 +7948,9 @@ void main() {
     });
 
     /// Phase 6's seam. The store keeps no record of a cluster the namer
-    /// declined beyond its tombstone hash, so the golden sweep bench reads
-    /// each cluster's gold purity BEFORE naming through an observer the app
-    /// never passes. What these pin is what that observer will see.
+    /// declined beyond the `possible` row it files, so the golden sweep bench
+    /// reads each cluster's gold purity BEFORE naming through an observer the
+    /// app never passes. What these pin is what that observer will see.
     group('the clusters are observable', () {
       /// Sweeps with [llm] and returns every report the observer was handed.
       Future<List<SeenCluster>> sweepAndObserve(ScriptedLlm llm) async {
@@ -7765,16 +8035,19 @@ void main() {
         expect(llm.callsFor('storyline_membership'), 2);
       });
 
-      test('a tombstone that already answers is reported as answered and asks '
+      test('a hash that already answers is reported as answered and asks '
           'no model', () async {
         await seedTrio(store);
         final first = await sweepAndObserve(fakeLlm({
           'storyline_name': [alphaName(coherent: false)],
         }));
         expect(first.single.outcome, 'incoherent');
+        // Filed as possible, which is the row whose hash answers next pass.
+        expect(await store.loadStorylines(statuses: const ['possible']),
+            hasLength(1));
 
-        // The same three threads rebuild the same cluster next pass, and the
-        // tombstone answers it for nothing.
+        // The same three threads rebuild the same cluster next pass, and that
+        // row answers it for nothing.
         final second = fakeLlm(const {});
         final seen = await sweepAndObserve(second);
 
@@ -7942,6 +8215,48 @@ void main() {
                 .customSelect(
                   'SELECT cluster_hash FROM storylines WHERE id = ?',
                   variables: [Variable(storyline.id)],
+                )
+                .getSingle())
+            .data['cluster_hash'] as String?;
+        expect(clusterHash, memberHashOf(['a', 'b', 'c']));
+      });
+
+      test('a possible storyline files its fragment siblings', () async {
+        await seedTrio(store);
+        await seed(store, 'a',
+            subject: 'Alpha launch review',
+            participants: const ['Sarah Chen'],
+            vector: vectorAt(1),
+            lastMessageAt: '2026-08-29T10:00:00Z');
+        await seedFragmentsOfA(store);
+        final llm = fakeLlm({
+          'storyline_name': [nameAnswer(coherent: false)],
+          'storyline_membership': [confirmAnswer()],
+        });
+
+        await StorylineService(store, llm).sweep();
+
+        // The declined cluster is filed with the same member set a proposal
+        // would have written: a fragment is not a second thread that agreed,
+        // it is the same thread arriving three times, and a kept storyline
+        // whose own forks sat outside it in the pool would not be the group
+        // anybody was asked about.
+        final possible =
+            (await store.loadStorylines(statuses: const ['possible'])).single;
+        expect(
+          (await store.membersOf(possible.id))
+              .map((m) => m.conversationKey)
+              .toSet(),
+          {'a', 'a2', 'a3', 'b', 'c'},
+        );
+        expect(llm.callsFor('storyline_membership'), 0);
+        // The two hashes answer their two questions here as well: who is
+        // stored, and which set the model was asked about.
+        expect(possible.memberHash, memberHashOf(['a', 'a2', 'a3', 'b', 'c']));
+        final clusterHash = (await db
+                .customSelect(
+                  'SELECT cluster_hash FROM storylines WHERE id = ?',
+                  variables: [Variable(possible.id)],
                 )
                 .getSingle())
             .data['cluster_hash'] as String?;

@@ -125,22 +125,92 @@ class StorylineEdits {
     return id;
   }
 
-  Future<void> keepSuggestion(String id) =>
-      _store.updateStoryline(id, status: 'active');
+  /// Accepts a question the app asked: a `suggested` storyline, or a
+  /// `possible` one the model would not vouch for. Both become `active`, which
+  /// is the same write, and for a possible storyline it is also what takes its
+  /// member threads OUT of the sweep's unassigned pool — every pool query
+  /// counts `suggested` and `active` memberships, so keeping is the moment its
+  /// threads stop being free to be clustered into something else.
+  ///
+  /// Which is why a possible storyline is RECONCILED first and a suggestion is
+  /// not. ONE THREAD, ONE LIVE STORYLINE rests on one mechanism: a thread in a
+  /// `suggested` or an `active` storyline sits in [MessageStore.assignedKeys],
+  /// so no other pass may take it. A possible storyline's members are
+  /// deliberately outside that set for as long as the row is possible — that
+  /// is the whole point of the status — so between the filing and this press
+  /// a later sweep, a recruit or the per-thread assign is free to have put one
+  /// of them into a live storyline. A bare status flip would then leave that
+  /// thread a member of two live storylines at once, which is the state the
+  /// rule was written after measuring.
+  ///
+  /// So every member whose thread a live storyline already holds is dropped
+  /// from THIS row before the flip, the member hash is recomputed over the
+  /// survivors so it still describes what is stored, and a row left with fewer
+  /// than [StorylineTuning.minClusterSize] members is dismissed rather than
+  /// activated: the group the user pressed Keep on no longer exists, and a
+  /// dismissal is the one answer that keeps its hashes on file so the sweep
+  /// does not rebuild it. All of it in ONE transaction, because a half
+  /// reconciled keep is exactly the two-storyline state it exists to prevent.
+  ///
+  /// Nothing is blocked on the way out. A block records a PERSON saying a
+  /// thread does not belong here; this is bookkeeping, and the thread left
+  /// only because something else reached it first.
+  Future<void> keepSuggestion(String id) async {
+    final storyline = await _store.getStoryline(id);
+    // A suggestion needs none of the reconciliation below: its members left
+    // the pool the moment it was proposed, so nothing can have taken them.
+    if (storyline?.status != 'possible') {
+      await _store.updateStoryline(id, status: 'active');
+      return;
+    }
+    await _store.db.transaction(() async {
+      final members = await _store.membersOf(id);
+      // One read per source the members span, not one per member: the answer
+      // is a whole connector's live memberships either way.
+      final held = <String, Set<String>>{};
+      for (final member in members) {
+        held[member.source] ??= await _store.assignedKeys(member.source);
+      }
+      var kept = 0;
+      for (final member in members) {
+        if (held[member.source]!.contains(member.conversationKey)) {
+          await _store.removeStorylineMember(
+            id,
+            member.source,
+            member.conversationKey,
+            block: false,
+          );
+          continue;
+        }
+        kept++;
+      }
+      await _store.updateStoryline(
+        id,
+        status: kept < StorylineTuning.minClusterSize ? 'dismissed' : 'active',
+        memberHash: await _memberHashOf(id),
+      );
+    });
+  }
 
-  /// Retires a storyline — a suggestion the user never wanted, or a kept one
-  /// they are done with. Nothing else moves: the row keeps both hashes, which
-  /// is what [MessageStore.dismissedHashExistsAny] reads when the very next
-  /// sweep rebuilds the same cluster, and the member rows stay as the record
-  /// of what the user was actually shown.
+  /// Retires a storyline — a suggestion the user never wanted, a possible one
+  /// they looked at and let go, or a kept one they are done with. Nothing else
+  /// moves: the row keeps both hashes, which is what
+  /// [MessageStore.dismissedHashExistsAny] reads when the very next sweep
+  /// rebuilds the same cluster, and the member rows stay as the record of what
+  /// the user was actually shown — which is also what keeps the row in the
+  /// rail's Dismissed fold, since that list shows rows with members only.
   Future<void> dismissSuggestion(String id) =>
       _store.updateStoryline(id, status: 'dismissed');
 
-  /// Brings a dismissed storyline back as a suggestion — the state it was in
-  /// before the owner said no, so the same Keep / Dismiss question is asked
-  /// again. The tombstone check keys on `status = 'dismissed'`, so restoring
-  /// also lifts the block on re-proposing this member set. Members were kept
-  /// on dismissal, so nothing else needs rebuilding.
+  /// Brings a dismissed storyline back as a suggestion, so the same Keep /
+  /// Dismiss question is asked again. The hash check reads `dismissed` and
+  /// `possible`, so restoring also lifts the block on re-proposing this member
+  /// set. Members were kept on dismissal, so nothing else needs rebuilding.
+  ///
+  /// A dismissed storyline that was `possible` comes back as `suggested` and
+  /// not as `possible`: the owner has been through it once by hand, so the
+  /// question has stopped being one the model declined and become one they
+  /// answered.
   Future<void> restoreDismissed(String id) =>
       _store.updateStoryline(id, status: 'suggested');
 
@@ -236,10 +306,13 @@ class StorylineEdits {
       // requeued below would find the mark already past every message on it and
       // return having said nothing.
       recapThrough: null,
-      // Filing a thread into a suggestion is accepting it — the same write
-      // [keepSuggestion] makes. Nothing is left to ask about a group the user
-      // is already putting threads into.
-      status: storyline?.status == 'suggested' ? 'active' : null,
+      // Filing a thread into a suggestion, or into a possible storyline, is
+      // accepting it — the same write [keepSuggestion] makes. Nothing is left
+      // to ask about a group the user is already putting threads into.
+      status: (storyline?.status == 'suggested' ||
+              storyline?.status == 'possible')
+          ? 'active'
+          : null,
     );
     await stampPointer(source, key);
     final row = await _store.getConversationRow(source, key);

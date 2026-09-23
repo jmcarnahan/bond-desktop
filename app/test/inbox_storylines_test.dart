@@ -15,6 +15,8 @@ import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
 import 'package:bond_inbox/widgets/icon_rail.dart';
+import 'package:bond_inbox/widgets/possible_storylines_fold.dart'
+    show possibleStorylineCaptionKeyFor;
 import 'package:bond_inbox/widgets/source_filter.dart';
 import 'package:bond_inbox/widgets/storyline_blocks_section.dart';
 import 'package:bond_inbox/widgets/storyline_pickers.dart';
@@ -785,6 +787,44 @@ void main() {
       // storyline's own header — two answers to one question is one too many.
       expect(find.text('Redesigning the site.'), findsNothing);
       expect(find.text('1 threads · 0 open'), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a possible storyline is a card that says what it is',
+        (tester) async {
+      await seedThread('c2', 'Roof replacement quote');
+      await seedThread('c3', 'Roof replacement schedule');
+      await store.insertStoryline(
+        id: 'sl-maybe',
+        title: 'Roof work',
+        status: 'possible',
+        createdBy: 'auto',
+      );
+      // Two of them, because Keep reconciles a possible storyline against the
+      // live ones and a row left under `minClusterSize` members is dismissed
+      // rather than activated. A filed row always has at least two.
+      await store.addStorylineMember('sl-maybe', 'email', 'c2',
+          addedBy: 'auto');
+      await store.addStorylineMember('sl-maybe', 'email', 'c3',
+          addedBy: 'auto');
+
+      await pumpOverview(tester);
+
+      expect(find.text('Roof work'), findsWidgets);
+      expect(
+        find.byKey(possibleStorylineCaptionKeyFor('sl-maybe')),
+        findsOneWidget,
+      );
+      // The same two answers a suggestion carries, on a row the model would
+      // not vouch for.
+      expect(find.text('Keep'), findsOneWidget);
+      expect(find.text('Dismiss'), findsOneWidget);
+
+      await tester.tap(find.text('Keep'));
+      await tester.pump();
+      await tester.pump();
+
+      expect((await store.getStoryline('sl-maybe'))!.status, 'active');
       await settleQueues(tester);
     });
 

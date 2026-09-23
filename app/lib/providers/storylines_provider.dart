@@ -55,14 +55,27 @@ class StorylinesLoaded extends StorylinesState {
   /// panel is pure and the screen holds nothing per storyline.
   final Set<String> auditing;
 
-  /// [dismissed] and [auditing] trail [loadError] positionally so that every
-  /// existing construction of this state keeps its meaning.
+  /// The clusters the sweep built and the model declined to vouch for, read in
+  /// the same pass as the live ones and kept apart from them. They ask the
+  /// same Keep or Dismiss question a suggestion does, under a fold of their
+  /// own, and until somebody answers their threads are still in the sweep's
+  /// pool.
+  ///
+  final List<Storyline> possible;
+
+  /// Everything but the rows themselves is named and optional. It used to be
+  /// positional, which is what a fourth list ended: Dart will not let one
+  /// constructor take optional positionals and a named parameter at the same
+  /// time, and four bare lists in a row at the call site is not something a
+  /// reader can check anyway. The three constructions all live in the notifier
+  /// below.
   const StorylinesLoaded(
-    this.storylines, [
+    this.storylines, {
     this.loadError,
     this.dismissed = const [],
     this.auditing = const {},
-  ]);
+    this.possible = const [],
+  });
 }
 
 class StorylinesError extends StorylinesState {
@@ -173,9 +186,10 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     if (current is! StorylinesLoaded) return;
     state = StorylinesLoaded(
       current.storylines,
-      current.loadError,
-      current.dismissed,
-      Set.of(_auditing),
+      loadError: current.loadError,
+      dismissed: current.dismissed,
+      auditing: Set.of(_auditing),
+      possible: current.possible,
     );
   }
 
@@ -203,27 +217,41 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
 
     final List<Storyline> rows;
     final List<Storyline> dismissed;
+    final List<Storyline> possible;
     try {
       rows = await _store.loadStorylines();
-      // Abandoned here rather than after the second read: a load that has
-      // already been overtaken has no one to hand its rows to, and the query
-      // below is a query nobody is waiting for.
+      // Abandoned here rather than after the later reads: a load that has
+      // already been overtaken has no one to hand its rows to, and the queries
+      // below are queries nobody is waiting for.
       if (seq != _fetchSeq) return;
-      // A second read rather than one wider query: the rail renders the two
+      // Separate reads rather than one wider query: the rail renders the three
       // lists in different places under different rules, and the live list
-      // must never have a dismissed row in it by accident.
-      dismissed = await _store.loadStorylines(statuses: const ['dismissed']);
+      // must never have a dismissed or a possible row in it by accident.
+      //
+      // `withMembersOnly` on the dismissed arm alone. Before a declined
+      // cluster became a possible storyline the sweep wrote a member-less
+      // tombstone for each one, and the fold showed the app's own bookkeeping
+      // as four things the owner had supposedly said no to. Those rows still
+      // answer the hash check; they are just not anybody's dismissal, and
+      // Restore would bring back a storyline with nothing in it.
+      dismissed = await _store.loadStorylines(
+        statuses: const ['dismissed'],
+        withMembersOnly: true,
+      );
+      if (seq != _fetchSeq) return;
+      possible = await _store.loadStorylines(statuses: const ['possible']);
     } catch (e) {
       if (seq != _fetchSeq) return;
       final current = state;
       state = current is StorylinesLoaded
           ? StorylinesLoaded(
               current.storylines,
-              _staleStorylinesMessage,
+              loadError: _staleStorylinesMessage,
               // Carried through for the same reason the rows above it are: a
               // failed re-read leaves what was on screen where it was.
-              current.dismissed,
-              Set.of(_auditing),
+              dismissed: current.dismissed,
+              auditing: Set.of(_auditing),
+              possible: current.possible,
             )
           : StorylinesError('Could not read storylines: $e');
       return;
@@ -231,7 +259,12 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
 
     if (seq != _fetchSeq) return;
     _onMembersChanged?.call();
-    state = StorylinesLoaded(rows, null, dismissed, Set.of(_auditing));
+    state = StorylinesLoaded(
+      rows,
+      dismissed: dismissed,
+      auditing: Set.of(_auditing),
+      possible: possible,
+    );
   }
 
   // ── user actions ───────────────────────────────────────────────────────

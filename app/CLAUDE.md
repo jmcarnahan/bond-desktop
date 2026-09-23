@@ -187,12 +187,28 @@ enforce the ones that are commands.
   delegates so its twenty-two importers, six in `lib` and sixteen in `test`, did
   not change. A new pass goes in the file whose job it is, and the service gets
   a delegate only if callers outside already reach for it.
+- A cluster the models DECLINE is a `possible` storyline WITH its members, in
+  the rail under **Possible · N** with Keep and Dismiss, never a member-less
+  tombstone. `_filePossible` in `storyline_service.dart` is the one insert site
+  for all three reasons (namer, charter lint, too few confirm survivors);
+  `dismissedHashExistsAny` and `expireStaleSuggestions` read `possible` as well
+  as their old status, and every pool, assign, recruit, refresh, recap and
+  home-feed query names `('suggested','active')` and so leaves a possible
+  storyline's threads unassigned and costs it no model call — on purpose, until
+  somebody keeps it. `loadStorylines(withMembersOnly: true)` is what the
+  Dismissed fold reads, so the member-less tombstones older builds wrote stop
+  appearing there while still answering the hash check.
 - ONE THREAD, ONE LIVE STORYLINE. `recruit`'s candidate walk excludes the
   sweep's `assignedOrBlockedKeys` set, read once per lap, so a declared
   storyline cannot take a thread another storyline already holds. Measured:
   before the rule, 41 of 57 recruited threads on the declared bench had landed
   in more than one storyline. The cost is that a contested thread goes to the
-  first storyline to ask rather than the best match.
+  first storyline to ask rather than the best match. A `possible` storyline is
+  the one row whose members sit outside that set, so Keep is the one press that
+  could break the rule: `StorylineEdits.keepSuggestion` drops every member a
+  live storyline took meanwhile, re-hashes the survivors and dismisses the row
+  instead of activating it when fewer than `minClusterSize` are left, in one
+  transaction. A `suggested` row skips all of it.
 - The fast gate carries a YIELD TICKET beside its queue. A triage pump that
   finds work asks for the yield and enqueues its own drain in the same step;
   the worker reads the flag only where it would claim its next item, so the
