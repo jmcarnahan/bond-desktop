@@ -523,6 +523,16 @@ class SyncService implements MailSync {
         source: _source,
       );
 
+      // What no window above can reach any more: mail triaged inside the
+      // bootstrap window whose work the rolling floor overtook before the
+      // pace got there. Owed is read off the progress row, so a pass here is
+      // one the next sync does not repeat — see
+      // [MessageStore.reviveOwedMessageStages].
+      final revivedOwedWork = await _store.reviveOwedMessageStages(
+        cap: backlogEnqueueCap,
+        source: _source,
+      );
+
       // The conversation vectors written under a clustering tag this build has
       // retired — the card change of Round D Phase 2 on 2026-09-18, and the
       // move to Qwen3-Embedding of Round E Phase 2 on 2026-09-19. A card
@@ -785,6 +795,7 @@ class SyncService implements MailSync {
             'revived_terminal_work': revivedTerminalWork,
           if (rejudged > 0) 'rejudged_triage': rejudged,
           if (revivedStoryline > 0) 'revived_storyline': revivedStoryline,
+          if (revivedOwedWork > 0) 'revived_owed_work': revivedOwedWork,
           // The count the delta feed owed and did not deliver. Absent on every
           // healthy pass, which is what makes its presence worth reading.
           if (reconciledInbox + reconciledSent > 0)

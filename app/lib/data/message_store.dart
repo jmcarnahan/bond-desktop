@@ -5821,6 +5821,84 @@ WHERE source IN (${_placeholders(sources.length)})
     return rows.length;
   }
 
+  /// Queues the extract / needs-you / embed trio for triaged messages the
+  /// windowed backlog enqueue walked past, and returns how many messages got
+  /// their extraction queued.
+  ///
+  /// The shape it heals: a first sync after a reset fetches down to the
+  /// BOOTSTRAP floor, and triage — which drains the pending set, not a window
+  /// — finishes all of it; but [enqueueExtractBacklog] and its twins are
+  /// paced ([cap] rows a pass) and read each pass's OWN floor, which later
+  /// passes recompute as rolling now-minus-lookback. When that rolling floor
+  /// overtakes the part of the bootstrap window the pace had not reached, a
+  /// message behind it is triaged and owed work no window will ever offer
+  /// again: its `extract_state` sits `pending`, [sweepSettledProgress]
+  /// rightly refuses a row whose stages have not all spoken, and the home
+  /// screen counts it in flight forever over an empty queue — ninety Teams
+  /// rows sat exactly there on 2026-09-23.
+  ///
+  /// So the owed condition is read off the PROGRESS row, never a window:
+  /// triage done, extraction never stamped, not dropped. That is what makes
+  /// this a heal rather than a retry loop — the extract pass stamps the
+  /// state, so a row it fixes no longer matches — and what makes it cover
+  /// the gap however it was opened.
+  ///
+  /// All three kinds go together for [enqueueNeedsYouBacklog]'s reason: one
+  /// set of messages under every queue is what keeps "judged no" apart from
+  /// "never judged". Each kind carries its own NOT EXISTS so [cap] counts
+  /// the rows that kind actually lacks, and `OR IGNORE` against the work
+  /// table's key means work that already ran — done, failed or in flight —
+  /// is never queued twice.
+  ///
+  /// The embed arm alone also asks whether a vector already EXISTS, under
+  /// whatever tag. A stranded row missed all three enqueues together, so it
+  /// has none and gets its embedding back with the rest; but the progress
+  /// row does not track embedding, so without this clause the arm would read
+  /// "extraction owed" as "vector owed" and queue a call for messages whose
+  /// vector is fine — and a vector under a RETIRED tag is already the
+  /// retired-tag one-shot's to walk, on its own cap and its own closing
+  /// pref, which this must not race.
+  Future<int> reviveOwedMessageStages({
+    int cap = 150,
+    String source = 'email',
+  }) async {
+    final now = _nowIso();
+    var owed = 0;
+    for (final kind in const ['extract', 'needs_you', 'embed_message']) {
+      final queued = await db.customUpdate(
+        '''
+INSERT OR IGNORE INTO work_items (
+  task_kind, source, entity_id, status, attempts, error, payload_json,
+  created_at, updated_at
+)
+SELECT ?, m.source, m.source_message_id, 'pending', 0, NULL, NULL,
+  COALESCE(m.received_at, ?), ?
+FROM message_progress p
+JOIN messages m
+  ON m.source = p.source AND m.source_message_id = p.source_message_id
+WHERE p.source = ?
+  AND p.dropped = 0 AND p.outcome = 'pending'
+  AND p.triage_state = 'done' AND p.extract_state = 'pending'
+  AND m.direction = 'inbound' AND m.triage_status = 'triaged'
+  AND NOT EXISTS (SELECT 1 FROM work_items w
+    WHERE w.task_kind = ? AND w.source = m.source
+      AND w.entity_id = m.source_message_id)
+  ${kind == 'embed_message' ? '''
+  AND NOT EXISTS (SELECT 1 FROM message_vectors v
+    WHERE v.source = m.source
+      AND v.source_message_id = m.source_message_id)''' : ''}
+ORDER BY m.received_at DESC
+LIMIT ?
+''',
+        variables: _args([kind, now, now, source, kind, cap]),
+      );
+      // The extract count is the answer — it is the stage the owed condition
+      // reads — and the twins ride along without inflating it.
+      if (kind == 'extract') owed = queued;
+    }
+    return owed;
+  }
+
   // ── drafts ───────────────────────────────────────────────────────────
 
   /// Writes the one draft a MESSAGE is allowed, replacing whatever was there.

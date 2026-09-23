@@ -375,6 +375,16 @@ class TeamsSync {
         source: source,
       );
 
+      // What no window above can reach any more: a chat triaged inside the
+      // bootstrap window whose work the rolling floor overtook before the
+      // pace got there. Owed is read off the progress row, so a pass here is
+      // one the next sync does not repeat — see
+      // [MessageStore.reviveOwedMessageStages].
+      final revivedOwedWork = await _store.reviveOwedMessageStages(
+        cap: _extractCap,
+        source: source,
+      );
+
       // Chat ingest freshens discovery exactly as mail ingest does: the sweep
       // reads both connectors, so a chat can now SEED a storyline and not only
       // join one. Both syncs write the SAME row, and why that row is named the
@@ -402,6 +412,7 @@ class TeamsSync {
           if (repended > 0) 'repended_triage': repended,
           if (rejudged > 0) 'rejudged_triage': rejudged,
           if (revivedStoryline > 0) 'revived_storyline': revivedStoryline,
+          if (revivedOwedWork > 0) 'revived_owed_work': revivedOwedWork,
           'backfilled_addressed_me': ?backfilled,
         },
       );

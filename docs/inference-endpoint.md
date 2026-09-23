@@ -25,6 +25,10 @@ loopback and an SSH tunnel is the only way in. **Persistent mode** is the
 other shape, described below: one hostname, TLS, an access key, no timer.
 That is the shape the app's testers point at.
 
+A box that lives INSIDE a platform's VPC, behind the platform's own ALB at
+a path on its hostname, is `tools/model-box.sh`, described in
+`docs/model-box-platform.md`. It embeds this script's slot recipe.
+
 ## What you need
 
 - **The AWS CLI (v2), signed in** to the account that will pay. A profile

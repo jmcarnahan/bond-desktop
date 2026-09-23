@@ -395,20 +395,28 @@ class TriageQueue {
     _parkedReason = null;
     if (_running) return;
     _running = true;
-    // Before the first message, not after it: the header counter would
-    // otherwise sit blank for the seventeen seconds that message takes, which
-    // is exactly when a user with a fresh backlog is looking for it.
-    final counts = await _emit();
-    // The counts this emit already read, so the ask costs no second query.
-    // Only when something is actually waiting: a pump over an empty queue
-    // that asked anyway would end the worker's pass for nothing, and the
-    // sixty-second poll would do it every minute.
-    //
-    // Asked in the same synchronous step as the `_gate.run` below, which is
-    // what makes the flag transient — this run holds the ticket that clears
-    // it. See [DrainGate.yieldRequested].
-    if ((counts['pending'] ?? 0) > 0) _gate.requestYield();
     try {
+      // Before the first message, not after it: the header counter would
+      // otherwise sit blank for the seventeen seconds that message takes,
+      // which is exactly when a user with a fresh backlog is looking for it.
+      final counts = await _emit();
+      // Nothing pending means nothing to claim, so the gate is not taken at
+      // all. It used to be — the drain would claim null and return — and the
+      // wait for it is what made that wrong: a pump over an empty queue does
+      // not ask for a yield (a worker's pass ended every minute for nothing
+      // is the cost that guard exists to avoid), so this run would sit
+      // TICKETLESS behind a worker drain that can hold the gate for hours,
+      // with [_running] latched — and the latch returns every later pump at
+      // the check above, so the mail that arrives mid-backlog can never ask
+      // for the yield that would let it through. Skipping the gate leaves
+      // [_running] free, and the first pump that finds that mail asks and
+      // enqueues in the same step, exactly as [DrainGate.yieldRequested]
+      // promises.
+      if ((counts['pending'] ?? 0) == 0) return;
+      // Asked in the same synchronous step as the `_gate.run` below, which is
+      // what makes the flag transient — this run holds the ticket that clears
+      // it. See [DrainGate.yieldRequested].
+      _gate.requestYield();
       await _gate.run(_drain);
       // After the gate is released and before the drain flag is: the worker
       // this wakes takes the very gate we are standing outside of. Not after
