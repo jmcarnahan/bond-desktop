@@ -403,9 +403,14 @@ class Message {
   final String? gateReason;
 
   /// The connector-specific blob stored alongside the message — for email,
-  /// `{"headers": {...}}` from the per-message detail fetch. Held as raw JSON
-  /// rather than decoded eagerly: the inbox renders thousands of messages and
-  /// reads this on none of them.
+  /// `{"headers": {...}, "meeting": "…"}` from the per-message detail fetch,
+  /// each key present only when that fetch had something to put in it. Held as
+  /// raw JSON rather than decoded eagerly: the inbox renders thousands of
+  /// messages and reads this on none of them.
+  ///
+  /// Read through [headers] and [meetingMessageType], never by hand: both
+  /// answer for a blob that never carried their key, which is every row a
+  /// build before theirs wrote.
   final String? sourceMetaJson;
 
   // ── Triage output ────────────────────────────────────────────────────
@@ -563,6 +568,26 @@ class Message {
       };
     } on FormatException {
       return const {};
+    }
+  }
+
+  /// What kind of invitation this message is, in Graph's own words —
+  /// `meetingRequest`, `meetingCancelled`, `meetingAccepted` and the rest.
+  ///
+  /// Null on ordinary mail, on every Teams and MCP message, and on any row
+  /// whose detail was fetched before the sync asked for the field: a reader
+  /// must treat null as "nobody said", never as "not a meeting".
+  String? get meetingMessageType {
+    final raw = sourceMetaJson;
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+      final meeting = decoded['meeting'];
+      if (meeting is! String || meeting.isEmpty) return null;
+      return meeting;
+    } on FormatException {
+      return null;
     }
   }
 

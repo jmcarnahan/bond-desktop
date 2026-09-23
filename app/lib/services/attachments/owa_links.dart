@@ -61,8 +61,16 @@ const String _zwsp = '\u200b';
 /// U+200B-delimited `[icon]name<url>`. The delimiters are what separate an
 /// OWALink entity from an ordinary hyperlink, which converts to the same
 /// `text<url>` shape without them. The icon may be empty; the name may not.
-final RegExp _owaLink =
-    RegExp(r'\u200b\[([^\]\u200b]*)\]([^<\u200b]+?)<([^>\u200b\s]+)>\u200b');
+///
+/// Two tolerances, and both are about which converter wrote the run. Graph's
+/// server-side text conversion renders the icon image as `[<icon url>]` and
+/// glues the name to the bracket; ours (`html_text.dart`, the mail profile)
+/// drops every non-inline image with no placeholder and writes a canonical
+/// run with ONE space before the bracket. So the icon group is optional and
+/// so is that space, and the same entity parses whichever side converted it.
+final RegExp _owaLink = RegExp(
+  r'\u200b(?:\[([^\]\u200b]*)\])?([^<\u200b]+?) ?<([^>\u200b\s]+)>\u200b',
+);
 
 /// Hosts whose files a connector can read through `inspect_file`.
 const Set<String> _cloudHosts = {'onedrive.live.com', '1drv.ms'};

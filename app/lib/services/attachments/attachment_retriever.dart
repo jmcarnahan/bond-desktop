@@ -8,6 +8,7 @@ import '../../models/message_models.dart';
 import '../extract_handler.dart' show buildMessageCard;
 import '../llm/embeddings_client.dart';
 import '../llm/message_block.dart' show attachmentStandIn, senderLine;
+import '../mail_body.dart' show stripLinkTargets;
 import 'attachment_markers.dart';
 
 /// One passage of one attached document, ready to go in front of a model.
@@ -306,12 +307,14 @@ Future<Uint8List?> replyToQueryVector(
   // The SAME card `embedMessageRow` builds, deliberately duplicated in shape
   // rather than shared: this path must produce a vector comparable with the
   // one the embed queue would have written, so the card's four segments, its
-  // marker strip and its stand-in all have to match. If that function's card
+  // two strips and its stand-in all have to match. If that function's card
   // changes, this one changes with it.
-  final stripped = stripAttachmentMarkers(
-    (row['body_text'] as String?)?.isNotEmpty ?? false
-        ? row['body_text'] as String?
-        : row['body_preview'] as String?,
+  final stripped = stripLinkTargets(
+    stripAttachmentMarkers(
+      (row['body_text'] as String?)?.isNotEmpty ?? false
+          ? row['body_text'] as String?
+          : row['body_preview'] as String?,
+    ),
   );
   final body = stripped.isEmpty
       ? attachmentStandIn([

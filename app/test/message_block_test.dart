@@ -4,11 +4,12 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// The two budget-and-render helpers every prompt builder shares.
 ///
-/// `buildMessageBlock` itself is pinned through the tasks that render it
+/// What `buildMessageBlock` RENDERS is pinned through the tasks that read it
 /// (`triage_task_test.dart`, `extract_task_test.dart`); what is here is the
 /// pair that arrived with the thread digest — the fitter that decides which
 /// LINES of a digest a prompt reads, and the tail renderer three tasks now
-/// share.
+/// share — plus the one thing about the block that is a property of the block
+/// itself and of no task: the order its two strips run in against its cap.
 Message row({
   String id = 'm1',
   String? fromName = 'Priya Anand',
@@ -26,7 +27,60 @@ Message row({
       receivedAt: '2026-08-29T16:05:00Z',
     );
 
+/// A URL-heavy body: [count] canonical runs, one per line, each a short label
+/// and a long tracking address. Automated mail in a nutshell, and the shape
+/// that decides whether the strip runs before the cap or after it.
+String linkRunBody(int count) => [
+      for (var i = 1; i <= count; i++)
+        'Item ${i.toString().padLeft(2, '0')} '
+            '<https://links.example.com/t/${'a' * 60}>',
+    ].join('\n');
+
 void main() {
+  group('buildMessageBlock', () {
+    test('a link run reaches the model as its label, never its target', () {
+      final block = buildMessageBlock(row(
+        bodyText: 'Findings.docx <https://files.example.com/a/Findings.docx> '
+            'is ready — see the summary '
+            '<https://wiki.example.com/x/Summary>.\n'
+            'Read https://docs.example.com/guide before Friday.',
+      ));
+
+      expect(block, contains('Findings.docx is ready'));
+      expect(block, contains('see the summary.'));
+      expect(block, isNot(contains('<https://')));
+      // A bare URL was never in a run: it is the only thing the sender put
+      // there, and taking it out would lose the reference entirely.
+      expect(block, contains('https://docs.example.com/guide'));
+    });
+
+    test('the targets come off BEFORE the cap, so labels survive it', () {
+      // Sixty runs: nothing but addresses past the cap in the raw body, and
+      // well inside it once the addresses go. A strip that ran after the clip
+      // would have spent the whole budget on tracking queries and never
+      // reached the last label.
+      final body = linkRunBody(60);
+      expect(body.length, greaterThan(messageBlockBodyCap));
+
+      final block = buildMessageBlock(row(bodyText: body));
+
+      expect(block, contains('Item 01'));
+      expect(block, contains('Item 60'));
+      expect(block, isNot(contains('links.example.com')));
+    });
+
+    test('a body that is nothing but unlabelled targets still says something',
+        () {
+      // The strip leaves a run with no label as its address in plain text, so
+      // the block is the message rather than the empty-body stand-in.
+      final block = buildMessageBlock(
+        row(bodyText: '<https://forms.example.com/approve/9f2>'),
+      );
+
+      expect(block, contains('https://forms.example.com/approve/9f2'));
+    });
+  });
+
   group('fitThreadDigest', () {
     const header = '(thread has 40 earlier messages; 12 quoted below)';
 
@@ -278,6 +332,32 @@ void main() {
         buildThreadTailText([row(bodyText: 'See [[att:abc]] for the numbers.')]),
         'Priya Anand: See for the numbers.',
       );
+    });
+
+    test('a quoted link run is its label, not its target', () {
+      expect(
+        buildThreadTailText([
+          row(
+            bodyText: 'Numbers are in the deck '
+                '<https://files.example.com/d/Q3-deck>.',
+          )
+        ]),
+        'Priya Anand: Numbers are in the deck.',
+      );
+    });
+
+    test('the targets come off before the 300-character clip', () {
+      // One anchor longer than the whole quote budget. Clipping first would
+      // leave a tail that is nothing but somebody else's tracking address;
+      // stripping first leaves the sentence, whole.
+      final text = buildThreadTailText([
+        row(
+          bodyText: 'Approve it here '
+              '<https://links.example.com/t/${'a' * 400}> before Friday.',
+        )
+      ]);
+
+      expect(text, 'Priya Anand: Approve it here before Friday.');
     });
   });
 }

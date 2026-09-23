@@ -214,7 +214,13 @@ void main() {
 
       expect(mcp.argsFor('read_email'), {'message_id': 'm1'});
       expect(detail, {
-        'uniqueBody': {'content': 'The homepage copy is in.'},
+        // `contentType` stated, and stated as text: the server's tool answers
+        // a converted body, and the ingest converter reads this key to decide
+        // whether it is looking at markup.
+        'uniqueBody': {
+          'content': 'The homepage copy is in.',
+          'contentType': 'text',
+        },
         'internetMessageHeaders': [
           {'name': 'list-unsubscribe', 'value': '<mailto:x@y.z>'},
           {'name': 'precedence', 'value': 'bulk'},

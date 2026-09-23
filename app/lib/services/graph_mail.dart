@@ -40,11 +40,29 @@ class GraphMail implements MailBackend {
       'hasAttachments';
 
   /// Tier two. `uniqueBody` is the part of the message that is NOT quoted
-  /// thread — Graph computes it server-side, and with the Prefer header
-  /// below it arrives as plain text already converted from HTML. That is the
-  /// entire reason this app never parses mail HTML itself.
-  static const String _detailSelect =
-      'id,uniqueBody,internetMessageHeaders,hasAttachments';
+  /// thread, which Graph computes server-side, and with the Prefer header
+  /// below it arrives as the sender's own HTML.
+  ///
+  /// Asking for HTML is a reversal: this app used to take Graph's server-side
+  /// text conversion and never parse mail HTML itself. What that conversion
+  /// writes is `label <href>` for every anchor and `[alt]` for every image,
+  /// which in automated mail is most of the message — a hundred-character
+  /// SharePoint address on a line of its own, `[Main Logo]`, `[Comment Icon]`,
+  /// a template placeholder the sender never resolved — with the sentence
+  /// somebody wrote below the fold. So the HTML comes down and
+  /// `mailBodyFromDetail` (`mail_body.dart`) converts it at ingest, where
+  /// every rule is ours and each one is a test.
+  ///
+  /// This backend converts NOTHING. `uniqueBody` leaves here in the shape
+  /// Graph sent it, `contentType` and all, because that seam is where the
+  /// parity test compares the two mail backends and because the one converter
+  /// must not have a second copy behind a connector.
+  ///
+  /// `meetingMessageType` is Graph's word for what kind of invitation a
+  /// message is (`meetingRequest`, `meetingCancelled`, …) and is absent on
+  /// ordinary mail.
+  static const String _detailSelect = 'id,uniqueBody,internetMessageHeaders,'
+      'hasAttachments,meetingMessageType';
 
   /// The attachment list, expanded onto the same detail request rather than
   /// fetched separately: a message's attachments are part of what the detail
@@ -60,8 +78,10 @@ class GraphMail implements MailBackend {
       'attachments(\$select=id,name,contentType,size,isInline,'
       'lastModifiedDateTime,microsoft.graph.fileAttachment/contentId)';
 
-  static const Map<String, String> _plainTextBody = {
-    'Prefer': 'outlook.body-content-type="text"',
+  /// On the DETAIL fetch only. A delta page carries `bodyPreview`, which is a
+  /// snippet Graph writes as text whatever anyone prefers.
+  static const Map<String, String> _htmlBody = {
+    'Prefer': 'outlook.body-content-type="html"',
   };
 
   /// A 429 with no parseable Retry-After waits this long; anything Graph
@@ -121,7 +141,7 @@ class GraphMail implements MailBackend {
           '&\$expand=${Uri.encodeComponent(_detailExpand)}',
     );
 
-    final response = await _send(uri, headers: _plainTextBody);
+    final response = await _send(uri, headers: _htmlBody);
     if (response.statusCode != 200) {
       throw _describe(response, 'Could not read a message from Microsoft Graph');
     }

@@ -12,6 +12,7 @@ import 'chips.dart';
 import 'image_grid.dart';
 import 'inline_image_thumb.dart';
 import 'link_unfurl.dart';
+import 'linked_text.dart';
 import 'preview/preview_kind.dart';
 import 'time_format.dart';
 
@@ -59,6 +60,10 @@ final RegExp _bodyToken = RegExp(
 /// Runs of blank lines, which is what taking a token out of its own paragraph
 /// leaves behind.
 final RegExp _blankRun = RegExp(r'\n{3,}');
+
+/// A single whitespace character — where the clamp looks for the edge of the
+/// last word it kept.
+final RegExp _whitespace = RegExp(r'\s');
 
 /// The kinds that are somewhere ELSE rather than something the message carried.
 ///
@@ -319,8 +324,11 @@ bool _isSubThresholdInlineImage(AttachmentRef attachment) =>
 /// There are no bubbles and no right-hand column: a transcript reads top to
 /// bottom in one gutter, and direction is carried by the avatar alone.
 /// Consecutive messages from the same sender collapse under the first one's
-/// header. Bodies are plain-text [SelectableText] — mail content is NEVER
-/// markdown-rendered.
+/// header. Bodies are plain-text [LinkedText] — mail content is NEVER
+/// markdown-rendered. Links are the ONE exception and a narrow one: a bare
+/// address and the canonical `label <url>` run a converter wrote are painted as
+/// links (see `linked_text.dart`), and every other character stays exactly as it
+/// was stored. No `*`, no `_`, no `#`, no `[](…)`.
 ///
 /// A row can also be FOLDED, which is a different thing from the `Show more`
 /// clamp on a long body: folded, the message keeps its header and gives up its
@@ -475,9 +483,33 @@ class _MessageRowState extends State<MessageRow> {
     var clamped =
         lines.length > _maxLines ? lines.take(_maxLines).join('\n') : body;
     if (clamped.length > _maxChars) {
-      clamped = clamped.substring(0, _maxChars);
+      clamped = _cutAt(clamped, _maxChars);
     }
     return clamped.trimRight();
+  }
+
+  /// [text] cut to [cap] characters, never through a link.
+  ///
+  /// The cap used to land wherever it landed, which cut a long address in half
+  /// — and half an address still parses, so the clamped body painted a link to
+  /// somewhere else entirely. Where the last token is the start of a link (a
+  /// bare address, or the `label <` head of a canonical run whose address the
+  /// cut took) the whole token comes off, and `Show more` is where the rest of
+  /// it is. A cut through ordinary words is left where it fell.
+  ///
+  /// A window with no whitespace in it at all — a machine-generated blob, one
+  /// enormous address — is the one case the token can't come off: there would be
+  /// nothing left to paint, and such a body has no words to show either way. The
+  /// cut stands there, and `Show more` still has the whole of it.
+  static String _cutAt(String text, int cap) {
+    final head = text.substring(0, cap);
+    final boundary = head.lastIndexOf(_whitespace);
+    if (boundary <= 0) return head;
+    final tail = head.substring(boundary + 1);
+    if (tail.contains('<') || tail.toLowerCase().contains('http')) {
+      return head.substring(0, boundary + 1);
+    }
+    return head;
   }
 
   String get _senderName {
@@ -673,10 +705,24 @@ class _MessageRowState extends State<MessageRow> {
     return widgets;
   }
 
-  Widget _text(String text) => SelectableText(
+  /// A stretch of body words. Its links came off anchors a real sender wrote,
+  /// whose text runs to a whole question ("Why am I receiving this notification
+  /// from Office?"), so the label caps here are the generous pair — the tight
+  /// defaults are for the one-line asks a model writes.
+  Widget _text(String text) => LinkedText(
         text,
         style: BondType.body.copyWith(color: BondColors.ink, height: 1.4),
+        onOpenLink: _openLink,
+        maxLabelChars: bodyMaxLabelChars,
+        maxLabelWords: bodyMaxLabelWords,
       );
+
+  /// The link seam, in the shape [LinkedText] takes. Null where the host gave
+  /// the row nowhere to send a tap, which paints the labels as words.
+  void Function(Uri target)? get _openLink {
+    final open = widget.onOpenLink;
+    return open == null ? null : (target) => open(target.toString());
+  }
 
   /// A picture, left-aligned in the body column and bounded on both axes — the
   /// transcript is a `ListView`, where an unbounded child is an assertion
@@ -866,12 +912,18 @@ class _MessageRowState extends State<MessageRow> {
       spacing: BondSpacing.s8,
       runSpacing: BondSpacing.s4,
       children: [
-        Text(
+        // An action item is written by a model reading the body, so it carries
+        // whatever link the body carried — "Verify access at <url>". Not
+        // selectable, because this line never was, and a tap on a link beats
+        // the InkWell below to the gesture arena by sitting deeper in it.
+        LinkedText(
           ask,
           style: BondType.caption.copyWith(
             color: BondColors.onAttentionTint,
             fontWeight: FontWeight.w600,
           ),
+          onOpenLink: _openLink,
+          selectable: false,
         ),
         if (deadline != null && deadline.isNotEmpty)
           BondChip.semantic(deadline, BondTone.attention),

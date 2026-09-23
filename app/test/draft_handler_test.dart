@@ -753,6 +753,26 @@ void main() {
       expect(llm.userMessages.last, isNot(contains('[[att:')));
       expect(llm.userMessages.last, contains('Signed copy attached'));
     });
+
+    test('a tone sample carries no link target', () async {
+      // The same reason one step on: an example whose sentences trail
+      // hundred-character addresses teaches the model to write them into the
+      // reply, and what is being sampled is how this person words things.
+      // The address is checked by host, because the fence escapes its
+      // brackets to `&lt;` on the way into the prompt.
+      await seedOutbound(
+        key: 'conv-0',
+        body: 'The deck <https://files.example.com/d/Q3> is attached — Jo',
+      );
+      await seedInbound();
+
+      final llm = draftClient(decision: decision(), draft: answer());
+      await runOne(DraftHandler(store, llm, progress: progress));
+
+      expect(llm.userMessages.last, contains('style_examples'));
+      expect(llm.userMessages.last, isNot(contains('files.example.com')));
+      expect(llm.userMessages.last, contains('The deck is attached'));
+    });
   });
 
   group('a chat drafts through the same handler', () {

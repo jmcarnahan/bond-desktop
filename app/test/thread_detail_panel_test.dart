@@ -71,6 +71,7 @@ void main() {
     void Function(Message message)? onSuggestFor,
     void Function(Message message)? onWhy,
     void Function(Message message)? onWhatHappened,
+    void Function(String url)? onOpenLink,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -96,6 +97,7 @@ void main() {
           onSuggestFor: onSuggestFor,
           onWhy: onWhy,
           onWhatHappened: onWhatHappened,
+          onOpenLink: onOpenLink,
         ),
       ),
     ));
@@ -160,6 +162,56 @@ void main() {
 
     expect(find.text('Reply to Dana'), findsOneWidget);
     expect(find.textContaining('open asks'), findsNothing);
+  });
+
+  group('links in the banner and the transcript', () {
+    const url = 'https://metrics.example.com/rooms/01f0b5d9c4e2';
+    const run = 'Dashboard <$url>';
+
+    testWidgets('the banner paints the label and opens the whole address',
+        (tester) async {
+      final opened = <String>[];
+      var replies = 0;
+      await pump(
+        tester,
+        messages: [_msg(id: 'a', receivedAt: '2026-08-25T09:00:00')],
+        ctaText: 'Confirm access. $run',
+        onOpenReply: () => replies++,
+        onOpenLink: opened.add,
+      );
+
+      expect(find.text('Confirm access. Dashboard'), findsOneWidget);
+      expect(find.textContaining('http'), findsNothing);
+
+      await tester.tapOnText(find.textRange.ofSubstring('Dashboard'));
+      await tester.pump();
+
+      expect(opened, [url]);
+      // The banner is still the way into the reply everywhere else on it.
+      expect(replies, 0);
+    });
+
+    testWidgets('a body link in the transcript reaches the host too',
+        (tester) async {
+      final opened = <String>[];
+      await pump(
+        tester,
+        messages: [
+          _msg(
+            id: 'a',
+            receivedAt: '2026-08-25T09:00:00',
+            bodyText: 'Numbers are here: $run',
+          ),
+        ],
+        ctaText: null,
+        onOpenLink: opened.add,
+      );
+
+      await tester.tapOnText(find.textRange.ofSubstring('Dashboard'));
+      await tester.pump();
+
+      expect(opened, [url]);
+    });
   });
 
   testWidgets('one reply answers every ask before it', (tester) async {

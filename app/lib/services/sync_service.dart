@@ -17,6 +17,7 @@ import 'graph_mail.dart';
 // `show`: the one thing the sync wants from the embedding client is the tag
 // the clustering one-shot below retires.
 import 'llm/embeddings_client.dart' show EmbeddingsClient;
+import 'mail_body.dart';
 import 'mail_text.dart';
 import 'pipeline_progress.dart';
 
@@ -461,6 +462,33 @@ class SyncService implements MailSync {
         await _store.setPref('sender_tip_strip', '1');
       }
 
+      // The mail bodies a server's own HTML→text conversion produced, off the
+      // rows stored before the detail fetch started asking for HTML. Same
+      // one-shot idiom, over the lookback window this pass ran with, and null
+      // until it runs. Nulled rather than rewritten: `ensureBodies` fetches
+      // exactly the rows with no body, so opening a thread refills it through
+      // this app's converter and a thread nobody opens costs nothing.
+      //
+      // The non-goal, stated because it is the obvious next thing to want: the
+      // verdicts, summaries, extractions and embeddings written from the old
+      // text are NOT re-judged. They finished `done` and nothing here re-pends
+      // them. Rejudging a mailbox is Clear AI results, which is a decision the
+      // owner makes in Settings and not a side effect of an upgrade.
+      int? clearedMailBodies;
+      if (await _store.getPref('mail_html_rebuild') == null) {
+        clearedMailBodies = await _store.clearLegacyMailBodies(sinceIso: floor);
+        await _store.setPref('mail_html_rebuild', '1');
+      }
+
+      // And the previews, which have no HTML part to go back to and so are
+      // rewritten in place through the same link rules the ingest now runs.
+      // Same one-shot idiom, and null until it runs.
+      int? tidiedMailPreviews;
+      if (await _store.getPref('mail_preview_tidy') == null) {
+        tidiedMailPreviews = await _store.tidyMailPreviews();
+        await _store.setPref('mail_preview_tidy', '1');
+      }
+
       // The display names of everyone the user has written to, off the rows
       // stored before the ingest above learned to carry them. Same one-shot
       // idiom, and null until it runs. Read-time name resolution in the
@@ -807,6 +835,8 @@ class SyncService implements MailSync {
           'revived_needs_you': ?revivedNeedsYou,
           'backfilled_needs_you': ?backfilledNeedsYou,
           'stripped_sender_tips': ?strippedSenderTips,
+          'cleared_mail_bodies': ?clearedMailBodies,
+          'tidied_mail_previews': ?tidiedMailPreviews,
           'named_participants': ?namedParticipants,
           'refolded_threads': ?refoldedThreads,
           'repaired_gated_conversations': ?repairedGated,
@@ -1341,10 +1371,20 @@ class SyncService implements MailSync {
         // invisible character.
         // And Exchange's first-contact tip, which the preview opens with for
         // any sender the mailbox has not seen — see `mail_text.dart`.
+        //
+        // The preview is Graph's own text conversion of the body and arrives
+        // that way whatever the DETAIL fetch prefers, so it carries the same
+        // `label <href>` runs the ingest converter exists to undo \u2014 in a
+        // snippet a list card has two lines for. `stripLinkTargets` keeps the
+        // label and drops the address; `tidyMailText` collapses what Graph's
+        // own wrapping left behind.
         final rawPreview =
             (message['bodyPreview'] as String?)?.replaceAll('\u200b', '');
-        final preview =
-            rawPreview == null ? null : stripSenderIdentification(rawPreview);
+        final preview = rawPreview == null
+            ? null
+            : stripLinkTargets(
+                tidyMailText(stripSenderIdentification(rawPreview)),
+              );
         final key = conversationKeyFor(
           message['conversationId'] as String?,
           id,
@@ -1584,11 +1624,29 @@ class SyncService implements MailSync {
     final uniqueBody = detail['uniqueBody'];
     final rawBody =
         uniqueBody is Map<String, dynamic> ? uniqueBody['content'] as String? : null;
-    // Exchange's first-contact tip comes off HERE, where the body first
-    // exists, so nothing downstream — the transcript, the index, the prompts
-    // — ever sees a sentence the sender did not write. See `mail_text.dart`.
-    final bodyText = rawBody == null ? null : stripSenderIdentification(rawBody);
+    // The one conversion site for mail. A backend hands over what its server
+    // sent — Graph's HTML, the MCP server's text — and `mailBodyFromDetail`
+    // reads the connector's own `contentType` to decide which it is. Here
+    // rather than in either backend because there is one set of rules and both
+    // connectors' bodies are read by the same transcript, index and prompts.
+    //
+    // Then Exchange's first-contact tip, and in that order: the tip is a
+    // sentence Exchange added to the body, so it is a line to delete once the
+    // body is text and not a question about converting markup.
+    final converted = rawBody == null
+        ? null
+        : mailBodyFromDetail(
+            content: rawBody,
+            contentType: uniqueBody is Map<String, dynamic>
+                ? uniqueBody['contentType'] as String?
+                : null,
+          );
+    final bodyText =
+        converted == null ? null : stripSenderIdentification(converted);
     final headers = _headers(detail['internetMessageHeaders']);
+    // Graph's word for what kind of invitation this is, and absent on
+    // ordinary mail and on every MCP message.
+    final meeting = (detail['meetingMessageType'] as String?)?.trim();
 
     final rawAttachments = detail['attachments'];
     final rawCount = rawAttachments is List ? rawAttachments.length : 0;
@@ -1598,13 +1656,31 @@ class SyncService implements MailSync {
     // the ordinal cap counts real attachments first.
     final links = extractOwaLinks(bodyText, startOrdinal: rawCount);
 
+    // A body that converted to nothing is a real answer, not a failure: an
+    // M365 notification whose entire content is one linked image has no words
+    // in it, and neither has a body of nested empty table cells. But an empty
+    // string is exactly what `ensureBodies` reads as "no body stored" — it
+    // fetches the rows where `bodyText` is null OR empty — so storing one would
+    // make every open of that thread fetch this detail again, forever, and get
+    // the same empty answer. So the row is SETTLED instead: the stored preview
+    // is the best text such a message has, and where there is not even one, a
+    // single space stops the loop, because the question `ensureBodies` asks is
+    // whether anything is stored and not whether it is worth reading.
+    final String? storedBody;
+    if (bodyText == null) {
+      storedBody = null;
+    } else if (links.body.isEmpty && rawBody!.isNotEmpty) {
+      storedBody = await _settledEmptyBody(sourceMessageId);
+    } else {
+      storedBody = links.body;
+    }
 
     await _store.updateMessageDetail(
       _source,
       sourceMessageId,
       // Null stays null: `updateMessageDetail` COALESCEs, and an empty string
       // from a detail that carried no body would blank one already stored.
-      bodyText: bodyText == null ? null : links.body,
+      bodyText: storedBody,
       // Raised, never lowered. A link the connector never counted is still a
       // file on the message, and the paperclip is how a card says so; a
       // detail that states nothing about attachments stays null, which the
@@ -1612,10 +1688,19 @@ class SyncService implements MailSync {
       // knew".
       hasAttachments:
           links.rows.isNotEmpty ? true : detail['hasAttachments'] as bool?,
-      // Under a 'headers' key rather than at the top level: source_meta_json
-      // is the whole connector-specific blob, and headers are one thing in
-      // it.
-      sourceMetaJson: headers.isEmpty ? null : jsonEncode({'headers': headers}),
+      // Under named keys rather than at the top level: source_meta_json is the
+      // whole connector-specific blob, and headers are one thing in it. Each
+      // key is OMITTED when it has nothing to say, and the whole blob stays
+      // null when neither does — `updateMessageDetail` COALESCEs, so a thin
+      // detail must not overwrite a fat blob a previous fetch wrote. Every
+      // reader looks its own key up and tolerates its absence, which is what
+      // lets a row written before `meeting` existed keep reading correctly.
+      sourceMetaJson: headers.isEmpty && (meeting == null || meeting.isEmpty)
+          ? null
+          : jsonEncode({
+              if (headers.isNotEmpty) 'headers': headers,
+              if (meeting != null && meeting.isNotEmpty) 'meeting': meeting,
+            }),
     );
 
     await _storeAttachments(
@@ -1623,6 +1708,30 @@ class SyncService implements MailSync {
       rawAttachments,
       extraRows: links.rows,
     );
+  }
+
+  /// What to store as the body of a message whose own content converted to no
+  /// text at all, so that the fetch is not repeated on every thread open.
+  ///
+  /// The delta page's preview is the fallback because it is the only other text
+  /// the server ever sent about this message, and on an image-only notification
+  /// it is usually the alt text or the subject restated — thin, but true, and
+  /// already tidied at ingest. Tidied again here because a row pulled down by an
+  /// older build stored the preview as the server wrote it, and this is the
+  /// moment its text becomes a body that the transcript, the index and the
+  /// prompts all read.
+  ///
+  /// The space is the last resort and it is deliberately not a sentence: nothing
+  /// should render a caption this app invented over a message it did not write.
+  /// It is a mark meaning "asked, and there were no words", and it survives
+  /// `updateMessageDetail`'s COALESCE, which only treats NULL as "unsaid".
+  Future<String> _settledEmptyBody(String sourceMessageId) async {
+    final row = await _store.getMessageRow(_source, sourceMessageId);
+    final preview = row?['body_preview'] as String?;
+    final tidied = preview == null || preview.isEmpty
+        ? ''
+        : stripLinkTargets(tidyMailText(preview));
+    return tidied.isEmpty ? ' ' : tidied;
   }
 
   /// Writes what came with one message and queues the eligible ones for text.

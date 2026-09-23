@@ -1,6 +1,7 @@
 import '../../models/attachment_models.dart';
 import '../../models/message_models.dart';
 import '../attachments/attachment_markers.dart';
+import '../mail_body.dart' show stripLinkTargets;
 
 /// Enough of a body for a model to judge intent. Past this it is quoted thread
 /// and signatures, which cost tokens and add nothing.
@@ -25,10 +26,16 @@ String buildMessageBlock(Message message) {
   // is a token this app minted, and a model shown one reasons about the token
   // rather than about the message.
   final stripped = stripAttachmentMarkers(raw);
+  // Then the `<target>` tail off every canonical link run, leaving the label.
+  // BEFORE the cap and not after: an automated mail spends a hundred
+  // characters of tracking query per anchor, and a strip that ran afterwards
+  // would have let those bytes push the sentence somebody wrote past 4000.
+  final unlinked = stripLinkTargets(stripped);
   // A chat message can be nothing BUT a shared file — somebody dropped a
   // contract into a thread and typed no words with it — and an empty body
   // tells the model the message said nothing, which is the opposite of true.
-  final body = stripped.isEmpty ? attachmentStandIn(message.attachments) : stripped;
+  final body =
+      unlinked.isEmpty ? attachmentStandIn(message.attachments) : unlinked;
   final clipped = body.length > messageBlockBodyCap
       ? body.substring(0, messageBlockBodyCap)
       : body;
@@ -271,12 +278,18 @@ String buildThreadTailText(List<Message> thread, {int max = 3, int cap = 300}) {
   ].join('\n---\n');
 }
 
-/// Markers out, for [buildMessageBlock]'s reason — a tail is quoted text too,
-/// and a `[[att:…]]` in it is a token nobody typed.
-String _tailBody(Message message) => stripAttachmentMarkers(
-      message.bodyText?.isNotEmpty == true
-          ? message.bodyText!
-          : message.bodyPreview,
+/// Markers out and link targets with them, for [buildMessageBlock]'s reasons —
+/// a tail is quoted text too, so a `[[att:…]]` in it is a token nobody typed
+/// and a `<target>` in it is tracking query where the words should be. The tail
+/// is where that bites hardest: its cap is 300 characters, so one automated
+/// anchor could spend a whole quoted turn without saying anything, which is
+/// why the strip runs before [_clampTail] rather than after.
+String _tailBody(Message message) => stripLinkTargets(
+      stripAttachmentMarkers(
+        message.bodyText?.isNotEmpty == true
+            ? message.bodyText!
+            : message.bodyPreview,
+      ),
     );
 
 String _clampTail(String value, int cap) =>

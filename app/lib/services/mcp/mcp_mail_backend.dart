@@ -114,7 +114,12 @@ class McpMailBackend implements MailBackend {
     final headers = result['headers'];
     final attachments = result['attachments'];
     return {
-      'uniqueBody': {'content': result['body_text']},
+      // `text`, stated rather than left out. The server's tool is named
+      // `body_text` and answers Graph's own server-side conversion, so the
+      // ingest converter must take the tidy path over it and not the HTML one
+      // — and an unstated type reads as text anyway, which would make this
+      // connector's shape depend on that default rather than on what it sends.
+      'uniqueBody': {'content': result['body_text'], 'contentType': 'text'},
       'internetMessageHeaders': [
         if (headers is Map)
           for (final entry in headers.entries)

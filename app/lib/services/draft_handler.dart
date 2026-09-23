@@ -19,6 +19,7 @@ import 'llm/llm_client.dart';
 import 'llm/model_slots.dart' show LlmTargetSpec;
 import 'llm/partial_json.dart';
 import 'llm/reply_decision_task.dart';
+import 'mail_body.dart' show stripLinkTargets;
 import 'pipeline_progress.dart';
 
 /// Decides whether ONE message needs an answer, and writes one when it does.
@@ -1075,10 +1076,16 @@ class DraftHandler extends WorkHandler {
     for (final row in rows) {
       // Markers out, for [buildMessageBlock]'s reason and one of its own: a
       // style example is a sample the model imitates, and `[[att:…]]` in one
-      // is a token it would learn to write.
-      final body = stripAttachmentMarkers(row['body_text'] as String?).trim();
-      final preview =
-          stripAttachmentMarkers(row['body_preview'] as String?).trim();
+      // is a token it would learn to write. Link targets go for the second
+      // reason alone — an example whose sentences trail hundred-character
+      // addresses teaches the model to write them into the reply, and what is
+      // being sampled here is how this person WORDS things.
+      final body = stripLinkTargets(
+        stripAttachmentMarkers(row['body_text'] as String?),
+      ).trim();
+      final preview = stripLinkTargets(
+        stripAttachmentMarkers(row['body_preview'] as String?),
+      ).trim();
       final text = body.isNotEmpty ? body : preview;
       if (text.isEmpty) continue;
       examples.add(

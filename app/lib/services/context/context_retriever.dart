@@ -14,6 +14,7 @@ import '../llm/context_select_task.dart';
 import '../llm/embeddings_client.dart';
 import '../llm/json_task.dart' show runTask;
 import '../llm/llm_client.dart';
+import '../mail_body.dart' show stripLinkTargets;
 import '../search_fusion.dart';
 import 'claude_conventions.dart';
 import 'context_chunker.dart'
@@ -1145,10 +1146,14 @@ class ContextRetriever {
     final row = await _store.getMessageRow(source, replyToId);
     // The row can be gone between the draft being queued and this read. An
     // empty question still lets the pointers answer.
+    // Link targets off the body: the selector is choosing which of the owner's
+    // files to read from what the message ASKS, and its own `messageCap` of
+    // 1500 is a budget a few automated anchors can spend on nothing. The strip
+    // runs here, before the task clamps, so the clamp measures words.
     final message = row == null
         ? ''
         : '${stripReFw(row['subject'] as String?)}\n'
-            '${row['body_text'] as String? ?? ''}';
+            '${stripLinkTargets(row['body_text'] as String? ?? '')}';
 
     final candidates = <({String path, String locator, String preview})>[];
     for (final hit in ordered.take(ContextSelectTask.maxCandidates)) {

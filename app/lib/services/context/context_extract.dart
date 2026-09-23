@@ -15,6 +15,8 @@ import 'dart:convert';
 
 import 'package:path/path.dart' as p;
 
+import '../html_text.dart';
+
 /// The ceiling on one file's words.
 ///
 /// A megabyte is about 250 pages. Past that a file is a log or a dump, and
@@ -71,172 +73,16 @@ ExtractedText? extractContextText(
 
 // ── HTML ───────────────────────────────────────────────────────────────
 
-/// The blocks whose contents are not prose and must go BEFORE anything else
-/// looks at a tag.
+/// A rendered page as the words a search can answer with.
 ///
-/// A Plotly export is the case this exists for: megabytes of embedded
-/// JavaScript wrapped around one page of findings. Strip the script first and
-/// what is left is the page; strip tags first and the index fills with
-/// minified JS that happens to contain English words.
-///
-/// The `(?<!/)` is what keeps a SELF-CLOSING tag out of this: `<svg …/>` opens
-/// nothing, so pairing it with the next `</svg>` on the page would delete
-/// everything between two unrelated charts.
-final RegExp _htmlDropped = RegExp(
-  r'<(script|style|svg|noscript|head)\b[^>]*(?<!/)>[\s\S]*?</\1\s*>',
-  caseSensitive: false,
-);
-
-/// The same blocks, UNCLOSED, running to the end of the file.
-///
-/// [_htmlDropped] only catches matched pairs, and a file that is truncated —
-/// a download interrupted, a page still being written when the walk reached
-/// it — routinely ends inside its `<script>`. Without this the tag is
-/// stripped by [_htmlAnyTag] and its whole body survives as prose, which is
-/// exactly the failure [_htmlDropped] exists to prevent.
-///
-/// Two exclusions, and both are about not deleting the document. A
-/// self-closing tag (`(?<!/)` again) never opened a block, and every
-/// matplotlib and Plotly export writes its inline `<svg …/>` that way — a
-/// sweep to end of file from one of those loses every finding below the
-/// chart. `head` is absent from the list entirely, because an omitted
-/// `</head>` is legal HTML rather than a truncation, and what follows it is
-/// the whole page; [_htmlOpenHead] handles that one properly.
-final RegExp _htmlUnclosed = RegExp(
-  r'<(script|style|svg|noscript)\b[^>]*(?<!/)>[\s\S]*$',
-  caseSensitive: false,
-);
-
-/// A `<head>` whose end tag was omitted, ending where the body begins.
-///
-/// Only ever reached when there is no `</head>` — a closed head is already
-/// gone with [_htmlDropped], leaving no `<head` for this to match. With no
-/// `<body` on the page the lookahead fails and nothing is dropped, which is
-/// the honest answer: there is no way to tell where such a head ends, and
-/// keeping a title and some meta is cheaper than losing the document.
-final RegExp _htmlOpenHead = RegExp(
-  r'<head\b[^>]*(?<!/)>[\s\S]*?(?=<body\b)',
-  caseSensitive: false,
-);
-
-final RegExp _htmlComment = RegExp(r'<!--[\s\S]*?-->');
-
-final RegExp _htmlHeadingOpen = RegExp(r'<h([1-6])\b[^>]*>', caseSensitive: false);
-final RegExp _htmlHeadingClose = RegExp(r'</h[1-6]\s*>', caseSensitive: false);
-final RegExp _htmlBlock = RegExp(
-  r'</?(p|div|section|article|li|tr|table|br|hr|blockquote|pre)\b[^>]*>',
-  caseSensitive: false,
-);
-final RegExp _htmlCell = RegExp(r'</(td|th)\s*>', caseSensitive: false);
-final RegExp _htmlAnyTag = RegExp(r'<[^>]*>');
-
-/// The attributes that carry the only words a picture has.
-///
-/// A chart in an analysis is an `<img>` or an inline `<svg>`, and its `alt`
-/// or `aria-label` is the one sentence saying what it shows — routinely the
-/// most retrievable line on the page.
-///
-/// `svg` earns its place here only for the SELF-CLOSING spelling: a matched
-/// `<svg>…</svg>` is gone with [_htmlDropped] before labels are lifted, and
-/// its label with it. That is the right trade — the alternative is lifting
-/// labels out of a block that may hold a megabyte of path data — and
-/// `<svg …/>`, which is what a chart export writes, keeps its sentence.
-final RegExp _htmlLabelled = RegExp(
-  r'<(img|svg|figure|div)\b[^>]*?\b(alt|aria-label|title)\s*=\s*'
-  '''(?:"([^"]*)"|'([^']*)')''',
-  caseSensitive: false,
-);
-
-/// A tag stripper, deliberately, and not a DOM.
-///
-/// There is no HTML parser in this app's dependencies (`xml` is XML-only and
-/// throws on the first unclosed `<br>`), and adding one to read a file the
-/// user already has is a dependency for a page of regexes. What this gives up
-/// is nesting-aware structure; what it keeps is every heading, every table
-/// cell, every paragraph and every picture's label, which is the whole of
-/// what a rendered analysis says.
-ExtractedText _fromHtml(String raw) {
-  // Order matters. Comments first (one can contain a `</script>` that would
-  // otherwise close a block early), then every matched block, then an
-  // unclosed head, and only then the unclosed tail — asking for the tail
-  // first would eat the rest of the page from the first `<script>` in a file
-  // that closes it perfectly well, and an unclosed script inside an unclosed
-  // head is a script the head sweep has already taken.
-  var text = raw
-      .replaceAll(_htmlComment, '')
-      .replaceAll(_htmlDropped, '')
-      .replaceAll(_htmlOpenHead, '')
-      .replaceAll(_htmlUnclosed, '');
-
-  // The picture labels are lifted out BEFORE the tags go, each onto its own
-  // line, because a stripper that only deletes tags deletes them with it.
-  final labels = <String>[];
-  for (final match in _htmlLabelled.allMatches(text)) {
-    final value = (match.group(3) ?? match.group(4) ?? '').trim();
-    if (value.isNotEmpty) labels.add(value);
-  }
-
-  text = text
-      .replaceAllMapped(
-        _htmlHeadingOpen,
-        (m) => '\n${'#' * int.parse(m.group(1)!)} ',
-      )
-      .replaceAll(_htmlHeadingClose, '\n')
-      .replaceAll(_htmlCell, '\t')
-      .replaceAll(_htmlBlock, '\n')
-      .replaceAll(_htmlAnyTag, '');
-
-  text = _decodeEntities(text);
-
-  // Runs of spaces collapse; tabs survive, because they are what separates
-  // one table cell from the next and a row read as one word is a row nobody
-  // can search.
-  text = text
-      .replaceAll(RegExp(r'[  ]+'), ' ')
-      .replaceAll(RegExp(r'[ \t]*\n[ \t]*'), '\n')
-      .replaceAll(RegExp(r'\n{3,}'), '\n\n')
-      .trim();
-
-  if (labels.isNotEmpty) text = '$text\n\n${labels.join('\n')}';
-  return ExtractedText(text.trim());
-}
-
-const Map<String, String> _namedEntities = {
-  '&amp;': '&',
-  '&lt;': '<',
-  '&gt;': '>',
-  '&quot;': '"',
-  '&#39;': "'",
-  '&apos;': "'",
-  '&nbsp;': ' ',
-};
-
-final RegExp _numericEntity = RegExp(r'&#(x?)([0-9a-fA-F]+);');
-
-/// `&amp;` LAST, so a double-escaped `&amp;lt;` becomes `&lt;` and not `<`.
-String _decodeEntities(String text) {
-  var out = text;
-  for (final entry in _namedEntities.entries) {
-    if (entry.key == '&amp;') continue;
-    out = out.replaceAll(entry.key, entry.value);
-  }
-  out = out.replaceAllMapped(_numericEntity, (m) {
-    final code = int.tryParse(m.group(2)!, radix: m.group(1)!.isEmpty ? 10 : 16);
-    // Out of range, a surrogate half, or unparseable: left as it was typed
-    // rather than turned into a replacement character. The surrogate range is
-    // named explicitly and it is the one that matters: half a pair is a
-    // string Dart will hold and UTF-8 cannot encode, so it would travel this
-    // far and then throw at the database write or the embedding POST.
-    if (code == null ||
-        code < 32 ||
-        code > 0x10ffff ||
-        (code >= 0xd800 && code <= 0xdfff)) {
-      return m.group(0)!;
-    }
-    return String.fromCharCode(code);
-  });
-  return out.replaceAll('&amp;', '&');
-}
+/// The conversion itself is shared with mail bodies and lives in
+/// `services/html_text.dart`; what belongs to THIS caller is the profile. A
+/// file the owner already has is read as a document: a chart's `alt` is the
+/// one sentence saying what it shows, and lifting it is the difference
+/// between an indexed finding and a picture. Mail wants the opposite of that
+/// and says so with its own profile.
+ExtractedText _fromHtml(String raw) =>
+    ExtractedText(htmlToText(raw, profile: HtmlProfile.document));
 
 // ── notebooks ──────────────────────────────────────────────────────────
 

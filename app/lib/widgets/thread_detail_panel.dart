@@ -11,6 +11,7 @@ import 'chips.dart';
 import 'hover_actions.dart';
 import 'inline_alert.dart';
 import 'link_unfurl.dart';
+import 'linked_text.dart';
 import 'message_row.dart';
 import 'preview/preview_kind.dart';
 import 'room_header.dart';
@@ -583,10 +584,23 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
   /// ANCESTOR — which here is behind the pane's opaque surface, where no hover
   /// could ever show.
   Widget _ctaBanner(String text) {
+    final open = widget.onOpenLink;
     final alert = InlineAlert(
       severity: InlineAlertSeverity.attention,
       text: text,
       maxLines: 2,
+      // The ask is written by a model reading the body, so it carries whatever
+      // link the body carried. Two lines still, ellipsised still — the tap
+      // opens the WHOLE address whichever half of it is on screen.
+      content: (style) => LinkedText(
+        text,
+        style: style,
+        onOpenLink:
+            open == null ? null : (target) => open(target.toString()),
+        selectable: false,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      ),
     );
     final why = widget.onWhy;
     final newest = _newestInbound;

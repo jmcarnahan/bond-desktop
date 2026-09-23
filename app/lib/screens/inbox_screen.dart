@@ -64,6 +64,7 @@ import '../widgets/bond_avatar.dart' show BondAvatar;
 import '../widgets/home_pane.dart';
 import '../widgets/icon_rail.dart';
 import '../widgets/inline_alert.dart';
+import '../widgets/linked_text.dart' show linkTargetOf;
 import '../widgets/message_history_host.dart';
 import '../widgets/needs_you_tabs.dart';
 import '../widgets/notification_ribbon.dart';
@@ -4282,16 +4283,20 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     }
   }
 
-  /// A file this app cannot fetch, opened where it actually lives.
+  /// A file this app cannot fetch, opened where it actually lives, and a link
+  /// in a body opened where it points.
   ///
-  /// Web addresses only. The url is the SENDER's string — a Teams card or a
-  /// reference attachment carries whatever the connector posted, verbatim —
-  /// so handing it straight to the operating system would let a message
-  /// launch a local application or mount a share behind a button that says
-  /// 'Open in Teams'. The panel already refuses to draw that button; this is
-  /// the guard behind it.
+  /// Web addresses and `mailto:`, nothing else. The url is the SENDER's string
+  /// — a Teams card or a reference attachment carries whatever the connector
+  /// posted, verbatim — so handing it straight to the operating system would
+  /// let a message launch a local application or mount a share behind a button
+  /// that says 'Open in Teams'. Every caller that draws a BUTTON already
+  /// refuses anything `webUriOf` refuses before drawing it, so the addition of
+  /// `mailto:` here reaches only the link spans `LinkedText` painted: a mail
+  /// composer, which is where a mail anchor goes. This is the guard behind all
+  /// of them.
   Future<void> _launchExternal(String url) async {
-    final uri = webUriOf(url);
+    final uri = linkTargetOf(url);
     if (uri == null) {
       _toast('That link is not a web address.');
       return;

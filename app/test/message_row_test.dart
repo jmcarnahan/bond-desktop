@@ -1089,6 +1089,165 @@ void main() {
     });
   });
 
+  group('links in a row', () {
+    /// A canonical link run: the label a sender saw, and an address long enough
+    /// that the clamp would have cut it.
+    const url = 'https://metrics.example.com/rooms/01f0b5d9c4e2';
+    const run = 'Dashboard <$url>';
+
+    /// Filler words exactly [chars] long, so a fixture can put a run where the
+    /// 600-character clamp will land on it.
+    String pad(int chars) => ('word ' * (chars ~/ 5 + 1)).substring(0, chars);
+
+    Future<List<String>> pump(WidgetTester tester, Message message,
+        {VoidCallback? onAskTap, bool openAsk = false}) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final opened = <String>[];
+      await tester.pumpWidget(_host(MessageRow(
+        message: message,
+        openAsk: openAsk,
+        onAskTap: onAskTap,
+        onOpenLink: opened.add,
+      )));
+      return opened;
+    }
+
+    testWidgets('a body paints the label and opens the whole address',
+        (tester) async {
+      final opened = await pump(
+        tester,
+        _msg(bodyText: 'Please check: $run before Friday.'),
+      );
+
+      expect(
+          find.text('Please check: Dashboard before Friday.'), findsOneWidget);
+      expect(find.textContaining('http'), findsNothing);
+
+      await tester.tapOnText(find.textRange.ofSubstring('Dashboard'));
+      await tester.pump();
+
+      expect(opened, [url]);
+    });
+
+    testWidgets('a clamped body still opens the whole address', (tester) async {
+      final opened = await pump(
+        tester,
+        _msg(bodyText: '$run ${pad(900)}'),
+      );
+
+      expect(find.text('Show more'), findsOneWidget);
+
+      await tester.tapOnText(find.textRange.ofSubstring('Dashboard'));
+      await tester.pump();
+
+      expect(opened, [url]);
+    });
+
+    testWidgets('and the clamp never paints half an address', (tester) async {
+      // The cut lands INSIDE the run: the whole token comes off rather than
+      // leaving a label whose address is half an address.
+      final opened = await pump(
+        tester,
+        _msg(bodyText: '${pad(580)}next. $run and the rest of it.'),
+      );
+
+      expect(find.textContaining('http'), findsNothing);
+      expect(find.textContaining('<'), findsNothing);
+      expect(find.text('Show more'), findsOneWidget);
+
+      await tester.tapOnText(find.textRange.ofSubstring('Dashboard'));
+      await tester.pump();
+      expect(opened, isEmpty);
+
+      await tester.tap(find.text('Show more'));
+      await tester.pump();
+      await tester.tapOnText(find.textRange.ofSubstring('Dashboard'));
+      await tester.pump();
+
+      expect(opened, [url]);
+    });
+
+    testWidgets("an ask line's link goes to the address, not the reply",
+        (tester) async {
+      var asks = 0;
+      final opened = await pump(
+        tester,
+        _msg(needsAction: true, actionItems: const ['Confirm access. $run']),
+        openAsk: true,
+        onAskTap: () => asks++,
+      );
+
+      expect(find.text('Confirm access. Dashboard'), findsOneWidget);
+
+      await tester.tapOnText(find.textRange.ofSubstring('Dashboard'));
+      await tester.pump();
+
+      expect(opened, [url]);
+      expect(asks, 0);
+
+      // The rest of the line is still the way into the reply.
+      await tester.tapOnText(find.textRange.ofSubstring('Confirm access'));
+      await tester.pump();
+
+      expect(asks, 1);
+      expect(opened, [url]);
+    });
+
+    testWidgets('a body paints the long anchor text real mail carries',
+        (tester) async {
+      // A gateway rewrote both addresses into something nobody reads, and the
+      // anchor text is a whole question. A body paints those; the ask line's
+      // tighter caps would have handed them back to the address.
+      const slot = 'https://links.example.net/?url=calendar.example.com'
+          '%2Fslots%2F7a2c&d=05';
+      const why = 'https://links.example.net/?url=support.example.com'
+          '%2Fwhy-this-mail&d=05';
+      final opened = await pump(
+        tester,
+        _msg(
+          bodyText: 'Does not suit? I want to choose another time <$slot>\n'
+              'Why am I receiving this notification from Office? <$why>',
+        ),
+      );
+
+      expect(find.textContaining('http'), findsNothing);
+
+      await tester.tapOnText(
+          find.textRange.ofSubstring('I want to choose another time'));
+      await tester.pump();
+      await tester.tapOnText(find.textRange
+          .ofSubstring('Why am I receiving this notification from Office?'));
+      await tester.pump();
+
+      expect(opened, [slot, why]);
+    });
+
+    testWidgets('a body with no whitespace in it still clamps to words',
+        (tester) async {
+      // Nothing to cut back to: dropping the token would leave an empty body,
+      // so the cut stands where the cap put it.
+      final blob = 'a1b2c3d4' * 120;
+      await pump(tester, _msg(bodyText: blob));
+
+      expect(find.textContaining(blob.substring(0, 64)), findsOneWidget);
+      expect(find.text('Show more'), findsOneWidget);
+    });
+
+    testWidgets('a row with nowhere to send a tap paints words', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(bodyText: 'Please check: $run before Friday.'),
+      )));
+
+      expect(
+          find.text('Please check: Dashboard before Friday.'), findsOneWidget);
+    });
+  });
+
   group('DayDivider', () {
     testWidgets('renders its label between two rules', (tester) async {
       await tester.pumpWidget(_host(const DayDivider(label: 'Yesterday')));

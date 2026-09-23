@@ -39,6 +39,7 @@ import '../services/search_fusion.dart';
 // over a string. The one-off below has to strip a stored body exactly the way
 // the ingest strips a fresh one, and a second spelling of the pattern here is
 // how the two would come to disagree about what the tip looks like.
+import '../services/mail_body.dart';
 import '../services/mail_text.dart';
 import 'attachment_chunk_index.dart';
 import 'conversation_vec_index.dart';
@@ -3773,6 +3774,136 @@ FROM messages
           _nowIso(),
           row.data['source'],
           row.data['source_message_id'],
+        ]),
+      );
+      changed++;
+    }
+    return changed;
+  }
+
+  /// Forgets the mail bodies a server's own HTML→text conversion produced, so
+  /// the lazy body fetch can bring them back through this app's converter.
+  /// Returns how many rows were cleared.
+  ///
+  /// Nulling rather than rewriting, because the noise is not recoverable: the
+  /// address in `label <https://…>` is all that is left of an anchor whose
+  /// label a table cell swallowed, and the `[Main Logo]` line is all that is
+  /// left of an image. Only a refetch of the HTML can say what the message
+  /// was, and `ensureBodies` already fetches exactly the rows with no body —
+  /// so the thread the owner opens next fills itself in and nothing is
+  /// refetched for a thread nobody reads.
+  ///
+  /// `updated_at` DOES NOT MOVE, and that is the whole reason this is one
+  /// statement of its own rather than a branch in
+  /// [stripSenderIdentificationTips]. The column is the keyword index's
+  /// watermark: restamping it here would offer the index a row whose body is
+  /// NULL, which indexes the message as having no words at all until somebody
+  /// opens its thread. Left alone, the row keeps the text it had until the
+  /// refill writes the new body through [updateMessageDetail], whose own stamp
+  /// is what hands the index the converted text exactly once.
+  ///
+  /// The three patterns are what a text conversion leaves and a person does
+  /// not: an address inside angle brackets, a `mailto:` run after a label, an
+  /// `[cid:…]` token. They also match a body THIS build's converter wrote,
+  /// which costs that thread one refetch and gets the same text back — the
+  /// wrong answer would be leaving a legacy body in place, so the patterns
+  /// stay generous.
+  Future<int> clearLegacyMailBodies({required String sinceIso}) =>
+      db.customUpdate(
+        'UPDATE messages SET body_text = NULL '
+        "WHERE source = 'email' AND body_text IS NOT NULL "
+        'AND received_at >= ? '
+        "AND (body_text LIKE '%<http%' "
+        "  OR body_text LIKE '% <mailto:%' "
+        "  OR body_text LIKE '%[cid:%')",
+        variables: _args([sinceIso]),
+      );
+
+  /// Rewrites the stored mail previews through the converter's link rules and
+  /// returns how many rows changed.
+  ///
+  /// A preview is the connector's own snippet, not a body: the server writes
+  /// it as text whatever this app prefers, so it arrives with the `label <url>`
+  /// runs in it and there is no HTML part to go back to. Unlike a body it is
+  /// worth rewriting in place — the label IS the snippet, and dropping the
+  /// address is the whole repair.
+  ///
+  /// Both places a preview is stored, because a list card reads one and a
+  /// thread row the other, and a repair that fixed one would leave the two
+  /// disagreeing on the same message.
+  ///
+  /// The message row's `updated_at` DOES NOT MOVE, and this is the one writer of
+  /// a message text column that leaves it alone. The keyword index files
+  /// `COALESCE(NULLIF(body_text, ''), body_preview, '')`, so a preview rewrite
+  /// changes the text the index would file only on a row with NO body — and
+  /// those are exactly the rows [clearLegacyMailBodies] just emptied in the same
+  /// pass, whose index entry still holds the words of the body it forgot.
+  /// Restamping them would trade a whole body for a 255-character snippet until
+  /// somebody opens the thread, which is the guarantee that method's own
+  /// still-column is there to make. On a row that DOES have a body the preview
+  /// is invisible to the index, so a stamp would re-file byte-identical text.
+  /// Neither kind of row is better off for a stamp and one is plainly worse, so
+  /// there is no case left to write one in — and the two other readers of this
+  /// column, [reclaimStaleTriage] and [reviveTerminalTriage], both count
+  /// BACKWARDS from now, so a stamp here would only postpone a stuck row's
+  /// rescue. The refill through [updateMessageDetail] is what hands the index
+  /// the converted body, exactly once, when there is one to hand over.
+  ///
+  /// The conversation row keeps its stamp, which is what every other writer of
+  /// that table does: no index files `last_message_preview` and nothing resumes
+  /// or counts backwards from `conversations.updated_at` — the list orders by
+  /// `last_message_at` — so the stamp there is bookkeeping about the row and
+  /// costs nothing.
+  ///
+  /// Candidates are found with a LIKE and a row is written only when the
+  /// rewrite changed something — [stripSenderIdentificationTips]' shape, for
+  /// its reasons.
+  Future<int> tidyMailPreviews() async {
+    var changed = 0;
+    final messages = await db
+        .customSelect(
+          'SELECT source, source_message_id, body_preview FROM messages '
+          "WHERE source = 'email' AND body_preview LIKE '%<%'",
+        )
+        .get();
+    for (final row in messages) {
+      final preview = row.data['body_preview'] as String?;
+      if (preview == null) continue;
+      final tidied = stripLinkTargets(tidyMailText(preview));
+      if (tidied == preview) continue;
+      // No `updated_at` here, deliberately — see above.
+      await db.customUpdate(
+        'UPDATE messages SET body_preview = ? '
+        'WHERE source = ? AND source_message_id = ?',
+        variables: _args([
+          tidied,
+          row.data['source'],
+          row.data['source_message_id'],
+        ]),
+      );
+      changed++;
+    }
+
+    final conversations = await db
+        .customSelect(
+          'SELECT source, conversation_key, last_message_preview '
+          'FROM conversations '
+          "WHERE source = 'email' AND last_message_preview LIKE '%<%'",
+        )
+        .get();
+    for (final row in conversations) {
+      final preview = row.data['last_message_preview'] as String?;
+      if (preview == null) continue;
+      final tidied = stripLinkTargets(tidyMailText(preview));
+      if (tidied == preview) continue;
+      await db.customUpdate(
+        'UPDATE conversations SET last_message_preview = ?, updated_at = ? '
+        'WHERE source = ? AND conversation_key = ?',
+        variables: _args([
+          tidied,
+          _nowIso(),
+          row.data['source'],
+          row.data['conversation_key'],
         ]),
       );
       changed++;

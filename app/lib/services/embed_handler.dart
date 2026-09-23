@@ -8,6 +8,7 @@ import 'extract_handler.dart';
 import 'llm/embeddings_client.dart';
 import 'llm/llm_client.dart';
 import 'llm/message_block.dart';
+import 'mail_body.dart' show stripLinkTargets;
 
 /// What happened when one message was offered to the embedding server.
 ///
@@ -55,8 +56,16 @@ Future<MessageEmbedOutcome> embedMessageRow(
   //
   // The cost of the change is one slow drain: every Teams message that carries
   // a marker gets a new `cardHash` and re-embeds once.
-  final stripped = stripAttachmentMarkers(
-    (body?.isNotEmpty ?? false) ? body : row['body_preview'] as String?,
+  //
+  // The `<target>` tails come off here too, and for the same "one place"
+  // reason. A vector is an average, and a tracking query averaged in is a
+  // hundred characters of somebody else's URL shape standing in for what the
+  // message said; the strip also runs before [buildMessageCard]'s own
+  // `messageCardBodyCap`, so the words that survive the clip are words.
+  final stripped = stripLinkTargets(
+    stripAttachmentMarkers(
+      (body?.isNotEmpty ?? false) ? body : row['body_preview'] as String?,
+    ),
   );
   // A message whose whole content was a shared file would otherwise embed as a
   // subject and a sender, and be findable by neither the file's name nor
