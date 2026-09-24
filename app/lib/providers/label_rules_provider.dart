@@ -215,6 +215,38 @@ class LabelRulesNotifier extends StateNotifier<LabelRulesState> {
     }
   }
 
+  /// "Show again" from the Recently dismissed view: ONE thread this rule filed
+  /// comes back, and the rule keeps standing. Returns whether anything moved,
+  /// or null when it failed.
+  ///
+  /// Never [undoRule], which deletes the rule and takes back every thread it
+  /// ever filed — see [MessageStore.showRuleFiledThread]. The list re-reads
+  /// because the rule's count moved.
+  Future<bool?> showThreadAgain(
+    String source,
+    String conversationKey,
+    String ruleId,
+  ) async {
+    try {
+      final moved = await _store.showRuleFiledThread(
+        source,
+        conversationKey,
+        ruleId: ruleId,
+      );
+      await load();
+      if (moved) await _announce();
+      return moved;
+    } catch (e) {
+      debugPrint('showing a rule-filed thread again failed: $e');
+      if (mounted) {
+        state = state.copyWith(
+          error: "Couldn't bring that thread back just now.",
+        );
+      }
+      return null;
+    }
+  }
+
   /// Tells the inbox list to re-read. A failure there is the list's own business
   /// and never the reason a write reads as failed — the rule is written either
   /// way, and saying otherwise would invite a second press that wrote it twice.

@@ -10,12 +10,14 @@ import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
+import 'package:bond_inbox/widgets/cheat_sheet_panel.dart';
 import 'package:bond_inbox/widgets/composer.dart';
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/widgets/conversation_row.dart';
 import 'package:bond_inbox/widgets/find_field.dart';
 import 'package:bond_inbox/widgets/label_picker.dart';
 import 'package:bond_inbox/widgets/side_panel.dart';
+import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -173,6 +175,18 @@ void main() {
     if (shift) await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
     await tester.sendKeyEvent(key);
     if (shift) await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+  }
+
+  /// `?` as the glyph a layout produces, which is what the binding listens
+  /// for — on a German keyboard it is not Shift+slash.
+  Future<void> pressQuestionMark(WidgetTester tester) async {
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.minus, character: '?');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.minus);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
     await tester.pump();
     await tester.pump();
     await tester.pump();
@@ -731,5 +745,114 @@ void main() {
     await press(tester, LogicalKeyboardKey.keyE);
     await settleQueues(tester);
     expect(find.text('1 of 2 cleared'), findsOneWidget);
+  });
+
+  testWidgets('? opens the sheet beside, and Escape closes it', (tester) async {
+    await seedPile();
+    await pumpInbox(tester);
+    await settleQueues(tester);
+
+    await pressQuestionMark(tester);
+    expect(find.byType(CheatSheetBody), findsOneWidget);
+    expect(find.text('Keyboard shortcuts'), findsOneWidget);
+    // Nothing was beside, so there is nothing to go back to.
+    expect(find.byKey(SidePanelHost.backKey), findsNothing);
+
+    await press(tester, LogicalKeyboardKey.escape);
+    expect(find.byType(CheatSheetBody), findsNothing);
+    expect(find.byType(SidePanelHost), findsNothing);
+    expect(unhandled, isEmpty);
+
+    // And the letters are the list's again.
+    await press(tester, LogicalKeyboardKey.keyJ);
+    expect(litRow(tester), 'Homepage copy');
+    await settleQueues(tester);
+  });
+
+  testWidgets('over a thread beside, the sheet goes ON it and Escape gives it '
+      'back', (tester) async {
+    await seedPile();
+    await pumpInbox(tester);
+    await settleQueues(tester);
+
+    await press(tester, LogicalKeyboardKey.keyJ);
+    expect(find.byType(ThreadDetailPanel), findsOneWidget);
+
+    await pressQuestionMark(tester);
+    expect(find.byType(CheatSheetBody), findsOneWidget);
+    expect(find.text('Back to Homepage copy'), findsOneWidget);
+
+    await press(tester, LogicalKeyboardKey.escape);
+    expect(find.byType(CheatSheetBody), findsNothing);
+    expect(find.byType(ThreadDetailPanel), findsOneWidget);
+    expect(litRow(tester), 'Homepage copy');
+    await settleQueues(tester);
+  });
+
+  testWidgets('] and [ walk the mentions of the thread open BESIDE',
+      (tester) async {
+    await seedPile();
+    // Two turns in c1 that name the owner, and one between them that does
+    // not. Older than the row's own message, so the pile's order holds.
+    Future<void> turn(String id, int hoursAgo, {required bool me}) =>
+        store.upsertMessage({
+          'source': 'email',
+          'source_message_id': id,
+          'conversation_key': 'c1',
+          'direction': 'inbound',
+          'subject': 'Homepage copy',
+          'from_name': 'Dana Whitfield',
+          'from_address': 'dana@example.com',
+          'received_at': ago(hoursAgo),
+          'body_text': 'turn $id',
+          'addressed_me': me ? 1 : 0,
+        });
+    await turn('c1-a', 6, me: true);
+    await turn('c1-b', 5, me: false);
+    await turn('c1-c', 4, me: true);
+    await pumpInbox(tester);
+    await settleQueues(tester);
+
+    // Needs You opens the thread beside the list, not in main.
+    await press(tester, LogicalKeyboardKey.keyJ);
+    expect(
+      find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.byType(ThreadDetailPanel),
+      ),
+      findsOneWidget,
+    );
+
+    Future<void> settleJump() async {
+      for (var i = 0; i < 20; i++) {
+        await tester.pump();
+      }
+    }
+
+    /// Whether the side transcript has lit [id] — the jump's own flash.
+    bool lit(String id) {
+      final box = tester.widget<DecoratedBox>(find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.byKey(ThreadDetailPanel.flashKeyFor(id)),
+      ));
+      return (box.decoration as BoxDecoration).color != null;
+    }
+
+    await press(tester, LogicalKeyboardKey.bracketRight);
+    await settleJump();
+    expect(lit('c1-a'), isTrue);
+
+    await press(tester, LogicalKeyboardKey.bracketRight);
+    await settleJump();
+    expect(lit('c1-c'), isTrue);
+    expect(lit('c1-a'), isFalse);
+
+    await press(tester, LogicalKeyboardKey.bracketLeft);
+    await settleJump();
+    expect(lit('c1-a'), isTrue);
+
+    expect(unhandled, isEmpty);
+    await tester.pump(ThreadDetailPanel.flashDuration);
+    await settleQueues(tester);
   });
 }

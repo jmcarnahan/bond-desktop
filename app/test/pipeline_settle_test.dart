@@ -6,6 +6,7 @@ import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/attention_service.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
+import 'package:bond_inbox/services/chat_mentions.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
@@ -423,7 +424,11 @@ class _UnreachableTeams implements TeamsBackend {
   Future<void> markChatRead(String chatId) => _no();
 
   @override
-  Future<Map<String, dynamic>> sendChatMessage(String chatId, String text) =>
+  Future<Map<String, dynamic>> sendChatMessage(
+    String chatId,
+    String text, {
+    List<ChatMention> mentions = const [],
+  }) =>
       _no();
 
   @override

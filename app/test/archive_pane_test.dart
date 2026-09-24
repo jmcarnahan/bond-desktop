@@ -1,3 +1,4 @@
+import 'package:bond_inbox/models/dismissed_thread.dart';
 import 'package:bond_inbox/models/home_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/widgets/archive_pane.dart';
@@ -85,6 +86,9 @@ void main() {
     void Function(String)? onSearch,
     VoidCallback? onExitSearch,
     Set<String> ownerDomains = const {},
+    List<DismissedThread> recentRows = const [],
+    bool recentLoaded = true,
+    void Function(String, String, String)? onShowAgain,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -116,17 +120,100 @@ void main() {
           onExitSearch: onExitSearch ?? () {},
           now: _now,
           ownerDomains: ownerDomains,
+          recentRows: recentRows,
+          recentLoaded: recentLoaded,
+          onShowAgain: onShowAgain,
         ),
       ),
     ));
   }
 
-  testWidgets('the three piles are offered as pills', (tester) async {
+  testWidgets('the three piles and the week look-back are offered as pills', (tester) async {
     await pump(tester, conversations: [_conv(id: 'a', bucket: 'later')]);
 
     expect(find.text('Later'), findsOneWidget);
     expect(find.text('Done'), findsOneWidget);
     expect(find.text('Dropped'), findsOneWidget);
+    expect(find.text('Recently dismissed'), findsOneWidget);
+  });
+
+  group('Recently dismissed', () {
+    final closed = DismissedThread(
+      conversation: _conv(
+        id: 'closed',
+        subject: 'Vendor renewal',
+        state: ConversationState.done,
+      ),
+      dismissedAt: '2026-01-14T11:00:00Z',
+    );
+    final filed = DismissedThread(
+      conversation: _conv(
+        id: 'filed',
+        subject: 'Build 4521 passed',
+        state: ConversationState.needsReply,
+      ),
+      dismissedAt: '2026-01-14T10:00:00Z',
+      ruleId: 'r1',
+      ruleScopeKind: 'sender',
+      ruleScopeValue: 'builds@ci.example.com',
+      ruleLabelName: 'CI noise',
+    );
+
+    testWidgets('each row says what took it, in place of its preview',
+        (tester) async {
+      await pump(
+        tester,
+        conversations: const [],
+        tab: ArchiveTab.recent,
+        recentRows: [closed, filed],
+      );
+
+      expect(find.text('Vendor renewal'), findsOneWidget);
+      expect(find.text('Dismissed'), findsOneWidget);
+      expect(find.text('Build 4521 passed'), findsOneWidget);
+      expect(find.text('Filed by rule "builds@ci.example.com" · CI noise'),
+          findsOneWidget);
+    });
+
+    testWidgets('Reopen only on a closed row, Show again only on a filed one',
+        (tester) async {
+      final reopened = <String>[];
+      final shown = <String>[];
+      await pump(
+        tester,
+        conversations: const [],
+        tab: ArchiveTab.recent,
+        recentRows: [closed, filed],
+        onReopen: (source, key) => reopened.add('$source/$key'),
+        onShowAgain: (source, key, rule) => shown.add('$source/$key/$rule'),
+      );
+
+      final closedRow = find.byKey(const ValueKey('recent-email-closed'));
+      final filedRow = find.byKey(const ValueKey('recent-email-filed'));
+      expect(find.descendant(of: closedRow, matching: find.text('Reopen')),
+          findsOneWidget);
+      expect(
+          find.descendant(of: closedRow, matching: find.text('Show again')),
+          findsNothing);
+      expect(find.descendant(of: filedRow, matching: find.text('Reopen')),
+          findsNothing);
+
+      await tester.tap(
+          find.descendant(of: filedRow, matching: find.text('Show again')));
+      await tester.tap(
+          find.descendant(of: closedRow, matching: find.text('Reopen')));
+
+      expect(shown, ['email/filed/r1']);
+      expect(reopened, ['email/closed']);
+    });
+
+    testWidgets('an empty week says so once it has been read',
+        (tester) async {
+      await pump(tester, conversations: const [], tab: ArchiveTab.recent);
+
+      expect(find.text('Nothing dismissed in the last 7 days.'),
+          findsOneWidget);
+    });
   });
 
   testWidgets('picking a pill asks the host to change tab', (tester) async {

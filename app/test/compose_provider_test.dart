@@ -11,6 +11,7 @@ import 'package:bond_inbox/services/backend/auth_session.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
+import 'package:bond_inbox/services/chat_mentions.dart';
 import 'package:bond_inbox/services/graph_mail.dart' show GraphMailException;
 import 'package:bond_inbox/services/graph_teams.dart' show GraphTeamsException;
 import 'package:bond_inbox/widgets/composer.dart' show SendCapability;
@@ -122,8 +123,9 @@ class _FakeTeams implements TeamsBackend {
   @override
   Future<Map<String, dynamic>> sendChatMessage(
     String chatId,
-    String text,
-  ) async {
+    String text, {
+    List<ChatMention> mentions = const [],
+  }) async {
     sends.add((chatId: chatId, text: text));
     final thrown = sendError;
     if (thrown != null) throw thrown;

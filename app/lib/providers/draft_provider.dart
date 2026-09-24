@@ -15,6 +15,7 @@ import '../services/backend/auth_session.dart';
 import '../services/backend/backend_types.dart';
 import '../services/backend/mail_backend.dart';
 import '../services/backend/teams_backend.dart';
+import '../services/chat_mentions.dart' show ChatMention;
 import '../services/draft_stream.dart';
 import '../services/graph_mail.dart';
 import '../services/graph_teams.dart' show GraphTeamsException;
@@ -236,6 +237,13 @@ class DraftState {
   /// Shown above the composer. Cleared by the next action.
   final String? error;
 
+  /// Something the owner should know about an act that WORKED, shown where
+  /// [error] would be but not in red — the copy rung's "the people you added
+  /// are not carried". Its own channel because the two ask different things
+  /// of the reader: an error says try again, and a notice says the thing
+  /// happened and here is its limit. Cleared everywhere [error] is.
+  final String? notice;
+
   /// Bumped once per SUCCESSFUL send, and only then. The screen keys the
   /// composer on it, so a completed send rebuilds a fresh empty reply box —
   /// the sent text must not sit there behind a re-enabled button, one stray
@@ -286,7 +294,7 @@ class DraftState {
 
   /// The people the owner has added to this reply, newest last, and not yet on
   /// any draft: they are applied inside [DraftNotifier.send] and cleared when it
-  /// succeeds.
+  /// succeeds — as Cc on mail, as real @mentions on a chat.
   ///
   /// Held HERE rather than in the composer because the composer is rebuilt with
   /// a fresh key on every staging and every send epoch, and somebody the owner
@@ -294,11 +302,11 @@ class DraftState {
   final List<Person> addedRecipients;
 
   /// Whether this connection can put them on the reply at all —
-  /// `MailBackendRecipients.canEditDraftRecipients`, and mail only.
+  /// `MailBackendRecipients.canEditDraftRecipients` on mail, and a Teams
+  /// backend at all on a chat, where they ride out as mention entities.
   ///
   /// False by default, which is the reading that offers nothing: a state built
-  /// before [DraftNotifier.load] has asked draws no picker, and a chat draws
-  /// none ever.
+  /// before [DraftNotifier.load] has asked draws no picker.
   final bool canEditRecipients;
 
   const DraftState({
@@ -311,6 +319,7 @@ class DraftState {
     this.sending = false,
     this.capability = SendCapability.copyOnly,
     this.error,
+    this.notice,
     this.sendEpoch = 0,
     this.pending,
     this.inFlightBody,
@@ -418,6 +427,7 @@ class DraftState {
     bool? sending,
     SendCapability? capability,
     Object? error = _unset,
+    Object? notice = _unset,
     int? sendEpoch,
     Object? pending = _unset,
     Object? inFlightBody = _unset,
@@ -437,6 +447,7 @@ class DraftState {
         sending: sending ?? this.sending,
         capability: capability ?? this.capability,
         error: identical(error, _unset) ? this.error : error as String?,
+        notice: identical(notice, _unset) ? this.notice : notice as String?,
         sendEpoch: sendEpoch ?? this.sendEpoch,
         pending: identical(pending, _unset)
             ? this.pending
@@ -666,12 +677,13 @@ class DraftNotifier extends StateNotifier<DraftState> {
     if (!mounted) return;
     state = state.copyWith(
       capability: capability,
-      // Mail AND a backend that can amend a draft's recipients. The source test
-      // is where the Teams decision lives: "adding somebody" to a chat would
-      // mean a real mention entity or a new group chat, neither of which is on
-      // this app's send path, and a plain-text name that notifies nobody reads
-      // to the sender as though somebody was told.
-      canEditRecipients: _source == 'email' && _mail.canEditDraftRecipients,
+      // Mail with a backend that can amend a draft's recipients, or a chat
+      // with a Teams backend behind it. On a chat "adding somebody" means a
+      // real mention entity, which both Teams backends send — no capability
+      // getter, because an MCP server too old for mentions refuses the send
+      // out loud rather than posting a name that notifies nobody.
+      canEditRecipients: (_source == 'email' && _mail.canEditDraftRecipients) ||
+          (_source == 'teams' && _teams != null),
     );
 
     final judgement = await _replyJudgement();
@@ -812,7 +824,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
     List<int> contextFileIds = const [],
   }) async {
     if (state.generating) return;
-    state = state.copyWith(generating: true, error: null);
+    state = state.copyWith(generating: true, error: null, notice: null);
     // Before ANY store write: a draft that would leave this machine and
     // cannot is a sentence, not a deleted row and a queued item that the
     // handler would then refuse.
@@ -901,7 +913,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
     final improve = _improve;
     final id = _draftKey;
     if (improve == null || id == null || state.improving) return;
-    state = state.copyWith(improving: true, error: null);
+    state = state.copyWith(improving: true, error: null, notice: null);
     String? line;
     try {
       line = await improve(_source, id);
@@ -957,7 +969,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
     );
     await _reloadDrafts();
     if (!mounted) return;
-    state = state.copyWith(error: null);
+    state = state.copyWith(error: null, notice: null);
   }
 
   /// Closes the short replies and leaves the draft alone. The row survives so
@@ -968,7 +980,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
     await _store.dismissDraftOptions(_source, replyTo);
     await _reloadDrafts();
     if (!mounted) return;
-    state = state.copyWith(error: null);
+    state = state.copyWith(error: null, notice: null);
   }
 
   /// Closes one message's suggestion cards — the inline card's ×.
@@ -982,7 +994,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
     await _store.dismissDraftOptions(_source, replyToMessageId);
     await _reloadDrafts();
     if (!mounted) return;
-    state = state.copyWith(error: null);
+    state = state.copyWith(error: null, notice: null);
   }
 
   /// Arms [send] to run in [undoWindow], and shows that it is armed.
@@ -1007,6 +1019,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
     state = state.copyWith(
       pending: (body: text, sendsAt: DateTime.now().add(_undoWindow)),
       error: null,
+      notice: null,
     );
     _pendingSend?.cancel();
     _pendingSend = Timer(_undoWindow, () {
@@ -1076,10 +1089,35 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// is false. People held here that the send could not apply would be dropped
   /// silently between the draft and the wire, and that is the one failure the
   /// owner has no way to see.
+  ///
+  /// On a chat, anybody without a Graph id is dropped here too: a mention
+  /// entity IS an id, and a name with none behind it would send as a mention
+  /// of nobody. The search already offers only people with one, so this is
+  /// the backstop, not the filter.
   void setAddedRecipients(List<Person> people) {
     if (!state.canEditRecipients && people.isNotEmpty) return;
-    state = state.copyWith(addedRecipients: List.unmodifiable(people));
+    final kept = _source == 'teams'
+        ? [
+            for (final person in people)
+              if (person.hasGraphId) person,
+          ]
+        : people;
+    state = state.copyWith(addedRecipients: List.unmodifiable(kept));
   }
+
+  /// The people added to a chat reply as the mentions its send carries —
+  /// read when the send FIRES, after the undo window, so a chip removed
+  /// during it is not mentioned.
+  List<ChatMention> _addedMentions() => [
+        for (final person in state.addedRecipients)
+          if (person.hasGraphId)
+            ChatMention(
+              userId: person.id,
+              displayName: person.displayName.isNotEmpty
+                  ? person.displayName
+                  : person.address,
+            ),
+      ];
 
   /// Sends, saves, or copies [body] — whichever this grant allows.
   ///
@@ -1106,11 +1144,13 @@ class DraftNotifier extends StateNotifier<DraftState> {
       // People the owner added are said out loud rather than silently not
       // carried: a clipboard has no recipients, so whoever pastes this has to
       // add them by hand. The copy still happens — refusing it would cost them
-      // the text as well.
+      // the text as well — which is why it is a [DraftState.notice] and not
+      // an error: nothing failed.
       if (mounted) {
         state = state.copyWith(
           inFlightBody: null,
-          error: state.addedRecipients.isEmpty
+          error: null,
+          notice: state.addedRecipients.isEmpty
               ? null
               : 'Copied. The people you added are not carried on a copy — '
                   'add them wherever you paste this.',
@@ -1150,7 +1190,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
       return SendOutcome.failed;
     }
 
-    state = state.copyWith(sending: true, error: null);
+    state = state.copyWith(sending: true, error: null, notice: null);
     try {
       final draft = await _mail.createReplyDraft(target);
       final draftId = draft['id'] as String? ?? '';
@@ -1296,9 +1336,13 @@ class DraftNotifier extends StateNotifier<DraftState> {
       throw StateError('A chat draft was built without a Teams backend.');
     }
 
-    state = state.copyWith(sending: true, error: null);
+    state = state.copyWith(sending: true, error: null, notice: null);
     try {
-      final sent = await teams.sendChatMessage(conversationKey, text);
+      final sent = await teams.sendChatMessage(
+        conversationKey,
+        text,
+        mentions: _addedMentions(),
+      );
       // The row, the fold and the recap, all in the writer compose-new shares
       // — see `outbound_chat.dart` for why a chat's own row is written here at
       // all, and for the null the writer answers when Graph hands back
@@ -1334,9 +1378,13 @@ class DraftNotifier extends StateNotifier<DraftState> {
       await _pipeline.clearNeedsYou(_source, conversationKey);
       await _logSent();
       await _reloadDrafts();
+      // The chips go in the same write as the epoch: left behind, they would
+      // mention the same people again on the next reply. A failed send never
+      // reaches here, so they stay for the retry.
       state = state.copyWith(
         sending: false,
         sendEpoch: state.sendEpoch + 1,
+        addedRecipients: const [],
       );
       await _onSent?.call();
       return SendOutcome.sent;

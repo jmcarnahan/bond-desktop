@@ -92,35 +92,55 @@ class RuleEvidence {
     return senderAddress.substring(at + 1);
   }
 
-  /// The front of the subject, when it has one a rule could match on.
-  ///
-  /// Two shapes and no others, because these are the two a machine writes and a
-  /// person does not: a bracketed tag at the very start (`[JIRA] `) and
-  /// everything up to and including a short leading colon (`Accepted: `). The
-  /// colon rule is capped at [_subjectPrefixCap] characters so a sentence with
-  /// a colon in the middle of it is prose rather than a prefix, and anything
-  /// under [_subjectPrefixFloor] is too short to mean anything.
-  ///
-  /// Lowercased, because `label_rules.scope_value` is stored folded and the
-  /// matcher compares folded.
-  String? get subjectPrefix {
-    if (subject.isEmpty) return null;
-    final bracket = _bracketedTag.firstMatch(subject);
-    if (bracket != null) return _prefixOrNull(bracket.group(0)!);
-    final colon = subject.indexOf(':');
-    if (colon < 0 || colon > _subjectPrefixCap) return null;
-    return _prefixOrNull(subject.substring(0, colon + 1));
-  }
-
-  static String? _prefixOrNull(String raw) {
-    final prefix = raw.trim().toLowerCase();
-    return prefix.length < _subjectPrefixFloor ? null : prefix;
-  }
+  /// The front of the subject, when it has one a rule could match on — see
+  /// [subjectPrefixOf], which this delegates to.
+  String? get subjectPrefix => subjectPrefixOf(subject);
 
   @override
   String toString() =>
       'RuleEvidence($threadKey, $senderAddress, $classification)';
 }
+
+/// The front of a subject, when it has one a rule could match on.
+///
+/// Two shapes and no others, because these are the two a machine writes and a
+/// person does not: a bracketed tag at the very start (`[JIRA] `) and
+/// everything up to and including a short leading colon (`Accepted: `). The
+/// colon rule is capped at [_subjectPrefixCap] characters so a sentence with
+/// a colon in the middle of it is prose rather than a prefix, and anything
+/// under [_subjectPrefixFloor] is too short to mean anything.
+///
+/// A reply or forward marker (`Re:`, `Fw:`, `Fwd:`, `AW:`, `SV:`) is NOT a
+/// prefix: a person's mail client writes it, not a machine, so it names no
+/// kind of mail — a rule on `re:` would hide every reply, and select-similar
+/// on it would select them all.
+///
+/// Lowercased, because `label_rules.scope_value` is stored folded and the
+/// matcher compares folded. Top-level rather than on [RuleEvidence] because
+/// select-similar asks the same question of a drawn row, and the chip must
+/// select exactly what a subject rule written from it would match.
+String? subjectPrefixOf(String? subject) {
+  final text = subject?.trim() ?? '';
+  if (text.isEmpty) return null;
+  final bracket = _bracketedTag.firstMatch(text);
+  if (bracket != null) return _prefixOrNull(bracket.group(0)!);
+  final colon = text.indexOf(':');
+  if (colon < 0 || colon > _subjectPrefixCap) return null;
+  final prefix = _prefixOrNull(text.substring(0, colon + 1));
+  if (prefix == null) return null;
+  final word = prefix.substring(0, prefix.length - 1).trim();
+  return _replyMarkers.contains(word) ? null : prefix;
+}
+
+String? _prefixOrNull(String raw) {
+  final prefix = raw.trim().toLowerCase();
+  return prefix.length < _subjectPrefixFloor ? null : prefix;
+}
+
+/// The markers a mail client puts in front of a subject it is answering or
+/// passing on, in the languages a mailbox here is likely to meet (`AW` and
+/// `SV` are the German and Scandinavian replies).
+const Set<String> _replyMarkers = {'re', 'fw', 'fwd', 'aw', 'sv'};
 
 /// A bracketed tag at the very start of a subject. `classification.dart` has
 /// its own copy of this shape for its own question, and the two are deliberately

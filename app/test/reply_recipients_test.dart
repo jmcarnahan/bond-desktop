@@ -181,12 +181,16 @@ class _Host extends StatefulWidget {
     required this.changes,
     this.canEditRecipients = true,
     this.initial = const [],
+    this.channel = RecipientChannel.mail,
+    this.refuse,
   });
 
   final Future<RecipientResults> Function(String) search;
   final List<List<Person>> changes;
   final bool canEditRecipients;
   final List<Person> initial;
+  final RecipientChannel channel;
+  final String? Function(Person)? refuse;
 
   @override
   State<_Host> createState() => _HostState();
@@ -204,6 +208,8 @@ class _HostState extends State<_Host> {
       addedRecipients: _added,
       canEditRecipients: widget.canEditRecipients,
       recipientSearch: widget.search,
+      recipientChannel: widget.channel,
+      refuseRecipient: widget.refuse,
       onRecipientsChanged: (next) {
         widget.changes.add(next);
         setState(() => _added = next);
@@ -432,6 +438,8 @@ void main() {
       bool canEditRecipients = true,
       List<Person> initial = const [],
       List<List<Person>>? changes,
+      RecipientChannel channel = RecipientChannel.mail,
+      String? Function(Person)? refuse,
     }) async {
       await tester.binding.setSurfaceSize(const Size(900, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -442,6 +450,8 @@ void main() {
             changes: changes ?? <List<Person>>[],
             canEditRecipients: canEditRecipients,
             initial: initial,
+            channel: channel,
+            refuse: refuse,
           ),
         ),
       ));
@@ -593,6 +603,55 @@ void main() {
       // No picker appeared, and no chip: nobody was taken on and then dropped.
       expect(find.byKey(Composer.recipientsKey), findsNothing);
       expect(find.byType(TextField), findsOneWidget);
+    });
+
+    testWidgets('on a chat the people picked are mentions, and say so',
+        (tester) async {
+      final changes = <List<Person>>[];
+      await pumpHost(
+        tester,
+        changes: changes,
+        channel: RecipientChannel.teams,
+      );
+
+      await tester.enterText(bodyField(), 'Looping in @');
+      await tester.pump();
+      expect(find.text('Reply in this chat'), findsOneWidget);
+      await tester.enterText(pickerField(), 'dana');
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('recipient-option-user-dana')));
+      await tester.pump();
+
+      expect(changes.single.single.id, 'user-dana');
+      expect(find.text('Reply in this chat, mentioning 1 person'),
+          findsOneWidget);
+      // The `@Name` the send turns into the mention's at-tag.
+      expect(find.text('Looping in @Dana Okoye '), findsOneWidget);
+    });
+
+    testWidgets('somebody the chat is known not to hold is refused at the pick',
+        (tester) async {
+      final changes = <List<Person>>[];
+      await pumpHost(
+        tester,
+        changes: changes,
+        channel: RecipientChannel.teams,
+        refuse: (person) => '${person.displayName} is not in this chat.',
+      );
+
+      await tester.enterText(bodyField(), 'Looping in @');
+      await tester.pump();
+      await tester.enterText(pickerField(), 'dana');
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('recipient-option-user-dana')));
+      await tester.pump();
+
+      expect(changes.single, isEmpty);
+      expect(find.byKey(Composer.recipientPickRefusedKey), findsOneWidget);
+      expect(find.text('Dana Okoye is not in this chat.'), findsOneWidget);
+      expect(find.text('Reply in this chat'), findsOneWidget);
+      // Nothing was written into the sentence for a person not added.
+      expect(find.text('Looping in @'), findsOneWidget);
     });
   });
 }

@@ -248,10 +248,19 @@ class Conversation {
   /// is waiting on. Null on every read that does not run the subquery in
   /// `loadConversations`, and on a thread with no inbound mail at all.
   ///
-  /// Carried for [isExternalTo] and for nothing else, which is why it is an
-  /// address and not a [Participant]: the name beside it is already on
-  /// [participants], and a second copy of it could disagree with the first.
+  /// Carried for [isExternalTo] and for select-similar's sender and domain
+  /// scopes (`services/select_similar.dart`), and for nothing else, which is
+  /// why it is an address and not a [Participant]: the name beside it is
+  /// already on [participants], and a second copy of it could disagree with
+  /// the first.
   final String? latestInboundFrom;
+
+  /// When [state] last moved, as the store stamped it — `setConversationState`
+  /// is the one writer, and it runs only when a person moves a thread (sync's
+  /// fold never does). Null on a thread nobody has moved and on every read that
+  /// does not carry the column. Read by the Recently dismissed view, which is
+  /// the one place "dismissed 3 days ago" is a different row from "just now".
+  final String? stateChangedAt;
 
   const Conversation({
     required this.id,
@@ -282,6 +291,7 @@ class Conversation {
     this.needsYouReasonAt,
     this.replyExpected,
     this.latestInboundFrom,
+    this.stateChangedAt,
   });
 
   /// Whether this thread came from outside the owner's own organisation.
@@ -365,6 +375,7 @@ class Conversation {
       needsYouReasonAt: needsYouReasonAt,
       replyExpected: replyExpected,
       latestInboundFrom: latestInboundFrom,
+      stateChangedAt: stateChangedAt,
     );
   }
 
@@ -402,6 +413,7 @@ class Conversation {
       needsYouReasonAt: needsYouReasonAt,
       replyExpected: replyExpected,
       latestInboundFrom: latestInboundFrom,
+      stateChangedAt: stateChangedAt,
     );
   }
 
@@ -488,6 +500,8 @@ class Conversation {
       // reads as "cannot tell who this is from", and [isExternalTo] answers
       // false to that rather than calling an unknown sender a stranger.
       latestInboundFrom: row['latest_inbound_from'] as String?,
+      // A column of the thread's own row, so every `c.*` read carries it.
+      stateChangedAt: row['state_changed_at'] as String?,
     );
   }
 }

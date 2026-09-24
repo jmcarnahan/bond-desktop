@@ -14,10 +14,11 @@ import 'icon_rail.dart' show IconRail;
 /// second nullable field per kind is how the file preview and the full viewer
 /// drifted apart — one could be set while the other said something else.
 ///
-/// Seven kinds: a thread, a file, a person, the reasoning behind one
+/// Eight kinds: a thread, a file, a person, the reasoning behind one
 /// message's verdict, the whole story of what the pipeline did to one
 /// message, which of the owner's own directories a room reads when a reply is
-/// drafted in it, and one indexed file out of one of those directories.
+/// drafted in it, one indexed file out of one of those directories, and the
+/// keyboard cheat sheet.
 sealed class SidePanel {
   const SidePanel();
 }
@@ -139,6 +140,14 @@ final class ContextFilePanel extends SidePanel {
   final DraftTarget? from;
 
   const ContextFilePanel({required this.fileId, this.locator, this.from});
+}
+
+/// The keys, read beside the list they work on — `?`.
+///
+/// About nothing in particular, so it carries nothing: there is one sheet, and
+/// two of it are the same panel.
+final class CheatSheetPanel extends SidePanel {
+  const CheatSheetPanel();
 }
 
 /// The chrome around whatever is open beside the main pane: where a pop lands,

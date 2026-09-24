@@ -3,6 +3,7 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/label_models.dart';
+import 'package:bond_inbox/models/message_models.dart' show ConversationState;
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -858,6 +859,300 @@ void main() {
       );
 
       expect(await store.regateMeetingResponses(), 0);
+    });
+  });
+
+  /// Requirement 12i's Recently dismissed view: the owner's dismissals and the
+  /// rules' filings, one row per thread, newest first, each attributed.
+  group('recently_dismissed', () {
+    String daysAgo(int days) => ago(days * 24);
+
+    Future<void> stampDone(String key, String at) async {
+      await store.setConversationState('email', key, ConversationState.done);
+      await db.customUpdate(
+        'UPDATE conversations SET state_changed_at = ? '
+        'WHERE conversation_key = ?',
+        variables: [Variable(at), Variable(key)],
+      );
+    }
+
+    Future<void> stampFiled(String key, String at) => db.customUpdate(
+          'UPDATE conversation_labels SET applied_at = ? '
+          'WHERE conversation_key = ? AND rule_id IS NOT NULL',
+          variables: [Variable(at), Variable(key)],
+        );
+
+    Future<LabelRule> hideRule({
+      String value = 'alerts@tracker.example.com',
+      String name = 'Tracker noise',
+      String disposition = LabelRule.hideNeedsYou,
+    }) async {
+      final label = await store.createLabel(name);
+      return store.createLabelRule(
+        labelId: label.id,
+        scopeKind: LabelRule.scopeSender,
+        scopeValue: value,
+        disposition: disposition,
+      );
+    }
+
+    Future<List<String>> keys() async => [
+          for (final row
+              in await store.recentlyDismissed(sinceIso: daysAgo(7)))
+            row.conversation.id,
+        ];
+
+    test('a dismissal inside the window is there, one outside is not',
+        () async {
+      await seedConversation('inside');
+      await seedConversation('outside');
+      final closedAt = ago(3);
+      await stampDone('inside', closedAt);
+      await stampDone('outside', daysAgo(9));
+
+      final rows = await store.recentlyDismissed(sinceIso: daysAgo(7));
+
+      expect(rows.map((r) => r.conversation.id), ['inside']);
+      final row = rows.single;
+      expect(row.byRule, isFalse);
+      expect(row.reopenable, isTrue);
+      expect(row.dismissedAt, closedAt);
+      expect(row.conversation.stateChangedAt, closedAt);
+      expect(row.caption, 'Dismissed');
+    });
+
+    test('a dismissal names the labels the owner filed it under', () async {
+      await seedConversation('c1');
+      final word = await store.createLabel('Waiting on legal');
+      await store.applyLabels('email', 'c1', [word.id]);
+      await stampDone('c1', ago(1));
+
+      final row = (await store.recentlyDismissed(sinceIso: daysAgo(7))).single;
+
+      expect(row.caption, 'Dismissed · Waiting on legal');
+    });
+
+    test('a reopened thread is not dismissed any more', () async {
+      await seedConversation('c1');
+      await stampDone('c1', ago(1));
+      await store.setConversationState(
+          'email', 'c1', ConversationState.needsReply);
+
+      expect(await keys(), isEmpty);
+    });
+
+    test('a rule-filed thread carries the rule and its label', () async {
+      await seedMessage('m1', conversationKey: 'c1');
+      final rule = await hideRule();
+      await store.applyLabelRule(rule.id);
+
+      final row = (await store.recentlyDismissed(sinceIso: daysAgo(7))).single;
+
+      // A rule hides without dismissing: the thread is still needs_reply, and
+      // it is here anyway — the whole reason the read is a union.
+      expect(row.conversation.state, ConversationState.needsReply);
+      expect(row.byRule, isTrue);
+      expect(row.reopenable, isFalse);
+      expect(row.ruleId, rule.id);
+      expect(row.ruleScopeKind, LabelRule.scopeSender);
+      expect(row.ruleScopeValue, 'alerts@tracker.example.com');
+      expect(row.ruleLabelName, 'Tracker noise');
+      expect(row.caption,
+          'Filed by rule "alerts@tracker.example.com" · Tracker noise');
+    });
+
+    test('a link the owner applied by hand is not a rule filing', () async {
+      await seedConversation('c1');
+      final word = await store.createLabel('Waiting on legal');
+      await store.applyLabels('email', 'c1', [word.id]);
+
+      expect(await keys(), isEmpty);
+    });
+
+    test('a rule filing outside the window is not there', () async {
+      await seedMessage('m1', conversationKey: 'c1', hoursAgo: 9 * 24);
+      final rule = await hideRule();
+      await store.applyLabelRule(rule.id);
+      await stampFiled('c1', daysAgo(8));
+
+      expect(await keys(), isEmpty);
+    });
+
+    test('newest first across both populations', () async {
+      await seedConversation('closed-old');
+      await seedConversation('closed-new');
+      await seedMessage('m1', conversationKey: 'filed-mid');
+      final rule = await hideRule();
+      await store.applyLabelRule(rule.id);
+      await stampDone('closed-old', daysAgo(5));
+      await stampFiled('filed-mid', daysAgo(2));
+      await stampDone('closed-new', ago(1));
+
+      expect(await keys(), ['closed-new', 'filed-mid', 'closed-old']);
+    });
+
+    test('a thread both dismissed and filed appears once, as the newer',
+        () async {
+      await seedMessage('m1', conversationKey: 'dismissed-last',
+          hoursAgo: 4 * 24);
+      await seedMessage('m2', conversationKey: 'filed-last', hoursAgo: 4 * 24);
+      final rule = await hideRule();
+      await store.applyLabelRule(rule.id);
+      await stampFiled('dismissed-last', daysAgo(3));
+      final closedAt = ago(2);
+      final filedAt = ago(5);
+      await stampDone('dismissed-last', closedAt);
+      await stampDone('filed-last', daysAgo(3));
+      await stampFiled('filed-last', filedAt);
+
+      final rows = await store.recentlyDismissed(sinceIso: daysAgo(7));
+
+      expect(rows.map((r) => r.conversation.id),
+          ['dismissed-last', 'filed-last']);
+      final dismissed = rows.first;
+      expect(dismissed.dismissedAt, closedAt);
+      expect(dismissed.byRule, isFalse);
+      expect(dismissed.caption, startsWith('Dismissed'));
+      final filed = rows.last;
+      expect(filed.dismissedAt, filedAt);
+      expect(filed.ruleId, rule.id);
+      // Closed by hand as well, so Reopen still applies to it.
+      expect(filed.reopenable, isTrue);
+    });
+
+    // `applied_at` is the FIRST filing and is never refreshed (the insert's
+    // count is what the tally and undo stand on), so a rule that has kept a
+    // thread hidden for weeks is dated by the newest mail it hid.
+    test('a hide rule filed long ago that hid mail today is there', () async {
+      await seedMessage('m1', conversationKey: 'c1', hoursAgo: 10 * 24);
+      final rule = await hideRule();
+      await store.applyLabelRule(rule.id);
+      await stampFiled('c1', daysAgo(10));
+      await seedMessage('m2', conversationKey: 'c1', hoursAgo: 1);
+      await store.writeNeedsYouVerdict('email', 'm2',
+          verdict: false, reason: rule.verdictReason);
+
+      final row = (await store.recentlyDismissed(sinceIso: daysAgo(7))).single;
+
+      expect(row.conversation.id, 'c1');
+      expect(row.ruleId, rule.id);
+      expect(row.dismissedAt,
+          (await store.getMessageRow('email', 'm2'))!['received_at']);
+    });
+
+    test('but mail the floor raised past the rule does not date it',
+        () async {
+      await seedMessage('m1', conversationKey: 'c1', hoursAgo: 10 * 24);
+      final rule = await hideRule();
+      await store.applyLabelRule(rule.id);
+      await stampFiled('c1', daysAgo(10));
+      // "Shown despite": the rule's reason under a YES, which the rule did
+      // not hide.
+      await seedMessage('m2', conversationKey: 'c1', hoursAgo: 1);
+      await store.writeNeedsYouVerdict('email', 'm2',
+          verdict: true, reason: rule.verdictReason);
+
+      expect(await keys(), isEmpty);
+    });
+
+    test('a later rule filed long ago is dated by the newest inbound',
+        () async {
+      await seedMessage('m1', conversationKey: 'c1', hoursAgo: 10 * 24);
+      final rule = await hideRule(disposition: LabelRule.sendToLater);
+      await store.applyLabelRule(rule.id);
+      await stampFiled('c1', daysAgo(10));
+      expect(await keys(), isEmpty);
+
+      await seedMessage('m2', conversationKey: 'c1', hoursAgo: 1);
+
+      expect(await keys(), ['c1']);
+    });
+
+    test('a rule deleted since still says a rule filed it', () async {
+      await seedMessage('m1', conversationKey: 'c1');
+      final rule = await hideRule();
+      await store.applyLabelRule(rule.id);
+      await store.deleteLabelRule(rule.id);
+
+      final row = (await store.recentlyDismissed(sinceIso: daysAgo(7))).single;
+
+      expect(row.caption, 'Filed by a rule · Tracker noise');
+    });
+
+    group('showRuleFiledThread', () {
+      test('shows one thread and leaves the rule standing', () async {
+        await seedMessage('m1', conversationKey: 'c1');
+        await seedMessage('m2', conversationKey: 'c2');
+        final rule = await hideRule();
+        await store.applyLabelRule(rule.id);
+        expect((await store.getLabelRule(rule.id))!.hiddenCount, 2);
+
+        expect(
+          await store.showRuleFiledThread('email', 'c1', ruleId: rule.id),
+          isTrue,
+        );
+
+        // The rule is still there and still holds the OTHER thread.
+        final standing = await store.getLabelRule(rule.id);
+        expect(standing, isNotNull);
+        expect(standing!.hiddenCount, 1);
+        expect(await linksOf('c1'), isEmpty);
+        expect(await linksOf('c2'), hasLength(1));
+        expect((await store.getMessageRow('email', 'm2'))!['needs_you_reason'],
+            'label_rule:Tracker noise');
+
+        // The thread's verdict goes back to never-judged, it is queued, and
+        // the stamp keeps the standing rule from re-hiding it on that pass.
+        final row = (await store.getMessageRow('email', 'm1'))!;
+        expect(row['needs_you_verdict'], isNull);
+        expect(row['needs_you_reason'], isNull);
+        expect(row['gate_override'], 'user');
+        expect(await pendingNeedsYou(), ['m1']);
+        expect(await keys(), ['c2']);
+      });
+
+      test('clears the bucket a later rule wrote, under the owner\'s word',
+          () async {
+        await seedMessage('m1', conversationKey: 'c1');
+        final rule = await hideRule(disposition: LabelRule.sendToLater);
+        await store.applyLabelRule(rule.id);
+        expect((await aiRow('c1'))!['bucket'], 'later');
+
+        await store.showRuleFiledThread('email', 'c1', ruleId: rule.id);
+
+        final ai = (await aiRow('c1'))!;
+        expect(ai['bucket'], isNull);
+        // `'user'` is what the attention sweep refuses to overrule, so the
+        // sweep does not file it straight back under the same rule.
+        expect(ai['bucket_reason'], 'user');
+        expect(await store.getLabelRule(rule.id), isNotNull);
+      });
+
+      test('a hide rule leaves a bucket the owner set by hand', () async {
+        await seedMessage('m1', conversationKey: 'c1');
+        await store.setConversationBucket('email', 'c1',
+            bucket: 'later', reason: 'user');
+        final rule = await hideRule();
+        await store.applyLabelRule(rule.id);
+
+        await store.showRuleFiledThread('email', 'c1', ruleId: rule.id);
+
+        expect((await aiRow('c1'))!['bucket'], 'later');
+      });
+
+      test('writes nothing when the rule never filed the thread', () async {
+        await seedMessage('m1', conversationKey: 'c1');
+        final rule = await hideRule(value: 'someone@else.example.com');
+
+        expect(
+          await store.showRuleFiledThread('email', 'c1', ruleId: rule.id),
+          isFalse,
+        );
+        expect(
+            (await store.getMessageRow('email', 'm1'))!['gate_override'],
+            isNull);
+        expect(await pendingNeedsYou(), isEmpty);
+      });
     });
   });
 }

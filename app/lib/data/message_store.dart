@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:drift/drift.dart';
 
 import '../models/attachment_models.dart';
+import '../models/dismissed_thread.dart';
 import '../models/drafts_models.dart';
 import '../models/files_models.dart';
 import '../models/home_models.dart';
@@ -931,27 +932,22 @@ WHERE source = ? AND conversation_key = ?
           // The newest inbound message's deadline, in the sender's own words.
           // The newest one's and nobody else's: a date somebody named three
           // replies ago is history, and a Deadlines tab that surfaced it would
-          // be listing threads whose deadline has already been answered.
-          '  (SELECT m4.deadline FROM messages m4 '
-          '   WHERE m4.source = c.source AND m4.conversation_key = c.conversation_key '
-          "     AND m4.direction = 'inbound' "
-          '   ORDER BY m4.received_at DESC, m4.source_message_id DESC LIMIT 1'
-          '  ) AS latest_deadline, '
-          // How many suggestions are waiting on this thread — and the
-          // subselect is the SAME newest-inbound rule [getDraft] uses, on
+          // be listing threads whose deadline has already been answered. Off
+          // the `ni` join below, which is that message.
+          '  ni.deadline AS latest_deadline, '
+          // How many suggestions are waiting on this thread — and the message
+          // it keys off is the SAME newest-inbound rule [getDraft] uses, on
           // purpose. A pending draft is the one the thread would actually
           // show; a suggestion left against an older message is history, not
           // work, and counting it would put a badge on a thread whose composer
-          // is empty.
+          // is empty. A thread with no inbound mail joins no `ni`, and
+          // `= NULL` matches nothing, so it counts zero exactly as the old
+          // subselect's NULL did.
           '  (SELECT COUNT(*) FROM drafts d '
           '   WHERE d.source = c.source AND d.conversation_key = c.conversation_key '
           "     AND d.status IN ('suggested','edited') "
-          '     AND d.reply_to_message_id = ('
-          '       SELECT m3.source_message_id FROM messages m3 '
-          '        WHERE m3.source = c.source AND m3.conversation_key = c.conversation_key '
-          "          AND m3.direction = 'inbound' "
-          '        ORDER BY m3.received_at DESC, m3.source_message_id DESC LIMIT 1'
-          '     )) AS pending_draft_count, '
+          '     AND d.reply_to_message_id = ni.source_message_id'
+          '  ) AS pending_draft_count, '
           // The owner's own words on the thread, three fields per label packed
           // into one column: a correlated GROUP_CONCAT rather than a join,
           // because a join would multiply every row above by its labels and
@@ -968,79 +964,87 @@ WHERE source = ? AND conversation_key = ?
           // from a subselect it reads — the same most-used-first order
           // [listLabels] and [labelsForConversation] use, so a row and the
           // thread it opens draw their chips alike.
-          '  (SELECT GROUP_CONCAT('
-          "     o.id || '$labelFieldSeparator' || o.name || "
-          "     '$labelFieldSeparator' || COALESCE(o.tone, ''), "
-          "     '$labelRecordSeparator') "
-          '   FROM (SELECT l.id, l.name, l.tone FROM conversation_labels cl '
-          '         JOIN labels l ON l.id = cl.label_id '
-          '         WHERE cl.source = c.source '
-          '           AND cl.conversation_key = c.conversation_key '
-          '         ORDER BY l.use_count DESC, l.last_used_at DESC, '
-          '                  l.name ASC) o) AS labels, '
+          '  ${_labelsConcatSql()} AS labels, '
           // WHY the thread wants the owner, and off WHICH message: the newest
-          // KEPT inbound one the needs-you pass judged YES with a reason. Three
-          // columns and therefore three subselects — SQLite has no way to take
-          // several columns from one — each the identical ORDER BY, so the three
+          // KEPT inbound one the needs-you pass judged YES with a reason — the
+          // `nr` join below. Three columns off ONE joined row, so the three
           // cannot name different messages.
-          //
-          // `needs_you_verdict = 1` is load-bearing, not tidiness. A reason on a
-          // `0` verdict explains why a message does NOT want the owner (a rule
-          // hid it, or the model read it and said no), and printing that under
-          // "Why does this need a reply" would answer the opposite question.
-          // `keptMessageSql` is the other half: a bot post the gate threw out is
-          // never "the latest inbound awaiting you" (requirement 8a), and the
-          // clause is what makes that true here as everywhere else.
-          '  (SELECT m5.needs_you_reason FROM messages m5 '
-          '   WHERE m5.source = c.source '
-          '     AND m5.conversation_key = c.conversation_key '
-          "     AND m5.direction = 'inbound' AND ${keptMessageSql('m5')} "
-          '     AND m5.needs_you_verdict = 1 '
-          '     AND m5.needs_you_reason IS NOT NULL '
-          '   ORDER BY m5.received_at DESC, m5.source_message_id DESC LIMIT 1'
-          '  ) AS needs_you_reason, '
-          '  (SELECT m6.source_message_id FROM messages m6 '
-          '   WHERE m6.source = c.source '
-          '     AND m6.conversation_key = c.conversation_key '
-          "     AND m6.direction = 'inbound' AND ${keptMessageSql('m6')} "
-          '     AND m6.needs_you_verdict = 1 '
-          '     AND m6.needs_you_reason IS NOT NULL '
-          '   ORDER BY m6.received_at DESC, m6.source_message_id DESC LIMIT 1'
-          '  ) AS needs_you_reason_message_id, '
-          '  (SELECT m7.received_at FROM messages m7 '
-          '   WHERE m7.source = c.source '
-          '     AND m7.conversation_key = c.conversation_key '
-          "     AND m7.direction = 'inbound' AND ${keptMessageSql('m7')} "
-          '     AND m7.needs_you_verdict = 1 '
-          '     AND m7.needs_you_reason IS NOT NULL '
-          '   ORDER BY m7.received_at DESC, m7.source_message_id DESC LIMIT 1'
-          '  ) AS needs_you_reason_at, '
+          '  nr.needs_you_reason AS needs_you_reason, '
+          '  nr.source_message_id AS needs_you_reason_message_id, '
+          '  nr.received_at AS needs_you_reason_at, '
           // Whether the sender of the message the thread is WAITING ON expects
-          // an answer — the newest kept inbound, no verdict clause, because this
-          // is triage v2's column and not the needs-you pass's. Tri-state all the
-          // way through: NULL here means nothing has judged that message, and
+          // an answer, and WHO that sender is — both off the `nk` join, the
+          // newest kept inbound with no verdict clause, because `reply_expected`
+          // is triage v2's column and not the needs-you pass's. Tri-state all
+          // the way through: NULL means nothing has judged that message, and
           // `isNeedsYou` reads the three values apart.
-          '  (SELECT m8.reply_expected FROM messages m8 '
-          '   WHERE m8.source = c.source '
-          '     AND m8.conversation_key = c.conversation_key '
-          "     AND m8.direction = 'inbound' AND ${keptMessageSql('m8')} "
-          '   ORDER BY m8.received_at DESC, m8.source_message_id DESC LIMIT 1'
-          '  ) AS reply_expected, '
-          // WHO the thread is waiting on, as an envelope address and nothing
-          // else — the one fact `Conversation.isExternalTo` needs, and the same
-          // newest-kept-inbound message `reply_expected` reads, deliberately:
-          // the row says "external" about the sender it is also saying "needs
-          // reply" about, and two subselects on different rules would let the
-          // chip and the ask describe different people.
-          '  (SELECT m9.from_address FROM messages m9 '
-          '   WHERE m9.source = c.source '
-          '     AND m9.conversation_key = c.conversation_key '
-          "     AND m9.direction = 'inbound' AND ${keptMessageSql('m9')} "
-          '   ORDER BY m9.received_at DESC, m9.source_message_id DESC LIMIT 1'
-          '  ) AS latest_inbound_from '
+          //
+          // `latest_inbound_from` is an envelope address and nothing else — the
+          // one fact `Conversation.isExternalTo` needs — and it comes off the
+          // same row as `reply_expected` deliberately: the row says "external"
+          // about the sender it is also saying "needs reply" about, and two
+          // reads on different rules would let the chip and the ask describe
+          // different people.
+          '  nk.reply_expected AS reply_expected, '
+          '  nk.from_address AS latest_inbound_from '
           'FROM conversations c '
           'LEFT JOIN conversation_ai ai '
           '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
+          // The three newest-message rules this read needs, each resolved ONCE
+          // per thread and joined on the message's full key — the
+          // `dismissedThreadHistory` shape. Each seek used to be spelled once
+          // per column (seven correlated subselects, because SQLite takes one
+          // column from a scalar subselect); a join takes every column off the
+          // one row the seek found. A LEFT join on `(source, source_message_id)`,
+          // the primary key, against a subselect that returns at most one id
+          // matches at most one row, so no thread is multiplied or lost, and a
+          // thread with no such message reads NULL in every column exactly as
+          // the subselects did. Every ORDER BY breaks the tie on the id, so a
+          // second message stamped the same second resolves the same way here
+          // as in [getDraft] and the history reads.
+          //
+          // `ni` — the newest inbound message, whatever the gate did with it:
+          // the message a deadline and a waiting draft are about.
+          'LEFT JOIN messages ni '
+          '  ON ni.source = c.source '
+          '  AND ni.conversation_key = c.conversation_key '
+          '  AND ni.source_message_id = ('
+          '    SELECT m3.source_message_id FROM messages m3 '
+          '     WHERE m3.source = c.source '
+          '       AND m3.conversation_key = c.conversation_key '
+          "       AND m3.direction = 'inbound' "
+          '     ORDER BY m3.received_at DESC, m3.source_message_id DESC LIMIT 1) '
+          // `nr` — the newest KEPT inbound the needs-you pass judged yes with a
+          // reason. `needs_you_verdict = 1` is load-bearing, not tidiness: a
+          // reason on a `0` verdict explains why a message does NOT want the
+          // owner (a rule hid it, or the model read it and said no), and
+          // printing that under "Why does this need a reply" would answer the
+          // opposite question. `keptMessageSql` is the other half: a bot post
+          // the gate threw out is never "the latest inbound awaiting you"
+          // (requirement 8a), and the clause is what makes that true here as
+          // everywhere else.
+          'LEFT JOIN messages nr '
+          '  ON nr.source = c.source '
+          '  AND nr.conversation_key = c.conversation_key '
+          '  AND nr.source_message_id = ('
+          '    SELECT m5.source_message_id FROM messages m5 '
+          '     WHERE m5.source = c.source '
+          '       AND m5.conversation_key = c.conversation_key '
+          "       AND m5.direction = 'inbound' AND ${keptMessageSql('m5')} "
+          '       AND m5.needs_you_verdict = 1 '
+          '       AND m5.needs_you_reason IS NOT NULL '
+          '     ORDER BY m5.received_at DESC, m5.source_message_id DESC LIMIT 1) '
+          // `nk` — the newest KEPT inbound, judged or not: the message the
+          // thread is waiting on.
+          'LEFT JOIN messages nk '
+          '  ON nk.source = c.source '
+          '  AND nk.conversation_key = c.conversation_key '
+          '  AND nk.source_message_id = ('
+          '    SELECT m8.source_message_id FROM messages m8 '
+          '     WHERE m8.source = c.source '
+          '       AND m8.conversation_key = c.conversation_key '
+          "       AND m8.direction = 'inbound' AND ${keptMessageSql('m8')} "
+          '     ORDER BY m8.received_at DESC, m8.source_message_id DESC LIMIT 1) '
           'WHERE $where ORDER BY c.last_message_at DESC',
           variables: _args(args),
         )
@@ -1205,6 +1209,114 @@ WHERE source = ? AND conversation_key = ?
       'WHERE source = ? AND conversation_key = ?',
       variables: _args([state.wire, now, now, source, conversationKey]),
     );
+  }
+
+  /// The `labels` column [loadConversations] projects, for a query whose
+  /// thread is aliased `c` — spelled once so [recentlyDismissed]'s rows draw
+  /// the same chips in the same order as every other list. See the comment at
+  /// its use in [loadConversations] for the separators and the order.
+  static String _labelsConcatSql() => '(SELECT GROUP_CONCAT('
+      "o.id || '$labelFieldSeparator' || o.name || "
+      "'$labelFieldSeparator' || COALESCE(o.tone, ''), "
+      "'$labelRecordSeparator') "
+      'FROM (SELECT l.id, l.name, l.tone FROM conversation_labels cl '
+      'JOIN labels l ON l.id = cl.label_id '
+      'WHERE cl.source = c.source '
+      'AND cl.conversation_key = c.conversation_key '
+      'ORDER BY l.use_count DESC, l.last_used_at DESC, l.name ASC) o)';
+
+  /// Every thread that left the owner's sight since [sinceIso], newest first,
+  /// each saying WHAT took it — requirement 12i's Recently dismissed view.
+  ///
+  /// Two populations, because a rule does not dismiss: a `hide_needs_you` rule
+  /// writes a verdict and a `later` rule a bucket, and neither touches
+  /// `conversations.state`. So the read is a UNION of:
+  /// - **the owner's dismissals** — `state = 'done'` stamped on or after
+  ///   [sinceIso]. `state_changed_at` is written only by
+  ///   [setConversationState], which only a person's press reaches (sync's fold
+  ///   never sets `done`), so this half is exactly what somebody closed.
+  /// - **what a rule filed** — a `conversation_labels` link carrying a
+  ///   `rule_id`, applied on or after [sinceIso]. Every rule path files through
+  ///   that link, whatever its disposition, so it is the one record of a rule's
+  ///   hand on a thread. `applied_at` is only the FIRST filing: a re-apply is
+  ///   an `INSERT OR IGNORE` that leaves the stamp alone (and must, because
+  ///   the insert's count is what `hidden_count` and undo are built on). So
+  ///   the rule's LATEST act is read instead: the newer of `applied_at` and
+  ///   the newest inbound message the rule hid — `needs_you_verdict = 0` with
+  ///   a `label_rule:` reason for a `hide_needs_you` rule (verdict 1 with that
+  ///   reason is a "shown despite" raise, which the rule did NOT hide), and
+  ///   any inbound message for a `later` or `drop` rule, which writes no
+  ///   per-message verdict and files the whole thread while its link stands.
+  ///   A rule that has kept a chatty thread hidden for a month, including
+  ///   today's mail, is therefore here today — the case 12i exists for. A
+  ///   rule deleted since acts on nothing, so its link dates from the filing.
+  ///
+  /// One row per thread, carrying the NEWER of its stamps as `dismissed_at`
+  /// and the attribution of whichever event that stamp is: SQLite takes the
+  /// bare `rule_id` and `label_id` of a `MAX()` aggregate from the row the max
+  /// came from, so a thread the owner closed after a rule filed it reads as
+  /// dismissed, and the other way round. The rule's scope and its label's name
+  /// ride along; a rule deleted since ([deleteLabelRule] keeps its links)
+  /// reads with a null scope and still names its label.
+  ///
+  /// NOT read from `feedback_events`, though a dismissal logs one there. That
+  /// table is DERIVED — Clear AI results wipes it — so a view built on it would
+  /// forget every dismissal the moment the owner reset the pipeline, which is
+  /// exactly when they would come looking for what went missing; it also never
+  /// hears about what a rule did, and an undone dismissal leaves its `down`
+  /// row standing (see [dismissedThreadHistory]). The thread's own state and
+  /// the links are the kept facts.
+  ///
+  /// No index of its own: `conversation_labels` holds one row per label per
+  /// thread and the scan is of that small table, and the `conversations` half
+  /// is a filter over one row per thread — both are read when the owner opens
+  /// the tab, never per row.
+  Future<List<DismissedThread>> recentlyDismissed({
+    required String sinceIso,
+  }) async {
+    final rows = await db
+        .customSelect(
+          'SELECT c.*, d.dismissed_at AS dismissed_at, d.rule_id AS rule_id, '
+          '  r.scope_kind AS rule_scope_kind, '
+          '  r.scope_value AS rule_scope_value, '
+          '  rl.name AS rule_label_name, '
+          '  ${_labelsConcatSql()} AS labels '
+          'FROM (SELECT source, conversation_key, MAX(at) AS dismissed_at, '
+          '        rule_id, label_id '
+          '      FROM ('
+          '        SELECT source, conversation_key, state_changed_at AS at, '
+          '          NULL AS rule_id, NULL AS label_id '
+          '        FROM conversations '
+          "        WHERE state = 'done' AND state_changed_at >= ? "
+          '        UNION ALL '
+          '        SELECT source, conversation_key, at, rule_id, label_id '
+          '        FROM ('
+          '          SELECT cl.source, cl.conversation_key, cl.rule_id, '
+          '            cl.label_id, '
+          '            MAX(cl.applied_at, COALESCE(('
+          '              SELECT MAX(m.received_at) FROM messages m '
+          '               WHERE m.source = cl.source '
+          '                 AND m.conversation_key = cl.conversation_key '
+          "                 AND m.direction = 'inbound' "
+          '                 AND r.id IS NOT NULL '
+          "                 AND (r.disposition <> '${LabelRule.hideNeedsYou}' "
+          '                      OR (m.needs_you_verdict = 0 '
+          "                          AND m.needs_you_reason LIKE 'label_rule:%'))"
+          "            ), '')) AS at "
+          '          FROM conversation_labels cl '
+          '          LEFT JOIN label_rules r ON r.id = cl.rule_id '
+          '          WHERE cl.rule_id IS NOT NULL) '
+          '        WHERE at >= ?) '
+          '      GROUP BY source, conversation_key) d '
+          'JOIN conversations c '
+          '  ON c.source = d.source AND c.conversation_key = d.conversation_key '
+          'LEFT JOIN label_rules r ON r.id = d.rule_id '
+          'LEFT JOIN labels rl ON rl.id = d.label_id '
+          'ORDER BY d.dismissed_at DESC, c.source ASC, c.conversation_key ASC',
+          variables: _args([sinceIso, sinceIso]),
+        )
+        .get();
+    return [for (final row in rows) DismissedThread.fromRow(row.data)];
   }
 
   /// A message the gate KEPT, for one aliased `messages` table.
@@ -5752,6 +5864,80 @@ SELECT conversation_key FROM (
       );
     });
     return threads.length;
+  }
+
+  /// "Show again" for ONE thread a rule filed: the thread comes back and the
+  /// rule stays. Returns false when the rule held no link on the thread, having
+  /// written nothing.
+  ///
+  /// [undoLabelRule]'s per-thread half and nothing more — never that method,
+  /// which deletes the rule and takes back every thread it ever filed. The
+  /// owner looking at one row of the Recently dismissed view is saying "not
+  /// this one", not "never again".
+  ///
+  /// Three writes, the same three the undo makes for each of its threads:
+  /// - the verdicts a rule wrote (`label_rule:…`) go back to NULL and each
+  ///   message is queued for the needs-you pass. Those messages are also
+  ///   stamped `gate_override = 'user'`, which is what makes the press stick:
+  ///   the rule is still standing, and without the stamp the requeued pass
+  ///   would match it again and re-hide the thread it was asked to show. The
+  ///   stamp is Restore's own word for "the owner pulled this back", and
+  ///   every rule consumer already reads it as outside the rule.
+  /// - the bucket a `later` or `drop` rule wrote is cleared under `'user'`,
+  ///   the word the attention sweep refuses to overrule — so the sweep does
+  ///   not file the thread straight back under the same rule.
+  /// - this rule's link on this thread goes, and the rule's tally with it.
+  ///   Links other rules or the owner applied stay.
+  ///
+  /// One transaction: a thread half shown — link gone, verdicts still hiding
+  /// it — would drop out of the view with nothing on the rail to show for it.
+  /// Mail that arrives on the thread LATER still meets the rule, which is the
+  /// rule doing its job; so does a message a `drop` rule gated, which stays in
+  /// the Dropped pile with its own Restore.
+  Future<bool> showRuleFiledThread(
+    String source,
+    String conversationKey, {
+    required String ruleId,
+  }) async {
+    final rule = await getLabelRule(ruleId);
+    final wroteBuckets = rule?.disposition == LabelRule.sendToLater ||
+        rule?.disposition == LabelRule.dropAtGate;
+    return db.transaction(() async {
+      final removed = await db.customUpdate(
+        'DELETE FROM conversation_labels '
+        'WHERE source = ? AND conversation_key = ? AND rule_id = ?',
+        variables: _args([source, conversationKey, ruleId]),
+      );
+      if (removed == 0) return false;
+      // `LIKE 'label_rule:%'` for [undoLabelRule]'s reason: the reason embeds
+      // the label's name as it was when written, so an exact match would miss
+      // every verdict written before a rename.
+      final cleared = await db.customWriteReturning(
+        'UPDATE messages SET needs_you_verdict = NULL, '
+        "  needs_you_reason = NULL, gate_override = 'user', updated_at = ? "
+        'WHERE source = ? AND conversation_key = ? '
+        "  AND needs_you_reason LIKE 'label_rule:%' "
+        'RETURNING source_message_id',
+        variables: _args([_nowIso(), source, conversationKey]),
+      );
+      for (final row in cleared) {
+        await enqueueWork(
+          'needs_you',
+          source,
+          row.data['source_message_id'] as String? ?? '',
+        );
+      }
+      if (wroteBuckets) {
+        await setConversationBucket(
+          source,
+          conversationKey,
+          bucket: null,
+          reason: 'user',
+        );
+      }
+      await bumpRuleHiddenCount(ruleId, by: -removed);
+      return true;
+    });
   }
 
   /// Re-gates the meeting RESPONSES already in the mailbox, and returns how many

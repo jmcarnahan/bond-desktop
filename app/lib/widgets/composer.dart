@@ -160,13 +160,13 @@ class Composer extends StatefulWidget {
 
   // ── People added to this reply ─────────────────────────────────────────
   //
-  // MAIL ONLY, and that is a decision rather than an omission. On a chat,
-  // "adding somebody" would mean a real Teams mention entity or a new group
-  // chat, and neither is on this app's send path — a plain-text `@Name` that
-  // notifies nobody is worse than nothing, because it reads to the sender as
-  // though somebody was told. So a host on a Teams thread wires none of the
-  // three fields below and this composer draws nothing about recipients. See
-  // `_recipientsWired`, which is the one place that decision is read.
+  // BOTH sources, meaning different things. On mail a person added is a Cc on
+  // the reply; on a chat they are a real Teams mention entity, which notifies
+  // them — never a plain-text `@Name` that notifies nobody, which would read
+  // to the sender as though somebody was told. [recipientChannel] says which,
+  // and a host with no directory behind it wires none of the fields below and
+  // this composer draws nothing about recipients. See `_recipientsWired`,
+  // which is the one place that decision is read.
 
   /// The people the owner has added to this reply so far, newest last.
   ///
@@ -177,8 +177,8 @@ class Composer extends StatefulWidget {
   final List<Person> addedRecipients;
 
   /// Reports every change to that list. **Null leaves the whole recipients
-  /// affordance out** — a host with no directory behind it, a chat, and every
-  /// call site that predates it.
+  /// affordance out** — a host with no directory behind it, and every call
+  /// site that predates it.
   final ValueChanged<List<Person>>? onRecipientsChanged;
 
   /// The typeahead's read side, handed in exactly as `new_message_screen.dart`
@@ -187,7 +187,8 @@ class Composer extends StatefulWidget {
   final Future<RecipientResults> Function(String query)? recipientSearch;
 
   /// Whether this connection can actually apply added people to a reply —
-  /// `MailBackendRecipients.canEditDraftRecipients`.
+  /// `MailBackendRecipients.canEditDraftRecipients` on mail, a Teams backend
+  /// at all on a chat.
   ///
   /// False draws no picker and no dead control. It draws a sentence, and only
   /// once somebody reaches for the feature: the honest answer at the moment of
@@ -198,6 +199,18 @@ class Composer extends StatefulWidget {
   /// Faces for the offered people. Null draws initials, which is what a host
   /// without a photo cache gets.
   final ProfilePhotos? recipientPhotos;
+
+  /// Which kind of thread the people are added to: mail makes them Cc and
+  /// takes a typed address; a chat mentions them, which needs a Graph id, so
+  /// a typed address is no answer there.
+  final RecipientChannel recipientChannel;
+
+  /// The sentence refusing [person] on this thread, or null to accept them.
+  ///
+  /// A chat's mention reaches only somebody IN the chat, so a host that knows
+  /// the whole roster refuses anybody outside it here, at the pick, rather
+  /// than letting a send go out naming a person Teams will not notify.
+  final String? Function(Person person)? refuseRecipient;
 
   const Composer({
     super.key,
@@ -225,6 +238,8 @@ class Composer extends StatefulWidget {
     this.recipientSearch,
     this.canEditRecipients = true,
     this.recipientPhotos,
+    this.recipientChannel = RecipientChannel.mail,
+    this.refuseRecipient,
   });
 
   /// Long enough that a normal typing rhythm does not write to sqlite between
@@ -259,6 +274,11 @@ class Composer extends StatefulWidget {
   /// The sentence a connection that cannot amend a reply's recipients shows,
   /// once somebody has reached for the feature.
   static const Key recipientsRefusedKey = Key('composer-recipients-refused');
+
+  /// The sentence under the scope line when a pick was turned away by
+  /// [refuseRecipient].
+  static const Key recipientPickRefusedKey =
+      Key('composer-recipient-pick-refused');
 
   @override
   State<Composer> createState() => _ComposerState();
@@ -295,6 +315,10 @@ class _ComposerState extends State<Composer> {
   /// which is when the question is asked again from scratch.
   bool _recipientsRefused = false;
 
+  /// Why the last pick was refused, by [Composer.refuseRecipient]; cleared by
+  /// the next change the picker reports.
+  String? _pickRefused;
+
   /// OURS, unlike [Composer.focusNode], and disposed here: it is the `@`
   /// keyboard path's whole implementation — a body keystroke has to be able to
   /// put the cursor in the picker — and nothing outside this widget has any
@@ -303,9 +327,9 @@ class _ComposerState extends State<Composer> {
 
   /// Whether this host wired the recipients affordance at all.
   ///
-  /// The one place the Teams decision above is read: a chat host passes neither
-  /// callback, so no part of this — not the button, not the `@`, not the
-  /// refusal sentence — exists on a chat thread.
+  /// The one place the decision above is read: a host with no directory passes
+  /// neither callback, so no part of this — not the button, not the `@`, not
+  /// the refusal sentence — exists on its threads.
   bool get _recipientsWired =>
       widget.onRecipientsChanged != null && widget.recipientSearch != null;
 
@@ -419,7 +443,33 @@ class _ComposerState extends State<Composer> {
 
   /// The picker reported a change. Forwarded to the host UNCHANGED — the list is
   /// theirs — after this widget has had its one look at it, for the name.
+  ///
+  /// Except a person [Composer.refuseRecipient] turns away: they are left out
+  /// of what goes to the host, the sentence says why, and the `@` stays as
+  /// typed. The host still gets a list — a fresh one — because the field keeps
+  /// its own copy of the picks and resyncs only when the value it is handed
+  /// changes.
   void _pickedRecipients(List<Person> next) {
+    final refuse = widget.refuseRecipient;
+    if (refuse != null) {
+      final before = {for (final person in widget.addedRecipients) person.id};
+      String? refused;
+      final kept = <Person>[];
+      for (final person in next) {
+        final reason = before.contains(person.id) ? null : refuse(person);
+        if (reason == null) {
+          kept.add(person);
+        } else {
+          refused = reason;
+        }
+      }
+      if (refused != _pickRefused) setState(() => _pickRefused = refused);
+      if (refused != null) {
+        setState(() => _mentionAt = null);
+        widget.onRecipientsChanged!(List.of(kept));
+        return;
+      }
+    }
     final person = _newlyAdded(next);
     if (person != null) _writeMentionName(person);
     widget.onRecipientsChanged!(next);
@@ -444,9 +494,10 @@ class _ComposerState extends State<Composer> {
   /// reads as addressed to the person they just added.
   ///
   /// PLAIN TEXT and nothing more: it notifies nobody by itself, which is why it
-  /// only ever accompanies a real Cc line. A pick made from the button has no
-  /// anchor and writes nothing into the body — they were adding a recipient, not
-  /// naming one mid-sentence.
+  /// only ever accompanies a real Cc line on mail, or a real mention on a chat
+  /// — where the send turns this very `@Name` into the mention's at-tag. A pick
+  /// made from the button has no anchor and writes nothing into the body — they
+  /// were adding a recipient, not naming one mid-sentence.
   void _writeMentionName(Person person) {
     final anchor = _mentionAt;
     if (anchor == null) return;
@@ -641,8 +692,8 @@ class _ComposerState extends State<Composer> {
   }
 
   /// Everything about who else this reply goes to, or null when there is
-  /// nothing to say: a chat host, a host with no directory behind it, or a
-  /// capable connection nobody has asked yet.
+  /// nothing to say: a host with no directory behind it, or a connection that
+  /// cannot apply people and nobody has asked yet.
   ///
   /// The null is what keeps a reply box a reply box. Every thread in the app
   /// would otherwise carry a standing line about recipients, and almost no reply
@@ -697,19 +748,29 @@ class _ComposerState extends State<Composer> {
             _scopeLine,
             style: BondType.caption.copyWith(color: BondColors.inkMuted),
           ),
+          if (_pickRefused != null) ...[
+            const SizedBox(height: BondSpacing.s4),
+            Text(
+              key: Composer.recipientPickRefusedKey,
+              _pickRefused!,
+              style: BondType.caption.copyWith(color: BondColors.inkMuted),
+            ),
+          ],
           const SizedBox(height: BondSpacing.s4),
           RecipientsField(
             value: widget.addedRecipients,
             onChanged: _pickedRecipients,
             search: widget.recipientSearch!,
-            // Mail, always: this row exists only on a mail thread, and a typed
-            // address is a legitimate answer there in a way it is not for a
-            // chat, where there is no Graph id behind one to open anything with.
-            channel: RecipientChannel.mail,
-            allowTypedAddress: true,
+            // A typed address is a legitimate answer on mail in a way it is
+            // not for a chat, where there is no Graph id behind one to
+            // mention anybody with.
+            channel: widget.recipientChannel,
+            allowTypedAddress: !_isChat,
             focusNode: _recipientsFocus,
             photos: widget.recipientPhotos,
-            hint: 'Add people to this reply',
+            hint: _isChat
+                ? 'Mention people in this reply'
+                : 'Add people to this reply',
           ),
         ],
       ),
@@ -722,12 +783,22 @@ class _ComposerState extends State<Composer> {
   /// this is never "Reply all" — it is that reply plus whoever the owner added,
   /// and the count is the honest way to say it while the chips sit underneath
   /// naming them.
+  ///
+  /// A chat has no sender-only reply to promise — everybody in it reads the
+  /// message — so there the line counts who will be notified by name.
   String get _scopeLine {
     final count = widget.addedRecipients.length;
-    if (count == 0) return 'Reply to the sender only';
     final people = count == 1 ? '1 person' : '$count people';
+    if (_isChat) {
+      return count == 0
+          ? 'Reply in this chat'
+          : 'Reply in this chat, mentioning $people';
+    }
+    if (count == 0) return 'Reply to the sender only';
     return 'Reply to the sender, plus $people in Cc';
   }
+
+  bool get _isChat => widget.recipientChannel == RecipientChannel.teams;
 
   Widget _field() {
     final field = TextField(

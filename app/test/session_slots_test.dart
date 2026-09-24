@@ -8,6 +8,7 @@ import 'package:bond_inbox/main.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/services/chat_mentions.dart';
 import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/screens/sign_in_screen.dart';
 import 'package:bond_inbox/services/backend/auth_session.dart';
@@ -154,7 +155,11 @@ class _FakeTeams implements TeamsBackend {
   Future<void> markChatRead(String chatId) async {}
 
   @override
-  Future<Map<String, dynamic>> sendChatMessage(String chatId, String text) =>
+  Future<Map<String, dynamic>> sendChatMessage(
+    String chatId,
+    String text, {
+    List<ChatMention> mentions = const [],
+  }) =>
       throw UnimplementedError();
 
   @override

@@ -3,11 +3,13 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart' show ConversationState;
+import 'package:bond_inbox/models/person.dart' show Person;
 import 'package:bond_inbox/providers/draft_provider.dart';
 import 'package:bond_inbox/services/backend/auth_session.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
+import 'package:bond_inbox/services/chat_mentions.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
@@ -32,6 +34,9 @@ const String _myId = 'me-1';
 /// would, then serves it to the next sync exactly as a pull would find it.
 class _FakeTeams implements TeamsBackend {
   final List<({String chatId, String text})> sends = [];
+
+  /// The mentions each send carried, one list per entry in [sends].
+  final List<List<ChatMention>> mentionsSent = [];
 
   /// Every message the chat holds, oldest first — the sends land here too,
   /// which is what makes the follow-up sync a real replay rather than a
@@ -82,9 +87,11 @@ class _FakeTeams implements TeamsBackend {
   @override
   Future<Map<String, dynamic>> sendChatMessage(
     String chatId,
-    String text,
-  ) async {
+    String text, {
+    List<ChatMention> mentions = const [],
+  }) async {
     sends.add((chatId: chatId, text: text));
+    mentionsSent.add(mentions);
     final thrown = error;
     if (thrown != null) throw thrown;
     final message = {
@@ -450,6 +457,64 @@ void main() {
 
       expect(teams.sends, isEmpty);
       expect(await teamsMessages(), hasLength(1));
+    });
+  });
+
+  group('people added to a chat reply', () {
+    const ada = Person(
+      id: 'aad-ada',
+      displayName: 'Ada Park',
+      mail: 'ada@example.com',
+    );
+
+    test('can be added at all, because the send mentions them', () async {
+      final notifier = await loaded();
+
+      expect(notifier.state.canEditRecipients, isTrue);
+    });
+
+    test('never include somebody with no Graph id to mention', () async {
+      final notifier = await loaded();
+
+      notifier.setAddedRecipients([ada, Person.typed('guest@example.test')]);
+
+      expect(notifier.state.addedRecipients, [ada]);
+    });
+
+    test('ride the send as mentions, and come off when it lands', () async {
+      await seedChat();
+      final notifier = await loaded();
+      notifier.setAddedRecipients(const [ada]);
+
+      expect(await notifier.send('Looping in @Ada Park.'), SendOutcome.sent);
+
+      expect(teams.mentionsSent.single, const [
+        ChatMention(userId: 'aad-ada', displayName: 'Ada Park'),
+      ]);
+      // Left on, they would mention the same person on the next reply.
+      expect(notifier.state.addedRecipients, isEmpty);
+      final outbound = (await teamsMessages()).last;
+      expect(outbound['direction'], 'outbound');
+      expect(outbound['addressed_me'], 0);
+    });
+
+    test('stay on a send that failed, for the retry', () async {
+      await seedChat();
+      teams.error = const GraphTeamsException('Graph said no', 502);
+      final notifier = await loaded();
+      notifier.setAddedRecipients(const [ada]);
+
+      expect(await notifier.send('On it.'), SendOutcome.failed);
+
+      expect(notifier.state.addedRecipients, [ada]);
+      expect(notifier.state.error, 'Graph said no');
+    });
+
+    test('a reply that adds nobody mentions nobody', () async {
+      await seedChat();
+      await (await loaded()).send('On it.');
+
+      expect(teams.mentionsSent.single, isEmpty);
     });
   });
 

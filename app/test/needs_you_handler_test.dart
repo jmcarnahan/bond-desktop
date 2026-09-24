@@ -562,6 +562,25 @@ void main() {
       expect((await store.getLabelRule(rule.id))!.hiddenCount, 1);
     });
 
+    test('a message the owner pulled back is outside the rule', () async {
+      // `gate_override = 'user'` is Restore's and Show again's stamp. The rule
+      // still stands, and without this exemption the requeue Show again makes
+      // would re-hide the thread on its first pass.
+      await seed(source: 'email', id: 'm1');
+      await ruleOn('teams:u-1');
+      await db.customStatement(
+        "UPDATE messages SET gate_override = 'user' "
+        "WHERE source_message_id = 'm1'",
+      );
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(llm.calls.length, 1);
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+      expect(await links(), isEmpty);
+    });
+
     test('a second message in the same thread is hidden without recounting',
         () async {
       await seed(source: 'email', id: 'm1');

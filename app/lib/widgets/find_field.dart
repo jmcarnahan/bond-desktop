@@ -517,9 +517,10 @@ const String commandPrefix = '>';
 /// Acts only. `j`/`k` are in the key map and not here: typing five characters
 /// to move down one row is slower than the thing it replaces, and a palette
 /// full of entries nobody would use is a palette nobody reads. Entry 12h also
-/// asks for "Open attachment" and "Reply with template…", which are left out
-/// because neither has an intent behind it yet — templates are deferred by
-/// design, and an entry that did nothing would be worse than an absent one.
+/// asks for "Open attachment" and "Reply with template…", which are left out:
+/// every intent here is payload-free, and "open attachment" cannot say WHICH
+/// attachment without one, while templates are deferred by design. An entry
+/// that did nothing would be worse than an absent one.
 ///
 /// Every [keyHint] here is a key the inbox's own map binds today. A hint for a
 /// key some later round intends to bind would be this file teaching a
@@ -533,6 +534,9 @@ const List<FindCommand> findCommands = [
   FindCommand('Next mention', NextMentionIntent(), keyHint: ']'),
   FindCommand('Previous mention', PreviousMentionIntent(), keyHint: '['),
   FindCommand('Undo', UndoLastIntent(), keyHint: 'z'),
+  FindCommand('Quick reply', QuickReplyIntent(), keyHint: 'r'),
+  FindCommand('Select row', ToggleCheckedIntent(), keyHint: 'x'),
+  FindCommand('Keyboard shortcuts', ShowCheatSheetIntent(), keyHint: '?'),
 ];
 
 /// Whether what has been typed is a command rather than a needle.
@@ -544,11 +548,12 @@ bool isCommandNeedle(String text) => text.trimLeft().startsWith(commandPrefix);
 
 /// The commands worth offering for what has been typed, most useful first.
 ///
-/// `>` alone is the whole palette. [max] is the vocabulary's own length rather
-/// than the label strip's six, because this list is FIXED and short: a palette
-/// that hid two of its eight entries would be one a reader has to already know,
-/// which is the opposite of what entry 12h asked for. The pills wrap over three
-/// rows of a 236pt rail, under a box the reader opened on purpose.
+/// `>` alone is the whole palette. [max] is at least the vocabulary's own
+/// length rather than the label strip's six, because this list is FIXED and
+/// short: a palette that hid two of its entries would be one a reader has to
+/// already know, which is the opposite of what entry 12h asked for. The pills
+/// wrap over a few rows of a 236pt rail, under a box the reader opened on
+/// purpose.
 ///
 /// After the `>`, the words narrow the list the way the label strip narrows:
 /// entries that START with what was typed lead, and the ones that merely
@@ -557,7 +562,7 @@ bool isCommandNeedle(String text) => text.trimLeft().startsWith(commandPrefix);
 ///
 /// Empty for text that is not a command at all, which is what keeps the strip
 /// out of an ordinary needle's way.
-List<FindCommand> commandsFor(String text, {int max = 8}) {
+List<FindCommand> commandsFor(String text, {int max = 12}) {
   if (!isCommandNeedle(text)) return const [];
   final typed =
       text.trimLeft().substring(commandPrefix.length).trim().toLowerCase();

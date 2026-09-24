@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 
 import 'backend/backend_types.dart';
 import 'backend/teams_backend.dart';
+import 'chat_mentions.dart';
 import 'graph_auth.dart';
 import 'attachments/attachment_markers.dart' show hostedContentIds;
 
@@ -266,11 +267,17 @@ class GraphTeams implements TeamsBackend {
     }
   }
 
-  /// Posts a plain-text message to a chat, and returns it as Graph stored it.
+  /// Posts a message to a chat, and returns it as Graph stored it.
   ///
   /// `contentType: 'text'` is stated rather than left to Graph's default: the
   /// composer holds exactly what somebody typed, and letting it be read as HTML
   /// would turn a typed `<` into markup.
+  ///
+  /// [mentions] are the one reason to send HTML, because Graph carries a
+  /// mention only as an `<at id>` in an html body beside a `mentions` array
+  /// whose ids point back at it. [chatHtmlWithMentions] escapes the rest, so a
+  /// typed `<` is still a `<`. With none, the body is exactly the text one —
+  /// no HTML on a send that has no reason for it.
   ///
   /// The decoded response is the whole point of returning anything — it carries
   /// the id Graph assigned, which is what the caller writes into its own
@@ -280,15 +287,40 @@ class GraphTeams implements TeamsBackend {
   @override
   Future<Map<String, dynamic>> sendChatMessage(
     String chatId,
-    String text,
-  ) async {
+    String text, {
+    List<ChatMention> mentions = const [],
+  }) async {
     await _throttleChat(chatId);
+    final people = distinctMentions(mentions);
     final response = await _request(
       'POST',
       Uri.parse('$_base/chats/${Uri.encodeComponent(chatId)}/messages'),
-      jsonBody: {
-        'body': {'contentType': 'text', 'content': text},
-      },
+      jsonBody: people.isEmpty
+          ? {
+              'body': {'contentType': 'text', 'content': text},
+            }
+          : {
+              'body': {
+                'contentType': 'html',
+                'content': chatHtmlWithMentions(text, people),
+              },
+              // `mentionText` is the at-tag's inner text exactly: Graph
+              // refuses a mention whose text the body does not contain.
+              'mentions': [
+                for (var i = 0; i < people.length; i++)
+                  {
+                    'id': i,
+                    'mentionText': people[i].displayName,
+                    'mentioned': {
+                      'user': {
+                        'id': people[i].userId,
+                        'displayName': people[i].displayName,
+                        'userIdentityType': 'aadUser',
+                      },
+                    },
+                  },
+              ],
+            },
     );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw _describe(response, 'Could not send your Teams message');

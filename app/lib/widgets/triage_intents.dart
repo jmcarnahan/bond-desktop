@@ -96,9 +96,24 @@ class PreviousMentionIntent extends Intent {
   const PreviousMentionIntent();
 }
 
+/// Tick or untick the row the reader is on for a bulk act — requirement 12c's
+/// `x`. It does NOT advance (the Gmail model): a wrong `x` costs one more `x`
+/// to fix, where an advance would also have moved the reader off the row they
+/// meant.
+class ToggleCheckedIntent extends Intent {
+  const ToggleCheckedIntent();
+}
+
 /// Take back the last thing an undo toast offered to take back.
 class UndoLastIntent extends Intent {
   const UndoLastIntent();
+}
+
+/// Open the keyboard cheat sheet beside the list — `?`. Here with the rest so
+/// the key and the palette's "Keyboard shortcuts" are one act, and so the
+/// sheet can name it in its own table (`widgets/cheat_sheet_panel.dart`).
+class ShowCheatSheetIntent extends Intent {
+  const ShowCheatSheetIntent();
 }
 
 /// The row [currentId]'s neighbour in the drawn order, or null at the edge.

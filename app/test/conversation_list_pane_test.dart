@@ -771,4 +771,78 @@ void main() {
       expect(line, lessThan(header));
     });
   });
+
+  // The selection gutter (12c): drawn by the pane, owned by the host.
+  group('the selection gutter', () {
+    final rows = [
+      _conv(id: 'a', subject: 'Homepage copy'),
+      _conv(id: 'b', subject: 'Invoice 4471'),
+    ];
+    final opened = <String>[];
+    final toggles = <(String, bool)>[];
+
+    setUp(() {
+      opened.clear();
+      toggles.clear();
+    });
+
+    Future<void> pumpGutter(
+      WidgetTester tester, {
+      Set<({String source, String key})> checked = const {},
+      bool wired = true,
+    }) =>
+        tester.pumpWidget(MaterialApp(
+          home: Scaffold(
+            body: ConversationListPane(
+              sources: const ['email'],
+              filter: InboxFilter.open,
+              conversations: rows,
+              selectedId: null,
+              onSelect: (_, id) => opened.add(id),
+              sectionsOverride: [('NEEDS YOU', rows)],
+              checked: checked,
+              onToggleChecked: wired
+                  ? (c, {required range}) => toggles.add((c.id, range))
+                  : null,
+            ),
+          ),
+        ));
+
+    testWidgets('an unwired host gets the list it always got', (tester) async {
+      await pumpGutter(tester, wired: false);
+      expect(find.byType(Checkbox), findsNothing);
+    });
+
+    testWidgets('once anything is ticked every row shows its box',
+        (tester) async {
+      await pumpGutter(tester, checked: {(source: 'email', key: 'a')});
+
+      final a = tester.widget<Checkbox>(
+        find.byKey(ConversationListPane.checkKeyFor(rows[0])),
+      );
+      final b = tester.widget<Checkbox>(
+        find.byKey(ConversationListPane.checkKeyFor(rows[1])),
+      );
+      expect(a.value, isTrue);
+      expect(b.value, isFalse);
+
+      await tester.tap(find.byKey(ConversationListPane.checkKeyFor(rows[1])));
+      expect(toggles, [('b', false)]);
+    });
+
+    testWidgets('a Shift-click on a card is a range and does not open it',
+        (tester) async {
+      await pumpGutter(tester, checked: {(source: 'email', key: 'a')});
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.tap(find.text('Invoice 4471'));
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+
+      expect(toggles, [('b', true)]);
+      expect(opened, isEmpty);
+
+      await tester.tap(find.text('Invoice 4471'));
+      expect(opened, ['b']);
+    });
+  });
 }

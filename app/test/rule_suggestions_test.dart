@@ -89,6 +89,46 @@ void main() {
         expect(prefix('A: yes'), isNull);
         expect(prefix(''), isNull);
       });
+
+      // Pinned when the rule was lifted to [subjectPrefixOf] for
+      // select-similar: `Re: Budget` used to answer `re:`, which offered a
+      // rule hiding every reply and would have selected every reply too.
+      test('a reply or forward marker is not a prefix', () {
+        for (final subject in [
+          'Re: Budget',
+          'RE: Budget',
+          'Fw: Budget',
+          'FWD: Budget',
+          'AW: Budget',
+          'Sv: Budget',
+        ]) {
+          expect(prefix(subject), isNull, reason: subject);
+        }
+      });
+    });
+
+    group('subjectPrefixOf, the one rule both callers share', () {
+      test('the table', () {
+        const table = <String?, String?>{
+          'Accepted: Weekly sync': 'accepted:',
+          '[JIRA] (KEY-12) Fix login': '[jira]',
+          'Re: Budget': null,
+          // The colon sits past character 24, so the front is prose.
+          'This subject runs on well past: the cap': null,
+          '  Declined: Offsite  ': 'declined:',
+          null: null,
+        };
+        table.forEach((subject, want) {
+          expect(subjectPrefixOf(subject), want, reason: '$subject');
+        });
+      });
+
+      test('the evidence getter delegates to it', () {
+        expect(
+          _thread('c', subject: 'Accepted: Weekly sync').subjectPrefix,
+          subjectPrefixOf('Accepted: Weekly sync'),
+        );
+      });
     });
   });
 

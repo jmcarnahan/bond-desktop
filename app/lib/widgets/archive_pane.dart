@@ -1,23 +1,27 @@
 import 'package:flutter/material.dart';
 
+import '../models/dismissed_thread.dart';
 import '../models/home_models.dart';
 import '../models/message_models.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'conversation_list_pane.dart';
+import 'conversation_row.dart';
 import 'home_feed_row.dart';
 import 'home_search.dart';
 import 'inline_alert.dart';
 import 'later_digest.dart';
 
-/// The three piles Archive holds, in the order they are offered.
-enum ArchiveTab { later, done, dropped }
+/// The three piles Archive holds, in the order they are offered, and the
+/// cross-pile look back at the last week's dismissals.
+enum ArchiveTab { later, done, dropped, recent }
 
 extension ArchiveTabLabel on ArchiveTab {
   String get label => switch (this) {
         ArchiveTab.later => 'Later',
         ArchiveTab.done => 'Done',
         ArchiveTab.dropped => 'Dropped',
+        ArchiveTab.recent => 'Recently dismissed',
       };
 }
 
@@ -93,6 +97,22 @@ class ArchivePane extends StatefulWidget {
 
   final VoidCallback onLoadMoreDropped;
 
+  /// The Recently dismissed tab, newest first: what the owner closed and what
+  /// a rule filed in the last week, each row saying which (requirement 12i).
+  /// Empty by default, so a host that never shows the tab passes nothing.
+  final List<DismissedThread> recentRows;
+
+  /// Whether a read of [recentRows] has come back at all.
+  final bool recentLoaded;
+
+  /// Non-null when the newest read of [recentRows] failed.
+  final String? recentError;
+
+  /// "Show again" on a row a rule filed: this one thread comes back and the
+  /// rule stands. Null draws no button — the rows still say what took them.
+  final void Function(String source, String conversationKey, String ruleId)?
+      onShowAgain;
+
   /// Opens the storyline a dropped message was filed under, from its chip.
   final void Function(String storylineId) onOpenStoryline;
 
@@ -158,6 +178,10 @@ class ArchivePane extends StatefulWidget {
     required this.droppedLoadingMore,
     required this.droppedError,
     required this.onLoadMoreDropped,
+    this.recentRows = const [],
+    this.recentLoaded = false,
+    this.recentError,
+    this.onShowAgain,
     required this.onOpenStoryline,
     required this.onRestore,
     this.onOpenHistory,
@@ -386,7 +410,119 @@ class _ArchivePaneState extends State<ArchivePane> {
             onRestore: widget.onRestore,
             onOpenHistory: widget.onOpenHistory,
           ),
+        ArchiveTab.recent => _RecentList(
+            rows: widget.recentRows,
+            loaded: widget.recentLoaded,
+            error: widget.recentError,
+            ownerDomains: widget.ownerDomains,
+            onOpen: widget.onOpen,
+            onReopen: widget.onReopen,
+            onShowAgain: widget.onShowAgain,
+          ),
       };
+}
+
+/// The Recently dismissed tab: one [ConversationRow] per thread, its preview
+/// line replaced by what took it, and the way back beside it.
+///
+/// The buttons sit OUTSIDE the row for [_withRestore]'s reason. Which one a
+/// row gets is the row's own fact: Reopen only for a thread that is actually
+/// closed (a rule never closes one), Show again only where a rule did it — and
+/// a thread the owner closed after a rule filed it can carry both.
+class _RecentList extends StatelessWidget {
+  final List<DismissedThread> rows;
+  final bool loaded;
+  final String? error;
+  final Set<String> ownerDomains;
+  final void Function(String source, String conversationId) onOpen;
+  final void Function(String source, String conversationKey) onReopen;
+  final void Function(String source, String conversationKey, String ruleId)?
+      onShowAgain;
+
+  const _RecentList({
+    required this.rows,
+    required this.loaded,
+    required this.error,
+    required this.ownerDomains,
+    required this.onOpen,
+    required this.onReopen,
+    required this.onShowAgain,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final error = this.error;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (error != null) ...[
+          Text(error, style: BondType.small.copyWith(color: BondColors.error)),
+          const SizedBox(height: BondSpacing.s12),
+        ],
+        Expanded(child: rows.isEmpty ? _empty() : _list()),
+      ],
+    );
+  }
+
+  Widget _empty() {
+    if (!loaded) return const SizedBox.shrink();
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(BondSpacing.s32),
+        child: Text(
+          'Nothing dismissed in the last 7 days.',
+          style: BondType.small,
+          textAlign: TextAlign.center,
+        ),
+      ),
+    );
+  }
+
+  Widget _list() => ListView.builder(
+        itemCount: rows.length,
+        itemBuilder: (context, index) {
+          final row = rows[index];
+          final c = row.conversation;
+          final ruleId = row.ruleId;
+          final showAgain = onShowAgain;
+          return Row(
+            key: ValueKey<String>('recent-${c.source}-${c.id}'),
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: ConversationRow(
+                  conversation: c,
+                  selected: false,
+                  onTap: () => onOpen(c.source, c.id),
+                  caption: row.caption,
+                  ownerDomains: ownerDomains,
+                ),
+              ),
+              if (row.reopenable) ...[
+                const SizedBox(width: BondSpacing.s8),
+                _action('Reopen', () => onReopen(c.source, c.id)),
+              ],
+              if (ruleId != null && showAgain != null) ...[
+                const SizedBox(width: BondSpacing.s8),
+                _action(
+                  'Show again',
+                  () => showAgain(c.source, c.id, ruleId),
+                ),
+              ],
+            ],
+          );
+        },
+      );
+
+  Widget _action(String label, VoidCallback onPressed) => TextButton(
+        onPressed: onPressed,
+        style: TextButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+          minimumSize: const Size(0, 32),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        child: Text(label),
+      );
 }
 
 /// One dropped row's tile, with Restore beside it.

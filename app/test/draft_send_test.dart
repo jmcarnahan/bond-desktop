@@ -817,6 +817,45 @@ void main() {
       expect(copied, ['Friday works.']);
       expect(mail.calls, isEmpty);
       expect(launched, isEmpty);
+      // Nobody added, so nothing to say about them.
+      expect(notifier.state.notice, isNull);
+      expect(notifier.state.error, isNull);
+    });
+
+    test('a copy with people added says so as a notice, not an error',
+        () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (_) async => null);
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+
+      tokens.values['granted_scopes'] = _coreGrant;
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+      notifier.setAddedRecipients([
+        const Person(
+          id: 'user-dana',
+          displayName: 'Dana Okoye',
+          mail: 'dana@example.com',
+        ),
+      ]);
+
+      expect(await notifier.send('Friday works.'), SendOutcome.copied);
+      // The copy worked, so nothing is red: the limit of it is its own channel.
+      expect(notifier.state.error, isNull);
+      expect(
+        notifier.state.notice,
+        'Copied. The people you added are not carried on a copy — '
+        'add them wherever you paste this.',
+      );
+
+      // And the next act clears it, the way it clears an error.
+      await notifier.dismissOptions();
+      expect(notifier.state.notice, isNull);
     });
   });
 

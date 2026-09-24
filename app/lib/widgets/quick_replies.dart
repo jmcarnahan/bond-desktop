@@ -619,6 +619,12 @@ class QuickReply {
   /// normal case.
   final String? error;
 
+  /// What the last send wants said though it worked — the copy rung's "the
+  /// people you added are not carried". Drawn muted where [error] is red, and
+  /// it keeps the box up the same way, because the box is the only place left
+  /// on screen to say it.
+  final String? notice;
+
   /// How many people the owner has STAGED onto this reply's Cc — in the thread
   /// composer, where the chips naming them live. The draft is shared, so a
   /// send from this box carries them too, and a box that drew no sign of that
@@ -626,11 +632,17 @@ class QuickReply {
   /// the names are one press away, in the thread.
   final int addedRecipients;
 
+  /// Those people ride out as @mentions rather than Cc — a chat reply, where
+  /// adding somebody means naming them to the chat's own members.
+  final bool mentionsNotCc;
+
   const QuickReply({
     this.body = '',
     this.sending = false,
     this.error,
+    this.notice,
     this.addedRecipients = 0,
+    this.mentionsNotCc = false,
   });
 }
 
@@ -689,6 +701,9 @@ class QuickReplyBox extends StatefulWidget {
 
   /// The line over the field, when there is anything to say on it.
   static const Key scopeKey = Key('quick-reply-scope');
+
+  /// The muted line under the field, for a [QuickReply.notice].
+  static const Key noticeKey = Key('quick-reply-notice');
 
   @override
   State<QuickReplyBox> createState() => _QuickReplyBoxState();
@@ -751,12 +766,14 @@ class _QuickReplyBoxState extends State<QuickReplyBox> {
     if (count == 0) return who.isEmpty ? '' : 'Reply to $who';
     final base = who.isEmpty ? 'Reply to the sender' : 'Reply to $who';
     final people = count == 1 ? '1 person' : '$count people';
+    if (widget.reply.mentionsNotCc) return '$base, mentioning $people';
     return '$base, plus $people in Cc';
   }
 
   @override
   Widget build(BuildContext context) {
     final error = widget.reply.error;
+    final notice = widget.reply.notice;
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.enter, meta: true): _send,
@@ -805,6 +822,14 @@ class _QuickReplyBoxState extends State<QuickReplyBox> {
               Text(
                 error,
                 style: BondType.caption.copyWith(color: BondColors.error),
+              ),
+            ],
+            if (notice != null) ...[
+              const SizedBox(height: BondSpacing.s4),
+              Text(
+                notice,
+                key: QuickReplyBox.noticeKey,
+                style: BondType.caption,
               ),
             ],
             const SizedBox(height: BondSpacing.s4),

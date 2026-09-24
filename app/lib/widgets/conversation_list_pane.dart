@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show HardwareKeyboard;
 
 import '../models/label_models.dart';
 import '../models/message_models.dart';
@@ -204,6 +205,25 @@ class ConversationListPane extends StatelessWidget {
   /// worse than no offer.
   final void Function(RuleSuggestion suggestion)? onNotNowRuleSuggestion;
 
+  /// The rows the reader has ticked for a bulk act — requirement 12c. Empty,
+  /// the default, ticks nothing.
+  ///
+  /// Host-owned for [labelPickerFor]'s reason: `x` is pressed on the screen's
+  /// own key map, and the bulk bar that acts on the selection is drawn outside
+  /// this pane. Keyed by source and id together, because a conversation key is
+  /// unique only within its connector.
+  final Set<({String source, String key})> checked;
+
+  /// The reader ticked or unticked that row. [range] is a Shift-click: the host
+  /// adds everything between its anchor and this row, which is arithmetic over
+  /// the pile the host drew and this pane only draws.
+  ///
+  /// Null, the default, draws no gutter at all — the list every other host
+  /// gets. Wired, the gutter is RESERVED on every row whether or not its box is
+  /// showing, so a pointer crossing a row never shifts the card under it.
+  final void Function(Conversation conversation, {required bool range})?
+      onToggleChecked;
+
   const ConversationListPane({
     super.key,
     required this.sources,
@@ -239,6 +259,8 @@ class ConversationListPane extends StatelessWidget {
     this.ruleSuggestion,
     this.onAcceptRuleSuggestion,
     this.onNotNowRuleSuggestion,
+    this.checked = const {},
+    this.onToggleChecked,
   });
 
   /// One row's quick actions, keyed by the thread rather than by its place in
@@ -249,6 +271,9 @@ class ConversationListPane extends StatelessWidget {
   static Key laterKeyFor(Conversation c) => _actionKey('later', c);
   static Key dismissSenderKeyFor(Conversation c) =>
       _actionKey('dismiss-sender', c);
+
+  /// The selection box in one row's gutter.
+  static Key checkKeyFor(Conversation c) => _actionKey('check', c);
 
   /// The inline picker under one row.
   static Key pickerKeyFor(Conversation c) => _actionKey('label-picker', c);
@@ -410,11 +435,21 @@ class ConversationListPane extends StatelessWidget {
   /// same row everywhere it appears, and a card that grows an action in one list
   /// is a card that reads differently in the others.
   Widget _row(Conversation c) {
+    final toggle = onToggleChecked;
     final row = ConversationRow(
       conversation: c,
       selected: c.id == selectedId &&
           (selectedSource == null || selectedSource == c.source),
-      onTap: () => onSelect(c.source, c.id),
+      // A Shift-click on the card is a range, and it does not open the row:
+      // the reader is sweeping a selection, and a thread opening beside on
+      // every sweep would be the list fighting them.
+      onTap: () {
+        if (toggle != null && HardwareKeyboard.instance.isShiftPressed) {
+          toggle(c, range: true);
+          return;
+        }
+        onSelect(c.source, c.id);
+      },
       processingSince: processingSince,
       caption: captionFor?.call(c),
       ownerDomains: ownerDomains,
@@ -441,8 +476,9 @@ class ConversationListPane extends StatelessWidget {
     }
 
     final actions = _quickActions(c);
-    if (actions.isNotEmpty) {
-      body = _RowActions(actions: actions, child: body);
+    final gutter = _checkGutter(c);
+    if (actions.isNotEmpty || gutter != null) {
+      body = _RowActions(actions: actions, leading: gutter, child: body);
     }
 
     final box = _quickReply(c);
@@ -550,6 +586,42 @@ class ConversationListPane extends StatelessWidget {
         ),
     ];
   }
+
+  /// The selection box beside one row, as a builder [_RowActions] calls with
+  /// whether the row is under the pointer or the focus — or null when the host
+  /// wired no [onToggleChecked].
+  ///
+  /// In a gutter OUTSIDE the card, on the Reopen button's rule: the external
+  /// tint's stripe owns the card's left edge, and [ConversationRow] stays the
+  /// same row in every list. The box draws on hover, on focus, on a ticked row,
+  /// and on every row once anything is ticked — a reader mid-selection should
+  /// see where the rest of the boxes are without hunting for them.
+  Widget Function(bool revealed)? _checkGutter(Conversation c) {
+    final toggle = onToggleChecked;
+    if (toggle == null) return null;
+    final ticked = checked.contains((source: c.source, key: c.id));
+    final anyTicked = checked.isNotEmpty;
+    return (revealed) => SizedBox(
+          width: _gutterWidth,
+          child: (revealed || ticked || anyTicked)
+              ? Padding(
+                  padding: const EdgeInsets.only(top: BondSpacing.s12),
+                  child: Checkbox(
+                    key: checkKeyFor(c),
+                    value: ticked,
+                    onChanged: (_) => toggle(
+                      c,
+                      range: HardwareKeyboard.instance.isShiftPressed,
+                    ),
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                )
+              : null,
+        );
+  }
+
+  static const double _gutterWidth = 24;
 
   /// The inline picker under one row, or null while that row has none open.
   ///
@@ -707,7 +779,16 @@ class _RowActions extends StatefulWidget {
   final Widget child;
   final List<HoverAction> actions;
 
-  const _RowActions({required this.child, required this.actions});
+  /// A leading gutter beside the card, told whether the row is revealed — the
+  /// selection box. Here rather than a second [MouseRegion] of its own, so one
+  /// region answers "is the pointer on this row" for both edges.
+  final Widget Function(bool revealed)? leading;
+
+  const _RowActions({
+    required this.child,
+    required this.actions,
+    this.leading,
+  });
 
   @override
   State<_RowActions> createState() => _RowActionsState();
@@ -719,6 +800,30 @@ class _RowActionsState extends State<_RowActions> {
 
   @override
   Widget build(BuildContext context) {
+    final revealed = _hovered || _focused;
+    Widget card = Stack(
+      clipBehavior: Clip.none,
+      children: [
+        widget.child,
+        if (revealed && widget.actions.isNotEmpty)
+          Positioned(
+            top: 0,
+            bottom: 0,
+            right: BondSpacing.s8,
+            child: _strip(),
+          ),
+      ],
+    );
+    final leading = widget.leading;
+    if (leading != null) {
+      card = Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          leading(revealed),
+          Expanded(child: card),
+        ],
+      );
+    }
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
@@ -728,19 +833,7 @@ class _RowActionsState extends State<_RowActions> {
         canRequestFocus: false,
         skipTraversal: true,
         onFocusChange: (has) => setState(() => _focused = has),
-        child: Stack(
-          clipBehavior: Clip.none,
-          children: [
-            widget.child,
-            if (_hovered || _focused)
-              Positioned(
-                top: 0,
-                bottom: 0,
-                right: BondSpacing.s8,
-                child: _strip(),
-              ),
-          ],
-        ),
+        child: card,
       ),
     );
   }

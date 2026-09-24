@@ -10,9 +10,11 @@ import '../models/open_asks.dart';
 import '../services/external_sender.dart';
 import '../services/mention_index.dart';
 import '../services/profile_photos.dart';
+import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 import 'attachment_card.dart';
 import 'attachment_format.dart';
+import 'bot_run_row.dart';
 import 'chips.dart';
 import 'hover_actions.dart';
 import 'inline_alert.dart';
@@ -392,6 +394,9 @@ class ThreadDetailPanel extends StatefulWidget {
   static Key flashKeyFor(String messageId) =>
       ValueKey('transcript-flash-$messageId');
 
+  /// The [BotRunRow] standing for the run whose first message is [firstId].
+  static Key botRunKeyFor(String firstId) => ValueKey('bot-run-$firstId');
+
   @override
   State<ThreadDetailPanel> createState() => _ThreadDetailPanelState();
 }
@@ -421,6 +426,12 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
   /// [MessageRow.unfoldRequest]. Counts rather than flags, and never cleared, so
   /// a second jump to a row the reader folded again opens it again.
   final Map<String, int> _unfoldRequests = {};
+
+  /// Which bot runs the reader has opened, keyed by the run's FIRST message id
+  /// (see [_botRuns]). Kept for the life of the thread and cleared with
+  /// [_unfoldRequests] when the thread changes: a run's first id is only a key
+  /// inside the transcript that minted it.
+  final Set<String> _openRuns = {};
 
   /// Which mention the reader is standing on, or null before they have stepped.
   String? _mentionAt;
@@ -504,6 +515,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       _flashId = null;
       _rowKeys.clear();
       _unfoldRequests.clear();
+      _openRuns.clear();
     }
   }
 
@@ -554,6 +566,12 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
     final seq = ++_jumpSeq;
     setState(() {
       _unfoldRequests[messageId] = (_unfoldRequests[messageId] ?? 0) + 1;
+      // A target inside a folded bot run has no row until the run opens, and
+      // the walk below can only land on a row that exists — so the run opens
+      // HERE, in the same frame, before the first lap looks for it.
+      for (final run in _botRuns(_mentions.toSet())) {
+        if (run.ids.contains(messageId)) _openRuns.add(run.ids.first);
+      }
       _flashId = messageId;
       // A jump lands on the transcript whichever tab the reader went looking at
       // files from.
@@ -671,9 +689,75 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
         ConversationState.done => BondTone.success,
       };
 
+  /// The gate word `TeamsSync` stamps on an application's message
+  /// (`teamsBotGate`), spelled out rather than imported so this widget does not
+  /// drag the connector and its store in behind it.
+  static const String _botGate = 'auto_generated';
+
+  /// The fewest consecutive bot messages that fold into one [BotRunRow]. Two is
+  /// a pair a reader takes in at a glance; the wall starts at three.
+  static const int _botRunMin = 3;
+
+  /// The runs of one application's messages this transcript draws as a single
+  /// [BotRunRow], each as the index of its first message and every id in it.
+  ///
+  /// A bot message is one `TeamsSync` gated as [_botGate] in a Teams thread —
+  /// the ingest fact, not [isBotSender]'s guess, which a bot with a display name
+  /// passes straight through. Mail is excluded outright: the header gate writes
+  /// the same word on an auto-reply, and an out-of-office in a mail thread is a
+  /// message somebody may need to read.
+  ///
+  /// A run is consecutive, one sender, and one day — a day divider between two
+  /// halves would have nowhere to sit inside one line. A message that names the
+  /// owner, or is the one the Why line points at, never joins: it is the reason
+  /// the thread is open, and folding it into a count hides the point. A jump to
+  /// any other member opens the run instead (see [_jumpToMessage]). Nor does
+  /// the thread's LAST message, for the per-message fold's reason: it is what
+  /// the thread is about, so a run ending the thread folds all but it — and
+  /// nothing at all if that leaves fewer than [_botRunMin].
+  List<({int start, List<String> ids})> _botRuns(Set<String> mentions) {
+    if (widget.conversation.source != 'teams') return const [];
+    final reasonId = widget.conversation.needsYouReasonMessageId;
+    final messages = widget.messages;
+    bool joins(Message m) =>
+        !identical(m, messages.last) &&
+        !m.outbound &&
+        m.gateReason == _botGate &&
+        (m.fromAddress ?? '').isNotEmpty &&
+        !mentions.contains(m.id) &&
+        m.id != reasonId;
+
+    final runs = <({int start, List<String> ids})>[];
+    var i = 0;
+    while (i < messages.length) {
+      if (!joins(messages[i])) {
+        i++;
+        continue;
+      }
+      final head = messages[i];
+      var end = i + 1;
+      while (end < messages.length &&
+          joins(messages[end]) &&
+          messages[end].fromAddress!.toLowerCase() ==
+              head.fromAddress!.toLowerCase() &&
+          dayKeyOf(messages[end]) == dayKeyOf(head)) {
+        end++;
+      }
+      if (end - i >= _botRunMin) {
+        runs.add((
+          start: i,
+          ids: [for (var k = i; k < end; k++) messages[k].id],
+        ));
+      }
+      i = end;
+    }
+    return runs;
+  }
+
   /// The transcript, flattened: a divider each time the calendar day turns
   /// over, then one row per message with its header suppressed when it
-  /// continues the run above it.
+  /// continues the run above it — and one [BotRunRow] in place of each run
+  /// [_botRuns] finds, with the run's rows under it only once it is opened.
   List<Widget> _transcript() {
     final items = <Widget>[];
     String? previousDay;
@@ -688,6 +772,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
     final closed = widget.conversation.state != ConversationState.needsReply;
     // One scan for the mentions too, and the same answer the navigator counts.
     final mentions = _mentions.toSet();
+    final runs = {for (final run in _botRuns(mentions)) run.start: run};
 
     for (var i = 0; i < widget.messages.length; i++) {
       final message = widget.messages[i];
@@ -702,6 +787,31 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       previousDay = day;
       first = false;
 
+      final run = runs[i];
+      if (run != null) {
+        final runKey = run.ids.first;
+        final opened = _openRuns.contains(runKey);
+        items.add(BotRunRow(
+          key: ThreadDetailPanel.botRunKeyFor(runKey),
+          senderName: displaySenderName(
+            name: message.fromName,
+            address: message.fromAddress,
+          ),
+          count: run.ids.length,
+          expanded: opened,
+          onTap: () => setState(() {
+            if (!_openRuns.remove(runKey)) _openRuns.add(runKey);
+          }),
+        ));
+        // Whatever follows the line — the run's own first row, or the next
+        // sender once a folded run is skipped — opens with a full header.
+        previous = null;
+        if (!opened) {
+          i += run.ids.length - 1;
+          continue;
+        }
+      }
+
       final open = hasOpenAsk(
         message,
         lastOutboundAt: lastOut,
@@ -710,7 +820,10 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       final suggestion = widget.suggestionFor?.call(message);
       final header = previous == null || !sameRun(previous, message);
       final next = i + 1 < widget.messages.length ? widget.messages[i + 1] : null;
-      final standalone = next == null || !sameRun(message, next);
+      // A bot run's line sits between this row and the next, so the next one
+      // opens with its own header and this one ends its run.
+      final standalone =
+          next == null || runs.containsKey(i + 1) || !sameRun(message, next);
       final isLast = identical(message, widget.messages.last);
       // Only a message that is a run all by itself folds, and never the newest
       // one. Folding a run's header while its continuations stayed up would

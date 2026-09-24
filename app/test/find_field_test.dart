@@ -369,22 +369,30 @@ void main() {
     test('> alone is the whole palette, not a sample of it', () {
       final all = commandsFor('>');
 
-      // Every command, because a palette that hid two of its eight entries
-      // would only serve a reader who already knew they were there.
+      // Every command, because a palette that hid two of its entries would
+      // only serve a reader who already knew they were there.
       expect(all.length, findCommands.length);
       expect(all.first.label, 'Dismiss');
       // Every command names a key, because teaching them is half the reason
       // the palette is worth having.
       expect(all.every((c) => c.keyHint != null), isTrue);
+      expect([for (final c in all) c.keyHint], [
+        'e', '⇧E', 'l', 's', 'm', ']', '[', 'z', 'r', 'x', '?',
+      ]);
+      expect(
+        [for (final c in all.skip(8)) c.label],
+        ['Quick reply', 'Select row', 'Keyboard shortcuts'],
+      );
     });
 
     test('the words narrow it, and a leading match leads', () {
-      // `Dismiss with label…` contains an l as well and comes last: what the
-      // reader is spelling is the start of a pill, and the rest follow it
-      // rather than being refused — the label strip's own rule.
+      // `Dismiss with label…`, `Quick reply` and `Select row` contain an l
+      // as well and come after: what the reader is spelling is the start of a
+      // pill, and the rest follow it rather than being refused — the label
+      // strip's own rule.
       expect(
         [for (final c in commandsFor('>l')) c.label],
-        ['Label…', 'Later', 'Dismiss with label…'],
+        ['Label…', 'Later', 'Dismiss with label…', 'Quick reply', 'Select row'],
       );
       // Contained rather than leading: the reader typed the word they think in,
       // which is not always the first one on the pill.

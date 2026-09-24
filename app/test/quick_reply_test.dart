@@ -893,6 +893,19 @@ void main() {
       );
     });
 
+    testWidgets('on a chat the people staged are mentions, not Cc',
+        (tester) async {
+      await pumpBox(
+        tester,
+        reply: const QuickReply(addedRecipients: 1, mentionsNotCc: true),
+      );
+
+      expect(
+        find.text('Reply to Dana Whitfield, mentioning 1 person'),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('the stored draft is what the box opens with', (tester) async {
       await pumpBox(
         tester,
@@ -992,6 +1005,21 @@ void main() {
         find.text('There is nothing to reply to in this thread yet.'),
         findsOneWidget,
       );
+    });
+
+    testWidgets('a notice is said muted, where an error would be red',
+        (tester) async {
+      const copied = 'Copied. The people you added are not carried on a copy — '
+          'add them wherever you paste this.';
+      await pumpBox(
+        tester,
+        reply: const QuickReply(body: 'On it.', notice: copied),
+      );
+
+      final line = tester.widget<Text>(find.byKey(QuickReplyBox.noticeKey));
+      expect(line.data, copied);
+      // The copy worked: the line is its limit, not a failure to retry.
+      expect(line.style?.color, isNot(BondColors.error));
     });
 
     testWidgets('a late prefill fills an untouched box and never a typed one',

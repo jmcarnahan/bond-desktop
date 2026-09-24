@@ -217,14 +217,24 @@ class NeedsYouHandler extends WorkHandler {
     // Only `hide_needs_you` is this pass's business. A `later` rule moves a
     // thread's BUCKET, which is the attention sweep's column, and a `drop` rule
     // is a gate on mail that never reaches this queue.
-    final rule = matchLabelRule(
-      await _store.listLabelRules(),
-      source: source,
-      senderAddress: row['from_address'] as String?,
-      senderName: row['from_name'] as String?,
-      subject: row['subject'] as String?,
-      classification: _classify?.call(row),
-    );
+    //
+    // A message stamped `gate_override = 'user'` is outside every rule: the
+    // owner's own hand pulled it back (Restore, or "Show again" on a thread a
+    // rule filed — `MessageStore.showRuleFiledThread`), which is the same
+    // exemption `MessageStore.applyLabelRule` and the triage gate already
+    // give it. Without this a requeued "Show again" would be re-hidden by the
+    // very rule the owner just overruled, on the first pass.
+    final overridden = (row['gate_override'] as String?) == 'user';
+    final rule = overridden
+        ? null
+        : matchLabelRule(
+            await _store.listLabelRules(),
+            source: source,
+            senderAddress: row['from_address'] as String?,
+            senderName: row['from_name'] as String?,
+            subject: row['subject'] as String?,
+            classification: _classify?.call(row),
+          );
     final hiding = rule != null && rule.disposition == LabelRule.hideNeedsYou;
 
     // A stranger's first approach, read before the floor because it is one of

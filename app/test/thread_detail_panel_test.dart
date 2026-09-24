@@ -2,6 +2,7 @@ import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/label_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/widgets/attachment_card.dart';
+import 'package:bond_inbox/widgets/bot_run_row.dart';
 import 'package:bond_inbox/widgets/hover_actions.dart';
 import 'package:bond_inbox/widgets/label_picker.dart';
 import 'package:bond_inbox/widgets/mention_navigator.dart';
@@ -63,6 +64,29 @@ Message _twoLine({
       bodyText: 'First line of $id.\nSecond line of $id.',
     );
 
+/// One status line from a meeting application, gated at ingest the way
+/// `TeamsSync` gates every application's message. [source] and [fromAddress]
+/// turn it into a mail auto-reply, which the header gate words the same way.
+Message _bot({
+  required String id,
+  required String receivedAt,
+  String source = 'teams',
+  String fromAddress = 'teams:app-0001',
+  bool addressedMe = false,
+}) =>
+    Message(
+      id: id,
+      source: source,
+      outbound: false,
+      fromName: 'Meeting assistant',
+      fromAddress: fromAddress,
+      receivedAt: receivedAt,
+      bodyText: 'Status from $id.',
+      triageStatus: 'done',
+      gateReason: 'auto_generated',
+      addressedMe: addressedMe,
+    );
+
 void main() {
   Future<void> pump(
     WidgetTester tester, {
@@ -92,6 +116,7 @@ void main() {
     void Function(String name)? onCreateLabel,
     VoidCallback? onDismissWithoutLabel,
     VoidCallback? onCloseLabelPicker,
+    String source = 'email',
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -100,6 +125,7 @@ void main() {
         body: ThreadDetailPanel(
           conversation: Conversation(
             id: 'c1',
+            source: source,
             subject: 'Launch date',
             state: state,
             ctaText: ctaText,
@@ -1584,6 +1610,166 @@ void main() {
       expect(litOn(tester, 'm$target'), isNotNull);
 
       await burnOut(tester);
+    });
+  });
+  group('a run of bot updates', () {
+    String iso(DateTime when) => when.toIso8601String().split('.').first;
+
+    /// Past-anchored and in hours, so the whole thread sits on one day well
+    /// behind now.
+    final base = DateTime.now().subtract(const Duration(hours: 6));
+    DateTime at(int minutes) => base.add(Duration(minutes: minutes));
+
+    /// A person, [bots] status lines a minute apart, and the person again.
+    List<Message> thread(int bots) => [
+          _msg(id: 'h1', receivedAt: iso(at(0))),
+          for (var i = 0; i < bots; i++)
+            _bot(id: 'b$i', receivedAt: iso(at(10 + i))),
+          _msg(id: 'h2', receivedAt: iso(at(30))),
+        ];
+
+    final runLine = BotRunRow.labelFor('Meeting assistant', 5);
+
+    testWidgets('five in a row become one muted line', (tester) async {
+      await pump(tester, source: 'teams', messages: thread(5));
+
+      expect(find.text(runLine), findsOneWidget);
+      for (var i = 0; i < 5; i++) {
+        expect(rowFor('b$i'), findsNothing);
+        expect(find.text('Status from b$i.'), findsNothing);
+      }
+      // The people either side are still rows of their own.
+      expect(rowFor('h1'), findsOneWidget);
+      expect(find.text('Body of h2.'), findsOneWidget);
+    });
+
+    testWidgets('and a tap gives all five back', (tester) async {
+      await pump(tester, source: 'teams', messages: thread(5));
+
+      await tester.tap(find.text(runLine));
+      await tester.pump();
+
+      for (var i = 0; i < 5; i++) {
+        expect(find.text('Status from b$i.'), findsOneWidget);
+      }
+      // The line stays as the way to put them away again.
+      expect(find.text(runLine), findsOneWidget);
+      await tester.tap(find.text(runLine));
+      await tester.pump();
+      expect(find.text('Status from b0.'), findsNothing);
+    });
+
+    testWidgets('a run that ends the thread leaves its last line showing',
+        (tester) async {
+      final messages = [
+        _msg(id: 'h1', receivedAt: iso(at(0))),
+        for (var i = 0; i < 4; i++)
+          _bot(id: 'b$i', receivedAt: iso(at(10 + i))),
+      ];
+      await pump(tester, source: 'teams', messages: messages);
+
+      expect(
+        find.text(BotRunRow.labelFor('Meeting assistant', 3)),
+        findsOneWidget,
+      );
+      expect(find.text('Status from b0.'), findsNothing);
+      expect(find.text('Status from b3.'), findsOneWidget);
+    });
+
+    testWidgets('and one that would be left under three folds nothing',
+        (tester) async {
+      final messages = [
+        _msg(id: 'h1', receivedAt: iso(at(0))),
+        for (var i = 0; i < 3; i++)
+          _bot(id: 'b$i', receivedAt: iso(at(10 + i))),
+      ];
+      await pump(tester, source: 'teams', messages: messages);
+
+      expect(find.byType(BotRunRow), findsNothing);
+      expect(find.text('Status from b0.'), findsOneWidget);
+    });
+
+    testWidgets('two in a row are just two rows', (tester) async {
+      await pump(tester, source: 'teams', messages: thread(2));
+
+      expect(find.byType(BotRunRow), findsNothing);
+      expect(find.text('Status from b0.'), findsOneWidget);
+      expect(find.text('Status from b1.'), findsOneWidget);
+    });
+
+    testWidgets('a bot line that names the owner stays out of the count',
+        (tester) async {
+      final messages = thread(5);
+      messages[3] = _bot(id: 'b2', receivedAt: iso(at(12)), addressedMe: true);
+      await pump(tester, source: 'teams', messages: messages);
+
+      // b0, b1 are only two; b3, b4 are only two. Nothing folds.
+      expect(find.byType(BotRunRow), findsNothing);
+      expect(find.text('Status from b2.'), findsOneWidget);
+    });
+
+    testWidgets('an auto-reply in a mail thread never folds', (tester) async {
+      // The mail header gate writes the very same word on an out-of-office.
+      final messages = [
+        for (final m in thread(5))
+          m.gateReason == null
+              ? m
+              : _bot(
+                  id: m.id,
+                  receivedAt: m.receivedAt!,
+                  source: 'email',
+                  fromAddress: 'noreply@example.com',
+                ),
+      ];
+      await pump(tester, messages: messages);
+
+      expect(find.byType(BotRunRow), findsNothing);
+      for (var i = 0; i < 5; i++) {
+        expect(find.text('Status from b$i.'), findsOneWidget);
+      }
+    });
+
+    testWidgets('a jump into a far folded run lands on it open and lit',
+        (tester) async {
+      // Far enough down that the run's rows would not be built even if it were
+      // open: the run has to open BEFORE the walk looks for the row, or the
+      // walk scrolls to a line that has no row for the target at all.
+      // A fixed time of day yesterday, so the run sits at noon and cannot
+      // straddle a midnight that would split it across two days.
+      final now = DateTime.now();
+      final start = DateTime(now.year, now.month, now.day - 1, 2);
+      final messages = [
+        for (var i = 0; i < 60; i++)
+          _msg(id: 'm$i', receivedAt: iso(start.add(Duration(minutes: i * 10)))),
+        for (var i = 0; i < 5; i++)
+          _bot(
+            id: 'b$i',
+            receivedAt: iso(start.add(Duration(minutes: 600, seconds: i * 20))),
+          ),
+        for (var i = 60; i < 80; i++)
+          _msg(
+            id: 'm$i',
+            receivedAt: iso(start.add(Duration(minutes: 610 + (i - 60) * 10))),
+          ),
+      ];
+      final jumps = TranscriptJumps();
+      await pump(tester, source: 'teams', jumps: jumps, messages: messages);
+
+      expect(rowFor('b3'), findsNothing);
+
+      jumps.toMessage('b3');
+      for (var i = 0; i < 20; i++) {
+        await tester.pump();
+      }
+
+      expect(rowFor('b3'), findsOneWidget);
+      expect(find.text('Status from b3.'), findsOneWidget);
+      final box = tester.widget<DecoratedBox>(
+        find.byKey(ThreadDetailPanel.flashKeyFor('b3')),
+      );
+      expect((box.decoration as BoxDecoration).color, isNotNull);
+
+      await tester.pump(ThreadDetailPanel.flashDuration);
     });
   });
 }

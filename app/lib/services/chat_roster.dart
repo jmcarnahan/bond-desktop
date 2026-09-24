@@ -49,6 +49,19 @@ Set<String> teamsMemberIds(Conversation chat) {
   return ids;
 }
 
+/// Whether [chat]'s stored roster is KNOWN not to hold [userId] — the one
+/// answer that refuses a mention, since Teams notifies only a chat's members.
+///
+/// Known means under [teamsRosterCap], which covers every 1:1: a roster at the
+/// cap may be truncated, and an empty one has not been read yet, so both
+/// answer false and the pick is allowed rather than refused on a guess.
+bool teamsRosterLacks(Conversation chat, String userId) {
+  if (chat.source != 'teams') return false;
+  final stored = teamsMemberIds(chat);
+  if (stored.isEmpty || stored.length >= teamsRosterCap) return false;
+  return !stored.contains(userId);
+}
+
 /// Whether [chat] is the chat holding exactly [userIds].
 ///
 /// [RosterMatch.unknown] is the answer that matters. A roster at

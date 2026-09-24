@@ -614,6 +614,80 @@ void main() {
 
         expect((await load()).latestInboundFrom, isNull);
       });
+
+      // The three newest-message joins name three DIFFERENT messages on a
+      // mixed thread, and each column must come off its own: the reason off
+      // the newest kept yes, the sender and reply_expected off the newest kept
+      // inbound, the deadline and the draft off the newest inbound whatever
+      // the gate did. Two columns off one join disagreeing would mean the join
+      // matched the wrong row, or more than one.
+      test('stays coherent with the reason columns on a mixed thread',
+          () async {
+        String ago(int hours) => MessageStore.isoStamp(
+            DateTime.now().toUtc().subtract(Duration(hours: hours)));
+        final askedAt = ago(4);
+        await store.upsertMessage(messageRow(
+          id: 'asked',
+          fromAddress: 'ana@northwind.example.com',
+          conversationKey: 'c-new',
+          receivedAt: askedAt,
+        ));
+        await store.writeNeedsYouVerdict('email', 'asked',
+            verdict: true, reason: 'Asks you to confirm the date.');
+        await store.upsertMessage(messageRow(
+          id: 'followup',
+          fromAddress: 'sam@contoso.example.com',
+          conversationKey: 'c-new',
+          receivedAt: ago(3),
+        ));
+        await store.writeTriage('email', 'followup',
+            status: 'done',
+            result: const TriageResult(
+              urgency: 'normal',
+              category: 'other',
+              summary: 'Chases the date.',
+              needsAction: true,
+              actionItems: [],
+              replyExpected: true,
+            ));
+        await store.upsertMessage(messageRow(
+          id: 'bot',
+          fromAddress: 'noreply@vendor.example.net',
+          conversationKey: 'c-new',
+          receivedAt: ago(2),
+        ));
+        await store.writeTriage('email', 'bot',
+            status: 'skipped', gateReason: 'auto_generated');
+        await db.customStatement(
+          "UPDATE messages SET deadline = 'by Friday' "
+          "WHERE source_message_id = 'bot'",
+        );
+        await store.upsertDraft(
+          source: 'email',
+          conversationKey: 'c-new',
+          replyToMessageId: 'bot',
+          body: 'Thanks.',
+        );
+        await store.upsertMessage(messageRow(
+          id: 'mine',
+          direction: 'outbound',
+          fromAddress: 'me@northwind.example.com',
+          conversationKey: 'c-new',
+          receivedAt: ago(1),
+        ));
+
+        final all = await store.loadConversations();
+        // One row per thread still: no join multiplied c-new.
+        expect(all.where((c) => c.id == 'c-new'), hasLength(1));
+        final c = all.firstWhere((c) => c.id == 'c-new');
+        expect(c.needsYouReason, 'Asks you to confirm the date.');
+        expect(c.needsYouReasonMessageId, 'asked');
+        expect(c.needsYouReasonAt, askedAt);
+        expect(c.latestInboundFrom, 'sam@contoso.example.com');
+        expect(c.replyExpected, isTrue);
+        expect(c.latestDeadline, 'by Friday');
+        expect(c.pendingDraftCount, 1);
+      });
     });
   });
 
