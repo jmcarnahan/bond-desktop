@@ -4,6 +4,7 @@ import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
 import 'package:bond_inbox/services/mcp/bond_mcp_client.dart';
 import 'package:bond_inbox/services/mcp/mcp_teams_backend.dart';
+import 'package:bond_inbox/services/sender_display.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -550,6 +551,13 @@ void main() {
       expect(message['from'], {
         'application': {'id': 'app-1', 'displayName': null},
       });
+
+      // And the row that comes out of it is named, which is the whole point of
+      // tolerating the null: the two backends must not disagree about what a
+      // nameless bot is called, and `teams:app-1` is not a name.
+      final row = TeamsSync.messageRow(message, 'chat-1', outbound: false)!;
+      expect(row['from_name'], botSenderName);
+      expect(row['from_address'], 'teams:app-1');
     });
 
     test('a system event has no sender at all', () async {

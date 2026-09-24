@@ -26,12 +26,14 @@ import 'package:flutter/material.dart';
 import '../../models/attachment_models.dart';
 import '../../services/attachments/attachment_bytes.dart';
 import '../../services/attachments/xlsx_reader.dart';
+import '../../services/html_text.dart';
 import '../../services/backend/attachment_backend.dart';
 import '../../theme/tokens.dart';
 import '../attachment_format.dart';
 import '../chips.dart';
 import '../inline_alert.dart';
 import 'eml_preview.dart';
+import 'html_preview.dart';
 import 'image_preview.dart';
 import 'pdf_preview.dart';
 import 'preview_engines.dart';
@@ -83,6 +85,15 @@ class AttachmentPreviewPanel extends StatefulWidget {
   /// posted instead of a payload.
   final void Function(String url)? onOpenLink;
 
+  /// Opening a web page in the default browser, and ONLY a web page.
+  ///
+  /// Deliberately not [onOpen] widened: the generic Open stays withheld for
+  /// every file the operating system would run, `.html` included — see
+  /// [openRefused]. This is the narrower door, reaching one application the
+  /// owner already reads the web in, offered on the page's own card with the
+  /// caution `HtmlPreview.caution` spells out. Null renders neither.
+  final void Function(AttachmentRef attachment)? onOpenInBrowser;
+
   const AttachmentPreviewPanel({
     super.key,
     required this.attachment,
@@ -97,6 +108,7 @@ class AttachmentPreviewPanel extends StatefulWidget {
     this.onPinToStoryline,
     this.pinned = false,
     this.onOpenLink,
+    this.onOpenInBrowser,
   });
 
   static const Key expandKey = ValueKey('attachment-preview-expand');
@@ -178,13 +190,41 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
     // document or a link needs no bytes, so a refusal remembered from the
     // previous file would otherwise outlive it and hide the new one's way out.
     _serverRefusedTooLarge = false;
-    _textLoad = _held(widget.bytes.textFor(attachment));
+    _textLoad = _held(_words(widget.bytes.textFor(attachment), kind));
     _bytesLoad = _needsBytes(kind) ? _startBytes() : null;
 
-    if (kind == PreviewKind.document && _hasRenderedThumbnail) {
+    // A page asks UNCONDITIONALLY, unlike a document: the rendering of a page
+    // is drawn by this build rather than fetched from a drive, so there is no
+    // "only where OneDrive would have one" to check. The ladder behind
+    // `thumbnailFor` is the thing that decides, and it answers null rather than
+    // throwing.
+    if (kind == PreviewKind.html ||
+        (kind == PreviewKind.document && _hasRenderedThumbnail)) {
       _thumbLoad = _held(widget.bytes.thumbnailFor(attachment));
     }
     _ensureDerived();
+  }
+
+  /// The stored words, converted here if what is stored is still markup.
+  ///
+  /// The conversion belongs at ingest and that is where it is
+  /// (`AttachmentTextHandler`), so this is a reader for the rows written
+  /// BEFORE it: a mailbox synced by an older build has `<table` in its
+  /// `attachment_text` for every page it pulled down, and nothing re-extracts
+  /// those until somebody clears the AI results. Guarded by a look for a real
+  /// tag rather than run unconditionally, so converted words — which can
+  /// legitimately carry an angle-bracketed address — pass through untouched.
+  static final RegExp _stillMarkup = RegExp(
+    r'</[a-z]+>|<(!doctype|html|body|table|div|br|span|tr|td|th|p|h[1-6]'
+    r'|style|script)[\s>/]',
+    caseSensitive: false,
+  );
+
+  Future<String?> _words(Future<String?> stored, PreviewKind kind) async {
+    final text = await stored;
+    if (kind != PreviewKind.html || text == null || text.isEmpty) return text;
+    if (!_stillMarkup.hasMatch(text)) return text;
+    return htmlToText(text, profile: HtmlProfile.document);
   }
 
   /// Every future this panel memoises, acknowledged at birth.
@@ -258,6 +298,11 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
       PreviewKind.pdf ||
       PreviewKind.sheet ||
       PreviewKind.text => true,
+      // A page is read through the words already in the store and a picture the
+      // thumbnail ladder draws — and that ladder fetches the file itself when
+      // it needs to, so a second download here would pay for the same bytes
+      // twice.
+      PreviewKind.html ||
       PreviewKind.document ||
       PreviewKind.eml ||
       PreviewKind.link ||
@@ -421,7 +466,9 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
   /// Open alone is withheld for a file the operating system would RUN — see
   /// [openRefused]. A caption stands where the button was, because a control
   /// that simply vanished for one file and not the next reads as a bug rather
-  /// than as a decision.
+  /// than as a decision. The one exception is a page whose card carries the
+  /// browser door: that card says where the file can go, so the caption saying
+  /// it cannot go anywhere would contradict it.
   ///
   /// A mail link previews like any other file now, so its real home has to
   /// stay one click away beside Open and Save. Drawn only where the BODY is
@@ -437,6 +484,16 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
         : null;
     final refused = openRefused(widget.attachment);
     final openable = fetchable && !refused;
+    // A page with the browser door wired has already said its piece, on the
+    // card, in the affirmative: "Open in browser" with the caution under it.
+    // The caption below would be a second sentence about the same file saying
+    // the opposite, so it is withheld — but only where that door exists. With
+    // no [onOpenInBrowser] the caption is still the only thing that explains
+    // the missing button. Withheld on every segment rather than on Preview
+    // alone: a control that appears when the reader switches to Text moves the
+    // row under their cursor, which is the thing this panel never does.
+    final saidOnTheCard =
+        kind == PreviewKind.html && widget.onOpenInBrowser != null;
     final open = widget.onOpen;
     final save = widget.onSave;
     final useInReply = widget.onUseInReply;
@@ -453,7 +510,7 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
             icon: const Icon(Icons.open_in_new, size: 16),
             label: const Text('Open'),
           ),
-        if (fetchable && refused && open != null)
+        if (fetchable && refused && open != null && !saidOnTheCard)
           Text(
             'Open is off for files that can run. Save it instead.',
             key: AttachmentPreviewPanel.openRefusedKey,
@@ -500,6 +557,7 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
     // the only thing this app can still show.
     if (_isTooLarge && _segment == PreviewSegment.text) return _textBody();
     if (_isTooLarge) return _tooLargeBody();
+    if (kind == PreviewKind.html) return _htmlBody();
     if (kind == PreviewKind.document) return _documentBody();
     if (kind == PreviewKind.unsupported) return _unsupportedBody();
     if (kind == PreviewKind.eml) return _emlBody();
@@ -666,6 +724,35 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
     );
   }
 
+  /// A web page: a picture of itself over the words in it, and the one control
+  /// that hands it to a browser.
+  ///
+  /// The words come from [_textBody] like every other kind's, which is what
+  /// makes this the whole of the change on the reading side: the pipeline
+  /// converted the markup before it stored it, so there is no markup here to
+  /// strip and no second converter that could disagree with the one that ran.
+  ///
+  /// Under Text this is [_textBody] alone. A reader who asked for the words
+  /// wants the words, and the card is still one pill away.
+  Widget _htmlBody() {
+    if (_segment == PreviewSegment.text) return _textBody();
+    final open = widget.onOpenInBrowser;
+    final attachment = widget.attachment;
+    return FutureBuilder<Uint8List?>(
+      future: _thumbLoad,
+      builder: (context, snapshot) => HtmlPreview(
+        // Still running is the glyph card rather than a spinner: the card is
+        // where the tap lives, and a control that appeared a second late is a
+        // control the reader's cursor was already over.
+        snapshot: snapshot.data,
+        glyph: _glyph,
+        name: attachment.name,
+        body: _textBody(),
+        onOpenInBrowser: open == null ? null : () => open(attachment),
+      ),
+    );
+  }
+
   Widget _unsupportedBody() {
     if (_segment == PreviewSegment.text) return _textBody();
     return UnsupportedPreview(
@@ -714,8 +801,9 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
         mono: monoForName(widget.attachment.name),
         note: _textNote,
       ),
-      // Never reached — the ladder above answers these four before any bytes
+      // Never reached — the ladder above answers these five before any bytes
       // are asked for.
+      PreviewKind.html ||
       PreviewKind.document ||
       PreviewKind.eml ||
       PreviewKind.link ||

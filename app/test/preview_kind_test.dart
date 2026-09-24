@@ -124,6 +124,51 @@ void main() {
       expect(previewKindFor(ref(name: 'Deck.pptx')), PreviewKind.document);
     });
 
+    test('a web page is its own kind, by name and by type', () {
+      expect(
+        previewKindFor(ref(name: 'security-report.html', contentType: null)),
+        PreviewKind.html,
+      );
+      expect(previewKindFor(ref(name: 'Report.HTM')), PreviewKind.html);
+      expect(previewKindFor(ref(name: 'page.xhtml')), PreviewKind.html);
+      expect(
+        previewKindFor(ref(name: null, contentType: 'text/html; charset=utf-8')),
+        PreviewKind.html,
+      );
+      expect(
+        previewKindFor(ref(name: null, contentType: 'application/xhtml+xml')),
+        PreviewKind.html,
+      );
+    });
+
+    test('text/html is answered before the text/ prefix rule', () {
+      // `text/html` IS a text type, and reading it as one would show the reader
+      // the markup rather than the report.
+      expect(
+        previewKindFor(ref(name: null, contentType: 'text/html')),
+        PreviewKind.html,
+        reason: 'not PreviewKind.text',
+      );
+      expect(
+        previewKindFor(ref(name: null, contentType: 'text/plain')),
+        PreviewKind.text,
+        reason: 'the prefix rule still answers everything else',
+      );
+    });
+
+    test('a chat file named .html is a page like any other', () {
+      expect(
+        previewKindFor(ref(
+          source: 'teams',
+          name: 'security-report.html',
+          contentType: 'application/octet-stream',
+          conversationKey: 'chat-1',
+        )),
+        PreviewKind.html,
+        reason: 'Graph names a great many real files octet-stream',
+      );
+    });
+
     test('a picture is a picture', () {
       expect(previewKindFor(imageRef()), PreviewKind.image);
       expect(
@@ -171,12 +216,15 @@ void main() {
 
     test('a preview is not an open — the kinds are unchanged', () {
       // Reading a file is not running it, so an `.xlsm` still renders as a
-      // sheet and an `.html` still shows as text.
+      // sheet and an `.html` still previews — drawn by the Runner's WebKit with
+      // scripting and the network off, which is not the same act as handing the
+      // file to whatever the operating system would run it with.
       expect(previewKindFor(ref(name: 'Budget.xlsm')), PreviewKind.sheet);
       expect(
         previewKindFor(ref(name: 'invoice.html', contentType: 'text/html')),
-        PreviewKind.text,
+        PreviewKind.html,
       );
+      expect(openRefused(ref(name: 'invoice.html')), isTrue);
     });
   });
 

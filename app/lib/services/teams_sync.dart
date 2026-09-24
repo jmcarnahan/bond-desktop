@@ -1,12 +1,14 @@
 import 'dart:convert';
 
 import '../data/message_store.dart';
+import '../models/attachment_models.dart' show quoteAttachmentKind;
 import 'activity_log.dart';
 import 'attachments/attachment_markers.dart';
 import 'attachments/attachment_policy.dart';
 import 'conversation_state.dart';
 import 'gates.dart';
 import 'pipeline_progress.dart';
+import 'sender_display.dart';
 // One symbol only, and deliberately: `sync_service.dart` also declares a
 // top-level `syncFloorDays`, and hauling it into this library beside
 // [TeamsSync.syncFloorDays] would leave two names that read alike and mean
@@ -740,7 +742,13 @@ class TeamsSync {
     final id = message['id'] as String?;
     if (id == null || id.isEmpty) return null;
 
-    final (name, senderId, fromApplication) = _sender(message['from']);
+    final (senderName, senderId, fromApplication) = _sender(message['from']);
+    // The sender ladder's last rung is for a sender the READER cannot place,
+    // and this app's own message is not one: the transcript has said `You`
+    // above it since long before any of this. It matters because the composer
+    // builds its row from what Graph echoed back, and that echo need not carry
+    // a `from` at all — a stored `Unknown sender` would then win over `You`.
+    final name = outbound && senderId == null ? null : senderName;
     final bodyText = _bodyText(message['body']);
     // The preview is what a list card and a recap line show, and a marker in
     // either is a token nobody typed. `body_text` KEEPS its markers — the
@@ -824,6 +832,15 @@ class TeamsSync {
   /// in a chat body IS inline by definition — it was pasted into the sentence.
   /// `source_url` takes the entry's `content_url`, which for a shared file is
   /// the OneDrive sharing link the bytes are fetched by.
+  ///
+  /// A `message_reference` — a quote-reply — lands on three columns that mail's
+  /// `item` attachments own: `item_from` is who was quoted, `card_text` is the
+  /// snippet of what they said, and `content_id` is the quoted message's id. No
+  /// new column, and no collision either: a quote is only ever a Teams row, a
+  /// chat has no forwarded-message attachments to describe, and the one reader
+  /// of `content_id` on this path (`layOutBody`'s `[cid:…]` join) requires
+  /// `is_inline`, which a quote never has. See the attachments table comment in
+  /// `data/schema.drift`.
   static List<Map<String, Object?>> attachmentRows(
     Map<String, dynamic> message,
   ) {
@@ -836,6 +853,7 @@ class TeamsSync {
       final id = entry['id'] as String? ?? '';
       if (id.isEmpty) continue;
       final kind = entry['kind'] as String? ?? 'other';
+      final quote = kind == quoteAttachmentKind;
       rows.add({
         'attachment_id': id,
         'ordinal': i,
@@ -844,10 +862,13 @@ class TeamsSync {
         'content_type': entry['content_type'] as String?,
         'size': 0,
         'is_inline': kind == 'image',
-        'content_id': null,
+        'content_id': quote ? entry['message_id'] as String? : null,
         'source_url': entry['content_url'] as String?,
         'thumbnail_url': entry['thumbnail_url'] as String?,
-        'card_text': entry['card_text'] as String?,
+        'card_text': quote
+            ? entry['message_preview'] as String?
+            : entry['card_text'] as String?,
+        'item_from': quote ? entry['message_sender'] as String? : null,
       });
     }
     return rows;
@@ -893,21 +914,36 @@ class TeamsSync {
   /// `from.application` non-null is a bot or a connector. Both shapes carry an
   /// id and a display name, and every level of the object can be absent — a
   /// system-adjacent message can arrive with no `from` at all.
+  ///
+  /// The name is a ladder, because Graph leaves `displayName` null for some
+  /// bots and the address is no help when it does: `from_address` is the
+  /// `teams:<id>` identity key, which named the facilitator bot
+  /// `teams:8e55a7b1-…` on every row it had sent. The rungs are the name Graph
+  /// gave, then [botSenderName] for an application it named nothing, then
+  /// [unknownSenderName] for a message that arrived with no sender at all.
+  ///
+  /// A PERSON Graph gave no name for keeps a null name on purpose, which is the
+  /// one place this ladder stops short. On screen it makes no difference —
+  /// [displaySenderName] answers [unknownSenderName] for exactly that row — and
+  /// it is what keeps the people directory out of it: the roster drops a
+  /// `teams:` sighting with no name as unshowable, where two stored
+  /// `Unknown sender`s would become two directory entries wearing one label.
   static (String?, String?, bool) _sender(Object? raw) {
-    if (raw is! Map) return (null, null, false);
+    if (raw is! Map) return (unknownSenderName, null, false);
     final user = raw['user'];
     if (user is Map) {
       return (user['displayName'] as String?, user['id'] as String?, false);
     }
     final application = raw['application'];
     if (application is Map) {
+      final name = (application['displayName'] as String?)?.trim();
       return (
-        application['displayName'] as String?,
+        name == null || name.isEmpty ? botSenderName : name,
         application['id'] as String?,
         true,
       );
     }
-    return (null, null, false);
+    return (unknownSenderName, null, false);
   }
 
   /// The Graph ids a chat message @mentions, in the order they appear.

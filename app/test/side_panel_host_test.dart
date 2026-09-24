@@ -5,8 +5,9 @@ import 'package:flutter_test/flutter_test.dart';
 /// The chrome every side panel wears, on its own.
 ///
 /// The screen tests pin what opens beside what; this file pins the header
-/// itself — the two controls it owns, and the fact that a panel with nowhere
-/// to expand to draws no ⤢ rather than a dead one.
+/// itself — the three controls it owns, the fact that a panel with nowhere to
+/// expand to draws no ⤢ rather than a dead one, and the fact that a panel with
+/// nothing underneath draws no back row rather than a second ✕.
 
 void main() {
   Future<void> pumpHost(
@@ -17,6 +18,8 @@ void main() {
     Widget? trailing,
     VoidCallback? onExpand,
     VoidCallback? onClose,
+    VoidCallback? onBack,
+    String? backLabel,
   }) async {
     await tester.binding.setSurfaceSize(const Size(600, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -29,6 +32,8 @@ void main() {
           trailing: trailing,
           onExpand: onExpand,
           onClose: onClose ?? () {},
+          onBack: onBack,
+          backLabel: backLabel,
           child: const Text('panel body'),
         ),
       ),
@@ -90,6 +95,46 @@ void main() {
     // and a control that answered nothing would still invite the tap.
     expect(find.byKey(SidePanelHost.expandKey), findsNothing);
     expect(find.byKey(SidePanelHost.closeKey), findsOneWidget);
+  });
+
+  group('the row back to the panel underneath', () {
+    testWidgets('names it, and reports the tap', (tester) async {
+      var popped = 0;
+      await pumpHost(
+        tester,
+        onBack: () => popped++,
+        backLabel: 'Survey window',
+      );
+
+      // The words a reader has to be able to act on without hovering
+      // anything: which conversation the ✕ is about to give back.
+      expect(find.text('Back to Survey window'), findsOneWidget);
+
+      await tester.tap(find.byKey(SidePanelHost.backKey));
+      await tester.pump();
+
+      expect(popped, 1);
+    });
+
+    testWidgets('nothing underneath is no row, not a second close',
+        (tester) async {
+      await pumpHost(tester);
+
+      // The ✕ already says what a close does when there is nothing behind the
+      // panel, and two controls saying one thing is one of them lying.
+      expect(find.byKey(SidePanelHost.backKey), findsNothing);
+      expect(find.textContaining('Back to'), findsNothing);
+    });
+
+    testWidgets('a panel underneath with no name still offers the way out',
+        (tester) async {
+      await pumpHost(tester, onBack: () {}, backLabel: null);
+
+      // A label the host could not resolve — a conversation the list no longer
+      // has — must not cost the reader the row itself.
+      expect(find.text('Back'), findsOneWidget);
+      expect(find.byKey(SidePanelHost.backKey), findsOneWidget);
+    });
   });
 
   group('the width beside the main pane', () {

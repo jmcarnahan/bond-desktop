@@ -43,6 +43,12 @@ class AttachmentViewerPane extends StatelessWidget {
   final bool pinned;
   final void Function(String url)? onOpenLink;
 
+  /// The page card's own way out — see [AttachmentPreviewPanel.onOpenInBrowser].
+  /// Threaded rather than dropped because the full pane is where a long report
+  /// is actually read, and deciding the browser is worth it is a decision made
+  /// after reading it.
+  final void Function(AttachmentRef attachment)? onOpenInBrowser;
+
   const AttachmentViewerPane({
     super.key,
     required this.attachment,
@@ -55,6 +61,7 @@ class AttachmentViewerPane extends StatelessWidget {
     this.onPinToStoryline,
     this.pinned = false,
     this.onOpenLink,
+    this.onOpenInBrowser,
   });
 
   @override
@@ -79,6 +86,7 @@ class AttachmentViewerPane extends StatelessWidget {
         onPinToStoryline: onPinToStoryline,
         pinned: pinned,
         onOpenLink: onOpenLink,
+        onOpenInBrowser: onOpenInBrowser,
       ),
     );
   }

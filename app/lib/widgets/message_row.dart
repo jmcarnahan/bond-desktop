@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import '../services/profile_photos.dart';
+import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 import 'attachment_card.dart';
 import 'attachment_chip.dart';
@@ -14,6 +15,7 @@ import 'inline_image_thumb.dart';
 import 'link_unfurl.dart';
 import 'linked_text.dart';
 import 'preview/preview_kind.dart';
+import 'quote_block.dart';
 import 'time_format.dart';
 
 // The avatar and its two pure helpers moved to `bond_avatar.dart` when the
@@ -137,12 +139,17 @@ final class BodyAttachmentSegment extends BodySegment {
 /// row draws it — but the file is still named in the chip row underneath,
 /// which is what carries its size and its tap target. Counting it twice would
 /// make a folded row claim two files where there is one.
+/// [quotes] is the one bucket that is NOT a file this message carried: a Teams
+/// quote-reply arrives as an attachment and is drawn above the words as the
+/// piece of conversation it is (`quote_block.dart`), so it is in none of the
+/// other four lists and counts toward nothing.
 typedef BodyLayout = ({
   List<BodySegment> segments,
   String plainText,
   List<AttachmentRef> chips,
   List<AttachmentRef> trailingImages,
   List<AttachmentRef> thumbnailable,
+  List<AttachmentRef> quotes,
 });
 
 /// The body a row reads.
@@ -171,6 +178,10 @@ String rawBodyOf(Message message) {
 /// - `[cid:x]` matching an INLINE attachment of at least [inlineImageMinBytes]
 ///   draws it there. A smaller one is stripped exactly as it always was, and is
 ///   dropped from the chips too: a signature logo is not a file somebody sent.
+/// - A marker naming a QUOTE-REPLY loses its marker and places nothing. Teams
+///   writes that marker at the head of the body, which is how the quote used to
+///   draw itself as a `🔗 (unnamed)` chip above the reply; the quote goes to
+///   [BodyLayout.quotes] instead and the row draws a quote block there.
 /// - Everything unplaced falls to the bottom in `ordinal` order — pictures as
 ///   pictures, the rest as chips.
 ///
@@ -224,6 +235,9 @@ BodyLayout layOutBody(String body, List<AttachmentRef> attachments) {
       }
     }
     if (target == null) continue;
+    // A quote-reply is not drawn where its marker sat. It is the thing being
+    // replied TO, so it belongs above the whole reply rather than inside it.
+    if (target.isQuoteReply) continue;
     // A body that names the same file twice draws it once, where it was first
     // mentioned; the second mention just loses its marker.
     if (!placed.add(target.attachmentId)) continue;
@@ -253,10 +267,16 @@ BodyLayout layOutBody(String body, List<AttachmentRef> attachments) {
       // byte for byte the way it always has.
       : <BodySegment>[if (plainText.isNotEmpty) BodyTextSegment(plainText)];
 
+  final quotes = [
+    for (final attachment in attachments)
+      if (attachment.isQuoteReply) attachment,
+  ]..sort((a, b) => a.ordinal.compareTo(b.ordinal));
+
   final leftovers = [
     for (final attachment in attachments)
       if (!placed.contains(attachment.attachmentId) &&
           !dropped.contains(attachment.attachmentId) &&
+          !attachment.isQuoteReply &&
           !_isSubThresholdInlineImage(attachment))
         attachment,
   ]..sort((a, b) => a.ordinal.compareTo(b.ordinal));
@@ -271,11 +291,12 @@ BodyLayout layOutBody(String body, List<AttachmentRef> attachments) {
     }
     chips.add(attachment);
     // A document that something in this build might be able to draw: a PDF
-    // (its own first page) or a chat's shared file (OneDrive's rendering).
-    // Whether one actually arrives is the host's answer, not this function's —
-    // it says only which files are worth asking about.
+    // (its own first page), a chat's shared file (OneDrive's rendering) or a web
+    // page (the Runner's WebKit). Whether one actually arrives is the host's
+    // answer, not this function's — it says only which files are worth asking
+    // about.
     if (!attachment.isInline &&
-        const {PreviewKind.pdf, PreviewKind.document}
+        const {PreviewKind.pdf, PreviewKind.document, PreviewKind.html}
             .contains(previewKindFor(attachment))) {
       thumbnailable.add(attachment);
     }
@@ -287,6 +308,7 @@ BodyLayout layOutBody(String body, List<AttachmentRef> attachments) {
     chips: chips,
     trailingImages: trailingImages,
     thumbnailable: thumbnailable,
+    quotes: quotes,
   );
 }
 
@@ -376,6 +398,16 @@ class MessageRow extends StatefulWidget {
   /// Whether it starts folded. Read once, at construction — see [_collapsed].
   final bool initiallyCollapsed;
 
+  /// Told whenever the reader folds or unfolds this row, with what it became.
+  ///
+  /// The fold survives every rebuild on its own (see [_collapsed]); what it
+  /// cannot survive is the row being DISPOSED, which is what happens to a
+  /// transcript replaced by something else and built again when it comes back.
+  /// A host that can lose the row remembers the answer and hands it back as
+  /// [initiallyCollapsed]; one that never loses it passes null and the fold
+  /// stays the row's own business.
+  final void Function(bool collapsed)? onFoldChanged;
+
   /// What opening one of this message's files does. Null leaves every chip and
   /// picture a statement — a row whose host has nowhere to show a file must not
   /// offer to show it.
@@ -418,6 +450,7 @@ class MessageRow extends StatefulWidget {
     this.suggestion,
     this.collapsible = false,
     this.initiallyCollapsed = false,
+    this.onFoldChanged,
     this.onOpenAttachment,
     this.selectedAttachment,
     this.thumbnailFor,
@@ -514,11 +547,11 @@ class _MessageRowState extends State<MessageRow> {
 
   String get _senderName {
     final message = widget.message;
-    final name = message.fromName;
-    if (name != null && name.isNotEmpty) return name;
-    final address = message.fromAddress;
-    if (address != null && address.isNotEmpty) return address;
-    return message.outbound ? 'You' : '(no sender)';
+    return displaySenderName(
+      name: message.fromName,
+      address: message.fromAddress,
+      fallback: message.outbound ? 'You' : unknownSenderName,
+    );
   }
 
   @override
@@ -590,6 +623,10 @@ class _MessageRowState extends State<MessageRow> {
                         BondType.caption.copyWith(color: BondColors.inkMuted),
                   ),
               ] else ...[
+                // What this reply is answering, first: a quote reads before the
+                // words that answer it or it is not a quote.
+                for (final quote in layout.quotes)
+                  QuoteBlock(key: QuoteBlock.keyFor(quote), attachment: quote),
                 ..._bodySegments(layout, overflows),
                 if (overflows) ...[
                   const SizedBox(height: BondSpacing.s4),
@@ -887,7 +924,10 @@ class _MessageRowState extends State<MessageRow> {
     return Material(
       type: MaterialType.transparency,
       child: InkWell(
-        onTap: () => setState(() => _collapsed = !_collapsed),
+        onTap: () {
+          setState(() => _collapsed = !_collapsed);
+          widget.onFoldChanged?.call(_collapsed);
+        },
         borderRadius: BondRadii.smAll,
         child: line,
       ),

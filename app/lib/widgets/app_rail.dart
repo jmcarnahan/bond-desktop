@@ -7,6 +7,7 @@ import '../models/storyline_models.dart';
 import '../services/attention.dart';
 import '../services/llm/storyline_tasks.dart' show NameStorylineTask;
 import '../services/profile_photos.dart';
+import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 import 'bond_avatar.dart';
 import 'dismissed_storylines_fold.dart';
@@ -258,7 +259,14 @@ List<Storyline> storylinesBySource(List<Storyline> all, String? source) {
 /// `withSourceGlyph`. At this width the participant's name is often all the
 /// two have to tell them apart, and the same colleague can be on both.
 String railTitleFor(Conversation c) {
-  final who = c.primaryParticipant?.display ?? '';
+  final who = displaySenderName(
+    name: c.primaryParticipant?.name,
+    address: c.primaryParticipant?.email,
+    // Empty rather than a word, so a row with nobody showable falls through to
+    // its subject exactly as it did before. A chat participant's address is a
+    // `teams:<id>` and is never the thing that falls through.
+    fallback: '',
+  );
   if (who.isNotEmpty) return withSourceGlyph(c.source, who);
   final subject = _stripReplyPrefixes(c.subject ?? '');
   if (subject.isNotEmpty) return withSourceGlyph(c.source, subject);
@@ -287,7 +295,14 @@ String needsYouTitleFor(Conversation c) {
 /// The dimmed `' · who'` a Needs You row carries after its ask, or null when
 /// the row is ALREADY the person and repeating them would be noise.
 String? needsYouWhoFor(Conversation c) {
-  final who = c.primaryParticipant?.display ?? '';
+  final who = displaySenderName(
+    name: c.primaryParticipant?.name,
+    address: c.primaryParticipant?.email,
+    // Empty rather than a word, so a row with nobody showable falls through to
+    // its subject exactly as it did before. A chat participant's address is a
+    // `teams:<id>` and is never the thing that falls through.
+    fallback: '',
+  );
   if (who.isEmpty) return null;
   final title = needsYouTitleFor(c);
   if (title == who || title == withSourceGlyph(c.source, who)) return null;

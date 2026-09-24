@@ -1742,10 +1742,32 @@ void main() {
     });
   });
 
-  group('has_attachments rides the shared projection', () {
-    test('a feed row says whether its message carried anything', () async {
+  group('has_file rides the shared projection', () {
+    Map<String, Object?> attachment(
+      String id, {
+      String kind = 'file',
+      String? name,
+      bool isInline = false,
+    }) =>
+        {
+          'attachment_id': id,
+          'ordinal': 0,
+          'kind': kind,
+          'name': name,
+          'content_type': kind == 'file' ? 'application/pdf' : null,
+          'is_inline': isInline,
+        };
+
+    test('a feed row says whether its message carries a file', () async {
       await seed('plain');
-      await seed('attached', receivedAt: '2026-09-02T10:00:00Z', hasAttachments: true);
+      await seed(
+        'attached',
+        receivedAt: '2026-09-02T10:00:00Z',
+        hasAttachments: true,
+      );
+      await store.upsertAttachments('email', 'attached', [
+        attachment('a1', name: 'Terms.pdf'),
+      ]);
 
       final rows = await store.pageHomeFeed();
 
@@ -1753,9 +1775,50 @@ void main() {
       // shares — so `has:file` can be answered off a hit without a second
       // query per row.
       expect(
-        {for (final row in rows) row.sourceMessageId: row.hasAttachments},
+        {for (final row in rows) row.sourceMessageId: row.hasFile},
         {'attached': true, 'plain': false},
       );
+    });
+
+    test('the flag alone is not a file, and a quote-reply is not one either',
+        () async {
+      // A Teams quote-reply arrives AS an attachment, so the sync sets
+      // `has_attachments` for a message carrying nothing to open. The flag has
+      // to stay 1 — three handlers read it before they hydrate attachments at
+      // all — so the projection asks the attachment rows instead.
+      await seed('flag-only', hasAttachments: true);
+      await seed(
+        'quote-only',
+        source: 'teams',
+        conversationKey: 'chat-1',
+        receivedAt: '2026-09-02T10:00:00Z',
+        hasAttachments: true,
+      );
+      await store.upsertAttachments('teams', 'quote-only', [
+        attachment('q1', kind: 'message_reference'),
+      ]);
+
+      final rows = await store.pageHomeFeed();
+
+      expect(
+        {for (final row in rows) row.sourceMessageId: row.hasFile},
+        {'flag-only': false, 'quote-only': false},
+      );
+    });
+
+    test('a file beside a quote is still a file', () async {
+      await seed(
+        'both',
+        source: 'teams',
+        conversationKey: 'chat-1',
+        hasAttachments: true,
+      );
+      await store.upsertAttachments('teams', 'both', [
+        attachment('q1', kind: 'message_reference'),
+        {...attachment('a1', name: 'Deck.pptx'), 'ordinal': 1},
+      ]);
+
+      expect((await store.pageHomeFeed()).single.hasFile, isTrue);
     });
   });
 }

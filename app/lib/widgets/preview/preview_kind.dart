@@ -23,7 +23,23 @@ import '../attachment_format.dart';
 /// answer for a `.heic` (an image Flutter cannot decode) and for a `.xls` (a
 /// spreadsheet in a binary format nothing here reads), and both of those are
 /// better said than half-drawn.
-enum PreviewKind { image, pdf, sheet, text, document, eml, link, unsupported }
+///
+/// `html` is a page, and it is its own kind rather than `text` because the two
+/// readings are different things: markup shown as text is `<table` and inline
+/// CSS, while the words in it are a report somebody wrote. The kind carries a
+/// picture of the page and the way out to a browser as well, neither of which
+/// a `.txt` has anywhere to put.
+enum PreviewKind {
+  image,
+  pdf,
+  sheet,
+  text,
+  document,
+  eml,
+  link,
+  html,
+  unsupported,
+}
 
 /// Kinds that point at something that is NOT a file — a card is a rendering of
 /// a message, a `message_reference` a quote of one — and are therefore never
@@ -75,6 +91,9 @@ PreviewKind? _kindForExtension(String extension) {
     // picture frame says less than a line naming the file.
     'heic' || 'heif' || 'tiff' || 'tif' => PreviewKind.unsupported,
     'pdf' => PreviewKind.pdf,
+    // Before the text list below, because a page IS text by content type and
+    // reading it as one would show the reader the markup instead of the report.
+    'html' || 'htm' || 'xhtml' => PreviewKind.html,
     'xlsx' || 'xlsm' => PreviewKind.sheet,
     // The legacy binary workbook. `xlsx_reader.dart` reads a zip of XML and
     // this is not one.
@@ -116,6 +135,11 @@ PreviewKind? _kindForContentType(String? contentType) {
   if (type ==
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
     return PreviewKind.sheet;
+  }
+  // BEFORE the `text/` prefix rule below, which would otherwise swallow it:
+  // `text/html` is the one text type whose bytes are not the words in it.
+  if (type == 'text/html' || type == 'application/xhtml+xml') {
+    return PreviewKind.html;
   }
   if (type.startsWith('text/')) return PreviewKind.text;
   if (type ==
@@ -175,8 +199,16 @@ const Set<String> _executableContentTypes = {
 /// them in charge of what happens next.
 ///
 /// PREVIEWS are unaffected. An `.xlsm` still renders as a sheet and an `.html`
-/// still shows as text — reading a file is not running it, and this app's own
-/// renderers are the safe way to look inside one.
+/// still shows its words and a picture of itself — reading a file is not
+/// running it, and this app's own renderers are the safe way to look inside
+/// one.
+///
+/// A page has ONE narrower door beside this refusal and nothing else does:
+/// `HtmlPreview`'s Open in browser, which hands the file to the browser the
+/// owner already reads the web in rather than to whatever the OS decides
+/// opening means. This function still answers true for it — the generic Open
+/// stays withheld — because "the browser, deliberately, with a caution on the
+/// control" and "whatever `open(2)` picks" are not the same offer.
 bool openRefused(AttachmentRef ref) {
   if (_executableExtensions.contains(extensionOf(ref.name))) return true;
   final type = ref.contentType?.split(';').first.trim().toLowerCase() ?? '';

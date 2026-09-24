@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/message_models.dart';
 import '../services/conversation_state.dart';
 import '../services/deadline_parse.dart';
+import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 import 'app_rail.dart';
 import 'time_format.dart';
@@ -90,7 +91,13 @@ class LaterDigestPanel extends StatelessWidget {
     for (final c in laterRows(conversations)) {
       final dayKey = dayKeyOfIso(c.lastMessageAt) ?? '';
       if (dayFilter != null && dayKey != dayFilter) continue;
-      final who = c.primaryParticipant?.display ?? '(no sender)';
+      // The heading a group is filed under, so it must be readable: a chat
+      // participant's address is a `teams:<id>` nobody could file anything by.
+      final who = displaySenderName(
+        name: c.primaryParticipant?.name,
+        address: c.primaryParticipant?.email,
+        fallback: '(no sender)',
+      );
       (days[dayKey] ??= <String, List<Conversation>>{})
           .putIfAbsent(who, () => <Conversation>[])
           .add(c);

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../services/profile_photos.dart';
+import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 
 /// Inbound avatar fills, picked from the existing token set rather than a new
@@ -18,6 +19,10 @@ const List<Color> _avatarPalette = [
 
 /// Two letters from a display name, one from an address, "?" from nothing.
 /// Never throws on the half-empty senders a mailbox is full of.
+///
+/// A `teams:` pseudo-address is skipped rather than initialled: every Teams
+/// sender would wear the same "T", which says less than the "?" that means
+/// "nobody knows". See [isPseudoAddress].
 String initialsFor(String? name, String? address) {
   final words = [
     for (final w in (name ?? '').split(RegExp(r'\s+')))
@@ -29,7 +34,7 @@ String initialsFor(String? name, String? address) {
   if (words.length == 1) return words.first[0].toUpperCase();
 
   final addr = (address ?? '').trim();
-  if (addr.isNotEmpty) return addr[0].toUpperCase();
+  if (addr.isNotEmpty && !isPseudoAddress(addr)) return addr[0].toUpperCase();
   return '?';
 }
 
@@ -46,7 +51,8 @@ Color avatarColorFor(String? address, {required bool outbound}) {
 
 
 /// One person's face: their photo when the directory has one, their initials
-/// on a stable colour until then and whenever it does not.
+/// on a stable colour until then and whenever it does not. A bot's face is a
+/// glyph instead of a letter — see [_BondAvatarState._disc].
 ///
 /// Initials FIRST, always. A photo arrives a network call after the frame that
 /// needed it, and a placeholder that were blank — or worse, a spinner — would
@@ -152,7 +158,23 @@ class _BondAvatarState extends State<BondAvatar> {
     return scaled < 9 ? 9 : scaled;
   }
 
-  Widget _initials() {
+  /// The glyph's size. Larger than [_fontSize] for the same disc, because a
+  /// letterform and an icon do not fill their box alike: two capitals at 12pt
+  /// read as the same weight as a robot at 20 in a 36px circle.
+  double get _glyphSize {
+    final scaled = widget.size * 0.55;
+    return scaled < 11 ? 11 : scaled;
+  }
+
+  /// The disc under everything: a bot's glyph, or the sender's initials.
+  ///
+  /// A bot gets a face that says "an application wrote this" instead of a
+  /// letter, which for the bots that prompted it was a `teams:` id's "T". The
+  /// fill is the same stable per-address colour every other sender gets, so a
+  /// transcript of one chat still reads as one palette — see [isBotSender] for
+  /// what counts as a bot and how sure it is.
+  Widget _disc() {
+    final bot = isBotSender(name: widget.name, address: widget.address);
     return Container(
       width: widget.size,
       height: widget.size,
@@ -161,21 +183,27 @@ class _BondAvatarState extends State<BondAvatar> {
         shape: BoxShape.circle,
         color: avatarColorFor(widget.address, outbound: widget.outbound),
       ),
-      child: Text(
-        initialsFor(widget.name, widget.address),
-        style: BondType.caption.copyWith(
-          color: BondColors.onDarkPrimary,
-          fontWeight: FontWeight.w600,
-          fontSize: _fontSize,
-        ),
-      ),
+      child: bot
+          ? Icon(
+              Icons.smart_toy_outlined,
+              size: _glyphSize,
+              color: BondColors.onDarkPrimary,
+            )
+          : Text(
+              initialsFor(widget.name, widget.address),
+              style: BondType.caption.copyWith(
+                color: BondColors.onDarkPrimary,
+                fontWeight: FontWeight.w600,
+                fontSize: _fontSize,
+              ),
+            ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
     final image = _resolved;
-    if (image == null) return _initials();
+    if (image == null) return _disc();
 
     return SizedBox(
       width: widget.size,
@@ -191,7 +219,7 @@ class _BondAvatarState extends State<BondAvatar> {
           gaplessPlayback: true,
           // Bytes that will not decode are somebody's broken upload, not an
           // error this app has anything to say about.
-          errorBuilder: (_, _, _) => _initials(),
+          errorBuilder: (_, _, _) => _disc(),
         ),
       ),
     );

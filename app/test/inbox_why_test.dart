@@ -291,10 +291,13 @@ void main() {
     await settleQueues(tester);
   });
 
-  testWidgets('from a thread that is already beside, it REPLACES that thread',
+  testWidgets('from a thread that is already beside, it stacks ON that thread',
       (tester) async {
-    // The side panel shows one thing. A Why opened from beside takes the slot
-    // its own thread was in — the same rule a file opened from there follows.
+    // The side panel shows one thing at a time, so the Why takes the panel its
+    // own thread was in — but it is a STACK and not a slot, so the thread is
+    // underneath rather than gone, and the ✕ gives it back. It used to be a
+    // replacement, and a reader who asked why one message was flagged lost the
+    // conversation they asked it about.
     await seedThread('c1', 'Homepage copy');
     await store.insertStoryline(
       id: 'sl-1',
@@ -343,9 +346,26 @@ void main() {
     }
 
     expect(whyPanel(), findsOneWidget);
-    // One panel, not two: the thread it came from has gone.
+    // One panel, not two, and nothing of the thread on screen.
     expect(find.byType(SidePanelHost), findsOneWidget);
     expect(find.byType(ThreadDetailPanel), findsNothing);
+    // And the row that says where the way out goes, by the thread's own name.
+    expect(find.text('Back to Homepage copy'), findsOneWidget);
+
+    await tester.tap(find.byKey(SidePanelHost.closeKey));
+    for (var i = 0; i < 3; i++) {
+      await tester.pump();
+    }
+
+    // The question is answered and the conversation it was about is back.
+    expect(whyPanel(), findsNothing);
+    expect(
+      find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.byType(ThreadDetailPanel),
+      ),
+      findsOneWidget,
+    );
     await settleQueues(tester);
   });
 }

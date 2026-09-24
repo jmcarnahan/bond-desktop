@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/profile_photos.dart';
+import 'package:bond_inbox/services/sender_display.dart';
 import 'package:bond_inbox/widgets/attachment_card.dart';
 import 'package:bond_inbox/widgets/attachment_chip.dart';
 import 'package:bond_inbox/widgets/bond_avatar.dart';
@@ -12,6 +13,7 @@ import 'package:bond_inbox/widgets/image_grid.dart';
 import 'package:bond_inbox/widgets/inline_image_thumb.dart';
 import 'package:bond_inbox/widgets/link_unfurl.dart';
 import 'package:bond_inbox/widgets/message_row.dart';
+import 'package:bond_inbox/widgets/quote_block.dart';
 import 'package:bond_inbox/widgets/time_format.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -91,6 +93,25 @@ class _FakePhotos implements ProfilePhotos {
     return images[key];
   }
 }
+
+/// A Teams quote-reply as the sync stores one: no name, no url, and the quoted
+/// sender and snippet on the two columns `TeamsSync.attachmentRows` reuses.
+AttachmentRef _quote({
+  String attachmentId = 'q1',
+  int ordinal = 0,
+  String? sender = 'Dana Ruiz',
+  String? preview = 'is it slide 29 in the deck?',
+}) =>
+    AttachmentRef(
+      source: 'teams',
+      messageId: 'm1',
+      attachmentId: attachmentId,
+      ordinal: ordinal,
+      kind: quoteAttachmentKind,
+      contentType: 'messageReference',
+      itemFrom: sender,
+      cardText: preview,
+    );
 
 Widget _host(Widget child) => MaterialApp(
       home: Scaffold(
@@ -248,6 +269,38 @@ void main() {
       );
       expect(find.text('EN'), findsNothing);
       expect(photos.asked, ['eric@example.com']);
+    });
+
+    testWidgets('a chat bot stored with no name shows neither its id nor a T',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      // What a row written before ingest named its bots carries: no name, and
+      // the `teams:` identity key for an address. The header used to print the
+      // key and the avatar the key's first letter.
+      const guid = 'teams:8e55a7b1-4c2d-4f1a-9b3e-77d0c1e2a5f4';
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(fromName: null, fromAddress: guid),
+      )));
+
+      expect(find.text(unknownSenderName), findsOneWidget);
+      expect(find.textContaining('teams:'), findsNothing);
+      expect(find.text('T'), findsNothing);
+      expect(find.byIcon(Icons.smart_toy_outlined), findsOneWidget);
+    });
+
+    testWidgets('a chat bot ingest named Bot says so', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(fromName: botSenderName, fromAddress: 'teams:app-9'),
+      )));
+
+      expect(find.text(botSenderName), findsOneWidget);
+      expect(find.textContaining('teams:'), findsNothing);
+      expect(find.byIcon(Icons.smart_toy_outlined), findsOneWidget);
     });
 
     testWidgets('a continuation row drops the avatar and the name',
@@ -1008,6 +1061,118 @@ void main() {
       )));
 
       expect(find.text('📎 1 file'), findsOneWidget);
+    });
+  });
+
+  /// A Teams quote-reply. Graph sends it as an attachment with no name and no
+  /// url, and writes an `<attachment id=…>` tag at the HEAD of the body, which
+  /// the sync turns into a marker — which is why the broken chip appeared ABOVE
+  /// the words rather than under them.
+  group('a quote-reply', () {
+    test('its marker places nothing and leaves no chip behind', () {
+      final quote = _quote();
+      final layout = layOutBody('[[att:q1]]29 and 30', [quote]);
+
+      expect(layout.plainText, '29 and 30');
+      expect(layout.segments.single, isA<BodyTextSegment>());
+      expect(layout.chips, isEmpty);
+      expect(layout.trailingImages, isEmpty);
+      expect(layout.quotes.map((a) => a.attachmentId), ['q1']);
+      // A quote is not a file, so a folded row must not claim one.
+      expect(displayableCountOf(layout), 0);
+    });
+
+    test('and a quote with no marker at all is still a quote', () {
+      final layout = layOutBody('29 and 30', [_quote()]);
+
+      expect(layout.quotes.map((a) => a.attachmentId), ['q1']);
+      expect(layout.chips, isEmpty);
+    });
+
+    testWidgets('reads as who was quoted and what they said, above the reply',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final quote = _quote();
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(
+          fromName: 'Priya Raman',
+          bodyText: '[[att:q1]]29 and 30',
+          attachments: [quote],
+        ),
+      )));
+
+      expect(find.byKey(QuoteBlock.keyFor(quote)), findsOneWidget);
+      expect(find.text('Dana Ruiz'), findsOneWidget);
+      expect(find.text('is it slide 29 in the deck?'), findsOneWidget);
+      // The quote reads before the words that answer it.
+      expect(
+        tester.getTopLeft(find.text('is it slide 29 in the deck?')).dy,
+        lessThan(tester.getTopLeft(find.text('29 and 30')).dy),
+      );
+    });
+
+    testWidgets('and never as the broken link chip it used to be',
+        (tester) async {
+      // The whole of entry 7a: a `🔗 (unnamed)` chip whose tap opened an empty
+      // preview panel. Nothing here may offer a tap.
+      final opened = <String>[];
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(bodyText: '[[att:q1]]29 and 30', attachments: [_quote()]),
+        onOpenAttachment: (a) => opened.add(a.attachmentId),
+      )));
+
+      expect(find.byType(AttachmentChip), findsNothing);
+      expect(find.byType(LinkUnfurl), findsNothing);
+      expect(find.byType(AttachmentCard), findsNothing);
+      expect(find.textContaining('🔗'), findsNothing);
+      expect(find.textContaining('(unnamed)'), findsNothing);
+      expect(opened, isEmpty);
+    });
+
+    testWidgets('a file on the same message is still a file', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final quote = _quote();
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(
+          bodyText: '[[att:q1]]here is the deck',
+          attachments: [
+            quote,
+            ref(source: 'teams', attachmentId: 'a2', ordinal: 1,
+                name: 'Report.pptx', contentType: null),
+          ],
+        ),
+      )));
+
+      expect(find.byKey(QuoteBlock.keyFor(quote)), findsOneWidget);
+      expect(find.byType(AttachmentCard), findsOneWidget);
+      expect(find.text('Report.pptx'), findsOneWidget);
+    });
+
+    testWidgets('a reference Graph told us nothing about draws nothing',
+        (tester) async {
+      // Malformed `content`, or a tenant that sent none: there is no sender and
+      // no snippet, and an empty rule says less than the words under it.
+      final bare = AttachmentRef(
+        source: 'teams',
+        messageId: 'm1',
+        attachmentId: 'q1',
+        kind: quoteAttachmentKind,
+      );
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(bodyText: '[[att:q1]]29 and 30', attachments: [bare]),
+      )));
+
+      expect(find.text('29 and 30'), findsOneWidget);
+      expect(find.byType(AttachmentChip), findsNothing);
+      expect(find.textContaining('(unnamed)'), findsNothing);
+      expect(
+        tester.getSize(find.byType(QuoteBlock)),
+        Size.zero,
+      );
     });
   });
 

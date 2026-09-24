@@ -339,8 +339,10 @@ class McpTeamsBackend implements TeamsBackend {
   /// application, else absent entirely — a system event arrives with neither
   /// and must not be handed a `from` object with nulls inside, which would read
   /// as a person with no name. A bot's display name is null because the wire
-  /// carries no `from_application_display`; the reader tolerates that, and a
-  /// bot message is gated out of extraction either way.
+  /// carries no `from_application_display`, and the reader is where that is
+  /// answered: `TeamsSync._sender` names an application Graph — or this wire —
+  /// gave no name for `Bot`, so both backends store the same word rather than a
+  /// `teams:<id>` the reader would have been shown instead.
   ///
   /// `mentions` gets the same treatment as `from`, and it is the clearest case
   /// for why this file exists at all: the wire carries `mentioned_user_ids`, a
@@ -384,7 +386,7 @@ class McpTeamsBackend implements TeamsBackend {
       if (message['attachments'] case final List attachments)
         'attachments': [
           for (final entry in attachments)
-            if (entry is Map) Map<String, Object?>.from(entry),
+            if (entry is Map) _attachmentEntry(entry),
         ],
       if (message['mentioned_user_ids'] case final List mentionedUserIds)
         'mentions': [
@@ -397,6 +399,26 @@ class McpTeamsBackend implements TeamsBackend {
               },
         ],
     };
+  }
+
+  /// One attachment entry, as the sync reads it.
+  ///
+  /// A pass-through with one arm. The server's flat entry already IS the shape
+  /// [TeamsSync.attachmentRows] takes — that is the whole reason
+  /// [GraphTeams.attachmentEntries] converts INTO it — except for a quote-reply,
+  /// where the three fields naming the quoted message may still be a JSON
+  /// `content` string the way Graph sends it. Unpacked through
+  /// [GraphTeams.quoteReferenceFields], so both backends read a quote the same
+  /// way; a server that already sent the flat fields keeps them, because the
+  /// decode only fills what it found.
+  static Map<String, Object?> _attachmentEntry(Map entry) {
+    final flat = Map<String, Object?>.from(entry);
+    if (flat['kind'] != 'message_reference') return flat;
+    final decoded = GraphTeams.quoteReferenceFields(flat['content']);
+    for (final field in decoded.entries) {
+      flat[field.key] ??= field.value;
+    }
+    return flat;
   }
 
   /// Waits out whatever is left of the gap since the last chat-list page.

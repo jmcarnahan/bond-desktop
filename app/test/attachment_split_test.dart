@@ -27,14 +27,18 @@ import 'package:bond_inbox/widgets/app_rail.dart' show AppRail;
 import 'package:bond_inbox/widgets/attachment_card.dart';
 import 'package:bond_inbox/widgets/composer.dart';
 import 'package:bond_inbox/widgets/home_pane.dart';
+import 'package:bond_inbox/widgets/hover_actions.dart';
 import 'package:bond_inbox/widgets/inline_image_thumb.dart';
 import 'package:bond_inbox/widgets/preview/attachment_preview_panel.dart';
+import 'package:bond_inbox/widgets/preview/html_preview.dart';
 import 'package:bond_inbox/widgets/preview/attachment_viewer_pane.dart';
 import 'package:bond_inbox/widgets/preview/preview_engines.dart';
 import 'package:bond_inbox/widgets/side_panel.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -672,7 +676,282 @@ void main() {
       await settleQueues(tester);
     });
 
-    testWidgets('a file from it replaces it, and Use in reply drafts on it',
+    /// The panel's ✕ — "close this panel", which is a pop and not a dismissal
+    /// whenever something is underneath.
+    Future<void> closeSide(WidgetTester tester) async {
+      await tester.tap(find.byKey(SidePanelHost.closeKey));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+    }
+
+    /// The thread beside, by the one widget only it puts on screen.
+    final sideThread = find.descendant(
+      of: find.byType(SidePanelHost),
+      matching: find.byType(ThreadDetailPanel),
+    );
+
+    testWidgets('the ✕ on a file opened from it gives the thread back',
+        (tester) async {
+      await seedThread(needsReply: true);
+      await seedStorylineWith('c1');
+      await pumpInbox(tester);
+      await openBeside(tester);
+      await openAttachment(tester, 'Terms.pdf');
+
+      // The words that say where the ✕ goes, before it is pressed: a reader
+      // who opened a file out of a conversation must be able to see that the
+      // conversation is what they are standing on.
+      expect(find.text('Back to Survey window'), findsOneWidget);
+
+      await closeSide(tester);
+
+      // Back to the thread, not to nothing. The storyline in the main pane
+      // never moved.
+      expect(find.byType(AttachmentPreviewPanel), findsNothing);
+      expect(sideThread, findsOneWidget);
+      expect(find.byType(StorylineTimelinePanel), findsOneWidget);
+      // And the thread is the bottom of the stack now, so it offers no way
+      // back — its ✕ is a close, and it says so by drawing no row.
+      expect(find.byKey(SidePanelHost.backKey), findsNothing);
+
+      await closeSide(tester);
+
+      // The second ✕ is the dismissal the first one used to be.
+      expect(find.byType(SidePanelHost), findsNothing);
+      expect(find.byType(StorylineTimelinePanel), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('Escape in the panel does what the ✕ does', (tester) async {
+      await seedThread(needsReply: true);
+      await seedStorylineWith('c1');
+      await pumpInbox(tester);
+      await openBeside(tester);
+      await openAttachment(tester, 'Terms.pdf');
+
+      // The tap that opened the file was itself inside the panel, which is
+      // what put the focus where the binding can see the key.
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(AttachmentPreviewPanel), findsNothing);
+      expect(sideThread, findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('the full pane comes back through the file to the thread',
+        (tester) async {
+      await seedThread(needsReply: true);
+      await seedStorylineWith('c1');
+      await pumpInbox(tester);
+      await openBeside(tester);
+      await openAttachment(tester, 'Terms.pdf');
+
+      await tester.tap(find.byKey(SidePanelHost.expandKey));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(AttachmentViewerPane), findsOneWidget);
+      expect(find.byType(StorylineTimelinePanel), findsNothing);
+
+      // Back from the whole pane is one rung, not all of them: it gives the
+      // split back, and the file is still the thing being read.
+      await tester.tap(find.byTooltip('Back'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(AttachmentPreviewPanel), findsOneWidget);
+      expect(find.byType(StorylineTimelinePanel), findsOneWidget);
+      expect(find.text('Back to Survey window'), findsOneWidget);
+
+      await closeSide(tester);
+      expect(sideThread, findsOneWidget);
+
+      // Opening the file again opens the SPLIT and not the pane it was last
+      // expanded to: the full-pane rung belongs to one visit, and it was let
+      // go of when that visit ended.
+      await openAttachment(tester, 'Terms.pdf');
+      expect(find.byType(AttachmentViewerPane), findsNothing);
+      expect(find.byType(AttachmentPreviewPanel), findsOneWidget);
+
+      await closeSide(tester);
+      await closeSide(tester);
+      expect(find.byType(SidePanelHost), findsNothing);
+      expect(find.byType(AttachmentViewerPane), findsNothing);
+      await settleQueues(tester);
+    });
+
+    testWidgets('the message a reply was aimed at survives the round trip',
+        (tester) async {
+      await seedThread(needsReply: true);
+      await seedStorylineWith('c1');
+      await pumpInbox(tester);
+      await openBeside(tester);
+
+      // Name the message the next send answers, the way the hover strip does.
+      final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await gesture.addPointer(location: Offset.zero);
+      addTearDown(gesture.removePointer);
+      await gesture.moveTo(tester.getCenter(find.byKey(const ValueKey('c1-m1'))));
+      await tester.pump();
+      await tester.tap(find.byKey(HoverActions.replyKeyFor('c1-m1')));
+      await tester.pump();
+      expect(find.text('Replying to Dana Whitfield'), findsOneWidget);
+
+      await openAttachment(tester, 'Terms.pdf');
+      expect(find.byKey(const Key('replying-to')), findsNothing);
+
+      await closeSide(tester);
+
+      // The caption is back with the thread. Reading the file the message
+      // mentioned is not a change of mind about which message is being
+      // answered — and the send that follows would otherwise quietly answer
+      // the newest one instead.
+      expect(sideThread, findsOneWidget);
+      expect(find.text('Replying to Dana Whitfield'), findsOneWidget);
+
+      // Closing the THREAD is the change of mind, and that one does clear it.
+      await closeSide(tester);
+      expect(find.byKey(const Key('replying-to')), findsNothing);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a page opened from it reads as words, and the ✕ still returns',
+        (tester) async {
+      // A page is the one kind whose bytes are not the words in it, and it is
+      // the kind whose card is built by a channel this process does not have —
+      // so it is worth pinning that the stack carries it like any other file.
+      await seedThread(
+        name: 'scorecard.html',
+        contentType: 'text/html',
+        needsReply: true,
+      );
+      // Stored as the markup an older build wrote, so the panel's own reader
+      // for those rows is what is under test rather than the ingest converter.
+      bytes.textByKey['email|c1-m1|a1'] = '<!DOCTYPE html>\n'
+          '<html><body><h1>Boundary scorecard</h1>'
+          '<table><tr><th>Segment</th><th>Finding</th></tr>'
+          '<tr><td>East edge</td><td>Setback short by four feet</td></tr>'
+          '</table></body></html>';
+      await seedStorylineWith('c1');
+      await pumpInbox(tester);
+      await openBeside(tester);
+      await openAttachment(tester, 'scorecard.html');
+
+      expect(find.byType(AttachmentPreviewPanel), findsOneWidget);
+      // No channel here means no rendering, which is the glyph card — the same
+      // thing every host without WebKit behind it gets.
+      expect(find.byKey(HtmlPreview.glyphKey), findsOneWidget);
+      // The words, converted. Nothing on screen is markup: a reader who opened
+      // a page must not be handed its source.
+      expect(find.textContaining('Setback short by four feet'), findsOneWidget);
+      expect(find.textContaining('<table'), findsNothing);
+      expect(find.textContaining('<!DOCTYPE'), findsNothing);
+      expect(find.textContaining('<h1'), findsNothing);
+
+      expect(find.text('Back to Survey window'), findsOneWidget);
+      await closeSide(tester);
+
+      expect(find.byType(AttachmentPreviewPanel), findsNothing);
+      expect(sideThread, findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('the transcript comes back where the reader left it',
+        (tester) async {
+      await seedThread(needsReply: true);
+      // Enough thread above the file to scroll through. It stays on the NEWEST
+      // message, at the bottom: that is the one row a transcript never folds,
+      // and a folded row shows that it carried files rather than the files.
+      for (var i = 0; i < 14; i++) {
+        await store.upsertMessage({
+          'source': 'email',
+          'source_message_id': 'c1-n$i',
+          'conversation_key': 'c1',
+          'direction': i.isEven ? 'inbound' : 'outbound',
+          'subject': 'Survey window',
+          'from_name': i.isEven ? 'Priya Raman' : 'You',
+          'received_at': '2026-08-27T09:${i.toString().padLeft(2, '0')}:00Z',
+          'body_text': 'Note $i on the survey window. The crew is booked for '
+              'the morning and the plat has to be signed before they arrive, '
+              'so the east boundary needs an answer today.',
+        });
+      }
+      await seedStorylineWith('c1');
+      await pumpInbox(tester);
+      await openBeside(tester);
+
+      final transcript = find.descendant(
+        of: sideThread,
+        matching: find.byType(Scrollable),
+      );
+      await tester.dragUntilVisible(
+        find.byType(AttachmentCard),
+        transcript.first,
+        const Offset(0, -120),
+      );
+      await tester.pump();
+      final left =
+          tester.firstState<ScrollableState>(transcript).position.pixels;
+      // A real offset, or the assertion below would hold at rest.
+      expect(left, greaterThan(0));
+
+      await openAttachment(tester, 'Terms.pdf');
+      await closeSide(tester);
+
+      expect(sideThread, findsOneWidget);
+      expect(
+        tester.firstState<ScrollableState>(transcript).position.pixels,
+        left,
+      );
+      await settleQueues(tester);
+    });
+
+    testWidgets('a run the reader opened is still open when they come back',
+        (tester) async {
+      await seedThread(needsReply: true);
+      // An older message of its own, on its own day, so the transcript offers
+      // it a fold: the newest message never folds, and a run's continuation
+      // never folds alone.
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'c1-m0',
+        'conversation_key': 'c1',
+        'direction': 'inbound',
+        'subject': 'Survey window',
+        'from_name': 'Priya Raman',
+        'received_at': '2026-08-26T09:00:00Z',
+        'body_text': 'The county sent the revised plat.\n'
+            'The setback on the east edge moved four feet.',
+      });
+      await seedStorylineWith('c1');
+      await pumpInbox(tester);
+      await openBeside(tester);
+
+      // Folded to its first line, which is where a transcript the thread has
+      // moved past starts.
+      expect(find.textContaining('setback on the east edge'), findsNothing);
+
+      // Scoped to the row: every fold on screen wears the same chevron.
+      await tester.tap(find.descendant(
+        of: find.byKey(const ValueKey('c1-m0')),
+        matching: find.byIcon(Icons.expand_more),
+      ));
+      await tester.pump();
+      expect(find.textContaining('setback on the east edge'), findsOneWidget);
+
+      await openAttachment(tester, 'Terms.pdf');
+      await closeSide(tester);
+
+      // The row the reader opened is open. `MessageRow` seeds its own fold once
+      // and never again, so a panel that was replaced and rebuilt would have
+      // refolded it — the screen remembers which ids were opened instead.
+      expect(sideThread, findsOneWidget);
+      expect(find.textContaining('setback on the east edge'), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a file from it takes the panel, and Use in reply drafts on it',
         (tester) async {
       await seedThread(needsReply: true);
       await seedStorylineWith('c1');
@@ -682,7 +961,10 @@ void main() {
       await openAttachment(tester, 'Terms.pdf');
 
       // One side panel, and the file has it: reading a file from a thread
-      // beside is still one thing at a time on that side of the seam.
+      // beside is still one thing at a time on that side of the seam. The
+      // thread is UNDERNEATH it now rather than gone — the test above this one
+      // pins the ✕ that gives it back — but nothing of it is on screen, which
+      // is what the three lines below have always said.
       expect(find.byType(AttachmentPreviewPanel), findsOneWidget);
       expect(find.byType(ThreadDetailPanel), findsNothing);
       expect(find.byType(StorylineTimelinePanel), findsOneWidget);

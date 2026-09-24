@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/home_models.dart';
+import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'home_result.dart';
@@ -345,7 +346,11 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
   Widget _from(HomeFeedRow row) => SizedBox(
         width: HomeFeedRowTile.fromWidth,
         child: Text(
-          row.fromName ?? row.fromAddress ?? '(no sender)',
+          displaySenderName(
+            name: row.fromName,
+            address: row.fromAddress,
+            fallback: '(no sender)',
+          ),
           style: BondType.body.copyWith(fontWeight: FontWeight.w600),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,

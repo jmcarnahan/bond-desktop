@@ -6806,6 +6806,26 @@ COALESCE(p.storyline_id, (
   WHERE x.source = p.source AND x.conversation_key = p.conversation_key
   ORDER BY x.added_at DESC, x.storyline_id DESC LIMIT 1))''';
 
+  /// Whether the message carries a FILE, which is not the same question as
+  /// `messages.has_attachments`.
+  ///
+  /// A Teams quote-reply arrives as an attachment and sets that flag — three
+  /// handlers read it to decide whether to hydrate attachments at all, and the
+  /// `↪ replying to …` line in a prompt depends on it staying 1. But a quote is
+  /// not a file (see `quoteAttachmentKind`), and `has:file` asking the flag
+  /// matched a message carrying nothing to open. So the search facet asks the
+  /// rows instead, and reads the flag never.
+  ///
+  /// A correlated EXISTS rather than a join or a count: `attachments` is keyed
+  /// `(source, source_message_id, attachment_id)`, so this is a primary-key
+  /// prefix seek that stops at the first non-quote row, and a join would
+  /// multiply the feed row by its attachments.
+  static const String _hasFileExists = '''
+EXISTS (SELECT 1 FROM attachments a
+        WHERE a.source = m.source
+          AND a.source_message_id = m.source_message_id
+          AND a.kind <> '$quoteAttachmentKind')''';
+
   /// Everything a home-feed row needs, in one projection.
   ///
   /// Shared by the paging read, the live patch read and the two search reads
@@ -6833,7 +6853,8 @@ p.source, p.source_message_id, p.conversation_key, p.received_at,
   p.settle_state,
   p.outcome, p.dropped, p.drop_reason, p.needs_you, p.urgency, p.updated_at,
   $_effectiveStorylineId AS storyline_id,
-  m.subject, m.from_name, m.from_address, m.has_attachments, m.summary,
+  m.subject, m.from_name, m.from_address, m.summary,
+  $_hasFileExists AS has_file,
   m.needs_you_verdict, m.needs_you_reason, m.gate_reason, m.triage_status,
   c.cta_text, c.state AS thread_state,
   s.title AS storyline_title,
@@ -9147,9 +9168,11 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
   /// file once. The OR then makes de-duplication free: a pinned file on a
   /// member thread satisfies both halves and is still one row.
   ///
-  /// Inline images are excluded on both halves. This is the Documents list —
-  /// a signature graphic in a footer is not a document, and it is not one
-  /// because somebody pinned it either.
+  /// Inline images are excluded on both halves, and quote-replies with them
+  /// ([_notAQuote]). This is the Documents list — a signature graphic in a
+  /// footer is not a document, and it is not one because somebody pinned it
+  /// either; a Teams quote-reply is not a document in any sense, having no name,
+  /// no bytes and nothing behind it but a message already on the timeline.
   ///
   /// Ordered pinned-first, then newest message first: the files a person chose
   /// are the ones they are coming back for, and everything after that is a
@@ -9170,7 +9193,7 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
           'FROM attachments a '
           'LEFT JOIN messages m ON m.source = a.source '
           '  AND m.source_message_id = a.source_message_id '
-          'WHERE a.is_inline = 0 AND ('
+          'WHERE a.is_inline = 0 $_notAQuote AND ('
           '  EXISTS (SELECT 1 FROM storyline_members sm '
           '          WHERE sm.storyline_id = ? AND sm.source = m.source '
           '            AND sm.conversation_key = m.conversation_key) '
@@ -9196,11 +9219,16 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
   /// under Links alone. The three shelves partition the whole one.
   static const String _kindClauseImages =
       "AND (a.kind = 'image' OR (lower(a.content_type) LIKE 'image/%' "
-      "  AND a.kind NOT IN ('reference','message_reference','card'))) ";
+      "  AND a.kind NOT IN ('reference','card'))) ";
 
-  /// The three kinds that point somewhere else rather than carrying bytes.
+  /// The two kinds that point somewhere else rather than carrying bytes.
+  ///
+  /// `message_reference` was the third until quote-replies stopped being files
+  /// at all: it is excluded from this whole query by [_notAQuote] instead. The
+  /// set is `linkAttachmentKinds` in `models/attachment_models.dart` spelled in
+  /// SQL — change both together.
   static const String _kindClauseLinks =
-      "AND a.kind IN ('reference','message_reference','card') ";
+      "AND a.kind IN ('reference','card') ";
 
   /// Everything that is not a picture and not a link.
   ///
@@ -9210,8 +9238,18 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
   /// file name in SQL, which cannot use an index, and the reader still finds
   /// the file under All.
   static const String _kindClauseDocuments =
-      "AND a.kind NOT IN ('image','reference','message_reference','card') "
+      "AND a.kind NOT IN ('image','reference','card') "
       "AND (a.content_type IS NULL OR lower(a.content_type) NOT LIKE 'image/%') ";
+
+  /// A quote-reply is not a file on any shelf, including All.
+  ///
+  /// Its own clause rather than a fourth exclusion inside the three above,
+  /// because it is not a partition of the files — it is a row that is not a
+  /// file. A Teams quote-reply carries no name, no bytes and no address (see
+  /// `quoteAttachmentKind`), so a Files row for one could only read as an
+  /// unnamed link to nowhere; the transcript draws it as a quote block instead.
+  /// Keeping it out here is also what keeps the three shelves adding up to All.
+  static const String _notAQuote = "AND a.kind <> '$quoteAttachmentKind' ";
 
   /// Every file the mailbox holds, newest message first — the Files stop.
   ///
@@ -9222,8 +9260,9 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
   /// shelf keeps such a file because somebody deliberately pinned it there;
   /// nobody pinned anything here.
   ///
-  /// Inline images are excluded and nothing else is: a signature logo is not a
-  /// file anybody sent. There is deliberately NO byte-size rule — the
+  /// Inline images are excluded, and quote-replies with them ([_notAQuote]):
+  /// a signature logo is not a file anybody sent, and a quoted message is not a
+  /// file at all. There is deliberately NO byte-size rule — the
   /// `inlineImageMinBytes` threshold in the widget layer is about inline
   /// pictures, which are already gone, and the store must not import a widget
   /// constant to apply it twice.
@@ -9254,6 +9293,7 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
           '  AND m.source_message_id = a.source_message_id '
           'WHERE a.is_inline = 0 '
           '  AND a.source IN (${_placeholders(sources.length)}) '
+          '  $_notAQuote'
           '$kindClause'
           'ORDER BY m.received_at DESC, a.source_message_id DESC, '
           '  a.ordinal ASC, a.attachment_id ASC '

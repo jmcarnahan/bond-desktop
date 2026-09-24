@@ -66,6 +66,69 @@ void main() {
     });
   });
 
+  group('a whole self-contained document', () {
+    /// What a security tool actually exports, and what the owner saw printed as
+    /// text in the preview before the conversion reached it: a doctype, a head
+    /// with a `<meta charset>` and a page of CSS in it, then the report.
+    const report = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scorecard</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 0 auto; }
+  table.findings { border-collapse: collapse; width: 100%; }
+  table.findings td { border: 1px solid #333333; padding: 6px 8px; }
+</style>
+</head>
+<body>
+<h1>Scorecard</h1>
+<table class="findings">
+<tr><th>Control</th><th>Score</th></tr>
+<tr><td>Password age</td><td>62</td></tr>
+</table>
+<p>Two accounts need a password change.</p>
+<script>document.querySelectorAll('td').forEach(sortRows);</script>
+</body>
+</html>
+''';
+
+    test('the reader gets the report and none of the file', () {
+      final text = htmlToText(report, profile: HtmlProfile.document);
+
+      expect(text, contains('Scorecard'));
+      expect(text, contains('Password age'));
+      expect(text, contains('Two accounts need a password change.'));
+
+      // The head goes whole, contents included — a `<meta charset>` and three
+      // CSS rules are not sentences a search should ever answer with.
+      expect(text, isNot(contains('DOCTYPE')));
+      expect(text, isNot(contains('charset')));
+      expect(text, isNot(contains('viewport')));
+      expect(text, isNot(contains('font-family')));
+      expect(text, isNot(contains('border-collapse')));
+      expect(text, isNot(contains('#333333')));
+      expect(text, isNot(contains('querySelectorAll')));
+      // And no tag of any kind survives as text.
+      expect(text, isNot(contains('<')));
+      expect(text, isNot(contains('>')));
+    });
+
+    test('a page whose head was never closed still reads', () {
+      // Legal HTML, and common in generated files: the omitted `</head>` must
+      // end at the body rather than eat the document.
+      const unclosed = '<!DOCTYPE html><html><head><style>p{color:red}</style>'
+          '<body><p>Two accounts need a password change.</p></body></html>';
+
+      final text = htmlToText(unclosed, profile: HtmlProfile.document);
+
+      expect(text, contains('Two accounts need a password change.'));
+      expect(text, isNot(contains('color:red')));
+    });
+  });
+
   group('the mail profile on structure', () {
     test('a table row is a line and its cells are tab separated', () {
       final text = htmlToText(

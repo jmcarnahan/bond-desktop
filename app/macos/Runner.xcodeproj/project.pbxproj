@@ -27,6 +27,7 @@
 		A1C7D3E100020B0DE0C0A7E0 /* BookmarkChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C7D3E100010B0DE0C0A7E0 /* BookmarkChannel.swift */; };
 		A1C7D3E100040B0DE0C0A7E0 /* SystemChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C7D3E100030B0DE0C0A7E0 /* SystemChannel.swift */; };
 		A1C7D3E100060B0DE0C0A7E0 /* UpdaterChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C7D3E100050B0DE0C0A7E0 /* UpdaterChannel.swift */; };
+		A1C7D3E100080B0DE0C0A7E0 /* WebSnapshotChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C7D3E100070B0DE0C0A7E0 /* WebSnapshotChannel.swift */; };
 		33CC10F32044A3C60003C045 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 33CC10F22044A3C60003C045 /* Assets.xcassets */; };
 		33CC10F62044A3C60003C045 /* MainMenu.xib in Resources */ = {isa = PBXBuildFile; fileRef = 33CC10F42044A3C60003C045 /* MainMenu.xib */; };
 		33CC11132044BFA00003C045 /* MainFlutterWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33CC11122044BFA00003C045 /* MainFlutterWindow.swift */; };
@@ -74,6 +75,7 @@
 		A1C7D3E100010B0DE0C0A7E0 /* BookmarkChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookmarkChannel.swift; sourceTree = "<group>"; };
 		A1C7D3E100030B0DE0C0A7E0 /* SystemChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemChannel.swift; sourceTree = "<group>"; };
 		A1C7D3E100050B0DE0C0A7E0 /* UpdaterChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdaterChannel.swift; sourceTree = "<group>"; };
+		A1C7D3E100070B0DE0C0A7E0 /* WebSnapshotChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSnapshotChannel.swift; sourceTree = "<group>"; };
 		33CC10F22044A3C60003C045 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = Runner/Assets.xcassets; sourceTree = "<group>"; };
 		33CC10F52044A3C60003C045 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.xib; name = Base; path = Base.lproj/MainMenu.xib; sourceTree = "<group>"; };
 		33CC10F72044A3C60003C045 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = Info.plist; path = Runner/Info.plist; sourceTree = "<group>"; };
@@ -177,6 +179,7 @@
 				A1C7D3E100010B0DE0C0A7E0 /* BookmarkChannel.swift */,
 				A1C7D3E100030B0DE0C0A7E0 /* SystemChannel.swift */,
 				A1C7D3E100050B0DE0C0A7E0 /* UpdaterChannel.swift */,
+				A1C7D3E100070B0DE0C0A7E0 /* WebSnapshotChannel.swift */,
 				33CC11122044BFA00003C045 /* MainFlutterWindow.swift */,
 				33E51913231747F40026EE4D /* DebugProfile.entitlements */,
 				33E51914231749380026EE4D /* Release.entitlements */,
@@ -364,6 +367,7 @@
 				A1C7D3E100020B0DE0C0A7E0 /* BookmarkChannel.swift in Sources */,
 				A1C7D3E100040B0DE0C0A7E0 /* SystemChannel.swift in Sources */,
 				A1C7D3E100060B0DE0C0A7E0 /* UpdaterChannel.swift in Sources */,
+				A1C7D3E100080B0DE0C0A7E0 /* WebSnapshotChannel.swift in Sources */,
 				335BBD1B22A9A15E00E9071D /* GeneratedPluginRegistrant.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

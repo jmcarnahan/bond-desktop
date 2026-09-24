@@ -14,7 +14,7 @@ HomeFeedRow _row({
   String receivedAt = '2026-09-03T09:00:00Z',
   String? fromName = 'Dana Whitfield',
   String? fromAddress = 'dana@example.com',
-  bool hasAttachments = false,
+  bool hasFile = false,
 }) =>
     HomeFeedRow(
       source: 'email',
@@ -31,7 +31,7 @@ HomeFeedRow _row({
       subject: 'Launch date',
       fromName: fromName,
       fromAddress: fromAddress,
-      hasAttachments: hasAttachments,
+      hasFile: hasFile,
     );
 
 List<SearchHit> _hits(List<HomeFeedRow> rows) => [
@@ -205,7 +205,7 @@ void main() {
     test('has:file keeps only the rows carrying something', () {
       final hits = _hits([
         _row(id: 'plain'),
-        _row(id: 'attached', hasAttachments: true),
+        _row(id: 'attached', hasFile: true),
       ]);
 
       expect(
@@ -240,9 +240,9 @@ void main() {
 
     test('the surviving hits keep the index order they arrived in', () {
       final hits = _hits([
-        _row(id: 'a', hasAttachments: true),
+        _row(id: 'a', hasFile: true),
         _row(id: 'b'),
-        _row(id: 'c', hasAttachments: true),
+        _row(id: 'c', hasFile: true),
       ]);
 
       expect(

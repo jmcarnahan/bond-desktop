@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
+import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'processing_hint.dart';
@@ -68,7 +69,13 @@ class ConversationRow extends StatelessWidget {
     final cta = c.ctaText;
     final hasCta = cta != null && cta.isNotEmpty;
     final secondary = caption ?? (hasCta ? cta : c.lastMessagePreview);
-    final who = c.primaryParticipant?.display ?? '(no sender)';
+    // Not `Participant.display`: that answers the address when there is no
+    // name, and a chat participant's address is a `teams:<id>` identity key.
+    final who = displaySenderName(
+      name: c.primaryParticipant?.name,
+      address: c.primaryParticipant?.email,
+      fallback: '(no sender)',
+    );
     final time = formatTimestamp(c.lastMessageAt);
     final processing = showsProcessing(c, since: processingSince);
 

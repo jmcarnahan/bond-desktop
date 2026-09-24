@@ -234,6 +234,117 @@ void main() {
     });
   });
 
+  group('a web page', () {
+    /// The shape a security tool exports: a style block, a script, a table of
+    /// findings and the sentence a reader came for.
+    const reportHtml = '''
+<!doctype html>
+<html><head><title>Access review</title>
+<style>table { border: 1px solid #333; }</style>
+<script>var rows = [1,2,3];</script></head>
+<body>
+<h1>Access review</h1>
+<table><tr><th>Account</th><th>Finding</th></tr>
+<tr><td>dana@example.com</td><td>Password age</td></tr></table>
+<p>Two accounts need a password change.</p>
+</body></html>
+''';
+
+    test('a page is stored as its words, never as its markup', () async {
+      if (!available) return;
+      await seedMessage('m1');
+      await seedAttachment(
+        'm1',
+        'a1',
+        name: 'security-report.html',
+        contentType: 'text/html',
+        size: 35 * 1024,
+      );
+      backend.textByKey['email|m1|a1'] = const AttachmentText.ok(
+        reportHtml,
+        fetchedBytes: 35 * 1024,
+      );
+
+      await handlerWith(FakeEmbedServer()).run(item('m1', 'a1'));
+
+      // One conversion, here, at the seam both connectors' text comes through —
+      // so the Text tab, the digest, the chunks and the thread's context all
+      // read the same words.
+      final stored = await store.attachmentTextOf('email', 'm1', 'a1');
+      expect(stored, contains('Two accounts need a password change.'));
+      expect(stored, isNot(contains('<table')));
+      expect(stored, isNot(contains('<p>')));
+      expect(stored, isNot(contains('border: 1px')));
+      expect(stored, isNot(contains('var rows')),
+          reason: 'a page of embedded script is not a page of prose');
+
+      final row = await attachmentOf('m1', 'a1');
+      expect(row['text_status'], 'done');
+      expect(await workStatus('attachment_digest', 'm1|a1'), 'pending');
+    });
+
+    test('what is embedded is the words, not the markup', () async {
+      if (!available) return;
+      await seedMessage('m1');
+      await seedAttachment(
+        'm1',
+        'a1',
+        name: 'security-report.html',
+        contentType: 'text/html',
+      );
+      backend.textByKey['email|m1|a1'] =
+          const AttachmentText.ok(reportHtml, fetchedBytes: 4096);
+      final server = FakeEmbedServer();
+
+      await handlerWith(server).run(item('m1', 'a1'));
+
+      final chunks = await chunksOf('m1');
+      expect(chunks, hasLength(1));
+      expect(chunks.single['chunk_text'], contains('Access review'));
+      expect(chunks.single['chunk_text'], isNot(contains('<table')));
+      expect(server.inputs.single, isNot(contains('<table')));
+    });
+
+    test('a page the connector never named is converted by its type too',
+        () async {
+      if (!available) return;
+      await seedMessage('m1');
+      await seedAttachment(
+        'm1',
+        'a1',
+        name: 'page',
+        contentType: 'text/html; charset=utf-8',
+      );
+      backend.textByKey['email|m1|a1'] =
+          const AttachmentText.ok(reportHtml, fetchedBytes: 4096);
+
+      await handlerWith(FakeEmbedServer()).run(item('m1', 'a1'));
+
+      final stored = await store.attachmentTextOf('email', 'm1', 'a1');
+      expect(stored, isNot(contains('<table')));
+    });
+
+    test('an ordinary text file is stored exactly as it was read', () async {
+      if (!available) return;
+      // The conversion is for pages and nothing else: a note that happens to
+      // use an angle bracket keeps it.
+      await seedMessage('m1');
+      await seedAttachment(
+        'm1',
+        'a1',
+        name: 'notes.txt',
+        contentType: 'text/plain',
+      );
+      const note = 'Rent < 2,400 per <month>, per the lease.';
+      backend.textByKey['email|m1|a1'] =
+          const AttachmentText.ok(note, fetchedBytes: 64);
+
+      await handlerWith(FakeEmbedServer()).run(item('m1', 'a1'));
+
+      expect(await store.attachmentTextOf('email', 'm1', 'a1'), note);
+    });
+  });
+
   group('the message inside a forwarded attachment', () {
     test('a forwarded message keeps its subject, sender and date on the row',
         () async {

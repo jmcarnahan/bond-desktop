@@ -36,6 +36,7 @@ import '../providers/why_provider.dart';
 import '../services/ai_workers.dart' show pumpTriageThenWorkersQuietly;
 import '../services/attachments/attachment_bytes.dart';
 import '../services/attachments/file_dialogs.dart';
+import '../services/attachments/html_open.dart';
 import '../services/attachments/xlsx_reader.dart';
 import '../services/backend/backend_types.dart';
 import '../services/llm/draft_task.dart' show DraftOption;
@@ -440,16 +441,63 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   final FocusNode _mainComposerFocus = FocusNode(debugLabel: 'main composer');
   final FocusNode _sideComposerFocus = FocusNode(debugLabel: 'side composer');
 
-  /// What is open beside the main pane, if anything: a file, or a thread
+  /// What makes the side panel's own Escape binding reachable — see
+  /// [_sidePanel].
+  ///
+  /// `CallbackShortcuts` only sees keys while focus is somewhere inside its
+  /// subtree, and nothing in a panel of pictures and chips ever asks for
+  /// focus: a reader who clicked a thumbnail and pressed Escape would be
+  /// pressing it at the screen's own root. So the panel takes focus on a click
+  /// anywhere in it — but only where it does not already have it, or a press in
+  /// the reply box would pull the cursor out of the box the press was aimed at.
+  /// Never autofocused: it must not take the cursor off the main pane's
+  /// composer just because something opened beside it.
+  final FocusNode _sidePanelFocus = FocusNode(debugLabel: 'side panel');
+
+  /// What is open beside the main pane, innermost LAST: a file, or a thread
   /// reached from inside a storyline. An overlay ON what the main pane is
   /// showing rather than a peer of it — a file is read against the message
   /// that carried it, and a thread against the storyline it belongs to.
   /// Cleared wherever the selection moves, exactly like [_replyTo].
-  SidePanel? _side;
+  ///
+  /// A stack rather than a slot, because a panel opened from INSIDE another
+  /// one is a step further in rather than a different subject: a file clicked
+  /// in the thread beside used to overwrite that thread, and the ✕ on it
+  /// dismissed the whole panel — the reader lost the conversation they were
+  /// reading and had to find it in the list again. Opening from outside still
+  /// REPLACES ([_openBeside] without `push`), because the side shows one
+  /// thing and a panel nobody navigated into has nothing behind it.
+  final List<SidePanel> _sideStack = [];
 
-  /// Whether that panel has the whole main pane. Only ever true of a
+  /// The panel actually on screen — the innermost one. Every reader of "what
+  /// is beside" goes through here rather than indexing the stack.
+  SidePanel? get _side => _sideStack.isEmpty ? null : _sideStack.last;
+
+  /// Where the side panel's transcripts keep their scroll offsets, so a thread
+  /// that was pushed under a file comes back where the reader left it rather
+  /// than at the top. Its own bucket and not the route's: the same thread can
+  /// be in the main pane and beside it at once, and one bucket would have the
+  /// two panes fighting over one offset.
+  final PageStorageBucket _sideStorage = PageStorageBucket();
+
+  /// Which rows of which thread the reader has UNFOLDED, by
+  /// `'$source|$conversationKey'`.
+  ///
+  /// Hoisted out of `MessageRow`, which seeds its own fold once and never
+  /// recomputes it: that keeps a fold from moving under a cursor, but it also
+  /// means a transcript rebuilt from scratch — a side thread coming back from
+  /// under a file — opens every history row folded again. The set is only ever
+  /// about unfolds; a row the reader FOLDED that started open is not restored,
+  /// and the panel's own rule opens it again.
+  ///
+  /// [_clearOverlays] deliberately does NOT touch it, for
+  /// [_expandedContextDirs]'s reason: this is a preference about a thread, not
+  /// a panel, and somebody who opened a run and came back is owed it open.
+  final Map<String, Set<String>> _unfoldedRows = {};
+
+  /// Whether the innermost panel has the whole main pane. Only ever true of a
   /// [FilePanel] — ⤢ on a thread hands it to the main pane proper, which
-  /// clears [_side] — and cleared with it.
+  /// clears the stack — and cleared on every pop.
   bool _sideFull = false;
 
   /// Built on first use and never under `flutter test` — see
@@ -619,6 +667,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     WidgetsBinding.instance.removeObserver(this);
     _mainComposerFocus.dispose();
     _sideComposerFocus.dispose();
+    _sidePanelFocus.dispose();
     _findText.dispose();
     _findFocus.dispose();
     _filesSearchText.dispose();
@@ -905,7 +954,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// Called from inside the caller's own `setState`, so one selection is one
   /// frame.
   void _clearOverlays() {
-    _side = null;
+    _sideStack.clear();
     _sideFull = false;
     _focusSideOnMount = null;
     _addingToStorylineId = null;
@@ -921,28 +970,157 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// Opens something beside the main pane, always in the split and never in
   /// the full pane: a panel that inherited the last one's ⤢ would take over a
   /// screen the user did not ask it to.
-  void _openBeside(SidePanel panel) => setState(() {
-        _side = panel;
+  ///
+  /// REPLACE is the default and stays it: the side shows one thing, and a
+  /// panel opened from the main pane, the rail or a list row is a new subject
+  /// with nothing behind it. [push] is for the opens that originate INSIDE the
+  /// panel — a file, a Why or a history asked for from the thread beside, a
+  /// directory file asked for from the Context panel beside — where the thing
+  /// underneath is what the reader came from and the ✕ owes it back to them.
+  /// Pushing what is already on top replaces it, so a second tap on the same
+  /// chip cannot stack a panel on itself.
+  void _openBeside(SidePanel panel, {bool push = false}) => setState(() {
+        if (push && _sideStack.isNotEmpty && !_samePanel(_sideStack.last, panel)) {
+          _sideStack.add(panel);
+        } else if (_sideStack.isEmpty) {
+          _sideStack.add(panel);
+        } else {
+          _sideStack[_sideStack.length - 1] = panel;
+        }
         _sideFull = false;
         _focusSideOnMount = null;
         _dropSideReplyTarget();
       });
 
+  /// The ✕, and Escape: closes THIS panel, which means going back to whatever
+  /// it was opened from and closing the side only when there is nothing left
+  /// underneath. ⤢ never survives a pop — the panel coming back was last seen
+  /// in the split and is owed the split.
   void _closeSide() => setState(() {
-        _side = null;
+        if (_sideStack.isNotEmpty) _sideStack.removeLast();
         _sideFull = false;
         _focusSideOnMount = null;
         _dropSideReplyTarget();
       });
+
+  /// Whether two panels are about the same thing — what stops a push stacking
+  /// a panel on itself, and how [_restoreSideThread] finds the thread it is
+  /// bringing back.
+  ///
+  /// By subject rather than by `==`: no [SidePanel] carries value equality,
+  /// and [AttachmentRef] deliberately does not either — a digest landing
+  /// mid-frame must not make a file stop being the file on screen, which is
+  /// why `sameAttachment` exists.
+  static bool _samePanel(SidePanel a, SidePanel b) => switch ((a, b)) {
+        (ThreadPanel a, ThreadPanel b) =>
+          a.source == b.source && a.conversationKey == b.conversationKey,
+        (FilePanel a, FilePanel b) => sameAttachment(a.attachment, b.attachment),
+        (PersonPanel a, PersonPanel b) => a.roomKey == b.roomKey,
+        (WhyPanel a, WhyPanel b) =>
+          a.source == b.source && a.messageId == b.messageId,
+        (HistoryPanel a, HistoryPanel b) => a.source == b.source && a.id == b.id,
+        (ContextPanel a, ContextPanel b) =>
+          a.kind == b.kind && a.source == b.source && a.scopeKey == b.scopeKey,
+        (ContextFilePanel a, ContextFilePanel b) =>
+          a.fileId == b.fileId && a.locator == b.locator,
+        _ => false,
+      };
 
   /// A side thread that goes away takes its reply target with it. The caption
   /// belongs to a box that is no longer on screen, and a send into the thread
   /// that comes back next must not inherit somebody else's message id.
   ///
+  /// "Goes away" is about the whole STACK, not the top of it: a thread pushed
+  /// under a file it opened is still on its way back, and dropping the caption
+  /// there would lose the message the reader said they were answering between
+  /// the ✕ and the panel returning. The half-typed body itself never came
+  /// through here — it lives on `draftProvider` and in [_staged].
+  ///
   /// Called from inside the caller's own `setState`.
   void _dropSideReplyTarget() {
     final replyTo = _replyTo;
-    if (replyTo != null && !_isMainThread(replyTo.target)) _replyTo = null;
+    if (replyTo == null || _isMainThread(replyTo.target)) return;
+    final thread = ThreadPanel(
+      source: replyTo.target.source,
+      conversationKey: replyTo.target.conversationKey,
+    );
+    for (final panel in _sideStack) {
+      if (_samePanel(panel, thread)) return;
+    }
+    _replyTo = null;
+  }
+
+  /// Brings the thread [from] back to the side panel, whatever is standing on
+  /// it — what `Use in reply` and `Consult` need, because a draft written into
+  /// a box that is off screen is nothing happening.
+  ///
+  /// A file opened FROM the thread beside was pushed ON it, so the thread is
+  /// underneath and unwinding to it is the whole job: its scroll, its unfolded
+  /// rows and its reply caption all come back with it. A file opened from
+  /// somewhere else — a storyline's shelf, a person's files — never had that
+  /// thread underneath, so the top is replaced the way it always was.
+  ///
+  /// Called from inside the caller's own `setState`.
+  void _restoreSideThread(DraftTarget from) {
+    final thread = ThreadPanel(
+      source: from.source,
+      conversationKey: from.conversationKey,
+    );
+    _sideFull = false;
+    for (var i = _sideStack.length - 1; i >= 0; i--) {
+      if (!_samePanel(_sideStack[i], thread)) continue;
+      _sideStack.removeRange(i + 1, _sideStack.length);
+      return;
+    }
+    if (_sideStack.isEmpty) {
+      _sideStack.add(thread);
+    } else {
+      _sideStack[_sideStack.length - 1] = thread;
+    }
+  }
+
+  /// Where the ✕ on the innermost panel lands, for the row that says so. Null
+  /// where a pop closes the panel: the ✕ already says that, and a second
+  /// control saying the same thing is one of them lying.
+  VoidCallback? get _sideBack => _sideStack.length > 1 ? _closeSide : null;
+
+  /// What that row calls the panel underneath.
+  String? get _sideBackLabel => _sideStack.length > 1
+      ? _backLabelFor(_sideStack[_sideStack.length - 2])
+      : null;
+
+  /// What a panel is CALLED one rung down — the same words its own header
+  /// carries, resolved from what the panel itself knows.
+  ///
+  /// In practice only a thread or the Context panel is ever underneath, since
+  /// those are the two the pushes originate in; the other arms are here so
+  /// that a later push cannot land on an unnamed row.
+  String _backLabelFor(SidePanel panel) => switch (panel) {
+        ThreadPanel() => _threadLabelFor(panel.source, panel.conversationKey),
+        FilePanel() => panel.attachment.name ?? 'the file',
+        PersonPanel() => _roomTitleFor(panel.roomKey) ?? 'the person',
+        WhyPanel() => 'Why',
+        HistoryPanel() => 'What happened',
+        ContextPanel() => 'Context',
+        ContextFilePanel() => 'the file',
+      };
+
+  /// A thread's own name for that row: [_roomNameFor]'s rule, and a phrase
+  /// rather than a blank for one the list no longer has.
+  String _threadLabelFor(String source, String conversationKey) {
+    final conversation = _conversationFor(source, conversationKey);
+    if (conversation == null) return 'the conversation';
+    final name = _roomNameFor(conversation);
+    return name.isEmpty ? 'the conversation' : name;
+  }
+
+  /// One room's title out of the list this build was handed, or null for a key
+  /// whose people went quiet while the panel was open.
+  String? _roomTitleFor(String roomKey) {
+    for (final room in _rooms) {
+      if (room.key == roomKey) return room.title;
+    }
+    return null;
   }
 
   /// Opens a conversation BESIDE whatever is in the main pane — a storyline's
@@ -2059,11 +2237,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// Deliberately NOT a selector: it clears nothing underneath, because the
   /// question "what happened to this" is always asked about something the
   /// reader is already looking at, and closing the panel has to leave them
-  /// where they were. From a side thread, a Why panel or a file it replaces
-  /// that panel — the side shows one thing — and [_openBeside] closes the
-  /// rail overlay at narrow widths.
-  void _openHistory(String source, String id) =>
-      _openBeside(HistoryPanel(source: source, id: id));
+  /// where they were. From a Why panel or a file it REPLACES that panel — the
+  /// side shows one thing — and [_openBeside] closes the rail overlay at
+  /// narrow widths.
+  ///
+  /// [push] is the ask made from the thread BESIDE, where the transcript is
+  /// what the reader came from: the story goes on top of it and the ✕ hands the
+  /// transcript back. Asked from a Why panel that was itself pushed, the
+  /// replace lands on the same stack and the ✕ still comes back to the
+  /// transcript rather than to the Why — which is what that panel's own
+  /// comment already promised.
+  void _openHistory(String source, String id, {bool push = false}) =>
+      _openBeside(HistoryPanel(source: source, id: id), push: push);
 
   /// Turns model work on or off for this session, and makes the four drains
   /// follow.
@@ -2623,6 +2808,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       title: 'What happened',
       leading: const Icon(Icons.history, size: 18),
       onClose: _closeSide,
+      onBack: _sideBack,
+      backLabel: _sideBackLabel,
       child: MessageHistoryHost(
         target: (source: side.source, id: side.id),
         // The host draws the header; the story renders bare inside it — so
@@ -3303,6 +3490,20 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // Read, not watched: the service is a session-long singleton, and each
       // avatar asks it for its own face.
       photos: ref.read(profilePhotosProvider),
+      // The folds live above the panel, so a side thread that went under a
+      // file preview opens the runs the reader had opened rather than starting
+      // over. Recorded WITHOUT a setState: nothing on this frame reads the
+      // set — the row has already redrawn itself — and rebuilding the screen
+      // under a cursor to note a fold would be a frame spent on nothing.
+      unfolded: _unfoldedRows[_stageKey(target)] ?? const <String>{},
+      onFoldChanged: (messageId, collapsed) {
+        final rows = _unfoldedRows.putIfAbsent(_stageKey(target), () => {});
+        if (collapsed) {
+          rows.remove(messageId);
+        } else {
+          rows.add(messageId);
+        }
+      },
       // The suggestions sit with the messages they answer. The panel places
       // them and never learns what they are.
       suggestionFor: cardFor,
@@ -3348,9 +3549,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             }
           : null,
       // The third hover button, and what the CTA banner opens. From a side
-      // thread it REPLACES that thread, the same rule a file opened from
-      // beside follows: the panel shows one thing.
-      onWhy: (message) => _openWhy(target, message),
+      // thread it goes ON that thread, the same rule a file opened from beside
+      // follows: the panel shows one thing, and the ✕ gives back the one the
+      // question was asked about.
+      onWhy: (message) => _openWhy(target, message, push: inSidePanel),
       // The faces: who is on this thread, and what else is live with them.
       // The SAME name resolution the rooms were built with, so a thread whose
       // recipient the sync stored nameless opens the colleague's room rather
@@ -3379,19 +3581,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // else has no business opening: the ✕ and the ⤢ are the two ways out of
       // the side panel.
       onCompose: inSidePanel ? null : () => unawaited(_composeFrom(selected)),
-      // Opening a file is a selection like any other: it replaces whatever the
-      // side panel was showing — including this very thread, when the file was
-      // opened from the side panel — and always lands on the split, never on
-      // the full pane the user may have left open for the last one.
+      // Opening a file always lands on the split, never on the full pane the
+      // user may have left open for the last one. From the MAIN thread it is a
+      // selection like any other and replaces whatever was beside; from the
+      // thread BESIDE it goes on top of this very thread, so the ✕ hands the
+      // conversation back with its scroll, its unfolded rows and its
+      // half-typed reply rather than dismissing the panel.
       //
       // The origin ALWAYS rides along, reply box or not: it is what a pin
       // resolves its storyline through, and a chat this build cannot send to
       // is still the thread the file came from. Whether 'Use in reply' is
       // offered is the file panel's own capability check, not this one's.
-      onOpenAttachment: (attachment) => _openBeside(FilePanel(
-        attachment: attachment,
-        from: target,
-      )),
+      onOpenAttachment: (attachment) => _openBeside(
+        FilePanel(attachment: attachment, from: target),
+        push: inSidePanel,
+      ),
       selectedAttachment: _sideAttachment,
       thumbnailFor: _thumbnailFor,
       // The same path the file panel's own button takes — see
@@ -3402,7 +3606,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // Per MESSAGE, not per thread: the pipeline decides one message at a
       // time, and the row's hover strip is where the question is asked — the
       // fourth button, after Why.
-      onWhatHappened: (message) => _openHistory(message.source, message.id),
+      onWhatHappened: (message) =>
+          _openHistory(message.source, message.id, push: inSidePanel),
       // Offered from a side thread too: the panel REPLACES that thread, the
       // rule Why already follows. The room's name is the thread panel's own
       // naming rule — a chat carries no subject and is named by who is on it.
@@ -3469,15 +3674,45 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// Whatever is open beside the main pane, in the chrome every side panel
   /// wears.
-  Widget _sidePanel(SidePanel side) => switch (side) {
-        FilePanel() => _filePanel(side),
-        ThreadPanel() => _threadPanel(side),
-        PersonPanel() => _personPanel(side),
-        WhyPanel() => _whyPanel(side),
-        HistoryPanel() => _historyPanel(side),
-        ContextPanel() => _contextPanel(side),
-        ContextFilePanel() => _contextFilePanel(side),
-      };
+  ///
+  /// Two things wrap every one of them. Escape is the ✕ from the keyboard,
+  /// bound HERE and not on the screen so that it belongs to the panel while
+  /// the reader is in it — `FindField`'s own arrangement, and the reason
+  /// Escape in the main pane's composer still means whatever that means. And
+  /// the panel's own [PageStorage] bucket is what lets a transcript pushed
+  /// under a file come back at the offset it was left at.
+  Widget _sidePanel(SidePanel side) {
+    final panel = switch (side) {
+      FilePanel() => _filePanel(side),
+      ThreadPanel() => _threadPanel(side),
+      PersonPanel() => _personPanel(side),
+      WhyPanel() => _whyPanel(side),
+      HistoryPanel() => _historyPanel(side),
+      ContextPanel() => _contextPanel(side),
+      ContextFilePanel() => _contextFilePanel(side),
+    };
+    return PageStorage(
+      bucket: _sideStorage,
+      child: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.escape): _closeSide,
+        },
+        // Skipped in traversal: this node is here to hold focus for the
+        // binding above it, and Tab landing on a panel's edge would be a stop
+        // with nothing in it.
+        child: Focus(
+          focusNode: _sidePanelFocus,
+          skipTraversal: true,
+          child: Listener(
+            onPointerDown: (_) {
+              if (!_sidePanelFocus.hasFocus) _sidePanelFocus.requestFocus();
+            },
+            child: panel,
+          ),
+        ),
+      ),
+    );
+  }
 
   /// Why one message got the verdict it did.
   ///
@@ -3506,6 +3741,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       subtitle: subject.isNotEmpty ? subject : (who.isEmpty ? null : who),
       leading: const Icon(Icons.help_outline, size: 18),
       onClose: _closeSide,
+      onBack: _sideBack,
+      backLabel: _sideBackLabel,
       child: facts.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (_, _) => Center(
@@ -3533,14 +3770,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  /// Explains one message beside its transcript. From a SIDE thread it
-  /// replaces that thread, which is the same rule a file opened from beside
-  /// follows: the panel shows one thing.
-  void _openWhy(DraftTarget target, Message message) => _openBeside(WhyPanel(
-        source: target.source,
-        conversationKey: target.conversationKey,
-        messageId: message.id,
-      ));
+  /// Explains one message beside its transcript. From a SIDE thread it goes ON
+  /// that thread, which is the same rule a file opened from beside follows: the
+  /// panel shows one thing at a time, and the ✕ gives back the thing the
+  /// question was asked about.
+  void _openWhy(DraftTarget target, Message message, {bool push = false}) =>
+      _openBeside(
+        WhyPanel(
+          source: target.source,
+          conversationKey: target.conversationKey,
+          messageId: message.id,
+        ),
+        push: push,
+      );
 
   /// What a thread is CALLED in a panel header's subtitle.
   ///
@@ -3662,14 +3904,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             _expandedContextDirs.add(id);
           }
         }),
-        onOpenFile: (fileId) => _openBeside(ContextFilePanel(
-          fileId: fileId,
-          // A thread's panel can write a reply; a storyline's cannot,
-          // because a storyline is not a room a draft is keyed by.
-          from: side.kind == ContextScopeKind.thread
-              ? (source: side.source, conversationKey: side.scopeKey)
-              : null,
-        )),
+        // On top of this panel, never instead of it: the Context panel only
+        // ever renders BESIDE, so a file opened out of its list is always a
+        // step further in and its ✕ is owed the list back — with the `Files ›`
+        // disclosures the reader opened to find the file still open.
+        onOpenFile: (fileId) => _openBeside(
+          ContextFilePanel(
+            fileId: fileId,
+            // A thread's panel can write a reply; a storyline's cannot,
+            // because a storyline is not a room a draft is keyed by.
+            from: side.kind == ContextScopeKind.thread
+                ? (source: side.source, conversationKey: side.scopeKey)
+                : null,
+          ),
+          push: true,
+        ),
         now: DateTime.now(),
       );
     }
@@ -3682,6 +3931,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       subtitle: side.title.isEmpty ? null : side.title,
       leading: const Icon(Icons.folder_open_outlined, size: 18),
       onClose: _closeSide,
+      onBack: _sideBack,
+      backLabel: _sideBackLabel,
       child: body,
     );
   }
@@ -3749,6 +4000,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             )
           : null,
       onClose: _closeSide,
+      onBack: _sideBack,
+      backLabel: _sideBackLabel,
       child: PersonPanelBody(
         room: room,
         storylines: storylines,
@@ -3803,6 +4056,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       trailing: size.isEmpty ? null : Text(size, style: BondType.caption),
       onExpand: () => setState(() => _sideFull = true),
       onClose: _closeSide,
+      onBack: _sideBack,
+      backLabel: _sideBackLabel,
       child: AttachmentPreviewPanel(
         key: attachmentKey('preview', attachment),
         attachment: attachment,
@@ -3826,6 +4081,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             : () => unawaited(_pinAttachment(attachment, pinTo)),
         pinned: _isPinned(attachment),
         onOpenLink: (url) => unawaited(_launchExternal(url)),
+        onOpenInBrowser: (page) =>
+            unawaited(openHtmlInBrowser(page, bytes: _attachmentBytes)),
       ),
     );
   }
@@ -3901,6 +4158,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           subtitle: subtitle,
           leading: const Icon(Icons.folder_open_outlined, size: 18),
           onClose: _closeSide,
+          onBack: _sideBack,
+          backLabel: _sideBackLabel,
           child: child,
         );
 
@@ -3953,13 +4212,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// what the DIRECTORY retriever quotes.
   void _consultContextFile(DraftTarget from, int fileId) {
     setState(() {
-      if (!_isMainThread(from)) {
-        _side = ThreadPanel(
-          source: from.source,
-          conversationKey: from.conversationKey,
-        );
-        _sideFull = false;
-      }
+      if (!_isMainThread(from)) _restoreSideThread(from);
     });
     _stageQuietly(from);
     unawaited(
@@ -3980,16 +4233,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       // The box is always there; what has to be on screen is the THREAD. A
       // file opened from the MAIN thread leaves that thread where it is; one
-      // opened from the thread beside REPLACED it, so the thread comes back
-      // and the file goes — the draft is what was asked for, and a draft
-      // written off screen is nothing happening.
-      if (!_isMainThread(from)) {
-        _side = ThreadPanel(
-          source: from.source,
-          conversationKey: from.conversationKey,
-        );
-        _sideFull = false;
-      }
+      // opened from the thread beside is standing ON it, so the panel unwinds
+      // to the thread and the file goes — the draft is what was asked for, and
+      // a draft written off screen is nothing happening.
+      if (!_isMainThread(from)) _restoreSideThread(from);
     });
     // The reader asked for a draft about this file, so the box is the place it
     // belongs — staged before the generate, so the words land in an open box
@@ -4019,6 +4266,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       return SidePanelHost(
         title: 'Conversation',
         onClose: _closeSide,
+        onBack: _sideBack,
+        backLabel: _sideBackLabel,
         child: Center(
           child: Padding(
             padding: const EdgeInsets.all(BondSpacing.s24),
@@ -4047,6 +4296,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // clears the side panel on its way, so the thread is never in both.
       onExpand: () => _select(side.conversationKey, source: side.source),
       onClose: _closeSide,
+      onBack: _sideBack,
+      backLabel: _sideBackLabel,
       child: _threadColumn(conversation, inSidePanel: true),
     );
   }
@@ -4108,6 +4359,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             : () => unawaited(_pinAttachment(attachment, pinTo)),
         pinned: _isPinned(attachment),
         onOpenLink: (url) => unawaited(_launchExternal(url)),
+        onOpenInBrowser: (page) =>
+            unawaited(openHtmlInBrowser(page, bytes: _attachmentBytes)),
       ),
     );
   }

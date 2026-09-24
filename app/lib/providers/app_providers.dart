@@ -23,6 +23,7 @@ import '../services/attachments/attachment_cache.dart';
 import '../services/attachments/attachment_digest_handler.dart';
 import '../services/attachments/attachment_retriever.dart';
 import '../services/attachments/attachment_text_handler.dart';
+import '../services/attachments/html_snapshot.dart' show htmlSnapshotPng;
 import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/attachment_backend.dart';
@@ -748,6 +749,18 @@ final attachmentCacheProvider = Provider<AttachmentCache>(
 /// has no PDF thumbnail.
 final pdfThumbnailerProvider = Provider<PdfThumbnailer?>((_) => null);
 
+/// How a web page becomes a picture — the REAL one by default, unlike the PDF
+/// thumbnailer above, and the difference is the whole reason this comment
+/// exists.
+///
+/// There is no binary behind it. `htmlSnapshotPng` is a method channel, and a
+/// process with no Runner registering that channel — every `flutter test` — gets
+/// a `MissingPluginException` the wrapper already turns into null. So the
+/// default can be the thing that works in the app without dragging anything
+/// into a test, and `main.dart` has no override to remember.
+final htmlThumbnailerProvider =
+    Provider<HtmlThumbnailer?>((_) => htmlSnapshotPng);
+
 /// What the UI asks for a file: cache first, connector second, row updated.
 final attachmentBytesProvider = Provider<AttachmentBytes>(
   (ref) => StoreAttachmentBytes(
@@ -755,6 +768,7 @@ final attachmentBytesProvider = Provider<AttachmentBytes>(
     backend: ref.watch(attachmentBackendProvider),
     cache: ref.watch(attachmentCacheProvider),
     pdfThumbnailer: ref.watch(pdfThumbnailerProvider),
+    htmlThumbnailer: ref.watch(htmlThumbnailerProvider),
   ),
 );
 

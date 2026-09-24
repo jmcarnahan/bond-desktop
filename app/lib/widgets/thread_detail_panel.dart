@@ -35,7 +35,10 @@ const Set<String> _linkKinds = linkAttachmentKinds;
 ///
 /// Inline images are left out: a signature logo is not a file anybody sent,
 /// which is the same rule the Documents shelf and the row's own fold count
-/// follow.
+/// follow. Quote-replies are left out for a stronger reason — a
+/// `message_reference` is not a file at all, it is a piece of this same
+/// transcript (`quoteAttachmentKind`), and counting one would put a thread with
+/// no files under a `Files (1)` tab whose single row had no name.
 ///
 /// Messages arrive oldest-first, so the walk is reversed; within one message
 /// the connector's own `ordinal` is the order, because that is the order the
@@ -45,7 +48,7 @@ List<AttachmentRef> threadFiles(List<Message> messages) {
   for (final message in messages.reversed) {
     final carried = [
       for (final attachment in message.attachments)
-        if (!attachment.isInline) attachment,
+        if (!attachment.isInline && !attachment.isQuoteReply) attachment,
     ]..sort((a, b) => a.ordinal.compareTo(b.ordinal));
     files.addAll(carried);
   }
@@ -199,6 +202,21 @@ class ThreadDetailPanel extends StatefulWidget {
   /// promise switches the panel does not draw.
   final int contextLinked;
 
+  /// Which of this thread's messages the reader has UNFOLDED, overriding the
+  /// fold this panel would otherwise open them with.
+  ///
+  /// The panel's own rule ([_transcript]) decides what starts folded, and a
+  /// `MessageRow` keeps the reader's toggle for as long as it lives. Neither
+  /// survives the panel being replaced and built again — a side thread that
+  /// went under a file preview — so a host that can lose it keeps the set and
+  /// hands it back through here, with [onFoldChanged] to fill it. Empty is
+  /// what every other host passes, and renders exactly what it always did.
+  final Set<String> unfolded;
+
+  /// Told which message the reader folded or unfolded, and what it became, so
+  /// [unfolded] can be kept. Null leaves every fold the row's own business.
+  final void Function(String messageId, bool collapsed)? onFoldChanged;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -227,6 +245,8 @@ class ThreadDetailPanel extends StatefulWidget {
     this.onWhatHappened,
     this.onContext,
     this.contextLinked = 0,
+    this.unfolded = const <String>{},
+    this.onFoldChanged,
   });
 
   @override
@@ -312,8 +332,16 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
         collapsible: collapsible,
         // Folded by default only where there is nothing left to do: history the
         // thread has moved past. An open ask or a live suggestion is the whole
-        // reason to scroll back, so neither ever starts hidden.
-        initiallyCollapsed: collapsible && !open && suggestion == null,
+        // reason to scroll back, so neither ever starts hidden — and neither
+        // does a run the reader already opened, which is what the host's set
+        // remembers across a panel that was replaced and came back.
+        initiallyCollapsed: collapsible &&
+            !open &&
+            suggestion == null &&
+            !widget.unfolded.contains(message.id),
+        onFoldChanged: widget.onFoldChanged == null
+            ? null
+            : (collapsed) => widget.onFoldChanged!(message.id, collapsed),
         onOpenAttachment: widget.onOpenAttachment,
         selectedAttachment: widget.selectedAttachment,
         thumbnailFor: widget.thumbnailFor,
@@ -478,6 +506,19 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
                         maxWidth: _maxContentWidth,
                       ),
                       child: ListView(
+                        // The offset is written to the nearest [PageStorage]
+                        // bucket under this key when a scroll ends and read
+                        // back when the list is built again, so a transcript
+                        // that went under a file preview comes back where the
+                        // reader left it rather than at the top. Keyed by the
+                        // CONVERSATION: two threads read one after the other
+                        // are two offsets, and the host's own bucket is what
+                        // keeps the main pane's copy of a thread from sharing
+                        // one with the panel beside it.
+                        key: PageStorageKey<String>(
+                          'transcript:${widget.conversation.source}'
+                          '|${widget.conversation.id}',
+                        ),
                         padding: const EdgeInsets.fromLTRB(
                           BondSpacing.s24,
                           0,
@@ -561,7 +602,11 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
   /// asking for a picture that can never arrive, which is the same rule
   /// `layOutBody.thumbnailable` applies in the transcript.
   ImageProvider? _fileImage(AttachmentRef file) {
-    const drawable = {PreviewKind.pdf, PreviewKind.document};
+    const drawable = {
+      PreviewKind.pdf,
+      PreviewKind.document,
+      PreviewKind.html,
+    };
     if (!drawable.contains(previewKindFor(file))) return null;
     return widget.thumbnailFor?.call(file);
   }

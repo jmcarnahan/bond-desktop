@@ -364,11 +364,13 @@ void main() {
     await seedThread();
     await pumpScreen(tester);
     await openThread(tester, 'Eric Vance');
-    // ⤢ first: a row on the People overview opens BESIDE now, and one thing at
-    // a time lives on that side of the seam — so a Why opened from a thread
-    // still in the side panel would take the thread's place, box and all. The
-    // question here is about the box, so the thread is given the main pane
-    // the way a reader who wants to work in it would.
+    // ⤢ first: a row on the People overview opens BESIDE now, and the question
+    // here is about the docked box, so the thread is given the whole pane the
+    // way a reader who wants to work in it would. A Why opened from the split
+    // no longer costs the thread either way — the panel is a stack now and the
+    // Why is pushed ONTO it — but this test is about the cursor, and a box
+    // measured through a panel that is not the one being asked about is a
+    // second thing going on.
     await tester.tap(find.byKey(SidePanelHost.expandKey));
     for (var i = 0; i < 3; i++) {
       await tester.pump();

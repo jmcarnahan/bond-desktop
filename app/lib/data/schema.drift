@@ -489,6 +489,16 @@ CREATE INDEX ix_message_vectors_unindexed ON message_vectors(indexed_at);
 -- The `text_*`, `digest_*`, `blob_*`, `thumb_path` and `pinned_storyline_id`
 -- columns belong to later stages and to the owner: a re-sync updates the
 -- metadata and never touches them.
+--
+-- THREE columns carry a second meaning on one kind of row, and only there. A
+-- Teams `message_reference` — a quote-reply, which Graph sends with no name and
+-- no url — stores the quoted sender in `item_from`, the quoted snippet in
+-- `card_text` and the quoted message's id in `content_id`. Reused rather than
+-- three new columns because the two meanings can never meet: `item_*` describes
+-- a message forwarded as a file, which only mail has, and `content_id` is
+-- joined only by `[cid:…]` in a body, which requires `is_inline` and a quote is
+-- never inline. `TeamsSync.attachmentRows` is the one writer and
+-- `AttachmentRef.quotedSender` / `quotedPreview` the one reader.
 CREATE TABLE attachments (
   source TEXT NOT NULL DEFAULT 'email',
   source_message_id TEXT NOT NULL,

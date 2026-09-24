@@ -141,14 +141,19 @@ final class ContextFilePanel extends SidePanel {
   const ContextFilePanel({required this.fileId, this.locator, this.from});
 }
 
-/// The chrome around whatever is open beside the main pane: a title, the way
-/// to give it the whole pane, and the way to close it.
+/// The chrome around whatever is open beside the main pane: where a pop lands,
+/// a title, the way to give it the whole pane, and the way to close it.
 ///
 /// Lifted out of `AttachmentPreviewPanel._header` so that every side panel
 /// wears the same header whatever it holds — the preview renders with
 /// `showHeader: false` inside this one rather than drawing a second header of
 /// its own. The ⤢ and ✕ are THIS widget's, which is why the keys live here:
 /// one owner for the two controls, whatever is in the panel.
+///
+/// The panel is a back STACK, not a slot, so the ✕ means "close this panel"
+/// and lands wherever the pop lands. [onBack] is what says so out loud, and
+/// the host passes it only where there is something underneath: a row that
+/// offered to go back to nothing would be the same ✕ twice.
 class SidePanelHost extends StatelessWidget {
   /// One line, ellipsised. The file's name, the thread's subject.
   final String title;
@@ -166,6 +171,16 @@ class SidePanelHost extends StatelessWidget {
 
   final VoidCallback onClose;
 
+  /// Pops back to the panel underneath this one. Null draws no row at all,
+  /// which is the only honest thing to draw when a pop closes the panel: the
+  /// ✕ already says that.
+  final VoidCallback? onBack;
+
+  /// What the back row names — the title of the panel underneath. Null or
+  /// empty leaves the row reading `← Back`, for a panel whose predecessor has
+  /// nothing it can be called yet.
+  final String? backLabel;
+
   /// Anything the panel wants at the right end of the header, before the two
   /// controls. The file's size rides here.
   final Widget? trailing;
@@ -179,12 +194,15 @@ class SidePanelHost extends StatelessWidget {
     this.leading,
     this.onExpand,
     required this.onClose,
+    this.onBack,
+    this.backLabel,
     this.trailing,
     required this.child,
   });
 
   static const Key expandKey = ValueKey('side-panel-expand');
   static const Key closeKey = ValueKey('side-panel-close');
+  static const Key backKey = ValueKey('side-panel-back');
 
   /// How much of the space beside the rail the panel asks for, and the widths
   /// that stop it asking for too much.
@@ -233,9 +251,11 @@ class SidePanelHost extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final expand = onExpand;
+    final back = onBack;
     final subtitle = this.subtitle;
     final leading = this.leading;
     final trailing = this.trailing;
+    final backLabel = this.backLabel;
     // A Material, not a decorated Container: rows inside the panel paint their
     // ink on the nearest Material, and a decoration over that ancestor would
     // swallow it (Flutter 3.47 asserts on exactly this shape).
@@ -250,57 +270,105 @@ class SidePanelHost extends StatelessWidget {
               horizontal: BondSpacing.s16,
               vertical: BondSpacing.s12,
             ),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                if (leading != null) ...[
-                  leading,
-                  const SizedBox(width: BondSpacing.s8),
-                ],
-                // The title yields first: it is the one child that can give,
-                // and everything beside it is either a control or a fact that
-                // does not ellipsise.
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        title,
-                        style:
-                            BondType.body.copyWith(fontWeight: FontWeight.w600),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      if (subtitle != null && subtitle.isNotEmpty) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          subtitle,
-                          style: BondType.caption,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                // Above the title rather than beside it: what the reader came
+                // here to read is the thing in the panel, and where the way
+                // out goes is a line about the panel itself.
+                if (back != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: BondSpacing.s4),
+                    child: InkWell(
+                      key: backKey,
+                      onTap: back,
+                      borderRadius: BondRadii.smAll,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: BondSpacing.s4,
+                          vertical: 2,
                         ),
-                      ],
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.arrow_back,
+                              size: 14,
+                              color: BondColors.inkMuted,
+                            ),
+                            const SizedBox(width: BondSpacing.s4),
+                            // Bounded and ellipsised: the label is another
+                            // panel's title, and a mail subject runs as long
+                            // as the sender wanted it to.
+                            Flexible(
+                              child: Text(
+                                backLabel == null || backLabel.isEmpty
+                                    ? 'Back'
+                                    : 'Back to $backLabel',
+                                style: BondType.caption,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                Row(
+                  children: [
+                    if (leading != null) ...[
+                      leading,
+                      const SizedBox(width: BondSpacing.s8),
                     ],
-                  ),
-                ),
-                if (trailing != null) ...[
-                  const SizedBox(width: BondSpacing.s8),
-                  trailing,
-                ],
-                if (expand != null)
-                  IconButton(
-                    key: expandKey,
-                    onPressed: expand,
-                    icon: const Icon(Icons.open_in_full),
-                    iconSize: 18,
-                    tooltip: 'Expand',
-                  ),
-                IconButton(
-                  key: closeKey,
-                  onPressed: onClose,
-                  icon: const Icon(Icons.close),
-                  iconSize: 18,
-                  tooltip: 'Close',
+                    // The title yields first: it is the one child that can
+                    // give, and everything beside it is either a control or a
+                    // fact that does not ellipsise.
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            title,
+                            style: BondType.body
+                                .copyWith(fontWeight: FontWeight.w600),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          if (subtitle != null && subtitle.isNotEmpty) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              subtitle,
+                              style: BondType.caption,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    if (trailing != null) ...[
+                      const SizedBox(width: BondSpacing.s8),
+                      trailing,
+                    ],
+                    if (expand != null)
+                      IconButton(
+                        key: expandKey,
+                        onPressed: expand,
+                        icon: const Icon(Icons.open_in_full),
+                        iconSize: 18,
+                        tooltip: 'Expand',
+                      ),
+                    IconButton(
+                      key: closeKey,
+                      onPressed: onClose,
+                      icon: const Icon(Icons.close),
+                      iconSize: 18,
+                      tooltip: 'Close',
+                    ),
+                  ],
                 ),
               ],
             ),

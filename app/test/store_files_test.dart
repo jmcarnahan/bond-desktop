@@ -200,12 +200,42 @@ void main() {
       expect(images.map((f) => f.ref.attachmentId), ['shot', 'photo']);
     });
 
-    test('Links are the three kinds that point somewhere else', () async {
+    test('Links are the two kinds that point somewhere else', () async {
       await seedOneOfEach();
 
       final links = await store.recentAttachments(kind: FilesKind.links);
 
       expect(links.map((f) => f.ref.attachmentId), ['link', 'card']);
+    });
+
+    test('a Teams quote-reply is on no shelf, not even All', () async {
+      // It used to be the third link kind, which put an unnamed row with
+      // nothing behind it on the Links shelf. A quote is not a file: it is a
+      // piece of the conversation, and the transcript draws it as one.
+      await seedMessage('t1', source: 'teams', key: 'chat-1');
+      await store.upsertAttachments('teams', 't1', [
+        row('deck', name: 'Report.pptx'),
+        {
+          ...row('quote', ordinal: 1, kind: 'message_reference'),
+          'name': null,
+          'content_type': 'messageReference',
+          'card_text': 'is it slide 29 in the deck?',
+          'item_from': 'Priya Raman',
+        },
+      ]);
+
+      for (final kind in FilesKind.values) {
+        final shelf = await store.recentAttachments(kind: kind);
+        expect(
+          shelf.map((f) => f.ref.attachmentId),
+          isNot(contains('quote')),
+          reason: 'a quote-reply reached the $kind shelf',
+        );
+      }
+      expect(
+        (await store.recentAttachments()).map((f) => f.ref.attachmentId),
+        ['deck'],
+      );
     });
 
     test('a link to a picture is a link, and the three shelves partition the '

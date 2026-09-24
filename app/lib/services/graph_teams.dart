@@ -384,6 +384,12 @@ class GraphTeams implements TeamsBackend {
   /// `card_text` is always null: parsing an adaptive card's JSON into a
   /// sentence is the server's job, and the desktop reads what the server
   /// rendered rather than rendering a second, differently-wrong version.
+  ///
+  /// A `messageReference` is the one entry whose `content` is read here, and it
+  /// is read because the entry has nothing else: Graph sends a quote-reply with
+  /// no `name` and no url, and everything a reader needs to see — who was
+  /// quoted and what they said — is inside that JSON string. The three keys
+  /// come out flat, so the sync reads fields rather than parsing a payload.
   static List<Map<String, Object?>> attachmentEntries(
     Map<String, dynamic> message,
   ) {
@@ -396,6 +402,13 @@ class GraphTeams implements TeamsBackend {
         if (id.isEmpty) continue;
         final contentType = (entry['contentType'] as String? ?? '')
             .toLowerCase();
+        final quoted = contentType == 'messagereference'
+            ? quoteReferenceFields(entry['content'])
+            : const <String, Object?>{
+                'message_id': null,
+                'message_sender': null,
+                'message_preview': null,
+              };
         entries.add({
           'id': id,
           'kind': switch (contentType) {
@@ -409,6 +422,7 @@ class GraphTeams implements TeamsBackend {
           'content_url': entry['contentUrl'] as String?,
           'thumbnail_url': entry['thumbnailUrl'] as String?,
           'card_text': null,
+          ...quoted,
         });
       }
     }
@@ -424,9 +438,80 @@ class GraphTeams implements TeamsBackend {
         'content_url': null,
         'thumbnail_url': null,
         'card_text': null,
+        'message_id': null,
+        'message_sender': null,
+        'message_preview': null,
       });
     }
     return entries;
+  }
+
+  /// The three fields inside a `messageReference` attachment's `content` —
+  /// `message_id`, `message_sender`, `message_preview`, flat, and null for
+  /// whatever was not there.
+  ///
+  /// Public because the MCP backend reads it too: a quote-reply is the one
+  /// attachment whose payload has to be unpacked, and unpacking it twice is how
+  /// the two backends would come to disagree about what a quote is.
+  ///
+  /// NEVER throws, and that is the whole reason it exists rather than a bare
+  /// `jsonDecode` at the call site: `content` is a JSON string on the wire, so
+  /// a tenant sending an empty one, a truncated one, or an object with only
+  /// some of the keys would take a whole chat page down over one quote-reply.
+  /// Whatever parses is kept and the rest reads null, which downstream is a
+  /// quote block with a sender and no snippet, or none at all.
+  static Map<String, Object?> quoteReferenceFields(Object? content) {
+    Object? decoded;
+    if (content is String && content.isNotEmpty) {
+      try {
+        decoded = jsonDecode(content);
+      } on FormatException {
+        decoded = null;
+      }
+    } else if (content is Map) {
+      // A server that already decoded it for us — not Graph's shape, but the
+      // field costs nothing to accept and refusing it would lose the quote.
+      decoded = content;
+    }
+    if (decoded is! Map) {
+      return const {
+        'message_id': null,
+        'message_sender': null,
+        'message_preview': null,
+      };
+    }
+    return {
+      'message_id': _asText(decoded['messageId']),
+      'message_sender': _quotedSenderName(decoded['messageSender']),
+      'message_preview': _asText(decoded['messagePreview']),
+    };
+  }
+
+  /// Who wrote the quoted message, as a name a reader would recognise.
+  ///
+  /// Two shapes are accepted because two are sent. Graph writes
+  /// `messageSender` as an identity SET — `{user: {id, displayName}}`, the same
+  /// shape `from` uses — while a server that has already flattened it sends the
+  /// display name as a plain string. A `user` with no display name (a guest, a
+  /// bot posting as an application) leaves the name null rather than showing an
+  /// id: `teams:<guid>` is not a person's name.
+  static String? _quotedSenderName(Object? sender) {
+    if (sender is String) return sender.isEmpty ? null : sender;
+    if (sender is! Map) return null;
+    for (final key in const ['user', 'application', 'device']) {
+      final identity = sender[key];
+      if (identity is Map) {
+        final name = _asText(identity['displayName']);
+        if (name != null) return name;
+      }
+    }
+    return _asText(sender['displayName']);
+  }
+
+  /// One JSON field as a non-empty string, whatever type it arrived as.
+  static String? _asText(Object? value) {
+    if (value is! String || value.isEmpty) return null;
+    return value;
   }
 
   /// A message's body when it is HTML, and nothing when it is not.
