@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 
+import '../models/label_models.dart';
 import '../models/message_models.dart';
+import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 import 'conversation_row.dart';
+import 'hover_actions.dart' show HoverAction;
+import 'label_picker.dart';
 
 /// Which threads the list shows. [open] is the working view — everything not
 /// yet resolved, split into what needs the user and what is waiting on someone
@@ -80,6 +84,52 @@ class ConversationListPane extends StatelessWidget {
   /// owns) and the pane must not pretend to know it.
   final Widget? emptyNotice;
 
+  /// Files the thread away from here — the ✓ on the quick-action cluster. Null
+  /// leaves that button off, which is what every host that wired none of these
+  /// gets: no cluster at all and a list identical to the one before it.
+  final void Function(Conversation conversation)? onDismiss;
+
+  /// Asks the host to open the inline picker for that row. The host answers by
+  /// changing what [labelPickerFor] reports, so the same open can come from a
+  /// key press somewhere else.
+  final void Function(Conversation conversation)? onLabel;
+
+  /// Defers the thread. Null leaves the button off.
+  final void Function(Conversation conversation)? onLater;
+
+  /// Quiets the whole sender, current and future — the standing correction
+  /// behind entry 6b. Drawn only on a row whose sender has a name to put in the
+  /// tooltip, because "Dismiss everything from Unknown sender" is not an offer
+  /// anybody can judge.
+  final void Function(Conversation conversation)? onDismissSender;
+
+  /// The owner's vocabulary for the inline picker, in the order the picker wants
+  /// it (see [LabelPicker.labels]).
+  final List<Label> labels;
+
+  /// Which question the picker under a row is asking, and null for the rows —
+  /// every row, by default — that have none open.
+  ///
+  /// A question per row rather than one id, because a conversation key is unique
+  /// only within its source: asking the host about the row it is drawing costs
+  /// nothing and cannot mix two connectors' threads up. Host-owned like the
+  /// thread panel's own picker, and for the same reason — a key press outside
+  /// this pane has to be able to open it.
+  final LabelPickerMode? Function(Conversation conversation)? labelPickerFor;
+
+  /// An existing label was chosen for that row.
+  final void Function(Conversation conversation, Label label)? onApplyLabel;
+
+  /// A name nothing matched was typed for that row; the host creates it and
+  /// applies what comes back.
+  final void Function(Conversation conversation, String name)? onCreateLabel;
+
+  /// Dismiss that row with nothing on it.
+  final void Function(Conversation conversation)? onDismissWithoutLabel;
+
+  /// Escape, or the strip's ✕: the host collapses the picker.
+  final void Function(Conversation conversation)? onCloseLabelPicker;
+
   const ConversationListPane({
     super.key,
     required this.sources,
@@ -94,7 +144,32 @@ class ConversationListPane extends StatelessWidget {
     this.captionFor,
     this.emptyText = 'Nothing here.',
     this.emptyNotice,
+    this.onDismiss,
+    this.onLabel,
+    this.onLater,
+    this.onDismissSender,
+    this.labels = const [],
+    this.labelPickerFor,
+    this.onApplyLabel,
+    this.onCreateLabel,
+    this.onDismissWithoutLabel,
+    this.onCloseLabelPicker,
   });
+
+  /// One row's quick actions, keyed by the thread rather than by its place in
+  /// the list: a section above it growing by one would move an index, and a
+  /// moving key throws away the button the pointer is on.
+  static Key dismissKeyFor(Conversation c) => _actionKey('dismiss', c);
+  static Key labelKeyFor(Conversation c) => _actionKey('label', c);
+  static Key laterKeyFor(Conversation c) => _actionKey('later', c);
+  static Key dismissSenderKeyFor(Conversation c) =>
+      _actionKey('dismiss-sender', c);
+
+  /// The inline picker under one row.
+  static Key pickerKeyFor(Conversation c) => _actionKey('label-picker', c);
+
+  static Key _actionKey(String what, Conversation c) =>
+      ValueKey('row-$what-${c.source}|${c.id}');
 
   List<Conversation> _inState(ConversationState state) => [
         for (final c in conversations)
@@ -218,10 +293,13 @@ class ConversationListPane extends StatelessWidget {
     );
   }
 
-  /// One thread's card, with Reopen beside it where the section offers one.
-  /// The button sits outside the card rather than in it: [ConversationRow] is
-  /// the same row everywhere it appears, and a card that grows an action in
-  /// one list is a card that reads differently in the others.
+  /// One thread's card, with Reopen beside it where the section offers one, the
+  /// quick-action cluster beside that where the host wired any, and the inline
+  /// label picker under it while the host has one open.
+  ///
+  /// Everything is outside the card rather than in it: [ConversationRow] is the
+  /// same row everywhere it appears, and a card that grows an action in one list
+  /// is a card that reads differently in the others.
   Widget _row(Conversation c) {
     final row = ConversationRow(
       conversation: c,
@@ -231,23 +309,216 @@ class ConversationListPane extends StatelessWidget {
       processingSince: processingSince,
       caption: captionFor?.call(c),
     );
-    if (!_showReopen) return row;
 
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Expanded(child: row),
-        const SizedBox(width: BondSpacing.s8),
-        TextButton(
-          onPressed: () => onReopen!(c.source, c.id),
-          style: TextButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
-            minimumSize: const Size(0, 32),
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    Widget body = row;
+    if (_showReopen) {
+      body = Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(child: body),
+          const SizedBox(width: BondSpacing.s8),
+          TextButton(
+            onPressed: () => onReopen!(c.source, c.id),
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+              minimumSize: const Size(0, 32),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text('Reopen'),
           ),
-          child: const Text('Reopen'),
-        ),
+        ],
+      );
+    }
+
+    final actions = _quickActions(c);
+    if (actions.isNotEmpty) {
+      body = _RowActions(actions: actions, child: body);
+    }
+
+    final picker = _picker(c);
+    if (picker == null) return body;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        body,
+        const SizedBox(height: BondSpacing.s8),
+        picker,
       ],
+    );
+  }
+
+  /// What the pointer — or the keyboard, on a focused row — offers beside one
+  /// thread: the four things entries 12b and 6b asked for, in the order they
+  /// cost the reader. Empty when the host wired none, which is what leaves the
+  /// row unwrapped.
+  ///
+  /// Every one of them also lives in the thread's own header, so a row that
+  /// never sees a pointer is not a row with actions nobody can reach.
+  List<HoverAction> _quickActions(Conversation c) {
+    final dismiss = onDismiss;
+    final label = onLabel;
+    final later = onLater;
+    final sender = onDismissSender;
+    // The tooltip carries the sender the button cannot name in its own width.
+    final who = displaySenderName(
+      name: c.primaryParticipant?.name,
+      address: c.primaryEmail,
+      fallback: '',
+    );
+
+    return [
+      if (dismiss != null)
+        HoverAction(
+          icon: Icons.check,
+          tooltip: 'Dismiss',
+          onTap: () => dismiss(c),
+          key: dismissKeyFor(c),
+        ),
+      if (label != null)
+        HoverAction(
+          icon: Icons.label_outline,
+          tooltip: 'Label…',
+          onTap: () => label(c),
+          key: labelKeyFor(c),
+        ),
+      if (later != null)
+        HoverAction(
+          icon: Icons.schedule,
+          tooltip: 'Later',
+          onTap: () => later(c),
+          key: laterKeyFor(c),
+        ),
+      // Last, because it is the widest correction on the strip: the others
+      // change one row, this one changes the shape of the inbox.
+      if (sender != null && who.isNotEmpty)
+        HoverAction(
+          icon: Icons.block_outlined,
+          tooltip: 'Dismiss everything from $who',
+          onTap: () => sender(c),
+          key: dismissSenderKeyFor(c),
+        ),
+    ];
+  }
+
+  /// The inline picker under one row, or null while that row has none open.
+  ///
+  /// Under the card rather than over it: nothing opens over anything here, and a
+  /// strip in the flow pushes the rows below down where a popup would hide them.
+  /// Like the panel's own mount, it draws only when the host wired the callbacks
+  /// it cannot work without.
+  Widget? _picker(Conversation c) {
+    final openFor = labelPickerFor;
+    final apply = onApplyLabel;
+    final create = onCreateLabel;
+    final close = onCloseLabelPicker;
+    if (openFor == null || apply == null || create == null || close == null) {
+      return null;
+    }
+    final mode = openFor(c);
+    if (mode == null) return null;
+
+    final without = onDismissWithoutLabel;
+    return LabelPicker(
+      key: pickerKeyFor(c),
+      labels: labels,
+      prompt: mode.prompt,
+      onApply: (label) => apply(c, label),
+      onCreate: (name) => create(c, name),
+      // Only the dismiss path can end with no word on the thread.
+      onDismissWithoutLabel: mode == LabelPickerMode.dismiss && without != null
+          ? () => without(c)
+          : null,
+      onClose: () => close(c),
+    );
+  }
+}
+
+/// A row's quick actions, revealed at its trailing edge under the pointer or on
+/// focus.
+///
+/// The transcript's `HoverActions` shape, and for its reason: a strip in the
+/// FLOW beside every row would reserve four buttons' width — a sixth of a narrow
+/// list column — on every row forever, and one under the row would move every
+/// row below it each time the pointer crossed one. A strip over the card's
+/// trailing edge costs nothing until it is asked for and reflows nothing when it
+/// is.
+///
+/// Two differences from the transcript's: focus reveals it as well as hover,
+/// because a keyboard-first pass down the list (`j`/`k`) never moves the mouse
+/// and must still see what it can do; and the strip is a SIBLING of the card,
+/// which is what keeps [ConversationRow] the same row in every list.
+///
+/// The strip is built only while it shows, so a test that finds its buttons is a
+/// test that the reveal happened.
+class _RowActions extends StatefulWidget {
+  final Widget child;
+  final List<HoverAction> actions;
+
+  const _RowActions({required this.child, required this.actions});
+
+  @override
+  State<_RowActions> createState() => _RowActionsState();
+}
+
+class _RowActionsState extends State<_RowActions> {
+  bool _hovered = false;
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      // Not a tab stop of its own — the row's own ink well is the stop, and this
+      // node exists only to hear when the focus lands anywhere inside it.
+      child: Focus(
+        canRequestFocus: false,
+        skipTraversal: true,
+        onFocusChange: (has) => setState(() => _focused = has),
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            widget.child,
+            if (_hovered || _focused)
+              Positioned(
+                top: 0,
+                bottom: 0,
+                right: BondSpacing.s8,
+                child: _strip(),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _strip() {
+    return Center(
+      widthFactor: 1,
+      child: Material(
+        color: BondColors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BondRadii.smAll,
+          side: const BorderSide(color: BondColors.border),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final action in widget.actions)
+              IconButton(
+                key: action.key,
+                onPressed: action.onTap,
+                icon: Icon(action.icon),
+                iconSize: 16,
+                tooltip: action.tooltip,
+                padding: const EdgeInsets.all(BondSpacing.s4),
+                constraints: const BoxConstraints(),
+                visualDensity: VisualDensity.compact,
+              ),
+          ],
+        ),
+      ),
     );
   }
 }

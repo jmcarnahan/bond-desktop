@@ -1,6 +1,8 @@
+import 'package:bond_inbox/models/label_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:bond_inbox/widgets/needs_you_tabs.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The five lenses on the Needs You pile.
@@ -18,6 +20,7 @@ Conversation _conv({
   int pendingDrafts = 0,
   double? score,
   String? lastMessageAt,
+  List<Label> labels = const [],
 }) =>
     Conversation(
       id: id,
@@ -27,7 +30,10 @@ Conversation _conv({
       latestDeadline: deadline,
       pendingDraftCount: pendingDrafts,
       lastMessageAt: lastMessageAt,
+      labels: labels,
     );
+
+Label _label(String id, String name) => Label(id: id, name: name);
 
 List<String> _idsOf(List<Conversation> rows) => [for (final c in rows) c.id];
 
@@ -213,6 +219,110 @@ void main() {
       for (final sort in NeedsYouSort.values) {
         expect(sortNeedsYou(sort, const []), isEmpty, reason: '$sort');
       }
+    });
+  });
+
+  group('needsYouLabelRows', () {
+    test('nothing picked is the pile itself, untouched', () {
+      final rows = [_conv(id: 'a'), _conv(id: 'b')];
+
+      expect(needsYouLabelRows(null, rows), same(rows));
+      expect(needsYouLabelRows('', rows), same(rows));
+    });
+
+    test('a label keeps the rows filed under it, in the order they came', () {
+      final legal = _label('legal', 'Waiting on legal');
+      final rows = [
+        _conv(id: 'c', labels: [legal]),
+        _conv(id: 'a'),
+        _conv(id: 'b', labels: [_label('jira', 'Jira update'), legal]),
+      ];
+
+      expect(_idsOf(needsYouLabelRows('legal', rows)), ['c', 'b']);
+    });
+
+    test('and a label nothing carries narrows to nothing, never a throw', () {
+      // The label was deleted while its pill was pressed. An empty tab is the
+      // honest answer; the tab's own empty sentence is what the reader reads.
+      final rows = [_conv(id: 'a', labels: [_label('jira', 'Jira update')])];
+
+      expect(needsYouLabelRows('gone', rows), isEmpty);
+    });
+  });
+
+  group('NeedsYouLabelFilter', () {
+    Future<void> pump(
+      WidgetTester tester, {
+      List<Label> labels = const [],
+      String? selected,
+      ValueChanged<String?>? onSelected,
+    }) =>
+        tester.pumpWidget(MaterialApp(
+          home: Scaffold(
+            body: NeedsYouLabelFilter(
+              labels: labels,
+              selectedLabelId: selected,
+              onLabelSelected: onSelected,
+            ),
+          ),
+        ));
+
+    testWidgets('an owner with no labels gets no row at all', (tester) async {
+      await pump(tester);
+
+      // Additive in the strict sense: the Needs You header is exactly what it
+      // was before labels existed.
+      expect(find.byKey(NeedsYouLabelFilter.rowKey), findsNothing);
+    });
+
+    testWidgets('one pill per word, read by the word', (tester) async {
+      await pump(tester, labels: [
+        _label('jira', 'Jira update'),
+        _label('legal', 'Waiting on legal'),
+      ]);
+
+      expect(find.byKey(NeedsYouLabelFilter.rowKey), findsOneWidget);
+      expect(find.text('Jira update'), findsOneWidget);
+      expect(find.text('Waiting on legal'), findsOneWidget);
+    });
+
+    testWidgets('a press selects, and a second press on it clears',
+        (tester) async {
+      final picked = <String?>[];
+      await pump(
+        tester,
+        labels: [_label('jira', 'Jira update')],
+        onSelected: picked.add,
+      );
+
+      await tester.tap(find.byKey(NeedsYouLabelFilter.pillKeyFor('jira')));
+      await tester.pump();
+
+      expect(picked, ['jira']);
+
+      // The pill is pressed now, which the host reports back as the selection.
+      await pump(
+        tester,
+        labels: [_label('jira', 'Jira update')],
+        selected: 'jira',
+        onSelected: picked.add,
+      );
+      await tester.tap(find.byKey(NeedsYouLabelFilter.pillKeyFor('jira')));
+      await tester.pump();
+
+      // Null, not the id again: a label filter's resting state is off, unlike
+      // the five tabs beside it.
+      expect(picked, ['jira', null]);
+    });
+
+    testWidgets('a host that cannot act leaves the pills inert',
+        (tester) async {
+      await pump(tester, labels: [_label('jira', 'Jira update')]);
+
+      await tester.tap(find.byKey(NeedsYouLabelFilter.pillKeyFor('jira')));
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
     });
   });
 

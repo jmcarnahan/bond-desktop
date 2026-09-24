@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show immutable;
 
 import 'attachment_models.dart';
+import 'label_models.dart';
 
 /// Wire/row models for the inbox. Hand-written and deliberately defensive:
 /// every field reads through a nullable cast with a default, so neither a
@@ -202,6 +203,15 @@ class Conversation {
   /// has passed.
   final String? snoozedUntil;
 
+  /// The owner's own words on this thread, most-used first — the chips a row
+  /// draws. Read at read time by the GROUP_CONCAT subquery in
+  /// `loadConversations`, and EMPTY on every read that does not run it, which
+  /// reads as "not filed" rather than as a wrong chip.
+  ///
+  /// Nothing to do with [Message.label], the model's verdict about one message.
+  /// A thread carries as many of these as the owner has put on it.
+  final List<Label> labels;
+
   const Conversation({
     required this.id,
     this.source = 'email',
@@ -225,6 +235,7 @@ class Conversation {
     this.latestDeadline,
     this.pendingDraftCount = 0,
     this.snoozedUntil,
+    this.labels = const [],
   });
 
   /// First participant — the row's primary sender. Null when a conversation
@@ -241,10 +252,19 @@ class Conversation {
   /// Whether the model is still working on this thread.
   bool get isAiBusy => aiPendingCount > 0;
 
-  /// Deliberately narrow: state and unread count are the only two fields a
-  /// local action flips. Marking a thread done flips the state; opening one
-  /// flips the count to zero.
-  Conversation copyWith({ConversationState? state, int? unreadCount}) {
+  /// Deliberately narrow: state, unread count and labels are the only three
+  /// fields a local action flips. Marking a thread done flips the state;
+  /// opening one flips the count to zero; filing one under a word of the
+  /// owner's puts a chip on it.
+  ///
+  /// Labels are here rather than in a method of their own because an empty list
+  /// is a real value: taking the last label off a thread and leaving its labels
+  /// alone are `[]` and null, which is exactly what an optional list says.
+  Conversation copyWith({
+    ConversationState? state,
+    int? unreadCount,
+    List<Label>? labels,
+  }) {
     return Conversation(
       id: id,
       source: source,
@@ -268,6 +288,7 @@ class Conversation {
       latestDeadline: latestDeadline,
       pendingDraftCount: pendingDraftCount,
       snoozedUntil: snoozedUntil,
+      labels: labels ?? this.labels,
     );
   }
 
@@ -299,6 +320,7 @@ class Conversation {
       latestDeadline: latestDeadline,
       pendingDraftCount: pendingDraftCount,
       snoozedUntil: snoozedUntil,
+      labels: labels,
     );
   }
 
@@ -370,6 +392,9 @@ class Conversation {
       // From the same LEFT JOIN the bucket comes from, and null on every read
       // that does not run it — which reads as "no date set".
       snoozedUntil: row['snoozed_until'] as String?,
+      // The owner's own words, concatenated by the last subquery and absent
+      // from every read that does not run it — which reads as "not filed".
+      labels: Label.parseConcat(row['labels']),
     );
   }
 }

@@ -356,6 +356,168 @@ void main() {
           .getSingle();
       expect(row.data['needs_you'], 1);
     });
+
+    test('with no labels it hands back the state to come back to', () async {
+      await seedConversation('c1');
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.load();
+
+      final undo = await notifier.markDone('email', 'c1');
+
+      expect(undo, isNotNull);
+      expect(undo!.previousState, ConversationState.needsReply);
+      expect(undo.appliedLabelIds, isEmpty);
+      expect(undo.source, 'email');
+      expect(undo.conversationKey, 'c1');
+    });
+
+    test('files the thread under the words it was given', () async {
+      await seedConversation('c1');
+      final fyi = await store.createLabel('FYI only');
+      final later = await store.createLabel('Later');
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.load();
+
+      final undo =
+          await notifier.markDone('email', 'c1', labelIds: [fyi.id, later.id]);
+
+      // Dismissing WITH a label is one action, so the chips are on the row in
+      // the same step the state flipped — not after a second re-read.
+      final row = (notifier.state as ConversationsLoaded).conversations.single;
+      expect(row.state, ConversationState.done);
+      expect([for (final l in row.labels) l.name], ['FYI only', 'Later']);
+      expect(
+        await store.labelsForConversation('email', 'c1'),
+        hasLength(2),
+      );
+      expect(undo!.appliedLabelIds, [fyi.id, later.id]);
+    });
+
+    test('a word already on the thread is not this action\'s to undo',
+        () async {
+      await seedConversation('c1');
+      final fyi = await store.createLabel('FYI only');
+      final later = await store.createLabel('Later');
+      await store.applyLabels('email', 'c1', [fyi.id]);
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.load();
+
+      final undo =
+          await notifier.markDone('email', 'c1', labelIds: [fyi.id, later.id]);
+
+      // The owner filed this thread under FYI only last week. Undoing today's
+      // dismissal must not take that back.
+      expect(undo!.appliedLabelIds, [later.id]);
+    });
+
+    test('a failed write applies no label and offers no undo', () async {
+      await seedConversation('c1');
+      final fyi = await store.createLabel('FYI only');
+      final notifier = ConversationsNotifier(UnwritableStore(db), sync);
+      await notifier.load();
+
+      final undo = await notifier.markDone('email', 'c1', labelIds: [fyi.id]);
+
+      expect(undo, isNull);
+      expect(await store.labelsForConversation('email', 'c1'), isEmpty);
+      final state = notifier.state as ConversationsLoaded;
+      expect(state.conversations.single.state, ConversationState.needsReply);
+      expect(state.conversations.single.labels, isEmpty);
+    });
+  });
+
+  group('undoMarkDone', () {
+    test('puts the state back and takes off the labels it applied', () async {
+      await seedConversation('c1');
+      final fyi = await store.createLabel('FYI only');
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.load();
+      final undo = await notifier.markDone('email', 'c1', labelIds: [fyi.id]);
+
+      await notifier.undoMarkDone(undo!);
+
+      final row = (notifier.state as ConversationsLoaded).conversations.single;
+      expect(row.state, ConversationState.needsReply);
+      expect(row.labels, isEmpty);
+      expect(
+        (await store.loadConversations(sources: const ['email'])).single.state,
+        ConversationState.needsReply,
+      );
+      expect(await store.labelsForConversation('email', 'c1'), isEmpty);
+    });
+
+    test('leaves a label the dismissal did not apply', () async {
+      await seedConversation('c1');
+      final fyi = await store.createLabel('FYI only');
+      final later = await store.createLabel('Later');
+      await store.applyLabels('email', 'c1', [fyi.id]);
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.load();
+      final undo =
+          await notifier.markDone('email', 'c1', labelIds: [fyi.id, later.id]);
+
+      await notifier.undoMarkDone(undo!);
+
+      final onThread = await store.labelsForConversation('email', 'c1');
+      expect([for (final l in onThread) l.id], [fyi.id]);
+      expect(
+        [
+          for (final l
+              in (notifier.state as ConversationsLoaded).conversations.single
+                  .labels)
+            l.id,
+        ],
+        [fyi.id],
+      );
+    });
+
+    test('a dismissal with no labels is still one press back', () async {
+      await seedConversation('c1', state: 'waiting');
+      await seedMessage('c1', 'm1');
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.load();
+      final undo = await notifier.markDone('email', 'c1');
+
+      await notifier.undoMarkDone(undo!);
+
+      // Recorded rather than re-derived, which is the difference from
+      // `reopenThread`: that one reads the newest message's direction and would
+      // call this thread `needs_reply` on an inbound last message. A thread the
+      // owner had parked comes back parked.
+      expect(
+        (notifier.state as ConversationsLoaded).conversations.single.state,
+        ConversationState.waiting,
+      );
+    });
+
+    test('a failed write leaves the thread dismissed and says so', () async {
+      await seedConversation('c1');
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.load();
+      final undo = await notifier.markDone('email', 'c1');
+
+      final refusing = ConversationsNotifier(UnwritableStore(db), sync);
+      await refusing.load();
+      await refusing.undoMarkDone(undo!);
+
+      final state = refusing.state as ConversationsLoaded;
+      expect(state.conversations.single.state, ConversationState.done);
+      expect(state.loadError, contains("Couldn't undo"));
+    });
+
+    test('the popularity of a word it removes stays where it was', () async {
+      await seedConversation('c1');
+      final fyi = await store.createLabel('FYI only');
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.load();
+      final undo = await notifier.markDone('email', 'c1', labelIds: [fyi.id]);
+
+      await notifier.undoMarkDone(undo!);
+
+      // `use_count` is how often the owner reached for the word, not a
+      // refcount — see `MessageStore.removeLabel`.
+      expect((await store.listLabels()).single.useCount, 1);
+    });
   });
 
   group('reopenThread', () {

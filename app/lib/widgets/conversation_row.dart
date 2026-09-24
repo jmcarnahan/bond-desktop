@@ -4,6 +4,7 @@ import '../models/message_models.dart';
 import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
+import 'label_chip.dart';
 import 'processing_hint.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
@@ -183,6 +184,13 @@ class ConversationRow extends StatelessWidget {
                           if (c.ctaUrgency == CtaUrgency.urgent)
                             const BondChip(
                                 label: 'Urgent', tone: BondTone.attention),
+                          // The owner's own words, ahead of the counts: a word
+                          // somebody chose for this thread says more about it
+                          // than how many messages are on it. Display-only
+                          // here — the picker is where a label is put on or
+                          // taken off, and a chip that swallowed the tap would
+                          // cost the row its own.
+                          ...labelChips(c.labels),
                           // What came with the thread, counted at read time
                           // over its non-inline attachments — a signature logo
                           // is not a file somebody sent.

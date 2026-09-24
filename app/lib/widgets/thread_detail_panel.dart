@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/attachment_models.dart';
+import '../models/label_models.dart';
 import '../models/message_models.dart';
 import '../models/open_asks.dart';
 import '../services/profile_photos.dart';
@@ -10,6 +11,7 @@ import 'attachment_format.dart';
 import 'chips.dart';
 import 'hover_actions.dart';
 import 'inline_alert.dart';
+import 'label_picker.dart';
 import 'link_unfurl.dart';
 import 'linked_text.dart';
 import 'message_row.dart';
@@ -217,6 +219,43 @@ class ThreadDetailPanel extends StatefulWidget {
   /// [unfolded] can be kept. Null leaves every fold the row's own business.
   final void Function(String messageId, bool collapsed)? onFoldChanged;
 
+  /// The owner's vocabulary for the inline picker, in the order the picker wants
+  /// it (see [LabelPicker.labels]). Empty — the default — is what a host that
+  /// knows nothing about labels passes, and draws nothing.
+  final List<Label> labels;
+
+  /// Which question the picker under the banner is asking, or null while it is
+  /// collapsed.
+  ///
+  /// HOST-OWNED rather than local state, on purpose: `l` and `Shift+E` live in a
+  /// keyboard map outside this panel and have to be able to open the strip, and
+  /// an apply has to be able to collapse it in the same step as the write it
+  /// caused. The strip draws only when a mode is set AND [onApplyLabel],
+  /// [onCreateLabel] and [onCloseLabelPicker] are all wired — a picker that
+  /// could not apply what it was asked for is worse than no picker.
+  final LabelPickerMode? labelPicker;
+
+  /// Asks the host to open the picker in one of its two modes — what the two
+  /// affordances under the banner do. Null hides both, and the panel renders
+  /// exactly what it always did.
+  final void Function(LabelPickerMode mode)? onOpenLabelPicker;
+
+  /// An existing label was chosen. The host applies it, and on the dismiss path
+  /// marks the thread done in the same call so the two are one undo.
+  final void Function(Label label)? onApplyLabel;
+
+  /// A name nothing matched was typed. The host creates it (idempotent on the
+  /// trimmed name) and applies what comes back.
+  final void Function(String name)? onCreateLabel;
+
+  /// Dismiss with nothing on it. Offered only while [labelPicker] is
+  /// [LabelPickerMode.dismiss] — there is nothing to dismiss on the label-only
+  /// path — and null takes it away there too.
+  final VoidCallback? onDismissWithoutLabel;
+
+  /// Escape, and the strip's own ✕. Sets the host's open state back to null.
+  final VoidCallback? onCloseLabelPicker;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -247,7 +286,21 @@ class ThreadDetailPanel extends StatefulWidget {
     this.contextLinked = 0,
     this.unfolded = const <String>{},
     this.onFoldChanged,
+    this.labels = const [],
+    this.labelPicker,
+    this.onOpenLabelPicker,
+    this.onApplyLabel,
+    this.onCreateLabel,
+    this.onDismissWithoutLabel,
+    this.onCloseLabelPicker,
   });
+
+  /// The one-click dismissal entry 1b asked for: it opens the picker rather than
+  /// closing the thread on the spot, because the reason is the point.
+  static const Key dismissWithLabelKey = ValueKey('thread-dismiss-with-label');
+
+  /// File the thread under a word without closing it — "keep with a label".
+  static const Key labelKey = ValueKey('thread-label');
 
   @override
   State<ThreadDetailPanel> createState() => _ThreadDetailPanelState();
@@ -491,6 +544,10 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
                 ),
               ),
             ),
+          // Under the banner, because the banner says what the thread wants and
+          // this is the answer "nothing, and here is why" — the one reply that
+          // is not typed.
+          ?_labelStrip(),
           Expanded(
             child: tab == ThreadTab.files
                 ? _filesBody(files)
@@ -662,6 +719,78 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       ),
     );
   }
+
+  /// The dismiss-and-file strip under the banner: two affordances while it is
+  /// collapsed, the inline picker in their place while the host has it open, and
+  /// null for every host that wired none of it.
+  ///
+  /// Two buttons rather than one, because they are two different acts: Dismiss
+  /// files the thread away with a word saying why, Label leaves it where it is
+  /// and puts the word on it. Both open the SAME strip, which is what keeps the
+  /// keyboard flow (`Shift+E` and `l`) and the pointer flow one code path.
+  Widget? _labelStrip() {
+    final mode = widget.labelPicker;
+    final apply = widget.onApplyLabel;
+    final create = widget.onCreateLabel;
+    final close = widget.onCloseLabelPicker;
+    final open = widget.onOpenLabelPicker;
+
+    const padding = EdgeInsets.fromLTRB(
+      BondSpacing.s16,
+      BondSpacing.s12,
+      BondSpacing.s16,
+      0,
+    );
+
+    if (mode != null && apply != null && create != null && close != null) {
+      return Padding(
+        padding: padding,
+        child: LabelPicker(
+          labels: widget.labels,
+          prompt: mode.prompt,
+          onApply: apply,
+          onCreate: create,
+          // Only the dismiss path can end with no word on the thread.
+          onDismissWithoutLabel: mode == LabelPickerMode.dismiss
+              ? widget.onDismissWithoutLabel
+              : null,
+          onClose: close,
+        ),
+      );
+    }
+
+    if (open == null) return null;
+
+    return Padding(
+      padding: padding,
+      child: Row(
+        children: [
+          TextButton.icon(
+            key: ThreadDetailPanel.dismissWithLabelKey,
+            onPressed: () => open(LabelPickerMode.dismiss),
+            icon: const Icon(Icons.check, size: 16),
+            label: const Text('Dismiss…'),
+            style: _stripButtonStyle,
+          ),
+          const SizedBox(width: BondSpacing.s8),
+          TextButton.icon(
+            key: ThreadDetailPanel.labelKey,
+            onPressed: () => open(LabelPickerMode.label),
+            icon: const Icon(Icons.label_outline, size: 16),
+            label: const Text('Label…'),
+            style: _stripButtonStyle,
+          ),
+        ],
+      ),
+    );
+  }
+
+  static final ButtonStyle _stripButtonStyle = TextButton.styleFrom(
+    padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+    minimumSize: const Size(0, 32),
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    textStyle: BondType.small,
+  );
 
   /// The room this thread is: what it is about, who is on it, where it stands,
   /// and the few things that can be done to the whole conversation. Filing it —

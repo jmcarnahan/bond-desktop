@@ -8,6 +8,7 @@ import '../models/drafts_models.dart';
 import '../models/files_models.dart';
 import '../models/home_models.dart';
 import '../models/home_sort.dart';
+import '../models/label_models.dart';
 import '../models/message_models.dart';
 import '../models/person.dart';
 import '../models/storyline_models.dart';
@@ -859,6 +860,15 @@ WHERE source = ? AND conversation_key = ?
   /// composer's suggestion by exactly that subselect, so a thread the drafts
   /// tab claims and a thread whose composer is full are the same set of
   /// threads by construction rather than by coincidence.
+  ///
+  /// `labels` is the owner's own words on the thread — the one place a
+  /// conversation row learns them, since this is the ONE projection every
+  /// conversation list is built from ([teamsChats] delegates here). Packed into
+  /// a single column by a GROUP_CONCAT over a correlated subselect, for the
+  /// reason spelled out at the column: a real join would multiply the rows and
+  /// every count above would come out wrong. An absent column reads as no
+  /// labels, which is right for the service reads that build a card out of a
+  /// conversation row and never draw a chip.
   Future<List<Conversation>> loadConversations({
     List<String> sources = const ['email'],
     ConversationState? state,
@@ -922,7 +932,33 @@ WHERE source = ? AND conversation_key = ?
           '        WHERE m3.source = c.source AND m3.conversation_key = c.conversation_key '
           "          AND m3.direction = 'inbound' "
           '        ORDER BY m3.received_at DESC, m3.source_message_id DESC LIMIT 1'
-          '     )) AS pending_draft_count '
+          '     )) AS pending_draft_count, '
+          // The owner's own words on the thread, three fields per label packed
+          // into one column: a correlated GROUP_CONCAT rather than a join,
+          // because a join would multiply every row above by its labels and
+          // every count in this SELECT would come out wrong.
+          //
+          // The separators are the ASCII unit and record separators
+          // (`labelFieldSeparator`, `labelRecordSeparator`), not a comma: a
+          // label name is free text the owner typed, and `Waiting on legal,
+          // then finance` is a perfectly good name that a comma would split in
+          // two. Neither character can be typed into a text field on this
+          // platform, and [Label.parseConcat] bounds its split anyway.
+          //
+          // GROUP_CONCAT has no ORDER BY of its own here, so the order comes
+          // from a subselect it reads — the same most-used-first order
+          // [listLabels] and [labelsForConversation] use, so a row and the
+          // thread it opens draw their chips alike.
+          '  (SELECT GROUP_CONCAT('
+          "     o.id || '$labelFieldSeparator' || o.name || "
+          "     '$labelFieldSeparator' || COALESCE(o.tone, ''), "
+          "     '$labelRecordSeparator') "
+          '   FROM (SELECT l.id, l.name, l.tone FROM conversation_labels cl '
+          '         JOIN labels l ON l.id = cl.label_id '
+          '         WHERE cl.source = c.source '
+          '           AND cl.conversation_key = c.conversation_key '
+          '         ORDER BY l.use_count DESC, l.last_used_at DESC, '
+          '                  l.name ASC) o) AS labels '
           'FROM conversations c '
           'LEFT JOIN conversation_ai ai '
           '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
@@ -2929,10 +2965,17 @@ RETURNING *
   /// Neither reset touches these as tables. [wipeAll] names the handful of
   /// `app_prefs` KEYS that describe one person rather than this machine, and
   /// deletes `sender_prefs` with the mailbox those rules were written about.
+  ///
+  /// The two label tables are here because **Clear AI results** must not take
+  /// them: a word the owner typed is not something a model produced, and
+  /// re-running the pipeline would never write it back. They are still deleted
+  /// by [wipeAll] — see [_wipeTables].
   static const List<String> keptTables = [
     'app_prefs',
     'sender_prefs',
     'setup_state',
+    'labels',
+    'conversation_labels',
   ];
 
   /// The five tables a wipe leaves alone although two of them are derived.
@@ -2998,6 +3041,16 @@ RETURNING *
         // mailbox's data, and the mail they were written about is what is
         // going.
         if (!keepIdentity) 'sender_prefs',
+        // The labels go EITHER WAY, unlike the sender rules above, and the
+        // links are why: they name conversation keys in the mailbox this
+        // deletes, so keeping them would leave every word of the vocabulary
+        // attached to threads that no longer exist and a `use_count` counting
+        // applications to them. A sender rule still means something about a
+        // person after their mail is gone; "FYI only, on these fourteen
+        // threads" does not. Both tables, because a vocabulary with no links
+        // is not what the owner built.
+        'conversation_labels',
+        'labels',
       ];
 
   /// Every row: a reset is not paced, the sync is. The cap [clearDerived]
@@ -4703,6 +4756,245 @@ SELECT conversation_key FROM (
       'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
       variables: _args([key, value]),
     );
+  }
+
+  // ── labels ───────────────────────────────────────────────────────────
+  //
+  // The owner's own vocabulary and the threads it is on. Nothing in this
+  // section reads or writes `messages.label`, which is the model's verdict
+  // about one message: the two are different facts written by different hands,
+  // and the whole point of these two tables is that neither can overwrite the
+  // other.
+
+  /// A label's uniqueness key: the name trimmed and lowercased.
+  ///
+  /// One spelling of the rule, because three methods compare against it —
+  /// [createLabel] to find an existing word, [renameLabel] to refuse a
+  /// collision, and the unique index to enforce both. `Meeting response` and
+  /// `meeting response ` are one label; offering the owner two chips that mean
+  /// the same thing is the failure this prevents.
+  static String labelNameKey(String name) => name.trim().toLowerCase();
+
+  /// The id minted for a new label: a slug of the name plus four hex digits.
+  ///
+  /// The slug is for a human reading a row; the suffix is what makes the id
+  /// unique, because two DIFFERENT labels can slug to the same stem — `FYI
+  /// only` and `FYI, only!` both reduce to `fyi-only` — and the name is what
+  /// renames, so the id cannot be derived from it. A name with no slug-able
+  /// character at all (an emoji, CJK) keeps the suffix alone under a `label-`
+  /// stem rather than minting a bare id.
+  static String _mintLabelId(String name) {
+    final stem = name
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
+        .replaceAll(RegExp(r'^-+|-+$'), '');
+    final buffer = StringBuffer(stem.isEmpty ? 'label' : stem);
+    buffer.write('-');
+    for (var i = 0; i < 4; i++) {
+      buffer.write(_random.nextInt(16).toRadixString(16));
+    }
+    return buffer.toString();
+  }
+
+  /// Randomness for label ids. Secure not for secrecy but for the guarantee
+  /// that two labels created in the same millisecond differ, which a
+  /// time-seeded generator does not give.
+  static final math.Random _random = math.Random.secure();
+
+  /// Adds a word to the owner's vocabulary, or hands back the one that is
+  /// already there.
+  ///
+  /// IDEMPOTENT on [labelNameKey], deliberately: the picker's Enter key means
+  /// "file this thread under this word", and a person who types a name that
+  /// already exists — in any casing, with any stray space — means the label
+  /// they can see, not a second one beside it. Throwing there would turn the
+  /// one keystroke the round exists for into an error message.
+  ///
+  /// [tone] is a `BondTone` name or null for neutral, and an existing label's
+  /// tone is left alone: the colour belongs to the label, not to this press.
+  Future<Label> createLabel(String name, {String? tone}) async {
+    final key = labelNameKey(name);
+    final existing = await db
+        .customSelect(
+          'SELECT * FROM labels WHERE name_key = ?',
+          variables: _args([key]),
+        )
+        .get();
+    if (existing.isNotEmpty) return Label.fromRow(existing.first.data);
+
+    final now = _nowIso();
+    final label = Label(
+      id: _mintLabelId(name),
+      name: name.trim(),
+      tone: tone,
+      createdAt: now,
+      updatedAt: now,
+    );
+    await db.customUpdate(
+      'INSERT INTO labels (id, name, name_key, tone, use_count, '
+      'last_used_at, created_at, updated_at) '
+      'VALUES (?, ?, ?, ?, 0, NULL, ?, ?)',
+      variables: _args([label.id, label.name, key, tone, now, now]),
+    );
+    return label;
+  }
+
+  /// Renames a label, keeping its id and therefore every thread it is on.
+  ///
+  /// Throws a [StateError] when another label already holds the new name's key.
+  /// Creating is idempotent — the picker treats a typed name that exists as
+  /// "apply that one" — but a RENAME onto an existing name is a merge of two
+  /// vocabularies, and doing that silently would move threads the owner never
+  /// mentioned. Re-spelling a label as itself (`fyi only` → `FYI Only`) is not
+  /// a collision and goes through.
+  Future<void> renameLabel(String id, String newName) async {
+    final key = labelNameKey(newName);
+    final clash = await db
+        .customSelect(
+          'SELECT id FROM labels WHERE name_key = ? AND id <> ?',
+          variables: _args([key, id]),
+        )
+        .get();
+    if (clash.isNotEmpty) {
+      throw StateError('A label called "${newName.trim()}" already exists');
+    }
+    await db.customUpdate(
+      'UPDATE labels SET name = ?, name_key = ?, updated_at = ? WHERE id = ?',
+      variables: _args([newName.trim(), key, _nowIso(), id]),
+    );
+  }
+
+  /// Sets, or with a null [tone] clears, a label's colour word.
+  ///
+  /// A nullable argument rather than a second method: unlike a bucket, where
+  /// clearing and leaving alone are opposite intentions, there is nothing to
+  /// leave alone here — the caller is a picker that always knows which tone it
+  /// means, and null is the default one.
+  Future<void> setLabelTone(String id, String? tone) async {
+    await db.customUpdate(
+      'UPDATE labels SET tone = ?, updated_at = ? WHERE id = ?',
+      variables: _args([tone, _nowIso(), id]),
+    );
+  }
+
+  /// Deletes a label and every link to it, in one transaction.
+  ///
+  /// Both or neither: a label row deleted on its own would leave links naming
+  /// an id nothing can resolve, and the join in [loadConversations] would draw
+  /// a chip with no name on it. The links go first only so a reader inside the
+  /// transaction never sees the reverse.
+  Future<void> deleteLabel(String id) async {
+    await db.transaction(() async {
+      await db.customUpdate(
+        'DELETE FROM conversation_labels WHERE label_id = ?',
+        variables: _args([id]),
+      );
+      await db.customUpdate(
+        'DELETE FROM labels WHERE id = ?',
+        variables: _args([id]),
+      );
+    });
+  }
+
+  /// The whole vocabulary in the picker's order: most-used first, then
+  /// most-recently-used, then alphabetical.
+  ///
+  /// The third key is what makes the order STABLE for the labels nobody has
+  /// used yet — they all tie at zero with no stamp, and a list that reshuffled
+  /// them between frames would move a chip out from under the cursor. NULLs
+  /// sort first in sqlite's DESC, so an unused label is asked for by name.
+  Future<List<Label>> listLabels() async {
+    final rows = await db
+        .customSelect(
+          'SELECT * FROM labels '
+          'ORDER BY use_count DESC, last_used_at DESC, name ASC',
+        )
+        .get();
+    return [for (final row in rows) Label.fromRow(row.data)];
+  }
+
+  /// Files a thread under [labelIds], and records that those words were
+  /// reached for.
+  ///
+  /// One transaction: the links and the counts they feed are one action, and a
+  /// picker whose chip order came from a half-written apply would reorder
+  /// itself for no reason the owner could see.
+  ///
+  /// INSERT OR IGNORE on the primary key, so applying a label a thread already
+  /// carries is a no-op rather than a second chip — but the use count still
+  /// moves, because the owner did reach for the word. [appliedBy] is `'user'`
+  /// here and `'rule'` for Phase 4's standing rules.
+  ///
+  /// An unknown label id writes a link nothing resolves; callers pass ids they
+  /// read out of [listLabels] or [createLabel], and the join simply omits a
+  /// link whose label is gone.
+  Future<void> applyLabels(
+    String source,
+    String conversationKey,
+    List<String> labelIds, {
+    String appliedBy = 'user',
+  }) async {
+    if (labelIds.isEmpty) return;
+    final now = _nowIso();
+    await db.transaction(() async {
+      for (final id in labelIds) {
+        await db.customUpdate(
+          'INSERT OR IGNORE INTO conversation_labels '
+          '(source, conversation_key, label_id, applied_by, applied_at) '
+          'VALUES (?, ?, ?, ?, ?)',
+          variables: _args([source, conversationKey, id, appliedBy, now]),
+        );
+        await db.customUpdate(
+          'UPDATE labels SET use_count = use_count + 1, last_used_at = ?, '
+          'updated_at = ? WHERE id = ?',
+          variables: _args([now, now, id]),
+        );
+      }
+    });
+  }
+
+  /// Takes one label off one thread.
+  ///
+  /// The link goes and `use_count` does NOT come back down. The count is a
+  /// popularity signal — how often the owner has reached for this word, which
+  /// is what orders the picker — and not a refcount over live links. Taking a
+  /// label off one thread does not unsay the twenty times it was the right
+  /// word, and a count that fell would quietly demote a chip because of one
+  /// correction.
+  Future<void> removeLabel(
+    String source,
+    String conversationKey,
+    String labelId,
+  ) async {
+    await db.customUpdate(
+      'DELETE FROM conversation_labels '
+      'WHERE source = ? AND conversation_key = ? AND label_id = ?',
+      variables: _args([source, conversationKey, labelId]),
+    );
+  }
+
+  /// One thread's labels, in the same order [loadConversations]' join emits
+  /// them — most-used first, so a row and the thread it opens draw their chips
+  /// in the same order.
+  ///
+  /// A link whose label has been deleted contributes nothing: the join is
+  /// inner, which is the same thing the deleting transaction already
+  /// guarantees and costs nothing to say twice.
+  Future<List<Label>> labelsForConversation(
+    String source,
+    String conversationKey,
+  ) async {
+    final rows = await db
+        .customSelect(
+          'SELECT l.* FROM conversation_labels cl '
+          'JOIN labels l ON l.id = cl.label_id '
+          'WHERE cl.source = ? AND cl.conversation_key = ? '
+          'ORDER BY l.use_count DESC, l.last_used_at DESC, l.name ASC',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    return [for (final row in rows) Label.fromRow(row.data)];
   }
 
   // ── storylines ───────────────────────────────────────────────────────

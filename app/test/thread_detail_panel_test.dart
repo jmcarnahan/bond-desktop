@@ -1,7 +1,9 @@
 import 'package:bond_inbox/models/attachment_models.dart';
+import 'package:bond_inbox/models/label_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/widgets/attachment_card.dart';
 import 'package:bond_inbox/widgets/hover_actions.dart';
+import 'package:bond_inbox/widgets/label_picker.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -72,6 +74,13 @@ void main() {
     void Function(Message message)? onWhy,
     void Function(Message message)? onWhatHappened,
     void Function(String url)? onOpenLink,
+    List<Label> labels = const [],
+    LabelPickerMode? labelPicker,
+    void Function(LabelPickerMode mode)? onOpenLabelPicker,
+    void Function(Label label)? onApplyLabel,
+    void Function(String name)? onCreateLabel,
+    VoidCallback? onDismissWithoutLabel,
+    VoidCallback? onCloseLabelPicker,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -98,6 +107,13 @@ void main() {
           onWhy: onWhy,
           onWhatHappened: onWhatHappened,
           onOpenLink: onOpenLink,
+          labels: labels,
+          labelPicker: labelPicker,
+          onOpenLabelPicker: onOpenLabelPicker,
+          onApplyLabel: onApplyLabel,
+          onCreateLabel: onCreateLabel,
+          onDismissWithoutLabel: onDismissWithoutLabel,
+          onCloseLabelPicker: onCloseLabelPicker,
         ),
       ),
     ));
@@ -910,6 +926,118 @@ void main() {
       await hover(tester, 'mine');
 
       expect(find.byKey(HoverActions.historyKeyFor('mine')), findsNothing);
+    });
+  });
+
+  group('the dismiss-and-file strip', () {
+    final one = [_msg(id: 'a', receivedAt: '2026-08-25T09:00:00')];
+    const fyi = Label(id: 'fyi', name: 'FYI only');
+
+    testWidgets('is absent until a host wires it', (tester) async {
+      await pump(tester, messages: one);
+
+      expect(find.byKey(ThreadDetailPanel.dismissWithLabelKey), findsNothing);
+      expect(find.byKey(ThreadDetailPanel.labelKey), findsNothing);
+      expect(find.byType(LabelPicker), findsNothing);
+      // And the panel is the one it always was.
+      expect(find.text('Reply to Dana'), findsOneWidget);
+      expect(find.text('Body of a.'), findsOneWidget);
+    });
+
+    testWidgets('offers both affordances, each opening its own mode',
+        (tester) async {
+      final opened = <LabelPickerMode>[];
+      await pump(
+        tester,
+        messages: one,
+        onOpenLabelPicker: opened.add,
+      );
+
+      expect(find.text('Dismiss…'), findsOneWidget);
+      expect(find.text('Label…'), findsOneWidget);
+      expect(find.byType(LabelPicker), findsNothing);
+
+      await tester.tap(find.byKey(ThreadDetailPanel.dismissWithLabelKey));
+      await tester.pump();
+      await tester.tap(find.byKey(ThreadDetailPanel.labelKey));
+      await tester.pump();
+
+      expect(opened, [LabelPickerMode.dismiss, LabelPickerMode.label]);
+    });
+
+    testWidgets('expands in place, with the mode\'s own prompt and its chips',
+        (tester) async {
+      await pump(
+        tester,
+        messages: one,
+        labels: const [fyi],
+        labelPicker: LabelPickerMode.dismiss,
+        onOpenLabelPicker: (_) {},
+        onApplyLabel: (_) {},
+        onCreateLabel: (_) {},
+        onDismissWithoutLabel: () {},
+        onCloseLabelPicker: () {},
+      );
+
+      expect(find.text('Dismiss with a label…'), findsOneWidget);
+      expect(find.text('FYI only'), findsOneWidget);
+      expect(find.byKey(LabelPicker.noLabelKey), findsOneWidget);
+      // The affordances are what it grew out of, so they are not beside it.
+      expect(find.byKey(ThreadDetailPanel.dismissWithLabelKey), findsNothing);
+      // Nothing opened over the thread: the transcript is still there.
+      expect(find.text('Body of a.'), findsOneWidget);
+    });
+
+    testWidgets('the label-only mode offers no way out with no label',
+        (tester) async {
+      await pump(
+        tester,
+        messages: one,
+        labels: const [fyi],
+        labelPicker: LabelPickerMode.label,
+        onApplyLabel: (_) {},
+        onCreateLabel: (_) {},
+        onDismissWithoutLabel: () {},
+        onCloseLabelPicker: () {},
+      );
+
+      expect(find.text('Label…'), findsOneWidget);
+      expect(find.byKey(LabelPicker.noLabelKey), findsNothing);
+    });
+
+    testWidgets('a chip fires the host\'s apply', (tester) async {
+      final applied = <String>[];
+      await pump(
+        tester,
+        messages: one,
+        labels: const [fyi],
+        labelPicker: LabelPickerMode.dismiss,
+        onApplyLabel: (label) => applied.add(label.id),
+        onCreateLabel: (_) {},
+        onCloseLabelPicker: () {},
+      );
+
+      await tester.tap(find.byKey(LabelPicker.keyFor(fyi)));
+      await tester.pump();
+
+      expect(applied, ['fyi']);
+    });
+
+    testWidgets('and the strip stays collapsed while a callback is missing',
+        (tester) async {
+      // A picker that could not apply what it was asked for is worse than none.
+      await pump(
+        tester,
+        messages: one,
+        labels: const [fyi],
+        labelPicker: LabelPickerMode.dismiss,
+        onOpenLabelPicker: (_) {},
+        onCreateLabel: (_) {},
+        onCloseLabelPicker: () {},
+      );
+
+      expect(find.byType(LabelPicker), findsNothing);
+      expect(find.byKey(ThreadDetailPanel.dismissWithLabelKey), findsOneWidget);
     });
   });
 }

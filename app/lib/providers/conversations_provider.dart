@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show debugPrint, immutable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/message_store.dart';
+import '../models/label_models.dart' show Label;
 import '../models/message_models.dart';
 import '../services/ai_worker.dart';
 import '../services/ai_workers.dart';
@@ -84,6 +85,35 @@ class ConversationsError extends ConversationsState {
   final bool signedOut;
 
   const ConversationsError(this.message, {this.signedOut = false});
+}
+
+/// Everything [ConversationsNotifier.undoMarkDone] needs to take one dismissal
+/// back.
+///
+/// Carried by the caller — the row that showed the Undo affordance — rather
+/// than held on the notifier, because two threads can be dismissed before
+/// either undo is pressed and a single remembered slot would take the wrong one
+/// back.
+@immutable
+class MarkDoneUndo {
+  final String source;
+  final String conversationKey;
+
+  /// Where the thread stood before it was dismissed. Recorded rather than
+  /// re-derived: this is the one case where something knew.
+  final ConversationState previousState;
+
+  /// Only the links that dismissal CREATED. A label the owner had already put
+  /// on the thread is not part of what they are taking back, so it is not in
+  /// here and undo leaves it alone.
+  final List<String> appliedLabelIds;
+
+  const MarkDoneUndo({
+    required this.source,
+    required this.conversationKey,
+    required this.previousState,
+    this.appliedLabelIds = const [],
+  });
 }
 
 class ConversationsNotifier extends StateNotifier<ConversationsState> {
@@ -430,7 +460,8 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     }
   }
 
-  /// Flips a thread to done, on screen first.
+  /// Flips a thread to done, on screen first, optionally filing it under the
+  /// owner's own words in the same action.
   ///
   /// Optimistic because the write is local and effectively instantaneous —
   /// waiting on it would only add a frame of lag to a button whose whole job
@@ -440,9 +471,56 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// reason and one more: a conversation key is unique only within a connector,
   /// so scanning for it could close whichever colliding thread the scan landed
   /// on last.
-  Future<void> markDone(String source, String conversationKey) async {
+  ///
+  /// [labelIds] are applied HERE rather than by the picker calling
+  /// `LabelsNotifier.apply` beside this, because dismiss-with-a-label is ONE
+  /// thing the owner did and therefore one thing to undo. What comes back is
+  /// what [undoMarkDone] needs to put it all back; null when there was nothing
+  /// to do (no list yet, no such row) or when the write failed and the row has
+  /// already been restored.
+  ///
+  /// `messages.label` — the model's verdict — is not touched here or anywhere
+  /// near here.
+  Future<MarkDoneUndo?> markDone(
+    String source,
+    String conversationKey, {
+    List<String> labelIds = const [],
+  }) async {
+    // What the thread already carried, read BEFORE anything is applied, so the
+    // undo record names only the links this action created: a label the owner
+    // put on the thread last week must survive undoing today's dismissal. Only
+    // when there are labels to apply, so the unlabelled path — every existing
+    // caller — reaches the optimistic flip without an await in front of it.
+    final alreadyOn = <String>{};
+    if (labelIds.isNotEmpty) {
+      try {
+        for (final label
+            in await _store.labelsForConversation(source, conversationKey)) {
+          alreadyOn.add(label.id);
+        }
+      } catch (e) {
+        // An unreadable join is no reason to refuse the dismissal. The undo
+        // then names every id asked for, so it may remove a link that was
+        // already there — the honest cost of not knowing.
+        debugPrint("reading a thread's labels failed: $e");
+      }
+    }
+    final applying = [
+      for (final id in labelIds)
+        if (!alreadyOn.contains(id)) id,
+    ];
+
+    // Snapshotted after that read, for [reopenThread]'s reason: the flip must
+    // be built from what the screen shows now.
     final current = state;
-    if (current is! ConversationsLoaded) return;
+    if (current is! ConversationsLoaded) return null;
+
+    ConversationState? previousState;
+    for (final c in current.conversations) {
+      if (c.id == conversationKey && c.source == source) {
+        previousState = c.state;
+      }
+    }
 
     state = current.withRows([
       for (final c in current.conversations)
@@ -463,6 +541,10 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       // with it. After the state write, so a failed write leaves the row
       // exactly as it was — chip included.
       await _pipeline.clearNeedsYou(source, conversationKey);
+      if (applying.isNotEmpty) {
+        await _store.applyLabels(source, conversationKey, applying);
+        await _refreshLabels(source, conversationKey);
+      }
       // On the success path only. Closing a thread is the quietest "I am done
       // with this" the user ever gives, and it is worth recording — but recording
       // one for a write that failed would teach the app from something that
@@ -470,12 +552,101 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       await _logImplicit('thread', conversationKey, 'down');
     } catch (_) {
       final latest = state;
-      if (latest is! ConversationsLoaded) return;
+      if (latest is! ConversationsLoaded) return null;
       state = latest.withRows(
         current.conversations,
         "Couldn't save that just now — the thread is unchanged.",
       );
+      return null;
     }
+
+    if (previousState == null) return null;
+    return MarkDoneUndo(
+      source: source,
+      conversationKey: conversationKey,
+      previousState: previousState,
+      appliedLabelIds: applying,
+    );
+  }
+
+  /// Undoes one [markDone] — the state it flipped and the labels it applied,
+  /// in one press.
+  ///
+  /// Capture-previous-then-restore rather than re-derived: [reopenThread] has
+  /// to guess a state because nothing recorded what a thread was before it was
+  /// closed, and an undo is exactly the case where something did.
+  ///
+  /// Only the labels THIS dismissal applied come off, which is what makes the
+  /// undo honest rather than tidy: a word the owner had already put on the
+  /// thread was not part of what they are taking back. The label's `use_count`
+  /// stays where it is for [MessageStore.removeLabel]'s reason.
+  ///
+  /// The needs-you chip [markDone] cleared does NOT come back, exactly as
+  /// [reopenThread] does not raise one: nothing stored which messages carried
+  /// it, and the triage pass writes one again if the thread still asks
+  /// something. Undo returns the thread, not the pipeline's opinion of it.
+  Future<void> undoMarkDone(MarkDoneUndo undo) async {
+    final current = state;
+    if (current is! ConversationsLoaded) return;
+
+    state = current.withRows([
+      for (final c in current.conversations)
+        if (c.id == undo.conversationKey && c.source == undo.source)
+          c.copyWith(state: undo.previousState)
+        else
+          c,
+    ], current.loadError);
+
+    try {
+      await _store.setConversationState(
+        undo.source,
+        undo.conversationKey,
+        undo.previousState,
+      );
+      for (final id in undo.appliedLabelIds) {
+        await _store.removeLabel(undo.source, undo.conversationKey, id);
+      }
+      if (undo.appliedLabelIds.isNotEmpty) {
+        await _refreshLabels(undo.source, undo.conversationKey);
+      }
+      // The mirror of the `down` [markDone] recorded, and for the same reason
+      // [reopenThread] records one: the thread came back. The `down` stays in
+      // the history — it happened — and this is the correction beside it.
+      await _logImplicit('thread', undo.conversationKey, 'up');
+    } catch (_) {
+      final latest = state;
+      if (latest is! ConversationsLoaded) return;
+      state = latest.withRows(
+        current.conversations,
+        "Couldn't undo that just now — the thread is unchanged.",
+      );
+    }
+  }
+
+  /// Re-reads one thread's labels out of the store and patches its row.
+  ///
+  /// The store is the truth about which words are on a thread, rather than the
+  /// list the caller asked for: the ids it passed may include one that was
+  /// already there, and a label deleted in another pane is gone from the join
+  /// whatever this call believes. A failed read leaves the chips as they are —
+  /// they are the last thing that was true.
+  Future<void> _refreshLabels(String source, String conversationKey) async {
+    final List<Label> labels;
+    try {
+      labels = await _store.labelsForConversation(source, conversationKey);
+    } catch (e) {
+      debugPrint("re-reading a thread's labels failed: $e");
+      return;
+    }
+    final latest = state;
+    if (latest is! ConversationsLoaded || !mounted) return;
+    state = latest.withRows([
+      for (final c in latest.conversations)
+        if (c.id == conversationKey && c.source == source)
+          c.copyWith(labels: labels)
+        else
+          c,
+    ], latest.loadError);
   }
 
   /// Brings a done thread back into the working inbox — [markDone] run

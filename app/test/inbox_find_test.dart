@@ -227,6 +227,41 @@ void main() {
     await settleQueues(tester);
   });
 
+  testWidgets('a label: facet narrows it the same way a word does',
+      (tester) async {
+    // The rail hands the needle to `conversationMatches`, which reads the
+    // facets itself, so a facet needs no wiring on this screen at all — the
+    // column narrows on `label:` today. The strip that COMPLETES the term does
+    // need a wire: `FindField.labelNames` is still empty here.
+    await seedAll();
+    final label = await store.createLabel('Waiting on legal');
+    await store.applyLabels('email', 'c2', [label.id]);
+    await pumpInbox(tester);
+
+    await type(tester, 'label:"waiting on legal"');
+
+    expect(railRow('Sign the invoice · Eric Vance'), findsOneWidget);
+    expect(railRow('Confirm the launch date · Dana Whitfield'), findsNothing);
+    // A facet is about a thread, and a storyline has no labels — so the
+    // storyline fold is not drawing one either.
+    expect(railRow('Website redesign'), findsNothing);
+    await settleQueues(tester);
+  });
+
+  testWidgets('and an unrecognised facet is still just words', (tester) async {
+    // Nothing here reserves `is:external`, so it narrows to the rows whose text
+    // carries it — which is none of them, and the same answer the box gave
+    // before facets existed.
+    await seedAll();
+    await pumpInbox(tester);
+
+    await type(tester, 'is:external');
+
+    expect(railRow('Sign the invoice · Eric Vance'), findsNothing);
+    expect(railRow('Confirm the launch date · Dana Whitfield'), findsNothing);
+    await settleQueues(tester);
+  });
+
   testWidgets('Enter opens the first row still drawn, in the main pane',
       (tester) async {
     await seedAll();

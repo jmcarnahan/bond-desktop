@@ -17899,6 +17899,900 @@ class SetupStateCompanion extends UpdateCompanion<SetupStateData> {
   }
 }
 
+class Labels extends Table with TableInfo<Labels, Label> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  Labels(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'PRIMARY KEY',
+  );
+  static const VerificationMeta _nameMeta = const VerificationMeta('name');
+  late final GeneratedColumn<String> name = GeneratedColumn<String>(
+    'name',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _nameKeyMeta = const VerificationMeta(
+    'nameKey',
+  );
+  late final GeneratedColumn<String> nameKey = GeneratedColumn<String>(
+    'name_key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _toneMeta = const VerificationMeta('tone');
+  late final GeneratedColumn<String> tone = GeneratedColumn<String>(
+    'tone',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _useCountMeta = const VerificationMeta(
+    'useCount',
+  );
+  late final GeneratedColumn<int> useCount = GeneratedColumn<int>(
+    'use_count',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _lastUsedAtMeta = const VerificationMeta(
+    'lastUsedAt',
+  );
+  late final GeneratedColumn<String> lastUsedAt = GeneratedColumn<String>(
+    'last_used_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  late final GeneratedColumn<String> createdAt = GeneratedColumn<String>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  late final GeneratedColumn<String> updatedAt = GeneratedColumn<String>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    name,
+    nameKey,
+    tone,
+    useCount,
+    lastUsedAt,
+    createdAt,
+    updatedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'labels';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<Label> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('name')) {
+      context.handle(
+        _nameMeta,
+        name.isAcceptableOrUnknown(data['name']!, _nameMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_nameMeta);
+    }
+    if (data.containsKey('name_key')) {
+      context.handle(
+        _nameKeyMeta,
+        nameKey.isAcceptableOrUnknown(data['name_key']!, _nameKeyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_nameKeyMeta);
+    }
+    if (data.containsKey('tone')) {
+      context.handle(
+        _toneMeta,
+        tone.isAcceptableOrUnknown(data['tone']!, _toneMeta),
+      );
+    }
+    if (data.containsKey('use_count')) {
+      context.handle(
+        _useCountMeta,
+        useCount.isAcceptableOrUnknown(data['use_count']!, _useCountMeta),
+      );
+    }
+    if (data.containsKey('last_used_at')) {
+      context.handle(
+        _lastUsedAtMeta,
+        lastUsedAt.isAcceptableOrUnknown(
+          data['last_used_at']!,
+          _lastUsedAtMeta,
+        ),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  Label map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return Label(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      name: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}name'],
+      )!,
+      nameKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}name_key'],
+      )!,
+      tone: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}tone'],
+      ),
+      useCount: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}use_count'],
+      )!,
+      lastUsedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}last_used_at'],
+      ),
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}created_at'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}updated_at'],
+      )!,
+    );
+  }
+
+  @override
+  Labels createAlias(String alias) {
+    return Labels(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class Label extends DataClass implements Insertable<Label> {
+  final String id;
+  final String name;
+  final String nameKey;
+  final String? tone;
+  final int useCount;
+  final String? lastUsedAt;
+  final String createdAt;
+  final String updatedAt;
+  const Label({
+    required this.id,
+    required this.name,
+    required this.nameKey,
+    this.tone,
+    required this.useCount,
+    this.lastUsedAt,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['name'] = Variable<String>(name);
+    map['name_key'] = Variable<String>(nameKey);
+    if (!nullToAbsent || tone != null) {
+      map['tone'] = Variable<String>(tone);
+    }
+    map['use_count'] = Variable<int>(useCount);
+    if (!nullToAbsent || lastUsedAt != null) {
+      map['last_used_at'] = Variable<String>(lastUsedAt);
+    }
+    map['created_at'] = Variable<String>(createdAt);
+    map['updated_at'] = Variable<String>(updatedAt);
+    return map;
+  }
+
+  LabelsCompanion toCompanion(bool nullToAbsent) {
+    return LabelsCompanion(
+      id: Value(id),
+      name: Value(name),
+      nameKey: Value(nameKey),
+      tone: tone == null && nullToAbsent ? const Value.absent() : Value(tone),
+      useCount: Value(useCount),
+      lastUsedAt: lastUsedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(lastUsedAt),
+      createdAt: Value(createdAt),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory Label.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return Label(
+      id: serializer.fromJson<String>(json['id']),
+      name: serializer.fromJson<String>(json['name']),
+      nameKey: serializer.fromJson<String>(json['name_key']),
+      tone: serializer.fromJson<String?>(json['tone']),
+      useCount: serializer.fromJson<int>(json['use_count']),
+      lastUsedAt: serializer.fromJson<String?>(json['last_used_at']),
+      createdAt: serializer.fromJson<String>(json['created_at']),
+      updatedAt: serializer.fromJson<String>(json['updated_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'name': serializer.toJson<String>(name),
+      'name_key': serializer.toJson<String>(nameKey),
+      'tone': serializer.toJson<String?>(tone),
+      'use_count': serializer.toJson<int>(useCount),
+      'last_used_at': serializer.toJson<String?>(lastUsedAt),
+      'created_at': serializer.toJson<String>(createdAt),
+      'updated_at': serializer.toJson<String>(updatedAt),
+    };
+  }
+
+  Label copyWith({
+    String? id,
+    String? name,
+    String? nameKey,
+    Value<String?> tone = const Value.absent(),
+    int? useCount,
+    Value<String?> lastUsedAt = const Value.absent(),
+    String? createdAt,
+    String? updatedAt,
+  }) => Label(
+    id: id ?? this.id,
+    name: name ?? this.name,
+    nameKey: nameKey ?? this.nameKey,
+    tone: tone.present ? tone.value : this.tone,
+    useCount: useCount ?? this.useCount,
+    lastUsedAt: lastUsedAt.present ? lastUsedAt.value : this.lastUsedAt,
+    createdAt: createdAt ?? this.createdAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+  );
+  Label copyWithCompanion(LabelsCompanion data) {
+    return Label(
+      id: data.id.present ? data.id.value : this.id,
+      name: data.name.present ? data.name.value : this.name,
+      nameKey: data.nameKey.present ? data.nameKey.value : this.nameKey,
+      tone: data.tone.present ? data.tone.value : this.tone,
+      useCount: data.useCount.present ? data.useCount.value : this.useCount,
+      lastUsedAt: data.lastUsedAt.present
+          ? data.lastUsedAt.value
+          : this.lastUsedAt,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('Label(')
+          ..write('id: $id, ')
+          ..write('name: $name, ')
+          ..write('nameKey: $nameKey, ')
+          ..write('tone: $tone, ')
+          ..write('useCount: $useCount, ')
+          ..write('lastUsedAt: $lastUsedAt, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    name,
+    nameKey,
+    tone,
+    useCount,
+    lastUsedAt,
+    createdAt,
+    updatedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is Label &&
+          other.id == this.id &&
+          other.name == this.name &&
+          other.nameKey == this.nameKey &&
+          other.tone == this.tone &&
+          other.useCount == this.useCount &&
+          other.lastUsedAt == this.lastUsedAt &&
+          other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt);
+}
+
+class LabelsCompanion extends UpdateCompanion<Label> {
+  final Value<String> id;
+  final Value<String> name;
+  final Value<String> nameKey;
+  final Value<String?> tone;
+  final Value<int> useCount;
+  final Value<String?> lastUsedAt;
+  final Value<String> createdAt;
+  final Value<String> updatedAt;
+  final Value<int> rowid;
+  const LabelsCompanion({
+    this.id = const Value.absent(),
+    this.name = const Value.absent(),
+    this.nameKey = const Value.absent(),
+    this.tone = const Value.absent(),
+    this.useCount = const Value.absent(),
+    this.lastUsedAt = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  LabelsCompanion.insert({
+    required String id,
+    required String name,
+    required String nameKey,
+    this.tone = const Value.absent(),
+    this.useCount = const Value.absent(),
+    this.lastUsedAt = const Value.absent(),
+    required String createdAt,
+    required String updatedAt,
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       name = Value(name),
+       nameKey = Value(nameKey),
+       createdAt = Value(createdAt),
+       updatedAt = Value(updatedAt);
+  static Insertable<Label> custom({
+    Expression<String>? id,
+    Expression<String>? name,
+    Expression<String>? nameKey,
+    Expression<String>? tone,
+    Expression<int>? useCount,
+    Expression<String>? lastUsedAt,
+    Expression<String>? createdAt,
+    Expression<String>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (name != null) 'name': name,
+      if (nameKey != null) 'name_key': nameKey,
+      if (tone != null) 'tone': tone,
+      if (useCount != null) 'use_count': useCount,
+      if (lastUsedAt != null) 'last_used_at': lastUsedAt,
+      if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  LabelsCompanion copyWith({
+    Value<String>? id,
+    Value<String>? name,
+    Value<String>? nameKey,
+    Value<String?>? tone,
+    Value<int>? useCount,
+    Value<String?>? lastUsedAt,
+    Value<String>? createdAt,
+    Value<String>? updatedAt,
+    Value<int>? rowid,
+  }) {
+    return LabelsCompanion(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      nameKey: nameKey ?? this.nameKey,
+      tone: tone ?? this.tone,
+      useCount: useCount ?? this.useCount,
+      lastUsedAt: lastUsedAt ?? this.lastUsedAt,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (name.present) {
+      map['name'] = Variable<String>(name.value);
+    }
+    if (nameKey.present) {
+      map['name_key'] = Variable<String>(nameKey.value);
+    }
+    if (tone.present) {
+      map['tone'] = Variable<String>(tone.value);
+    }
+    if (useCount.present) {
+      map['use_count'] = Variable<int>(useCount.value);
+    }
+    if (lastUsedAt.present) {
+      map['last_used_at'] = Variable<String>(lastUsedAt.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<String>(createdAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<String>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('LabelsCompanion(')
+          ..write('id: $id, ')
+          ..write('name: $name, ')
+          ..write('nameKey: $nameKey, ')
+          ..write('tone: $tone, ')
+          ..write('useCount: $useCount, ')
+          ..write('lastUsedAt: $lastUsedAt, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class ConversationLabels extends Table
+    with TableInfo<ConversationLabels, ConversationLabel> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  ConversationLabels(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _conversationKeyMeta = const VerificationMeta(
+    'conversationKey',
+  );
+  late final GeneratedColumn<String> conversationKey = GeneratedColumn<String>(
+    'conversation_key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _labelIdMeta = const VerificationMeta(
+    'labelId',
+  );
+  late final GeneratedColumn<String> labelId = GeneratedColumn<String>(
+    'label_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _appliedByMeta = const VerificationMeta(
+    'appliedBy',
+  );
+  late final GeneratedColumn<String> appliedBy = GeneratedColumn<String>(
+    'applied_by',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'user\'',
+    defaultValue: const CustomExpression('\'user\''),
+  );
+  static const VerificationMeta _appliedAtMeta = const VerificationMeta(
+    'appliedAt',
+  );
+  late final GeneratedColumn<String> appliedAt = GeneratedColumn<String>(
+    'applied_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    source,
+    conversationKey,
+    labelId,
+    appliedBy,
+    appliedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'conversation_labels';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<ConversationLabel> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMeta);
+    }
+    if (data.containsKey('conversation_key')) {
+      context.handle(
+        _conversationKeyMeta,
+        conversationKey.isAcceptableOrUnknown(
+          data['conversation_key']!,
+          _conversationKeyMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_conversationKeyMeta);
+    }
+    if (data.containsKey('label_id')) {
+      context.handle(
+        _labelIdMeta,
+        labelId.isAcceptableOrUnknown(data['label_id']!, _labelIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_labelIdMeta);
+    }
+    if (data.containsKey('applied_by')) {
+      context.handle(
+        _appliedByMeta,
+        appliedBy.isAcceptableOrUnknown(data['applied_by']!, _appliedByMeta),
+      );
+    }
+    if (data.containsKey('applied_at')) {
+      context.handle(
+        _appliedAtMeta,
+        appliedAt.isAcceptableOrUnknown(data['applied_at']!, _appliedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_appliedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {source, conversationKey, labelId};
+  @override
+  ConversationLabel map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ConversationLabel(
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source'],
+      )!,
+      conversationKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}conversation_key'],
+      )!,
+      labelId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}label_id'],
+      )!,
+      appliedBy: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}applied_by'],
+      )!,
+      appliedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}applied_at'],
+      )!,
+    );
+  }
+
+  @override
+  ConversationLabels createAlias(String alias) {
+    return ConversationLabels(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  List<String> get customConstraints => const [
+    'PRIMARY KEY(source, conversation_key, label_id)',
+  ];
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class ConversationLabel extends DataClass
+    implements Insertable<ConversationLabel> {
+  final String source;
+  final String conversationKey;
+  final String labelId;
+  final String appliedBy;
+  final String appliedAt;
+  const ConversationLabel({
+    required this.source,
+    required this.conversationKey,
+    required this.labelId,
+    required this.appliedBy,
+    required this.appliedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['source'] = Variable<String>(source);
+    map['conversation_key'] = Variable<String>(conversationKey);
+    map['label_id'] = Variable<String>(labelId);
+    map['applied_by'] = Variable<String>(appliedBy);
+    map['applied_at'] = Variable<String>(appliedAt);
+    return map;
+  }
+
+  ConversationLabelsCompanion toCompanion(bool nullToAbsent) {
+    return ConversationLabelsCompanion(
+      source: Value(source),
+      conversationKey: Value(conversationKey),
+      labelId: Value(labelId),
+      appliedBy: Value(appliedBy),
+      appliedAt: Value(appliedAt),
+    );
+  }
+
+  factory ConversationLabel.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ConversationLabel(
+      source: serializer.fromJson<String>(json['source']),
+      conversationKey: serializer.fromJson<String>(json['conversation_key']),
+      labelId: serializer.fromJson<String>(json['label_id']),
+      appliedBy: serializer.fromJson<String>(json['applied_by']),
+      appliedAt: serializer.fromJson<String>(json['applied_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'source': serializer.toJson<String>(source),
+      'conversation_key': serializer.toJson<String>(conversationKey),
+      'label_id': serializer.toJson<String>(labelId),
+      'applied_by': serializer.toJson<String>(appliedBy),
+      'applied_at': serializer.toJson<String>(appliedAt),
+    };
+  }
+
+  ConversationLabel copyWith({
+    String? source,
+    String? conversationKey,
+    String? labelId,
+    String? appliedBy,
+    String? appliedAt,
+  }) => ConversationLabel(
+    source: source ?? this.source,
+    conversationKey: conversationKey ?? this.conversationKey,
+    labelId: labelId ?? this.labelId,
+    appliedBy: appliedBy ?? this.appliedBy,
+    appliedAt: appliedAt ?? this.appliedAt,
+  );
+  ConversationLabel copyWithCompanion(ConversationLabelsCompanion data) {
+    return ConversationLabel(
+      source: data.source.present ? data.source.value : this.source,
+      conversationKey: data.conversationKey.present
+          ? data.conversationKey.value
+          : this.conversationKey,
+      labelId: data.labelId.present ? data.labelId.value : this.labelId,
+      appliedBy: data.appliedBy.present ? data.appliedBy.value : this.appliedBy,
+      appliedAt: data.appliedAt.present ? data.appliedAt.value : this.appliedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ConversationLabel(')
+          ..write('source: $source, ')
+          ..write('conversationKey: $conversationKey, ')
+          ..write('labelId: $labelId, ')
+          ..write('appliedBy: $appliedBy, ')
+          ..write('appliedAt: $appliedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(source, conversationKey, labelId, appliedBy, appliedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ConversationLabel &&
+          other.source == this.source &&
+          other.conversationKey == this.conversationKey &&
+          other.labelId == this.labelId &&
+          other.appliedBy == this.appliedBy &&
+          other.appliedAt == this.appliedAt);
+}
+
+class ConversationLabelsCompanion extends UpdateCompanion<ConversationLabel> {
+  final Value<String> source;
+  final Value<String> conversationKey;
+  final Value<String> labelId;
+  final Value<String> appliedBy;
+  final Value<String> appliedAt;
+  final Value<int> rowid;
+  const ConversationLabelsCompanion({
+    this.source = const Value.absent(),
+    this.conversationKey = const Value.absent(),
+    this.labelId = const Value.absent(),
+    this.appliedBy = const Value.absent(),
+    this.appliedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  ConversationLabelsCompanion.insert({
+    required String source,
+    required String conversationKey,
+    required String labelId,
+    this.appliedBy = const Value.absent(),
+    required String appliedAt,
+    this.rowid = const Value.absent(),
+  }) : source = Value(source),
+       conversationKey = Value(conversationKey),
+       labelId = Value(labelId),
+       appliedAt = Value(appliedAt);
+  static Insertable<ConversationLabel> custom({
+    Expression<String>? source,
+    Expression<String>? conversationKey,
+    Expression<String>? labelId,
+    Expression<String>? appliedBy,
+    Expression<String>? appliedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (source != null) 'source': source,
+      if (conversationKey != null) 'conversation_key': conversationKey,
+      if (labelId != null) 'label_id': labelId,
+      if (appliedBy != null) 'applied_by': appliedBy,
+      if (appliedAt != null) 'applied_at': appliedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  ConversationLabelsCompanion copyWith({
+    Value<String>? source,
+    Value<String>? conversationKey,
+    Value<String>? labelId,
+    Value<String>? appliedBy,
+    Value<String>? appliedAt,
+    Value<int>? rowid,
+  }) {
+    return ConversationLabelsCompanion(
+      source: source ?? this.source,
+      conversationKey: conversationKey ?? this.conversationKey,
+      labelId: labelId ?? this.labelId,
+      appliedBy: appliedBy ?? this.appliedBy,
+      appliedAt: appliedAt ?? this.appliedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (conversationKey.present) {
+      map['conversation_key'] = Variable<String>(conversationKey.value);
+    }
+    if (labelId.present) {
+      map['label_id'] = Variable<String>(labelId.value);
+    }
+    if (appliedBy.present) {
+      map['applied_by'] = Variable<String>(appliedBy.value);
+    }
+    if (appliedAt.present) {
+      map['applied_at'] = Variable<String>(appliedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ConversationLabelsCompanion(')
+          ..write('source: $source, ')
+          ..write('conversationKey: $conversationKey, ')
+          ..write('labelId: $labelId, ')
+          ..write('appliedBy: $appliedBy, ')
+          ..write('appliedAt: $appliedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$BondDatabase extends GeneratedDatabase {
   _$BondDatabase(QueryExecutor e) : super(e);
   $BondDatabaseManager get managers => $BondDatabaseManager(this);
@@ -18033,6 +18927,16 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     'CREATE INDEX ix_context_chunks_file ON context_chunks (file_id)',
   );
   late final SetupState setupState = SetupState(this);
+  late final Labels labels = Labels(this);
+  late final Index ixLabelsNameKey = Index(
+    'ix_labels_name_key',
+    'CREATE UNIQUE INDEX ix_labels_name_key ON labels (name_key)',
+  );
+  late final ConversationLabels conversationLabels = ConversationLabels(this);
+  late final Index ixConvLabelsLabel = Index(
+    'ix_conv_labels_label',
+    'CREATE INDEX ix_conv_labels_label ON conversation_labels (label_id, applied_at DESC)',
+  );
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -18090,6 +18994,10 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     ixContextChunksUnindexed,
     ixContextChunksFile,
     setupState,
+    labels,
+    ixLabelsNameKey,
+    conversationLabels,
+    ixConvLabelsLabel,
   ];
 }
 
@@ -26447,6 +27355,462 @@ typedef $SetupStateProcessedTableManager =
       SetupStateData,
       PrefetchHooks Function()
     >;
+typedef $LabelsCreateCompanionBuilder =
+    LabelsCompanion Function({
+      required String id,
+      required String name,
+      required String nameKey,
+      Value<String?> tone,
+      Value<int> useCount,
+      Value<String?> lastUsedAt,
+      required String createdAt,
+      required String updatedAt,
+      Value<int> rowid,
+    });
+typedef $LabelsUpdateCompanionBuilder =
+    LabelsCompanion Function({
+      Value<String> id,
+      Value<String> name,
+      Value<String> nameKey,
+      Value<String?> tone,
+      Value<int> useCount,
+      Value<String?> lastUsedAt,
+      Value<String> createdAt,
+      Value<String> updatedAt,
+      Value<int> rowid,
+    });
+
+class $LabelsFilterComposer extends Composer<_$BondDatabase, Labels> {
+  $LabelsFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get nameKey => $composableBuilder(
+    column: $table.nameKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get tone => $composableBuilder(
+    column: $table.tone,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get useCount => $composableBuilder(
+    column: $table.useCount,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get lastUsedAt => $composableBuilder(
+    column: $table.lastUsedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $LabelsOrderingComposer extends Composer<_$BondDatabase, Labels> {
+  $LabelsOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get nameKey => $composableBuilder(
+    column: $table.nameKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get tone => $composableBuilder(
+    column: $table.tone,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get useCount => $composableBuilder(
+    column: $table.useCount,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get lastUsedAt => $composableBuilder(
+    column: $table.lastUsedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $LabelsAnnotationComposer extends Composer<_$BondDatabase, Labels> {
+  $LabelsAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get name =>
+      $composableBuilder(column: $table.name, builder: (column) => column);
+
+  GeneratedColumn<String> get nameKey =>
+      $composableBuilder(column: $table.nameKey, builder: (column) => column);
+
+  GeneratedColumn<String> get tone =>
+      $composableBuilder(column: $table.tone, builder: (column) => column);
+
+  GeneratedColumn<int> get useCount =>
+      $composableBuilder(column: $table.useCount, builder: (column) => column);
+
+  GeneratedColumn<String> get lastUsedAt => $composableBuilder(
+    column: $table.lastUsedAt,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<String> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $LabelsTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          Labels,
+          Label,
+          $LabelsFilterComposer,
+          $LabelsOrderingComposer,
+          $LabelsAnnotationComposer,
+          $LabelsCreateCompanionBuilder,
+          $LabelsUpdateCompanionBuilder,
+          (Label, BaseReferences<_$BondDatabase, Labels, Label>),
+          Label,
+          PrefetchHooks Function()
+        > {
+  $LabelsTableManager(_$BondDatabase db, Labels table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $LabelsFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $LabelsOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $LabelsAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<String> name = const Value.absent(),
+                Value<String> nameKey = const Value.absent(),
+                Value<String?> tone = const Value.absent(),
+                Value<int> useCount = const Value.absent(),
+                Value<String?> lastUsedAt = const Value.absent(),
+                Value<String> createdAt = const Value.absent(),
+                Value<String> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => LabelsCompanion(
+                id: id,
+                name: name,
+                nameKey: nameKey,
+                tone: tone,
+                useCount: useCount,
+                lastUsedAt: lastUsedAt,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                required String name,
+                required String nameKey,
+                Value<String?> tone = const Value.absent(),
+                Value<int> useCount = const Value.absent(),
+                Value<String?> lastUsedAt = const Value.absent(),
+                required String createdAt,
+                required String updatedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => LabelsCompanion.insert(
+                id: id,
+                name: name,
+                nameKey: nameKey,
+                tone: tone,
+                useCount: useCount,
+                lastUsedAt: lastUsedAt,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $LabelsProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      Labels,
+      Label,
+      $LabelsFilterComposer,
+      $LabelsOrderingComposer,
+      $LabelsAnnotationComposer,
+      $LabelsCreateCompanionBuilder,
+      $LabelsUpdateCompanionBuilder,
+      (Label, BaseReferences<_$BondDatabase, Labels, Label>),
+      Label,
+      PrefetchHooks Function()
+    >;
+typedef $ConversationLabelsCreateCompanionBuilder =
+    ConversationLabelsCompanion Function({
+      required String source,
+      required String conversationKey,
+      required String labelId,
+      Value<String> appliedBy,
+      required String appliedAt,
+      Value<int> rowid,
+    });
+typedef $ConversationLabelsUpdateCompanionBuilder =
+    ConversationLabelsCompanion Function({
+      Value<String> source,
+      Value<String> conversationKey,
+      Value<String> labelId,
+      Value<String> appliedBy,
+      Value<String> appliedAt,
+      Value<int> rowid,
+    });
+
+class $ConversationLabelsFilterComposer
+    extends Composer<_$BondDatabase, ConversationLabels> {
+  $ConversationLabelsFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get conversationKey => $composableBuilder(
+    column: $table.conversationKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get labelId => $composableBuilder(
+    column: $table.labelId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get appliedBy => $composableBuilder(
+    column: $table.appliedBy,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get appliedAt => $composableBuilder(
+    column: $table.appliedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $ConversationLabelsOrderingComposer
+    extends Composer<_$BondDatabase, ConversationLabels> {
+  $ConversationLabelsOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get conversationKey => $composableBuilder(
+    column: $table.conversationKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get labelId => $composableBuilder(
+    column: $table.labelId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get appliedBy => $composableBuilder(
+    column: $table.appliedBy,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get appliedAt => $composableBuilder(
+    column: $table.appliedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $ConversationLabelsAnnotationComposer
+    extends Composer<_$BondDatabase, ConversationLabels> {
+  $ConversationLabelsAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get conversationKey => $composableBuilder(
+    column: $table.conversationKey,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get labelId =>
+      $composableBuilder(column: $table.labelId, builder: (column) => column);
+
+  GeneratedColumn<String> get appliedBy =>
+      $composableBuilder(column: $table.appliedBy, builder: (column) => column);
+
+  GeneratedColumn<String> get appliedAt =>
+      $composableBuilder(column: $table.appliedAt, builder: (column) => column);
+}
+
+class $ConversationLabelsTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          ConversationLabels,
+          ConversationLabel,
+          $ConversationLabelsFilterComposer,
+          $ConversationLabelsOrderingComposer,
+          $ConversationLabelsAnnotationComposer,
+          $ConversationLabelsCreateCompanionBuilder,
+          $ConversationLabelsUpdateCompanionBuilder,
+          (
+            ConversationLabel,
+            BaseReferences<
+              _$BondDatabase,
+              ConversationLabels,
+              ConversationLabel
+            >,
+          ),
+          ConversationLabel,
+          PrefetchHooks Function()
+        > {
+  $ConversationLabelsTableManager(_$BondDatabase db, ConversationLabels table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $ConversationLabelsFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $ConversationLabelsOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $ConversationLabelsAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> source = const Value.absent(),
+                Value<String> conversationKey = const Value.absent(),
+                Value<String> labelId = const Value.absent(),
+                Value<String> appliedBy = const Value.absent(),
+                Value<String> appliedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => ConversationLabelsCompanion(
+                source: source,
+                conversationKey: conversationKey,
+                labelId: labelId,
+                appliedBy: appliedBy,
+                appliedAt: appliedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String source,
+                required String conversationKey,
+                required String labelId,
+                Value<String> appliedBy = const Value.absent(),
+                required String appliedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => ConversationLabelsCompanion.insert(
+                source: source,
+                conversationKey: conversationKey,
+                labelId: labelId,
+                appliedBy: appliedBy,
+                appliedAt: appliedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $ConversationLabelsProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      ConversationLabels,
+      ConversationLabel,
+      $ConversationLabelsFilterComposer,
+      $ConversationLabelsOrderingComposer,
+      $ConversationLabelsAnnotationComposer,
+      $ConversationLabelsCreateCompanionBuilder,
+      $ConversationLabelsUpdateCompanionBuilder,
+      (
+        ConversationLabel,
+        BaseReferences<_$BondDatabase, ConversationLabels, ConversationLabel>,
+      ),
+      ConversationLabel,
+      PrefetchHooks Function()
+    >;
 
 class $BondDatabaseManager {
   final _$BondDatabase _db;
@@ -26502,4 +27866,7 @@ class $BondDatabaseManager {
       $ContextChunksTableManager(_db, _db.contextChunks);
   $SetupStateTableManager get setupState =>
       $SetupStateTableManager(_db, _db.setupState);
+  $LabelsTableManager get labels => $LabelsTableManager(_db, _db.labels);
+  $ConversationLabelsTableManager get conversationLabels =>
+      $ConversationLabelsTableManager(_db, _db.conversationLabels);
 }

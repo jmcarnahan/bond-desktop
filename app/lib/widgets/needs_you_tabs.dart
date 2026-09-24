@@ -1,5 +1,10 @@
+import 'package:flutter/material.dart';
+
+import '../models/label_models.dart';
 import '../models/message_models.dart';
+import '../theme/tokens.dart';
 import 'app_rail.dart' show isWaitingRow;
+import 'chips.dart';
 
 /// The pile's ORDER travels with its lenses: everything that draws Needs You
 /// already imports this file, and the enum lives in `models/` only so the
@@ -70,3 +75,88 @@ List<Conversation> needsYouTabRows(NeedsYouTab tab, List<Conversation> rows) =>
             if (c.pendingDraftCount > 0) c,
         ],
     };
+
+/// The rows of the pile filed under one label, or the pile itself when nothing
+/// is picked.
+///
+/// A SIXTH filter over the same ranking and not a sixth tab: a label answers a
+/// different question from the five lenses ("what is this about" rather than
+/// "who is waiting"), so it narrows whichever lens the reader is already on
+/// rather than replacing it. The order survives, for the reason every function
+/// above keeps it: the ranking was decided once.
+///
+/// A null [labelId] is the identity, which is what makes an unpicked filter row
+/// the unfiltered pile. So is an id no row carries — a label the owner deleted
+/// while the pill was pressed narrows to nothing rather than throwing, and the
+/// tab's own empty sentence is what the reader sees.
+List<Conversation> needsYouLabelRows(String? labelId, List<Conversation> rows) {
+  if (labelId == null || labelId.isEmpty) return rows;
+  return [
+    for (final c in rows)
+      if (c.labels.any((l) => l.id == labelId)) c,
+  ];
+}
+
+/// The owner's words as a second pill row under the five tabs.
+///
+/// Additive in the strict sense: an owner who has never made a label passes an
+/// empty list and this draws NOTHING — not an empty row, not a gap — so the
+/// Needs You header is exactly what it was before labels existed.
+///
+/// Single-select and self-clearing, unlike [BondFilterPillRow] above it: the
+/// tabs partition the pile so one of them is always on, while a label filter's
+/// resting state is off. Pressing the pressed pill is how it goes back off,
+/// which is why [onLabelSelected] takes a nullable id.
+class NeedsYouLabelFilter extends StatelessWidget {
+  /// The vocabulary, in `labelsProvider`'s order — most used first, so the
+  /// words the owner actually files under lead the row.
+  final List<Label> labels;
+
+  /// Which label is narrowing the pile, or null for the whole pile.
+  final String? selectedLabelId;
+
+  /// Fired with the pressed label's id, or with null when the press was on the
+  /// already-selected pill. Null leaves every pill inert, the house discipline
+  /// for a control whose host cannot act on it.
+  final ValueChanged<String?>? onLabelSelected;
+
+  const NeedsYouLabelFilter({
+    super.key,
+    this.labels = const [],
+    this.selectedLabelId,
+    this.onLabelSelected,
+  });
+
+  /// The row itself, for a test that wants to assert it is absent.
+  static const Key rowKey = ValueKey('needs-you-label-filter');
+
+  static ValueKey<String> pillKeyFor(String id) =>
+      ValueKey('needs-you-label-$id');
+
+  @override
+  Widget build(BuildContext context) {
+    if (labels.isEmpty) return const SizedBox.shrink();
+    final onSelected = onLabelSelected;
+    return Padding(
+      key: rowKey,
+      padding: const EdgeInsets.only(top: BondSpacing.s8),
+      child: Wrap(
+        spacing: BondSpacing.s8,
+        runSpacing: BondSpacing.s8,
+        children: [
+          for (final label in labels)
+            BondFilterPill(
+              key: pillKeyFor(label.id),
+              label: label.name,
+              selected: label.id == selectedLabelId,
+              onTap: onSelected == null
+                  ? null
+                  : () => onSelected(
+                        label.id == selectedLabelId ? null : label.id,
+                      ),
+            ),
+        ],
+      ),
+    );
+  }
+}

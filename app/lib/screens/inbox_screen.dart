@@ -11,6 +11,7 @@ import '../data/message_store.dart' show MessageStore;
 import '../models/attachment_models.dart';
 import '../models/context_models.dart' show ContextScopeKind;
 import '../models/draft_provenance.dart';
+import '../models/label_models.dart';
 import '../models/message_models.dart';
 import '../models/open_asks.dart' show latestOutboundAt;
 import '../models/people_sort.dart';
@@ -25,6 +26,7 @@ import '../providers/draft_provider.dart';
 import '../providers/drafts_inbox_provider.dart';
 import '../providers/files_provider.dart';
 import '../providers/home_provider.dart';
+import '../providers/labels_provider.dart';
 import '../providers/navigation_provider.dart';
 import '../providers/person_facts_provider.dart';
 import '../providers/notification_provider.dart';
@@ -63,6 +65,7 @@ import '../widgets/find_field.dart';
 import '../widgets/find_filter.dart';
 import '../widgets/bond_avatar.dart' show BondAvatar;
 import '../widgets/home_pane.dart';
+import '../widgets/label_picker.dart';
 import '../widgets/icon_rail.dart';
 import '../widgets/inline_alert.dart';
 import '../widgets/linked_text.dart' show linkTargetOf;
@@ -89,9 +92,36 @@ import '../widgets/storyline_pickers.dart';
 import '../widgets/storyline_timeline.dart';
 import '../widgets/thread_detail_panel.dart';
 import '../widgets/time_format.dart';
+import '../widgets/triage_intents.dart';
 import '../widgets/why_panel.dart';
 import 'new_message_screen.dart';
 import 'settings_host.dart';
+
+/// One triage gesture, wherever it came from.
+///
+/// A closure and an enabled rule, because the bodies live on the inbox's state
+/// and every one of them is "do this to the thread the reader is on". Disabled
+/// rather than absent while the cursor is in a box: an action the dispatcher
+/// finds disabled leaves the key event UNHANDLED, so the letter reaches the box
+/// the reader was typing in — see `_InboxScreenState._editingText`.
+class _TriageAction<T extends Intent> extends Action<T> {
+  _TriageAction(this._run, {this.live});
+
+  final VoidCallback _run;
+
+  /// Asked at invoke time rather than captured, so one map built once in
+  /// `initState` still answers where the cursor is right now.
+  final bool Function()? live;
+
+  @override
+  bool get isActionEnabled => live?.call() ?? true;
+
+  @override
+  Object? invoke(T intent) {
+    _run();
+    return null;
+  }
+}
 
 /// The whole app, for now: a dark rail of sections beside one main pane that
 /// shows either a section's threads or the open thread's transcript.
@@ -454,6 +484,55 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// composer just because something opened beside it.
   final FocusNode _sidePanelFocus = FocusNode(debugLabel: 'side panel');
 
+  /// What makes the triage keys reachable — see [_triageScope].
+  ///
+  /// The `Shortcuts` pair sits over the list and the detail and nowhere else, so
+  /// it only sees a key while focus is somewhere inside that region; the
+  /// `Focus(autofocus: true)` at the top of [build] exists to make ⌘K global and
+  /// would otherwise hold the focus itself, above the pair, where single letters
+  /// would never arrive. So this node asks for focus in [initState] and gets it
+  /// the moment the region mounts (a request made before a node has a parent is
+  /// honoured at its reparent), and [_takeTriageFocus] hands it back whenever a
+  /// selection moves. It never takes focus off something INSIDE the region: a
+  /// composer or a picker there is a descendant, and [FocusNode.hasFocus] is
+  /// what says so.
+  final FocusNode _triageFocus = FocusNode(debugLabel: 'triage list');
+
+  /// The undo the last toast offered, and the only one [UndoLastIntent] can
+  /// reach.
+  ///
+  /// ONE slot, deliberately: [_toast] hides the bar already on screen rather
+  /// than queueing behind it, so the only undo a reader can see is the newest
+  /// one — and a second action therefore OVERWRITES the first's undo here, for
+  /// the keyboard exactly as it already did for the bar. A toast with no undo of
+  /// its own clears the slot for the same reason: there is nothing on screen
+  /// offering to take anything back.
+  VoidCallback? _lastUndo;
+
+  /// The label picker the reader has asked for: which thread it is about, and
+  /// whether applying a label should dismiss the thread with it (`Shift+E`) or
+  /// leave it where it is (`l`).
+  ///
+  /// The picker mount reads this; wired at phase integration. Nothing in this
+  /// file draws a picker — the widget and its two mounts land with the picker
+  /// package, and this is the request they answer.
+  ({String source, String key, bool dismissAfter})? _labelPickerRequest;
+
+  /// The label lens on the Needs You pile, or null for no lens. Session state
+  /// like [_needsYouTab], not a preference: a filter the reader put on to work
+  /// through one pile does not belong on tomorrow's inbox.
+  String? _needsYouLabelId;
+
+  /// [_needsYouLabelId], but only while the vocabulary still holds that label:
+  /// a lens whose label was deleted in Settings must read as no lens, not as an
+  /// empty pile with no visible cause.
+  String? get _activeNeedsYouLabelId {
+    final id = _needsYouLabelId;
+    if (id == null) return null;
+    final labels = ref.read(labelsProvider).labels;
+    return labels.any((l) => l.id == id) ? id : null;
+  }
+
   /// What is open beside the main pane, innermost LAST: a file, or a thread
   /// reached from inside a storyline. An overlay ON what the main pane is
   /// showing rather than a peer of it — a file is read against the message
@@ -636,6 +715,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // notifier's sequence guard discards whichever answer is older.
       ref.read(homeFeedProvider.notifier).setSources(_activeSources);
       ref.read(homeFeedProvider.notifier).load();
+      // The label vocabulary rides the same read: one indexed table, and the
+      // row chips, the filter pills and Find's autocomplete all want it from
+      // the first frame that draws them.
+      unawaited(ref.read(labelsProvider.notifier).load());
     });
     // LAST of the three, deliberately: this is a keychain read whose only
     // consumers are the People grouping and one avatar, and queueing it ahead
@@ -659,6 +742,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       setState(() => _owner = account);
     }());
     _poll = Timer.periodic(_pollInterval, (_) => _refresh());
+    // Asked for now and honoured when the region arrives: the list is where a
+    // reader who has clicked nothing yet is standing, and it is where the
+    // triage keys have to land. See [_triageFocus].
+    _triageFocus.requestFocus();
   }
 
   @override
@@ -668,6 +755,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _mainComposerFocus.dispose();
     _sideComposerFocus.dispose();
     _sidePanelFocus.dispose();
+    _triageFocus.dispose();
     _findText.dispose();
     _findFocus.dispose();
     _filesSearchText.dispose();
@@ -996,12 +1084,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// it was opened from and closing the side only when there is nothing left
   /// underneath. ⤢ never survives a pop — the panel coming back was last seen
   /// in the split and is owed the split.
-  void _closeSide() => setState(() {
-        if (_sideStack.isNotEmpty) _sideStack.removeLast();
-        _sideFull = false;
-        _focusSideOnMount = null;
-        _dropSideReplyTarget();
-      });
+  void _closeSide() {
+    setState(() {
+      if (_sideStack.isNotEmpty) _sideStack.removeLast();
+      _sideFull = false;
+      _focusSideOnMount = null;
+      _dropSideReplyTarget();
+    });
+    // The panel was the room the cursor was standing in, and it is going away.
+    // Unasked for, the cursor falls out of the region with it and the letter
+    // keys go dead on a list the reader is looking straight at — so the list
+    // takes it back. Not [_takeTriageFocus]: the node about to be disposed is
+    // itself inside the region, so `hasFocus` is true right up to the frame
+    // that drops it.
+    _triageFocus.requestFocus();
+  }
 
   /// Whether two panels are about the same thing — what stops a push stacking
   /// a panel on itself, and how [_restoreSideThread] finds the thread it is
@@ -1666,19 +1763,32 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               width: 1,
               child: ColoredBox(color: BondColors.border),
             ),
-            // Both cannot be had at this width, so the panel REPLACES the main
-            // pane rather than squeezing it — the same call the rail makes at
-            // its own breakpoint, and the one the thread pane's split made
-            // before this moved out here.
-            if (beside != null && width == null)
-              Expanded(child: _sidePanel(beside))
-            else ...[
-              Expanded(child: _main(conversations, rooms, loadError)),
-              if (beside != null && width != null) ...[
-                const SizedBox(width: BondSpacing.s16),
-                SizedBox(width: width, child: _sidePanel(beside)),
-              ],
-            ],
+            // The list and the detail, under the triage keys — see
+            // [_triageScope]. One `Expanded` around both of them rather than one
+            // each: the pair has to sit ABOVE whatever has the cursor, and the
+            // inner row divides the same space the two of them divided before.
+            Expanded(
+              child: _triageScope(
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // Both cannot be had at this width, so the panel REPLACES
+                    // the main pane rather than squeezing it — the same call the
+                    // rail makes at its own breakpoint, and the one the thread
+                    // pane's split made before this moved out here.
+                    if (beside != null && width == null)
+                      Expanded(child: _sidePanel(beside))
+                    else ...[
+                      Expanded(child: _main(conversations, rooms, loadError)),
+                      if (beside != null && width != null) ...[
+                        const SizedBox(width: BondSpacing.s16),
+                        SizedBox(width: width, child: _sidePanel(beside)),
+                      ],
+                    ],
+                  ],
+                ),
+              ),
+            ),
           ],
         );
       },
@@ -1714,10 +1824,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             // One thing at a time at this width: an open side panel has the
             // pane, exactly as the file preview did before the panel was a
             // shell-level thing.
+            // The triage keys sit over the pane and not over the hamburger
+            // above it, for [_wide]'s reason.
             Expanded(
-              child: (_side != null && !_sideFull)
-                  ? _sidePanel(_side!)
-                  : _main(conversations, rooms, loadError),
+              child: _triageScope(
+                (_side != null && !_sideFull)
+                    ? _sidePanel(_side!)
+                    : _main(conversations, rooms, loadError),
+              ),
             ),
           ],
         ),
@@ -1771,6 +1885,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   void _toast(String message, {VoidCallback? onUndo}) {
     if (!mounted) return;
+    // Every correction in the app already says what it did through this one
+    // call, which makes it the one place the keyboard's undo can be fed from:
+    // the sender rules, the thread actions and anything added later populate the
+    // slot by construction rather than by remembering to. See [_lastUndo].
+    _lastUndo = onUndo;
     final messenger = ScaffoldMessenger.of(context);
     // The previous bar goes now rather than queueing: correcting three senders
     // in a row should leave the third one's undo reachable, not the first's.
@@ -1865,6 +1984,458 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       'Thread kept in your inbox.',
       onUndo: () => notifier.sendThreadToLater(source, key),
     );
+  }
+
+  /// Replays the undo the last bar offered, and empties the slot.
+  ///
+  /// The bar goes with it: an Undo still on screen after the undo has run is a
+  /// button offering to do the same thing twice.
+  void _undoLast() {
+    final undo = _lastUndo;
+    if (undo == null) return;
+    _lastUndo = null;
+    if (mounted) ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    undo();
+  }
+
+  // ── keyboard triage ────────────────────────────────────────────────────
+  //
+  // One `Shortcuts` + `Actions` pair over the list and the detail, and every
+  // gesture in it named as an [Intent] in `triage_intents.dart` — so the keys
+  // here, the buttons on a row and the command palette that comes later all run
+  // the same code. The keys:
+  //
+  //   j / ↓    the row under this one          k / ↑    the row above
+  //   e        dismiss, then advance           Shift+E  dismiss with a label
+  //   l        label, keeping the thread       s        Later, per thread
+  //   m        drop the sender                 z / ⌘Z   undo the last action
+  //   Esc      back to the list
+  //
+  // Every single letter is INERT while the cursor is in something that takes
+  // typing — see [_editingText]. Escape is the one binding that is not: coming
+  // back out of the composer is exactly what a reader means by it.
+
+  /// The key map, and the whole key map.
+  ///
+  /// ⌘Z carries a control twin for a runner that is not a Mac, the way the ⌘K
+  /// binding in [build] does. Escape is mapped to Flutter's own [DismissIntent]
+  /// rather than to a name of ours: the app already turns Escape into that
+  /// intent, and anything nested in this region that means something else by it
+  /// — the side panel's ✕, the Find box's clear — binds the key closer to the
+  /// cursor and still wins.
+  static const Map<ShortcutActivator, Intent> _triageKeys = {
+    SingleActivator(LogicalKeyboardKey.keyJ): NextThreadIntent(),
+    SingleActivator(LogicalKeyboardKey.arrowDown): NextThreadIntent(),
+    SingleActivator(LogicalKeyboardKey.keyK): PreviousThreadIntent(),
+    SingleActivator(LogicalKeyboardKey.arrowUp): PreviousThreadIntent(),
+    SingleActivator(LogicalKeyboardKey.keyE): DismissThreadIntent(),
+    SingleActivator(LogicalKeyboardKey.keyE, shift: true):
+        DismissWithLabelIntent(),
+    SingleActivator(LogicalKeyboardKey.keyL): LabelThreadIntent(),
+    SingleActivator(LogicalKeyboardKey.keyS): LaterThreadIntent(),
+    SingleActivator(LogicalKeyboardKey.keyM): DropSenderIntent(),
+    SingleActivator(LogicalKeyboardKey.keyZ): UndoLastIntent(),
+    SingleActivator(LogicalKeyboardKey.keyZ, meta: true): UndoLastIntent(),
+    SingleActivator(LogicalKeyboardKey.keyZ, control: true): UndoLastIntent(),
+    SingleActivator(LogicalKeyboardKey.escape): DismissIntent(),
+  };
+
+  /// What each intent does, built once so the map's identity survives a rebuild.
+  ///
+  /// [FocusReplyIntent] is here with no key on it: `r` belongs to the in-list
+  /// quick reply that lands later, and the thread's own controls can invoke this
+  /// through [Actions] meanwhile.
+  late final Map<Type, Action<Intent>> _triageActions = {
+    NextThreadIntent: _TriageAction<NextThreadIntent>(
+      () => _moveSelection(forward: true),
+      live: _keysLive,
+    ),
+    PreviousThreadIntent: _TriageAction<PreviousThreadIntent>(
+      () => _moveSelection(forward: false),
+      live: _keysLive,
+    ),
+    DismissThreadIntent: _TriageAction<DismissThreadIntent>(
+      () => unawaited(_triageAndAdvance(_dismissThread)),
+      live: _keysLive,
+    ),
+    DismissWithLabelIntent: _TriageAction<DismissWithLabelIntent>(
+      () => _requestLabelPicker(dismissAfter: true),
+      live: _keysLive,
+    ),
+    LabelThreadIntent: _TriageAction<LabelThreadIntent>(
+      () => _requestLabelPicker(dismissAfter: false),
+      live: _keysLive,
+    ),
+    LaterThreadIntent: _TriageAction<LaterThreadIntent>(
+      () => unawaited(_triageAndAdvance(_laterThread)),
+      live: _keysLive,
+    ),
+    DropSenderIntent: _TriageAction<DropSenderIntent>(
+      () => unawaited(_triageAndAdvance(_dropSenderForThread)),
+      live: _keysLive,
+    ),
+    UndoLastIntent: _TriageAction<UndoLastIntent>(
+      _undoLast,
+      live: _keysLive,
+    ),
+    FocusReplyIntent: _TriageAction<FocusReplyIntent>(
+      _mainComposerFocus.requestFocus,
+      live: _keysLive,
+    ),
+    DismissIntent: _TriageAction<DismissIntent>(_returnFocusToList),
+  };
+
+  /// The one `Shortcuts` + `Actions` pair, over the list and the detail and
+  /// nothing else.
+  ///
+  /// Called from both layouts and mounted once either way: [_wide] and [_narrow]
+  /// are the two arms of one `LayoutBuilder`. The region is deliberately
+  /// narrower than the screen — the rail's stops, its Find box and the source
+  /// chips are chrome, and a `j` typed into Find is a letter.
+  Widget _triageScope(Widget child) => Shortcuts(
+        shortcuts: _triageKeys,
+        child: Actions(
+          actions: _triageActions,
+          child: Focus(focusNode: _triageFocus, child: child),
+        ),
+      );
+
+  /// Whether the single letters are live, which is exactly "the cursor is not in
+  /// a box".
+  bool _keysLive() => !_editingText;
+
+  /// Whether the cursor is in something that takes typing.
+  ///
+  /// Read off the focus manager rather than off any flag of ours: the composer,
+  /// the Find box, a recipient field and whatever a later round adds are all
+  /// `EditableText` underneath, and asking the one question covers them all. A
+  /// disabled action leaves the key event UNHANDLED, so the `e` that would have
+  /// dismissed a thread lands in the box as a letter — which is what somebody
+  /// typing means by it.
+  static bool get _editingText {
+    final focused = FocusManager.instance.primaryFocus?.context;
+    if (focused == null) return false;
+    return focused.widget is EditableText ||
+        focused.findAncestorWidgetOfExactType<EditableText>() != null;
+  }
+
+  /// Hands the cursor back to the list, unless it is already somewhere inside
+  /// the region — a composer being typed in is not something to interrupt.
+  void _takeTriageFocus() {
+    if (_triageFocus.hasFocus) return;
+    _triageFocus.requestFocus();
+  }
+
+  /// Escape: the picker first, then the cursor.
+  void _returnFocusToList() {
+    _clearLabelPickerRequest();
+    _triageFocus.requestFocus();
+  }
+
+  /// The rows the list is drawing, in the order it draws them.
+  ///
+  /// One derivation for the pane and for the keys: auto-advance has to land on
+  /// the row that is actually under the one just cleared, and a second reading
+  /// of "the list" is how the two would come to disagree. [prefs] is passed
+  /// rather than read, so the pane can watch it and a key press can read it.
+  ///
+  /// Off the Needs You stop it is the same pile without the tab's lens, which is
+  /// what the rail draws.
+  List<Conversation> _triageRows(AppPrefs prefs) {
+    final ranked = sortNeedsYou(
+      prefs.needsYouSort,
+      needsYouRows(_rows, threshold: prefs.attentionThreshold),
+    );
+    return _section == RailSection.needsYou
+        ? needsYouLabelRows(
+            _activeNeedsYouLabelId,
+            needsYouTabRows(_needsYouTab, ranked),
+          )
+        : ranked;
+  }
+
+  /// The thread the keys act on: whatever is open beside, else the main pane's
+  /// selection. The list lights the same row, so this is the thread the reader
+  /// is looking at either way.
+  ({String source, String key})? get _triageTarget {
+    final beside = _threadBeside;
+    if (beside != null) {
+      return (source: beside.source, key: beside.conversationKey);
+    }
+    final id = _selectedId;
+    return id == null ? null : (source: _selectedSource ?? 'email', key: id);
+  }
+
+  /// Opens a row the way the surface it is on already opens rows: a thread in
+  /// the main pane is replaced there, and a list the reader is working through
+  /// keeps its place and opens beside.
+  void _selectTriageRow(String source, String key) {
+    if (_selectedId != null) {
+      _select(key, source: source);
+    } else {
+      _openThreadBeside(source, key);
+    }
+    _takeTriageFocus();
+  }
+
+  void _moveSelection({required bool forward}) {
+    final rows = _triageRows(ref.read(appPrefsProvider));
+    final target = _triageTarget;
+    // A thread open from another stop — Archive, Home, a room — is not in
+    // this pile, and stepping "next" from it would teleport the reader to the
+    // top Needs You row. No target at all still starts at the top: that is a
+    // reader on the pile who has not picked a row yet.
+    if (target != null &&
+        !rows.any((c) => c.id == target.key && c.source == target.source)) {
+      return;
+    }
+    final next = neighbourRow(
+      [for (final c in rows) c.id],
+      target?.key,
+      forward: forward,
+    );
+    // Null is the edge of the list, where the reader stays put: wrapping around
+    // would hand them the thread they started at and call it progress.
+    if (next == null) return;
+    for (final row in rows) {
+      if (row.id != next) continue;
+      _selectTriageRow(row.source, row.id);
+      return;
+    }
+  }
+
+  /// Every destructive key, and every button that does the same thing: work out
+  /// where the reader lands BEFORE the list moves, do the thing, then land them.
+  ///
+  /// Computed first because the row is about to leave the drawn list and take
+  /// its place with it. Landing nowhere means there is nothing left to stand on,
+  /// and then the thread the reader just cleared is closed rather than left in
+  /// front of them.
+  ///
+  /// [on] is how a control NAMES its thread. The keys leave it null and get
+  /// [_triageTarget], but a button drawn on a panel belongs to the conversation
+  /// that panel is showing — and a thread in the main pane with another one open
+  /// beside it would otherwise act on the one beside.
+  Future<void> _triageAndAdvance(
+    Future<void> Function(({String source, String key}) target) act, {
+    ({String source, String key})? on,
+  }) async {
+    final target = on ?? _triageTarget;
+    if (target == null) return;
+    final rows = _triageRows(ref.read(appPrefsProvider));
+    // A thread cleared from another stop has no place in this pile to land
+    // from: advancing would put the reader on the top Needs You row, a
+    // teleport nobody asked for. No landing takes the close/clear branch.
+    final inPile =
+        rows.any((c) => c.id == target.key && c.source == target.source);
+    final nextId =
+        inPile ? nextRowAfter([for (final c in rows) c.id], target.key) : null;
+    ({String source, String key})? landing;
+    if (nextId != null) {
+      for (final row in rows) {
+        if (row.id != nextId) continue;
+        landing = (source: row.source, key: row.id);
+        break;
+      }
+    }
+
+    await act(target);
+    if (!mounted) return;
+    if (landing != null) {
+      _selectTriageRow(landing.source, landing.key);
+      return;
+    }
+    final beside = _threadBeside;
+    if (beside != null &&
+        beside.source == target.source &&
+        beside.conversationKey == target.key) {
+      _closeSide();
+    } else if (_selectedId == target.key) {
+      setState(() {
+        _clearOverlays();
+        _selectedId = null;
+        _selectedSource = null;
+      });
+    }
+    _takeTriageFocus();
+  }
+
+  /// Dismiss: `done`, said in a bar with the way back on it.
+  ///
+  /// [ConversationsNotifier.reopenThread] is the undo rather than a stored
+  /// previous state, because that is what the Reopen button already is — see its
+  /// doc for why the state it lands in is re-derived.
+  Future<void> _dismissThread(({String source, String key}) target) async {
+    final notifier = ref.read(conversationsProvider.notifier);
+    await notifier.markDone(target.source, target.key);
+    _toast(
+      'Dismissed.',
+      onUndo: () => notifier.reopenThread(target.source, target.key),
+    );
+  }
+
+  /// [_snoozeThread] without a day named: the per-thread deferral takes the date
+  /// the thread's own newest inbound message asked for, else seven days out.
+  /// [ConversationsNotifier.keepThreadInInbox] is the undo, which is exactly
+  /// what [_keepThread] offers in the other direction.
+  Future<void> _laterThread(({String source, String key}) target) async {
+    final notifier = ref.read(conversationsProvider.notifier);
+    await notifier.sendThreadToLater(target.source, target.key);
+    _toast(
+      'Sent to Later.',
+      onUndo: () => notifier.keepThreadInInbox(target.source, target.key),
+    );
+  }
+
+  /// `m`, on the address the thread panel's own menu item would key a rule on:
+  /// whoever sent the newest inbound message where the transcript is loaded,
+  /// else the row's own participant. [_dropSender] carries the toast and the
+  /// undo that restores whatever rule was there before.
+  Future<void> _dropSenderForThread(({String source, String key}) target) async {
+    final thread = ref.read(threadProvider(
+      (source: target.source, conversationKey: target.key),
+    ));
+    final messages =
+        thread is ThreadLoaded ? thread.messages : const <Message>[];
+    final address = _newestInboundSender(messages) ??
+        _loadedRow(target)?.primaryEmail;
+    if (address == null || address.isEmpty) {
+      _toast('No sender on that thread to make a rule about.');
+      return;
+    }
+    await _dropSender(address, target.source);
+  }
+
+  /// One loaded conversation by target, or null if the list does not hold it.
+  ///
+  /// [_conversationFor] answers the same question by `ref.watch`, which is for
+  /// build; a key handler reads.
+  Conversation? _loadedRow(({String source, String key}) target) {
+    final loaded = ref.read(conversationsProvider);
+    if (loaded is! ConversationsLoaded) return null;
+    for (final c in loaded.conversations) {
+      if (c.id == target.key && c.source == target.source) return c;
+    }
+    return null;
+  }
+
+  /// `l` and `Shift+E`, and every Label… button: the reader has asked for the
+  /// picker on this thread.
+  ///
+  /// The request and not the picker — see [_labelPickerRequest]. The two picker
+  /// mounts (the thread panel's strip, the list row's) read the request and
+  /// answer it; [on] is how a control drawn on a row names that row, the same
+  /// contract [_triageAndAdvance] keeps, and the keys leave it null for
+  /// [_triageTarget].
+  void _requestLabelPicker({
+    required bool dismissAfter,
+    ({String source, String key})? on,
+  }) {
+    final target = on ?? _triageTarget;
+    if (target == null) return;
+    // Re-read on every open: an apply moves `use_count`, which is the order
+    // the chips are offered in, and the read is one indexed table.
+    unawaited(ref.read(labelsProvider.notifier).load());
+    setState(() {
+      _labelPickerRequest = (
+        source: target.source,
+        key: target.key,
+        dismissAfter: dismissAfter,
+      );
+    });
+  }
+
+  /// A label picked from the open picker, applied to the thread the request
+  /// names.
+  ///
+  /// Two different actions behind one chip, told apart by the request's own
+  /// flag: `Shift+E`'s picker dismisses WITH the label — one [markDone], whose
+  /// [MarkDoneUndo] takes back the state change and the links it created in one
+  /// step, riding [_triageAndAdvance] so the label path gets the same landing
+  /// and the same `z` as `e` — while `l`'s picker files the thread where it
+  /// stands (keep with a label), and its undo is taking the chip back off.
+  Future<void> _applyPickedLabel(
+    ({String source, String key}) target,
+    Label label,
+  ) async {
+    final dismissAfter = _labelPickerRequest?.dismissAfter ?? false;
+    _clearLabelPickerRequest();
+    if (dismissAfter) {
+      await _triageAndAdvance(
+        (t) async {
+          final notifier = ref.read(conversationsProvider.notifier);
+          final undo =
+              await notifier.markDone(t.source, t.key, labelIds: [label.id]);
+          _toast(
+            'Dismissed · ${label.name}.',
+            onUndo: undo == null
+                ? null
+                : () => unawaited(notifier.undoMarkDone(undo)),
+          );
+        },
+        on: target,
+      );
+      return;
+    }
+    final labels = ref.read(labelsProvider.notifier);
+    await labels.apply(target.source, target.key, [label.id]);
+    _toast(
+      'Labeled ${label.name}.',
+      onUndo: () =>
+          unawaited(labels.remove(target.source, target.key, label.id)),
+    );
+    // The strip the cursor was in has just unmounted, and nothing advanced to
+    // take focus in its place: hand it back, or `z` on the toast this very
+    // action raised would land nowhere.
+    if (mounted) _takeTriageFocus();
+  }
+
+  /// Enter on a name no chip carries: the vocabulary grows by one word and the
+  /// word goes straight onto the thread — creating without applying would make
+  /// the reader say the same thing twice.
+  ///
+  /// A create the store refused answers null, the provider keeps the sentence
+  /// for the picker's own error line, and nothing is dismissed on the strength
+  /// of a label that was never made.
+  Future<void> _createAndApplyLabel(
+    ({String source, String key}) target,
+    String name,
+  ) async {
+    final label = await ref.read(labelsProvider.notifier).create(name);
+    if (!mounted) return;
+    if (label == null) {
+      // The provider kept the sentence; the bar is where this screen says
+      // such things. A field that just sits there reads as a dead Enter key.
+      _toast(ref.read(labelsProvider).error ??
+          "Couldn't save that label just now.");
+      return;
+    }
+    await _applyPickedLabel(target, label);
+  }
+
+  /// The dismiss-mode picker's way out with nothing on it: entry 1c says
+  /// dismissing without a tag is allowed, so this is `e` with the picker's
+  /// politeness — same dismiss, same undo, same landing.
+  Future<void> _dismissWithoutLabel(({String source, String key}) target) {
+    _clearLabelPickerRequest();
+    return _triageAndAdvance(_dismissThread, on: target);
+  }
+
+  void _clearLabelPickerRequest() {
+    if (_labelPickerRequest == null) return;
+    setState(() => _labelPickerRequest = null);
+  }
+
+  /// The mode a mount should draw the picker in for one thread, or null when
+  /// the open request is not about that thread. One reading of the request for
+  /// both mounts, so the panel and the list row cannot disagree about whose
+  /// picker is open.
+  LabelPickerMode? _pickerModeFor(String source, String key) {
+    final request = _labelPickerRequest;
+    if (request == null || request.source != source || request.key != key) {
+      return null;
+    }
+    return request.dismissAfter ? LabelPickerMode.dismiss : LabelPickerMode.label;
   }
 
   /// The stop the two rails highlight, or null when what is on screen is not a
@@ -2054,6 +2625,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             onChanged: (value) => setState(() => _find = value),
             onSubmit: (_) => _submitFind(),
             onClear: _clearFind,
+            // Names only: the autocomplete completes `label:` terms, and the
+            // matching itself is find_filter's, which reads the rows.
+            labelNames: [
+              for (final l in ref.watch(labelsProvider).labels) l.name,
+            ],
           ),
           const SizedBox(height: BondSpacing.s8),
           _sourceFilterBar(),
@@ -3507,9 +4083,36 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // The suggestions sit with the messages they answer. The panel places
       // them and never learns what they are.
       suggestionFor: cardFor,
-      onMarkDone: () => ref
-          .read(conversationsProvider.notifier)
-          .markDone(selected.source, selected.id),
+      // The same path `e` takes, named on this panel's own thread: one dismiss
+      // in the app, with one undo and one auto-advance behind it, rather than a
+      // button that quietly does less than the key.
+      onMarkDone: () => unawaited(_triageAndAdvance(
+        _dismissThread,
+        on: (source: selected.source, key: selected.id),
+      )),
+      // The picker strip, and the two affordances that open it. The panel
+      // draws the strip whenever the one request names ITS thread — which is
+      // how `l` and `Shift+E` land here — and every callback re-reads that
+      // request at press time, so a strip the reader left open across an
+      // auto-advance answers for the thread it is on, never a stale one.
+      labels: ref.watch(labelsProvider).labels,
+      labelPicker: _pickerModeFor(selected.source, selected.id),
+      onOpenLabelPicker: (mode) => _requestLabelPicker(
+        dismissAfter: mode == LabelPickerMode.dismiss,
+        on: (source: selected.source, key: selected.id),
+      ),
+      onApplyLabel: (label) => unawaited(_applyPickedLabel(
+        (source: selected.source, key: selected.id),
+        label,
+      )),
+      onCreateLabel: (name) => unawaited(_createAndApplyLabel(
+        (source: selected.source, key: selected.id),
+        name,
+      )),
+      onDismissWithoutLabel: () => unawaited(
+        _dismissWithoutLabel((source: selected.source, key: selected.id)),
+      ),
+      onCloseLabelPicker: _clearLabelPickerRequest,
       onReopen: () => ref
           .read(conversationsProvider.notifier)
           .reopenThread(selected.source, selected.id),
@@ -5192,17 +5795,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// and not a `(label, rows)` pair.
   Widget _needsYouOverview(List<Conversation> conversations) {
     final tab = _needsYouTab;
-    final sort = ref.watch(appPrefsProvider).needsYouSort;
-    final rows = needsYouTabRows(
-      tab,
-      sortNeedsYou(
-        sort,
-        needsYouRows(
-          conversations,
-          threshold: ref.watch(appPrefsProvider).attentionThreshold,
-        ),
-      ),
-    );
+    final prefs = ref.watch(appPrefsProvider);
+    final sort = prefs.needsYouSort;
+    // Watched, so a label created in the picker is a pill here on the same
+    // frame; the pile itself already re-reads through the provider's announce.
+    final labels = ref.watch(labelsProvider).labels;
+    // [_triageRows] and not a derivation of its own: the keys advance down THIS
+    // list, and two readings of it is how `e` would land the reader somewhere
+    // other than the row under the one they cleared.
+    final rows = _triageRows(prefs);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -5225,6 +5826,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             _needsYouSortControl(sort),
           ],
         ),
+        // The label lens, under the tabs it narrows further. Absent until the
+        // owner has words: a filter row over an empty vocabulary is a control
+        // with nothing to say. No spacer of ours — the row carries its own
+        // top padding, being the widget that knows whether it drew at all.
+        if (labels.isNotEmpty)
+          NeedsYouLabelFilter(
+            labels: labels,
+            selectedLabelId: _activeNeedsYouLabelId,
+            onLabelSelected: (id) => setState(() => _needsYouLabelId = id),
+          ),
         const SizedBox(height: BondSpacing.s12),
         Expanded(
           child: ConversationListPane(
@@ -5257,6 +5868,51 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             processingSince: ref.watch(sessionStartProvider),
             emptyText: tab.emptyText,
             emptyNotice: _scopeNotice(),
+            // The hover cluster: the four quick actions, each the SAME path
+            // the key takes, named on the row it is drawn against — see
+            // [_triageAndAdvance]'s doc for why a row action must say whose
+            // row it is.
+            onDismiss: (c) => unawaited(_triageAndAdvance(
+              _dismissThread,
+              on: (source: c.source, key: c.id),
+            )),
+            onLabel: (c) => _requestLabelPicker(
+              dismissAfter: false,
+              on: (source: c.source, key: c.id),
+            ),
+            onLater: (c) => unawaited(_triageAndAdvance(
+              _laterThread,
+              on: (source: c.source, key: c.id),
+            )),
+            onDismissSender: (c) => unawaited(_triageAndAdvance(
+              _dropSenderForThread,
+              on: (source: c.source, key: c.id),
+            )),
+            // The row-side picker mount. The thread panel's mount answers the
+            // same request, so a thread that is open beside yields to it —
+            // one request, one picker on screen.
+            labels: labels,
+            labelPickerFor: (c) {
+              final beside = _threadBeside;
+              if (beside != null &&
+                  beside.source == c.source &&
+                  beside.conversationKey == c.id) {
+                return null;
+              }
+              return _pickerModeFor(c.source, c.id);
+            },
+            onApplyLabel: (c, label) => unawaited(_applyPickedLabel(
+              (source: c.source, key: c.id),
+              label,
+            )),
+            onCreateLabel: (c, name) => unawaited(_createAndApplyLabel(
+              (source: c.source, key: c.id),
+              name,
+            )),
+            onDismissWithoutLabel: (c) => unawaited(
+              _dismissWithoutLabel((source: c.source, key: c.id)),
+            ),
+            onCloseLabelPicker: (_) => _clearLabelPickerRequest(),
           ),
         ),
       ],

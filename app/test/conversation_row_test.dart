@@ -1,5 +1,9 @@
+import 'package:bond_inbox/models/label_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/theme/tokens.dart';
+import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/conversation_row.dart';
+import 'package:bond_inbox/widgets/label_chip.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -21,6 +25,7 @@ Conversation _conv({
   int pending = 2,
   String? lastMessageAt = _afterSince,
   int attachmentCount = 0,
+  List<Label> labels = const [],
 }) {
   return Conversation(
     id: id,
@@ -32,8 +37,12 @@ Conversation _conv({
     lastMessageAt: lastMessageAt,
     aiPendingCount: pending,
     attachmentCount: attachmentCount,
+    labels: labels,
   );
 }
+
+Label _label(String name, {String? tone}) =>
+    Label(id: name.toLowerCase().replaceAll(' ', '-'), name: name, tone: tone);
 
 /// Loose width, like the list gives it — a Scaffold body's tight constraints
 /// would hide a regression in the row's own layout.
@@ -192,5 +201,104 @@ void main() {
     )));
 
     expect(find.text('Confirm the launch date'), findsOneWidget);
+  });
+
+  group('the owner\'s labels', () {
+    /// The chip one label is drawn as, read by id rather than counted — the
+    /// house rule, and the only way this file can tell a tint from a tint.
+    BondChip chipFor(WidgetTester tester, String id) =>
+        tester.widget<BondChip>(find.byKey(labelChipKey(id)));
+
+    testWidgets('a thread nobody has filed draws the row it always drew',
+        (tester) async {
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(),
+        selected: false,
+        onTap: () {},
+      )));
+
+      // Not a chip, not a gap, not a `+0`: an empty vocabulary costs the row
+      // nothing at all.
+      expect(find.byKey(labelChipOverflowKey), findsNothing);
+      expect(find.text('0 messages'), findsOneWidget);
+    });
+
+    testWidgets('one label is one chip, wearing its own tone', (tester) async {
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(labels: [_label('Jira update', tone: 'success')]),
+        selected: false,
+        onTap: () {},
+      )));
+
+      expect(find.text('Jira update'), findsOneWidget);
+      expect(chipFor(tester, 'jira-update').tone, BondTone.success);
+    });
+
+    testWidgets('a label with no colour of its own reads as neutral',
+        (tester) async {
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(labels: [_label('Meeting response')]),
+        selected: false,
+        onTap: () {},
+      )));
+
+      expect(chipFor(tester, 'meeting-response').tone, BondTone.neutral);
+    });
+
+    testWidgets('and a tone this build does not know reads as neutral too',
+        (tester) async {
+      // Written by a later version of the app. One chip loses its tint; nothing
+      // throws mid-render.
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(labels: [_label('Later', tone: 'chartreuse')]),
+        selected: false,
+        onTap: () {},
+      )));
+
+      expect(chipFor(tester, 'later').tone, BondTone.neutral);
+    });
+
+    testWidgets('two labels both fit', (tester) async {
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(labels: [_label('Jira'), _label('Later')]),
+        selected: false,
+        onTap: () {},
+      )));
+
+      expect(find.text('Jira'), findsOneWidget);
+      expect(find.text('Later'), findsOneWidget);
+      expect(find.byKey(labelChipOverflowKey), findsNothing);
+    });
+
+    testWidgets('five become the first two and a +3', (tester) async {
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(labels: [
+          for (final name in const ['Jira', 'Later', 'Legal', 'Ops', 'Travel'])
+            _label(name),
+        ]),
+        selected: false,
+        onTap: () {},
+      )));
+
+      // The store's order is most-used first, so the two that survive are the
+      // two words the owner actually reaches for.
+      expect(find.text('Jira'), findsOneWidget);
+      expect(find.text('Later'), findsOneWidget);
+      expect(find.text('Legal'), findsNothing);
+      expect(find.text('+3'), findsOneWidget);
+    });
+
+    testWidgets('and the counts the row already drew are still there',
+        (tester) async {
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(attachmentCount: 2, labels: [_label('Legal')]),
+        selected: false,
+        onTap: () {},
+      )));
+
+      expect(find.text('Legal'), findsOneWidget);
+      expect(find.text('📎 2'), findsOneWidget);
+      expect(find.text('0 messages'), findsOneWidget);
+    });
   });
 }

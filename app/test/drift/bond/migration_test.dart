@@ -965,6 +965,58 @@ void main() {
     expect(derived, isEmpty);
   });
 
+  test('v16 to v17 takes a vocabulary and leaves the AI verdict alone',
+      () async {
+    // The labels round. A message carrying the model's own `label` is seeded
+    // at v16 so the step is exercised against the one column whose name this
+    // round could be confused with: `messages.label` is the AI verdict, the
+    // new tables are the owner's words, and the step must not touch the first.
+    final schema = await verifier.schemaAt(16);
+    schema.rawDatabase.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, subject, label, triage_status, created_at, updated_at)
+      VALUES ('email', 'm-invite', 'c1', 'inbound', 'Accepted: standup',
+        'meeting', 'triaged', 't', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 17);
+    addTearDown(db.close);
+
+    final message = await db
+        .customSelect('SELECT * FROM messages WHERE source_message_id = ?',
+            variables: [Variable('m-invite')])
+        .getSingle();
+    expect(message.data['label'], 'meeting');
+
+    // Nothing is invented: a vocabulary exists only once a person has typed
+    // one, and an install that predates the picker has no labels at all.
+    for (final table in const ['labels', 'conversation_labels']) {
+      final rows = await db.customSelect('SELECT * FROM $table').get();
+      expect(rows, isEmpty, reason: table);
+    }
+
+    // And both tables take a write, which a STRICT one would reject if the
+    // step had declared a column as the wrong type. The defaults are the two
+    // the picker relies on: a fresh label has been used no times, and a link
+    // nobody attributed was put there by the owner.
+    await db.customStatement(
+      "INSERT INTO labels (id, name, name_key, created_at, updated_at) "
+      "VALUES ('fyi-only-ab12', 'FYI only', 'fyi only', 't', 't')",
+    );
+    await db.customStatement(
+      "INSERT INTO conversation_labels (source, conversation_key, label_id, "
+      "applied_at) VALUES ('email', 'c1', 'fyi-only-ab12', 't')",
+    );
+    final label = await db.customSelect('SELECT * FROM labels').getSingle();
+    expect(label.data['use_count'], 0);
+    expect(label.data['last_used_at'], null);
+    expect(label.data['tone'], null);
+    final link =
+        await db.customSelect('SELECT * FROM conversation_labels').getSingle();
+    expect(link.data['applied_by'], 'user');
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

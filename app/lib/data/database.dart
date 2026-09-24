@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 16;
+  int get schemaVersion => 17;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -610,6 +610,37 @@ UPDATE storylines
                 if (!await _tableExists('setup_state')) {
                   await m.createTable(schema.setupState);
                 }
+              },
+              // v17 — the labels round. Two tables: `labels`, the OWNER'S
+              // vocabulary, and `conversation_labels`, which of their threads
+              // each word is on. Neither has anything to do with
+              // `messages.label`, the model's verdict about one message —
+              // that column is untouched here and stays untouched.
+              //
+              // Nothing to backfill. A label exists only once a person has
+              // typed one, and a mailbox that predates this round has no
+              // vocabulary rather than an empty one.
+              //
+              // The two indexes are hand-written with IF NOT EXISTS for the
+              // v6 reason (a generated `Index` entity carries a bare CREATE
+              // INDEX, which throws on a replay over a torn state); names and
+              // columns match the generated entities exactly, which is what
+              // the fresh-vs-migrated parity test compares.
+              from16To17: (m, schema) async {
+                if (!await _tableExists('labels')) {
+                  await m.createTable(schema.labels);
+                }
+                if (!await _tableExists('conversation_labels')) {
+                  await m.createTable(schema.conversationLabels);
+                }
+                await customStatement(
+                  'CREATE UNIQUE INDEX IF NOT EXISTS ix_labels_name_key '
+                  'ON labels(name_key)',
+                );
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_conv_labels_label '
+                  'ON conversation_labels(label_id, applied_at DESC)',
+                );
               },
             ),
           ),
