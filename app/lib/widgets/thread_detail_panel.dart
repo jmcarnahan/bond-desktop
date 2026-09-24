@@ -1,9 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../models/attachment_models.dart';
 import '../models/label_models.dart';
 import '../models/message_models.dart';
 import '../models/open_asks.dart';
+import '../services/external_sender.dart';
+import '../services/mention_index.dart';
 import '../services/profile_photos.dart';
 import '../theme/tokens.dart';
 import 'attachment_card.dart';
@@ -14,11 +19,13 @@ import 'inline_alert.dart';
 import 'label_picker.dart';
 import 'link_unfurl.dart';
 import 'linked_text.dart';
+import 'mention_navigator.dart';
 import 'message_row.dart';
 import 'needs_you_reason.dart';
 import 'preview/preview_kind.dart';
 import 'room_header.dart';
 import 'time_format.dart';
+import 'triage_intents.dart';
 
 /// The two halves of a thread: what was said, and what came with it.
 enum ThreadTab { messages, files }
@@ -56,6 +63,42 @@ List<AttachmentRef> threadFiles(List<Message> messages) {
     files.addAll(carried);
   }
   return files;
+}
+
+/// A handle on the open transcript's jumps, for a host whose keys are bound
+/// ABOVE the panel.
+///
+/// The panel answers [NextMentionIntent] and [PreviousMentionIntent] itself, so
+/// the navigator's arrows and anything else inside the thread work with nothing
+/// wired. A KEY cannot take that path: a key event is dispatched from the
+/// primary focus, and in the inbox the focus lives on the region that holds the
+/// list and the detail — above this panel — so the screen's own `Actions` entry
+/// is what answers, and it needs somewhere to send the request. This is that
+/// somewhere.
+///
+/// Held by the host, handed in as [ThreadDetailPanel.jumps], and attached by the
+/// panel for as long as one is mounted. Every method is a no-op while nothing is
+/// attached, which is what a key pressed on the list with no thread open means.
+class TranscriptJumps {
+  _ThreadDetailPanelState? _panel;
+
+  /// Whether a transcript is listening. The host has no reason to ask before
+  /// calling — the calls are already no-ops — but a control that draws itself
+  /// from this does.
+  bool get attached => _panel != null;
+
+  /// The next message in the open thread that names the owner, and the one
+  /// before it. Both walk the same index the navigator counts and both stop at
+  /// the thread's edges.
+  void nextMention() => _panel?._stepMention(forward: true);
+
+  void previousMention() => _panel?._stepMention(forward: false);
+
+  /// Scroll to one message by id and flash it. Silent for an id this transcript
+  /// never loaded — the host is welcome to ask about a message that scrolled out
+  /// of the window it read.
+  void toMessage(String messageId) =>
+      unawaited(_panel?._jumpToMessage(messageId) ?? Future<void>.value());
 }
 
 /// The thread view: the main pane's whole content once a thread is open.
@@ -268,6 +311,23 @@ class ThreadDetailPanel extends StatefulWidget {
   /// The reader chose a scope on the offer line. The panel writes no rule.
   final void Function(Label label, LabelRuleOffer offer)? onRuleChosen;
 
+  /// The host's handle on this transcript's jumps — see [TranscriptJumps]. Null
+  /// is what every host that binds no keys passes, and the navigator's own
+  /// arrows still work.
+  final TranscriptJumps? jumps;
+
+  /// The owner's own mail domains, for the `External` chip beside the state
+  /// chip. Empty — the default — draws no chip, which is the thread every host
+  /// that has not resolved the signed-in account yet still gets.
+  ///
+  /// The question is answered off [messages] here rather than off
+  /// [Conversation.latestInboundFrom]: this pane holds the whole transcript, so
+  /// the newest inbound message is already in hand, and reading the sender the
+  /// reader can SEE at the bottom of the thread is the one way the chip cannot
+  /// contradict the pane it sits over. Same rule either way — see
+  /// [Conversation.isExternalTo] for what it is and why nothing stores it.
+  final Set<String> ownerDomains;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -308,7 +368,13 @@ class ThreadDetailPanel extends StatefulWidget {
     this.ruleOffers = const [],
     this.ruleOfferLabel,
     this.onRuleChosen,
+    this.jumps,
+    this.ownerDomains = const {},
   });
+
+  /// The `External` chip beside the state chip, for a test that wants the chip
+  /// in this header rather than the one on a row behind it.
+  static const Key externalChipKey = ValueKey('thread-external');
 
   /// The one-click dismissal entry 1b asked for: it opens the picker rather than
   /// closing the thread on the spot, because the reason is the point.
@@ -316,6 +382,15 @@ class ThreadDetailPanel extends StatefulWidget {
 
   /// File the thread under a word without closing it — "keep with a label".
   static const Key labelKey = ValueKey('thread-label');
+
+  /// How long an arrived-at row stays lit. Long enough to catch the eye that
+  /// was moving, short enough that it is gone before the reader starts reading
+  /// — and public so a test can pump past it rather than guess.
+  static const Duration flashDuration = Duration(milliseconds: 1200);
+
+  /// The tinted wrapper around a row a jump has just landed on.
+  static Key flashKeyFor(String messageId) =>
+      ValueKey('transcript-flash-$messageId');
 
   @override
   State<ThreadDetailPanel> createState() => _ThreadDetailPanelState();
@@ -331,6 +406,258 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
   /// Wide enough for a long paragraph, narrow enough that an ultrawide window
   /// does not turn every message into one unreadable line.
   static const double _maxContentWidth = 900;
+
+  /// The transcript's own controller, so a jump can move the list rather than
+  /// only asking a built row to show itself.
+  final ScrollController _scroll = ScrollController();
+
+  /// One [GlobalKey] per message, minted on demand and kept for the life of the
+  /// panel: `Scrollable.ensureVisible` needs the row's own context, and a key
+  /// that changed between builds would hand back a context that had just been
+  /// discarded.
+  final Map<String, GlobalKey> _rowKeys = {};
+
+  /// How many times each row has been jumped to — see
+  /// [MessageRow.unfoldRequest]. Counts rather than flags, and never cleared, so
+  /// a second jump to a row the reader folded again opens it again.
+  final Map<String, int> _unfoldRequests = {};
+
+  /// Which mention the reader is standing on, or null before they have stepped.
+  String? _mentionAt;
+
+  /// Which jump is the current one. A far jump can still be retrying (each lap
+  /// awaits a frame) when the reader starts a nearer one — `]` autorepeat is
+  /// enough — and without a generation check the STALE walk's last scroll
+  /// would win the viewport while [_flashId] and the navigator name the new
+  /// target. Each entry to [_jumpToMessage] takes the next number; a lap that
+  /// wakes to find it is no longer current stops moving the list.
+  int _jumpSeq = 0;
+
+  /// The row lit by the jump that just landed, and the timer that puts it out.
+  String? _flashId;
+  Timer? _flashTimer;
+
+  /// How many times a jump scrolls and looks again before it gives up.
+  ///
+  /// A row outside the viewport (and outside its cache extent) has no element
+  /// and therefore no context, so `ensureVisible` cannot be asked about it at
+  /// all. Each attempt scrolls toward where the row is ESTIMATED to be and lets
+  /// a frame build; every scroll makes the list's own extent estimate more
+  /// accurate, so the walk converges in two or three steps on a normal thread.
+  /// The cap is what keeps a thread whose rows are wildly uneven from looping.
+  static const int _jumpAttempts = 8;
+
+  /// Where in the viewport an arrived-at row lands: near the top, with a little
+  /// of the message above it for context. Dead top would hide what the reader
+  /// was answering.
+  static const double _jumpAlignment = 0.1;
+
+  /// The tint an arrived-at row wears for [ThreadDetailPanel.flashDuration].
+  ///
+  /// Not animated, on purpose: the highlight has to be at its brightest the
+  /// instant the scroll lands, and a fade-in is faintest exactly when the
+  /// reader's eye arrives.
+  static const BoxDecoration _flashTint = BoxDecoration(
+    color: BondColors.attentionTint,
+    borderRadius: BondRadii.smAll,
+  );
+
+  /// The panel answers the two mention intents itself, which is what makes the
+  /// navigator's arrows work with nothing wired above. A key bound above the
+  /// panel takes the other door, [TranscriptJumps] — the same two methods either
+  /// way, so there is one implementation of "next mention" and two ways in.
+  late final Map<Type, Action<Intent>> _mentionActions = {
+    NextMentionIntent: CallbackAction<NextMentionIntent>(
+      onInvoke: (_) {
+        _stepMention(forward: true);
+        return null;
+      },
+    ),
+    PreviousMentionIntent: CallbackAction<PreviousMentionIntent>(
+      onInvoke: (_) {
+        _stepMention(forward: false);
+        return null;
+      },
+    ),
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    widget.jumps?._panel = this;
+  }
+
+  @override
+  void didUpdateWidget(ThreadDetailPanel old) {
+    super.didUpdateWidget(old);
+    if (old.jumps != widget.jumps) {
+      if (old.jumps?._panel == this) old.jumps?._panel = null;
+      widget.jumps?._panel = this;
+    }
+    // A different thread is a different walk: the stop the reader was on is a
+    // message this panel no longer draws. The keys go with it, or the map grows
+    // for every thread the reader opens in one session.
+    if (old.conversation.id != widget.conversation.id ||
+        old.conversation.source != widget.conversation.source) {
+      _mentionAt = null;
+      _flashTimer?.cancel();
+      _flashId = null;
+      _rowKeys.clear();
+      _unfoldRequests.clear();
+    }
+  }
+
+  @override
+  void dispose() {
+    if (widget.jumps?._panel == this) widget.jumps?._panel = null;
+    _flashTimer?.cancel();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  GlobalKey _rowKeyFor(String messageId) =>
+      _rowKeys.putIfAbsent(messageId, GlobalKey.new);
+
+  /// The ids of the messages that name the owner, in transcript order.
+  List<String> get _mentions => mentionIndexOf(widget.messages);
+
+  /// One step along that index, and the jump that follows it.
+  ///
+  /// Stops at the ends (see [stepMention]): a press at the last mention leaves
+  /// the reader where they are rather than sending them back to the top.
+  void _stepMention({required bool forward}) {
+    final next = stepMention(_mentions, _mentionAt, forward: forward);
+    if (next == null) return;
+    setState(() => _mentionAt = next);
+    unawaited(_jumpToMessage(next));
+  }
+
+  /// Put [messageId] on screen, open, and lit.
+  ///
+  /// Three things in one act, because a jump that did any two of them would
+  /// leave the reader looking at a folded row or at a row they cannot tell from
+  /// its neighbours:
+  ///
+  ///  1. the row is asked to unfold ([MessageRow.unfoldRequest]) and reports the
+  ///     unfold back through [ThreadDetailPanel.onFoldChanged], so the host's
+  ///     set remembers it if this panel is replaced and built again;
+  ///  2. the transcript scrolls to it, retrying for rows the list has not built
+  ///     yet (see [_jumpAttempts]);
+  ///  3. it wears [_flashTint] for [ThreadDetailPanel.flashDuration].
+  ///
+  /// Silent for a message this thread never loaded: the reason id on a
+  /// conversation and the `content_id` on a quote can both name a message
+  /// outside the window that was read, and a jump to nowhere must not throw
+  /// under a reader's finger.
+  Future<void> _jumpToMessage(String messageId) async {
+    if (!_isLoaded(messageId)) return;
+    final seq = ++_jumpSeq;
+    setState(() {
+      _unfoldRequests[messageId] = (_unfoldRequests[messageId] ?? 0) + 1;
+      _flashId = messageId;
+      // A jump lands on the transcript whichever tab the reader went looking at
+      // files from.
+      _tab = ThreadTab.messages;
+    });
+    _flashTimer?.cancel();
+    _flashTimer = Timer(ThreadDetailPanel.flashDuration, () {
+      if (mounted) setState(() => _flashId = null);
+    });
+
+    for (var attempt = 0; attempt < _jumpAttempts; attempt++) {
+      // The frame the setState above asked for, and after that the frame each
+      // scroll asks for: a row is only reachable once it has been built.
+      await SchedulerBinding.instance.endOfFrame;
+      if (!mounted || seq != _jumpSeq) return;
+      // The row's own context, not this State's, so it carries its own mounted
+      // check: the key is kept across builds and can be holding an element the
+      // last frame discarded.
+      final rowContext = _rowKeys[messageId]?.currentContext;
+      if (rowContext != null && rowContext.mounted) {
+        await Scrollable.ensureVisible(
+          rowContext,
+          alignment: _jumpAlignment,
+          // Instant, matching the hard scrolls that got us here: animating the
+          // last hop of a walk that teleported through the thread reads as a
+          // glitch rather than as movement.
+          duration: Duration.zero,
+        );
+        return;
+      }
+      if (!_scroll.hasClients) continue;
+      final position = _scroll.position;
+      final estimate = _estimatedOffsetFor(messageId, position);
+      if (estimate == null) return;
+      // Already as close as the estimate can put us and the row still is not
+      // built: another identical scroll would not build it either.
+      if ((estimate - position.pixels).abs() < 1) return;
+      position.jumpTo(estimate);
+    }
+  }
+
+  /// Whether [messageId] is one of the rows this panel drew.
+  bool _isLoaded(String messageId) =>
+      messageId.isNotEmpty &&
+      widget.messages.any((message) => message.id == messageId);
+
+  /// Roughly where [messageId] sits in the scrollable, read off the list's own
+  /// extent estimate.
+  ///
+  /// A fraction of the way down by MESSAGE INDEX, which is approximate twice
+  /// over: rows differ in height and the day dividers are extra children. Both
+  /// are why the caller retries rather than trusting one answer — and why the
+  /// estimate is re-read each lap, since the list refines its extent as more of
+  /// it is built.
+  double? _estimatedOffsetFor(String messageId, ScrollPosition position) {
+    final index = widget.messages.indexWhere((m) => m.id == messageId);
+    if (index < 0) return null;
+    final min = position.minScrollExtent;
+    final max = position.maxScrollExtent;
+    if (!min.isFinite || !max.isFinite || max <= min) return null;
+    if (widget.messages.length < 2) return min;
+    final fraction = index / (widget.messages.length - 1);
+    return min + (max - min) * fraction;
+  }
+
+  /// The navigator under the header, or nothing at all in a thread that names
+  /// the owner nowhere.
+  ///
+  /// Nothing rather than `@ You · 0`: a control that counts to zero is a control
+  /// the reader has to read before learning there is nothing to press. The
+  /// position is 1-based off the same index the walk steps along, so the words
+  /// and the walk cannot disagree.
+  Widget? _mentionStrip() {
+    final mentions = _mentions;
+    if (mentions.isEmpty) return null;
+    final at = _mentionAt == null ? -1 : mentions.indexOf(_mentionAt!);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        BondSpacing.s16,
+        BondSpacing.s8,
+        BondSpacing.s16,
+        0,
+      ),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: MentionNavigator(
+          count: mentions.length,
+          position: at < 0 ? null : at + 1,
+        ),
+      ),
+    );
+  }
+
+  /// What tapping the `Why:` line does: go to the message the verdict named.
+  ///
+  /// Null — and so an inert line — when the pipeline named no message, or named
+  /// one this read never loaded. Entry 8a's promise was that the reason says
+  /// WHICH message; this is the other half, and it is only offered where the app
+  /// can keep it.
+  VoidCallback? get _toReasonMessage {
+    final id = widget.conversation.needsYouReasonMessageId;
+    if (id == null || !_isLoaded(id)) return null;
+    return () => unawaited(_jumpToMessage(id));
+  }
 
   static String _stateLabel(ConversationState state) => switch (state) {
         ConversationState.needsReply => 'Needs reply',
@@ -359,6 +686,8 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
     // message syncs back.
     final lastOut = latestOutboundAt(widget.messages);
     final closed = widget.conversation.state != ConversationState.needsReply;
+    // One scan for the mentions too, and the same answer the navigator counts.
+    final mentions = _mentions.toSet();
 
     for (var i = 0; i < widget.messages.length; i++) {
       final message = widget.messages[i];
@@ -389,11 +718,15 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       // last message is what the thread is about — a transcript that opens with
       // its point folded away has answered the wrong question.
       final collapsible = header && standalone && !isLast;
+      final namesOwner = mentions.contains(message.id);
       final row = MessageRow(
         key: ValueKey(message.id),
         message: message,
         showHeader: header,
         openAsk: open,
+        namesOwner: namesOwner,
+        unfoldRequest: _unfoldRequests[message.id] ?? 0,
+        quoteTapFor: _quoteTapFor,
         // Only a line that is actually on screen gets a tap.
         onAskTap: open ? widget.onOpenReply : null,
         suggestion: suggestion,
@@ -403,10 +736,22 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
         // reason to scroll back, so neither ever starts hidden — and neither
         // does a run the reader already opened, which is what the host's set
         // remembers across a panel that was replaced and came back.
+        //
+        // A message that NAMES the owner is the same argument one step earlier:
+        // an @mention halfway up a fifty-message chat is why the thread is in
+        // Needs You, and a thread that opens with it folded to one muted line
+        // has hidden its own point. An answered ask still folds — `open` is
+        // false by then — but the marker stays, so the row is still findable.
+        //
+        // A pending jump counts too: a far row the list has not built yet only
+        // sees `unfoldRequest` move via didUpdateWidget, so a row FIRST built
+        // mid-jump must read the request here or the jump lands on a fold.
         initiallyCollapsed: collapsible &&
             !open &&
+            !namesOwner &&
             suggestion == null &&
-            !widget.unfolded.contains(message.id),
+            !widget.unfolded.contains(message.id) &&
+            !_unfoldRequests.containsKey(message.id),
         onFoldChanged: widget.onFoldChanged == null
             ? null
             : (collapsed) => widget.onFoldChanged!(message.id, collapsed),
@@ -419,10 +764,26 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       );
       // Only what is being ANSWERED wears the strip. There is nothing to reply
       // to on the user's own message, and nothing to draft an answer to either.
-      items.add(HoverActions(
+      final hovered = HoverActions(
         key: ValueKey('hover-${message.id}'),
         actions: message.inbound ? _hoverActionsFor(message) : const [],
         child: row,
+      );
+      // Two wrappers whose SHAPE never changes, which is the whole reason they
+      // are written this way: the [KeyedSubtree] carries the key a jump needs a
+      // context from (and adds no layout of its own), and the [DecoratedBox] is
+      // always there with an empty decoration when the row is not lit. A wrapper
+      // that came and went with the flash would take the row's element with it
+      // and lose the fold the jump had just opened.
+      items.add(KeyedSubtree(
+        key: _rowKeyFor(message.id),
+        child: DecoratedBox(
+          key: ThreadDetailPanel.flashKeyFor(message.id),
+          decoration: _flashId == message.id
+              ? _flashTint
+              : const BoxDecoration(),
+          child: hovered,
+        ),
       ));
       previous = message;
     }
@@ -441,6 +802,19 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       ));
     }
     return items;
+  }
+
+  /// What tapping the quote above a reply does: go to the message it quotes.
+  ///
+  /// The quoted message's id rides on the reference's `content_id` — the column
+  /// the Teams sync reuses for it, documented on [AttachmentRef.quotedSender] —
+  /// so the whole resolution is one lookup against the rows this panel drew. A
+  /// quote of a message older than the window that was read resolves to nothing,
+  /// and [QuoteBlock] draws a statement rather than a control that goes nowhere.
+  VoidCallback? _quoteTapFor(AttachmentRef quote) {
+    final quoted = quote.contentId;
+    if (quoted == null || !_isLoaded(quoted)) return null;
+    return () => unawaited(_jumpToMessage(quoted));
   }
 
   /// What the pointer offers on one inbound row. Empty when the host wired
@@ -527,7 +901,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
 
     // A height-filling bordered surface, not a shrink-wrapping card: the
     // message ListView below needs a bounded height to scroll in.
-    return Container(
+    final pane = Container(
       decoration: BoxDecoration(
         color: BondColors.surface,
         borderRadius: BondRadii.mdAll,
@@ -539,6 +913,9 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
         children: [
           _header(files, tab),
           const Divider(height: 1, color: BondColors.border),
+          // Above the ask and under the header: the ask says what the thread
+          // wants, and this says where in the thread it is wanted of you.
+          ?_mentionStrip(),
           if (showCta)
             Padding(
               padding: const EdgeInsets.fromLTRB(
@@ -568,6 +945,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
             NeedsYouWhyLine(
               reason: widget.conversation.needsYouReason,
               at: widget.conversation.needsYouReasonAt,
+              onTap: _toReasonMessage,
             ),
           // Under the banner, because the banner says what the thread wants and
           // this is the answer "nothing, and here is why" — the one reply that
@@ -588,6 +966,12 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
                         maxWidth: _maxContentWidth,
                       ),
                       child: ListView(
+                        // A jump drives this directly when the row it wants has
+                        // not been built yet and so has no context to make
+                        // visible; see [_jumpToMessage]. It coexists with the
+                        // key below — the bucket restores an offset on build and
+                        // the controller moves one after it.
+                        controller: _scroll,
                         // The offset is written to the nearest [PageStorage]
                         // bucket under this key when a scroll ends and read
                         // back when the list is built again, so a transcript
@@ -615,6 +999,13 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
         ],
       ),
     );
+
+    // Its own `Actions` for the two mention intents: a press on the navigator's
+    // arrows is dispatched from INSIDE this subtree and is answered here, which
+    // is what makes the control work in a host that binds no keys at all. A key
+    // bound above the panel arrives the other way, through [TranscriptJumps],
+    // and lands in the same two methods — one walk, two doors onto it.
+    return Actions(actions: _mentionActions, child: pane);
   }
 
   /// Everything this thread carried, newest first, in the same cards the
@@ -731,10 +1122,20 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
     );
     final why = widget.onWhy;
     final newest = _newestInbound;
-    final onTap = (why != null && newest != null)
+    final opens = (why != null && newest != null)
         ? () => why(newest)
         : widget.onOpenReply;
-    if (onTap == null) return alert;
+    if (opens == null) return alert;
+    // The transcript jump RIDES ALONG on whatever the banner already did, and is
+    // never a tap of its own: a pane with nothing to open stays the statement it
+    // shipped as. One press now opens the explanation and leaves the reader
+    // standing on the message the words were read off.
+    final onTap = newest == null
+        ? opens
+        : () {
+            opens();
+            unawaited(_jumpToMessage(newest.id));
+          };
     return Material(
       type: MaterialType.transparency,
       child: InkWell(
@@ -838,6 +1239,48 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
   /// The storyline half is one item that opens a pane. Listing every storyline
   /// in the menu would put the whole choice in a popup, and the house rule is a
   /// screen with a way back.
+  /// Whether the person this thread is waiting on writes from outside the
+  /// owner's domains — the newest inbound message's sender, and nobody else's,
+  /// which is [Conversation.isExternalTo]'s rule.
+  ///
+  /// The stored answer first: `latestInboundFrom` comes through the same kept
+  /// filter the list row and `is:external` read, so a bot's `noreply@` that
+  /// the pipeline gated cannot make the header say External while the row
+  /// says nothing. The transcript is only the fallback for a row loaded
+  /// before the column existed, where its unfiltered newest inbound is still
+  /// a better answer than none.
+  bool get _external => isExternalAddress(
+      widget.conversation.latestInboundFrom ?? _newestInbound?.fromAddress,
+      widget.ownerDomains);
+
+  /// The state chip, and beside it the one fact about the thread that is not a
+  /// state.
+  ///
+  /// `External` stands where the tenant's injected "⚠ External Email — Use
+  /// caution with links and attachments" banner used to be read: Phase 1 strips
+  /// that line out of every body at ingest, so the warning has to exist
+  /// somewhere the reader looks, and once per thread in the header is both
+  /// quieter and harder to miss than once per message inside the prose.
+  Widget _chips() {
+    final state = BondChip.semantic(
+      _stateLabel(widget.conversation.state),
+      _stateTone(widget.conversation.state),
+    );
+    if (!_external) return state;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        state,
+        const SizedBox(width: BondSpacing.s8),
+        const BondChip(
+          key: ThreadDetailPanel.externalChipKey,
+          label: 'External',
+          tone: BondTone.external,
+        ),
+      ],
+    );
+  }
+
   Widget _header(List<AttachmentRef> files, ThreadTab tab) {
     final participants = widget.conversation.participants
         .map((p) => p.display)
@@ -878,10 +1321,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       ],
       photos: widget.photos,
       onPeopleTap: widget.onPeople,
-      stateChip: BondChip.semantic(
-        _stateLabel(widget.conversation.state),
-        _stateTone(widget.conversation.state),
-      ),
+      stateChip: _chips(),
       onBack: widget.onBack,
       actions: [
         // First, and before Message: what this room READS is a standing fact

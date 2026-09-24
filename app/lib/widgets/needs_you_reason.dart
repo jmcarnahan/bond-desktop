@@ -23,13 +23,13 @@ import 'time_format.dart';
 ///
 ///  * `teams_direct` — the deterministic floor's token, and the one token the
 ///    needs-you pass writes instead of a sentence. Translated.
-///  * `label_rule:<name>` — written by a label rule, and the words after the
-///    colon are the owner's own label name, so the name IS the explanation.
-///    Today this arm is DEFENSIVE: a rule writes its reason with verdict 0
-///    and the subselect above reads only verdict 1, so no current caller can
-///    hand one in. It stays because 12i's "shown despite rule X" note is
-///    exactly this token surfacing on a raised thread, and the map is the one
-///    place those words are minted.
+///  * `label_rule:<name>` — a thread this token reaches the reader on is one
+///    the floor RAISED past the owner's rule (`needs_you_handler` writes it
+///    with `despite_rule` on exactly that path; the verdict-0 write a rule
+///    makes never surfaces, since the subselect reads only verdict 1). So the
+///    honest words are "shown despite `<name>`": the bare label name alone
+///    would read as the reason the thread needs you — the opposite of what
+///    happened.
 ///  * anything else — the model's `evidence` line, already a sentence in the
 ///    judge's own words. Passed through with its whitespace collapsed and
 ///    clamped to [maxChars]; paraphrasing it would be the app putting words in
@@ -44,8 +44,8 @@ String? needsYouReasonWords(String? reason, {int maxChars = 120}) {
   if (text.startsWith(_labelRulePrefix)) {
     final name = text.substring(_labelRulePrefix.length).trim();
     // A rule with no name behind it explains nothing a reader can act on, so
-    // it reads as nothing rather than as a bare "Label rule".
-    return name.isEmpty ? null : name;
+    // it reads as nothing rather than as a bare "Shown despite".
+    return name.isEmpty ? null : 'Shown despite $name';
   }
   final collapsed = text.replaceAll(RegExp(r'\s+'), ' ');
   if (collapsed.length <= maxChars) return collapsed;
@@ -83,10 +83,13 @@ List<Widget> needsYouReasonChips(Conversation c, {int maxChars = 36}) {
 /// `Why: <reason> · <when>` — the line under a thread's header that says which
 /// message made it ask for you, and when that message arrived.
 ///
-/// Inert text: naming the message is this phase's promise, and scrolling the
-/// transcript to it is the next one. The stamp is [formatTimestamp]'s, the same
-/// format the message bubbles below carry, so the reader can find the message
-/// by eye until the tap works.
+/// With [onTap] wired the line is also the way THERE: it scrolls the transcript
+/// to that message and flashes it, which is the half of entry 8a naming the
+/// message could only promise. Without it the line is the statement it shipped
+/// as — a host whose thread never loaded the message the reason came from has
+/// nowhere to send the tap, and the stamp is still the reader's own way of
+/// finding it, in [formatTimestamp]'s format, the same one the message bubbles
+/// below carry.
 class NeedsYouWhyLine extends StatelessWidget {
   /// The stored slug or sentence; see [needsYouReasonWords].
   final String? reason;
@@ -95,13 +98,31 @@ class NeedsYouWhyLine extends StatelessWidget {
   /// read that did not ask for it — drops the stamp and keeps the reason.
   final String? at;
 
-  const NeedsYouWhyLine({super.key, required this.reason, this.at});
+  /// Jump to the message the reason came from. Resolved by the host from
+  /// `needs_you_reason_message_id`, so this widget never learns which message
+  /// that is. Null leaves the line inert.
+  final VoidCallback? onTap;
+
+  const NeedsYouWhyLine({
+    super.key,
+    required this.reason,
+    this.at,
+    this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
     final words = needsYouReasonWords(reason);
     if (words == null) return const SizedBox.shrink();
     final stamp = formatTimestamp(at);
+    final line = Text(
+      stamp == null ? 'Why: $words' : 'Why: $words · $stamp',
+      key: needsYouWhyLineKey,
+      style: BondType.small.copyWith(color: BondColors.inkMuted),
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+    );
+    final tap = onTap;
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         BondSpacing.s16,
@@ -109,13 +130,19 @@ class NeedsYouWhyLine extends StatelessWidget {
         BondSpacing.s16,
         0,
       ),
-      child: Text(
-        stamp == null ? 'Why: $words' : 'Why: $words · $stamp',
-        key: needsYouWhyLineKey,
-        style: BondType.small.copyWith(color: BondColors.inkMuted),
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-      ),
+      // Its own transparent Material: ink paints on the nearest Material
+      // ANCESTOR, which sits behind the pane's opaque surface — the same trap
+      // `thread_detail_panel._ctaBanner` documents.
+      child: tap == null
+          ? line
+          : Material(
+              type: MaterialType.transparency,
+              child: InkWell(
+                onTap: tap,
+                borderRadius: BondRadii.smAll,
+                child: line,
+              ),
+            ),
     );
   }
 }

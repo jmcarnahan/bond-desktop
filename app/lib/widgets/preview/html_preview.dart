@@ -41,6 +41,11 @@ class HtmlPreview extends StatelessWidget {
   /// caution.
   final VoidCallback? onOpenInBrowser;
 
+  /// Whether the message this file came with was sent from outside the owner's
+  /// own domains. False — the default — keeps the sentence this card has always
+  /// said; true swaps it for [cautionExternal].
+  final bool externalSender;
+
   const HtmlPreview({
     super.key,
     required this.glyph,
@@ -48,6 +53,7 @@ class HtmlPreview extends StatelessWidget {
     this.snapshot,
     this.name,
     this.onOpenInBrowser,
+    this.externalSender = false,
   });
 
   static const Key cardKey = ValueKey('html-preview-card');
@@ -65,6 +71,23 @@ class HtmlPreview extends StatelessWidget {
   static const String caution =
       'Opens in your browser — be careful with files from people you '
       'do not know.';
+
+  /// The same sentence when the sender is outside the owner's organisation.
+  ///
+  /// Stronger in the one way that helps: it names the fact the reader would have
+  /// had to work out for themselves, and it names the thing an attacker
+  /// actually wants, which is a password typed into a page that looks like the
+  /// one they use every day. "Be careful" is advice; "do not sign in" is an
+  /// instruction, and this is the only place in the app where a file somebody
+  /// outside the tenant chose is about to be handed to a real browser.
+  static const String cautionExternal =
+      'This page came from outside your organisation. It opens in your '
+      'browser — do not sign in to anything it asks you to.';
+
+  /// Which sentence this card is showing. A getter rather than a literal at the
+  /// draw site so a test can ask for the string it expects by the same rule the
+  /// widget picks it by.
+  String get cautionText => externalSender ? cautionExternal : caution;
 
   /// How tall the rendering gets. The same ceiling `_documentBody` gives
   /// OneDrive's picture, so a page and a Word file read as the same kind of
@@ -176,9 +199,16 @@ class HtmlPreview extends StatelessWidget {
               ),
               const SizedBox(height: 2),
               Text(
-                caution,
+                cautionText,
                 key: cautionKey,
-                style: BondType.caption.copyWith(color: BondColors.inkMuted),
+                // The external sentence is the one line on this card that is
+                // asking to be read, so it gets ink rather than the muted grey
+                // the ordinary caution wears.
+                style: BondType.caption.copyWith(
+                  color: externalSender
+                      ? BondColors.onExternalTint
+                      : BondColors.inkMuted,
+                ),
               ),
             ],
           ),

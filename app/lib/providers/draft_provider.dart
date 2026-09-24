@@ -9,6 +9,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../data/message_store.dart';
 import '../models/draft_request.dart';
 import '../models/message_models.dart' show ConversationState, Message;
+import '../models/person.dart' show Person;
 import '../services/ai_worker.dart';
 import '../services/backend/auth_session.dart';
 import '../services/backend/backend_types.dart';
@@ -54,6 +55,22 @@ import 'prefs_provider.dart' show appPrefsProvider;
 /// replaces on the next drain, matched on the internet message id — the whole
 /// contract is in `mail_echo.dart`. The user watched the reply leave; it is on
 /// screen from that moment, and it survives a restart.
+
+/// Added people this send cannot honour, and the sentence the owner reads.
+///
+/// Thrown and caught inside this file only, one frame apart: it exists so the
+/// refusal is written where the addresses are resolved and reported where the
+/// error line is set, without that resolution returning a nullable pair every
+/// caller has to unpack.
+@immutable
+class _UnaddressableRecipients implements Exception {
+  const _UnaddressableRecipients(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
 
 /// Which conversation a draft belongs to.
 ///
@@ -267,9 +284,28 @@ class DraftState {
   /// wants the reply rather than a link out.
   final LinkRun? openIn;
 
+  /// The people the owner has added to this reply, newest last, and not yet on
+  /// any draft: they are applied inside [DraftNotifier.send] and cleared when it
+  /// succeeds.
+  ///
+  /// Held HERE rather than in the composer because the composer is rebuilt with
+  /// a fresh key on every staging and every send epoch, and somebody the owner
+  /// picked must not be lost to a rebuild they did not cause.
+  final List<Person> addedRecipients;
+
+  /// Whether this connection can put them on the reply at all —
+  /// `MailBackendRecipients.canEditDraftRecipients`, and mail only.
+  ///
+  /// False by default, which is the reading that offers nothing: a state built
+  /// before [DraftNotifier.load] has asked draws no picker, and a chat draws
+  /// none ever.
+  final bool canEditRecipients;
+
   const DraftState({
     this.draft,
     this.threadDrafts = const {},
+    this.addedRecipients = const [],
+    this.canEditRecipients = false,
     this.generating = false,
     this.improving = false,
     this.sending = false,
@@ -375,6 +411,8 @@ class DraftState {
   DraftState copyWith({
     Object? draft = _unset,
     Map<String, Map<String, Object?>>? threadDrafts,
+    List<Person>? addedRecipients,
+    bool? canEditRecipients,
     bool? generating,
     bool? improving,
     bool? sending,
@@ -392,6 +430,8 @@ class DraftState {
             ? this.draft
             : draft as Map<String, Object?>?,
         threadDrafts: threadDrafts ?? this.threadDrafts,
+        addedRecipients: addedRecipients ?? this.addedRecipients,
+        canEditRecipients: canEditRecipients ?? this.canEditRecipients,
         generating: generating ?? this.generating,
         improving: improving ?? this.improving,
         sending: sending ?? this.sending,
@@ -624,7 +664,15 @@ class DraftNotifier extends StateNotifier<DraftState> {
 
     final capability = await _capability();
     if (!mounted) return;
-    state = state.copyWith(capability: capability);
+    state = state.copyWith(
+      capability: capability,
+      // Mail AND a backend that can amend a draft's recipients. The source test
+      // is where the Teams decision lives: "adding somebody" to a chat would
+      // mean a real mention entity or a new group chat, neither of which is on
+      // this app's send path, and a plain-text name that notifies nobody reads
+      // to the sender as though somebody was told.
+      canEditRecipients: _source == 'email' && _mail.canEditDraftRecipients,
+    );
 
     final judgement = await _replyJudgement();
     if (!mounted) return;
@@ -983,6 +1031,56 @@ class DraftNotifier extends StateNotifier<DraftState> {
     state = state.copyWith(pending: null);
   }
 
+  /// The addresses to Cc, or a throw naming what stopped the send.
+  ///
+  /// It REFUSES rather than sending what it can, in both cases. A reply that
+  /// went out without somebody the owner put on it is a reply they believe was
+  /// copied to a person who never saw it, and neither the send nor the thread
+  /// afterwards would say otherwise — so the send stops, the chips stay on
+  /// screen, and the sentence says which person and why.
+  List<String> _addedAddresses() {
+    final people = state.addedRecipients;
+    if (people.isEmpty) return const [];
+    if (!state.canEditRecipients) {
+      throw const _UnaddressableRecipients(
+        'This connection cannot add people to a reply. Remove them to send '
+        'this to the sender only, or reply from Outlook.',
+      );
+    }
+    final addresses = <String>[];
+    final nameless = <String>[];
+    for (final person in people) {
+      final address = person.address.trim();
+      if (address.isEmpty) {
+        nameless.add(
+          person.displayName.isEmpty ? 'somebody' : person.displayName,
+        );
+        continue;
+      }
+      addresses.add(address);
+    }
+    if (nameless.isNotEmpty) {
+      throw _UnaddressableRecipients(
+        'No mail address is known for ${nameless.join(', ')}. '
+        'Remove them to send this reply.',
+      );
+    }
+    return addresses;
+  }
+
+  /// Records who the owner has added to this reply. Nothing leaves the machine:
+  /// the additions are applied inside [send], on the draft the server builds.
+  ///
+  /// Refused when this connection cannot apply them, which is belt to the
+  /// composer's braces — it draws no picker where [DraftState.canEditRecipients]
+  /// is false. People held here that the send could not apply would be dropped
+  /// silently between the draft and the wire, and that is the one failure the
+  /// owner has no way to see.
+  void setAddedRecipients(List<Person> people) {
+    if (!state.canEditRecipients && people.isNotEmpty) return;
+    state = state.copyWith(addedRecipients: List.unmodifiable(people));
+  }
+
   /// Sends, saves, or copies [body] — whichever this grant allows.
   ///
   /// **The only path in this app that puts mail in front of another person.**
@@ -1004,7 +1102,20 @@ class DraftNotifier extends StateNotifier<DraftState> {
       // Nothing left the machine, so nothing is in flight. Cleared explicitly
       // because a queued send that lands on this rung set the bubble on its
       // way here, and a clipboard copy must not leave one hanging.
-      if (mounted) state = state.copyWith(inFlightBody: null);
+      //
+      // People the owner added are said out loud rather than silently not
+      // carried: a clipboard has no recipients, so whoever pastes this has to
+      // add them by hand. The copy still happens — refusing it would cost them
+      // the text as well.
+      if (mounted) {
+        state = state.copyWith(
+          inFlightBody: null,
+          error: state.addedRecipients.isEmpty
+              ? null
+              : 'Copied. The people you added are not carried on a copy — '
+                  'add them wherever you paste this.',
+        );
+      }
       return SendOutcome.copied;
     }
 
@@ -1029,6 +1140,16 @@ class DraftNotifier extends StateNotifier<DraftState> {
       return SendOutcome.failed;
     }
 
+    // Resolved BEFORE anything is created, so a person who cannot be addressed
+    // stops the send while there is still nothing on the server to clean up.
+    final List<String> cc;
+    try {
+      cc = _addedAddresses();
+    } on _UnaddressableRecipients catch (e) {
+      state = state.copyWith(error: e.message);
+      return SendOutcome.failed;
+    }
+
     state = state.copyWith(sending: true, error: null);
     try {
       final draft = await _mail.createReplyDraft(target);
@@ -1038,6 +1159,18 @@ class DraftNotifier extends StateNotifier<DraftState> {
         throw const GraphMailException(
           'Microsoft Graph created a draft with no id.',
         );
+      }
+      // Between the draft and its body, and Cc rather than To: the server's own
+      // `/createReply` owns the To line — the person being answered is on it —
+      // and everybody the owner added is a copy to somebody, not a redirection
+      // of the reply. The call ADDS to the lines the draft already has; see
+      // `DraftRecipientsEditor.updateDraftRecipients`.
+      //
+      // Before the body on purpose. It is the call most likely to be refused,
+      // and a refusal here has to reach the owner as a send that did not happen
+      // rather than as a reply already on its way without them.
+      if (cc.isNotEmpty) {
+        await _mail.updateDraftRecipients(draftId, cc: cc);
       }
       await _mail.updateDraftBody(draftId, text);
 
@@ -1113,6 +1246,11 @@ class DraftNotifier extends StateNotifier<DraftState> {
       state = state.copyWith(
         sending: false,
         sendEpoch: state.sendEpoch + 1,
+        // They are on the mail that just went out, so they are not pending on
+        // anything any more. Cleared in the same write as the epoch, which is
+        // what rebuilds the composer: chips left behind would read as people
+        // waiting to be added to the NEXT reply.
+        addedRecipients: const [],
       );
       // The list, last: everything this thread needed has already been
       // written, and the echo above is what the transcript shows until the

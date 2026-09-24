@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/draft_request.dart';
+import 'package:bond_inbox/models/person.dart' show Person;
 import 'package:bond_inbox/providers/draft_provider.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
@@ -82,6 +83,23 @@ class RecordingMail extends GraphMail {
     final error = failure;
     if (error != null) throw error;
     return reply;
+  }
+
+  /// The Cc lines the send asked for, one entry per call. Overridden rather
+  /// than inherited: [GraphMail] implements it against the real endpoint, and a
+  /// subclass that left it alone would dial Microsoft from this file.
+  final List<List<String>> ccLines = [];
+
+  @override
+  Future<void> updateDraftRecipients(
+    String draftId, {
+    List<String> to = const [],
+    List<String> cc = const [],
+  }) async {
+    calls.add('recipients:$draftId');
+    ccLines.add([...cc]);
+    final error = failure;
+    if (error != null) throw error;
   }
 
   @override
@@ -273,6 +291,66 @@ void main() {
         'send:graph-draft-1',
       ]);
       expect(mail.bodies, ['Friday works. — Jo']);
+    });
+
+    test('adds people between the draft and its body', () async {
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+      notifier.setAddedRecipients([
+        const Person(
+          id: 'user-dana',
+          displayName: 'Dana Okoye',
+          mail: 'dana@example.com',
+        ),
+      ]);
+
+      final outcome = await notifier.send('Friday works. — Jo');
+
+      expect(notifier.state.error, isNull);
+      expect(outcome, SendOutcome.sent);
+      // Before the body on purpose: a refused recipients call has to read as a
+      // send that did not happen, not as a reply already gone without them.
+      expect(mail.calls, [
+        'createReply:inbound-1',
+        'recipients:graph-draft-1',
+        'updateBody:graph-draft-1',
+        'send:graph-draft-1',
+      ]);
+      // Cc, not To: the server's own reply owns the To line.
+      expect(mail.ccLines, [
+        ['dana@example.com']
+      ]);
+      // On the mail that went out, so no longer pending on anything.
+      expect(notifier.state.addedRecipients, isEmpty);
+    });
+
+    test('and leaves the call out when nobody was added', () async {
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.send('Friday works.');
+
+      expect(mail.calls, isNot(contains('recipients:graph-draft-1')));
+    });
+
+    test('a person with no address stops the send before anything is created',
+        () async {
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+      notifier.setAddedRecipients([
+        const Person(id: 'user-noel', displayName: 'Noel Pike'),
+      ]);
+
+      final outcome = await notifier.send('Friday works.');
+
+      expect(outcome, SendOutcome.failed);
+      expect(mail.calls, isEmpty);
+      expect(notifier.state.error, contains('Noel Pike'));
+      // Still on screen, so they can be removed and the reply sent.
+      expect(notifier.state.addedRecipients, hasLength(1));
     });
 
     test('sends what it was handed, not what was stored', () async {

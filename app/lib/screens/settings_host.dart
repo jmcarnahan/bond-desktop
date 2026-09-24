@@ -238,6 +238,9 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       storylineNewestFirst: prefs.storylineNewestFirst,
       onStorylineNewestFirstChanged: (on) =>
           unawaited(notifier.setStorylineNewestFirst(on)),
+      replySendMarksDone: prefs.replySendMarksDone,
+      onReplySendMarksDoneChanged: (on) =>
+          unawaited(notifier.setReplySendMarksDone(on)),
       // The owner's label vocabulary. The list is state, the writers are the
       // notifier's own — rename answers the bool the inline refusal reads,
       // and the other two say their failures through [labelsError].

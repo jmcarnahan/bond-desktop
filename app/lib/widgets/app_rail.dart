@@ -486,6 +486,11 @@ class AppRail extends StatefulWidget {
   /// hide their own work by mistyping a name.
   final String find;
 
+  /// What `is:external` in [find] measures against — see
+  /// [conversationMatches]. Empty, the default, makes that facet match
+  /// nothing, which is what it matched before it existed.
+  final Set<String> ownerDomains;
+
   /// Whether to draw only rows with something unread on them. Threads and
   /// rooms answer to it; storylines do not — a storyline is not read or
   /// unread, and hiding one under a filter about mail would make the toggle
@@ -553,6 +558,7 @@ class AppRail extends StatefulWidget {
     this.selectedRoomKey,
     this.photos,
     this.find = '',
+    this.ownerDomains = const {},
     this.unreadOnly = false,
     this.pendingDraftCount = 0,
     this.filesKind = FilesKind.all,
@@ -671,7 +677,8 @@ class _AppRailState extends State<AppRail> {
     final needle = normalizeFind(widget.find);
     final matching = [
       for (final c in needsYou)
-        if (conversationMatches(c, needle) &&
+        if (conversationMatches(c, needle,
+                ownerDomains: widget.ownerDomains) &&
             (!widget.unreadOnly || c.hasUnread))
           c,
     ];

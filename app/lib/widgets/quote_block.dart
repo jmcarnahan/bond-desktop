@@ -14,10 +14,11 @@ import 'attachment_format.dart' show attachmentKey;
 /// rule, who said it, and enough of what they said to recognise the turn.
 ///
 /// Two lines of snippet and no more, because the quoted message is somewhere
-/// else on this same screen. The block is a STATEMENT this round — no tap, no
-/// hover, no cursor: jumping to the quoted message (and highlighting it) is
-/// Phase 5's, and a control that looked tappable and did nothing would be the
-/// dead end this replaced.
+/// else on this same screen — and [onTap] is how the reader gets there: the
+/// block scrolls the transcript to the message it quotes and flashes it. Null
+/// leaves it the statement it shipped as, no tap and no hover, which is what a
+/// host whose thread never loaded the quoted message must pass: a control that
+/// looks tappable and goes nowhere would be the dead end this block replaced.
 ///
 /// Draws nothing at all when Graph sent a reference with neither a sender nor a
 /// snippet in it: an empty rule says less than the words underneath it.
@@ -27,7 +28,12 @@ class QuoteBlock extends StatelessWidget {
   /// the model.
   final AttachmentRef attachment;
 
-  const QuoteBlock({super.key, required this.attachment});
+  /// Jump to the message this quotes. Resolved by the host from the reference's
+  /// `content_id` — see `thread_detail_panel.dart` — so this widget neither
+  /// knows nor asks which message that is.
+  final VoidCallback? onTap;
+
+  const QuoteBlock({super.key, required this.attachment, this.onTap});
 
   /// The key the transcript builds this under. Keyed by the reference itself,
   /// like every other attachment widget: a re-list must not move it.
@@ -46,7 +52,7 @@ class QuoteBlock extends StatelessWidget {
 
     return Padding(
       padding: const EdgeInsets.only(bottom: BondSpacing.s8),
-      child: Container(
+      child: _tappable(Container(
         decoration: const BoxDecoration(
           border: Border(
             left: BorderSide(color: BondColors.border, width: 3),
@@ -80,6 +86,25 @@ class QuoteBlock extends StatelessWidget {
               ),
           ],
         ),
+      )),
+    );
+  }
+
+  /// The block wrapped in its tap, or handed straight back when there is none.
+  ///
+  /// Its own transparent Material, because ink paints on the nearest Material
+  /// ANCESTOR — which here is behind the pane's opaque surface, where no hover
+  /// could ever show. The same trap `message_row._askLine` and
+  /// `thread_detail_panel._ctaBanner` document.
+  Widget _tappable(Widget child) {
+    final tap = onTap;
+    if (tap == null) return child;
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: tap,
+        borderRadius: BondRadii.smAll,
+        child: child,
       ),
     );
   }

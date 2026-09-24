@@ -28,7 +28,7 @@ class GraphMailException implements Exception {
   String toString() => message;
 }
 
-class GraphMail implements MailBackend {
+class GraphMail implements MailBackend, DraftRecipientsEditor {
   static const String _base = 'https://graph.microsoft.com/v1.0';
 
   /// Tier one of the two-tier fetch: enough to list, sort, and thread a
@@ -203,11 +203,13 @@ class GraphMail implements MailBackend {
 
   // ── Drafts and sending ───────────────────────────────────────────────
   //
-  // Three calls, in the order the send flow makes them: create the reply
-  // shell, fill in its body, send it. Graph builds the reply itself, which is
-  // the whole reason it is done this way — the recipients, the subject, the
-  // In-Reply-To and References headers and the quoted thread all come from the
-  // message being replied to, and none of them are this app's to reconstruct.
+  // In the order the send flow makes them: create the reply shell, add anybody
+  // the owner asked for, fill in its body, send it. Graph builds the reply
+  // itself, which is the whole reason it is done this way — the recipients, the
+  // subject, the In-Reply-To and References headers and the quoted thread all
+  // come from the message being replied to, and none of them are this app's to
+  // reconstruct. Which is also why the recipients call ADDS rather than states:
+  // it is amending a set Graph owns.
 
   /// Creates a draft reply to [messageId] in the user's Drafts folder.
   ///
@@ -307,6 +309,104 @@ class GraphMail implements MailBackend {
     if (response.statusCode != 200) {
       throw _describe(response, 'Could not save the draft to Microsoft Graph');
     }
+  }
+
+  /// Adds people to a draft's To and Cc lines.
+  ///
+  /// READ, MERGE, PATCH — and the read is the whole point of it. A PATCH of
+  /// `ccRecipients` REPLACES that line, and the base set is the server's:
+  /// `/createReply` put the person being answered on the To line and this app
+  /// never learned who that was. So the draft's own lines come back first and
+  /// the additions are merged onto them; whoever the reply was already going to
+  /// cannot be lost by somebody being added to it.
+  ///
+  /// A line with nothing to add to it is NOT in the body at all. Two rules meet
+  /// there: an empty array is Graph's instruction to CLEAR a line (the reason
+  /// [createDraft] omits an empty Cc), and re-sending a line unchanged would be
+  /// this app restating a recipient set it does not own.
+  ///
+  /// Addresses are deduplicated by their lowercased form, across the base set
+  /// and the additions both: a person already on the reply stays exactly as the
+  /// server spelled them, name and all, rather than being appended a second
+  /// time as a bare address.
+  @override
+  Future<void> updateDraftRecipients(
+    String draftId, {
+    List<String> to = const [],
+    List<String> cc = const [],
+  }) async {
+    if (to.isEmpty && cc.isEmpty) return;
+    final id = Uri.encodeComponent(draftId);
+
+    final read = await _request(
+      'GET',
+      Uri.parse('$_base/me/messages/$id?\$select=$_recipientsSelect'),
+    );
+    if (read.statusCode != 200) {
+      throw _describe(
+        read,
+        'Microsoft Graph could not read who the reply was going to',
+      );
+    }
+    final draft = _decodeObject(read);
+
+    final body = <String, Object?>{
+      if (to.isNotEmpty)
+        'toRecipients': _mergedRecipients(draft['toRecipients'], to),
+      if (cc.isNotEmpty)
+        'ccRecipients': _mergedRecipients(draft['ccRecipients'], cc),
+    };
+
+    final response = await _request(
+      'PATCH',
+      Uri.parse('$_base/me/messages/$id'),
+      jsonBody: body,
+    );
+    if (response.statusCode != 200) {
+      throw _describe(
+        response,
+        'Could not add people to the reply in Microsoft Graph',
+      );
+    }
+  }
+
+  /// Just the two lines [updateDraftRecipients] merges onto.
+  static const String _recipientsSelect = 'toRecipients,ccRecipients';
+
+  /// [base] as Graph sent it, plus each of [added] that is not already there.
+  ///
+  /// Base entries are copied through with their `name`, which is the display
+  /// name Graph resolved; an addition carries an address alone, because an
+  /// address is all this app knows it can deliver to and Graph resolves the
+  /// name itself.
+  static List<Map<String, Object?>> _mergedRecipients(
+    Object? base,
+    List<String> added,
+  ) {
+    final entries = <Map<String, Object?>>[];
+    final seen = <String>{};
+    for (final entry in base is List ? base : const []) {
+      if (entry is! Map) continue;
+      final email = entry['emailAddress'];
+      if (email is! Map) continue;
+      final address = (email['address'] as String? ?? '').trim();
+      if (address.isEmpty || !seen.add(address.toLowerCase())) continue;
+      final name = email['name'];
+      entries.add({
+        'emailAddress': {
+          if (name is String && name.isNotEmpty) 'name': name,
+          'address': address,
+        },
+      });
+    }
+    for (final address in added) {
+      final trimmed = address.trim();
+      if (trimmed.isEmpty || !seen.add(trimmed.toLowerCase())) continue;
+      entries.add({
+        'emailAddress': {'address': trimmed},
+      });
+    }
+    return entries;
   }
 
   /// Sends an existing draft and answers with what went out. Graph's own

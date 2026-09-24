@@ -34,9 +34,17 @@ String normalizeFind(String raw) => raw.trim().toLowerCase();
 /// facet would be a box nobody could trust with an ordinary sentence. There is
 /// no error channel here to explain what happened.
 ///
-/// `is:external` is deliberately not in the switch and deliberately not
-/// rejected either: it lands as text until the external-sender signal it needs
-/// exists, at which point it becomes a facet with nothing else to change.
+/// `is:external` is the one facet that needs something from OUTSIDE the row it
+/// is asked about — whose domains are the owner's — and it takes it as data
+/// rather than reaching for it: [conversationMatchesQuery] grows an
+/// `ownerDomains` argument and this file still performs no I/O and holds no
+/// address of its own. A caller that passes none narrows to nothing, which is
+/// the same answer `Conversation.isExternalTo` gives for the same reason.
+///
+/// There is NO `-is:external`, and that is a decision rather than an omission:
+/// `-label:` is the only negation this grammar has, `is:dismissed` has never
+/// had one, and one `is:` value that could be negated while the other could not
+/// would read as a bug in whichever one the reader tried second.
 @immutable
 class FindQuery {
   /// The words left once the facets have been lifted out, normalised. The whole
@@ -65,6 +73,11 @@ class FindQuery {
   /// paperclip draws, so the facet agrees with what the reader can see.
   final bool attachmentsOnly;
 
+  /// `is:external` — the thread's latest inbound sender is outside the owner's
+  /// domains, the same question the row's External chip answers, so the facet
+  /// and the mark can never disagree about a thread.
+  final bool externalOnly;
+
   const FindQuery({
     this.text = '',
     this.labels = const [],
@@ -72,6 +85,7 @@ class FindQuery {
     this.senders = const [],
     this.dismissedOnly = false,
     this.attachmentsOnly = false,
+    this.externalOnly = false,
   });
 
   /// Whether this query asks anything a STORYLINE or a person room could not
@@ -83,7 +97,8 @@ class FindQuery {
       withoutLabels.isNotEmpty ||
       senders.isNotEmpty ||
       dismissedOnly ||
-      attachmentsOnly;
+      attachmentsOnly ||
+      externalOnly;
 
   /// Reads a needle. Never throws, and never refuses one.
   ///
@@ -103,6 +118,7 @@ class FindQuery {
     final senders = <String>[];
     var dismissedOnly = false;
     var attachmentsOnly = false;
+    var externalOnly = false;
     final words = <String>[];
 
     for (final token in _tokenise(needle)) {
@@ -128,6 +144,10 @@ class FindQuery {
                 dismissedOnly = true;
                 continue;
               }
+              if (value == 'external') {
+                externalOnly = true;
+                continue;
+              }
             case 'has':
               if (const {'attachment', 'attachments', 'file', 'files'}
                   .contains(value)) {
@@ -147,6 +167,7 @@ class FindQuery {
       senders: senders,
       dismissedOnly: dismissedOnly,
       attachmentsOnly: attachmentsOnly,
+      externalOnly: externalOnly,
     );
     // Nothing was a facet after all, so the needle is the needle — whitespace,
     // quotes and every colon exactly as they were typed.
@@ -197,8 +218,19 @@ List<String> _tokenise(String raw) {
 /// parses per call, which a needle with no colon in it makes almost free; a
 /// caller with a query already in hand should reach for
 /// [conversationMatchesQuery] instead.
-bool conversationMatches(Conversation c, String find) =>
-    conversationMatchesQuery(c, FindQuery.parse(find));
+///
+/// [ownerDomains] is only ever read by `is:external`. A caller that passes none
+/// still gets every other facet exactly as it was.
+bool conversationMatches(
+  Conversation c,
+  String find, {
+  Set<String> ownerDomains = const {},
+}) =>
+    conversationMatchesQuery(
+      c,
+      FindQuery.parse(find),
+      ownerDomains: ownerDomains,
+    );
 
 /// The same question with the needle already read.
 ///
@@ -206,9 +238,14 @@ bool conversationMatches(Conversation c, String find) =>
 /// words, because that is what a reader adding a second term to a filter box
 /// means by it. The words are tried LAST: they are the only clause that walks
 /// several fields, and a cheap `state` or `label` refusal above them saves it.
-bool conversationMatchesQuery(Conversation c, FindQuery query) {
+bool conversationMatchesQuery(
+  Conversation c,
+  FindQuery query, {
+  Set<String> ownerDomains = const {},
+}) {
   if (query.dismissedOnly && c.state != ConversationState.done) return false;
   if (query.attachmentsOnly && c.attachmentCount <= 0) return false;
+  if (query.externalOnly && !c.isExternalTo(ownerDomains)) return false;
   for (final name in query.labels) {
     if (!_carriesLabel(c, name)) return false;
   }
@@ -320,6 +357,11 @@ final class FindRoom extends FindTarget {
 /// dropped, which is why the rail must never be "optimised" into that order.
 /// A test pins the two against each other.
 ///
+/// [ownerDomains] is passed for the same reason and from the same place: the
+/// screen that knows who is signed in hands the identical set to the rail and to
+/// this walk, so `is:external` cannot mean one thing in the column and another
+/// under Enter.
+///
 /// Later days, the Files stop and the AI stop answer null. A day is a bucket
 /// rather than a thing, the Files column is a list of SHELVES rather than of
 /// rows, and the AI pane is one screen with no list beside it — none of the
@@ -333,6 +375,7 @@ FindTarget? firstFindTarget({
   required bool unreadOnly,
   required double threshold,
   NeedsYouSort needsYouSort = NeedsYouSort.priority,
+  Set<String> ownerDomains = const {},
 }) {
   // Read once and reused, unlike the rail's per-row call: this walk has the
   // whole needle in hand before it starts.
@@ -345,7 +388,8 @@ FindTarget? firstFindTarget({
   final threadsOnly = query.hasThreadFacets;
 
   bool keepThread(Conversation c) =>
-      conversationMatchesQuery(c, query) && (!unreadOnly || c.hasUnread);
+      conversationMatchesQuery(c, query, ownerDomains: ownerDomains) &&
+      (!unreadOnly || c.hasUnread);
   bool keepRoom(PersonRoom r) =>
       !threadsOnly && roomMatches(r, needle) && (!unreadOnly || r.unread > 0);
 

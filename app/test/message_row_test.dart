@@ -1116,7 +1116,10 @@ void main() {
     testWidgets('and never as the broken link chip it used to be',
         (tester) async {
       // The whole of entry 7a: a `🔗 (unnamed)` chip whose tap opened an empty
-      // preview panel. Nothing here may offer a tap.
+      // preview panel. No attachment surface here, and nothing reaches the
+      // preview. The quote DOES take a tap now, but a different one — a jump to
+      // the message it quotes, wired through `quoteTapFor`, which this row was
+      // handed none of.
       final opened = <String>[];
       await tester.pumpWidget(_host(MessageRow(
         message: _msg(bodyText: '[[att:q1]]29 and 30', attachments: [_quote()]),
@@ -1173,6 +1176,165 @@ void main() {
         tester.getSize(find.byType(QuoteBlock)),
         Size.zero,
       );
+    });
+
+    testWidgets('the host can make it the way to the message it quotes',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final asked = <String>[];
+      final jumped = <String>[];
+      final quote = _quote();
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(bodyText: '[[att:q1]]29 and 30', attachments: [quote]),
+        quoteTapFor: (q) {
+          asked.add(q.attachmentId);
+          return () => jumped.add(q.attachmentId);
+        },
+      )));
+
+      // The row asks the host about the reference rather than deciding for
+      // itself: only the host knows which rows it loaded.
+      expect(asked, ['q1']);
+      await tester.tap(find.text('is it slide 29 in the deck?'));
+      await tester.pump();
+      expect(jumped, ['q1']);
+    });
+
+    testWidgets('and stays a statement where the host has nowhere to send it',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      // A quote of a message older than the window that was read: a control
+      // that looks tappable and goes nowhere is the dead end entry 7a was.
+      final quote = _quote();
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(bodyText: '[[att:q1]]29 and 30', attachments: [quote]),
+        quoteTapFor: (_) => null,
+      )));
+
+      expect(find.text('is it slide 29 in the deck?'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(QuoteBlock.keyFor(quote)),
+          matching: find.byType(InkWell),
+        ),
+        findsNothing,
+      );
+    });
+  });
+
+  /// Entry 7b's marker: in a thread of fifty messages, which two are yours.
+  group('a message that names the owner', () {
+    testWidgets('wears a marker in its header', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(),
+        namesOwner: true,
+      )));
+
+      expect(find.byKey(MessageRow.ownerMarkerKey), findsOneWidget);
+      expect(find.text('@ you'), findsOneWidget);
+    });
+
+    testWidgets('and one that does not wears none', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(message: _msg())));
+
+      expect(find.byKey(MessageRow.ownerMarkerKey), findsNothing);
+      expect(find.text('@ you'), findsNothing);
+    });
+
+    testWidgets('a continuation row carries it too', (tester) async {
+      // A run of messages from one sender draws one header for the lot, so the
+      // marker cannot live only in the header or the second of a pair loses it.
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(),
+        showHeader: false,
+        namesOwner: true,
+      )));
+
+      expect(find.byKey(MessageRow.ownerMarkerKey), findsOneWidget);
+    });
+  });
+
+  group('unfoldRequest', () {
+    testWidgets('a bump opens a folded row and tells the host it did',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final folds = <bool>[];
+      Widget row(int request) => _host(MessageRow(
+            message: _msg(bodyText: 'The long answer is in the deck.'),
+            collapsible: true,
+            initiallyCollapsed: true,
+            unfoldRequest: request,
+            onFoldChanged: folds.add,
+          ));
+
+      await tester.pumpWidget(row(0));
+      expect(find.byIcon(Icons.expand_more), findsOneWidget);
+
+      await tester.pumpWidget(row(1));
+      await tester.pump();
+      expect(find.byIcon(Icons.expand_less), findsOneWidget);
+      // Reported, so a host holding its own fold set remembers the unfold when
+      // this row is built again.
+      expect(folds, [false]);
+    });
+
+    testWidgets('the same count again changes nothing', (tester) async {
+      // A rebuild for any other reason must not reopen a row the reader folded
+      // by hand after the jump landed.
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final folds = <bool>[];
+      Widget row() => _host(MessageRow(
+            message: _msg(bodyText: 'The long answer is in the deck.'),
+            collapsible: true,
+            initiallyCollapsed: true,
+            unfoldRequest: 3,
+            onFoldChanged: folds.add,
+          ));
+
+      await tester.pumpWidget(row());
+      await tester.pumpWidget(row());
+      await tester.pump();
+
+      expect(find.byIcon(Icons.expand_more), findsOneWidget);
+      expect(folds, isEmpty);
+    });
+
+    testWidgets('a bump at an already-open row is not reported',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final folds = <bool>[];
+      Widget row(int request) => _host(MessageRow(
+            message: _msg(bodyText: 'The long answer is in the deck.'),
+            collapsible: true,
+            unfoldRequest: request,
+            onFoldChanged: folds.add,
+          ));
+
+      await tester.pumpWidget(row(0));
+      await tester.pumpWidget(row(1));
+      await tester.pump();
+
+      expect(find.byIcon(Icons.expand_less), findsOneWidget);
+      expect(folds, isEmpty);
     });
   });
 

@@ -1,4 +1,5 @@
 import 'package:bond_inbox/widgets/find_field.dart';
+import 'package:bond_inbox/widgets/triage_intents.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -29,6 +30,7 @@ void main() {
     ValueChanged<String>? onSubmit,
     VoidCallback? onClear,
     List<String> labelNames = const [],
+    ValueChanged<Intent>? onCommand,
   }) async {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
@@ -41,6 +43,7 @@ void main() {
             onSubmit: onSubmit ?? (_) {},
             onClear: onClear ?? () {},
             labelNames: labelNames,
+            onCommand: onCommand,
           ),
         ),
       ),
@@ -349,6 +352,209 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byKey(FindField.suggestionsKey), findsOneWidget);
+    });
+  });
+
+  group('commandsFor', () {
+    test('a needle is a needle until it starts with >', () {
+      expect(isCommandNeedle('launch'), isFalse);
+      expect(isCommandNeedle('label:legal'), isFalse);
+      expect(isCommandNeedle('>'), isTrue);
+      // ⌘K selects the whole needle, so the leading space a reader leaves is
+      // the app's problem rather than theirs.
+      expect(isCommandNeedle('  >dis'), isTrue);
+      expect(commandsFor('launch'), isEmpty);
+    });
+
+    test('> alone is the whole palette, not a sample of it', () {
+      final all = commandsFor('>');
+
+      // Every command, because a palette that hid two of its eight entries
+      // would only serve a reader who already knew they were there.
+      expect(all.length, findCommands.length);
+      expect(all.first.label, 'Dismiss');
+      // Every command names a key, because teaching them is half the reason
+      // the palette is worth having.
+      expect(all.every((c) => c.keyHint != null), isTrue);
+    });
+
+    test('the words narrow it, and a leading match leads', () {
+      // `Dismiss with label…` contains an l as well and comes last: what the
+      // reader is spelling is the start of a pill, and the rest follow it
+      // rather than being refused — the label strip's own rule.
+      expect(
+        [for (final c in commandsFor('>l')) c.label],
+        ['Label…', 'Later', 'Dismiss with label…'],
+      );
+      // Contained rather than leading: the reader typed the word they think in,
+      // which is not always the first one on the pill.
+      expect(
+        [for (final c in commandsFor('>sender')) c.label],
+        ['Drop sender'],
+      );
+      expect(commandsFor('>zzz'), isEmpty);
+    });
+
+    test('and every entry means an intent, never a handler', () {
+      // The rule `triage_intents.dart` exists for: the palette is a third door
+      // onto the same act, so it must not know what the act does.
+      for (final command in findCommands) {
+        expect(command.intent, isA<Intent>(), reason: command.label);
+      }
+      expect(
+        commandsFor('>dismiss').first.intent,
+        isA<DismissThreadIntent>(),
+      );
+    });
+  });
+
+  group('the palette', () {
+    Future<void> type(WidgetTester tester, String text) async {
+      await tester.enterText(find.byKey(FindField.fieldKey), text);
+      await tester.pump();
+    }
+
+    testWidgets('a host that listens for no command gets the old box',
+        (tester) async {
+      String? submitted;
+      await pumpField(tester, onSubmit: (value) => submitted = value);
+
+      await type(tester, '>dis');
+
+      expect(find.byKey(FindField.commandsKey), findsNothing);
+
+      // `>` is a character like any other while the feature is dormant, so a
+      // needle that happens to start with one still searches.
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await tester.pump();
+
+      expect(submitted, '>dis');
+    });
+
+    testWidgets('> offers the commands under the box, with their keys',
+        (tester) async {
+      await pumpField(tester, onCommand: (_) {});
+
+      await type(tester, '>');
+
+      expect(find.byKey(FindField.commandsKey), findsOneWidget);
+      expect(find.byKey(FindField.commandKeyFor('Dismiss')), findsOneWidget);
+      expect(find.text('Dismiss'), findsOneWidget);
+      expect(find.text('e'), findsOneWidget);
+      // The same place the label strip draws: nothing opens over the list.
+      expect(
+        tester.getTopLeft(find.byKey(FindField.commandsKey)).dy,
+        greaterThan(
+          tester.getBottomLeft(find.byKey(FindField.fieldKey)).dy - 1,
+        ),
+      );
+    });
+
+    testWidgets('and it is the commands, not the labels', (tester) async {
+      // One strip and two vocabularies: a needle cannot be a command and a
+      // half-typed label term at once, so the palette wins outright.
+      await pumpField(
+        tester,
+        labelNames: const ['Jira update'],
+        onCommand: (_) {},
+      );
+
+      await type(tester, '>label');
+
+      expect(find.byKey(FindField.commandsKey), findsOneWidget);
+      expect(find.byKey(FindField.suggestionsKey), findsNothing);
+    });
+
+    testWidgets('Enter invokes the intent, and the box gives up the needle',
+        (tester) async {
+      final invoked = <Intent>[];
+      final focusedAtInvoke = <bool>[];
+      await pumpField(
+        tester,
+        onCommand: (intent) {
+          invoked.add(intent);
+          focusedAtInvoke.add(focusNode.hasFocus);
+        },
+        onClear: controller.clear,
+      );
+
+      await type(tester, '>later');
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await tester.pump();
+
+      expect(invoked.single, isA<LaterThreadIntent>());
+      expect(controller.text, isEmpty);
+      // The contract the whole deferral exists for: the triage actions are
+      // gated on the cursor NOT being in a box, so a command that arrived
+      // while this field still held it would be refused in silence.
+      expect(focusedAtInvoke.single, isFalse);
+      expect(find.byKey(FindField.commandsKey), findsNothing);
+    });
+
+    testWidgets('the arrows walk it, and Enter takes where they stopped',
+        (tester) async {
+      final invoked = <Intent>[];
+      await pumpField(
+        tester,
+        onCommand: invoked.add,
+        onClear: controller.clear,
+      );
+
+      await type(tester, '>l');
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await tester.pump();
+
+      // Down once from `Label…`, which led.
+      expect(invoked.single, isA<LaterThreadIntent>());
+    });
+
+    testWidgets('a tap does the same thing the key would', (tester) async {
+      final invoked = <Intent>[];
+      await pumpField(
+        tester,
+        onCommand: invoked.add,
+        onClear: controller.clear,
+      );
+
+      await type(tester, '>');
+      await tester.tap(find.byKey(FindField.commandKeyFor('Undo')));
+      await tester.pump();
+
+      expect(invoked.single, isA<UndoLastIntent>());
+    });
+
+    testWidgets('a command nothing answers leaves Enter alone', (tester) async {
+      // No strip and no invoke, so the needle behaves like any other needle
+      // nothing matched: the host's own Enter gets it and can escalate.
+      final invoked = <Intent>[];
+      String? submitted;
+      await pumpField(
+        tester,
+        onCommand: invoked.add,
+        onSubmit: (value) => submitted = value,
+      );
+
+      await type(tester, '>zzz');
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await tester.pump();
+
+      expect(find.byKey(FindField.commandsKey), findsNothing);
+      expect(invoked, isEmpty);
+      expect(submitted, '>zzz');
+    });
+
+    testWidgets('Escape clears the palette the way it clears a needle',
+        (tester) async {
+      var cleared = 0;
+      await pumpField(tester, onCommand: (_) {}, onClear: () => cleared++);
+
+      await type(tester, '>');
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+
+      expect(cleared, 1);
     });
   });
 }

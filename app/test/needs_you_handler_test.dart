@@ -579,7 +579,8 @@ void main() {
       expect((await verdictOf('email', 'm2'))['verdict'], 0);
     });
 
-    test('a chat that named the owner beats the rule', () async {
+    test('a chat that named the owner beats the rule, and says which rule',
+        () async {
       await seed();
       await ruleOn('teams:u-1');
       final llm = scriptedLlm(needsYouYes);
@@ -588,10 +589,46 @@ void main() {
 
       // `unless_mentions_me` is on by default, and the floor runs first: an
       // @mention outranks the owner's own standing rule.
+      //
+      // The REASON is the rule's own token rather than the floor's, which is
+      // requirement 12i: a reader who wrote "never this kind of mail again" and
+      // finds one on the rail anyway is owed the name of the rule it got past,
+      // and `needsYouReasonWords` translates exactly this token. The verdict is
+      // 1, so `loadConversations` — which reads the reason off the newest
+      // inbound message whose verdict was YES — can reach it.
       expect(await verdictOf('teams', 't1'),
-          {'verdict': 1, 'reason': 'teams_direct'});
+          {'verdict': 1, 'reason': 'label_rule:Not for me'});
       expect(await links(), isEmpty);
       expect(llm.calls.length, 0);
+    });
+
+    test('a chat under no rule at all still reads as the floor', () async {
+      // The other side of the line above: the rule's token is written ONLY
+      // where a rule argued against the raise. A plain @mention names no rule,
+      // because there was none.
+      await seed();
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm));
+
+      expect(await verdictOf('teams', 't1'),
+          {'verdict': 1, 'reason': 'teams_direct'});
+    });
+
+    test('a rule that files under a renamed word carries the new name',
+        () async {
+      // The token embeds the label NAME as it reads when the verdict is
+      // written, which is the same contract `undoLabelRule` documents — it
+      // matches `label_rule:%` rather than one rule's exact reason for this
+      // reason.
+      await seed();
+      await ruleOn('teams:u-1', name: 'Vendor noise');
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm));
+
+      expect((await verdictOf('teams', 't1'))['reason'],
+          'label_rule:Vendor noise');
     });
 
     test('with the exception off, the same chat is hidden anyway', () async {

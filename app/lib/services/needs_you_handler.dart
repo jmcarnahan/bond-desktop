@@ -241,13 +241,36 @@ class NeedsYouHandler extends WorkHandler {
       suppressed: hiding && !rule.unlessMentionsMe,
       coldOutreach: cold,
     )) {
+      // A raise the owner's own rule ARGUED AGAINST says so, in the rule's own
+      // token: reaching here with [hiding] true means a `hide_needs_you` rule
+      // matched this message and its `unless_mentions_me` exception — which is
+      // on by default — let the mention through anyway. That is the one case
+      // requirement 12i asks the thread to explain itself for: a reader who
+      // wrote "never this kind of mail again" and finds one on the rail is owed
+      // the name of the rule it got past, and the rail is where they will see
+      // it (`needsYouReasonWords` translates the token; the `teams_direct` one
+      // reads "Direct message" and names no rule).
+      //
+      // In practice this is Teams only, and by construction: the floor reads
+      // `addressed_me` on a chat row, and nothing detects the owner's name in a
+      // mail BODY. Mail's own `addressed_me` is deliberately outside the floor
+      // (`needs_you.dart`), so a mail rule's exception has nothing to fire on.
+      final reason = hiding ? rule.verdictReason : 'teams_direct';
       await _store.writeNeedsYouVerdict(
         source,
         id,
         verdict: true,
-        reason: 'teams_direct',
+        reason: reason,
       );
-      _log.note({'verdict': true, 'reason': 'teams_direct'});
+      // The FLOOR is what raised it either way, and the log says that rather
+      // than the token: a rule's reason embeds the owner's own label name, and
+      // the hiding branch below keeps that name out of the log for the same
+      // reason.
+      _log.note({
+        'verdict': true,
+        'reason': 'teams_direct',
+        if (hiding) 'despite_rule': true,
+      });
       await _followChip(source, id, previous: previous, verdict: true);
       return;
     }

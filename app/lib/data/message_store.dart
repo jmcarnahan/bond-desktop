@@ -1025,7 +1025,19 @@ WHERE source = ? AND conversation_key = ?
           '     AND m8.conversation_key = c.conversation_key '
           "     AND m8.direction = 'inbound' AND ${keptMessageSql('m8')} "
           '   ORDER BY m8.received_at DESC, m8.source_message_id DESC LIMIT 1'
-          '  ) AS reply_expected '
+          '  ) AS reply_expected, '
+          // WHO the thread is waiting on, as an envelope address and nothing
+          // else — the one fact `Conversation.isExternalTo` needs, and the same
+          // newest-kept-inbound message `reply_expected` reads, deliberately:
+          // the row says "external" about the sender it is also saying "needs
+          // reply" about, and two subselects on different rules would let the
+          // chip and the ask describe different people.
+          '  (SELECT m9.from_address FROM messages m9 '
+          '   WHERE m9.source = c.source '
+          '     AND m9.conversation_key = c.conversation_key '
+          "     AND m9.direction = 'inbound' AND ${keptMessageSql('m9')} "
+          '   ORDER BY m9.received_at DESC, m9.source_message_id DESC LIMIT 1'
+          '  ) AS latest_inbound_from '
           'FROM conversations c '
           'LEFT JOIN conversation_ai ai '
           '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '

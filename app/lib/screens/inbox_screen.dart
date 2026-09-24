@@ -34,6 +34,7 @@ import '../providers/notification_provider.dart';
 import '../providers/notify_routing.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/message_history_provider.dart';
+import '../providers/recipient_search_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../providers/why_provider.dart';
 import '../services/ai_workers.dart' show pumpTriageThenWorkersQuietly;
@@ -44,6 +45,7 @@ import '../services/attachments/file_dialogs.dart';
 import '../services/attachments/html_open.dart';
 import '../services/attachments/xlsx_reader.dart';
 import '../services/backend/backend_types.dart';
+import '../services/external_sender.dart';
 import '../services/llm/draft_task.dart' show DraftOption;
 // [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
 // re-exports them; [ModelPlacement] is not re-exported, and the rail's AI
@@ -302,6 +304,33 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// coming back lands on the tab the reader left.
   NeedsYouTab _needsYouTab = NeedsYouTab.all;
 
+  /// The session's progress over the pile (12g): how many rows have LEFT it
+  /// since the reader arrived, over how big it was when they arrived. The
+  /// total is snapshotted on the overview's first non-empty render and does
+  /// not move when new mail lands mid-session — the line answers "how far
+  /// through what I sat down to", and a moving total answers nothing. Both
+  /// reset whenever the pile on screen changes ([_resetPileProgress]), so the
+  /// next sit-down starts its own count.
+  int _clearedThisSession = 0;
+  int? _pileAtSessionStart;
+
+  /// Ends the sit-down: the next non-empty render of whatever pile is on
+  /// screen snapshots its own total. Called wherever the pile the reader is
+  /// looking at CHANGES — the rail moving, a tab pick, the label lens — since
+  /// "3 of 40" held over a five-row tab is a progress line about a pile that
+  /// is no longer there. Callers wrap it in their own setState.
+  void _resetPileProgress() {
+    _clearedThisSession = 0;
+    _pileAtSessionStart = null;
+  }
+
+  /// True only while [_triageAndAdvance] runs an act on a row that is IN the
+  /// pile. [_toast] reads it: an undoable toast raised in that window is a
+  /// row leaving, so the count and its way back live on the same bar the act
+  /// already raised — which is what keeps `_dropSender`'s menu path, whose
+  /// toasts fire outside the window, out of the count.
+  bool _countingCleared = false;
+
   /// The Find field's text, and the two objects behind it.
   ///
   /// The controller and the node live on the SCREEN rather than in
@@ -474,6 +503,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   final FocusNode _mainComposerFocus = FocusNode(debugLabel: 'main composer');
   final FocusNode _sideComposerFocus = FocusNode(debugLabel: 'side composer');
 
+  // One handle per mounted transcript, for the same reason the composer focus
+  // is two nodes: the wide layout mounts a main and a side panel at once, and
+  // a shared handle would belong to whichever attached last. The keys bind to
+  // the main one, as FocusReplyIntent does with its focus node.
+  final TranscriptJumps _mainJumps = TranscriptJumps();
+  final TranscriptJumps _sideJumps = TranscriptJumps();
+
   /// What makes the side panel's own Escape binding reachable — see
   /// [_sidePanel].
   ///
@@ -520,6 +556,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// file draws a picker — the widget and its two mounts land with the picker
   /// package, and this is the request they answer.
   ({String source, String key, bool dismissAfter})? _labelPickerRequest;
+
+  /// The row whose in-list quick reply is open, on [_labelPickerRequest]'s
+  /// pattern: a request the pane answers, and a stale one that names no drawn
+  /// row draws nothing. One strip at a time — each of the two opens clears
+  /// the other's request, because a box and a picker on one row would be two
+  /// answers to "what is the reader doing here".
+  ({String source, String key})? _quickReplyFor;
 
   /// The one rule the app is currently offering to write, or null. Computed
   /// from the owner's own dismissal history through [suggestRules] — best
@@ -691,6 +734,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The owner as [peopleRooms] wants them.
   Owner get _ownerRecord =>
       (name: _owner?.displayName, address: _owner?.mail ?? _owner?.userPrincipalName);
+
+  /// What "external" is measured against, everywhere this screen says it:
+  /// empty for the first frames — nobody is external until the account is
+  /// read, which errs quiet rather than tinting the whole list.
+  Set<String> get _ownerDomains =>
+      ownerDomainsOf(_owner?.mail ?? _owner?.userPrincipalName);
 
   /// Whether the tenant granted `Chat.Read`. Read once — it is a keychain
   /// read, and the answer cannot change without a fresh sign-in, which
@@ -1361,6 +1410,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     }
     setState(() {
       _clearOverlays();
+      // Moving the rail ends the sit-down: the next visit to the overview
+      // snapshots its own pile — see [_pileAtSessionStart].
+      _resetPileProgress();
       _section = section;
       _selectedId = null;
       _selectedSource = null;
@@ -1902,6 +1954,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   void _toast(String message, {VoidCallback? onUndo}) {
     if (!mounted) return;
+    // The progress count (12g), fed where the act says what it did: an
+    // undoable bar inside [_countingCleared]'s window is one row gone, and
+    // pressing its Undo is that row back. Counting here and not in the acts
+    // keeps a refused act — a toast with no undo on it — out of the count.
+    final total = _pileAtSessionStart;
+    if (_countingCleared && onUndo != null && total != null) {
+      setState(() => _clearedThisSession =
+          (_clearedThisSession + 1).clamp(0, total));
+      final inner = onUndo;
+      onUndo = () {
+        setState(() => _clearedThisSession =
+            (_clearedThisSession - 1).clamp(0, total));
+        inner();
+      };
+    }
     // Every correction in the app already says what it did through this one
     // call, which makes it the one place the keyboard's undo can be fed from:
     // the sender rules, the thread actions and anything added later populate the
@@ -2234,7 +2301,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         DismissWithLabelIntent(),
     SingleActivator(LogicalKeyboardKey.keyL): LabelThreadIntent(),
     SingleActivator(LogicalKeyboardKey.keyS): LaterThreadIntent(),
+    SingleActivator(LogicalKeyboardKey.keyR): QuickReplyIntent(),
     SingleActivator(LogicalKeyboardKey.keyM): DropSenderIntent(),
+    // Brackets, because they already read as forward/back WITHIN a thing
+    // where j/k are the things themselves — and they collide with nothing.
+    SingleActivator(LogicalKeyboardKey.bracketRight): NextMentionIntent(),
+    SingleActivator(LogicalKeyboardKey.bracketLeft): PreviousMentionIntent(),
     SingleActivator(LogicalKeyboardKey.keyZ): UndoLastIntent(),
     SingleActivator(LogicalKeyboardKey.keyZ, meta: true): UndoLastIntent(),
     SingleActivator(LogicalKeyboardKey.keyZ, control: true): UndoLastIntent(),
@@ -2244,8 +2316,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// What each intent does, built once so the map's identity survives a rebuild.
   ///
   /// [FocusReplyIntent] is here with no key on it: `r` belongs to the in-list
-  /// quick reply that lands later, and the thread's own controls can invoke this
-  /// through [Actions] meanwhile.
+  /// quick reply — [QuickReplyIntent] holds it now — and the thread's own
+  /// controls invoke this through [Actions].
   late final Map<Type, Action<Intent>> _triageActions = {
     NextThreadIntent: _TriageAction<NextThreadIntent>(
       () => _moveSelection(forward: true),
@@ -2275,8 +2347,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       () => unawaited(_triageAndAdvance(_dropSenderForThread)),
       live: _keysLive,
     ),
+    QuickReplyIntent: _TriageAction<QuickReplyIntent>(
+      _openQuickReply,
+      live: _keysLive,
+    ),
     UndoLastIntent: _TriageAction<UndoLastIntent>(
       _undoLast,
+      live: _keysLive,
+    ),
+    // The main transcript, like FocusReplyIntent's node: the keys serve the
+    // thread the reader is IN, and the handle is a no-op with no thread open.
+    NextMentionIntent: _TriageAction<NextMentionIntent>(
+      _mainJumps.nextMention,
+      live: _keysLive,
+    ),
+    PreviousMentionIntent: _TriageAction<PreviousMentionIntent>(
+      _mainJumps.previousMention,
       live: _keysLive,
     ),
     FocusReplyIntent: _TriageAction<FocusReplyIntent>(
@@ -2327,9 +2413,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _triageFocus.requestFocus();
   }
 
-  /// Escape: the picker first, then the cursor.
+  /// A palette pick (12h): the intent travels UP from the triage region's own
+  /// focus, never from the Find field's — the `Actions` map lives inside
+  /// [_triageScope], deliberately not over the rail, and an invoke from the
+  /// field's context would find nothing above it.
+  void _runCommand(Intent intent) {
+    final ctx = _triageFocus.context;
+    if (ctx != null) Actions.maybeInvoke(ctx, intent);
+  }
+
+  /// Escape: the open strip first — picker or quick reply — then the cursor.
   void _returnFocusToList() {
     _clearLabelPickerRequest();
+    _clearQuickReply();
     _triageFocus.requestFocus();
   }
 
@@ -2440,7 +2536,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       }
     }
 
-    await act(target);
+    // The window [_toast] counts in — see [_countingCleared]. Spanning the
+    // act's own awaits is the point (its toast fires inside them); the cost
+    // is that an unrelated bar landing in those few frames would be counted,
+    // which the clamp bounds and a progress line can afford.
+    _countingCleared = inPile;
+    try {
+      await act(target);
+    } finally {
+      _countingCleared = false;
+    }
     if (!mounted) return;
     // The suggestion feeds on exactly these presses, so it is re-asked
     // behind every one — fire-and-forget, four indexed reads.
@@ -2541,6 +2646,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // the chips are offered in, and the read is one indexed table.
     unawaited(ref.read(labelsProvider.notifier).load());
     setState(() {
+      // The other strip's half of the one-strip rule — see [_quickReplyFor].
+      _quickReplyFor = null;
       _labelPickerRequest = (
         source: target.source,
         key: target.key,
@@ -2630,6 +2737,47 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() => _labelPickerRequest = null);
   }
 
+  /// `r`: the in-list quick reply on the thread the keys act on. Takes the
+  /// picker's place when one is open — see [_quickReplyFor]'s one-strip rule.
+  ///
+  /// Only where the box can actually draw: the Needs You overview's pane is
+  /// the one surface handed [_quickReplyFor]. Anywhere else the press would
+  /// close an open picker and park a request that pops a box the next time
+  /// the reader lands on the overview with that row in it.
+  void _openQuickReply() {
+    if (_section != RailSection.needsYou) return;
+    final target = _triageTarget;
+    if (target == null) return;
+    setState(() {
+      _labelPickerRequest = null;
+      _quickReplyFor = target;
+    });
+  }
+
+  void _clearQuickReply() {
+    if (_quickReplyFor == null) return;
+    setState(() => _quickReplyFor = null);
+  }
+
+  /// The in-list box's send: the same [_send] every reply takes, with the
+  /// box's own closing rule — it stays up on a failure, where its error line
+  /// is, and goes away with anything else, because anything else means the
+  /// words left the box.
+  Future<void> _sendQuickReply(
+    ({String source, String key}) target,
+    String body,
+  ) async {
+    final draftTarget = (
+      source: target.source,
+      conversationKey: target.key,
+    );
+    await _send(draftTarget, body);
+    if (!mounted) return;
+    if (ref.read(draftProvider(draftTarget)).error == null) {
+      _clearQuickReply();
+    }
+  }
+
   /// The mode a mount should draw the picker in for one thread, or null when
   /// the open request is not about that thread. One reading of the request for
   /// both mounts, so the panel and the list row cannot disagree about whose
@@ -2703,6 +2851,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // The same value the overview's control writes and `_submitFind` reads.
       // One pile, one order, three places it is drawn.
       needsYouSort: ref.watch(appPrefsProvider).needsYouSort,
+      ownerDomains: _ownerDomains,
       processingSince: ref.watch(sessionStartProvider),
       // A thread, a storyline, a room or a Later day being open means no
       // section overview is showing, so the rail must not highlight one.
@@ -2826,9 +2975,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           FindField(
             controller: _findText,
             focusNode: _findFocus,
-            onChanged: (value) => setState(() => _find = value),
+            // A `>` needle is a command being chosen, not a filter: narrowing
+            // the column under it would empty the very list the command is
+            // about to act on.
+            onChanged: (value) => setState(
+              () => _find = isCommandNeedle(value) ? '' : value,
+            ),
             onSubmit: (_) => _submitFind(),
             onClear: _clearFind,
+            onCommand: _runCommand,
             // Names only: the autocomplete completes `label:` terms, and the
             // matching itself is find_filter's, which reads the rows.
             labelNames: [
@@ -3235,6 +3390,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       unreadOnly: _unreadOnly,
       threshold: ref.read(appPrefsProvider).attentionThreshold,
       needsYouSort: ref.read(appPrefsProvider).needsYouSort,
+      ownerDomains: _ownerDomains,
     );
     switch (target) {
       case FindThread(:final source, :final conversationKey):
@@ -4267,6 +4423,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       key: ValueKey(selected.id),
       conversation: selected,
       messages: shown,
+      jumps: inSidePanel ? _sideJumps : _mainJumps,
+      ownerDomains: _ownerDomains,
       // Read, not watched: the service is a session-long singleton, and each
       // avatar asks it for its own face.
       photos: ref.read(profilePhotosProvider),
@@ -4905,6 +5063,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onOpenLink: (url) => unawaited(_launchExternal(url)),
         onOpenInBrowser: (page) =>
             unawaited(openHtmlInBrowser(page, bytes: _attachmentBytes)),
+        senderIsExternal: _fileSenderIsExternal(side),
       ),
     );
   }
@@ -5183,7 +5342,31 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onOpenLink: (url) => unawaited(_launchExternal(url)),
         onOpenInBrowser: (page) =>
             unawaited(openHtmlInBrowser(page, bytes: _attachmentBytes)),
+        senderIsExternal: _fileSenderIsExternal(side),
       ),
+    );
+  }
+
+  /// External for a file, by the yardstick every other surface uses: the
+  /// newest KEPT inbound sender of the thread it was opened from —
+  /// `Conversation.latestInboundFrom`, the same stored answer the list row
+  /// and `is:external` read, so the preview's caution cannot strengthen on a
+  /// gated `noreply@` the row does not tint for. The transcript is only the
+  /// fallback when the row is not loaded. A shelf file carries no thread and
+  /// reads internal — quiet over unknown.
+  bool _fileSenderIsExternal(FilePanel side) {
+    final from = side.from;
+    if (from == null) return false;
+    final row = _conversationFor(from.source, from.conversationKey);
+    if (row != null && row.latestInboundFrom != null) {
+      return row.isExternalTo(_ownerDomains);
+    }
+    final thread = ref.watch(threadProvider(from));
+    return isExternalAddress(
+      _newestInboundSender(
+        thread is ThreadLoaded ? thread.messages : const <Message>[],
+      ),
+      _ownerDomains,
     );
   }
 
@@ -5590,6 +5773,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       generating: draft.generating,
       sending: draft.sending,
       capability: draft.capability,
+      // Mail only, and the callbacks together or not at all: a chat thread
+      // wires neither, so nothing about recipients exists on Teams — a
+      // plain-text @Name that does not notify would be worse than nothing
+      // (the full decision sits above these props in composer.dart).
+      addedRecipients:
+          target.source == 'email' ? draft.addedRecipients : const [],
+      canEditRecipients: draft.canEditRecipients,
+      onRecipientsChanged:
+          target.source == 'email' ? notifier.setAddedRecipients : null,
+      recipientSearch: target.source == 'email'
+          ? (query) => ref
+              .read(recipientSearchProvider)
+              .search(query, channel: RecipientChannel.mail)
+          : null,
+      recipientPhotos:
+          target.source == 'email' ? ref.watch(profilePhotosProvider) : null,
       onSend: (body) => _send(target, body),
       // Both sources, unconditionally. A chat is drafted through the same
       // queue and the same system prompt a mail is — only the channel's style
@@ -5736,7 +5935,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // The reply just crossed from one half of the Drafts & sent pane to
         // the other. It may be open beside the send that fired this.
         ref.read(draftsInboxProvider.notifier).load();
-        _toast('Reply sent.');
+        // The one read of the preference, here so the thread composer and the
+        // in-list box clear the same way. Only a real send: a copy or an
+        // Outlook save is a reply that has not gone anywhere yet, and `done`
+        // on its strength would clear a thread that is still the reader's.
+        if (ref.read(appPrefsProvider).replySendMarksDone) {
+          final conversations = ref.read(conversationsProvider.notifier);
+          final undo = await conversations.markDone(
+            target.source,
+            target.conversationKey,
+          );
+          if (!mounted) return;
+          _toast(
+            'Reply sent · Marked done.',
+            onUndo: undo == null
+                ? null
+                : () => unawaited(conversations.undoMarkDone(undo)),
+          );
+        } else {
+          _toast('Reply sent.');
+        }
       case SendOutcome.savedToOutlook:
         _toast('Saved to your Outlook drafts.');
       case SendOutcome.copied:
@@ -5856,6 +6074,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       return ArchivePane(
         conversations: conversations,
         sources: _sources,
+        ownerDomains: _ownerDomains,
         // A day row is a Later row, so opening one puts the pane on the tab
         // that can show it whatever the user last picked.
         tab: _selectedLaterDay == null ? _archiveTab : ArchiveTab.later,
@@ -6030,6 +6249,28 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // list, and two readings of it is how `e` would land the reader somewhere
     // other than the row under the one they cleared.
     final rows = _triageRows(prefs);
+    // The total, taken once — see [_pileAtSessionStart]. A bare field write:
+    // it is read two statements down in this same build, and nothing else
+    // draws it until then.
+    if (rows.isNotEmpty) _pileAtSessionStart ??= rows.length;
+    // The one open box's draft, watched HERE so the box redraws as its send
+    // moves: the pane's row callback answers synchronously mid-build and must
+    // not register a watch of its own.
+    final quickReplyOn = _quickReplyFor;
+    QuickReply? quickReply;
+    if (quickReplyOn != null) {
+      final d = ref.watch(draftProvider(
+        (source: quickReplyOn.source, conversationKey: quickReplyOn.key),
+      ));
+      quickReply = QuickReply(
+        body: d.body ?? '',
+        sending: d.sending,
+        error: d.error,
+        // Staged in the thread composer, riding the same draft out of this
+        // box — the count is what keeps that from being a silent Cc.
+        addedRecipients: d.addedRecipients.length,
+      );
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -6045,7 +6286,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                 options: NeedsYouTab.values,
                 selected: tab,
                 labelOf: (t) => t.label,
-                onSelected: (t) => setState(() => _needsYouTab = t),
+                onSelected: (t) => setState(() {
+                  _needsYouTab = t;
+                  // A tab is a different pile — see [_resetPileProgress].
+                  _resetPileProgress();
+                }),
               ),
             ),
             const SizedBox(width: BondSpacing.s8),
@@ -6060,7 +6305,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           NeedsYouLabelFilter(
             labels: labels,
             selectedLabelId: _activeNeedsYouLabelId,
-            onLabelSelected: (id) => setState(() => _needsYouLabelId = id),
+            onLabelSelected: (id) => setState(() {
+              _needsYouLabelId = id;
+              // Narrowing by label is a different pile too.
+              _resetPileProgress();
+            }),
           ),
         const SizedBox(height: BondSpacing.s12),
         Expanded(
@@ -6118,6 +6367,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             // same request, so a thread that is open beside yields to it —
             // one request, one picker on screen.
             labels: labels,
+            // The tint's yardstick (6a): display-time, off the signed-in
+            // account, empty until it resolves — nobody external over a
+            // missing answer.
+            ownerDomains: _ownerDomains,
             labelPickerFor: (c) {
               final beside = _threadBeside;
               if (beside != null &&
@@ -6154,6 +6407,23 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ruleSuggestion: _ruleSuggestion,
             onAcceptRuleSuggestion: (s) => unawaited(_acceptRuleSuggestion(s)),
             onNotNowRuleSuggestion: _declineRuleSuggestion,
+            // The session's line (12g): the pane draws it only when both
+            // numbers are above zero, so a fresh sit-down shows nothing.
+            progress: (
+              cleared: _clearedThisSession,
+              total: _pileAtSessionStart ?? 0,
+            ),
+            // The in-list box (12f): drawn only on the row `r` named, fed by
+            // the draft watched above.
+            quickReplyFor: (c) => quickReplyOn != null &&
+                    quickReplyOn.source == c.source &&
+                    quickReplyOn.key == c.id
+                ? quickReply
+                : null,
+            onQuickReplySend: (c, body) => unawaited(
+              _sendQuickReply((source: c.source, key: c.id), body),
+            ),
+            onCloseQuickReply: (_) => _clearQuickReply(),
           ),
         ),
       ],

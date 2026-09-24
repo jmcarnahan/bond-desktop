@@ -100,8 +100,11 @@ void main() {
       NextThreadIntent(),
       PreviousThreadIntent(),
       FocusReplyIntent(),
+      QuickReplyIntent(),
       UndoLastIntent(),
+      NextMentionIntent(),
+      PreviousMentionIntent(),
     ];
-    expect(intents.map((i) => i.runtimeType).toSet(), hasLength(9));
+    expect(intents.map((i) => i.runtimeType).toSet(), hasLength(12));
   });
 }

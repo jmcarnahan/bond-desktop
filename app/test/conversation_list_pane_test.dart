@@ -4,6 +4,8 @@ import 'package:bond_inbox/services/rule_suggestions.dart';
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/widgets/conversation_row.dart';
 import 'package:bond_inbox/widgets/label_picker.dart';
+import 'package:bond_inbox/widgets/quick_replies.dart'
+    show QuickReply, QuickReplyBox;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -48,6 +50,10 @@ void main() {
     List<LabelRuleOffer> Function(Conversation)? ruleOffersFor,
     Label? Function(Conversation)? ruleOfferLabelFor,
     void Function(Conversation, Label, LabelRuleOffer)? onRuleChosen,
+    ({int cleared, int total})? progress,
+    QuickReply? Function(Conversation)? quickReplyFor,
+    void Function(Conversation, String)? onQuickReplySend,
+    void Function(Conversation)? onCloseQuickReply,
     RuleSuggestion? suggestion,
     void Function(RuleSuggestion)? onAcceptSuggestion,
     void Function(RuleSuggestion)? onNotNowSuggestion,
@@ -78,6 +84,10 @@ void main() {
           ruleOffersFor: ruleOffersFor,
           ruleOfferLabelFor: ruleOfferLabelFor,
           onRuleChosen: onRuleChosen,
+          progress: progress,
+          quickReplyFor: quickReplyFor,
+          onQuickReplySend: onQuickReplySend,
+          onCloseQuickReply: onCloseQuickReply,
           ruleSuggestion: suggestion,
           onAcceptRuleSuggestion: onAcceptSuggestion,
           onNotNowRuleSuggestion: onNotNowSuggestion,
@@ -581,6 +591,184 @@ void main() {
 
       expect(find.byKey(ConversationListPane.suggestionKey), findsNothing);
       expect(find.text('Nothing here.'), findsOneWidget);
+    });
+  });
+
+  /// The in-list quick reply's mount (entry 12f). The box itself is pinned in
+  /// `quick_reply_test.dart`; these are about WHICH row has one, and that a
+  /// list nobody wired one on is the list it always was.
+  group('the quick reply under one row', () {
+    final needsYou = _conv(
+      id: 'c1',
+      state: ConversationState.needsReply,
+      subject: 'Access to the analytics tool',
+    );
+    final other = _conv(
+      id: 'c9',
+      state: ConversationState.needsReply,
+      subject: 'Renewal approval',
+    );
+
+    testWidgets('opens for the row the host names, and no other',
+        (tester) async {
+      await pump(
+        tester,
+        conversations: [needsYou, other],
+        filter: InboxFilter.needsReply,
+        quickReplyFor: (c) => c.id == 'c1' ? const QuickReply() : null,
+        onQuickReplySend: (_, _) {},
+        onCloseQuickReply: (_) {},
+      );
+
+      expect(
+        find.byKey(ConversationListPane.quickReplyKeyFor(needsYou)),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(ConversationListPane.quickReplyKeyFor(other)),
+        findsNothing,
+      );
+      // The sender comes off the thread, not from the host.
+      expect(find.text('Reply to Alex Rivera'), findsOneWidget);
+    });
+
+    testWidgets('a send carries the row it was typed under', (tester) async {
+      final sent = <String>[];
+      await pump(
+        tester,
+        conversations: [needsYou, other],
+        filter: InboxFilter.needsReply,
+        quickReplyFor: (c) => c.id == 'c9' ? const QuickReply() : null,
+        onQuickReplySend: (c, body) => sent.add('${c.id}:$body'),
+        onCloseQuickReply: (_) {},
+      );
+
+      await tester.enterText(find.byKey(QuickReplyBox.fieldKey), 'On it.');
+      await tester.pump();
+      await tester.tap(find.byKey(QuickReplyBox.sendKey));
+      await tester.pump();
+
+      expect(sent, ['c9:On it.']);
+    });
+
+    testWidgets('and so does the close', (tester) async {
+      final closed = <String>[];
+      await pump(
+        tester,
+        conversations: [needsYou],
+        filter: InboxFilter.needsReply,
+        quickReplyFor: (_) => const QuickReply(),
+        onQuickReplySend: (_, _) {},
+        onCloseQuickReply: (c) => closed.add(c.id),
+      );
+
+      await tester.tap(find.byKey(QuickReplyBox.cancelKey));
+      await tester.pump();
+
+      expect(closed, ['c1']);
+    });
+
+    testWidgets('a host that wired no send path draws no box', (tester) async {
+      await pump(
+        tester,
+        conversations: [needsYou],
+        filter: InboxFilter.needsReply,
+        quickReplyFor: (_) => const QuickReply(),
+      );
+
+      expect(find.byType(QuickReplyBox), findsNothing);
+      // And the row is the row it always was.
+      expect(find.text('Access to the analytics tool'), findsOneWidget);
+    });
+
+    testWidgets('the box is outside the card, like every other row action',
+        (tester) async {
+      await pump(
+        tester,
+        conversations: [needsYou],
+        filter: InboxFilter.needsReply,
+        quickReplyFor: (_) => const QuickReply(),
+        onQuickReplySend: (_, _) {},
+        onCloseQuickReply: (_) {},
+      );
+
+      expect(
+        find.descendant(
+          of: find.byType(ConversationRow),
+          matching: find.byType(QuickReplyBox),
+        ),
+        findsNothing,
+      );
+      expect(find.byType(QuickReplyBox), findsOneWidget);
+    });
+
+    testWidgets('a picker open on the same row sits under the box',
+        (tester) async {
+      await pump(
+        tester,
+        conversations: [needsYou],
+        filter: InboxFilter.needsReply,
+        labels: const [Label(id: 'fyi', name: 'FYI only')],
+        labelPickerFor: (_) => LabelPickerMode.label,
+        onApplyLabel: (_, _) {},
+        onCreateLabel: (_, _) {},
+        onCloseLabelPicker: (_) {},
+        quickReplyFor: (_) => const QuickReply(),
+        onQuickReplySend: (_, _) {},
+        onCloseQuickReply: (_) {},
+      );
+
+      final box = tester.getTopLeft(find.byType(QuickReplyBox)).dy;
+      final picker = tester.getTopLeft(find.byType(LabelPicker)).dy;
+      expect(box, lessThan(picker));
+    });
+  });
+
+  /// The session's own line (entry 12g). The host counts; the pane draws.
+  group('the triage progress line', () {
+    final rows = [_conv(id: 'c1', state: ConversationState.needsReply)];
+
+    testWidgets('says how much of the pile was the reader\'s', (tester) async {
+      await pump(
+        tester,
+        conversations: rows,
+        filter: InboxFilter.needsReply,
+        progress: (cleared: 12, total: 60),
+      );
+
+      expect(find.text('12 of 60 cleared'), findsOneWidget);
+    });
+
+    testWidgets('a session that has cleared nothing has nothing to report',
+        (tester) async {
+      await pump(
+        tester,
+        conversations: rows,
+        filter: InboxFilter.needsReply,
+        progress: (cleared: 0, total: 60),
+      );
+
+      expect(find.byKey(ConversationListPane.progressKey), findsNothing);
+    });
+
+    testWidgets('and no count at all leaves the list as it was', (tester) async {
+      await pump(tester, conversations: rows, filter: InboxFilter.needsReply);
+
+      expect(find.byKey(ConversationListPane.progressKey), findsNothing);
+      expect(find.text('NEEDS REPLY'), findsOneWidget);
+    });
+
+    testWidgets('it sits above the first section header', (tester) async {
+      await pump(
+        tester,
+        conversations: rows,
+        filter: InboxFilter.needsReply,
+        progress: (cleared: 1, total: 4),
+      );
+
+      final line = tester.getTopLeft(find.text('1 of 4 cleared')).dy;
+      final header = tester.getTopLeft(find.text('NEEDS REPLY')).dy;
+      expect(line, lessThan(header));
     });
   });
 }

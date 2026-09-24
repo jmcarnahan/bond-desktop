@@ -565,6 +565,56 @@ void main() {
         expect(c.replyExpected, isNull);
       });
     });
+
+    /// Who the thread is from for the external mark — the newest KEPT inbound
+    /// sender, on the reason subselect's own filter, so the chip and the ask
+    /// can never describe different people.
+    group('latest_inbound_from', () {
+      Future<Conversation> load() async =>
+          (await store.loadConversations()).firstWhere((c) => c.id == 'c-new');
+
+      test('skips the owner\'s reply and the gated bot to name the person',
+          () async {
+        await store.upsertMessage(messageRow(
+          id: 'human',
+          fromAddress: 'sam@northwind.example.com',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T08:00:00Z',
+        ));
+        // Newer inbound, but the gate threw it out: tinting off it would say
+        // External about a sender the row never claims to be waiting on.
+        await store.upsertMessage(messageRow(
+          id: 'bot',
+          fromAddress: 'noreply@vendor.example.net',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T09:00:00Z',
+        ));
+        await store.writeTriage('email', 'bot',
+            status: 'skipped', gateReason: 'auto_generated');
+        // Newest of all, and the owner's own — never who the thread is from.
+        await store.upsertMessage(messageRow(
+          id: 'mine',
+          direction: 'outbound',
+          fromAddress: 'me@northwind.example.com',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T10:00:00Z',
+        ));
+
+        expect((await load()).latestInboundFrom, 'sam@northwind.example.com');
+      });
+
+      test('a thread with no kept inbound answers null', () async {
+        await store.upsertMessage(messageRow(
+          id: 'bot',
+          fromAddress: 'noreply@vendor.example.net',
+          conversationKey: 'c-new',
+        ));
+        await store.writeTriage('email', 'bot',
+            status: 'skipped', gateReason: 'no_reply');
+
+        expect((await load()).latestInboundFrom, isNull);
+      });
+    });
   });
 
   group('setConversationState', () {

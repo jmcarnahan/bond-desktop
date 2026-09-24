@@ -18,6 +18,17 @@ import 'bond_mcp_client.dart';
 /// callers already route on it, and one of them routes on its status code.
 /// Auth failures — [NotSignedIn], [ReconsentRequired], [AuthException] — pass
 /// through UNWRAPPED, exactly as they do from `graph_mail.dart`.
+///
+/// One thing this backend deliberately does NOT do is implement
+/// [DraftRecipientsEditor], which is what makes
+/// `MailBackendRecipients.canEditDraftRecipients` false here and a call to
+/// `updateDraftRecipients` through the seam a [StateError]. `manage_draft` takes
+/// `to` and `cc` on `action: 'create'` and on no other action, so a reply draft
+/// this server built cannot have anybody added to it: there is no tool call to
+/// make. The composer reads the capability and says so where somebody reaches
+/// for the feature, rather than adding people to a reply that would go out
+/// without them. Turning it on is a `manage_draft` action on the server, not a
+/// change here.
 
 /// The HTTP status inside a tool's failure text, when it names one.
 ///

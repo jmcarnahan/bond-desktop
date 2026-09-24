@@ -94,6 +94,16 @@ class AttachmentPreviewPanel extends StatefulWidget {
   /// caution `HtmlPreview.caution` spells out. Null renders neither.
   final void Function(AttachmentRef attachment)? onOpenInBrowser;
 
+  /// Whether the message this file arrived on was sent from outside the owner's
+  /// own domains — the host's answer, because externality is a fact about a
+  /// SENDER and this panel is handed a file.
+  ///
+  /// False, the default, is the panel every existing host draws. True adds the
+  /// `External` chip to the header and hands `HtmlPreview` the stronger caution:
+  /// a page chosen by a stranger is the one attachment in this app that reaches
+  /// a real browser, so it is where the difference is worth saying twice.
+  final bool senderIsExternal;
+
   const AttachmentPreviewPanel({
     super.key,
     required this.attachment,
@@ -109,6 +119,7 @@ class AttachmentPreviewPanel extends StatefulWidget {
     this.pinned = false,
     this.onOpenLink,
     this.onOpenInBrowser,
+    this.senderIsExternal = false,
   });
 
   static const Key expandKey = ValueKey('attachment-preview-expand');
@@ -124,6 +135,7 @@ class AttachmentPreviewPanel extends StatefulWidget {
   static const Key pinKey = ValueKey('attachment-preview-pin');
   static const Key sourceLinkKey = ValueKey('attachment-preview-source-link');
   static const Key openRefusedKey = ValueKey('attachment-preview-open-refused');
+  static const Key externalChipKey = ValueKey('attachment-preview-external');
 
   @override
   State<AttachmentPreviewPanel> createState() => _AttachmentPreviewPanelState();
@@ -433,6 +445,18 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
               overflow: TextOverflow.ellipsis,
             ),
           ),
+          // Before the size, because where a file came from is worth more than
+          // how big it is: this header is read by somebody deciding whether to
+          // open the thing, and the caution under the card says the same fact
+          // again once they are looking at it.
+          if (widget.senderIsExternal) ...[
+            const SizedBox(width: BondSpacing.s8),
+            const BondChip(
+              key: AttachmentPreviewPanel.externalChipKey,
+              label: 'External',
+              tone: BondTone.external,
+            ),
+          ],
           if (size.isNotEmpty) ...[
             const SizedBox(width: BondSpacing.s8),
             Text(size, style: BondType.caption),
@@ -749,6 +773,7 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
         name: attachment.name,
         body: _textBody(),
         onOpenInBrowser: open == null ? null : () => open(attachment),
+        externalSender: widget.senderIsExternal,
       ),
     );
   }

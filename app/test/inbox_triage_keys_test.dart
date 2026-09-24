@@ -328,6 +328,38 @@ void main() {
     await settleQueues(tester);
   });
 
+  testWidgets('a palette pick actually runs: >later defers the standing row',
+      (tester) async {
+    // The whole feature in one walk, because it rests on a fragile handoff:
+    // the single letters are dead while an editable has focus, so the field
+    // must give the cursor BACK and defer the invoke a frame — a same-frame
+    // dispatch is silently refused and this test is what notices.
+    await seedPile();
+    await pumpInbox(tester);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    expect(litRow(tester), 'Invoice 4471');
+
+    await tester.enterText(find.byKey(FindField.fieldKey), '>later');
+    await tester.pump();
+    await tester.pump();
+    // A command needle never narrows the list: '>' is an order, not a search.
+    expect(rowTitles(tester), hasLength(3));
+
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    // One frame to give up the cursor, one for the post-frame invoke, one
+    // for what it did.
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    await settleQueues(tester);
+
+    // The same LaterThreadIntent `s` fires, on the same standing row.
+    expect(rowTitles(tester), ['Homepage copy', 'Vendor quote']);
+    expect(find.text('Sent to Later.'), findsOneWidget);
+    await settleQueues(tester);
+  });
+
   testWidgets('e typed in the composer is a letter, not a dismissal',
       (tester) async {
     await seedPile();
@@ -603,5 +635,101 @@ void main() {
     final rule = (await store.listLabelRules()).single;
     expect(rule.labelId, label.id);
     expect(rule.scopeKind, 'sender');
+  });
+
+  testWidgets(
+      'r opens the in-list box on the focused row, a letter inside it is a '
+      'letter, and Escape hands the keys back', (tester) async {
+    await seedPile();
+    await pumpInbox(tester);
+    await settleQueues(tester);
+
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyR);
+
+    // On the row `r` named — the newest, where j stood — and nowhere else.
+    // The key is derived from source|id, so any row with c1's identity names
+    // the same box.
+    Key boxKey() {
+      final pane = tester.widget<ConversationListPane>(
+        find.byType(ConversationListPane),
+      );
+      for (final (_, rows) in pane.sectionsOverride!) {
+        for (final c in rows) {
+          if (c.id == 'c1') return ConversationListPane.quickReplyKeyFor(c);
+        }
+      }
+      fail('c1 left the pile');
+    }
+
+    expect(find.byKey(boxKey()), findsOneWidget);
+
+    // The box autofocused, so `e` is a letter in it, not a dismissal.
+    await press(tester, LogicalKeyboardKey.keyE);
+    expect(rowTitles(tester), hasLength(3),
+        reason: 'e typed into the box must not clear the thread');
+
+    // Escape closes the box and the keys work again: this `e` IS a dismissal.
+    await press(tester, LogicalKeyboardKey.escape);
+    expect(find.byKey(boxKey()), findsNothing);
+    await press(tester, LogicalKeyboardKey.keyE);
+    await settleQueues(tester);
+    expect(rowTitles(tester), ['Invoice 4471', 'Vendor quote']);
+  });
+
+  testWidgets(
+      'the progress line counts a cleared row and gives it back with z',
+      (tester) async {
+    await seedPile();
+    await pumpInbox(tester);
+    await settleQueues(tester);
+
+    // Nothing cleared yet: no line, however big the pile is.
+    expect(find.byKey(ConversationListPane.progressKey), findsNothing);
+
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyE);
+    await settleQueues(tester);
+    expect(find.text('1 of 3 cleared'), findsOneWidget);
+
+    // The undo is the row back AND the count back — the same bar carries both.
+    await press(tester, LogicalKeyboardKey.keyZ);
+    await settleQueues(tester);
+    expect(rowTitles(tester), hasLength(3));
+    expect(find.byKey(ConversationListPane.progressKey), findsNothing);
+  });
+
+  testWidgets('switching tabs ends the sit-down the progress line was counting',
+      (tester) async {
+    await seedPile();
+    await pumpInbox(tester);
+    await settleQueues(tester);
+
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyE);
+    await settleQueues(tester);
+    expect(find.text('1 of 3 cleared'), findsOneWidget);
+
+    // The pill, not whatever else says the same word on screen.
+    Finder pill(String label) => find.descendant(
+          of: find.byKey(const Key('needs-you-tabs')),
+          matching: find.text(label),
+        );
+
+    // A tab is a different pile: "1 of 3" held over whatever Asked of me
+    // shows would be progress through a pile that is no longer on screen.
+    await tester.tap(pill('Asked of me'));
+    await settleQueues(tester);
+    expect(find.byKey(ConversationListPane.progressKey), findsNothing);
+
+    // And coming back starts a fresh count over the pile as it IS now — two
+    // rows, not the three the first sit-down began with.
+    await tester.tap(pill('All'));
+    await settleQueues(tester);
+    expect(find.byKey(ConversationListPane.progressKey), findsNothing);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyE);
+    await settleQueues(tester);
+    expect(find.text('1 of 2 cleared'), findsOneWidget);
   });
 }

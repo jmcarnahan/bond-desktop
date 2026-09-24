@@ -341,8 +341,11 @@ void main() {
       expect(find.text('teams_direct'), findsNothing);
     });
 
-    testWidgets('a rule reason reads as the label the owner chose',
+    testWidgets('a rule reason says the thread was shown DESPITE the rule',
         (tester) async {
+      // The only way this token reaches a drawn row is the floor raising a
+      // thread past the owner's rule, so the bare label name would claim the
+      // opposite of what happened.
       await tester.pumpWidget(_host(ConversationRow(
         conversation: _conv(
           state: ConversationState.needsReply,
@@ -352,7 +355,7 @@ void main() {
         onTap: () {},
       )));
 
-      expect(chipText(tester), 'Jira update');
+      expect(chipText(tester), 'Shown despite Jira update');
     });
 
     testWidgets('a long sentence is clamped to the width of a row',
@@ -421,6 +424,25 @@ void main() {
       // The counts carry no keys of their own, so their position is read off
       // what the row still says.
       expect(find.text('📎 1'), findsOneWidget);
+      expect(find.text('0 messages'), findsOneWidget);
+    });
+  });
+
+  group('where the thread came from', () {
+    testWidgets('a host that cannot say draws the row it always drew',
+        (tester) async {
+      // `ownerDomains` defaults to empty, so every call site that existed
+      // before the external mark keeps the row it had — which is the whole
+      // reason the prop is optional. `external_tint_test` holds the other side:
+      // what a host that CAN say gets.
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(),
+        selected: false,
+        onTap: () {},
+      )));
+
+      expect(find.byKey(ConversationRow.externalStripeKey), findsNothing);
+      expect(find.text('External'), findsNothing);
       expect(find.text('0 messages'), findsOneWidget);
     });
   });

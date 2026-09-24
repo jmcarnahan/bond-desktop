@@ -154,10 +154,11 @@ void main() {
     test('a name this parser does not know stays text, verbatim', () {
       // The rule the whole grammar rests on: there is no error channel here, so
       // an unknown facet has to be readable as the words somebody typed.
-      // `is:external` in particular is not reserved and not refused — it lands
-      // as text until the signal it needs exists.
+      // `-is:external` is in the list because `is:external` DOES parse now and
+      // its negation deliberately does not — `-label:` is this grammar's only
+      // one, so the minus falls through to text like any other unknown name.
       for (final needle in const [
-        'is:external',
+        '-is:external',
         'is:unread',
         'has:deadline',
         'foo:bar',
@@ -282,19 +283,19 @@ void main() {
       // whatever the words clause does, an unknown facet must do the same
       // thing, today and after the next term lands.
       final rows = [
-        _conv(id: 'a', subject: 'Re: is:external tagging'),
+        _conv(id: 'a', subject: 'Re: is:unread tagging'),
         _conv(id: 'b', subject: 'Launch date'),
       ];
 
       for (final c in rows) {
         expect(
-          conversationMatches(c, 'is:external'),
-          conversationMatchesText(c, 'is:external'),
+          conversationMatches(c, 'is:unread'),
+          conversationMatchesText(c, 'is:unread'),
           reason: c.id,
         );
       }
-      expect(conversationMatches(rows.first, 'is:external'), isTrue);
-      expect(conversationMatches(rows.last, 'is:external'), isFalse);
+      expect(conversationMatches(rows.first, 'is:unread'), isTrue);
+      expect(conversationMatches(rows.last, 'is:unread'), isFalse);
     });
 
     test('a needle that is only facets matches on the facets alone', () {

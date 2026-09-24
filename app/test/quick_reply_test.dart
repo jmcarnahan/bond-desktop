@@ -5,6 +5,7 @@ import 'package:bond_inbox/widgets/linked_text.dart' show LinkRun;
 import 'package:bond_inbox/widgets/quick_replies.dart';
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_test/flutter_test.dart';
 
 /// The short answers under the transcript.
@@ -813,6 +814,211 @@ void main() {
 
       expect(find.byKey(QuickReplyBar.streamingKeyFor(0)), findsOneWidget);
       expect(find.text('Drafting…'), findsOneWidget);
+    });
+  });
+
+  /// The in-list box (entry 12f): one reply, written without leaving the list.
+  ///
+  /// It decides as little as the bar does — the host owns the send — so these
+  /// pin what it draws, that the two keys mean here what they mean nowhere else
+  /// in the app, and that nothing reports twice.
+  group('the in-list box', () {
+    Future<void> pumpBox(
+      WidgetTester tester, {
+      QuickReply reply = const QuickReply(),
+      String who = 'Dana Whitfield',
+      void Function(String body)? onSend,
+      VoidCallback? onClose,
+    }) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: QuickReplyBox(
+            reply: reply,
+            who: who,
+            onSend: onSend ?? (_) {},
+            onClose: onClose ?? () {},
+          ),
+        ),
+      ));
+      await tester.pump();
+    }
+
+    testWidgets('says who it answers and starts empty', (tester) async {
+      await pumpBox(tester);
+
+      expect(find.text('Reply to Dana Whitfield'), findsOneWidget);
+      expect(find.text('⌘Enter sends'), findsOneWidget);
+      // Nothing to send yet, so the button is inert rather than absent: the
+      // reader can see what will happen when they type.
+      final send = tester.widget<TextButton>(
+        find.byKey(QuickReplyBox.sendKey),
+      );
+      expect(send.onPressed, isNull);
+    });
+
+    testWidgets('a sender with no name is a box with no line', (tester) async {
+      await pumpBox(tester, who: '');
+
+      expect(find.textContaining('Reply to'), findsNothing);
+    });
+
+    testWidgets('people staged on the draft are said out loud, never carried '
+        'silently', (tester) async {
+      // The draft is shared with the thread composer, so Cc chips staged
+      // there ride a send from THIS box too. The box draws no chips — the
+      // names are in the thread — but it must say the count, or it would send
+      // to people it never showed.
+      await pumpBox(
+        tester,
+        reply: const QuickReply(addedRecipients: 2),
+      );
+
+      expect(
+        find.text('Reply to Dana Whitfield, plus 2 people in Cc'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('one staged person is a person, even with nobody to name',
+        (tester) async {
+      await pumpBox(
+        tester,
+        who: '',
+        reply: const QuickReply(addedRecipients: 1),
+      );
+
+      expect(
+        find.text('Reply to the sender, plus 1 person in Cc'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('the stored draft is what the box opens with', (tester) async {
+      await pumpBox(
+        tester,
+        reply: const QuickReply(body: 'Friday works — see you then.'),
+      );
+
+      expect(find.text('Friday works — see you then.'), findsOneWidget);
+    });
+
+    testWidgets('Send reports the typed words, trimmed, once', (tester) async {
+      final sent = <String>[];
+      await pumpBox(tester, onSend: sent.add);
+
+      await tester.enterText(find.byKey(QuickReplyBox.fieldKey), '  Yes.  ');
+      await tester.pump();
+      await tester.tap(find.byKey(QuickReplyBox.sendKey));
+      await tester.pump();
+
+      expect(sent, ['Yes.']);
+    });
+
+    testWidgets('⌘Enter sends the same words', (tester) async {
+      final sent = <String>[];
+      await pumpBox(tester, onSend: sent.add);
+
+      await tester.enterText(find.byKey(QuickReplyBox.fieldKey), 'On it.');
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.meta);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.meta);
+      await tester.pump();
+
+      expect(sent, ['On it.']);
+    });
+
+    testWidgets('an empty box sends nothing, by key or by button',
+        (tester) async {
+      final sent = <String>[];
+      await pumpBox(tester, onSend: sent.add);
+
+      await tester.enterText(find.byKey(QuickReplyBox.fieldKey), '   ');
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.meta);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.meta);
+      await tester.pump();
+
+      expect(sent, isEmpty);
+    });
+
+    testWidgets('Escape and Cancel both close it', (tester) async {
+      var closed = 0;
+      await pumpBox(tester, onClose: () => closed++);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      expect(closed, 1);
+
+      await tester.tap(find.byKey(QuickReplyBox.cancelKey));
+      await tester.pump();
+      expect(closed, 2);
+    });
+
+    testWidgets('a send in flight says so and refuses a second one',
+        (tester) async {
+      final sent = <String>[];
+      await pumpBox(
+        tester,
+        reply: const QuickReply(body: 'On it.', sending: true),
+        onSend: sent.add,
+      );
+
+      expect(find.text('Sending…'), findsOneWidget);
+      final send = tester.widget<TextButton>(
+        find.byKey(QuickReplyBox.sendKey),
+      );
+      expect(send.onPressed, isNull);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.meta);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.meta);
+      await tester.pump();
+
+      expect(sent, isEmpty);
+    });
+
+    testWidgets('what stopped a send is said in the box', (tester) async {
+      await pumpBox(
+        tester,
+        reply: const QuickReply(
+          body: 'On it.',
+          error: 'There is nothing to reply to in this thread yet.',
+        ),
+      );
+
+      expect(
+        find.text('There is nothing to reply to in this thread yet.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a late prefill fills an untouched box and never a typed one',
+        (tester) async {
+      Future<void> pumpWith(QuickReply reply) => tester.pumpWidget(MaterialApp(
+            home: Scaffold(
+              body: QuickReplyBox(
+                reply: reply,
+                onSend: (_) {},
+                onClose: () {},
+              ),
+            ),
+          ));
+
+      await pumpWith(const QuickReply());
+      await pumpWith(const QuickReply(body: 'Friday works.'));
+      await tester.pump();
+      expect(find.text('Friday works.'), findsOneWidget);
+
+      // Now the reader types over it, and a third read of the same draft
+      // arrives.
+      await tester.enterText(find.byKey(QuickReplyBox.fieldKey), 'Mine.');
+      await pumpWith(const QuickReply(body: 'Tuesday instead?'));
+      await tester.pump();
+
+      expect(find.text('Mine.'), findsOneWidget);
+      expect(find.text('Tuesday instead?'), findsNothing);
     });
   });
 }

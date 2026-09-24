@@ -20,6 +20,7 @@ void main() {
     String? name = 'security-report.html',
     VoidCallback? onOpenInBrowser,
     Widget? body,
+    bool externalSender = false,
   }) async {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
@@ -31,6 +32,7 @@ void main() {
             name: name,
             snapshot: snapshot,
             onOpenInBrowser: onOpenInBrowser,
+            externalSender: externalSender,
             body: body ??
                 const Text('Two accounts need a password change.'),
           ),
@@ -118,6 +120,25 @@ void main() {
         findsOneWidget,
         reason: 'the caution is read before the press, not after',
       );
+    });
+
+    testWidgets('a page from outside the organisation says so instead',
+        (tester) async {
+      await pump(tester, onOpenInBrowser: () {}, externalSender: true);
+
+      // One caution line, not two: the external sentence REPLACES the ordinary
+      // one under the same key, so there is no version of this card where a
+      // reader has to work out which of two warnings applies to them.
+      expect(find.byKey(HtmlPreview.cautionKey), findsOneWidget);
+      expect(find.text(HtmlPreview.cautionExternal), findsOneWidget);
+      expect(find.text(HtmlPreview.caution), findsNothing);
+    });
+
+    testWidgets('and with nowhere to open it, neither sentence is drawn',
+        (tester) async {
+      await pump(tester, externalSender: true);
+
+      expect(find.byKey(HtmlPreview.cautionKey), findsNothing);
     });
 
     testWidgets('with nowhere to open it there is no control at all',

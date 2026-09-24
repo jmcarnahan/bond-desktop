@@ -399,6 +399,24 @@ class MessageRow extends StatefulWidget {
   /// Whether it starts folded. Read once, at construction — see [_collapsed].
   final bool initiallyCollapsed;
 
+  /// A COUNTER of times the host has asked for this row to be opened, which is
+  /// how a jump lands on a folded message and finds it readable.
+  ///
+  /// Not a bool and not a re-read of [initiallyCollapsed]: the fold is seeded
+  /// once and never recomputed, deliberately (see [_collapsed]), so the only
+  /// honest way to open a row from outside is an EVENT rather than a state the
+  /// row keeps re-deciding. Each increment is one such event — "the reader just
+  /// jumped here" — so a reader who folds the row again and jumps back to it
+  /// gets it opened again. Never decreases, so the host keeps one number per
+  /// message rather than clearing a flag on the frame after it set one.
+  final int unfoldRequest;
+
+  /// Whether this message names the owner — an `@mention`, a 1:1, or an ask the
+  /// extractor wrote for them (`services/mention_index.dart`). Draws the `@ you`
+  /// marker, and is why the host starts such a row unfolded in a thread whose
+  /// history is otherwise folded away. False is what every other host passes.
+  final bool namesOwner;
+
   /// Told whenever the reader folds or unfolds this row, with what it became.
   ///
   /// The fold survives every rebuild on its own (see [_collapsed]); what it
@@ -442,6 +460,16 @@ class MessageRow extends StatefulWidget {
   /// Null draws no button, and so does an address `webUriOf` refuses.
   final void Function(String url)? onOpenLink;
 
+  /// What tapping the quote above a reply does, asked PER QUOTE.
+  ///
+  /// A quote-reply names the message it quotes (`content_id`), and only the host
+  /// knows whether that message is one of the rows it loaded. So the row asks
+  /// about each quote and draws whatever comes back: a tap where the answer is
+  /// somewhere on this screen, a statement where it is not. Null altogether
+  /// leaves every quote a statement, which is what a host with no transcript to
+  /// scroll passes.
+  final VoidCallback? Function(AttachmentRef quote)? quoteTapFor;
+
   const MessageRow({
     super.key,
     required this.message,
@@ -451,6 +479,8 @@ class MessageRow extends StatefulWidget {
     this.suggestion,
     this.collapsible = false,
     this.initiallyCollapsed = false,
+    this.unfoldRequest = 0,
+    this.namesOwner = false,
     this.onFoldChanged,
     this.onOpenAttachment,
     this.selectedAttachment,
@@ -458,11 +488,16 @@ class MessageRow extends StatefulWidget {
     this.photos,
     this.onUseInReply,
     this.onOpenLink,
+    this.quoteTapFor,
   });
 
   /// The one line a folded row keeps about its files.
   static const Key collapsedAttachmentHintKey =
       ValueKey('message-row-attachment-hint');
+
+  /// The `@ you` marker — what a reader scanning a long thread is looking for,
+  /// and what a test asks for instead of hunting a colour.
+  static const Key ownerMarkerKey = ValueKey('message-row-owner-marker');
 
   /// The run of file cards under a message — what a test asks for to say "the
   /// files this message carried are drawn here".
@@ -492,6 +527,21 @@ class _MessageRowState extends State<MessageRow> {
   void initState() {
     super.initState();
     _collapsed = widget.initiallyCollapsed && widget.collapsible;
+  }
+
+  /// The ONE arm that reopens a folded row from outside, and it reads an event
+  /// rather than a state: a fresh [MessageRow.unfoldRequest] means the reader
+  /// has just been sent here, and a message the reader was sent to has to be
+  /// readable when they arrive. [MessageRow.initiallyCollapsed] is still never
+  /// re-read — that is the rule this arm sits beside rather than the rule it
+  /// breaks.
+  @override
+  void didUpdateWidget(MessageRow old) {
+    super.didUpdateWidget(old);
+    if (widget.unfoldRequest != old.unfoldRequest && _collapsed) {
+      setState(() => _collapsed = false);
+      widget.onFoldChanged?.call(false);
+    }
   }
 
   String get _raw => rawBodyOf(widget.message);
@@ -599,6 +649,13 @@ class _MessageRowState extends State<MessageRow> {
               if (widget.showHeader) ...[
                 _header(meta, folds: folds),
                 const SizedBox(height: 2),
+              ]
+              // A continuation row has no header to hang the marker on, and a
+              // mention in the middle of somebody's run is still the reason the
+              // reader came here, so it wears one of its own.
+              else if (widget.namesOwner) ...[
+                _ownerMarker(),
+                const SizedBox(height: 2),
               ],
               if (collapsed) ...[
                 // One line of what was said, and then only what still wants
@@ -627,7 +684,11 @@ class _MessageRowState extends State<MessageRow> {
                 // What this reply is answering, first: a quote reads before the
                 // words that answer it or it is not a quote.
                 for (final quote in layout.quotes)
-                  QuoteBlock(key: QuoteBlock.keyFor(quote), attachment: quote),
+                  QuoteBlock(
+                    key: QuoteBlock.keyFor(quote),
+                    attachment: quote,
+                    onTap: widget.quoteTapFor?.call(quote),
+                  ),
                 ..._bodySegments(layout, overflows),
                 if (overflows) ...[
                   const SizedBox(height: BondSpacing.s4),
@@ -910,6 +971,12 @@ class _MessageRowState extends State<MessageRow> {
           const SizedBox(width: BondSpacing.s8),
           Text(meta, style: BondType.caption),
         ],
+        // After the name and the stamp, before the chevron: it says something
+        // about this message, not about whether the row is open.
+        if (widget.namesOwner) ...[
+          const SizedBox(width: BondSpacing.s8),
+          _ownerMarker(),
+        ],
         if (folds) ...[
           const SizedBox(width: BondSpacing.s4),
           Icon(
@@ -934,6 +1001,17 @@ class _MessageRowState extends State<MessageRow> {
       ),
     );
   }
+
+  /// The `@ you` marker: this is one of the messages the navigator counts.
+  ///
+  /// The attention tone, the same copper the ask line and the banner wear,
+  /// because it is the same claim in fewer words — something here is the
+  /// reader's. Lowercase `you`, matching the header's own sentence case.
+  Widget _ownerMarker() => BondChip.semantic(
+        '@ you',
+        BondTone.attention,
+        key: MessageRow.ownerMarkerKey,
+      );
 
   /// The open ask, in the same copper ink an inbox row tints its CTA with.
   /// Triage names an action item where it can; where it only judged that a

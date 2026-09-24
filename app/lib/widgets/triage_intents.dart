@@ -61,6 +61,41 @@ class FocusReplyIntent extends Intent {
   const FocusReplyIntent();
 }
 
+/// Answer the thread the reader is standing on WITHOUT opening it: the in-list
+/// quick reply of entry 12f, bound to `r`.
+///
+/// A second intent beside [FocusReplyIntent] rather than one that does whichever
+/// applies, because they are two acts with two costs: this one opens a box under
+/// a row the reader has not read, and that one moves the cursor into a composer
+/// under a thread they are reading. A single `r` meaning either depending on
+/// what is open is how a reader learns to check before pressing it.
+///
+/// Payload-free like the rest — the focused row is the row it means, and the
+/// screen is the layer that knows which that is and where its box's state
+/// lives (`QuickReply` in `widgets/quick_replies.dart`).
+class QuickReplyIntent extends Intent {
+  const QuickReplyIntent();
+}
+
+/// The next place in the OPEN THREAD where the owner is named — not the next
+/// thread.
+///
+/// Here rather than in a second key map for the reason at the top of this file:
+/// the `@ You · 3` control in the thread header and whatever key the screen
+/// binds are two doors into one act, and a navigator with its own handler is how
+/// the button and the key come to disagree about where "next" is. Payload-free
+/// like the rest — the thread on screen is the thread it means, and the
+/// transcript is the layer that knows which of its rows that names
+/// (`services/mention_index.dart`).
+class NextMentionIntent extends Intent {
+  const NextMentionIntent();
+}
+
+/// [NextMentionIntent] backwards, toward the start of the thread.
+class PreviousMentionIntent extends Intent {
+  const PreviousMentionIntent();
+}
+
 /// Take back the last thing an undo toast offered to take back.
 class UndoLastIntent extends Intent {
   const UndoLastIntent();

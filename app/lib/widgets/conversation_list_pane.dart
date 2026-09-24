@@ -8,6 +8,7 @@ import '../theme/tokens.dart';
 import 'conversation_row.dart';
 import 'hover_actions.dart' show HoverAction;
 import 'label_picker.dart';
+import 'quick_replies.dart' show QuickReply, QuickReplyBox;
 
 /// Which threads the list shows. [open] is the working view — everything not
 /// yet resolved, split into what needs the user and what is waiting on someone
@@ -108,6 +109,10 @@ class ConversationListPane extends StatelessWidget {
   /// it (see [LabelPicker.labels]).
   final List<Label> labels;
 
+  /// What the rows measure "external" against — see [ConversationRow.ownerDomains].
+  /// Empty means nobody is external, which is what an unwired host gets.
+  final Set<String> ownerDomains;
+
   /// Which question the picker under a row is asking, and null for the rows —
   /// every row, by default — that have none open.
   ///
@@ -153,6 +158,32 @@ class ConversationListPane extends StatelessWidget {
     LabelRuleOffer offer,
   )? onRuleChosen;
 
+  /// How far this triage session has got — entry 12g's *12 of 60 cleared*.
+  /// Null, the default, draws nothing.
+  ///
+  /// The host's arithmetic, not this pane's: what a session started with is a
+  /// fact about a moment the pane was not there for, and counting the rows it
+  /// can see would report the list shrinking rather than the reader's progress.
+  /// Drawn only once something HAS been cleared — a line reading *0 of 60* is a
+  /// scoreboard telling somebody who just sat down that they have done nothing.
+  final ({int cleared, int total})? progress;
+
+  /// Which row has a quick reply open, and what it is doing — see
+  /// [QuickReply]. Null for every other row, and the default answers null for
+  /// all of them.
+  ///
+  /// Host-owned for [labelPickerFor]'s reason, and it matters more here: `r` is
+  /// pressed on the screen's own key map, not in this pane, so the state saying
+  /// which row is being answered has to live where that press lands.
+  final QuickReply? Function(Conversation conversation)? quickReplyFor;
+
+  /// Sends what the reader typed in that row's box. The pane owns no send path
+  /// — this is the composer's own [onSend] one row up the tree.
+  final void Function(Conversation conversation, String body)? onQuickReplySend;
+
+  /// Escape, Cancel, or a send the host decided closes the box.
+  final void Function(Conversation conversation)? onCloseQuickReply;
+
   /// One rule the app would offer to write from what the owner keeps doing by
   /// hand — requirement 12d. Null, the default, draws nothing.
   ///
@@ -192,6 +223,7 @@ class ConversationListPane extends StatelessWidget {
     this.onLater,
     this.onDismissSender,
     this.labels = const [],
+    this.ownerDomains = const {},
     this.labelPickerFor,
     this.onApplyLabel,
     this.onCreateLabel,
@@ -200,6 +232,10 @@ class ConversationListPane extends StatelessWidget {
     this.ruleOffersFor,
     this.ruleOfferLabelFor,
     this.onRuleChosen,
+    this.progress,
+    this.quickReplyFor,
+    this.onQuickReplySend,
+    this.onCloseQuickReply,
     this.ruleSuggestion,
     this.onAcceptRuleSuggestion,
     this.onNotNowRuleSuggestion,
@@ -216,6 +252,14 @@ class ConversationListPane extends StatelessWidget {
 
   /// The inline picker under one row.
   static Key pickerKeyFor(Conversation c) => _actionKey('label-picker', c);
+
+  /// The quick-reply box under one row. Per row like the picker's, even though
+  /// the host opens one at a time: a box carrying the row's own key is a box
+  /// whose state cannot follow the focus onto the next thread.
+  static Key quickReplyKeyFor(Conversation c) => _actionKey('quick-reply', c);
+
+  /// The session's progress line over the list.
+  static const Key progressKey = ValueKey('triage-progress');
 
   /// The rule offer at the top of the list, and its two answers.
   static const Key suggestionKey = ValueKey('rule-suggestion');
@@ -309,11 +353,16 @@ class ConversationListPane extends StatelessWidget {
     // built a widget for every thread up front, which on a mailbox with
     // thousands of "Done" threads exhausted the GPU and crashed the app.
     final entries = <_PaneEntry>[];
+    // The session's own line first: it is about the reader rather than about
+    // any thread, and it scrolls away with the rest — a counter pinned over a
+    // list of mail would be the loudest thing on the screen.
+    final progressLine = _progressRow();
+    if (progressLine != null) entries.add(_LooseEntry(progressLine));
     // Above the first section header, inside the scroll rather than pinned over
     // it: the offer is about mail the reader has already dealt with, so it must
     // never hold the top of a list they came here to read down.
     final offer = _suggestionRow();
-    if (offer != null) entries.add(_SuggestionEntry(offer));
+    if (offer != null) entries.add(_LooseEntry(offer));
     for (final (label, rows) in sections) {
       if (rows.isEmpty) continue;
       entries.add(_HeaderEntry(label, rows.length));
@@ -327,7 +376,7 @@ class ConversationListPane extends StatelessWidget {
       itemCount: entries.length,
       itemBuilder: (context, i) {
         final entry = entries[i];
-        if (entry is _SuggestionEntry) return entry.child;
+        if (entry is _LooseEntry) return entry.child;
         if (entry is _HeaderEntry) {
           return Padding(
             padding: const EdgeInsets.fromLTRB(
@@ -368,6 +417,7 @@ class ConversationListPane extends StatelessWidget {
       onTap: () => onSelect(c.source, c.id),
       processingSince: processingSince,
       caption: captionFor?.call(c),
+      ownerDomains: ownerDomains,
     );
 
     Widget body = row;
@@ -395,16 +445,56 @@ class ConversationListPane extends StatelessWidget {
       body = _RowActions(actions: actions, child: body);
     }
 
+    final box = _quickReply(c);
     final picker = _picker(c);
-    if (picker == null) return body;
+    if (box == null && picker == null) return body;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         body,
-        const SizedBox(height: BondSpacing.s8),
-        picker,
+        // The box first where both are up: it holds a cursor, and a picker
+        // pushing a half-written reply down the pane would move the words the
+        // reader is looking at.
+        if (box != null) ...[
+          const SizedBox(height: BondSpacing.s8),
+          box,
+        ],
+        if (picker != null) ...[
+          const SizedBox(height: BondSpacing.s8),
+          picker,
+        ],
       ],
+    );
+  }
+
+  /// The quick-reply box under one row, or null while that row has none open.
+  ///
+  /// Under the card and outside it, on [_picker]'s rule and the Reopen button's:
+  /// [ConversationRow] draws the same row in every list, and a card that grew a
+  /// text field here would be a different card in the four lists that never
+  /// wired this.
+  ///
+  /// The reader it names comes off the thread itself rather than from the host —
+  /// the same `displaySenderName` the sender rule's tooltip uses, so the box says
+  /// who it is answering in the words the row already shows.
+  Widget? _quickReply(Conversation c) {
+    final openFor = quickReplyFor;
+    final send = onQuickReplySend;
+    final close = onCloseQuickReply;
+    if (openFor == null || send == null || close == null) return null;
+    final reply = openFor(c);
+    if (reply == null) return null;
+    return QuickReplyBox(
+      key: quickReplyKeyFor(c),
+      reply: reply,
+      who: displaySenderName(
+        name: c.primaryParticipant?.name,
+        address: c.primaryEmail,
+        fallback: '',
+      ),
+      onSend: (body) => send(c, body),
+      onClose: () => close(c),
     );
   }
 
@@ -500,6 +590,29 @@ class ConversationListPane extends StatelessWidget {
       onRuleChosen: offering && chosen != null
           ? (label, offer) => chosen(c, label, offer)
           : null,
+    );
+  }
+
+  /// *12 of 60 cleared*, or null — see [progress].
+  ///
+  /// One line of caption and nothing else: no bar, no percentage and no
+  /// celebration. The reader can see the list getting shorter; this says how
+  /// much of it was theirs.
+  Widget? _progressRow() {
+    final done = progress;
+    if (done == null || done.cleared <= 0 || done.total <= 0) return null;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        BondSpacing.s4,
+        BondSpacing.s12,
+        BondSpacing.s4,
+        0,
+      ),
+      child: Text(
+        '${done.cleared} of ${done.total} cleared',
+        key: progressKey,
+        style: BondType.caption,
+      ),
     );
   }
 
@@ -681,10 +794,10 @@ class _RowEntry extends _PaneEntry {
   const _RowEntry(this.conversation);
 }
 
-/// The rule offer, built ONCE in `build` rather than in the item builder: it is
-/// the only entry there can be at most one of, and it does not depend on the
-/// index it lands at.
-class _SuggestionEntry extends _PaneEntry {
+/// A one-off line over the list — the rule offer, the session's progress —
+/// built ONCE in `build` rather than in the item builder: there is at most one
+/// of each, and neither depends on the index it lands at.
+class _LooseEntry extends _PaneEntry {
   final Widget child;
-  const _SuggestionEntry(this.child);
+  const _LooseEntry(this.child);
 }

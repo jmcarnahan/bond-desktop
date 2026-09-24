@@ -51,6 +51,8 @@ void main() {
     List<LabelRule> labelRules = const [],
     void Function(String)? onDeleteRule,
     void Function(String, String)? onRuleDispositionChanged,
+    bool replySendMarksDone = false,
+    void Function(bool)? onReplySendMarksDoneChanged,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -84,6 +86,8 @@ void main() {
           labelRules: labelRules,
           onDeleteRule: onDeleteRule,
           onRuleDispositionChanged: onRuleDispositionChanged,
+          replySendMarksDone: replySendMarksDone,
+          onReplySendMarksDoneChanged: onReplySendMarksDoneChanged,
         ),
       ),
     ));
@@ -158,6 +162,88 @@ void main() {
     );
 
     expect(find.textContaining('judging'), findsNothing);
+  });
+
+  group('sending a reply marks it done', () {
+    testWidgets('is absent when the host cannot write it', (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+      );
+      await expand(tester, 'Needs You');
+
+      expect(
+        find.byKey(SettingsScreen.replySendMarksDoneKey),
+        findsNothing,
+      );
+      expect(find.text('Sending a reply marks it done'), findsNothing);
+    });
+
+    testWidgets('reads off by default, with its words under it',
+        (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        onReplySendMarksDoneChanged: (_) {},
+      );
+      await expand(tester, 'Needs You');
+
+      final row = find.byKey(SettingsScreen.replySendMarksDoneKey);
+      expect(tester.widget<SwitchListTile>(row).value, isFalse);
+      expect(find.text('Sending a reply marks it done'), findsOneWidget);
+      expect(
+        find.text(
+          'A thread leaves Needs You as soon as you answer it, instead of '
+          'waiting for you to dismiss it.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('flips the moment it is pressed, like every other switch here',
+        (tester) async {
+      final written = <bool>[];
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        onReplySendMarksDoneChanged: written.add,
+      );
+      await expand(tester, 'Needs You');
+
+      final row = find.byKey(SettingsScreen.replySendMarksDoneKey);
+      await tester.ensureVisible(row);
+      await tester.tap(row);
+      await tester.pumpAndSettle();
+
+      // The control moved under the finger AND the host heard about it: a
+      // preference that only landed on Back could not be checked by the person
+      // who flipped it.
+      expect(written, [true]);
+      expect(tester.widget<SwitchListTile>(row).value, isTrue);
+    });
+
+    testWidgets('a stored on reads on', (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        replySendMarksDone: true,
+        onReplySendMarksDoneChanged: (_) {},
+      );
+      await expand(tester, 'Needs You');
+
+      final row = find.byKey(SettingsScreen.replySendMarksDoneKey);
+      expect(tester.widget<SwitchListTile>(row).value, isTrue);
+
+      await tester.ensureVisible(row);
+      await tester.tap(row);
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<SwitchListTile>(row).value, isFalse);
+    });
   });
 
   testWidgets('the rules editor is absent when no save is wired',

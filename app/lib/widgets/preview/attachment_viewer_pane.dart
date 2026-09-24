@@ -62,7 +62,13 @@ class AttachmentViewerPane extends StatelessWidget {
     this.pinned = false,
     this.onOpenLink,
     this.onOpenInBrowser,
+    this.senderIsExternal = false,
   });
+
+  /// Passed through to [AttachmentPreviewPanel.senderIsExternal]: the full
+  /// pane says External where the split panel would, or the chip would vanish
+  /// on the ⤢ that is supposed to show MORE of the same file.
+  final bool senderIsExternal;
 
   @override
   Widget build(BuildContext context) {
@@ -87,6 +93,7 @@ class AttachmentViewerPane extends StatelessWidget {
         pinned: pinned,
         onOpenLink: onOpenLink,
         onOpenInBrowser: onOpenInBrowser,
+        senderIsExternal: senderIsExternal,
       ),
     );
   }

@@ -21,6 +21,8 @@ Conversation _conv({
   double? score,
   String? lastMessageAt,
   List<Label> labels = const [],
+  int messages = 0,
+  bool? replyExpected,
 }) =>
     Conversation(
       id: id,
@@ -31,6 +33,8 @@ Conversation _conv({
       pendingDraftCount: pendingDrafts,
       lastMessageAt: lastMessageAt,
       labels: labels,
+      messageCount: messages,
+      replyExpected: replyExpected,
     );
 
 Label _label(String id, String name) => Label(id: id, name: name);
@@ -162,7 +166,7 @@ void main() {
     test('every order has a label a menu item can wear', () {
       expect(
         [for (final sort in NeedsYouSort.values) sort.label],
-        ['By priority', 'Newest first'],
+        ['By priority', 'Newest first', 'Quick wins', 'Oldest first'],
       );
     });
 
@@ -238,6 +242,68 @@ void main() {
       for (final sort in NeedsYouSort.values) {
         expect(sortNeedsYou(sort, const []), isEmpty, reason: '$sort');
       }
+    });
+
+    group('the two session orders', () {
+      test('oldest is the clock run backwards, undated still last', () {
+        final rows = [
+          _conv(id: 'newest', lastMessageAt: '2026-09-05T09:00:00Z'),
+          _conv(id: 'undated'),
+          _conv(id: 'older', lastMessageAt: '2026-09-01T09:00:00Z'),
+          _conv(id: 'middle', lastMessageAt: '2026-09-03T09:00:00Z'),
+        ];
+
+        expect(
+          _idsOf(sortNeedsYou(NeedsYouSort.oldest, rows)),
+          ['older', 'middle', 'newest', 'undated'],
+        );
+      });
+
+      test('and is stable through a tie, like newest', () {
+        final rows = [
+          for (var i = 0; i < 8; i++)
+            _conv(id: 'c$i', lastMessageAt: '2026-09-03T09:00:00Z'),
+        ];
+
+        expect(_idsOf(sortNeedsYou(NeedsYouSort.oldest, rows)), _idsOf(rows));
+      });
+
+      test('quick wins rise, and each half keeps the ranking it came in with',
+          () {
+        final rows = [
+          _conv(id: 'long-ask', messages: 20),
+          // No ask on it and short: the shape of a thread that clears in a
+          // line.
+          _conv(id: 'short', cta: null, messages: 2),
+          _conv(id: 'other-ask', messages: 9),
+          // The model said outright that no reply is expected, so its length
+          // does not matter.
+          _conv(id: 'no-reply', messages: 30, replyExpected: false),
+        ];
+
+        expect(
+          _idsOf(sortNeedsYou(NeedsYouSort.quickWins, rows)),
+          ['short', 'no-reply', 'long-ask', 'other-ask'],
+        );
+      });
+
+      test('a thread past the message ceiling is not a quick win', () {
+        expect(
+          isQuickWin(_conv(id: 'a', cta: null, messages: quickWinMessages)),
+          isTrue,
+        );
+        expect(
+          isQuickWin(_conv(id: 'b', cta: null, messages: quickWinMessages + 1)),
+          isFalse,
+        );
+      });
+
+      test('an ask on a short thread is still an ask', () {
+        expect(isQuickWin(_conv(id: 'a', cta: 'Answer Dana', messages: 1)),
+            isFalse);
+        // Whitespace is not an ask.
+        expect(isQuickWin(_conv(id: 'b', cta: '   ', messages: 1)), isTrue);
+      });
     });
   });
 

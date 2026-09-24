@@ -17,7 +17,10 @@ import 'chips.dart';
 ///
 /// [BondTone.video] is deliberately absent: it is the governed off-palette
 /// purple the Video channel owns, and a label wearing it would claim to be a
-/// channel.
+/// channel. [BondTone.external] is absent for the stronger version of the same
+/// reason — the app puts that tone on a thread from outside the owner's
+/// domains, and a label the owner could paint the same colour would make the
+/// External chip mean two things.
 const List<BondTone> labelTones = [
   BondTone.neutral,
   BondTone.primary,
@@ -53,6 +56,8 @@ String toneLabel(BondTone tone) => switch (tone) {
       BondTone.attention => 'Copper',
       BondTone.error => 'Clay',
       BondTone.video => 'Violet',
+      // Named for completeness, and offered by no picker — see [labelTones].
+      BondTone.external => 'Slate',
     };
 
 /// The chip one label is drawn as, by label id. What every test reads a label

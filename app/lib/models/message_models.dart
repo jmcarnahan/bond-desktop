@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart' show immutable;
 
+import '../services/external_sender.dart';
 import 'attachment_models.dart';
 import 'label_models.dart';
 
@@ -243,6 +244,15 @@ class Conversation {
   /// judgement.
   final bool? replyExpected;
 
+  /// The envelope address of the newest KEPT inbound message — who the thread
+  /// is waiting on. Null on every read that does not run the subquery in
+  /// `loadConversations`, and on a thread with no inbound mail at all.
+  ///
+  /// Carried for [isExternalTo] and for nothing else, which is why it is an
+  /// address and not a [Participant]: the name beside it is already on
+  /// [participants], and a second copy of it could disagree with the first.
+  final String? latestInboundFrom;
+
   const Conversation({
     required this.id,
     this.source = 'email',
@@ -271,7 +281,33 @@ class Conversation {
     this.needsYouReasonMessageId,
     this.needsYouReasonAt,
     this.replyExpected,
+    this.latestInboundFrom,
   });
+
+  /// Whether this thread came from outside the owner's own organisation.
+  ///
+  /// **The LATEST INBOUND SENDER's domain, and nobody else's.** A thread is
+  /// external when the person the inbox is waiting on writes from a domain that
+  /// is not one of [ownerDomains] — so a vendor copied in on an internal thread
+  /// does not tint it, and an internal reply to a vendor's mail un-tints the
+  /// thread the moment a colleague answers. The alternative rule — any external
+  /// participant, ever — would paint half a busy inbox and stop meaning
+  /// anything.
+  ///
+  /// **Computed at display time and never stored.** Whose domains are "ours"
+  /// is a fact about the signed-in account, not about the mail: a stored flag
+  /// would be wrong for the next account to open the same database, and right
+  /// only until the owner's own address changed. The cost is a string compare
+  /// per drawn row, which is the same cost as the row's own `from:` filter.
+  ///
+  /// [ownerDomains] comes from `ownerDomainsOf(account.mail ??
+  /// account.userPrincipalName)` — the one source `needs_you_handler` ranks
+  /// from, so the tint and the ranking cannot disagree about who is a stranger.
+  /// EMPTY — a signed-out app, and every widget test that passes nothing —
+  /// answers false for every thread: an app that cannot say who the owner is
+  /// does not get to call anybody external.
+  bool isExternalTo(Set<String> ownerDomains) =>
+      isExternalAddress(latestInboundFrom, ownerDomains);
 
   /// First participant — the row's primary sender. Null when a conversation
   /// somehow carries no participants.
@@ -328,6 +364,7 @@ class Conversation {
       needsYouReasonMessageId: needsYouReasonMessageId,
       needsYouReasonAt: needsYouReasonAt,
       replyExpected: replyExpected,
+      latestInboundFrom: latestInboundFrom,
     );
   }
 
@@ -364,6 +401,7 @@ class Conversation {
       needsYouReasonMessageId: needsYouReasonMessageId,
       needsYouReasonAt: needsYouReasonAt,
       replyExpected: replyExpected,
+      latestInboundFrom: latestInboundFrom,
     );
   }
 
@@ -446,6 +484,10 @@ class Conversation {
       // Null survives as null, exactly as it does on [Message.replyExpected]:
       // a message triage v2 has never judged is not a message it judged "no".
       replyExpected: _boolFromInt(row['reply_expected']),
+      // The last subquery, and null on every read that does not run it — which
+      // reads as "cannot tell who this is from", and [isExternalTo] answers
+      // false to that rather than calling an unknown sender a stranger.
+      latestInboundFrom: row['latest_inbound_from'] as String?,
     );
   }
 }

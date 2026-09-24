@@ -4,7 +4,10 @@ import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/widgets/attachment_card.dart';
 import 'package:bond_inbox/widgets/hover_actions.dart';
 import 'package:bond_inbox/widgets/label_picker.dart';
+import 'package:bond_inbox/widgets/mention_navigator.dart';
+import 'package:bond_inbox/widgets/message_row.dart';
 import 'package:bond_inbox/widgets/needs_you_reason.dart';
+import 'package:bond_inbox/widgets/quote_block.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:bond_inbox/widgets/time_format.dart';
 import 'package:flutter/gestures.dart';
@@ -24,6 +27,7 @@ Message _msg({
   bool? replyExpected,
   List<String> actionItems = const [],
   String? bodyText,
+  bool addressedMe = false,
   List<AttachmentRef> attachments = const [],
 }) {
   return Message(
@@ -37,6 +41,7 @@ Message _msg({
     needsAction: needsAction,
     replyExpected: replyExpected,
     actionItems: actionItems,
+    addressedMe: addressedMe,
     attachments: attachments,
   );
 }
@@ -66,6 +71,8 @@ void main() {
     ConversationState state = ConversationState.needsReply,
     String? reason,
     String? reasonAt,
+    String? reasonMessageId,
+    TranscriptJumps? jumps,
     VoidCallback? onOpenReply,
     VoidCallback? onReopen,
     VoidCallback? onCompose,
@@ -98,8 +105,10 @@ void main() {
             ctaText: ctaText,
             needsYouReason: reason,
             needsYouReasonAt: reasonAt,
+            needsYouReasonMessageId: reasonMessageId,
           ),
           messages: messages,
+          jumps: jumps,
           onMarkDone: () {},
           onReopen: onReopen,
           onOpenReply: onOpenReply,
@@ -252,6 +261,21 @@ void main() {
       );
 
       expect(find.byKey(needsYouWhyLineKey), findsNothing);
+    });
+  });
+
+  group('where the thread came from', () {
+    testWidgets('a host that cannot say draws no External chip',
+        (tester) async {
+      // `ownerDomains` defaults to empty, so the header every existing call
+      // site draws is the header it drew before the chip existed.
+      // `external_tint_test` holds what a host that CAN say gets.
+      await pump(tester, messages: [
+        _msg(id: 'a', receivedAt: '2026-08-25T09:00:00'),
+      ]);
+
+      expect(find.byKey(ThreadDetailPanel.externalChipKey), findsNothing);
+      expect(find.text('External'), findsNothing);
     });
   });
 
@@ -1113,6 +1137,453 @@ void main() {
 
       expect(find.byType(LabelPicker), findsNothing);
       expect(find.byKey(ThreadDetailPanel.dismissWithLabelKey), findsOneWidget);
+    });
+  });
+
+  /// Entry 7b: in a fifty-message chat, which two turns are yours and how to
+  /// get to them. The walk, the four other doors onto the same jump, and what
+  /// arriving looks like.
+  group('mentions and transcript jumps', () {
+    /// A local, timezone-free stamp, derived from now so nothing here rots at a
+    /// midnight boundary.
+    String iso(DateTime when) => when.toIso8601String().split('.').first;
+
+    final base = DateTime.now().subtract(const Duration(hours: 6));
+
+    /// Every frame a jump's scroll-then-retry can ask for, and no more TIME than
+    /// that: bare pumps, so the flash timer is still burning when the
+    /// assertions read it (the pump at the end of each test lets it fire).
+    Future<void> settleJump(WidgetTester tester) async {
+      for (var i = 0; i < 20; i++) {
+        await tester.pump();
+      }
+    }
+
+    /// The tint a row is wearing, or null for one that is not lit. Read off the
+    /// always-present wrapper rather than by looking for a widget that comes and
+    /// goes, which is how the wrapper is built.
+    Color? litOn(WidgetTester tester, String id) {
+      final box = tester.widget<DecoratedBox>(
+        find.byKey(ThreadDetailPanel.flashKeyFor(id)),
+      );
+      return (box.decoration as BoxDecoration).color;
+    }
+
+    /// Let the flash burn out, so no timer outlives the test.
+    Future<void> burnOut(WidgetTester tester) =>
+        tester.pump(ThreadDetailPanel.flashDuration);
+
+    testWidgets('the navigator counts the turns that name the owner',
+        (tester) async {
+      await pump(tester, messages: [
+        _msg(id: 'a', receivedAt: iso(base)),
+        _msg(
+          id: 'b',
+          receivedAt: iso(base.add(const Duration(minutes: 30))),
+          addressedMe: true,
+        ),
+        _msg(
+          id: 'c',
+          receivedAt: iso(base.add(const Duration(minutes: 60))),
+          actionItems: const ['Send the deck'],
+        ),
+        _msg(
+          id: 'd',
+          receivedAt: iso(base.add(const Duration(minutes: 90))),
+        ),
+      ]);
+
+      expect(find.byKey(MentionNavigator.navigatorKey), findsOneWidget);
+      expect(find.text('@ You · 2'), findsOneWidget);
+    });
+
+    testWidgets('a thread that names the owner nowhere draws no navigator',
+        (tester) async {
+      await pump(tester, messages: [
+        _msg(id: 'a', receivedAt: iso(base)),
+        _msg(id: 'b', receivedAt: iso(base.add(const Duration(minutes: 30)))),
+      ]);
+
+      expect(find.byKey(MentionNavigator.navigatorKey), findsNothing);
+    });
+
+    testWidgets('the arrow walks the mentions and says where the reader stands',
+        (tester) async {
+      await pump(tester, messages: [
+        _msg(id: 'a', receivedAt: iso(base), addressedMe: true),
+        _msg(id: 'b', receivedAt: iso(base.add(const Duration(minutes: 30)))),
+        _msg(
+          id: 'c',
+          receivedAt: iso(base.add(const Duration(minutes: 60))),
+          addressedMe: true,
+        ),
+      ]);
+
+      await tester.tap(find.byKey(MentionNavigator.nextKey));
+      await settleJump(tester);
+      expect(find.text('@ You · 1 of 2'), findsOneWidget);
+      expect(litOn(tester, 'a'), isNotNull);
+      expect(litOn(tester, 'c'), isNull);
+
+      await tester.tap(find.byKey(MentionNavigator.nextKey));
+      await settleJump(tester);
+      expect(find.text('@ You · 2 of 2'), findsOneWidget);
+      expect(litOn(tester, 'c'), isNotNull);
+      // One row lit at a time: two highlights would say the reader is in two
+      // places.
+      expect(litOn(tester, 'a'), isNull);
+
+      await tester.tap(find.byKey(MentionNavigator.previousKey));
+      await settleJump(tester);
+      expect(find.text('@ You · 1 of 2'), findsOneWidget);
+
+      await burnOut(tester);
+      expect(litOn(tester, 'a'), isNull);
+    });
+
+    testWidgets('a key bound above the panel takes the very same walk',
+        (tester) async {
+      // The host's key map reaches the transcript through this seam, and lands
+      // in the same method the arrows invoke — one walk, two doors.
+      final jumps = TranscriptJumps();
+      await pump(
+        tester,
+        jumps: jumps,
+        messages: [
+          _msg(id: 'a', receivedAt: iso(base), addressedMe: true),
+          _msg(id: 'b', receivedAt: iso(base.add(const Duration(minutes: 30)))),
+          _msg(
+            id: 'c',
+            receivedAt: iso(base.add(const Duration(minutes: 60))),
+            addressedMe: true,
+          ),
+        ],
+      );
+      expect(jumps.attached, isTrue);
+
+      jumps.nextMention();
+      await settleJump(tester);
+      expect(find.text('@ You · 1 of 2'), findsOneWidget);
+      expect(litOn(tester, 'a'), isNotNull);
+
+      jumps.previousMention();
+      await settleJump(tester);
+      // Already at the first: the walk stops rather than wrapping to the end.
+      expect(find.text('@ You · 1 of 2'), findsOneWidget);
+
+      await burnOut(tester);
+    });
+
+    testWidgets('the seam also goes to one named message, and to no other',
+        (tester) async {
+      final jumps = TranscriptJumps();
+      await pump(
+        tester,
+        jumps: jumps,
+        messages: [
+          _msg(id: 'a', receivedAt: iso(base)),
+          _msg(id: 'b', receivedAt: iso(base.add(const Duration(minutes: 30)))),
+          _msg(
+            id: 'c',
+            receivedAt: iso(base.add(const Duration(minutes: 60))),
+            needsAction: true,
+          ),
+        ],
+      );
+
+      jumps.toMessage('a');
+      await settleJump(tester);
+      expect(litOn(tester, 'a'), isNotNull);
+      expect(chevronOn('a', collapsed: false), findsOneWidget);
+      await burnOut(tester);
+
+      // An id from outside the window this panel read is a no-op, not a throw:
+      // a host may well ask about a message that scrolled out of it.
+      jumps.toMessage('older-than-the-window');
+      await settleJump(tester);
+      expect(litOn(tester, 'a'), isNull);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('and goes quiet once no transcript is mounted', (tester) async {
+      final jumps = TranscriptJumps();
+      await pump(
+        tester,
+        jumps: jumps,
+        messages: [
+          _msg(id: 'a', receivedAt: iso(base), addressedMe: true),
+          _msg(id: 'b', receivedAt: iso(base.add(const Duration(minutes: 30)))),
+        ],
+      );
+      expect(jumps.attached, isTrue);
+
+      // What a key pressed on the list with no thread open means.
+      await tester.pumpWidget(const MaterialApp(home: Scaffold()));
+      expect(jumps.attached, isFalse);
+
+      jumps.nextMention();
+      jumps.toMessage('a');
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a mentioned row wears its marker and starts unfolded',
+        (tester) async {
+      await pump(tester, messages: [
+        _msg(id: 'a', receivedAt: iso(base)),
+        _msg(
+          id: 'b',
+          receivedAt: iso(base.add(const Duration(minutes: 30))),
+          addressedMe: true,
+        ),
+        _msg(id: 'c', receivedAt: iso(base.add(const Duration(minutes: 60)))),
+      ]);
+
+      // 'a' is history the thread moved past and folds; 'b' is the reason the
+      // thread is here at all and does not.
+      expect(chevronOn('a', collapsed: true), findsOneWidget);
+      expect(chevronOn('b', collapsed: false), findsOneWidget);
+      expect(
+        find.descendant(
+          of: rowFor('b'),
+          matching: find.byKey(MessageRow.ownerMarkerKey),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: rowFor('a'),
+          matching: find.byKey(MessageRow.ownerMarkerKey),
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets('the Why line goes to the message the verdict named',
+        (tester) async {
+      await pump(
+        tester,
+        ctaText: null,
+        reason: 'Dana asked you to confirm the launch date.',
+        reasonMessageId: 'a',
+        messages: [
+          _msg(id: 'a', receivedAt: iso(base)),
+          _msg(id: 'b', receivedAt: iso(base.add(const Duration(minutes: 30)))),
+          _msg(
+            id: 'c',
+            receivedAt: iso(base.add(const Duration(minutes: 60))),
+            needsAction: true,
+          ),
+        ],
+      );
+
+      expect(chevronOn('a', collapsed: true), findsOneWidget);
+
+      await tester.tap(find.byKey(needsYouWhyLineKey));
+      await settleJump(tester);
+
+      // Entry 8a's other half: the reason says which message, and now it goes
+      // there — arriving unfolds the row and lights it.
+      expect(chevronOn('a', collapsed: false), findsOneWidget);
+      expect(litOn(tester, 'a'), isNotNull);
+
+      await burnOut(tester);
+    });
+
+    testWidgets('and stays a statement when it names nothing this read loaded',
+        (tester) async {
+      await pump(
+        tester,
+        ctaText: null,
+        reason: 'Dana asked you to confirm the launch date.',
+        reasonMessageId: 'older-than-the-window',
+        messages: [
+          _msg(id: 'a', receivedAt: iso(base)),
+          _msg(
+            id: 'b',
+            receivedAt: iso(base.add(const Duration(minutes: 30))),
+            needsAction: true,
+          ),
+        ],
+      );
+
+      expect(find.byKey(needsYouWhyLineKey), findsOneWidget);
+      expect(
+        find.ancestor(
+          of: find.byKey(needsYouWhyLineKey),
+          matching: find.byType(InkWell),
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets('the banner goes to the message its ask was read off',
+        (tester) async {
+      final asked = <String>[];
+      await pump(
+        tester,
+        onWhy: (m) => asked.add(m.id),
+        messages: [
+          _msg(id: 'a', receivedAt: iso(base)),
+          _msg(
+            id: 'b',
+            receivedAt: iso(base.add(const Duration(minutes: 30))),
+            needsAction: true,
+          ),
+        ],
+      );
+
+      await tester.tap(find.text('Reply to Dana'));
+      await settleJump(tester);
+
+      // One press: the explanation opens AND the reader is left standing on the
+      // message the words came from.
+      expect(asked, ['b']);
+      expect(litOn(tester, 'b'), isNotNull);
+
+      await burnOut(tester);
+    });
+
+    testWidgets('a quote is the way back to the message it quotes',
+        (tester) async {
+      final quote = AttachmentRef(
+        source: 'teams',
+        messageId: 'c',
+        attachmentId: 'q1',
+        kind: quoteAttachmentKind,
+        contentType: 'messageReference',
+        itemFrom: 'Dana Ruiz',
+        cardText: 'is it slide 29 in the deck?',
+        // The quoted message's id, on the column the Teams sync reuses for it.
+        contentId: 'a',
+      );
+      await pump(tester, messages: [
+        _msg(id: 'a', receivedAt: iso(base)),
+        _msg(id: 'b', receivedAt: iso(base.add(const Duration(minutes: 30)))),
+        _msg(
+          id: 'c',
+          receivedAt: iso(base.add(const Duration(minutes: 60))),
+          attachments: [quote],
+        ),
+      ]);
+
+      expect(chevronOn('a', collapsed: true), findsOneWidget);
+
+      await tester.tap(find.text('is it slide 29 in the deck?'));
+      await settleJump(tester);
+
+      expect(chevronOn('a', collapsed: false), findsOneWidget);
+      expect(litOn(tester, 'a'), isNotNull);
+
+      await burnOut(tester);
+    });
+
+    testWidgets('a quote of a message outside the window offers no tap',
+        (tester) async {
+      final quote = AttachmentRef(
+        source: 'teams',
+        messageId: 'b',
+        attachmentId: 'q1',
+        kind: quoteAttachmentKind,
+        contentType: 'messageReference',
+        itemFrom: 'Dana Ruiz',
+        cardText: 'is it slide 29 in the deck?',
+        contentId: 'older-than-the-window',
+      );
+      await pump(tester, messages: [
+        _msg(id: 'a', receivedAt: iso(base)),
+        _msg(
+          id: 'b',
+          receivedAt: iso(base.add(const Duration(minutes: 30))),
+          attachments: [quote],
+        ),
+      ]);
+
+      expect(find.text('is it slide 29 in the deck?'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(QuoteBlock.keyFor(quote)),
+          matching: find.byType(InkWell),
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets('a jump reaches a mention the list had not built yet',
+        (tester) async {
+      // The whole reason the jump is a LOOP. `ListView(children:)` creates
+      // elements for the viewport and its cache extent and nothing else, so a
+      // row forty messages down has no context for `ensureVisible` to work
+      // from. Each lap scrolls to where the list's own extent estimate puts the
+      // row, lets a frame build, and looks again — and the estimate sharpens as
+      // more of the list exists.
+      const target = 40;
+      await pump(tester, messages: [
+        for (var i = 0; i < 80; i++)
+          _msg(
+            id: 'm$i',
+            receivedAt: iso(base.add(Duration(minutes: i * 5))),
+            addressedMe: i == target,
+          ),
+      ]);
+
+      expect(find.text('@ You · 1'), findsOneWidget);
+      // Not built, and so not reachable by the naive one-shot jump this loop
+      // replaced.
+      expect(rowFor('m$target'), findsNothing);
+
+      await tester.tap(find.byKey(MentionNavigator.nextKey));
+      await settleJump(tester);
+
+      expect(rowFor('m$target'), findsOneWidget);
+      final row = tester.getRect(rowFor('m$target'));
+      final pane = tester.getRect(find.byType(ThreadDetailPanel));
+      // Near the TOP of the pane, not merely somewhere on screen: the first lap
+      // can only scroll to an estimate, and only a later lap — once the row
+      // exists and has a context — can align it. Measured at 219 with the loop
+      // and 438 with one lap, so this fails if the retry is removed.
+      expect(row.top, greaterThanOrEqualTo(pane.top));
+      expect(row.top, lessThan(pane.top + pane.height / 3));
+      expect(litOn(tester, 'm$target'), isNotNull);
+
+      await burnOut(tester);
+    });
+
+    testWidgets('a far collapsible row arrives OPEN, not folded',
+        (tester) async {
+      // The mention above is immune to this by accident — a mentioned row
+      // starts unfolded. A row that folds by default and is FIRST BUILT
+      // mid-jump only ever sees `unfoldRequest` in its initial widget, so
+      // `initiallyCollapsed` has to read the pending request too, or the walk
+      // ends on one muted line. Ten-minute gaps, so every row is its own run
+      // and folds; the Why line is the door, since its target is exactly the
+      // kind of old row a long thread has scrolled past.
+      const target = 40;
+      final start = DateTime.now().subtract(const Duration(hours: 20));
+      await pump(
+        tester,
+        ctaText: null,
+        reason: 'Dana asked you to confirm the launch date.',
+        reasonMessageId: 'm$target',
+        messages: [
+          for (var i = 0; i < 80; i++)
+            _msg(
+              id: 'm$i',
+              receivedAt: iso(start.add(Duration(minutes: i * 10))),
+            ),
+        ],
+      );
+
+      expect(rowFor('m$target'), findsNothing);
+
+      await tester.tap(find.byKey(needsYouWhyLineKey));
+      await settleJump(tester);
+
+      expect(rowFor('m$target'), findsOneWidget);
+      expect(chevronOn('m$target', collapsed: false), findsOneWidget);
+      expect(litOn(tester, 'm$target'), isNotNull);
+
+      await burnOut(tester);
     });
   });
 }

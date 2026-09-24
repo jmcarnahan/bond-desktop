@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 
 import '../providers/draft_provider.dart' show PendingSend;
 import '../services/llm/draft_task.dart' show DraftOption;
@@ -594,4 +595,261 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
       ],
     );
   }
+}
+
+/// What the host says about the quick reply open on one row: the words to start
+/// from, whether a send of them is already on its way, and whatever the last
+/// attempt had to say.
+///
+/// A record of the host's own draft state rather than three props on the pane,
+/// because all three are answers to one question — *what is the quick reply on
+/// this row doing* — and the pane asks it once, for the one row that has a box
+/// open.
+class QuickReply {
+  /// Prefills the box. The stored draft where there is one, so `r` on a thread
+  /// the model already answered opens those words rather than an empty box the
+  /// reader would have to go to the thread to fill.
+  final String body;
+
+  /// A send is in flight. The box stays up and inert: the reply has not landed
+  /// yet, and a box that closed on the press would leave the reader guessing.
+  final bool sending;
+
+  /// What stopped the last send, from the host's own draft state. Null is the
+  /// normal case.
+  final String? error;
+
+  /// How many people the owner has STAGED onto this reply's Cc — in the thread
+  /// composer, where the chips naming them live. The draft is shared, so a
+  /// send from this box carries them too, and a box that drew no sign of that
+  /// would Cc people it never showed. The count is the box's honest minimum:
+  /// the names are one press away, in the thread.
+  final int addedRecipients;
+
+  const QuickReply({
+    this.body = '',
+    this.sending = false,
+    this.error,
+    this.addedRecipients = 0,
+  });
+}
+
+/// One reply, written without leaving the list (entry 12f).
+///
+/// It is the composer's job in a fifth of its space: a box, a Send, and a way
+/// out. Everything the docked composer does that this does not — suggestions,
+/// Regenerate, Improve, recipients, attachments, the draft's provenance — is
+/// in the thread, one press away, and a reader who needs any of it is not
+/// answering in one line anyway.
+///
+/// It draws OUTSIDE the row's card, like the Reopen button and the label
+/// picker, which is what keeps `ConversationRow` the same row in every list.
+///
+/// ⌘Enter sends, Escape closes. The two are bound here rather than in the
+/// screen's one triage map on purpose: both keys mean something else everywhere
+/// else in that map (Escape returns the focus to the list, and Enter opens a
+/// row), and a binding closer to the cursor is how a key means one thing in a
+/// box and another outside it. The single letters are already dead while the
+/// cursor is in an `EditableText`, so `e` typed in here is a letter.
+///
+/// **Snippets and templates are deferred.** Entry 12f asks for saved phrases
+/// inserted with `/` — "Thanks, got it", `Adding <person>` — and they need a
+/// vocabulary table of their own to live in, with the editing surface that
+/// implies. Nothing here is in their way: a snippet ends up as text in this
+/// field, whatever puts it there.
+class QuickReplyBox extends StatefulWidget {
+  /// Who the reply answers, for the line over the box. Empty draws no line
+  /// rather than a line naming nobody.
+  final String who;
+
+  /// The host's state for this row — see [QuickReply].
+  final QuickReply reply;
+
+  /// Sends what is in the box. The host owns the path: this widget knows
+  /// nothing about drafts, grants or the network, exactly as the composer's own
+  /// Send does not.
+  final void Function(String body) onSend;
+
+  /// Closes the box — Escape, Cancel, or a send the host decided ends it.
+  final VoidCallback onClose;
+
+  const QuickReplyBox({
+    super.key,
+    required this.reply,
+    required this.onSend,
+    required this.onClose,
+    this.who = '',
+  });
+
+  /// One box on screen at a time — the host opens it for a single row — so
+  /// plain keys rather than per-row factories.
+  static const Key fieldKey = Key('quick-reply-field');
+  static const Key sendKey = Key('quick-reply-send');
+  static const Key cancelKey = Key('quick-reply-cancel');
+
+  /// The line over the field, when there is anything to say on it.
+  static const Key scopeKey = Key('quick-reply-scope');
+
+  @override
+  State<QuickReplyBox> createState() => _QuickReplyBoxState();
+}
+
+class _QuickReplyBoxState extends State<QuickReplyBox> {
+  late final TextEditingController _body =
+      TextEditingController(text: widget.reply.body);
+
+  /// Its own node so ⌘Enter can be heard around the field rather than in it.
+  final FocusNode _focus = FocusNode(debugLabel: 'quick-reply');
+
+  @override
+  void initState() {
+    super.initState();
+    // Taken, not offered: `autofocus` yields when anything else holds focus,
+    // and something always does here — the box opens under `r`, pressed on
+    // the list's own node. The reader asked to type; the cursor must follow.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focus.requestFocus();
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant QuickReplyBox oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A prefill that arrives LATE — the host's draft read landing a frame after
+    // the box opened — fills an untouched box. Never over words the reader has
+    // typed: the box is theirs the moment they touch it, and a suggestion
+    // replacing a half-written reply is the one thing this must not do.
+    final prefill = widget.reply.body;
+    if (prefill != oldWidget.reply.body && _body.text == oldWidget.reply.body) {
+      _body.text = prefill;
+    }
+  }
+
+  @override
+  void dispose() {
+    _body.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  void _send() {
+    if (widget.reply.sending) return;
+    final text = _body.text.trim();
+    if (text.isEmpty) return;
+    widget.onSend(text);
+  }
+
+  /// Who a send from this box reaches, in the composer's own words.
+  ///
+  /// The Cc half is [QuickReply.addedRecipients]'s point: people staged in the
+  /// thread composer ride the shared draft out of THIS box too, and the line
+  /// is what keeps that from happening silently. Empty when there is nothing
+  /// to say — no name and nobody added — rather than a line naming nobody.
+  String get _scopeLine {
+    final who = widget.who;
+    final count = widget.reply.addedRecipients;
+    if (count == 0) return who.isEmpty ? '' : 'Reply to $who';
+    final base = who.isEmpty ? 'Reply to the sender' : 'Reply to $who';
+    final people = count == 1 ? '1 person' : '$count people';
+    return '$base, plus $people in Cc';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final error = widget.reply.error;
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.enter, meta: true): _send,
+        // Control as well, for a keyboard that has no Command: the app runs on
+        // one platform today and this costs a line.
+        const SingleActivator(LogicalKeyboardKey.enter, control: true): _send,
+        const SingleActivator(LogicalKeyboardKey.escape): widget.onClose,
+      },
+      child: Container(
+        padding: const EdgeInsets.all(BondSpacing.s12),
+        decoration: BoxDecoration(
+          color: BondColors.surface,
+          borderRadius: BondRadii.smAll,
+          border: Border.all(color: BondColors.border),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (_scopeLine.isNotEmpty)
+              Text(
+                _scopeLine,
+                key: QuickReplyBox.scopeKey,
+                style: BondType.caption,
+              ),
+            TextField(
+              key: QuickReplyBox.fieldKey,
+              controller: _body,
+              focusNode: _focus,
+              // The box is what `r` opened, so the cursor starts in it: a box
+              // that opened beside the keyboard rather than under it would cost
+              // the reader a reach for the mouse to use a keyboard shortcut.
+              autofocus: true,
+              enabled: !widget.reply.sending,
+              minLines: 1,
+              maxLines: 6,
+              style: BondType.body,
+              decoration: const InputDecoration(
+                hintText: 'Reply…',
+                border: InputBorder.none,
+                isDense: true,
+              ),
+            ),
+            if (error != null) ...[
+              const SizedBox(height: BondSpacing.s4),
+              Text(
+                error,
+                style: BondType.caption.copyWith(color: BondColors.error),
+              ),
+            ],
+            const SizedBox(height: BondSpacing.s4),
+            // Both buttons read the field, so both rebuild with it — the
+            // composer's own rule: emptying the box has to disable Send.
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: _body,
+              builder: (context, value, _) => Row(
+                children: [
+                  Text(
+                    widget.reply.sending ? 'Sending…' : '⌘Enter sends',
+                    style: BondType.caption,
+                  ),
+                  const Spacer(),
+                  TextButton(
+                    key: QuickReplyBox.cancelKey,
+                    onPressed: widget.onClose,
+                    style: _quietButton,
+                    child: const Text('Cancel'),
+                  ),
+                  const SizedBox(width: BondSpacing.s4),
+                  TextButton(
+                    key: QuickReplyBox.sendKey,
+                    onPressed:
+                        value.text.trim().isEmpty || widget.reply.sending
+                            ? null
+                            : _send,
+                    style: _quietButton,
+                    child: const Text('Send'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The list pane's own button shape, so a box under a row reads as part of
+  /// the row rather than as a screen that opened inside one.
+  static final ButtonStyle _quietButton = TextButton.styleFrom(
+    padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+    minimumSize: const Size(0, 28),
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    textStyle: BondType.caption,
+  );
 }

@@ -67,6 +67,17 @@ void main() {
       expect(GraphMail(auth, httpClient: client), isA<MailBackend>());
     });
 
+    test('and the one backend that can amend a reply says so', () {
+      // A SECOND interface rather than two more members on [MailBackend]: only
+      // some connections can do it, and every test double in this suite
+      // implements the seam by hand, so a member there would be a member each of
+      // them had to write out. Asked through the extension, never with an `is`.
+      final auth = GraphAuth(httpClient: client, store: _Tokens());
+      final MailBackend mail = GraphMail(auth, httpClient: client);
+      expect(mail, isA<DraftRecipientsEditor>());
+      expect(mail.canEditDraftRecipients, isTrue);
+    });
+
     test('GraphTeams is a TeamsBackend', () {
       final auth = GraphAuth(httpClient: client, store: _Tokens());
       expect(GraphTeams(auth, httpClient: client), isA<TeamsBackend>());

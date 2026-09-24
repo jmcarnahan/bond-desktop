@@ -205,6 +205,13 @@ class SettingsScreen extends StatefulWidget {
   /// editor and leaves the Needs You section as the threshold alone.
   final void Function(String value)? onNeedsYouRulesSaved;
 
+  /// Whether sending a reply also clears the thread out of Needs You. It sits
+  /// in the Needs You section rather than beside the composer because it is a
+  /// rule about the PILE, and it is off by default: see
+  /// `AppPrefs.replySendMarksDone`. Null takes the switch off the section.
+  final bool replySendMarksDone;
+  final void Function(bool value)? onReplySendMarksDoneChanged;
+
   final bool storylineNewestFirst;
   final void Function(bool value)? onStorylineNewestFirstChanged;
 
@@ -554,6 +561,8 @@ class SettingsScreen extends StatefulWidget {
     this.needsYouFixedTail = '',
     this.needsYouRulesMaxLength = 4000,
     this.onNeedsYouRulesSaved,
+    this.replySendMarksDone = false,
+    this.onReplySendMarksDoneChanged,
     this.storylineNewestFirst = false,
     this.onStorylineNewestFirstChanged,
     this.probeServer,
@@ -640,6 +649,11 @@ class SettingsScreen extends StatefulWidget {
   static const Key clearCacheKeepKey =
       ValueKey('settings-clear-attachment-cache-keep');
 
+  /// The Needs You section's one switch, keyed because its words are a whole
+  /// sentence and a test reading it by text would pin the wording twice.
+  static const Key replySendMarksDoneKey =
+      ValueKey('settings-reply-send-marks-done');
+
   /// The Processing section's controls, keyed for the reason the three above
   /// are: 'Clear AI results' is also most of the caption beside it, and both
   /// confirm buttons carry the same words on purpose.
@@ -693,6 +707,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late DraftPolicy _draftPolicy = widget.draftPolicy;
   late bool _cloudDraftsStanding = widget.cloudDraftsStanding;
   late bool _storylineNewestFirst = widget.storylineNewestFirst;
+  late bool _replySendMarksDone = widget.replySendMarksDone;
 
   /// Ten stops. Enough that the slider feels like it has an opinion, few enough
   /// that the same drag lands on the same value twice.
@@ -887,6 +902,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     if (old.storylineNewestFirst != widget.storylineNewestFirst) {
       _storylineNewestFirst = widget.storylineNewestFirst;
+    }
+    if (old.replySendMarksDone != widget.replySendMarksDone) {
+      _replySendMarksDone = widget.replySendMarksDone;
     }
     // The host clamps: a typed 5000 comes back as 1000, and the field has to
     // say what the ledger line beside it says. Only while the field still
@@ -2208,6 +2226,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onSave: onSave,
           ),
         ],
+        // Last in the section because it is about leaving the pile rather than
+        // about what lands in it, and it is the one control here that acts on
+        // threads already judged.
+        if (widget.onReplySendMarksDoneChanged case final onChanged?)
+          SwitchListTile(
+            key: SettingsScreen.replySendMarksDoneKey,
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _replySendMarksDone,
+            title: Text(
+              'Sending a reply marks it done',
+              style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+            ),
+            subtitle: Text(
+              'A thread leaves Needs You as soon as you answer it, instead of '
+              'waiting for you to dismiss it.',
+              style: BondType.caption,
+            ),
+            onChanged: (value) {
+              setState(() => _replySendMarksDone = value);
+              onChanged(value);
+            },
+          ),
       ],
     );
   }

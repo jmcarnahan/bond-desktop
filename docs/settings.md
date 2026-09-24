@@ -109,6 +109,16 @@ The Needs You wording is a five-step ladder on the stored threshold: `≥0.8`
 ten stops, because the slider is a feel and a summary reading "0.7" would report
 an implementation detail at somebody who moved a slider.
 
+The section's last control is a switch, **Sending a reply marks it done** — *A
+thread leaves Needs You as soon as you answer it, instead of waiting for you to
+dismiss it.* — keyed `settings-reply-send-marks-done` and wired by
+`onReplySendMarksDoneChanged`. It is **off by default**, because a sent reply and
+a cleared thread are two different claims: an answer that asks a question back is
+still the reader's to watch. It is last in the section because everything above
+it decides what ENTERS the pile and this one says when a thread leaves. It does
+not appear in the section summary: the summary already carries three clauses, and
+the threshold is the thing a reader scans that line for.
+
 ## What commits, and when
 
 **Toggles, segments and the slider apply instantly.** The activity-log switch,

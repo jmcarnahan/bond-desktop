@@ -136,6 +136,12 @@ class ArchivePane extends StatefulWidget {
   /// same gesture: one body replacing another rather than a page load.
   static const Duration searchSwap = Duration(milliseconds: 160);
 
+  /// Passed through to the Done tab's [ConversationListPane]: a filed thread
+  /// from outside the owner's domains keeps its tint here too, or filing a
+  /// thread would quietly change who it looks like it is from. Defaults empty
+  /// — nobody external — exactly as the pane itself does.
+  final Set<String> ownerDomains;
+
   const ArchivePane({
     super.key,
     required this.conversations,
@@ -162,6 +168,7 @@ class ArchivePane extends StatefulWidget {
     required this.onExitSearch,
     required this.now,
     required this.onSnooze,
+    this.ownerDomains = const {},
   });
 
   @override
@@ -365,6 +372,7 @@ class _ArchivePaneState extends State<ArchivePane> {
             selectedId: null,
             onSelect: widget.onOpen,
             onReopen: widget.onReopen,
+            ownerDomains: widget.ownerDomains,
           ),
         ArchiveTab.dropped => _DroppedList(
             rows: widget.droppedRows,
