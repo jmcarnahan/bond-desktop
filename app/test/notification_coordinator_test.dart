@@ -71,7 +71,7 @@ void main() {
     bool replyExpected = true,
     String urgency = 'normal',
     String deadline = '',
-    bool? needsYouVerdict = false,
+    bool? needsYouVerdict = true,
     String extractState = 'done',
     String storylineState = 'done',
   }) async {
@@ -309,7 +309,7 @@ void main() {
       expect(await notifyRow('m-1'), containsPair('state', 'pending'));
 
       await store.writeNeedsYouVerdict('email', 'm-1',
-          verdict: false, reason: 'model says so');
+          verdict: true, reason: 'model says so');
       await store.writeAttentionScore('email', 'conv-1', 0.9);
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'notified'));
@@ -369,7 +369,7 @@ void main() {
       // Volume alone is a ranking, not a request. Firing on it would announce
       // every unread message of every decent-scoring thread — the notification
       // stream this app exists to replace.
-      await seedCandidate(replyExpected: false);
+      await seedCandidate(replyExpected: false, needsYouVerdict: false);
       await sweep();
 
       expect(await notifyRow('m-1'), containsPair('state', 'suppressed'));
@@ -379,12 +379,32 @@ void main() {
 
     test('needs_action, urgency and a named deadline are each an ask on their '
         'own', () async {
+      // While nothing has judged the message — the deadline path — triage's
+      // asks are the whole question. Once the needs-you pass has spoken its
+      // verdict decides; the veto test below is the other half.
       await seedCandidate(
-          id: 'm-act', key: 'c-act', replyExpected: false, needsAction: true);
+          id: 'm-act',
+          key: 'c-act',
+          replyExpected: false,
+          needsAction: true,
+          needsYouVerdict: null,
+          storylineState: 'pending');
       await seedCandidate(
-          id: 'm-urg', key: 'c-urg', replyExpected: false, urgency: 'urgent');
+          id: 'm-urg',
+          key: 'c-urg',
+          replyExpected: false,
+          urgency: 'urgent',
+          needsYouVerdict: null,
+          storylineState: 'pending');
       await seedCandidate(
-          id: 'm-due', key: 'c-due', replyExpected: false, deadline: 'Friday');
+          id: 'm-due',
+          key: 'c-due',
+          replyExpected: false,
+          deadline: 'Friday',
+          needsYouVerdict: null,
+          storylineState: 'pending');
+      await sweep();
+      now = armedAt.add(const Duration(minutes: 7));
       await sweep();
 
       for (final id in ['m-act', 'm-urg', 'm-due']) {
@@ -393,8 +413,32 @@ void main() {
       }
     });
 
+    test('a judged no outranks every ask triage wrote', () async {
+      // The Jira broadcast: a reply expected, an action, an urgency and a
+      // thread ask, on a message the needs-you pass read and said is
+      // somebody else's.
+      await seedCandidate(
+        needsAction: true,
+        urgency: 'high',
+        ctaText: 'Review the issue',
+        needsYouVerdict: false,
+      );
+      await sweep();
+
+      expect(await notifyRow('m-1'), containsPair('state', 'suppressed'));
+      expect(await notifyRow('m-1'), containsPair('reason', 'not_worthy'));
+      expect(emitted, isEmpty);
+    });
+
     test("a thread's CTA is an ask when the message carries none", () async {
-      await seedCandidate(replyExpected: false, ctaText: 'Send the appraisal');
+      await seedCandidate(
+        replyExpected: false,
+        ctaText: 'Send the appraisal',
+        needsYouVerdict: null,
+        storylineState: 'pending',
+      );
+      await sweep();
+      now = armedAt.add(const Duration(minutes: 7));
       await sweep();
 
       expect(await notifyRow('m-1'), containsPair('state', 'notified'));
@@ -411,6 +455,7 @@ void main() {
         triageStatus: 'error',
         triageVerdict: false,
         ctaText: 'Send the appraisal',
+        needsYouVerdict: false,
       );
       await sweep();
 
@@ -425,7 +470,11 @@ void main() {
       // "no reply expected" — but it is not a "yes" either. The score is well
       // over the threshold here, so the NULL is the only thing that can be
       // keeping this quiet.
-      await seedCandidate(triageVerdict: false, attentionScore: 0.9);
+      await seedCandidate(
+        triageVerdict: false,
+        attentionScore: 0.9,
+        needsYouVerdict: false,
+      );
       final stored = await store.getMessageRow('email', 'm-1');
       expect(stored!['reply_expected'], isNull);
 
@@ -602,6 +651,7 @@ void main() {
         triageStatus: 'pending',
         replyExpected: false,
         ctaText: 'Send the appraisal',
+        needsYouVerdict: null,
       );
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'pending'));
@@ -684,7 +734,7 @@ void main() {
         'created_at': '2026-09-02T12:01:00.000Z',
       });
       await store.writeNeedsYouVerdict('email', 'm-1',
-          verdict: false, reason: 'seeded');
+          verdict: true, reason: 'seeded');
       await store.writeTriage('email', 'm-1',
           status: 'triaged',
           result: const TriageResult(

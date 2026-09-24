@@ -244,6 +244,16 @@ class Conversation {
   /// judgement.
   final bool? replyExpected;
 
+  /// The needs-you pass's verdict on the newest KEPT inbound message — the
+  /// same message [replyExpected] is read off. TRI-STATE on that field's rule:
+  /// null is "not judged yet" (or a read that did not run the subquery), and
+  /// only an explicit `false` is the judge saying no.
+  ///
+  /// It outranks triage's ask and `reply_expected` in [isNeedsYou]: the judge
+  /// reads the thread before the message and answers the narrower question —
+  /// is this the owner's — where triage answers "does anyone owe a reply".
+  final bool? latestNeedsYouVerdict;
+
   /// The envelope address of the newest KEPT inbound message — who the thread
   /// is waiting on. Null on every read that does not run the subquery in
   /// `loadConversations`, and on a thread with no inbound mail at all.
@@ -290,6 +300,7 @@ class Conversation {
     this.needsYouReasonMessageId,
     this.needsYouReasonAt,
     this.replyExpected,
+    this.latestNeedsYouVerdict,
     this.latestInboundFrom,
     this.stateChangedAt,
   });
@@ -374,6 +385,7 @@ class Conversation {
       needsYouReasonMessageId: needsYouReasonMessageId,
       needsYouReasonAt: needsYouReasonAt,
       replyExpected: replyExpected,
+      latestNeedsYouVerdict: latestNeedsYouVerdict,
       latestInboundFrom: latestInboundFrom,
       stateChangedAt: stateChangedAt,
     );
@@ -412,6 +424,7 @@ class Conversation {
       needsYouReasonMessageId: needsYouReasonMessageId,
       needsYouReasonAt: needsYouReasonAt,
       replyExpected: replyExpected,
+      latestNeedsYouVerdict: latestNeedsYouVerdict,
       latestInboundFrom: latestInboundFrom,
       stateChangedAt: stateChangedAt,
     );
@@ -496,6 +509,8 @@ class Conversation {
       // Null survives as null, exactly as it does on [Message.replyExpected]:
       // a message triage v2 has never judged is not a message it judged "no".
       replyExpected: _boolFromInt(row['reply_expected']),
+      // Tri-state on the same rule, off the same row.
+      latestNeedsYouVerdict: _boolFromInt(row['latest_needs_you_verdict']),
       // The last subquery, and null on every read that does not run it — which
       // reads as "cannot tell who this is from", and [isExternalTo] answers
       // false to that rather than calling an unknown sender a stranger.

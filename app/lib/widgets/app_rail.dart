@@ -106,10 +106,21 @@ String _stripReplyPrefixes(String subject) {
 /// honesty rule. STORED STATE IS UNTOUCHED: the thread still says `needs_reply`
 /// and every other reader still sees it; what changes is that the rail stops
 /// claiming a thread it cannot say one true sentence about.
+///
+/// And a fifth, which outranks the ask: the needs-you pass said NO about the
+/// newest kept inbound. Triage folds an ask up out of any message with an
+/// action in it — a Jira broadcast to four people describing somebody else's
+/// ticket reads as "Review the issue…" — and the thread says `needs_reply`
+/// for any unanswered inbound at all. Neither is the question the rail asks.
+/// The judge is: it reads the thread before the message, holds an older
+/// still-open ask as a yes, and answers "is this the owner's". Only an
+/// explicit `false` counts; an unjudged message keeps its place, on
+/// [_canExplainItself]'s rule for null.
 bool isNeedsYou(Conversation c, {double threshold = 0}) {
   if (c.bucket == 'later') return false;
   if (c.state == ConversationState.done) return false;
   if ((c.attentionScore ?? 0) < threshold) return false;
+  if (c.latestNeedsYouVerdict == false) return false;
   if (c.ctaText?.isNotEmpty == true) return true;
   return c.state == ConversationState.needsReply && _canExplainItself(c);
 }

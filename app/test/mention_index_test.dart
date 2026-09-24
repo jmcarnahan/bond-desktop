@@ -7,12 +7,14 @@ Message _msg({
   bool outbound = false,
   bool addressedMe = false,
   List<String> actionItems = const [],
+  bool? needsYouVerdict,
 }) {
   return Message(
     id: id,
     outbound: outbound,
     addressedMe: addressedMe,
     actionItems: actionItems,
+    needsYouVerdict: needsYouVerdict,
   );
 }
 
@@ -50,6 +52,20 @@ void main() {
       ),
       'a whitespace item beside a real one': (
         _msg(actionItems: ['  ', 'send the deck']),
+        true,
+      ),
+      // The Jira broadcast: an extracted task on a message the judge read and
+      // said is somebody else's.
+      'an action item on a message the judge said no to': (
+        _msg(actionItems: ['Review the issue'], needsYouVerdict: false),
+        false,
+      ),
+      'an action item the judge agreed with': (
+        _msg(actionItems: ['send the deck'], needsYouVerdict: true),
+        true,
+      ),
+      'a real mention the judge said no to is still a mention': (
+        _msg(addressedMe: true, needsYouVerdict: false),
         true,
       ),
     };

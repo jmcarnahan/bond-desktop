@@ -47,6 +47,7 @@ Conversation _conv({
   String source = 'email',
   String? reason,
   bool? replyExpected,
+  bool? verdict,
 }) {
   return Conversation(
     id: id,
@@ -62,6 +63,7 @@ Conversation _conv({
     aiPendingCount: pending,
     needsYouReason: reason,
     replyExpected: replyExpected,
+    latestNeedsYouVerdict: verdict,
   );
 }
 
@@ -228,6 +230,45 @@ void main() {
     test('keeps it when nothing has judged the thread yet', () {
       final rows = needsYouRows([
         _conv(id: 'fresh', state: ConversationState.needsReply),
+      ]);
+      expect(rows.map((c) => c.id), ['fresh']);
+    });
+
+    // The judge outranks triage: an ask folded out of a broadcast about
+    // somebody else's ticket, on a thread nobody answered, is still not the
+    // owner's once the needs-you pass has read it and said so.
+    test('drops an asked, reply-expected thread the judge said no to', () {
+      final rows = needsYouRows([
+        _conv(
+          id: 'broadcast',
+          state: ConversationState.needsReply,
+          cta: 'Review the issue description',
+          replyExpected: true,
+          verdict: false,
+        ),
+      ]);
+      expect(rows, isEmpty);
+    });
+
+    test('keeps the same thread when the judge said yes', () {
+      final rows = needsYouRows([
+        _conv(
+          id: 'mine',
+          state: ConversationState.needsReply,
+          cta: 'Review the issue description',
+          verdict: true,
+        ),
+      ]);
+      expect(rows.map((c) => c.id), ['mine']);
+    });
+
+    test('an unjudged verdict is not a no', () {
+      final rows = needsYouRows([
+        _conv(
+          id: 'fresh',
+          state: ConversationState.needsReply,
+          cta: 'Review the issue description',
+        ),
       ]);
       expect(rows.map((c) => c.id), ['fresh']);
     });

@@ -30,9 +30,19 @@ import '../models/message_models.dart';
 /// outbound bubble is not somewhere to be sent. An action item of nothing but
 /// whitespace is not an ask: the row would draw an empty orange line and the
 /// navigator would count a stop with nothing at it.
+///
+/// An action item stops counting once the needs-you pass has said NO about
+/// the message. The extractor writes "things the reader must do" off any
+/// message with a task in it — a Jira broadcast describing somebody else's
+/// ticket comes back as "Review the issue…" — and `@ you` over that is a
+/// mention nobody made. The judge's no is the same one `isNeedsYou` lets
+/// outrank the ask; an unjudged message (null) keeps its items, on that
+/// rule's reading of null. [Message.addressedMe] is the connector's fact and
+/// no verdict overrules it.
 bool namesOwner(Message m) {
   if (!m.inbound) return false;
   if (m.addressedMe) return true;
+  if (m.needsYouVerdict == false) return false;
   return m.actionItems.any((item) => item.trim().isNotEmpty);
 }
 

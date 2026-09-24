@@ -453,6 +453,15 @@ class SyncService implements MailSync {
         await _store.setPref('needs_you_flag_backfill', '1');
       }
 
+      // And its lowering twin: the chips that settled on triage's ask before
+      // the judge's no was allowed to outrank it (`notifyWorthy`). Once, on
+      // the same idiom, and null until it runs.
+      int? vetoedNeedsYou;
+      if (await _store.getPref('needs_you_flag_veto') == null) {
+        vetoedNeedsYou = await _progress.lowerVetoedNeedsYou();
+        await _store.setPref('needs_you_flag_veto', '1');
+      }
+
       // Exchange's first-contact tip, off the rows stored before the ingest
       // learned to strip it. Once, on the same one-shot idiom as the two
       // above. Null until it runs.
@@ -536,6 +545,16 @@ class SyncService implements MailSync {
           await _store.refoldAllThreadStates();
         }
         await _store.setPref('meeting_regate_crlf', '1');
+      }
+
+      // The ask banners triage wrote before it learned that "Day 1" is not a
+      // date — "Confirm the source — by Day 1" is stored text and outlives
+      // the fix on every thread that is not triaged again. Same one-shot
+      // idiom, every connector at once like the refold above.
+      int? strippedPlanRelative;
+      if (await _store.getPref('plan_relative_banner_strip') == null) {
+        strippedPlanRelative = await _store.stripPlanRelativeBanners();
+        await _store.setPref('plan_relative_banner_strip', '1');
       }
 
       // The threads that were extracted, embedded and filed before a gate
@@ -860,12 +879,14 @@ class SyncService implements MailSync {
           'backfilled_addressed_me': ?backfilled,
           'revived_needs_you': ?revivedNeedsYou,
           'backfilled_needs_you': ?backfilledNeedsYou,
+          'vetoed_needs_you': ?vetoedNeedsYou,
           'stripped_sender_tips': ?strippedSenderTips,
           'cleared_mail_bodies': ?clearedMailBodies,
           'tidied_mail_previews': ?tidiedMailPreviews,
           'named_participants': ?namedParticipants,
           'refolded_threads': ?refoldedThreads,
           'regated_meeting_responses': ?regatedMeetingResponses,
+          'stripped_plan_relative_banners': ?strippedPlanRelative,
           'repaired_gated_conversations': ?repairedGated,
           'requeued_clustering_reembeds': ?requeuedReembeds,
           // The four search-corpus one-shots, counts only, and only on a pass

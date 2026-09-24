@@ -226,6 +226,56 @@ void main() {
       expect(metrics.errored, 1);
     });
 
+    test('the judge saying no takes a thread off the tile and the filter',
+        () async {
+      // Both threads owe a reply by state; only one of them is the owner's.
+      await seed('mine', threadState: 'needs_reply');
+      await seed('broadcast', threadState: 'needs_reply', conversationKey: 'c2');
+      await db.customUpdate(
+        'UPDATE messages SET needs_you_verdict = 0 '
+        "WHERE source_message_id = 'broadcast'",
+      );
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+      final rows = await store.pageHomeFeed(
+        filter: HomeFilter.needsYou,
+        sinceIso: '2026-09-01T00:00:00Z',
+      );
+
+      expect(metrics.needsYou, 1);
+      expect(rows.map((r) => r.sourceMessageId), ['mine']);
+    });
+
+    test('the veto one-shot clears chips a judged no no longer earns',
+        () async {
+      await seed('vetoed', needsYou: true);
+      await seed('kept', needsYou: true, conversationKey: 'c2');
+      await seed('unjudged', needsYou: true, conversationKey: 'c3');
+      await db.customUpdate(
+        "UPDATE messages SET needs_you_verdict = CASE source_message_id "
+        "WHEN 'vetoed' THEN 0 WHEN 'kept' THEN 1 END",
+      );
+
+      final lowered = await store.lowerNeedsYouFromVerdicts();
+      expect(lowered.map((r) => r.sourceMessageId), ['vetoed']);
+
+      final chips = await db
+          .customSelect(
+            'SELECT source_message_id, needs_you FROM message_progress '
+            'ORDER BY source_message_id',
+          )
+          .get();
+      expect(
+        {for (final r in chips) r.data['source_message_id']: r.data['needs_you']},
+        {'kept': 1, 'unjudged': 1, 'vetoed': 0},
+      );
+      expect(await store.lowerNeedsYouFromVerdicts(), isEmpty);
+    });
+
     test('a message counts as urgent on either of the two loud words',
         () async {
       await seed('m1', urgency: 'urgent');

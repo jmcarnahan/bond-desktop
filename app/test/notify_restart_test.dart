@@ -61,7 +61,7 @@ void main() {
     // The verdict before triage, so the score written last is newer than every
     // write to the message row. Completeness reads a written verdict rather
     // than a work row, so a candidate with none stays open to its deadline.
-    await store.writeNeedsYouVerdict('email', id, verdict: false,
+    await store.writeNeedsYouVerdict('email', id, verdict: true,
         reason: 'seeded');
     await store.writeTriage(
       'email',

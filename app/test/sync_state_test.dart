@@ -398,6 +398,36 @@ void main() {
           reason: 'exactly one sync_mail row ever names the regate');
     });
 
+    test('the Day 1 banner strip runs once over stored asks', () async {
+      // A kept inbound, so the refold one-shot ahead of the strip sees a
+      // thread with something to answer and leaves its banner standing.
+      await store.upsertMessage({
+        'source_message_id': 'ticket-1',
+        'conversation_key': 'ticket',
+        'direction': 'inbound',
+        'from_address': 'tracker@example.com',
+        'subject': 'New Request under EDA-100',
+        'received_at': isoAgo(const Duration(hours: 20)),
+        'triage_status': 'triaged',
+      });
+      await store.upsertConversation({
+        'conversation_key': 'ticket',
+        'state': 'needs_reply',
+        'cta_text': 'Confirm the upstream source — by Day 1',
+      });
+
+      await syncReaching(14).syncNow();
+
+      final rows = await db
+          .customSelect(
+            "SELECT cta_text FROM conversations WHERE conversation_key = 'ticket'",
+          )
+          .get();
+      expect(rows.first.data['cta_text'], 'Confirm the upstream source');
+      expect(await store.getPref('plan_relative_banner_strip'), '1');
+      expect((await syncMailDetail())['stripped_plan_relative_banners'], 1);
+    });
+
     test('a mailbox that ran the first regate is owed the CRLF one',
         () async {
       // The first key's pass read this `\r\n` body as somebody talking and

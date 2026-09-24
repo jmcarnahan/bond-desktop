@@ -446,7 +446,8 @@ void main() {
       }
     });
 
-    test('name every search-corpus one-shot, and account for all ten', () {
+    test('name every search-corpus one-shot, and account for all eleven',
+        () {
       // The same rule over the four search corpora, and it bites harder here:
       // the clear EMPTIES `message_vectors`, `attachment_chunks` and
       // `context_chunks` and nulls every `desc_embedding`, so a key left set
@@ -460,9 +461,10 @@ void main() {
       }
       // The count, so a key added to the store's list without a walk behind it
       // shows up here rather than in a mailbox. Six from before the search
-      // corpora, four with them. The behaviour of each search walk is pinned
-      // in `embed_backfill_test.dart`.
-      expect(MessageStore.derivedOneShotPrefs, hasLength(10));
+      // corpora, four with them, and the needs-you veto's lowering twin of
+      // the verdict backfill. The behaviour of each search walk is pinned in
+      // `embed_backfill_test.dart`.
+      expect(MessageStore.derivedOneShotPrefs, hasLength(11));
       expect(
         MessageStore.derivedOneShotPrefs.toSet(),
         hasLength(MessageStore.derivedOneShotPrefs.length),

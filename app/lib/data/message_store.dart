@@ -25,6 +25,11 @@ import '../services/chat_roster.dart';
 // copy of the "an outbound may go quiet, but never off `done`" asymmetry is
 // exactly how a send would start disagreeing with the sync about a thread.
 import '../services/conversation_state.dart';
+// And `deadline_parse.dart`, on the same licence: pure date arithmetic with no
+// imports at all. [stripPlanRelativeBanners] must judge a stored banner's
+// deadline by [showableDeadline] itself, because a second spelling of "Day 1
+// is not a date" is how the repair and the live banner would disagree.
+import '../services/deadline_parse.dart';
 // The third read out of `services/`, on the same licence as the two above:
 // `extract_task.dart` imports `models/` and nothing else, and [extractionFor]
 // needs `ExtractionResult.fromJson` to be the same decoder the handler wrote
@@ -986,6 +991,10 @@ WHERE source = ? AND conversation_key = ?
           // reads on different rules would let the chip and the ask describe
           // different people.
           '  nk.reply_expected AS reply_expected, '
+          // And the needs-you pass's verdict on that same message, tri-state
+          // on the same rule — `isNeedsYou` lets an explicit no outrank the
+          // ask triage folded up.
+          '  nk.needs_you_verdict AS latest_needs_you_verdict, '
           '  nk.from_address AS latest_inbound_from '
           'FROM conversations c '
           'LEFT JOIN conversation_ai ai '
@@ -3216,6 +3225,7 @@ RETURNING *
   static const List<String> derivedOneShotPrefs = [
     'needs_you_model_revive',
     'needs_you_flag_backfill',
+    'needs_you_flag_veto',
     'thread_state_refold',
     'gated_conversation_repair',
     'clustering_card_v2',
@@ -6002,6 +6012,53 @@ SELECT conversation_key FROM (
       '  )',
       variables: _args([_nowIso()]),
     );
+  }
+
+  /// Takes a plan-relative deadline back off every stored ask banner, and
+  /// returns how many banners changed.
+  ///
+  /// Triage appends the deadline to the ask it writes — "Confirm the upstream
+  /// source — by Day 1" — and it now does so through [showableDeadline], which
+  /// drops wording that counts from a start nobody named. The banners written
+  /// before that learned nothing from it: `cta_text` is stored text, and a
+  /// thread that is not triaged again keeps its "— by Day 1" for good. This is
+  /// that thread triaged again for the one clause, without a model call.
+  ///
+  /// The LAST ` — by ` only, because that is the one triage appends; an ask
+  /// with the phrase in its own words keeps them. And only a tail
+  /// [showableDeadline] refuses, so "— by Friday" and "— by Day 1
+  /// (2026-10-05)" stay exactly as they are.
+  Future<int> stripPlanRelativeBanners({DateTime? now}) async {
+    const marker = ' — by ';
+    final at = now ?? DateTime.now();
+    final rows = await db
+        .customSelect(
+          'SELECT source, conversation_key, cta_text FROM conversations '
+          'WHERE cta_text LIKE ?',
+          variables: _args(['%$marker%']),
+        )
+        .get();
+    var changed = 0;
+    for (final row in rows) {
+      final text = row.data['cta_text'] as String? ?? '';
+      final cut = text.lastIndexOf(marker);
+      if (cut <= 0) continue;
+      final tail = text.substring(cut + marker.length);
+      if (showableDeadline(tail, now: at) != null) continue;
+      await db.customUpdate(
+        'UPDATE conversations SET cta_text = ?, updated_at = ? '
+        'WHERE source = ? AND conversation_key = ? AND cta_text = ?',
+        variables: _args([
+          text.substring(0, cut),
+          _nowIso(),
+          row.data['source'],
+          row.data['conversation_key'],
+          text,
+        ]),
+      );
+      changed++;
+    }
+    return changed;
   }
 
   /// The characters sqlite's TRIM should strip to call a body empty — space,
@@ -8817,6 +8874,41 @@ RETURNING source, source_message_id, received_at
     ];
   }
 
+  /// The lowering twin of [backfillNeedsYouFromVerdicts]: every settled chip
+  /// whose message the needs-you pass judged NO, cleared, and the rows it
+  /// cleared returned so the caller can tick each one.
+  ///
+  /// For the rows that settled before `notifyWorthy` learned that a judged no
+  /// outranks triage's `reply_expected` and ask. A deadline settle routinely
+  /// lands before the judge answers, so those rows took a chip from triage
+  /// alone, and the refresh that followed the verdict recomputed it through
+  /// the old rule and kept it. `needs_you = 1` is the whole guard past the
+  /// verdict: lowering a chip the rule no longer grants needs none of the
+  /// raise's volume checks.
+  Future<List<({String source, String sourceMessageId, String receivedAt})>>
+      lowerNeedsYouFromVerdicts() async {
+    final rows = await db.customWriteReturning(
+      '''
+UPDATE message_progress SET needs_you = 0, updated_at = ?1
+WHERE needs_you = 1
+  AND EXISTS (SELECT 1 FROM messages m
+              WHERE m.source = message_progress.source
+                AND m.source_message_id = message_progress.source_message_id
+                AND m.needs_you_verdict = 0)
+RETURNING source, source_message_id, received_at
+''',
+      variables: _args([_nowIso()]),
+    );
+    return [
+      for (final row in rows)
+        (
+          source: row.data['source'] as String? ?? '',
+          sourceMessageId: row.data['source_message_id'] as String? ?? '',
+          receivedAt: row.data['received_at'] as String? ?? '',
+        ),
+    ];
+  }
+
   /// The home screen's tiles: seven over everything received since [sinceIso],
   /// and `needs_you` over all time.
   ///
@@ -8982,10 +9074,25 @@ WHERE p.received_at >= ? AND p.source IN ($places)
   /// a correlated read of `messages` inside the feed's page query, so it waits
   /// for whoever wants the tile narrowed rather than riding along with the
   /// rail's honesty fix. Until then the tile can read HIGHER than the rail.
-  static const String _liveNeedsYouThread = '''
+  ///
+  /// The judge's explicit no IS spelled here, and ahead of the ask, because it
+  /// is the term that moves the most threads: triage folds an ask out of any
+  /// Jira broadcast, and a tile still counting those would read dozens above
+  /// the rail rather than a handful. Off the newest kept inbound — the `nk`
+  /// message `loadConversations` reads `latest_needs_you_verdict` from — so the
+  /// Dart and SQL spellings name the same row. `ix_messages_conv` makes the
+  /// seek an index walk per thread. `-1` stands in for NULL: an unjudged
+  /// message keeps its place, as it does in [isNeedsYou].
+  static final String _liveNeedsYouThread = '''
 COALESCE(ai.bucket, '') <> 'later'
 AND c.state <> 'done'
 AND COALESCE(ai.attention_score, 0) >= ?
+AND COALESCE((SELECT nv.needs_you_verdict FROM messages nv
+               WHERE nv.source = c.source
+                 AND nv.conversation_key = c.conversation_key
+                 AND nv.direction = 'inbound' AND ${keptMessageSql('nv')}
+               ORDER BY nv.received_at DESC, nv.source_message_id DESC
+               LIMIT 1), -1) <> 0
 AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
 
   /// The WHERE fragment one [HomeFilter] stands for, with no leading `AND`
