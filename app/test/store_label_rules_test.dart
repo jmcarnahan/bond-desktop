@@ -763,6 +763,46 @@ void main() {
       );
     });
 
+    test('an Exchange-empty body, a bare CRLF, is still nothing in it',
+        () async {
+      // What the mailbox actually stores for an empty Accepted: — sqlite's
+      // one-argument TRIM strips spaces only and kept all of these.
+      await seedMessage(
+        'm1',
+        conversationKey: 'c1',
+        subject: 'Accepted: Quarterly planning',
+        bodyText: '\r\n',
+        bodyPreview: '',
+      );
+      await seedMessage(
+        'm2',
+        conversationKey: 'c2',
+        subject: 'Canceled: Weekly review',
+        bodyText: ' \t\r\n ',
+        bodyPreview: '\n',
+      );
+
+      expect(await store.regateMeetingResponses(), 2);
+      for (final id in ['m1', 'm2']) {
+        expect(
+          (await store.getMessageRow('email', id))!['gate_reason'],
+          'meeting_response',
+          reason: id,
+        );
+      }
+    });
+
+    test('a CRLF around real words is still somebody talking', () async {
+      await seedMessage(
+        'm1',
+        subject: 'Canceled: 1:1',
+        bodyText: 'PTO\r\n',
+        bodyPreview: 'PTO',
+      );
+
+      expect(await store.regateMeetingResponses(), 0);
+    });
+
     test('the same subject with something written in it is somebody talking',
         () async {
       await seedMessage(

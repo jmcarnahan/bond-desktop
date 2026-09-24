@@ -381,7 +381,7 @@ void main() {
       // The refold is paired with the regate: a gated row falls out of
       // "kept", so the thread stops asking.
       expect((await conversation('resp'))['state'], 'waiting');
-      expect(await store.getPref('meeting_regate'), '1');
+      expect(await store.getPref('meeting_regate_crlf'), '1');
       expect((await syncMailDetail())['regated_meeting_responses'], 1);
 
       // Once, and the pref is what says so. A later pass omits the key
@@ -396,6 +396,32 @@ void main() {
           .getSingle();
       expect((named.data['n'] as num).toInt(), 1,
           reason: 'exactly one sync_mail row ever names the regate');
+    });
+
+    test('a mailbox that ran the first regate is owed the CRLF one',
+        () async {
+      // The first key's pass read this `\r\n` body as somebody talking and
+      // kept the row; its pref being set must not close the corrected pass.
+      await store.setPref('meeting_regate', '1');
+      await store.upsertMessage({
+        'source_message_id': 'accepted',
+        'conversation_key': 'resp',
+        'direction': 'inbound',
+        'from_address': 'colleague@example.com',
+        'subject': 'Accepted: Weekly sync',
+        'received_at': isoAgo(const Duration(hours: 20)),
+        'triage_status': 'triaged',
+        'body_text': '\r\n',
+        'body_preview': '',
+      });
+
+      await syncReaching(14).syncNow();
+
+      expect(
+        (await store.getMessageRow('email', 'accepted'))!['gate_reason'],
+        'meeting_response',
+      );
+      expect(await store.getPref('meeting_regate_crlf'), '1');
     });
 
     /// How many `sync_mail` rows name the gate repair at all — the twin of

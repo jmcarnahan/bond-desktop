@@ -525,13 +525,17 @@ class SyncService implements MailSync {
       // `needs_reply`, and a gate that told nobody is exactly the lie that
       // repair was written for. Plain repair mode rather than every thread,
       // because only the threads this just gated can have moved.
+      //
+      // `_crlf` because the first key's pass read Exchange's `\r\n` empty
+      // body as somebody talking and gated none of the fallback-shape rows;
+      // a fresh key is what owes that pass to a mailbox that already ran it.
       int? regatedMeetingResponses;
-      if (await _store.getPref('meeting_regate') == null) {
+      if (await _store.getPref('meeting_regate_crlf') == null) {
         regatedMeetingResponses = await _store.regateMeetingResponses();
         if (regatedMeetingResponses > 0) {
           await _store.refoldAllThreadStates();
         }
-        await _store.setPref('meeting_regate', '1');
+        await _store.setPref('meeting_regate_crlf', '1');
       }
 
       // The threads that were extracted, embedded and filed before a gate

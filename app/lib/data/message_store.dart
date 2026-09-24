@@ -5973,6 +5973,11 @@ SELECT conversation_key FROM (
   ///
   /// `json_valid` guards the extract: a malformed blob would otherwise make
   /// sqlite throw for the whole statement rather than skip one row.
+  ///
+  /// "Nothing in it" is read with [_blank] and not a bare `TRIM`: sqlite's
+  /// one-argument TRIM strips spaces only, and Exchange stores an empty
+  /// response body as `\r\n` — so the bare form read every real one as
+  /// somebody talking, and the rail kept them.
   Future<int> regateMeetingResponses() async {
     const String stored = "json_extract(source_meta_json, '\$.meeting')";
     const String hasMeeting =
@@ -5992,12 +5997,18 @@ SELECT conversation_key FROM (
       '    OR (NOT ($hasMeeting)'
       "      AND (subject LIKE 'Accepted:%' OR subject LIKE 'Declined:%' "
       "        OR subject LIKE 'Tentative:%' OR subject LIKE 'Canceled:%') "
-      "      AND (body_text IS NULL OR TRIM(body_text) = '') "
-      "      AND (body_preview IS NULL OR TRIM(body_preview) = ''))"
+      "      AND (body_text IS NULL OR TRIM(body_text, $_blank) = '') "
+      "      AND (body_preview IS NULL OR TRIM(body_preview, $_blank) = ''))"
       '  )',
       variables: _args([_nowIso()]),
     );
   }
+
+  /// The characters sqlite's TRIM should strip to call a body empty — space,
+  /// tab, newline, carriage return — as the second argument its one-argument
+  /// form lacks. Dart's `trim()` is the live gate's reading; this is the same
+  /// reading in SQL.
+  static const String _blank = "' ' || char(9) || char(10) || char(13)";
 
   // ── storylines ───────────────────────────────────────────────────────
 
