@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/attachment_models.dart';
 import '../models/message_models.dart';
+import '../services/deadline_parse.dart' show showableDeadline;
 import '../services/profile_photos.dart';
 import '../services/sender_display.dart';
 import '../theme/tokens.dart';
@@ -944,7 +945,10 @@ class _MessageRowState extends State<MessageRow> {
     final ask = message.actionItems.isNotEmpty
         ? message.actionItems.first
         : 'Reply expected';
-    final deadline = message.deadline;
+    // Through [showableDeadline], so plan-relative wording the extractor
+    // repeated ("Day 1", "sprint 2") never wears a chip that reads like a
+    // date the app worked out.
+    final deadline = showableDeadline(message.deadline, now: DateTime.now());
 
     final onTap = widget.onAskTap;
     final line = Wrap(

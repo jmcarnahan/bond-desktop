@@ -187,6 +187,55 @@ List<LinkedRun> linkSpansOf(
   return runs;
 }
 
+/// The first ANCHORED web link in [text] — the words a sender wrote over it and
+/// the address behind them — or null when the body offers none.
+///
+/// What a call-to-action button is built from. An automated notification's whole
+/// point is somewhere else ("View comment", "Approve request", "Open in the
+/// tracker"), and the one thing in the body that says where is its first anchor:
+/// real notification mail puts its CTA above the footer links, so first is the
+/// one the sender meant.
+///
+/// ANCHORED, and that is the whole of the filter. A run whose label is its own
+/// address — a bare `https://…` in the prose, or a canonical run the label caps
+/// refused — is skipped, because a button reading
+/// *https://…safelinks…%2Foverview%23comment-…* tells a reader nothing and does
+/// not fit on a row. `mailto:` is skipped for a different reason: a composer is
+/// not an external tool, and the thing this answers is "the real action is over
+/// there".
+///
+/// Pure, and it reads the body through [linkSpansOf] rather than a pattern of
+/// its own: the address a button opens must be the same address the same words
+/// open when they are tapped in the transcript, and two parsers would eventually
+/// disagree. The label caps default to the BODY pair — these runs came from real
+/// anchors, whose text is a sentence as often as a phrase.
+LinkRun? firstLinkOf(
+  String text, {
+  int maxLabelChars = bodyMaxLabelChars,
+  int maxLabelWords = bodyMaxLabelWords,
+}) {
+  for (final run in linkSpansOf(
+    text,
+    maxLabelChars: maxLabelChars,
+    maxLabelWords: maxLabelWords,
+  )) {
+    if (run is! LinkRun) continue;
+    if (run.target.scheme.toLowerCase() != 'http' &&
+        run.target.scheme.toLowerCase() != 'https') {
+      continue;
+    }
+    if (run.label.trim().isEmpty) continue;
+    // The address painting itself is not an anchor. Asked of the LABEL through
+    // [linkTargetOf] rather than compared against `target.toString()`: `Uri`
+    // re-normalizes percent-encoding on the way back out, and a Safe Links
+    // wrapper is nothing but percent-encoding, so a string comparison there
+    // would call the address an anchor about half the time.
+    if (linkTargetOf(run.label) != null) continue;
+    return run;
+  }
+  return null;
+}
+
 bool _isBlank(String c) =>
     c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == _zeroWidth;
 

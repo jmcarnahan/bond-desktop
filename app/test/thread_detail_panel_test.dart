@@ -4,7 +4,9 @@ import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/widgets/attachment_card.dart';
 import 'package:bond_inbox/widgets/hover_actions.dart';
 import 'package:bond_inbox/widgets/label_picker.dart';
+import 'package:bond_inbox/widgets/needs_you_reason.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
+import 'package:bond_inbox/widgets/time_format.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -62,6 +64,8 @@ void main() {
     required List<Message> messages,
     String? ctaText = 'Reply to Dana',
     ConversationState state = ConversationState.needsReply,
+    String? reason,
+    String? reasonAt,
     VoidCallback? onOpenReply,
     VoidCallback? onReopen,
     VoidCallback? onCompose,
@@ -92,6 +96,8 @@ void main() {
             subject: 'Launch date',
             state: state,
             ctaText: ctaText,
+            needsYouReason: reason,
+            needsYouReasonAt: reasonAt,
           ),
           messages: messages,
           onMarkDone: () {},
@@ -178,6 +184,75 @@ void main() {
 
     expect(find.text('Reply to Dana'), findsOneWidget);
     expect(find.textContaining('open asks'), findsNothing);
+  });
+
+  group('why this thread is asking', () {
+    final messages = [_msg(id: 'a', receivedAt: '2026-08-25T09:00:00')];
+    const at = '2026-08-25T09:00:00';
+
+    String lineText(WidgetTester tester) =>
+        tester.widget<Text>(find.byKey(needsYouWhyLineKey)).data!;
+
+    testWidgets('names the reason and when the message arrived',
+        (tester) async {
+      await pump(
+        tester,
+        messages: messages,
+        ctaText: null,
+        reason: 'Asks you to confirm the launch date.',
+        reasonAt: at,
+      );
+
+      expect(
+        lineText(tester),
+        'Why: Asks you to confirm the launch date. · '
+        '${formatTimestamp(at)}',
+      );
+    });
+
+    testWidgets('a reason with no stamp still says why', (tester) async {
+      await pump(
+        tester,
+        messages: messages,
+        ctaText: null,
+        reason: 'teams_direct',
+      );
+
+      expect(lineText(tester), 'Why: Direct message');
+    });
+
+    testWidgets('the banner answers first when there is one', (tester) async {
+      // Two explanations stacked would read as two different ones, and the ask
+      // is the better answer of the two.
+      await pump(
+        tester,
+        messages: messages,
+        reason: 'teams_direct',
+        reasonAt: at,
+      );
+
+      expect(find.text('Reply to Dana'), findsOneWidget);
+      expect(find.byKey(needsYouWhyLineKey), findsNothing);
+    });
+
+    testWidgets('no reason, no line', (tester) async {
+      await pump(tester, messages: messages, ctaText: null);
+
+      expect(find.byKey(needsYouWhyLineKey), findsNothing);
+    });
+
+    testWidgets('and none on a thread that is not asking', (tester) async {
+      await pump(
+        tester,
+        messages: messages,
+        ctaText: null,
+        state: ConversationState.done,
+        reason: 'teams_direct',
+        reasonAt: at,
+      );
+
+      expect(find.byKey(needsYouWhyLineKey), findsNothing);
+    });
   });
 
   group('links in the banner and the transcript', () {

@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 17;
+  int get schemaVersion => 18;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -640,6 +640,39 @@ UPDATE storylines
                 await customStatement(
                   'CREATE INDEX IF NOT EXISTS ix_conv_labels_label '
                   'ON conversation_labels(label_id, applied_at DESC)',
+                );
+              },
+              // v18 — a label becomes a STANDING RULE. `label_rules` holds the
+              // scope (a sender, a domain, a subject prefix, a kind of
+              // message), the disposition and the exception that lets an
+              // @mention through, and `conversation_labels.rule_id` names which
+              // rule filed a link — NULL for every word the owner applied by
+              // hand, which is what makes undoing a rule take back its own
+              // links and nothing else.
+              //
+              // Nothing to backfill: every link that exists at this version was
+              // applied by a person, and NULL is what that reads as. The column
+              // is appended, so the migrated table's column order matches the
+              // fresh one (`db_adoption_test.dart` compares them ordered).
+              //
+              // Indexes hand-written with IF NOT EXISTS for the v17 reason.
+              from17To18: (m, schema) async {
+                if (!await _tableExists('label_rules')) {
+                  await m.createTable(schema.labelRules);
+                }
+                if (!await _columnExists('conversation_labels', 'rule_id')) {
+                  await m.addColumn(
+                    schema.conversationLabels,
+                    schema.conversationLabels.ruleId,
+                  );
+                }
+                await customStatement(
+                  'CREATE UNIQUE INDEX IF NOT EXISTS ix_label_rules_scope '
+                  'ON label_rules(scope_kind, scope_value)',
+                );
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_label_rules_label '
+                  'ON label_rules(label_id)',
                 );
               },
             ),

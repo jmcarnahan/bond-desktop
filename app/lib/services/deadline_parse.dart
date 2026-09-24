@@ -250,6 +250,55 @@ DateTime? parseDeadline(String text, {required DateTime now}) {
   return null;
 }
 
+/// Wording that counts from a start nobody named.
+///
+/// A COUNTER WORD followed by a small number, or the `T+n` form: "Day 1",
+/// "day one", "sprint 2", "week 3", "phase 2", "T+5". Each of them is a real
+/// date to whoever wrote the plan and nothing at all to the reader, because the
+/// day the count starts from is not in the message.
+///
+/// The number is REQUIRED, and it is what keeps this narrow. "day after
+/// tomorrow" and "week of May 5" both carry a counter word and neither is
+/// plan-relative; both name a day, and both keep working. The counter list
+/// leaves out `quarter` and `Q3` on purpose: a quarter is anchored to the
+/// calendar year, so a reader can act on it.
+final RegExp _planRelative = RegExp(
+  r'\b(?:day|week|sprint|phase|milestone|stage|step|iteration|cycle)\s*'
+  r'(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\b'
+  r'|\bt\s*\+\s*\d{1,3}\b',
+  caseSensitive: false,
+);
+
+/// Whether [text] is deadline wording that counts from an unstated start —
+/// see [_planRelative].
+bool isPlanRelativeDeadline(String text) => _planRelative.hasMatch(text);
+
+/// The deadline worth PUTTING ON SCREEN, or null when the words name nothing a
+/// reader could act on.
+///
+/// `messages.deadline` holds the sender's own words, on purpose (see this
+/// library's own note): normalising at write time would throw away the only
+/// evidence anybody could check. The cost of that decision is that whatever
+/// triage read as a deadline is what the chip shows, and a tracker's ticket
+/// description saying "— by Day 1" produced a `Day 1` chip on a thread with no
+/// deadline in it. A fabricated date would have been worse; a chip that looks
+/// like a date and is not is still a chip a reader plans around.
+///
+/// So the rule is narrow: plan-relative wording is dropped, and everything else
+/// is kept exactly as stored. "ASAP", "before the 15th", "end of month" and
+/// every other vague-but-anchored phrase still shows — [parseDeadline] cannot
+/// turn all three into a day either, and a reader can act on all three.
+///
+/// A plan-relative phrase that ALSO carries a real date keeps its chip: "Day 1
+/// (2026-10-05)" is the ticket telling the reader when day one is, and
+/// [parseDeadline] is what notices. That is why this takes a clock at all.
+String? showableDeadline(String? deadline, {required DateTime now}) {
+  final text = deadline?.trim() ?? '';
+  if (text.isEmpty) return null;
+  if (!isPlanRelativeDeadline(text)) return text;
+  return parseDeadline(text, now: now) == null ? null : text;
+}
+
 /// The next [weekday] strictly after [today] — today's own weekday is seven
 /// days away, never zero. Somebody writing a weekday name on the day itself
 /// means the one coming, otherwise they would have written "today".

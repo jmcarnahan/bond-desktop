@@ -16,12 +16,14 @@ void main() {
   late List<String> created;
   late int dismissedWithout;
   late int closed;
+  late List<(Label, LabelRuleOffer)> rules;
 
   setUp(() {
     applied = [];
     created = [];
     dismissedWithout = 0;
     closed = 0;
+    rules = [];
   });
 
   Future<void> pump(
@@ -29,6 +31,9 @@ void main() {
     required List<Label> labels,
     bool withoutLabel = true,
     String prompt = 'Dismiss with a label…',
+    List<LabelRuleOffer> offers = const [],
+    Label? offerLabel,
+    bool onRule = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(600, 500));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -41,6 +46,10 @@ void main() {
           onCreate: created.add,
           onDismissWithoutLabel: withoutLabel ? () => dismissedWithout++ : null,
           onClose: () => closed++,
+          ruleOffers: offers,
+          ruleOfferLabel: offerLabel,
+          onRuleChosen:
+              onRule ? (label, offer) => rules.add((label, offer)) : null,
         ),
       ),
     ));
@@ -208,5 +217,150 @@ void main() {
     expect(find.text('Label ${LabelPicker.visibleChips - 1}'), findsOneWidget);
     expect(find.text('Label ${LabelPicker.visibleChips}'), findsNothing);
     expect(find.text('+3 more — keep typing'), findsOneWidget);
+  });
+
+  group('the rule offer', () {
+    const sender =
+        LabelRuleOffer(scopeKind: 'sender', scopeValue: 'noreply@jira.example.com');
+    const domain =
+        LabelRuleOffer(scopeKind: 'domain', scopeValue: 'jira.example.com');
+    const kind = LabelRuleOffer(
+        scopeKind: 'classification', scopeValue: 'tracker_notification');
+    const subject =
+        LabelRuleOffer(scopeKind: 'subject', scopeValue: '[JIRA] BOND-');
+
+    /// Every widget the strip draws, which is how this file pins "off costs the
+    /// strip nothing" without reading a pixel.
+    int widgetCount(WidgetTester tester) => tester
+        .widgetList(find.descendant(
+          of: find.byType(LabelPicker),
+          matching: find.byWidgetPredicate((_) => true),
+        ))
+        .length;
+
+    testWidgets('the four scopes read as words a reader can judge',
+        (tester) async {
+      await pump(
+        tester,
+        labels: [fyi],
+        offers: const [sender, domain, kind, subject],
+        offerLabel: vendor,
+        onRule: true,
+      );
+
+      expect(find.text("Also file future mail under 'Vendor outreach':"),
+          findsOneWidget);
+      expect(find.text('this sender'), findsOneWidget);
+      expect(find.text('this domain'), findsOneWidget);
+      expect(find.text('this kind of mail'), findsOneWidget);
+      expect(find.text('subjects like "[JIRA] BOND-"'), findsOneWidget);
+      // Never the stored token: `classification` and `tracker_notification`
+      // are column values, not words.
+      expect(find.textContaining('tracker_notification'), findsNothing);
+    });
+
+    testWidgets('pressing one hands back the label and the scope',
+        (tester) async {
+      await pump(
+        tester,
+        labels: [fyi],
+        offers: const [sender, domain],
+        offerLabel: vendor,
+        onRule: true,
+      );
+
+      await tester.tap(find.byKey(LabelPicker.ruleKeyFor(domain)));
+      await tester.pump();
+
+      expect(rules, [(vendor, domain)]);
+      // And it writes nothing itself, including nothing to the thread.
+      expect(applied, isEmpty);
+      expect(created, isEmpty);
+      expect(dismissedWithout, 0);
+    });
+
+    testWidgets('a kind this build never heard of is still legible',
+        (tester) async {
+      const later = LabelRuleOffer(scopeKind: 'room', scopeValue: 'Design');
+      await pump(
+        tester,
+        labels: [fyi],
+        offers: const [later],
+        offerLabel: vendor,
+        onRule: true,
+      );
+
+      expect(find.text('this room'), findsOneWidget);
+    });
+
+    testWidgets('it never takes Enter off the type-ahead', (tester) async {
+      await pump(
+        tester,
+        labels: [fyi, vendor],
+        offers: const [sender],
+        offerLabel: vendor,
+        onRule: true,
+      );
+
+      // The hint line still says what it said, and Enter still does it.
+      expect(hint(tester), "Enter — apply 'FYI only'");
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+
+      expect(applied, [fyi]);
+      expect(rules, isEmpty);
+    });
+
+    testWidgets('and Escape still collapses the strip', (tester) async {
+      await pump(
+        tester,
+        labels: [fyi],
+        offers: const [sender],
+        offerLabel: vendor,
+        onRule: true,
+      );
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+
+      expect(closed, 1);
+    });
+
+    testWidgets('off, the strip is the strip it was before rules existed',
+        (tester) async {
+      await pump(tester, labels: [fyi, handled]);
+      final baseline = widgetCount(tester);
+
+      // Each of the three parts alone is not an offer, and none of them costs
+      // the strip a single widget.
+      await pump(tester,
+          labels: [fyi, handled], offers: const [sender, domain]);
+      expect(widgetCount(tester), baseline);
+      expect(find.byKey(LabelPicker.ruleRowKey), findsNothing);
+
+      await pump(tester, labels: [fyi, handled], onRule: true);
+      expect(widgetCount(tester), baseline);
+      expect(find.byKey(LabelPicker.ruleRowKey), findsNothing);
+
+      await pump(tester,
+          labels: [fyi, handled], offers: const [sender], onRule: true);
+      expect(widgetCount(tester), baseline);
+      expect(find.byKey(LabelPicker.ruleRowKey), findsNothing);
+
+      await pump(tester,
+          labels: [fyi, handled], offerLabel: vendor, onRule: true);
+      expect(widgetCount(tester), baseline);
+      expect(find.byKey(LabelPicker.ruleRowKey), findsNothing);
+
+      // And with all three, it costs something — otherwise the count above
+      // would pin nothing at all.
+      await pump(tester,
+          labels: [fyi, handled],
+          offers: const [sender],
+          offerLabel: vendor,
+          onRule: true);
+      expect(widgetCount(tester), greaterThan(baseline));
+      expect(find.byKey(LabelPicker.ruleRowKey), findsOneWidget);
+    });
   });
 }

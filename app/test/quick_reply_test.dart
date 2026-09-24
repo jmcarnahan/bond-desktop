@@ -1,6 +1,7 @@
 import 'package:bond_inbox/providers/draft_provider.dart' show PendingSend;
 import 'package:bond_inbox/services/llm/draft_task.dart' show DraftOption;
 import 'package:bond_inbox/theme/tokens.dart' show BondColors;
+import 'package:bond_inbox/widgets/linked_text.dart' show LinkRun;
 import 'package:bond_inbox/widgets/quick_replies.dart';
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
@@ -35,6 +36,8 @@ void main() {
     VoidCallback? onSuggest,
     bool suggesting = false,
     List<({String stance, String body})> streamingOptions = const [],
+    LinkRun? openIn,
+    void Function(String url)? onOpenLink,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -51,6 +54,8 @@ void main() {
           onSuggest: onSuggest,
           suggesting: suggesting,
           streamingOptions: streamingOptions,
+          openIn: openIn,
+          onOpenLink: onOpenLink,
         ),
       ),
     ));
@@ -536,6 +541,145 @@ void main() {
       await tester.pump();
 
       expect(asked, 1);
+    });
+  });
+
+  /// What the row offers when a reply is the wrong answer: an automated
+  /// notification's point is somewhere else, and the first anchored link in its
+  /// body is the one thing that says where.
+  group('the way out instead of a reply', () {
+    final comment = LinkRun(
+      'View comment',
+      Uri.parse('https://tracker.example.com/t/41#c9'),
+    );
+
+    /// The words on the button, as the button actually paints them.
+    String paintedLabel(WidgetTester tester) => tester
+        .widget<Text>(find.descendant(
+          of: find.byKey(QuickReplyBar.openInKey),
+          matching: find.byType(Text),
+        ))
+        .data!;
+
+    testWidgets("it wears the sender's own words, with the outward arrow",
+        (tester) async {
+      // No `onSuggest`: the host has said a reply would be wrong here. Nothing
+      // in this widget knows which product the address belongs to, and guessing
+      // one from a hostname would put a wrong name on a button — the anchor text
+      // is the one description of the destination that is certainly right.
+      await pumpBar(
+        tester,
+        options: const [],
+        openIn: comment,
+        onOpenLink: (_) {},
+      );
+
+      expect(find.byKey(QuickReplyBar.openInKey), findsOneWidget);
+      expect(paintedLabel(tester), 'View comment');
+      expect(find.byIcon(Icons.open_in_new), findsOneWidget);
+    });
+
+    testWidgets('a press hands the WHOLE address to the one seam', (tester) async {
+      // The same `void Function(String url)` a tap on those words in the body
+      // goes through, so the row and the transcript cannot open different
+      // places. Whole, because the fragment is which comment.
+      final opened = <String>[];
+      await pumpBar(
+        tester,
+        options: const [],
+        openIn: comment,
+        onOpenLink: opened.add,
+      );
+
+      await tester.tap(find.byKey(QuickReplyBar.openInKey));
+      await tester.pump();
+
+      expect(opened, ['https://tracker.example.com/t/41#c9']);
+    });
+
+    testWidgets('a bar that can offer a reply offers the reply', (tester) async {
+      // This button stands IN PLACE OF Suggest a reply and never beside it:
+      // two doorways on one row is the reader choosing between them.
+      await pumpBar(
+        tester,
+        options: const [],
+        onSuggest: () {},
+        openIn: comment,
+        onOpenLink: (_) {},
+      );
+
+      expect(find.text('Suggest a reply'), findsOneWidget);
+      expect(find.byKey(QuickReplyBar.openInKey), findsNothing);
+    });
+
+    testWidgets('nor is it drawn beside cards already in hand', (tester) async {
+      await pumpBar(
+        tester,
+        onDismiss: () {},
+        openIn: comment,
+        onOpenLink: (_) {},
+      );
+
+      expect(find.text('Confirm Friday'), findsOneWidget);
+      expect(find.byKey(QuickReplyBar.openInKey), findsNothing);
+    });
+
+    testWidgets('with nowhere to send a press there is no button', (tester) async {
+      // `LinkedText.onOpenLink`'s rule: a host with no launcher draws words, not
+      // a link. Here that means the bar goes back to drawing nothing at all.
+      await pumpBar(tester, options: const [], openIn: comment);
+
+      expect(find.byKey(QuickReplyBar.openInKey), findsNothing);
+      expect(find.byType(TextButton), findsNothing);
+    });
+
+    testWidgets('and no link means no button either', (tester) async {
+      // The normal case, and the whole of the off switch: a thread that wants a
+      // reply wants the reply.
+      await pumpBar(tester, options: const [], onOpenLink: (_) {});
+
+      expect(find.byKey(QuickReplyBar.openInKey), findsNothing);
+    });
+
+    testWidgets('a sentence-long anchor is clipped to fit the row', (tester) async {
+      // Real anchor text runs to a sentence — `bodyMaxLabelChars` is 140 — and
+      // this is a button beside a ×.
+      await pumpBar(
+        tester,
+        options: const [],
+        openIn: LinkRun(
+          'Why am I receiving this notification from the tracker?',
+          Uri.parse('https://tracker.example.com/help'),
+        ),
+        onOpenLink: (_) {},
+      );
+
+      final label = paintedLabel(tester);
+      expect(label, 'Why am I receiving this notification fro…');
+      expect(label, hasLength(41));
+    });
+
+    testWidgets('the tooltip names the host, not the tracking address',
+        (tester) async {
+      // A press leaves for another program, so the reader is owed the chance to
+      // see where. A wrapped tracking address runs to hundreds of characters and
+      // a tooltip that long answers nothing; the host is the part that does.
+      await pumpBar(
+        tester,
+        options: const [],
+        openIn: LinkRun(
+          'View comment',
+          Uri.parse('https://links.example.com/?url=https%3A%2F%2Ftracker'
+              '.example.com%2Ft%2F41&d=05'),
+        ),
+        onOpenLink: (_) {},
+      );
+
+      final tooltip = tester.widget<Tooltip>(find.ancestor(
+        of: find.byKey(QuickReplyBar.openInKey),
+        matching: find.byType(Tooltip),
+      ));
+      expect(tooltip.message, 'Opens links.example.com');
     });
   });
 

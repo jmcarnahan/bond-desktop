@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
+import '../services/deadline_parse.dart' show showableDeadline;
 import '../services/llm/extract_task.dart' show ExtractionResult;
 import '../theme/tokens.dart';
 import 'time_format.dart';
@@ -234,8 +235,11 @@ class WhyPanelBody extends StatelessWidget {
       case null:
         lines.add('Not judged whether a reply is expected.');
     }
-    final deadline = m.deadline?.trim() ?? '';
-    if (deadline.isNotEmpty) lines.add('Deadline: $deadline');
+    // Same filter the chip wears: plan-relative wording ("Day 1") is not a
+    // deadline, and this panel explaining the verdict must not present it as
+    // one either.
+    final deadline = showableDeadline(m.deadline, now: DateTime.now());
+    if (deadline != null) lines.add('Deadline: $deadline');
     lines.add(m.addressedMe
         ? 'Addressed to you directly.'
         : 'Not addressed to you alone.');

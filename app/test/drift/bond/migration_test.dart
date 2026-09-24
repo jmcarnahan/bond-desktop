@@ -1017,6 +1017,67 @@ void main() {
     expect(link.data['applied_by'], 'user');
   });
 
+  test('v17 to v18 takes standing rules and leaves the links unattributed',
+      () async {
+    // The rules round. A label and a link the OWNER applied are seeded at v17,
+    // because the new column on `conversation_labels` is what separates the two
+    // hands: a link with a NULL `rule_id` is one a person put there, which is
+    // what makes undoing a rule able to take back only its own work. A step
+    // that stamped the existing links would hand every word the owner has ever
+    // filed by hand to the first rule that mentioned that label.
+    final schema = await verifier.schemaAt(17);
+    schema.rawDatabase.execute("""
+      INSERT INTO labels (id, name, name_key, created_at, updated_at)
+      VALUES ('not-for-me-ab12', 'Not for me', 'not for me', 't', 't');
+    """);
+    schema.rawDatabase.execute("""
+      INSERT INTO conversation_labels (source, conversation_key, label_id,
+        applied_by, applied_at)
+      VALUES ('email', 'c1', 'not-for-me-ab12', 'user', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 18);
+    addTearDown(db.close);
+
+    final link =
+        await db.customSelect('SELECT * FROM conversation_labels').getSingle();
+    expect(link.data['applied_by'], 'user');
+    expect(link.data['rule_id'], null);
+
+    // No rule is invented: a standing instruction exists only once somebody has
+    // written one, and an install that predates this round has none.
+    final rules = await db.customSelect('SELECT * FROM label_rules').get();
+    expect(rules, isEmpty);
+
+    // And the table takes a write, which a STRICT one would reject if the step
+    // had declared a column as the wrong type. The two defaults are the ones the
+    // rest of the round relies on: the exception is ON, and a fresh rule has
+    // hidden nothing.
+    await db.customStatement(
+      "INSERT INTO label_rules (id, label_id, scope_kind, scope_value, "
+      "disposition, created_at, updated_at) "
+      "VALUES ('rule-sender-ab12', 'not-for-me-ab12', 'sender', "
+      "'alerts@tracker.example.com', 'hide_needs_you', 't', 't')",
+    );
+    final rule = await db.customSelect('SELECT * FROM label_rules').getSingle();
+    expect(rule.data['unless_mentions_me'], 1);
+    expect(rule.data['hidden_count'], 0);
+
+    // One rule per scope, enforced where it has to be: two standing
+    // instructions about one address with no way to say which won is the state
+    // the unique index exists to refuse.
+    await expectLater(
+      db.customStatement(
+        "INSERT INTO label_rules (id, label_id, scope_kind, scope_value, "
+        "disposition, created_at, updated_at) "
+        "VALUES ('rule-sender-cd34', 'not-for-me-ab12', 'sender', "
+        "'alerts@tracker.example.com', 'later', 't', 't')",
+      ),
+      throwsA(anything),
+    );
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

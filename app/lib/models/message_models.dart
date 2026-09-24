@@ -212,6 +212,37 @@ class Conversation {
   /// A thread carries as many of these as the owner has put on it.
   final List<Label> labels;
 
+  /// WHY this thread wants the owner, in the words the needs-you pass wrote:
+  /// `'teams_direct'` from the deterministic floor, or the model's own evidence
+  /// sentence. Null when nothing on the thread has been judged to need them.
+  ///
+  /// Read at read time by the subquery in `loadConversations`, off the newest
+  /// KEPT inbound message whose verdict was YES — the only kind of row that can
+  /// answer this question. A reason attached to a `false` verdict explains why a
+  /// message does NOT want the owner, and showing it here would answer the
+  /// opposite of what was asked. Null on every read that does not run the
+  /// subquery, which reads as "nothing to show" rather than as a wrong sentence.
+  ///
+  /// [needsYouReasonWords] is the one place these turn into words on screen.
+  final String? needsYouReason;
+
+  /// Which message [needsYouReason] came off, and when it landed. Carried so a
+  /// later phase can jump the transcript to it — the line that shows the reason
+  /// is inert text today — and null together with the reason.
+  final String? needsYouReasonMessageId;
+  final String? needsYouReasonAt;
+
+  /// Whether the sender of the newest kept inbound message is waiting on an
+  /// answer, as triage v2 judged it. TRI-STATE, and the null arm is the point:
+  /// null means no v2 pass has ever judged that message, which is NOT "no reply
+  /// expected" (`schema.drift` says so at the column, and [isNeedsYou] is
+  /// written on that distinction).
+  ///
+  /// Read at read time by the subquery in `loadConversations`; null on every
+  /// read that does not run it, which reads as "nobody has judged", never as a
+  /// judgement.
+  final bool? replyExpected;
+
   const Conversation({
     required this.id,
     this.source = 'email',
@@ -236,6 +267,10 @@ class Conversation {
     this.pendingDraftCount = 0,
     this.snoozedUntil,
     this.labels = const [],
+    this.needsYouReason,
+    this.needsYouReasonMessageId,
+    this.needsYouReasonAt,
+    this.replyExpected,
   });
 
   /// First participant — the row's primary sender. Null when a conversation
@@ -289,6 +324,10 @@ class Conversation {
       pendingDraftCount: pendingDraftCount,
       snoozedUntil: snoozedUntil,
       labels: labels ?? this.labels,
+      needsYouReason: needsYouReason,
+      needsYouReasonMessageId: needsYouReasonMessageId,
+      needsYouReasonAt: needsYouReasonAt,
+      replyExpected: replyExpected,
     );
   }
 
@@ -321,6 +360,10 @@ class Conversation {
       pendingDraftCount: pendingDraftCount,
       snoozedUntil: snoozedUntil,
       labels: labels,
+      needsYouReason: needsYouReason,
+      needsYouReasonMessageId: needsYouReasonMessageId,
+      needsYouReasonAt: needsYouReasonAt,
+      replyExpected: replyExpected,
     );
   }
 
@@ -395,6 +438,14 @@ class Conversation {
       // The owner's own words, concatenated by the last subquery and absent
       // from every read that does not run it — which reads as "not filed".
       labels: Label.parseConcat(row['labels']),
+      // The three reason columns travel together: one subquery picks the
+      // message, and a read that does not run it carries none of them.
+      needsYouReason: row['needs_you_reason'] as String?,
+      needsYouReasonMessageId: row['needs_you_reason_message_id'] as String?,
+      needsYouReasonAt: row['needs_you_reason_at'] as String?,
+      // Null survives as null, exactly as it does on [Message.replyExpected]:
+      // a message triage v2 has never judged is not a message it judged "no".
+      replyExpected: _boolFromInt(row['reply_expected']),
     );
   }
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/label_models.dart';
 import '../models/message_models.dart';
+import '../services/deadline_parse.dart' show showableDeadline;
 import '../theme/tokens.dart';
 import 'app_rail.dart' show isWaitingRow;
 import 'chips.dart';
@@ -55,7 +56,8 @@ extension NeedsYouTabLabel on NeedsYouTab {
 /// [NeedsYouTab.askedOfMe] is everything [isWaitingRow] denies, and
 /// [NeedsYouTab.waitingOnOthers] is everything it claims — so every row is on
 /// exactly one of the two and the counts add up to [NeedsYouTab.all].
-List<Conversation> needsYouTabRows(NeedsYouTab tab, List<Conversation> rows) =>
+List<Conversation> needsYouTabRows(NeedsYouTab tab, List<Conversation> rows,
+        {DateTime? now}) =>
     switch (tab) {
       NeedsYouTab.all => rows,
       NeedsYouTab.askedOfMe => [
@@ -66,9 +68,16 @@ List<Conversation> needsYouTabRows(NeedsYouTab tab, List<Conversation> rows) =>
           for (final c in rows)
             if (isWaitingRow(c)) c,
         ],
+      // Through [showableDeadline]: a plan-relative phrase the extractor
+      // repeated ("Day 1") is not a date, and a tab the reader picked
+      // BECAUSE every row has a date on it must not seat rows that don't.
+      // The caption over these rows prints `latestDeadline` raw, which is
+      // safe exactly because membership and caption read the same field.
       NeedsYouTab.deadlines => [
           for (final c in rows)
-            if (c.latestDeadline?.trim().isNotEmpty == true) c,
+            if (showableDeadline(c.latestDeadline, now: now ?? DateTime.now())
+                != null)
+              c,
         ],
       NeedsYouTab.suggestedDrafts => [
           for (final c in rows)

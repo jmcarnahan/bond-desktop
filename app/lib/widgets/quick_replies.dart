@@ -4,6 +4,7 @@ import '../providers/draft_provider.dart' show PendingSend;
 import '../services/llm/draft_task.dart' show DraftOption;
 import '../theme/tokens.dart';
 import 'composer.dart' show Composer;
+import 'linked_text.dart' show LinkRun;
 
 /// The short answers to one message: at most two cards, each one a reply that
 /// could go as it stands.
@@ -77,6 +78,28 @@ class QuickReplyBar extends StatefulWidget {
   /// reader can act on always outranks a preview of one.
   final List<({String stance, String body})> streamingOptions;
 
+  /// Where the real action is, when it is not a reply: the first anchored link
+  /// in the message's own body — the words the sender wrote over it, and the
+  /// address behind them (`DraftState.openIn`).
+  ///
+  /// Drawn IN PLACE OF **Suggest a reply**, and only where that button is not
+  /// offered: [onSuggest] null with no options in hand is a host saying a reply
+  /// would be wrong here, which for an automated notification is true and
+  /// unhelpful on its own. The notification's point is somewhere else, and this is
+  /// the one thing in the body that says where — so the row that offered a reply
+  /// nobody wanted offers the thing the reader actually came for.
+  ///
+  /// Null is the whole of the off switch, and it is the normal case: a thread that
+  /// wants a reply wants the reply.
+  final LinkRun? openIn;
+
+  /// Where an [openIn] press goes. The app's ONE link seam — the same
+  /// `void Function(String url)` a transcript's links are launched through — so a
+  /// button on this row and a tap on the same words in the body open the same
+  /// address by the same route. Null hides the button, on `LinkedText.onOpenLink`'s
+  /// rule: a host with nowhere to send a press must not draw one.
+  final void Function(String url)? onOpenLink;
+
   const QuickReplyBar({
     super.key,
     this.options = const [],
@@ -89,6 +112,8 @@ class QuickReplyBar extends StatefulWidget {
     this.onSuggest,
     this.suggesting = false,
     this.streamingOptions = const [],
+    this.openIn,
+    this.onOpenLink,
   });
 
   /// The three answers to the question a card's tap asks. Keyed by INDEX
@@ -105,6 +130,10 @@ class QuickReplyBar extends StatefulWidget {
 
   /// One card of a draft still being written, by its position.
   static Key streamingKeyFor(int index) => Key('quick-reply-streaming-$index');
+
+  /// The **Open in …** button. One per bar, so a plain key rather than a
+  /// factory.
+  static const Key openInKey = Key('quick-reply-open-in');
 
   @override
   State<QuickReplyBar> createState() => _QuickReplyBarState();
@@ -129,6 +158,12 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
   /// Wide enough for three lines of a short reply, narrow enough that two sit
   /// side by side in the thread pane.
   static const double _cardWidth = 320;
+
+  /// How much of an anchor's words the **Open in …** button shows. A body
+  /// anchor may run to a sentence (`bodyMaxLabelChars` is 140) and this is a
+  /// BUTTON on a row beside a ×; past this the words are clipped with an
+  /// ellipsis and the whole of them goes in the tooltip.
+  static const int _openLabelCap = 40;
 
   @override
   void didUpdateWidget(covariant QuickReplyBar oldWidget) {
@@ -453,11 +488,22 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
   /// what makes a dismissal reversible: the × takes the cards away, and this
   /// button is how they come back. The composer's Regenerate is where a
   /// DIFFERENT pair comes from.
+  /// [openIn] and [onOpenLink] add the one alternative to asking: a message no
+  /// reply is offered for, whose body says where the action really is, offers
+  /// THAT instead. It takes the Suggest button's place rather than sitting beside
+  /// it — the two are answers to the same question, and a row holding both would
+  /// be offering a reply this host already declined to offer.
   Widget? _replyRow() {
     final suggest = widget.onSuggest;
     final canDismiss = widget.options.isNotEmpty && widget.onDismiss != null;
     final canSuggest = suggest != null && widget.options.isEmpty;
-    if (!canSuggest && !canDismiss) return null;
+    // Both halves of the seam, and no options: the button is only ever drawn
+    // over a callback it can call, and a bar already holding suggestions is not
+    // a bar with nothing to offer.
+    final open = canSuggest || widget.options.isNotEmpty ? null : widget.openIn;
+    final openLink = widget.onOpenLink;
+    final canOpen = open != null && openLink != null;
+    if (!canSuggest && !canDismiss && !canOpen) return null;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -477,6 +523,7 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
                     widget.suggesting ? 'Drafting…' : 'Suggest a reply',
                   ),
                 ),
+              if (canOpen) _openInButton(open, openLink),
             ],
           ),
         ),
@@ -493,6 +540,35 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
             visualDensity: VisualDensity.compact,
           ),
       ],
+    );
+  }
+
+  /// The way out to wherever this notification is really about.
+  ///
+  /// The button wears the SENDER'S OWN WORDS — *View comment*, *Approve request*
+  /// — rather than a sentence this app made up. Nothing here knows which platform
+  /// it is talking to, and guessing one from a hostname would put a wrong product
+  /// name on a button; the anchor text is the one description of the destination
+  /// that is certainly right, and the outward arrow says it leaves the app.
+  ///
+  /// The tooltip is the HOST and not the whole address. A press leaves for another
+  /// program and a reader is owed the chance to see where before they press, but a
+  /// tracking address runs to hundreds of characters and a tooltip that long is
+  /// unreadable — the host is the part of it that answers the question.
+  Widget _openInButton(LinkRun open, void Function(String url) onOpenLink) {
+    final words = open.label.trim();
+    final label = words.length > _openLabelCap
+        ? '${words.substring(0, _openLabelCap)}…'
+        : words;
+    final host = open.target.host;
+    return Tooltip(
+      message: host.isEmpty ? open.target.toString() : 'Opens $host',
+      child: TextButton.icon(
+        key: QuickReplyBar.openInKey,
+        onPressed: () => onOpenLink(open.target.toString()),
+        icon: const Icon(Icons.open_in_new, size: 16),
+        label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+      ),
     );
   }
 

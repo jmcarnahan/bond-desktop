@@ -5,17 +5,33 @@ import 'package:bond_inbox/services/gates.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// An inbound message with only the fields the gates read.
+///
+/// `headers` and `meeting` are two named keys in one blob, which is the shape
+/// the detail fetch writes: each is present only when that fetch had something
+/// to put in it, so a message given neither carries no blob at all.
 Message message({
   String source = 'email',
   String? from = 'sarah@example.com',
   Map<String, String>? headers,
+  String? subject,
+  String? meeting,
+  String? body,
+  String? preview,
 }) =>
     Message(
       id: 'm1',
       source: source,
       outbound: false,
       fromAddress: from,
-      sourceMetaJson: headers == null ? null : jsonEncode({'headers': headers}),
+      subject: subject,
+      bodyText: body,
+      bodyPreview: preview,
+      sourceMetaJson: headers == null && meeting == null
+          ? null
+          : jsonEncode({
+              'headers': ?headers,
+              'meeting': ?meeting,
+            }),
     );
 
 void main() {
@@ -238,6 +254,375 @@ void main() {
         'sender_rule',
       );
       expect(gateFor(chat, userAddress: null), isNull);
+    });
+  });
+
+  /// The same standing word one scope wider: a rule the owner wrote about a
+  /// class of mail rather than about one address. It arrives as an argument
+  /// too, and the call site is what reads the rules table.
+  group('label_rule', () {
+    test('a drop rule gates an ordinary human address', () {
+      expect(
+        gateFor(
+          message(from: 'sarah@example.com'),
+          userAddress: null,
+          labelRuleDisposition: 'drop',
+        ),
+        'label_rule',
+      );
+    });
+
+    test('and is asked before every name rule below it', () {
+      expect(
+        gateFor(
+          message(from: 'noreply@example.com'),
+          userAddress: null,
+          labelRuleDisposition: 'drop',
+        ),
+        'label_rule',
+      );
+    });
+
+    test('but after sender_rule — the narrower instruction is the reason a '
+        'reader is shown', () {
+      expect(
+        gateFor(
+          message(from: 'sarah@example.com'),
+          userAddress: null,
+          senderDisposition: 'drop',
+          labelRuleDisposition: 'drop',
+        ),
+        'sender_rule',
+      );
+    });
+
+    test('and never before self', () {
+      expect(
+        gateFor(
+          message(from: 'lo@bond.com'),
+          userAddress: 'lo@bond.com',
+          labelRuleDisposition: 'drop',
+        ),
+        'self',
+      );
+    });
+
+    test('the dispositions that are not gates change nothing here', () {
+      // `later` moves the bucket and `hide_needs_you` moves the verdict. A
+      // gate means the model never read the message, which is larger than
+      // either of them asked for.
+      for (final disposition in [null, 'later', 'hide_needs_you', 'keep']) {
+        expect(
+          gateFor(
+            message(from: 'sarah@example.com'),
+            userAddress: null,
+            labelRuleDisposition: disposition,
+          ),
+          isNull,
+          reason: 'disposition $disposition',
+        );
+      }
+    });
+
+    test('a chat under a drop rule is gated too, and its other dispositions '
+        'are not', () {
+      final chat = Message(
+        id: 'c1',
+        source: 'teams',
+        outbound: false,
+        fromAddress: 'teams:user-1',
+        bodyText: 'can you send the CD?',
+      );
+      expect(
+        gateFor(chat, userAddress: null, labelRuleDisposition: 'drop'),
+        'label_rule',
+      );
+      for (final disposition in [null, 'later', 'hide_needs_you']) {
+        expect(
+          gateFor(chat, userAddress: null, labelRuleDisposition: disposition),
+          isNull,
+          reason: 'disposition $disposition',
+        );
+      }
+      // The owner's word about the address still outranks the one about the
+      // class, on this path as on the mail one.
+      expect(
+        gateFor(
+          chat,
+          userAddress: null,
+          senderDisposition: 'drop',
+          labelRuleDisposition: 'drop',
+        ),
+        'sender_rule',
+      );
+    });
+  });
+
+  /// Somebody answering an invitation, which is the class of mail entry 11a
+  /// found sitting in Needs You marked `Needs reply`. The INVITE is the whole
+  /// subtlety: every rung here is shaped so one cannot be caught.
+  group('meeting_response', () {
+    const responses = [
+      'meetingAccepted',
+      'meetingDeclined',
+      'meetingCancelled',
+      // The regional spelling and the typo Microsoft's own enum carried for
+      // years, both matched: missing the one the server sends puts a calendar
+      // response back in front of the reader.
+      'meetingCanceled',
+      'meetingTentativelyAccepted',
+      'meetingTenativelyAccepted',
+    ];
+
+    for (final type in responses) {
+      test('$type gates', () {
+        expect(
+          gateFor(message(meeting: type), userAddress: null),
+          'meeting_response',
+        );
+      });
+    }
+
+    test('a genuine meetingRequest is NEVER gated — an invite asks for the '
+        'reader\'s time', () {
+      expect(
+        gateFor(
+          message(meeting: 'meetingRequest', subject: 'Design review'),
+          userAddress: null,
+        ),
+        isNull,
+      );
+    });
+
+    test('and not even when it wears a response\'s clothes: where Graph said '
+        'the kind, no fallback is consulted', () {
+      expect(
+        gateFor(
+          message(
+            meeting: 'meetingRequest',
+            subject: 'Accepted: weekly sync',
+            headers: const {
+              'content-class': 'urn:content-classes:calendarmessage',
+            },
+          ),
+          userAddress: null,
+        ),
+        isNull,
+      );
+    });
+
+    test('`none` is in the same enum and gates nothing', () {
+      expect(
+        gateFor(
+          message(meeting: 'none', subject: 'the renewal export'),
+          userAddress: null,
+        ),
+        isNull,
+      );
+    });
+
+    test('the value is read case-folded — it is stored as the server spelt it',
+        () {
+      expect(
+        gateFor(message(meeting: 'MEETINGDECLINED'), userAddress: null),
+        'meeting_response',
+      );
+    });
+
+    group('the Content-Class fallback, for rows whose detail carried no kind',
+        () {
+      const calendar = {
+        'content-class': 'urn:content-classes:calendarmessage',
+      };
+
+      test('gates a response-shaped subject', () {
+        expect(
+          gateFor(
+            message(
+              subject: 'Accepted: weekly sync',
+              headers: calendar,
+              body: 'a calendar response with something in it',
+            ),
+            userAddress: null,
+          ),
+          'meeting_response',
+        );
+      });
+
+      for (final subject in const [
+        'Accepted: weekly sync',
+        'Declined: weekly sync',
+        'Tentative: weekly sync',
+        'Tentatively accepted: weekly sync',
+        'Canceled: weekly sync',
+        'Cancelled: weekly sync',
+        'accepted:weekly sync',
+      ]) {
+        test('the subject shape "$subject"', () {
+          expect(
+            gateFor(
+              message(subject: subject, headers: calendar, body: 'words'),
+              userAddress: null,
+            ),
+            'meeting_response',
+          );
+        });
+      }
+
+      test('but the header ALONE gates nothing — an invite carries it too', () {
+        expect(
+          gateFor(
+            message(
+              subject: 'Design review',
+              headers: calendar,
+              body: 'Please join us on Thursday.',
+            ),
+            userAddress: null,
+          ),
+          isNull,
+        );
+      });
+
+      test('and a subject that only mentions the word is not a prefix', () {
+        expect(
+          gateFor(
+            message(
+              subject: 'the proposal was declined: here is why',
+              headers: calendar,
+              body: 'words',
+            ),
+            userAddress: null,
+          ),
+          isNull,
+        );
+      });
+    });
+
+    group('the last-resort fallback: a response subject over nothing at all',
+        () {
+      test('an empty body gates', () {
+        expect(
+          gateFor(
+            message(subject: 'Accepted: weekly sync', body: '   '),
+            userAddress: null,
+          ),
+          'meeting_response',
+        );
+        expect(
+          gateFor(message(subject: 'Canceled: weekly sync'), userAddress: null),
+          'meeting_response',
+        );
+      });
+
+      test('the same subject over a real body does NOT', () {
+        expect(
+          gateFor(
+            message(
+              subject: 'Accepted: weekly sync',
+              body: 'Accepted — though can we move it an hour later? I have a '
+                  'conflict with the renewal review.',
+            ),
+            userAddress: null,
+          ),
+          isNull,
+        );
+      });
+
+      test('the preview stands in for the body, so a delta row with words in '
+          'it is left alone', () {
+        expect(
+          gateFor(
+            message(
+              subject: 'Declined: weekly sync',
+              preview: 'I am out that week — can Dana cover it?',
+            ),
+            userAddress: null,
+          ),
+          isNull,
+        );
+      });
+
+      test('and an ordinary subject over an empty body is not a response', () {
+        expect(
+          gateFor(message(subject: 'Design review', body: ''), userAddress: null),
+          isNull,
+        );
+      });
+    });
+
+    group('where the rung sits', () {
+      test('sender_rule still wins', () {
+        expect(
+          gateFor(
+            message(meeting: 'meetingAccepted'),
+            userAddress: null,
+            senderDisposition: 'drop',
+          ),
+          'sender_rule',
+        );
+      });
+
+      test('self still wins over everything', () {
+        expect(
+          gateFor(
+            message(from: 'lo@bond.com', meeting: 'meetingAccepted'),
+            userAddress: 'lo@bond.com',
+            senderDisposition: 'drop',
+            labelRuleDisposition: 'drop',
+          ),
+          'self',
+        );
+      });
+
+      test('but it beats the name rules below it: the colleague who accepted '
+          'is an ordinary human address', () {
+        expect(
+          gateFor(
+            message(from: 'sarah@example.com', meeting: 'meetingAccepted'),
+            userAddress: null,
+          ),
+          'meeting_response',
+        );
+      });
+
+      test('and the header gates: the reason is the one a reader recognises',
+          () {
+        expect(
+          gateFor(
+            message(
+              meeting: 'meetingCancelled',
+              headers: const {'auto-submitted': 'auto-generated'},
+            ),
+            userAddress: null,
+          ),
+          'meeting_response',
+        );
+      });
+
+      test('none of it fires on a chat, which has no meetings', () {
+        expect(
+          gateFor(
+            message(
+              source: 'teams',
+              from: 'teams:user-1',
+              subject: 'Accepted: weekly sync',
+              meeting: 'meetingAccepted',
+              body: 'a real sentence',
+            ),
+            userAddress: null,
+          ),
+          isNull,
+        );
+      });
+
+      test('and nothing fires when everything is null, which is the delta '
+          'call', () {
+        expect(gateFor(message(), userAddress: null), isNull);
+        expect(
+          gateFor(message(subject: 'the renewal export'), userAddress: null),
+          isNull,
+        );
+      });
     });
   });
 

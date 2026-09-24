@@ -3,9 +3,13 @@ import 'dart:async';
 import '../data/message_store.dart';
 import '../models/attachment_models.dart';
 import '../models/message_models.dart';
+import '../models/label_models.dart';
 import 'activity_log.dart';
+import 'classification.dart';
+import 'deadline_parse.dart' show showableDeadline;
 import 'drain_gate.dart';
 import 'gates.dart';
+import 'label_rules.dart';
 import 'backend/backend_types.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
@@ -548,14 +552,55 @@ class TriageQueue {
         ? null
         : await _store.getSenderPref(from);
 
+    // The owner's standing label rules, read once per claim for the sender
+    // rule's reason: nothing inside a claim changes them. Matched through the
+    // one matcher the retroactive apply also walks, so the mail this gate
+    // drops tomorrow is exactly the set the rule moved the day it was
+    // written. Re-asked per tier because the answer can change: the detail
+    // fetch below is what gives `classificationOf` headers to read. Only a
+    // `drop` rule gates — `gateFor` ignores the other dispositions, which act
+    // on the needs-you verdict and the bucket rather than here.
+    final labelRules =
+        overridden ? const <LabelRule>[] : await _store.listLabelRules();
+    LabelRule? ruleOf(Message m) => labelRules.isEmpty
+        ? null
+        : matchLabelRule(
+            labelRules,
+            source: source,
+            senderAddress: m.fromAddress,
+            senderName: m.fromName,
+            subject: m.subject,
+            classification: classificationOf(m),
+          );
+
+    // A rule that dropped a message still FILES it: the link (applied_by
+    // 'rule', the rule's own id) is what keeps the thread findable under the
+    // owner's word after it stops appearing anywhere else, and the insert's
+    // answer is what feeds `hidden_count` — new links only, so a re-triaged
+    // message cannot inflate the number the Settings list shows and undo
+    // takes back.
+    Future<void> fileUnderRule(LabelRule rule) async {
+      final conversationKey = current['conversation_key'] as String? ?? '';
+      if (conversationKey.isEmpty) return;
+      final isNew = await _store.applyLabelsByRule(
+        source,
+        conversationKey,
+        rule.labelId,
+        ruleId: rule.id,
+      );
+      if (isNew) await _store.bumpRuleHiddenCount(rule.id);
+    }
+
     // Tier one, on the delta page's own fields. Free, and it is what keeps
     // the fetch below off every no-reply and every message the user sent.
+    final tierOneRule = overridden ? null : ruleOf(message);
     final senderGate = overridden
         ? null
         : gateFor(
             message,
             userAddress: _userAddress,
             senderDisposition: senderDisposition,
+            labelRuleDisposition: tierOneRule?.disposition,
           );
     if (senderGate != null) {
       // No activity row, here or at the header gate below. A `triage` row
@@ -568,6 +613,9 @@ class TriageQueue {
         status: 'skipped',
         gateReason: senderGate,
       );
+      if (senderGate == 'label_rule' && tierOneRule != null) {
+        await fileUnderRule(tierOneRule);
+      }
       // The thread hears about the gate. The fold at ingest reads only kept
       // messages, and this message was kept until a moment ago — so the
       // thread may be asking for a reply to something that will never reach
@@ -634,13 +682,18 @@ class TriageQueue {
 
     // Again, because the gates that read headers had nothing to read a moment
     // ago. Re-running the sender gate too is free and keeps this one call
-    // the single place a gate decision is made.
+    // the single place a gate decision is made. The rule is re-matched on the
+    // refreshed row for the same reason: a classification-scoped rule can
+    // only recognise a tracker or a meeting response once the headers and the
+    // meeting field are here to read.
+    final tierTwoRule = overridden ? null : ruleOf(message);
     final headerGate = overridden
         ? null
         : gateFor(
             message,
             userAddress: _userAddress,
             senderDisposition: senderDisposition,
+            labelRuleDisposition: tierTwoRule?.disposition,
           );
     if (headerGate != null) {
       await _writeTriage(
@@ -649,6 +702,9 @@ class TriageQueue {
         status: 'skipped',
         gateReason: headerGate,
       );
+      if (headerGate == 'label_rule' && tierTwoRule != null) {
+        await fileUnderRule(tierTwoRule);
+      }
       // Same as tier one, and for every reason it gives — including the
       // chat gate, which reaches here too: a message that stripped down to
       // nothing is a message the model will never read.
@@ -970,9 +1026,13 @@ class TriageQueue {
     // The deadline rides the banner for free — "Send the invoice — by Friday"
     // is the line the row wanted anyway. Appended BEFORE the clamp below, so
     // the pair stays honest: a long ask loses its own tail rather than ending
-    // up with a deadline the cap would have cut in half.
-    if (ask != null && ask.isNotEmpty && result.deadline.isNotEmpty) {
-      ask = '$ask — by ${result.deadline}';
+    // up with a deadline the cap would have cut in half. Through
+    // [showableDeadline], because this WRITES the banner: "— by Day 1"
+    // stamped here would outlive every display-time filter.
+    final deadline =
+        showableDeadline(result.deadline, now: DateTime.now());
+    if (ask != null && ask.isNotEmpty && deadline != null) {
+      ask = '$ask — by $deadline';
     }
 
     await _store.updateConversationTriage(

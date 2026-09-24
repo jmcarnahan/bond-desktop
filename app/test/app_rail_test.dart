@@ -45,6 +45,8 @@ Conversation _conv({
   int unread = 0,
   int pending = 0,
   String source = 'email',
+  String? reason,
+  bool? replyExpected,
 }) {
   return Conversation(
     id: id,
@@ -58,6 +60,8 @@ Conversation _conv({
     lastMessageAt: lastMessageAt,
     unreadCount: unread,
     aiPendingCount: pending,
+    needsYouReason: reason,
+    replyExpected: replyExpected,
   );
 }
 
@@ -166,6 +170,78 @@ void main() {
         threshold: 0.5,
       );
       expect(rows.map((c) => c.id), ['a']);
+    });
+
+    // The section only claims what it can explain: a thread reaches Needs You
+    // on a reason, an ask, or a judgement that a reply is owed — and a thread
+    // carrying none of the three is dropped rather than shown with nothing to
+    // say for itself.
+    test('drops a needs-reply thread that can explain nothing', () {
+      final rows = needsYouRows([
+        _conv(
+          id: 'mute',
+          state: ConversationState.needsReply,
+          replyExpected: false,
+        ),
+      ]);
+      expect(rows, isEmpty);
+    });
+
+    test('keeps it when the pass named a reason', () {
+      final rows = needsYouRows([
+        _conv(
+          id: 'named',
+          state: ConversationState.needsReply,
+          replyExpected: false,
+          reason: 'Asks you to confirm the date.',
+        ),
+      ]);
+      expect(rows.map((c) => c.id), ['named']);
+    });
+
+    test('keeps it when the thread carries an ask', () {
+      final rows = needsYouRows([
+        _conv(
+          id: 'asked',
+          state: ConversationState.needsReply,
+          replyExpected: false,
+          cta: 'Send the signed copy',
+        ),
+      ]);
+      expect(rows.map((c) => c.id), ['asked']);
+    });
+
+    test('keeps it when the pass judged a reply is expected', () {
+      final rows = needsYouRows([
+        _conv(
+          id: 'owed',
+          state: ConversationState.needsReply,
+          replyExpected: true,
+        ),
+      ]);
+      expect(rows.map((c) => c.id), ['owed']);
+    });
+
+    // NULL is "never judged", not "no": brand new mail, an install with the
+    // processing switch off, and every read that does not ask for the column
+    // all arrive here, and hiding them would empty the section.
+    test('keeps it when nothing has judged the thread yet', () {
+      final rows = needsYouRows([
+        _conv(id: 'fresh', state: ConversationState.needsReply),
+      ]);
+      expect(rows.map((c) => c.id), ['fresh']);
+    });
+
+    test('an empty reason is no reason at all', () {
+      final rows = needsYouRows([
+        _conv(
+          id: 'blank',
+          state: ConversationState.needsReply,
+          replyExpected: false,
+          reason: '',
+        ),
+      ]);
+      expect(rows, isEmpty);
     });
   });
 

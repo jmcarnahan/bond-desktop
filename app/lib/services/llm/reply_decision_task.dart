@@ -4,11 +4,64 @@ import 'package:intl/intl.dart';
 import '../../models/message_models.dart';
 import '../attachments/attachment_markers.dart';
 import '../attachments/attachment_retriever.dart';
+import '../classification.dart';
 import '../context/context_pack_render.dart';
 import '../context/context_retriever.dart';
 import 'json_task.dart';
 import 'message_block.dart';
 import 'prompt_guard.dart';
+
+/// The `gate_reason` slugs that say a machine wrote the message.
+///
+/// Every one of them is a reason `gates.dart` already refused to spend a model
+/// call on, read here for the messages that carry one anyway: the `teams_source`
+/// tolerance lets a gated row through the draft queue, a gate can fire on the
+/// second call after a draft was already enqueued, and a row an older build
+/// stored keeps whatever word that build wrote. `label_rule` is the owner's own
+/// standing instruction about a class of mail, which is the loudest of the five.
+///
+/// Not every gate reason belongs here. `self`, `sender_rule`, `monitoring` and
+/// `machine_sender` all gate mail for reasons that say nothing about whether a
+/// reply is owed, and `teams_source` is not a judgement at all.
+const Set<String> automatedGateReasons = {
+  'no_reply',
+  'newsletter',
+  'auto_generated',
+  'meeting_response',
+  'label_rule',
+};
+
+/// Whether no reply may be offered for [message] — ever, by anybody.
+///
+/// The one authority on the question, asked at three points that would otherwise
+/// each grow their own answer: the draft queue ahead of the prefetch
+/// (`extract_handler.dart`), the handler that would consult [ReplyDecisionTask]
+/// about it (`draft_handler.dart`), and the composer that would offer
+/// **Suggest a reply** over it (`DraftState.suggestable`). A procurement
+/// platform's comment notification reached all three and came back with a
+/// drafted reply to a no-reply mailer; the real action was in the platform.
+///
+/// It is a judgement at READ TIME and it stores nothing. No column is written,
+/// no verdict is overwritten, and a message whose headers arrive later — the
+/// detail fetch is what gives [classificationOf] anything to read — simply gets
+/// a different answer the next time somebody asks. A stored suppression would
+/// be a fourth opinion about mail the gates, the rules and the model already
+/// have one each.
+///
+/// TWO signals, and the second is the one that does the work. The `gate_reason`
+/// arm is the belt: a gated message rarely reaches the draft paths at all.
+/// [classificationOf] answering `automated_notification` is the braces, and it
+/// is what catches the mail in the report — `Auto-Submitted`, `List-Id`,
+/// `List-Unsubscribe` on a notification nothing gated, which triage then read as
+/// an ask because the body politely asks the reader to approve something.
+///
+/// Deliberately NOT suppressed: `meeting_invite` and `tracker_notification`. An
+/// invite asks for the reader's time and can be the most important mail of the
+/// day, and a tracker's mention is addressed to the person reading it — the
+/// same line `gates.dart` draws, and for the same reason.
+bool replySuppressed(Message message) =>
+    automatedGateReasons.contains(message.gateReason) ||
+    classificationOf(message) == 'automated_notification';
 
 /// The rules half of the reply-decision system prompt. Const, and never
 /// interpolated into: see [JsonTask.systemPrompt] for why one changed

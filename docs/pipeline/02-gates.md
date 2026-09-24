@@ -9,7 +9,7 @@ strings and headers.
 
 ## Tier 1 — sender-only, on delta fields
 
-Before fetching anything, five questions about the address, in this order, and
+Before fetching anything, six questions about the address, in this order, and
 the first answer wins. `gateFor` in `app/lib/services/gates.dart` dispatches to
 `_emailGate` / `_teamsGate` per source, driven from the claim loop in
 `app/lib/services/triage_queue.dart`.
@@ -18,6 +18,7 @@ the first answer wins. `gateFor` in `app/lib/services/gates.dart` dispatches to
 | --- | --- |
 | `self` | the user's own address, however the message came back to them |
 | `sender_rule` | an address the owner dropped by hand — below |
+| `label_rule` | a class of mail the owner's standing label rule says to `drop` — below |
 | `no_reply` | `noreply` / `donotreply` anywhere in the local part — the compact word as a plain substring (`noreply@`, `orders-noreply@`, `noreply+billing@`, `noreply2@`, `opsnoreplyrelay@`), the punctuated spellings (`no-reply`, `do.not.reply`) as delimited TOKENS — plus the prefix family `notifications?`, `alerts?`, `mailer-daemon`, `postmaster`, `bounces?` |
 | `monitoring` | `monitoring@`, `monitoring-eu@`, `prod-monitoring@` |
 | `machine_sender` | `svc-…@`, `bot-…@`, `…-bot@`, and the exact local parts `pipelines@`, `builds@`, `ci@` |
@@ -45,13 +46,33 @@ claim by `_triageClaimed` and handed to both tiers. Undo is the one the sender
 corrections already have — `restoreSenderPref`, which puts the previous rule
 back and re-files the threads from it.
 
-**One gate deliberately does not exist here**, beside the two the header block
-below names: issue trackers and code hosts sending from their bare local parts
-(`jira@`, `github@`, …). On the golden set that exact shape is two gold drops
-AND two gold keeps — the same address sends the digest nobody reads and the
-mention addressed to the reader — so no name rule can split them. What
-separates the two populations is which tenant is talking, which is the sender
-rule above or a header, never a pattern compiled into the app.
+**The label rule is the second data gate** (schema v18). It comes from a
+`label_rules` row whose disposition is `drop`, which the owner writes by
+dismissing a thread with a label and keeping the rule — a standing instruction
+about a CLASS of mail (a sender, a domain, a subject prefix, or a
+classification from `app/lib/services/classification.dart`) rather than one
+address. `_triageClaimed` reads the table once per claim and matches through
+`matchLabelRule` (`app/lib/services/label_rules.dart`) — the SAME matcher the
+retroactive apply walks, so the mail the gate drops tomorrow is exactly the
+set the rule moved the day it was written. A classification-scoped rule can
+only recognise its mail once the detail is fetched, so the match is re-asked
+at tier 2 on the refreshed row. A dropped message is still FILED under the
+rule's label (`applied_by = 'rule'`, the rule's id on the link), which keeps
+the thread findable under the owner's word, and each newly inserted link bumps
+the rule's `hidden_count` — the number the Settings list shows and undo
+(`undoLabelRule`) takes back. A rule's other dispositions, `later` and
+`hide_needs_you`, are deliberately NOT gates: they move the bucket or the
+needs-you verdict, where a gate means the model never read the message.
+
+**One gate deliberately does not exist here**, beside the internal-domain gate
+the header block in `gates.dart` also refuses: issue trackers and code hosts
+sending from their bare local parts (`jira@`, `github@`, …). On the golden set
+that exact shape is two gold drops AND two gold keeps — the same address sends
+the digest nobody reads and the mention addressed to the reader — so no name
+rule can split them. What separates the two populations is which tenant is
+talking, which is data or a header, never a pattern compiled into the app.
+The label rule above is that data arriving: the refusal stands, and it now has
+a mechanism behind it instead of only a reason.
 
 ## Detail fetch (mail only)
 
@@ -75,6 +96,24 @@ exactly as it always was.
 With headers in hand, the list/auto-generated checks run: `List-Unsubscribe`
 / `List-Id`, `Precedence: bulk|list|junk|auto_reply`, `Auto-Submitted`, and
 `X-Auto-Response-Suppress`. Also in `gates.dart`.
+
+## Meeting responses
+
+`meeting_response` gates the "Accepted: / Declined: / Tentative: / Canceled:"
+mail a calendar sends back about the reader's own invites — mail that never
+needs a reply, and that sat in Needs You saying `Needs reply` over a summary
+reading "no further action required". The field that decides is
+`meetingMessageType`, Graph's own word, stored off the per-message detail
+`$select` since Phase 1 — so this is mostly a tier-2 gate, with one exception:
+a delta row whose preview came down empty can be caught at tier 1 by the
+subject-and-empty-body fallback. A meeting INVITE (`meetingRequest`) is never
+gated, and both fallbacks require a response-shaped subject before reading
+anything else, precisely so an invite cannot reach them — the header comment
+in `gates.dart` walks the whole line. Rows a build before v18 already triaged
+are re-gated once by the `meeting_regate` one-shot
+(`app/lib/services/sync_service.dart`), which then refolds the affected
+threads; `clearDerived` re-pends such rows like any others and the gate simply
+re-applies at the next claim.
 
 ## A gate drop and the thread
 
@@ -135,9 +174,9 @@ for the ingest half and the one-shot repair.
 ## Reading the file
 
 The header comment in `gates.dart` is the real documentation: it explains the
-two-tier split, a delimiter subtlety in the local-part regexes, and — most
-usefully — three gates that deliberately do **not** exist. Keep that comment
-authoritative; this page is the map to it.
+two-tier split, a delimiter subtlety in the local-part regexes, the
+meeting-response line, and — most usefully — two gates that deliberately do
+**not** exist. Keep that comment authoritative; this page is the map to it.
 
 A gated message is not hidden: it lands with a drop reason, visible under the
 Inbox's Dropped tile (`HomeFilter.dropped`) and in the Archive section's

@@ -1,5 +1,6 @@
 import 'package:bond_inbox/models/label_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/rule_suggestions.dart';
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/widgets/conversation_row.dart';
 import 'package:bond_inbox/widgets/label_picker.dart';
@@ -44,6 +45,12 @@ void main() {
     void Function(Conversation, String)? onCreateLabel,
     void Function(Conversation)? onDismissWithoutLabel,
     void Function(Conversation)? onCloseLabelPicker,
+    List<LabelRuleOffer> Function(Conversation)? ruleOffersFor,
+    Label? Function(Conversation)? ruleOfferLabelFor,
+    void Function(Conversation, Label, LabelRuleOffer)? onRuleChosen,
+    RuleSuggestion? suggestion,
+    void Function(RuleSuggestion)? onAcceptSuggestion,
+    void Function(RuleSuggestion)? onNotNowSuggestion,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -68,6 +75,12 @@ void main() {
           onCreateLabel: onCreateLabel,
           onDismissWithoutLabel: onDismissWithoutLabel,
           onCloseLabelPicker: onCloseLabelPicker,
+          ruleOffersFor: ruleOffersFor,
+          ruleOfferLabelFor: ruleOfferLabelFor,
+          onRuleChosen: onRuleChosen,
+          ruleSuggestion: suggestion,
+          onAcceptRuleSuggestion: onAcceptSuggestion,
+          onNotNowRuleSuggestion: onNotNowSuggestion,
         ),
       ),
     ));
@@ -374,6 +387,200 @@ void main() {
       );
       expect(find.byKey(ConversationListPane.dismissKeyFor(needsYou)),
           findsOneWidget);
+    });
+
+    group('the rule offer inside that picker', () {
+      const domain =
+          LabelRuleOffer(scopeKind: 'domain', scopeValue: 'jira.example.com');
+
+      testWidgets('reaches the row the host named it for', (tester) async {
+        final chosen = <String>[];
+        await pump(
+          tester,
+          conversations: [needsYou],
+          filter: InboxFilter.needsReply,
+          labels: const [fyi],
+          labelPickerFor: (_) => LabelPickerMode.dismiss,
+          onApplyLabel: (_, _) {},
+          onCreateLabel: (_, _) {},
+          onCloseLabelPicker: (_) {},
+          ruleOffersFor: (_) => const [domain],
+          ruleOfferLabelFor: (_) => fyi,
+          onRuleChosen: (c, label, offer) =>
+              chosen.add('${c.id}:${label.id}:${offer.scopeKind}'),
+        );
+
+        await tester.tap(find.byKey(LabelPicker.ruleKeyFor(domain)));
+        await tester.pump();
+
+        expect(chosen, ['c1:fyi:domain']);
+      });
+
+      testWidgets('and no offer on the label-only question', (tester) async {
+        // Labelling a thread that stays where it is says what the thread is;
+        // only a dismissal says what to do with the next one.
+        await pump(
+          tester,
+          conversations: [needsYou],
+          filter: InboxFilter.needsReply,
+          labels: const [fyi],
+          labelPickerFor: (_) => LabelPickerMode.label,
+          onApplyLabel: (_, _) {},
+          onCreateLabel: (_, _) {},
+          onCloseLabelPicker: (_) {},
+          ruleOffersFor: (_) => const [domain],
+          ruleOfferLabelFor: (_) => fyi,
+          onRuleChosen: (_, _, _) {},
+        );
+
+        expect(find.byKey(LabelPicker.ruleRowKey), findsNothing);
+      });
+
+      testWidgets('a host that wires none of it draws none of it',
+          (tester) async {
+        await pump(
+          tester,
+          conversations: [needsYou],
+          filter: InboxFilter.needsReply,
+          labels: const [fyi],
+          labelPickerFor: (_) => LabelPickerMode.dismiss,
+          onApplyLabel: (_, _) {},
+          onCreateLabel: (_, _) {},
+          onCloseLabelPicker: (_) {},
+        );
+
+        expect(find.byType(LabelPicker), findsOneWidget);
+        expect(find.byKey(LabelPicker.ruleRowKey), findsNothing);
+      });
+    });
+  });
+
+  /// The one rule offer over the list — requirement 12d's surface. The counting
+  /// behind the sentence is `rule_suggestions_test.dart`; everything here is
+  /// about the row being legible, answerable and absent by default.
+  group('the rule suggestion over the list', () {
+    const offer = RuleSuggestion(
+      scopeKind: 'sender',
+      scopeValue: 'noreply@jira.example.com',
+      disposition: 'hide_needs_you',
+      threadCount: 41,
+    );
+
+    testWidgets('says what the owner did and what it would do', (tester) async {
+      await pump(
+        tester,
+        conversations: [_conv(id: 'c1')],
+        suggestion: offer,
+        onAcceptSuggestion: (_) {},
+        onNotNowSuggestion: (_) {},
+      );
+
+      expect(
+        find.text("You've dismissed 41 threads from noreply@jira.example.com. "
+            'Hide these from Needs You in future?'),
+        findsOneWidget,
+      );
+      expect(find.text('Hide these'), findsOneWidget);
+      expect(find.text('Not now'), findsOneWidget);
+      // And the list is still the list.
+      expect(find.text('Homepage copy'), findsOneWidget);
+      expect(find.text('DONE'), findsOneWidget);
+    });
+
+    testWidgets('hands the whole offer back to whichever answer was pressed',
+        (tester) async {
+      final accepted = <RuleSuggestion>[];
+      final notNow = <String>[];
+      await pump(
+        tester,
+        conversations: [_conv(id: 'c1')],
+        suggestion: offer,
+        onAcceptSuggestion: accepted.add,
+        onNotNowSuggestion: (s) => notNow.add(s.key),
+      );
+
+      await tester.tap(find.byKey(ConversationListPane.suggestionAcceptKey));
+      await tester.pump();
+      await tester.tap(find.byKey(ConversationListPane.suggestionNotNowKey));
+      await tester.pump();
+
+      expect(accepted, [offer]);
+      // The key, because that is what a "Not now" is remembered under.
+      expect(notNow, ['hide_needs_you:sender:noreply@jira.example.com']);
+    });
+
+    testWidgets('the reverse offer reads as a sentence about a person',
+        (tester) async {
+      await pump(
+        tester,
+        conversations: [_conv(id: 'c1')],
+        suggestion: const RuleSuggestion(
+          scopeKind: 'sender',
+          scopeValue: 'alex.rivera@example.com',
+          disposition: RuleSuggestion.keepInNeedsYou,
+          threadCount: 7,
+        ),
+        onAcceptSuggestion: (_) {},
+        onNotNowSuggestion: (_) {},
+      );
+
+      expect(
+        find.text('You keep coming back to alex.rivera@example.com. '
+            'Always keep them in Needs You?'),
+        findsOneWidget,
+      );
+      expect(find.text('Always keep'), findsOneWidget);
+    });
+
+    testWidgets('an offer with only one answer wired is not drawn',
+        (tester) async {
+      // An offer nobody can accept is a notification, and one nobody can put
+      // away is an ultimatum.
+      await pump(
+        tester,
+        conversations: [_conv(id: 'c1')],
+        suggestion: offer,
+        onAcceptSuggestion: (_) {},
+      );
+      expect(find.byKey(ConversationListPane.suggestionKey), findsNothing);
+
+      await pump(
+        tester,
+        conversations: [_conv(id: 'c1')],
+        suggestion: offer,
+        onNotNowSuggestion: (_) {},
+      );
+      expect(find.byKey(ConversationListPane.suggestionKey), findsNothing);
+    });
+
+    testWidgets('and a host with nothing to offer draws the list it always did',
+        (tester) async {
+      await pump(
+        tester,
+        conversations: [_conv(id: 'c1')],
+        onAcceptSuggestion: (_) {},
+        onNotNowSuggestion: (_) {},
+      );
+
+      expect(find.byKey(ConversationListPane.suggestionKey), findsNothing);
+      expect(find.text('Not now'), findsNothing);
+      expect(find.text('DONE'), findsOneWidget);
+    });
+
+    testWidgets('an empty list is an empty list, offer or no offer',
+        (tester) async {
+      // The offer rides the scroll over the rows. With no rows there is no
+      // scroll, and the pane's own "nothing here" is the whole answer.
+      await pump(
+        tester,
+        conversations: const [],
+        suggestion: offer,
+        onAcceptSuggestion: (_) {},
+        onNotNowSuggestion: (_) {},
+      );
+
+      expect(find.byKey(ConversationListPane.suggestionKey), findsNothing);
+      expect(find.text('Nothing here.'), findsOneWidget);
     });
   });
 }

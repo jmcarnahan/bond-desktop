@@ -761,12 +761,13 @@ CREATE TABLE labels (
 CREATE UNIQUE INDEX ix_labels_name_key ON labels(name_key);
 
 -- One label on one thread. The link, and nothing about why beyond who put it
--- there: `applied_by` is 'user' today, and Phase 4's rules write 'rule'.
+-- there: `applied_by` is 'user' when the owner chose the word and 'rule' when
+-- a standing rule filed it.
 --
--- `rule_id` is deliberately ABSENT. A column naming the rule that applied a
--- link belongs to the round that has rules; adding it now would mean a column
--- nothing writes and nothing reads, and the append-only column rule means
--- Phase 4 can add it to the end of this table without touching a frozen step.
+-- `rule_id` names WHICH rule filed it, and it is NULL on every link the owner
+-- applied by hand. That null is what makes undoing a rule possible: taking a
+-- rule back deletes its own links and nothing else, so a word the owner put on
+-- a thread themselves survives the rule that later agreed with them.
 --
 -- Keyed by (source, conversation_key, label_id) because a conversation key is
 -- unique only within a connector, and the PK is what makes applying a label
@@ -777,8 +778,62 @@ CREATE TABLE conversation_labels (
   label_id TEXT NOT NULL,
   applied_by TEXT NOT NULL DEFAULT 'user',
   applied_at TEXT NOT NULL,
+  rule_id TEXT,
   PRIMARY KEY (source, conversation_key, label_id)
 ) STRICT;
 
 CREATE INDEX ix_conv_labels_label
   ON conversation_labels(label_id, applied_at DESC);
+
+-- A word in the owner's vocabulary that has become a STANDING RULE: the same
+-- label they file today's thread under, pointed at the mail that has not
+-- arrived yet.
+--
+-- `scope_kind` is an OPEN SET, on `context_links.scope_kind`'s precedent above:
+-- 'sender' and 'domain' name who wrote it, 'subject' a prefix of what it is
+-- called, and 'classification' the KIND of message it is (a meeting response, a
+-- tracker notification) as the pipeline names it. A kind this build does not
+-- know matches nothing rather than throwing, which is what lets a rule written
+-- by a later build sit in a store an older one opens.
+--
+-- `scope_value` is stored LOWERCASED, always: every comparison against it is
+-- case-insensitive, and folding once at write time is what keeps the matcher
+-- (`services/label_rules.dart`) free of per-row `LOWER()` calls.
+--
+-- `disposition` is the same vocabulary the sender rules use, minus 'keep':
+-- 'hide_needs_you' takes the thread off the Needs You rail and leaves it in the
+-- inbox, 'later' files it under Later, 'drop' gates the message at triage so no
+-- model ever reads it. Only the third one is a gate; the first two are about
+-- where a thread the app has already read belongs.
+--
+-- `unless_mentions_me` is the exception the tracker case needs, and it defaults
+-- to ON: the same address sends the digest nobody reads and the @mention that
+-- is addressed to the reader, so a rule about that address has to let the
+-- second one through. It is spent through the needs-you FLOOR
+-- (`services/needs_you.dart`), which may only raise a verdict — the rule
+-- suppresses that floor only when this is 0.
+--
+-- `hidden_count` is how many threads this rule has filed, which is the number
+-- the Settings list shows ("hid 41 threads"). It counts the rule's OWN links in
+-- `conversation_labels`, so a thread the owner had already labelled by hand is
+-- hidden without being counted, and undoing the rule takes back exactly what it
+-- counted.
+--
+-- The unique index over (scope_kind, scope_value) is the one-rule-per-scope
+-- rule: a second rule on the same sender REPLACES the first (see
+-- `MessageStore.createLabelRule`) rather than leaving two standing
+-- instructions about one address with no way to tell which won.
+CREATE TABLE label_rules (
+  id TEXT PRIMARY KEY,
+  label_id TEXT NOT NULL,
+  scope_kind TEXT NOT NULL,
+  scope_value TEXT NOT NULL,
+  disposition TEXT NOT NULL,
+  unless_mentions_me INTEGER NOT NULL DEFAULT 1,
+  hidden_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE UNIQUE INDEX ix_label_rules_scope ON label_rules(scope_kind, scope_value);
+CREATE INDEX ix_label_rules_label ON label_rules(label_id);

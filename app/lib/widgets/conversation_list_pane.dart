@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/label_models.dart';
 import '../models/message_models.dart';
+import '../services/rule_suggestions.dart';
 import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 import 'conversation_row.dart';
@@ -130,6 +131,48 @@ class ConversationListPane extends StatelessWidget {
   /// Escape, or the strip's ✕: the host collapses the picker.
   final void Function(Conversation conversation)? onCloseLabelPicker;
 
+  /// The scopes a rule could be written on for that row — see
+  /// [LabelPicker.ruleOffers]. A host that answers with an empty list, which is
+  /// the default for every host that wires none of this, gets the strip it got
+  /// before the offer existed.
+  ///
+  /// Per row and computed by the host, because the candidates come off the
+  /// thread's own sender, domain, classification and subject, and this pane
+  /// holds no opinion about which of them is worth offering.
+  final List<LabelRuleOffer> Function(Conversation conversation)? ruleOffersFor;
+
+  /// The label the host has just filed that row under — see
+  /// [LabelPicker.ruleOfferLabel]. Null for a row it has not.
+  final Label? Function(Conversation conversation)? ruleOfferLabelFor;
+
+  /// The reader chose a scope on that row's offer line. The pane never writes a
+  /// rule; this is the host's to persist.
+  final void Function(
+    Conversation conversation,
+    Label label,
+    LabelRuleOffer offer,
+  )? onRuleChosen;
+
+  /// One rule the app would offer to write from what the owner keeps doing by
+  /// hand — requirement 12d. Null, the default, draws nothing.
+  ///
+  /// ONE at a time, and the host picks which (`suggestRules` returns them
+  /// best-evidence first): a list of offers is a chore, and the reader came here
+  /// to read their mail.
+  final RuleSuggestion? ruleSuggestion;
+
+  /// Yes. The pane writes no rule and applies nothing — the host persists it,
+  /// retro-applies it and owns the toast and the undo, exactly as the picker's
+  /// offer works. Null takes the row away: an offer nobody can accept is an
+  /// interruption.
+  final void Function(RuleSuggestion suggestion)? onAcceptRuleSuggestion;
+
+  /// Not now. Remembered by the host under [RuleSuggestion.key], so the same
+  /// offer does not come back tomorrow. Null takes the row away for
+  /// [onAcceptRuleSuggestion]'s reason: an offer a reader cannot get rid of is
+  /// worse than no offer.
+  final void Function(RuleSuggestion suggestion)? onNotNowRuleSuggestion;
+
   const ConversationListPane({
     super.key,
     required this.sources,
@@ -154,6 +197,12 @@ class ConversationListPane extends StatelessWidget {
     this.onCreateLabel,
     this.onDismissWithoutLabel,
     this.onCloseLabelPicker,
+    this.ruleOffersFor,
+    this.ruleOfferLabelFor,
+    this.onRuleChosen,
+    this.ruleSuggestion,
+    this.onAcceptRuleSuggestion,
+    this.onNotNowRuleSuggestion,
   });
 
   /// One row's quick actions, keyed by the thread rather than by its place in
@@ -167,6 +216,11 @@ class ConversationListPane extends StatelessWidget {
 
   /// The inline picker under one row.
   static Key pickerKeyFor(Conversation c) => _actionKey('label-picker', c);
+
+  /// The rule offer at the top of the list, and its two answers.
+  static const Key suggestionKey = ValueKey('rule-suggestion');
+  static const Key suggestionAcceptKey = ValueKey('rule-suggestion-accept');
+  static const Key suggestionNotNowKey = ValueKey('rule-suggestion-not-now');
 
   static Key _actionKey(String what, Conversation c) =>
       ValueKey('row-$what-${c.source}|${c.id}');
@@ -255,6 +309,11 @@ class ConversationListPane extends StatelessWidget {
     // built a widget for every thread up front, which on a mailbox with
     // thousands of "Done" threads exhausted the GPU and crashed the app.
     final entries = <_PaneEntry>[];
+    // Above the first section header, inside the scroll rather than pinned over
+    // it: the offer is about mail the reader has already dealt with, so it must
+    // never hold the top of a list they came here to read down.
+    final offer = _suggestionRow();
+    if (offer != null) entries.add(_SuggestionEntry(offer));
     for (final (label, rows) in sections) {
       if (rows.isEmpty) continue;
       entries.add(_HeaderEntry(label, rows.length));
@@ -268,6 +327,7 @@ class ConversationListPane extends StatelessWidget {
       itemCount: entries.length,
       itemBuilder: (context, i) {
         final entry = entries[i];
+        if (entry is _SuggestionEntry) return entry.child;
         if (entry is _HeaderEntry) {
           return Padding(
             padding: const EdgeInsets.fromLTRB(
@@ -419,6 +479,11 @@ class ConversationListPane extends StatelessWidget {
     if (mode == null) return null;
 
     final without = onDismissWithoutLabel;
+    final chosen = onRuleChosen;
+    // Only the dismiss path offers a rule: a label put on a thread that stays
+    // where it is says what the thread IS, and a dismissal says what should
+    // happen to the next one like it.
+    final offering = mode == LabelPickerMode.dismiss;
     return LabelPicker(
       key: pickerKeyFor(c),
       labels: labels,
@@ -430,8 +495,82 @@ class ConversationListPane extends StatelessWidget {
           ? () => without(c)
           : null,
       onClose: () => close(c),
+      ruleOffers: offering ? ruleOffersFor?.call(c) ?? const [] : const [],
+      ruleOfferLabel: offering ? ruleOfferLabelFor?.call(c) : null,
+      onRuleChosen: offering && chosen != null
+          ? (label, offer) => chosen(c, label, offer)
+          : null,
     );
   }
+
+  /// The rule offer over the list, or null when there is nothing to offer or
+  /// nowhere for an answer to go.
+  ///
+  /// One sentence and two buttons, in the flow: no banner, no icon and no badge.
+  /// The sentence names the owner's own count, because the whole claim the app is
+  /// making is "you have done this N times" — a reader who disagrees with the
+  /// count can say Not now, and a reader who agrees is one press from never
+  /// seeing that mail again.
+  ///
+  /// Both answers must be wired or the row does not draw. An offer with no Yes
+  /// is a notification, and an offer with no Not now is an ultimatum.
+  Widget? _suggestionRow() {
+    final suggestion = ruleSuggestion;
+    final accept = onAcceptRuleSuggestion;
+    final notNow = onNotNowRuleSuggestion;
+    if (suggestion == null || accept == null || notNow == null) return null;
+    return Padding(
+      key: suggestionKey,
+      padding: const EdgeInsets.fromLTRB(
+        BondSpacing.s4,
+        BondSpacing.s12,
+        BondSpacing.s4,
+        BondSpacing.s4,
+      ),
+      child: Container(
+        padding: const EdgeInsets.all(BondSpacing.s12),
+        decoration: BoxDecoration(
+          color: BondColors.faintGround,
+          borderRadius: BondRadii.smAll,
+          border: Border.all(color: BondColors.border),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(suggestion.words, style: BondType.small),
+            const SizedBox(height: BondSpacing.s8),
+            Row(
+              children: [
+                TextButton(
+                  key: suggestionAcceptKey,
+                  onPressed: () => accept(suggestion),
+                  style: _offerButton,
+                  child: Text(suggestion.acceptWords),
+                ),
+                const SizedBox(width: BondSpacing.s8),
+                TextButton(
+                  key: suggestionNotNowKey,
+                  onPressed: () => notNow(suggestion),
+                  style: _offerButton,
+                  child: const Text('Not now'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The picker's own button shape, so the two offers in this pane read as one
+  /// thing the app does rather than as two features.
+  static final ButtonStyle _offerButton = TextButton.styleFrom(
+    padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+    minimumSize: const Size(0, 28),
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    textStyle: BondType.caption,
+  );
 }
 
 /// A row's quick actions, revealed at its trailing edge under the pointer or on
@@ -523,9 +662,10 @@ class _RowActionsState extends State<_RowActions> {
   }
 }
 
-/// One line in the pane's flattened, lazily-built list: a section header or a
-/// thread row. Flattening is what lets a `ListView.builder` render only the
-/// entries on screen instead of a widget per thread.
+/// One line in the pane's flattened, lazily-built list: a section header, a
+/// thread row, or the one rule offer over the top of them. Flattening is what
+/// lets a `ListView.builder` render only the entries on screen instead of a
+/// widget per thread.
 sealed class _PaneEntry {
   const _PaneEntry();
 }
@@ -539,4 +679,12 @@ class _HeaderEntry extends _PaneEntry {
 class _RowEntry extends _PaneEntry {
   final Conversation conversation;
   const _RowEntry(this.conversation);
+}
+
+/// The rule offer, built ONCE in `build` rather than in the item builder: it is
+/// the only entry there can be at most one of, and it does not depend on the
+/// index it lands at.
+class _SuggestionEntry extends _PaneEntry {
+  final Widget child;
+  const _SuggestionEntry(this.child);
 }

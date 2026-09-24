@@ -504,4 +504,104 @@ void main() {
     expect(find.text('Dismissed.'), findsNothing);
     await settleQueues(tester);
   });
+
+  testWidgets(
+      'three dismissals of one sender become an offer, accepting writes the '
+      'rule, and z takes it back', (tester) async {
+    await seedPile();
+    // A fourth thread from somebody else, so the pile is not empty once the
+    // three from Dana are cleared — the suggestion row deliberately never
+    // draws over an empty list.
+    final received = ago(4);
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'c0-m1',
+      'conversation_key': 'c0',
+      'direction': 'inbound',
+      'subject': 'Budget review',
+      'from_name': 'Priya Nair',
+      'from_address': 'priya@example.com',
+      'received_at': received,
+      'body_text': 'the other paragraph',
+    });
+    await store.upsertConversation({
+      'source': 'email',
+      'conversation_key': 'c0',
+      'subject': 'Budget review',
+      'participants_json': '[{"name":"Priya Nair","email":"priya@example.com"}]',
+      'state': 'needs_reply',
+      'cta_text': 'Review the budget',
+      'cta_urgency': 'normal',
+      'last_message_at': received,
+      'last_inbound_at': received,
+    });
+    await pumpInbox(tester);
+    await settleQueues(tester);
+
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyE);
+    await press(tester, LogicalKeyboardKey.keyE);
+    await press(tester, LogicalKeyboardKey.keyE);
+    // The suggestion loader runs behind each dismissal; let its reads land.
+    await settleQueues(tester);
+    await tester.pump();
+
+    // Three distinct threads, one sender: the offer names the sender scope
+    // (the most specific kind wins the tie over the shared domain).
+    expect(find.byKey(ConversationListPane.suggestionKey), findsOneWidget);
+
+    await tester.tap(find.byKey(ConversationListPane.suggestionAcceptKey));
+    await tester.pump();
+    await tester.pump();
+    await settleQueues(tester);
+
+    expect(find.text('Rule saved · 3 threads moved.'), findsOneWidget);
+    final rule = (await store.listLabelRules()).single;
+    expect(rule.scopeKind, 'sender');
+    expect(rule.scopeValue, 'dana@example.com');
+    // The label the rule hangs off is the address itself, minted on accept.
+    expect(
+      (await store.listLabels()).map((l) => l.name),
+      contains('dana@example.com'),
+    );
+
+    // One z: the rule is gone and only what IT filed goes with it.
+    await press(tester, LogicalKeyboardKey.keyZ);
+    await settleQueues(tester);
+    expect(await store.listLabelRules(), isEmpty);
+  });
+
+  testWidgets(
+      'the dismiss picker offers a rule under the word the thread already '
+      'wears, and a scope chip writes it', (tester) async {
+    await seedPile();
+    // The thread came back wearing its word — the population the offer line
+    // is for. A first-ever dismissal has no label and draws no line.
+    final label = await store.createLabel('Vendor noise');
+    await store.applyLabels('email', 'c1', [label.id]);
+    await pumpInbox(tester);
+    await settleQueues(tester);
+
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyE, shift: true);
+
+    expect(find.byKey(LabelPicker.fieldKey), findsOneWidget);
+    expect(find.byKey(LabelPicker.ruleRowKey), findsOneWidget);
+
+    await tester.tap(find.byKey(LabelPicker.ruleKeyFor(const LabelRuleOffer(
+      scopeKind: 'sender',
+      scopeValue: 'dana@example.com',
+    ))));
+    await tester.pump();
+    await tester.pump();
+    await settleQueues(tester);
+
+    // The chip answered the picker's question: the strip is gone, the rule
+    // stands, and its retroactive apply filed every thread of Dana's.
+    expect(find.byKey(LabelPicker.fieldKey), findsNothing);
+    expect(find.text('Rule saved · 3 threads moved.'), findsOneWidget);
+    final rule = (await store.listLabelRules()).single;
+    expect(rule.labelId, label.id);
+    expect(rule.scopeKind, 'sender');
+  });
 }

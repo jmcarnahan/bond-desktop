@@ -18,12 +18,14 @@ import '../services/draft_stream.dart';
 import '../services/graph_mail.dart';
 import '../services/graph_teams.dart' show GraphTeamsException;
 import '../services/llm/draft_task.dart' show DraftOption;
+import '../services/llm/reply_decision_task.dart' show replySuppressed;
 import '../services/mail_echo.dart' show firstLine, mailEchoRow, nowSecondsZ;
 import '../services/outbound_chat.dart'
     show queueRecapFor, writeOutboundChatRow;
 import '../services/pipeline_progress.dart';
 import '../services/teams_sync.dart' show TeamsSync;
 import '../widgets/composer.dart' show SendCapability;
+import '../widgets/linked_text.dart' show LinkRun, firstLinkOf;
 import 'app_providers.dart';
 import 'conversations_provider.dart';
 import 'prefs_provider.dart' show appPrefsProvider;
@@ -241,6 +243,30 @@ class DraftState {
   /// failed. Read through [bubbleBody], never directly.
   final String? inFlightBody;
 
+  /// Whether a machine wrote the message this pane would answer — see
+  /// `replySuppressed` in `services/llm/reply_decision_task.dart`, which is the
+  /// one authority on the question and is asked here at READ time.
+  ///
+  /// Read through [suggestable], which is what both of the inbox's suggest
+  /// buttons already consult, so this closes them both with no change at either
+  /// site. It is a field rather than a getter over [draft] because the answer is
+  /// about the MESSAGE and the draft row carries nothing of it; [load] computes it
+  /// from the same newest-inbound row `generate` would draft for, so the button
+  /// and the drafting agree about which message is in question.
+  ///
+  /// False by default, which is the reading that changes nothing: a state built
+  /// before the row has been read offers the reply it always did.
+  final bool replySuppressed;
+
+  /// The anchored link the suppressed message points at — the words the sender
+  /// wrote over it and where it goes — or null when the body offers none.
+  ///
+  /// What the **Open in …** button is built from (`QuickReplyBar.openIn`). Only
+  /// ever set while [replySuppressed] is true: the point of it is that the real
+  /// action on a notification is somewhere else, and a thread that wants a reply
+  /// wants the reply rather than a link out.
+  final LinkRun? openIn;
+
   const DraftState({
     this.draft,
     this.threadDrafts = const {},
@@ -253,6 +279,8 @@ class DraftState {
     this.pending,
     this.inFlightBody,
     this.streaming,
+    this.replySuppressed = false,
+    this.openIn,
   });
 
   /// The optimistic bubble to draw under [messages], or null for none.
@@ -324,7 +352,15 @@ class DraftState {
   /// An 'edited' row is the user's own words and a 'sent' one is history;
   /// generate() deletes the row, so offering it beside either would offer to
   /// destroy it.
+  ///
+  /// [replySuppressed] is asked FIRST and it is not about the row at all: a
+  /// message a machine wrote has nobody waiting for an answer, so the offer is
+  /// wrong however the draft table looks. **Draft reply** on the hover strip is
+  /// deliberately left alone — the owner asking for a draft on a thread the app
+  /// would not have offered one for is the escape hatch, the same shape Restore
+  /// is for the gates.
   bool get suggestable {
+    if (replySuppressed) return false;
     final row = draft;
     if (row == null) return true;
     final status = row['status'] as String?;
@@ -348,6 +384,8 @@ class DraftState {
     Object? pending = _unset,
     Object? inFlightBody = _unset,
     Object? streaming = _unset,
+    bool? replySuppressed,
+    Object? openIn = _unset,
   }) =>
       DraftState(
         draft: identical(draft, _unset)
@@ -369,6 +407,8 @@ class DraftState {
         streaming: identical(streaming, _unset)
             ? this.streaming
             : streaming as StreamingDraft?,
+        replySuppressed: replySuppressed ?? this.replySuppressed,
+        openIn: identical(openIn, _unset) ? this.openIn : openIn as LinkRun?,
       );
 
   /// Separates "not passed" from "passed as null" on [copyWith], where the two
@@ -585,6 +625,40 @@ class DraftNotifier extends StateNotifier<DraftState> {
     final capability = await _capability();
     if (!mounted) return;
     state = state.copyWith(capability: capability);
+
+    final judgement = await _replyJudgement();
+    if (!mounted) return;
+    state = state.copyWith(
+      replySuppressed: judgement.suppressed,
+      openIn: judgement.openIn,
+    );
+  }
+
+  /// Whether a reply may be offered on this thread at all, and where the real
+  /// action is if not.
+  ///
+  /// The read is the SAME one `generate` makes — the thread's newest inbound
+  /// message — so the button and the draft it would produce are talking about one
+  /// message. It answers no-and-nowhere on every failure, for [load]'s stated
+  /// contract: a database that threw must leave the composer usable, and the
+  /// reading that changes nothing is the one that offers what it always did.
+  ///
+  /// The link is looked for only for a SUPPRESSED message. Reading every thread's
+  /// body for an anchor would be work spent on an answer nothing shows, and the
+  /// CTA only means anything where the reply it replaces is gone.
+  Future<({bool suppressed, LinkRun? openIn})> _replyJudgement() async {
+    try {
+      final row = await _store.newestInboundMessage(_source, conversationKey);
+      if (row == null) return (suppressed: false, openIn: null);
+      final message = Message.fromRow(row);
+      if (!replySuppressed(message)) return (suppressed: false, openIn: null);
+      final body = message.bodyText?.isNotEmpty == true
+          ? message.bodyText!
+          : message.bodyPreview ?? '';
+      return (suppressed: true, openIn: firstLinkOf(body));
+    } catch (_) {
+      return (suppressed: false, openIn: null);
+    }
   }
 
   /// Re-reads both views of this conversation's suggestions after a write.

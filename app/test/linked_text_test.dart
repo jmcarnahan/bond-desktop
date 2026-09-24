@@ -199,6 +199,84 @@ void main() {
     });
   });
 
+  group('firstLinkOf', () {
+    /// What a call-to-action button would wear, and where it would go.
+    String? cta(String text) {
+      final run = firstLinkOf(text);
+      return run == null ? null : '${run.label} → ${run.target}';
+    }
+
+    test('the first anchored link in a body', () {
+      expect(
+        cta('Amina left a comment.\n\n'
+            'View comment <https://tracker.example.com/t/41#c9>\n\n'
+            'Manage notifications <https://tracker.example.com/prefs>'),
+        'View comment → https://tracker.example.com/t/41#c9',
+      );
+    });
+
+    test('a body with no links at all offers nothing', () {
+      expect(cta('Nothing to click here.'), isNull);
+      expect(cta(''), isNull);
+    });
+
+    test('a bare address is not an anchor, so it is skipped', () {
+      // A button reading `https://…%2Foverview%23comment-…` tells a reader
+      // nothing and does not fit on a row.
+      expect(cta('See https://tracker.example.com/t/41 for more.'), isNull);
+    });
+
+    test('a bare address is skipped and a later anchor still found', () {
+      expect(
+        cta('Raw https://tracker.example.com/raw first.\n'
+            'Approve request <https://tracker.example.com/approve/7>'),
+        'Approve request → https://tracker.example.com/approve/7',
+      );
+    });
+
+    test('mailto is not an external tool', () {
+      // A composer is not "the real action is over there", which is the one
+      // thing this answers.
+      expect(cta('Reply to us <mailto:desk@vendor.example.net> any time.'),
+          isNull);
+      expect(
+        cta('Mail us <mailto:desk@vendor.example.net>\n'
+            'Open ticket <https://tracker.example.com/t/9>'),
+        'Open ticket → https://tracker.example.com/t/9',
+      );
+    });
+
+    test('an anchor whose words are long still counts, up to the body caps', () {
+      // The caps default to the BODY pair, because real anchor text is a
+      // sentence as often as a phrase.
+      const label = 'Why am I receiving this notification from the tracker?';
+      expect(
+        cta('$label <https://tracker.example.com/help>'),
+        '$label → https://tracker.example.com/help',
+      );
+    });
+
+    test('words past the caps are not a label, so that run is skipped', () {
+      // Past the caps `linkSpansOf` paints the address itself, which is exactly
+      // the run this refuses.
+      final long = List.filled(bodyMaxLabelWords + 4, 'word').join(' ');
+      expect(cta('$long <https://tracker.example.com/x>'), isNull);
+    });
+
+    test('a percent-encoded wrapper behind real words is still an anchor', () {
+      // The reason the anchor test asks [linkTargetOf] about the LABEL rather
+      // than comparing it against `target.toString()`: `Uri` re-normalizes
+      // percent-encoding on the way back out, and a wrapper is nothing but
+      // percent-encoding.
+      expect(
+        cta('View comment '
+            '<https://links.example.com/?url=https%3A%2F%2Ftracker.example.com'
+            '%2Ft%2F41%23c9>'),
+        startsWith('View comment → https://links.example.com/'),
+      );
+    });
+  });
+
   group('LinkedText', () {
     testWidgets('paints the label, not the address', (tester) async {
       await tester.pumpWidget(_host(LinkedText(

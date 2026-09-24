@@ -24,8 +24,10 @@ import '../services/attachments/attachment_digest_handler.dart';
 import '../services/attachments/attachment_retriever.dart';
 import '../services/attachments/attachment_text_handler.dart';
 import '../services/attachments/html_snapshot.dart' show htmlSnapshotPng;
+import '../models/message_models.dart' show Message;
 import '../services/attention.dart';
 import '../services/attention_service.dart';
+import '../services/classification.dart';
 import '../services/backend/attachment_backend.dart';
 import '../services/backend/auth_session.dart';
 import '../services/backend/mail_backend.dart';
@@ -42,6 +44,7 @@ import '../services/draft_stream.dart';
 import '../services/drain_gate.dart';
 import '../services/embed_handler.dart';
 import '../services/extract_handler.dart';
+import '../services/external_sender.dart';
 import '../services/gate_repair_service.dart';
 import '../services/graph_attachment_backend.dart';
 import '../services/graph_auth.dart';
@@ -1228,6 +1231,16 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         attentionThreshold:
             attentionThresholdReader(ref.watch(messageStoreProvider)),
         owner: _ownerLookup(ref),
+        // The triage side's own definition of a message's kind, handed in as
+        // a closure for the reason the handler's field gives: two passes, one
+        // vocabulary. This is what lets a classification-scoped rule
+        // ('meeting_response', 'tracker_notification', …) hide a thread.
+        classify: (row) => classificationOf(Message.fromRow(row)),
+        // The owner's own organisation, so the handler can tell a stranger's
+        // first approach from a colleague's question. Same shape as `owner`
+        // above and for the same reason: the account is a keychain read, and
+        // most builds of this provider never drain.
+        ownerDomains: _ownerDomainsLookup(ref),
       ),
       // Extraction next, and it drains completely before either storyline
       // handler starts. That order is the point: extraction is what writes the
@@ -1580,6 +1593,32 @@ OwnerLookup _ownerLookup(Ref ref) => () =>
                   name: account.displayName,
                   address: account.mail ?? account.userPrincipalName,
                 ),
+        );
+
+/// Which mail domains count as INSIDE the owner's organisation, from the same
+/// account [_ownerLookup] reads.
+///
+/// One domain, taken off the signed-in address, and no way yet for the owner to
+/// add a second. That is a deliberate floor rather than the finished feature:
+/// an owner with a parent company, an acquired brand or a personal address that
+/// is really theirs has more than one, and the list they would type belongs in
+/// Settings. Until it exists, the one domain the app can KNOW is better than
+/// none — see [isColdOutreach] for why a wrong answer here costs a ranking and
+/// never a message.
+///
+/// Normalised exactly the way `IdentityGuard` normalises the owner's address —
+/// `mail` first, `userPrincipalName` behind it, trimmed and lower-cased — so the
+/// two never disagree about who the owner is. An account that has not arrived,
+/// or one with no address at all, yields the EMPTY set, which
+/// [isExternalAddress] reads as "cannot tell" and answers false to: no account
+/// means no strangers, which is the reading that changes nothing.
+Future<Set<String>> Function() _ownerDomainsLookup(Ref ref) => () =>
+    ref.read(authSessionProvider).storedAccount.then(
+          (account) => ownerDomainsOf(
+            account == null
+                ? null
+                : account.mail ?? account.userPrincipalName,
+          ),
         );
 
 /// Reads the processing switch, for a drain that asks on every launch

@@ -11,6 +11,7 @@ import '../providers/context_provider.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
 import '../providers/home_provider.dart';
+import '../providers/label_rules_provider.dart';
 import '../providers/labels_provider.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/recipient_search_provider.dart';
@@ -118,6 +119,20 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
   /// handed in through [SettingsHost.probe] is the one that is used and the
   /// one that is closed.
   late final ModelServerProbe _probe = widget.probe ?? ModelServerProbe();
+
+  @override
+  void initState() {
+    super.initState();
+    // The standing rules ride their own read: Settings is the surface that
+    // lists them with their hidden counts, and the pane must not open on an
+    // empty section while rules exist. Cheap — one indexed read of a table
+    // with as many rows as the owner has written. A microtask because
+    // initState may not touch providers that notify.
+    Future.microtask(() {
+      if (!mounted) return;
+      unawaited(ref.read(labelRulesProvider.notifier).load());
+    });
+  }
 
   @override
   void dispose() {
@@ -233,6 +248,28 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       onLabelToneChanged: (id, tone) =>
           unawaited(labelsNotifier.setTone(id, tone)),
       onDeleteLabel: (id) => unawaited(labelsNotifier.delete(id)),
+      // The standing rules those labels carry. Remove is deleteRule — the
+      // threads a rule already filed stay put, which is what removing a
+      // standing instruction means. A disposition change is createRule again
+      // on the same label and scope: the store replaces in place (same id,
+      // created_at, hidden_count) and retro-applies, so the new answer covers
+      // the mail already here. The moved count is deliberately not toasted
+      // from Settings — the row's own "hid N threads" is the running total.
+      labelRules: ref.watch(labelRulesProvider).rules,
+      onDeleteRule: (ruleId) => unawaited(
+          ref.read(labelRulesProvider.notifier).deleteRule(ruleId)),
+      onRuleDispositionChanged: (ruleId, disposition) {
+        final rules = ref.read(labelRulesProvider).rules;
+        final rule = rules.where((r) => r.id == ruleId).firstOrNull;
+        if (rule == null) return;
+        unawaited(ref.read(labelRulesProvider.notifier).createRule(
+              labelId: rule.labelId,
+              scopeKind: rule.scopeKind,
+              scopeValue: rule.scopeValue,
+              disposition: disposition,
+              unlessMentionsMe: rule.unlessMentionsMe,
+            ));
+      },
       // BOTH sources are wired, and deliberately not bound to the mode the
       // screen OPENED in: the toggle switches backends in place, so which one
       // answers is the screen's live choice. Each closure reads the providers

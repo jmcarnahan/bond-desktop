@@ -1,4 +1,6 @@
-import 'package:bond_inbox/data/database.dart';
+// `show`, because both libraries export a `Conversation` and this file names
+// the model one.
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:drift/drift.dart' show Variable;
@@ -405,6 +407,164 @@ void main() {
         4,
       );
     });
+
+    /// Why the thread is asking, read off the message that made it ask — the
+    /// four columns the rail and the row explain themselves with.
+    group('the needs-you reason', () {
+      Future<Conversation> load() async =>
+          (await store.loadConversations()).firstWhere((c) => c.id == 'c-new');
+
+      test('comes off the newest kept inbound that answered yes', () async {
+        await store.upsertMessage(messageRow(
+          id: 'old',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T09:00:00Z',
+        ));
+        await store.upsertMessage(messageRow(
+          id: 'new',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T10:00:00Z',
+        ));
+        await store.writeNeedsYouVerdict('email', 'old',
+            verdict: true, reason: 'An older ask nobody answered.');
+        await store.writeNeedsYouVerdict('email', 'new',
+            verdict: true, reason: 'teams_direct');
+
+        final c = await load();
+        // One message names all three, because all three subqueries order the
+        // same way — a reason from one message stamped with another's time
+        // would point the reader at the wrong place in the transcript.
+        expect(c.needsYouReason, 'teams_direct');
+        expect(c.needsYouReasonMessageId, 'new');
+        expect(c.needsYouReasonAt, '2026-08-28T10:00:00Z');
+      });
+
+      test('ignores a verdict of no, whatever it wrote', () async {
+        await store.upsertMessage(messageRow(
+          id: 'yes',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T09:00:00Z',
+        ));
+        await store.upsertMessage(messageRow(
+          id: 'no',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T10:00:00Z',
+        ));
+        await store.writeNeedsYouVerdict('email', 'yes',
+            verdict: true, reason: 'Asks you to confirm the date.');
+        // A reason written under a NO answers the opposite question, and a
+        // label rule's `label_rule:<name>` is always written under one.
+        await store.writeNeedsYouVerdict('email', 'no',
+            verdict: false, reason: 'label_rule:Jira');
+
+        final c = await load();
+        expect(c.needsYouReason, 'Asks you to confirm the date.');
+        expect(c.needsYouReasonMessageId, 'yes');
+      });
+
+      test('a message the gate threw out never explains the thread', () async {
+        // The bot post of entry 8a: it is the newest thing in the thread and
+        // the reader is not waiting on it.
+        await store.upsertMessage(messageRow(
+          id: 'human',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T09:00:00Z',
+        ));
+        await store.upsertMessage(messageRow(
+          id: 'bot',
+          conversationKey: 'c-new',
+          fromName: 'Build bot',
+          fromAddress: 'builds@ci.example.com',
+          receivedAt: '2026-08-28T10:00:00Z',
+        ));
+        await store.writeNeedsYouVerdict('email', 'human',
+            verdict: true, reason: 'Asks you to confirm the date.');
+        await store.writeNeedsYouVerdict('email', 'bot',
+            verdict: true, reason: 'The build finished.');
+        await store.writeTriage('email', 'bot',
+            status: 'skipped', gateReason: 'auto_generated');
+
+        final c = await load();
+        expect(c.needsYouReason, 'Asks you to confirm the date.');
+        expect(c.needsYouReasonMessageId, 'human');
+      });
+
+      test('a Teams message the gate skipped still counts as kept', () async {
+        await store.upsertMessage(messageRow(
+          id: 'chat',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T10:00:00Z',
+        ));
+        await store.writeNeedsYouVerdict('email', 'chat',
+            verdict: true, reason: 'teams_direct');
+        await store.writeTriage('email', 'chat',
+            status: 'skipped', gateReason: 'teams_source');
+
+        expect((await load()).needsYouReason, 'teams_direct');
+      });
+
+      test('the owner\'s own mail never explains the thread', () async {
+        await store.upsertMessage(messageRow(
+          id: 'mine',
+          conversationKey: 'c-new',
+          direction: 'outbound',
+          receivedAt: '2026-08-28T10:00:00Z',
+        ));
+        await store.writeNeedsYouVerdict('email', 'mine',
+            verdict: true, reason: 'You asked them a question.');
+
+        final c = await load();
+        expect(c.needsYouReason, isNull);
+        expect(c.needsYouReasonMessageId, isNull);
+        expect(c.needsYouReasonAt, isNull);
+      });
+
+      test('reply_expected is the newest kept inbound\'s own judgement',
+          () async {
+        await store.upsertMessage(messageRow(
+          id: 'm1',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T10:00:00Z',
+        ));
+
+        // Never judged reads as null, not as false: the unjudged rows are the
+        // worklist, and rounding them down would hide brand new mail.
+        expect((await load()).replyExpected, isNull);
+
+        await store.writeTriage('email', 'm1',
+            status: 'done',
+            result: const TriageResult(
+              urgency: 'normal',
+              category: 'other',
+              summary: 'An FYI.',
+              needsAction: false,
+              actionItems: [],
+            ));
+        expect((await load()).replyExpected, isFalse);
+
+        await store.writeTriage('email', 'm1',
+            status: 'done',
+            result: const TriageResult(
+              urgency: 'normal',
+              category: 'other',
+              summary: 'Asks for a date.',
+              needsAction: true,
+              actionItems: ['Confirm the date'],
+              replyExpected: true,
+            ));
+        expect((await load()).replyExpected, isTrue);
+      });
+
+      test('a thread with nothing stored answers all four with nothing',
+          () async {
+        final c = (await store.loadConversations())
+            .firstWhere((c) => c.id == 'c-old');
+        expect(c.needsYouReason, isNull);
+        expect(c.needsYouReasonMessageId, isNull);
+        expect(c.needsYouReasonAt, isNull);
+        expect(c.replyExpected, isNull);
+      });
+    });
   });
 
   group('setConversationState', () {
@@ -428,6 +588,215 @@ void main() {
       expect(row.data['state_changed_at'], isNotNull);
       expect((await store.loadConversations()).single.state,
           ConversationState.done);
+    });
+  });
+
+  /// The two histories requirement 12d's offers are counted from, and the
+  /// "Not now" that silences one. Every case here is about WHICH threads count
+  /// as evidence — the counting itself is `rule_suggestions_test.dart`.
+  group('rule suggestion history', () {
+    /// A thread with one inbound message on it, dismissed or not, answered or
+    /// not — the three facts the two reads disagree about.
+    Future<void> thread(
+      String key, {
+      String from = 'noreply@jira.example.com',
+      String subject = 'BOND-41 updated',
+      bool dismissed = false,
+      bool answered = false,
+      String at = '2026-08-28T10:00:00Z',
+    }) async {
+      await store.upsertMessage(messageRow(
+        id: '$key-in',
+        conversationKey: key,
+        fromAddress: from,
+        subject: subject,
+        receivedAt: at,
+      ));
+      await store.upsertConversation({
+        ...conversationRow(
+          key: key,
+          state: dismissed ? 'done' : 'needs_reply',
+        ),
+        if (answered) 'last_outbound_at': at,
+      });
+      if (dismissed) {
+        // What `markDone` writes: a thread-scoped down, origin IMPLICIT. A read
+        // asking for `explicit` here would find nothing at all.
+        await store.recordFeedback(
+          scope: 'thread',
+          scopeKey: key,
+          direction: 'down',
+          origin: 'implicit',
+        );
+      }
+    }
+
+    Future<List<String>> dismissedKeys() async => [
+          for (final row in await store.dismissedThreadHistory())
+            row['conversation_key'] as String,
+        ];
+
+    Future<List<String>> answeredKeys() async => [
+          for (final row in await store.answeredThreadHistory())
+            row['conversation_key'] as String,
+        ];
+
+    test('a dismissal carries the sender and subject the reader saw', () async {
+      await thread(
+        'c1',
+        dismissed: true,
+        from: 'noreply@jira.example.com',
+        subject: '[JIRA] BOND-41 updated',
+      );
+
+      final row = (await store.dismissedThreadHistory()).single;
+      expect(row['source'], 'email');
+      expect(row['conversation_key'], 'c1');
+      expect(row['from_address'], 'noreply@jira.example.com');
+      expect(row['subject'], '[JIRA] BOND-41 updated');
+    });
+
+    test('a thread nobody dismissed is not evidence', () async {
+      await thread('c1');
+      await thread('c2', dismissed: true);
+
+      expect(await dismissedKeys(), ['c2']);
+    });
+
+    test('nor one the owner answered and then closed', () async {
+      // The ordinary successful path through the inbox. Counting it would make
+      // the senders the owner works with hardest look like the ones to hide.
+      await thread('c1', dismissed: true, answered: true);
+      await thread('c2', dismissed: true);
+
+      expect(await dismissedKeys(), ['c2']);
+    });
+
+    test('nor one whose dismissal was undone', () async {
+      // The events table is INSERT-only, so only the thread's own state says
+      // the owner took it back.
+      await thread('c1', dismissed: true);
+      await store.setConversationState(
+          'email', 'c1', ConversationState.needsReply);
+
+      expect(await dismissedKeys(), isEmpty);
+    });
+
+    test('one row per thread, however many times it was closed', () async {
+      await thread('c1', dismissed: true);
+      for (var i = 0; i < 3; i++) {
+        await store.recordFeedback(
+          scope: 'thread',
+          scopeKey: 'c1',
+          direction: 'down',
+          origin: 'implicit',
+        );
+      }
+
+      expect(await dismissedKeys(), ['c1']);
+    });
+
+    test('newest dismissal first, and the limit counts threads', () async {
+      await thread('older', dismissed: true, at: '2026-08-20T09:00:00Z');
+      await thread('newer', dismissed: true, at: '2026-08-28T09:00:00Z');
+
+      // Ordered by when the owner ACTED, not by when the mail arrived, so the
+      // rows the count keeps are the most recent opinions.
+      expect(await dismissedKeys(), ['newer', 'older']);
+      expect(
+        (await store.dismissedThreadHistory(limit: 1)).length,
+        1,
+      );
+    });
+
+    test('the message it describes is the newest kept inbound one', () async {
+      await thread('c1', dismissed: true, from: 'first@example.com');
+      await store.upsertMessage(messageRow(
+        id: 'later',
+        conversationKey: 'c1',
+        fromAddress: 'second@example.com',
+        receivedAt: '2026-08-28T11:00:00Z',
+      ));
+      // And a gated bot post after that explains nothing: `keptMessageSql` is
+      // the one spelling of kept, here as in every other read.
+      await store.upsertMessage(messageRow(
+        id: 'bot',
+        conversationKey: 'c1',
+        fromAddress: 'bot@example.com',
+        receivedAt: '2026-08-28T12:00:00Z',
+      ));
+      await store.writeTriage('email', 'bot',
+          status: 'skipped', gateReason: 'auto_generated');
+
+      expect(
+        (await store.dismissedThreadHistory()).single['from_address'],
+        'second@example.com',
+      );
+    });
+
+    test("a thread with no kept inbound message can't teach anything", () async {
+      await thread('c1', dismissed: true);
+      await store.writeTriage('email', 'c1-in',
+          status: 'skipped', gateReason: 'auto_generated');
+
+      expect(await dismissedKeys(), isEmpty);
+    });
+
+    test('the answered history is read from the mailbox, not the events',
+        () async {
+      // A sent reply and a mere thread-open both record thread/up/implicit, so
+      // `last_outbound_at` is the only honest signal: somebody wrote back.
+      await thread('replied', answered: true);
+      await thread('opened');
+      await store.recordFeedback(
+        scope: 'thread',
+        scopeKey: 'opened',
+        direction: 'up',
+        origin: 'implicit',
+      );
+
+      expect(await answeredKeys(), ['replied']);
+    });
+
+    test('and the two histories never hold the same thread', () async {
+      await thread('both', dismissed: true, answered: true);
+
+      expect(await answeredKeys(), ['both']);
+      expect(await dismissedKeys(), isEmpty);
+    });
+
+    group('not now', () {
+      test('remembers one offer by its own key', () async {
+        expect(await store.suppressedRuleSuggestions(), isEmpty);
+
+        await store.suppressRuleSuggestion(
+            'hide_needs_you:sender:noreply@jira.example.com');
+        await store.suppressRuleSuggestion('keep:sender:alex@example.com');
+
+        expect(await store.suppressedRuleSuggestions(), {
+          'hide_needs_you:sender:noreply@jira.example.com',
+          'keep:sender:alex@example.com',
+        });
+      });
+
+      test('twice is once, and an empty key is nothing', () async {
+        await store.suppressRuleSuggestion('keep:sender:alex@example.com');
+        await store.suppressRuleSuggestion('keep:sender:alex@example.com');
+        await store.suppressRuleSuggestion('');
+
+        expect(await store.suppressedRuleSuggestions(),
+            {'keep:sender:alex@example.com'});
+      });
+
+      test('and reads nothing else out of app_prefs', () async {
+        await store.setPref('attention_threshold', '3');
+
+        await store.suppressRuleSuggestion('keep:sender:alex@example.com');
+
+        expect(await store.suppressedRuleSuggestions(),
+            {'keep:sender:alex@example.com'});
+        expect(await store.getPref('attention_threshold'), '3');
+      });
     });
   });
 

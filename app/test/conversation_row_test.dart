@@ -4,6 +4,7 @@ import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/conversation_row.dart';
 import 'package:bond_inbox/widgets/label_chip.dart';
+import 'package:bond_inbox/widgets/needs_you_reason.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -26,13 +27,19 @@ Conversation _conv({
   String? lastMessageAt = _afterSince,
   int attachmentCount = 0,
   List<Label> labels = const [],
+  ConversationState? state,
+  String? reason,
 }) {
   return Conversation(
     id: id,
     subject: subject,
     participants: who == null ? const [] : [Participant(name: who)],
     ctaText: cta,
-    state: cta == null ? ConversationState.waiting : ConversationState.needsReply,
+    state: state ??
+        (cta == null
+            ? ConversationState.waiting
+            : ConversationState.needsReply),
+    needsYouReason: reason,
     lastMessagePreview: preview,
     lastMessageAt: lastMessageAt,
     aiPendingCount: pending,
@@ -298,6 +305,122 @@ void main() {
 
       expect(find.text('Legal'), findsOneWidget);
       expect(find.text('📎 2'), findsOneWidget);
+      expect(find.text('0 messages'), findsOneWidget);
+    });
+  });
+
+  group('why the row is asking', () {
+    String chipText(WidgetTester tester) =>
+        tester.widget<BondChip>(find.byKey(needsYouReasonChipKey)).label!;
+
+    testWidgets('a reason on a needs-reply thread is a chip', (tester) async {
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(
+          state: ConversationState.needsReply,
+          reason: 'Asks you to confirm Friday.',
+        ),
+        selected: false,
+        onTap: () {},
+      )));
+
+      expect(chipText(tester), 'Asks you to confirm Friday.');
+    });
+
+    testWidgets('the connector token reads as words, not as a token',
+        (tester) async {
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(
+          state: ConversationState.needsReply,
+          reason: 'teams_direct',
+        ),
+        selected: false,
+        onTap: () {},
+      )));
+
+      expect(chipText(tester), 'Direct message');
+      expect(find.text('teams_direct'), findsNothing);
+    });
+
+    testWidgets('a rule reason reads as the label the owner chose',
+        (tester) async {
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(
+          state: ConversationState.needsReply,
+          reason: 'label_rule:Jira update',
+        ),
+        selected: false,
+        onTap: () {},
+      )));
+
+      expect(chipText(tester), 'Jira update');
+    });
+
+    testWidgets('a long sentence is clamped to the width of a row',
+        (tester) async {
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(
+          state: ConversationState.needsReply,
+          reason: 'The sender asks you to review the attached statement of '
+              'work and reply with a date before the end of the quarter.',
+        ),
+        selected: false,
+        onTap: () {},
+      )));
+
+      final text = chipText(tester);
+      expect(text.length, lessThanOrEqualTo(37));
+      expect(text, endsWith('…'));
+      expect(text, startsWith('The sender asks you'));
+    });
+
+    testWidgets('a thread with no reason draws no chip', (tester) async {
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(state: ConversationState.needsReply),
+        selected: false,
+        onTap: () {},
+      )));
+
+      expect(find.byKey(needsYouReasonChipKey), findsNothing);
+    });
+
+    testWidgets('and neither does a thread that is not asking for a reply',
+        (tester) async {
+      // The same stored reason, on a thread the owner has answered: the words
+      // explain a question nobody is asking any more.
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(
+          state: ConversationState.waiting,
+          reason: 'teams_direct',
+        ),
+        selected: false,
+        onTap: () {},
+      )));
+
+      expect(find.byKey(needsYouReasonChipKey), findsNothing);
+    });
+
+    testWidgets('the chip sits after the labels and before the counts',
+        (tester) async {
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(
+          state: ConversationState.needsReply,
+          labels: [_label('Legal')],
+          attachmentCount: 1,
+          reason: 'teams_direct',
+        ),
+        selected: false,
+        onTap: () {},
+      )));
+
+      final wrap = tester.widget<Wrap>(find.byType(Wrap));
+      final keys = wrap.children.map((w) => w.key).toList();
+      expect(
+        keys.indexOf(labelChipKey('legal')),
+        lessThan(keys.indexOf(needsYouReasonChipKey)),
+      );
+      // The counts carry no keys of their own, so their position is read off
+      // what the row still says.
+      expect(find.text('📎 1'), findsOneWidget);
       expect(find.text('0 messages'), findsOneWidget);
     });
   });

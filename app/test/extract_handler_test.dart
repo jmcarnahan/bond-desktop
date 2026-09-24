@@ -1,10 +1,13 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:bond_inbox/data/database.dart';
+// `show BondDatabase`: drift generates a row class named LabelRule from the
+// table, and the rule cases below mean the app's own model.
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:drift/drift.dart' show Variable;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/draft_policy.dart';
+import 'package:bond_inbox/models/label_models.dart' show LabelRule;
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
@@ -122,6 +125,7 @@ void main() {
     String conversationKey = 'conv-1',
     String? summary,
     String? triageStatus,
+    Map<String, String>? headers,
   }) async {
     await store.upsertMessage({
       'source': 'email',
@@ -133,6 +137,10 @@ void main() {
       'from_address': 'sarah@x.com',
       'received_at': '2026-08-29T10:00:00Z',
       'body_text': 'Can we still ship on Thursday?',
+      // The shape the detail fetch stores them in, which is what
+      // `classificationOf` reads a machine sender off.
+      'source_meta_json':
+          headers == null ? null : jsonEncode({'headers': headers}),
     });
     if (summary != null) {
       await store.writeTriage(
@@ -1039,6 +1047,170 @@ void main() {
 
       expect(await store.getConversationAi('email', 'orphan'), isNull);
     });
+
+    /// A standing `later` rule has to act on mail that arrives AFTER it was
+    /// written, which is the half that was missing: the retroactive apply filed
+    /// the mailbox as it stood and then nothing filed tomorrow's, so the rule
+    /// looked like it had stopped working.
+    group('a standing later rule', () {
+      /// One rule, with the word it files under created beside it.
+      Future<LabelRule> ruleOn(
+        String scopeValue, {
+        String name = 'Read later',
+        String kind = LabelRule.scopeSender,
+        String disposition = LabelRule.sendToLater,
+      }) async {
+        final label = await store.createLabel(name);
+        return store.createLabelRule(
+          labelId: label.id,
+          scopeKind: kind,
+          scopeValue: scopeValue,
+          disposition: disposition,
+        );
+      }
+
+      Future<List<Map<String, Object?>>> links() async => [
+            for (final row
+                in await db.customSelect('SELECT * FROM conversation_labels').get())
+              row.data,
+          ];
+
+      test("it files the thread, and files it under the rule's own word",
+          () async {
+        await seedCurrentConversation();
+        await seedMessage();
+        final rule = await ruleOn('sarah@x.com');
+
+        // A request the model called important: the rule is the owner's
+        // standing word and it is asked BEFORE the guess, so what the model
+        // thought of this message does not come into it.
+        await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
+
+        expect(await bucketOf(), 'later');
+        // `user`, not `label_rule`: the attention sweep refuses to overrule
+        // `user`, and a rule's filing has to survive a later pass deciding the
+        // thread looked important. WHICH threads the rule filed is on the link.
+        expect(await reasonOf(), 'user');
+        final link = (await links()).single;
+        expect(link['applied_by'], 'rule');
+        expect(link['rule_id'], rule.id);
+        expect((await store.getLabelRule(rule.id))!.hiddenCount, 1);
+      });
+
+      test('a domain rule and a subject rule file it too', () async {
+        await seedCurrentConversation();
+        await seedMessage();
+        await ruleOn('x.com', kind: LabelRule.scopeDomain, name: 'Vendors');
+
+        await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
+        expect(await bucketOf(), 'later');
+
+        // A fresh thread for the subject scope, so the two are not read off one
+        // filing. `Re: Launch date` is what [seedMessage] writes, and the
+        // subject scope is a PREFIX.
+        await store.upsertConversation({
+          'source': 'email',
+          'conversation_key': 'conv-2',
+          'state': 'waiting',
+          'last_inbound_at': '2026-08-29T10:00:00Z',
+          'last_message_at': '2026-08-29T10:00:00Z',
+        });
+        await seedMessage(id: 'm2', conversationKey: 'conv-2');
+        await ruleOn('re:', kind: LabelRule.scopeSubject, name: 'Threads');
+
+        await runOne(
+          handlerFor(answer(intent: 'request', importance: 'high')),
+          id: 'm2',
+        );
+
+        expect(
+          (await store.getConversationAi('email', 'conv-2'))?['bucket'],
+          'later',
+        );
+      });
+
+      test('the count follows the LINK, so one thread counts once', () async {
+        // Two messages in the same thread, both filed. Undo takes back exactly
+        // the links that were counted, so a second count here would leave the
+        // Settings number saying two where one press takes one back.
+        await seedCurrentConversation();
+        await seedMessage();
+        await seedMessage(id: 'm2');
+        final rule = await ruleOn('sarah@x.com');
+
+        await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
+        await runOne(
+          handlerFor(answer(intent: 'request', importance: 'high')),
+          id: 'm2',
+        );
+
+        expect(await links(), hasLength(1));
+        expect((await store.getLabelRule(rule.id))!.hiddenCount, 1);
+      });
+
+      test('a Back date the owner set by hand is cleared', () async {
+        // A rule has no "when" in it, so a date inherited from an earlier
+        // hand-deferral would draw a `Back <when>` the rule would never honour.
+        await seedCurrentConversation();
+        await seedMessage();
+        await store.setConversationBucket('email', 'conv-1',
+            bucket: 'later', reason: 'low_value');
+        await store.setSnoozedUntil('email', 'conv-1', '2026-09-05T09:00:00Z');
+        await ruleOn('sarah@x.com');
+
+        await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
+
+        expect(await bucketOf(), 'later');
+        expect(await reasonOf(), 'user');
+        expect(
+          (await store.getConversationAi('email', 'conv-1'))?['snoozed_until'],
+          isNull,
+        );
+      });
+
+      test('a hide-needs-you rule is not this pass to spend', () async {
+        // The owner's nearest word about this mail is about the RAIL, and
+        // `NeedsYouHandler` is what reads it. Filing the thread as well would
+        // take a thread off the list on the strength of a rule about a chip.
+        await seedCurrentConversation();
+        await seedMessage();
+        await ruleOn('sarah@x.com', disposition: LabelRule.hideNeedsYou);
+
+        await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
+
+        expect(await bucketOf(), isNull);
+        expect(await links(), isEmpty);
+      });
+
+      test('a rule about somebody else leaves the guess alone', () async {
+        await seedCurrentConversation();
+        await seedMessage();
+        await ruleOn('someone@other.example.com');
+
+        await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
+
+        // The ordinary path, untouched: the model's own guess and its own word.
+        expect(await bucketOf(), 'later');
+        expect(await reasonOf(), 'low_value');
+        expect(await links(), isEmpty);
+      });
+
+      test("an exemption the owner asked for still beats the rule", () async {
+        // `user` is checked before any of this, and it is the same word this
+        // filing writes: a thread somebody pulled back out of Later stays out,
+        // whatever their older rule says.
+        await seedCurrentConversation();
+        await seedMessage();
+        await store.setConversationBucket('email', 'conv-1',
+            bucket: null, reason: 'user');
+        await ruleOn('sarah@x.com');
+
+        await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
+
+        expect(await bucketOf(), isNull);
+        expect(await links(), isEmpty);
+      });
+    });
   });
 
 
@@ -1295,6 +1467,88 @@ void main() {
 
       expect(await queuedDrafts(), isEmpty);
       expect(await draftStateOf('o1'), 'skipped');
+    });
+
+    test('a message a machine wrote is not queued, whatever triage read in it',
+        () async {
+      // The case in the report: nothing gated the mail, triage read its polite
+      // "please approve" as an ask, and the queue spent the 27B on a reply to a
+      // list address. The headers are the evidence, and they are the only thing
+      // different about this row.
+      await seedMessage(headers: {'List-Unsubscribe': '<https://x.example.com/u>'});
+      await seedConversation();
+      await triageSaid(replyExpected: true, needsAction: true);
+      final log = _Recorder();
+
+      await extract(activityLog: log);
+
+      expect(await queuedDrafts(), isEmpty);
+      // Skipped, not pending: nothing will ever write this row, and a bar
+      // waiting on it waits forever.
+      expect(await draftStateOf('m1'), 'skipped');
+      expect(log.notes['draft'], 'automated_sender');
+      // The extraction itself still landed — only the drafting was declined.
+      expect(await store.getExtraction('email', 'm1'), isNotNull);
+    });
+
+    test('an Auto-Submitted header is the same answer', () async {
+      await seedMessage(headers: {'Auto-Submitted': 'auto-generated'});
+      await seedConversation();
+      await triageSaid(replyExpected: true);
+
+      await extract();
+
+      expect(await queuedDrafts(), isEmpty);
+    });
+
+    test('and the same message from a person is queued', () async {
+      // The control. Without it the two above would pass on a gate that queued
+      // nothing at all.
+      await seedMessage();
+      await seedConversation();
+      await triageSaid(replyExpected: true, needsAction: true);
+
+      await extract();
+
+      expect(await queuedDrafts(), ['m1']);
+    });
+
+    test('it runs ahead of the narrow policy as well as the wide one', () async {
+      // A machine sender is not a preference, so the verdict that would have
+      // prefetched a draft does not buy one either.
+      await seedMessage(headers: {'List-Id': 'news.x.example.com'});
+      await seedConversation();
+      await triageSaid();
+      await store.writeNeedsYouVerdict('email', 'm1',
+          verdict: true, reason: 'it asks the reader to approve the invoice');
+      final log = _Recorder();
+
+      await extract(policy: DraftPolicy.needsYou, activityLog: log);
+
+      expect(await queuedDrafts(), isEmpty);
+      expect(log.notes['draft'], 'automated_sender');
+    });
+
+    test('but a meeting invite is still drafted for', () async {
+      // An invite asks for the reader's TIME, which is an ask a person can
+      // answer. The line `gates.dart` draws, and this pass keeps it.
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'i1',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'subject': 'Design review',
+        'from_address': 'sarah@x.com',
+        'received_at': '2026-08-29T10:00:00Z',
+        'body_text': 'Thursday at ten?',
+        'source_meta_json': jsonEncode({'meeting': 'meetingRequest'}),
+      });
+      await seedConversation();
+      await triageSaid(id: 'i1', replyExpected: true);
+
+      await extract(id: 'i1');
+
+      expect(await queuedDrafts(), ['i1']);
     });
   });
 

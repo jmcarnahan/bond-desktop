@@ -1,8 +1,11 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
-import 'package:bond_inbox/data/database.dart';
+// `show BondDatabase`: drift generates a row class named LabelRule from the
+// table, and the rule cases below mean the app's own model.
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/label_models.dart' show LabelRule;
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/attention.dart';
 import 'package:bond_inbox/services/attention_service.dart';
@@ -55,6 +58,7 @@ void main() {
     bool needsAction = false,
     String deadline = '',
     bool answered = false,
+    Map<String, String>? headers,
   }) async {
     await store.upsertConversation({
       'source': source,
@@ -73,6 +77,8 @@ void main() {
       'from_address': from,
       'received_at': receivedAt,
       'addressed_me': addressedMe ? 1 : 0,
+      'source_meta_json':
+          headers == null ? null : jsonEncode({'headers': headers}),
     });
     if (answered) {
       await store.upsertMessage({
@@ -720,6 +726,159 @@ void main() {
       expect(await service.recomputeAll(now: now), 0);
       expect(await bucketOf('c1'), 'later');
       expect(await scoreOf('c1'), isNull);
+    });
+
+    /// A standing `later` rule, read on the sweep as well as at ingest. The
+    /// retroactive apply files the mailbox as it stood when the rule was
+    /// written; this is what files a thread the apply did not reach — one
+    /// outside its lookback, or one whose newest inbound arrived while the
+    /// pipeline was off.
+    group('a standing later rule', () {
+      Future<LabelRule> ruleOn(
+        String scopeValue, {
+        String name = 'Read later',
+        String kind = LabelRule.scopeSender,
+        String disposition = LabelRule.sendToLater,
+      }) async {
+        final label = await store.createLabel(name);
+        return store.createLabelRule(
+          labelId: label.id,
+          scopeKind: kind,
+          scopeValue: scopeValue,
+          disposition: disposition,
+        );
+      }
+
+      Future<List<Map<String, Object?>>> links() async => [
+            for (final row
+                in await db.customSelect('SELECT * FROM conversation_labels').get())
+              row.data,
+          ];
+
+      test("it files the thread under the rule's word, not as a guess",
+          () async {
+        await seed('c1', intent: 'request', importance: 'high');
+        final rule = await ruleOn('eric@x.com');
+
+        await service.recomputeAll(now: now);
+
+        expect(await bucketOf('c1'), 'later');
+        // `user`, the protected word: `label_rule` would read as this pass's own
+        // guess and the next sweep would clear it.
+        expect(await reasonOf('c1'), 'user');
+        final link = (await links()).single;
+        expect(link['rule_id'], rule.id);
+        expect((await store.getLabelRule(rule.id))!.hiddenCount, 1);
+      });
+
+      test('a domain rule and a subject rule reach it too', () async {
+        // Both scopes read off what this pass HAS: the newest inbound sender's
+        // address, and the thread's own subject.
+        await seed('c1', intent: 'request', importance: 'high');
+        await seed('invoices-2026', from: 'billing@vendor.example.net');
+        await ruleOn('x.com', kind: LabelRule.scopeDomain, name: 'That lot');
+        await ruleOn('invoices', kind: LabelRule.scopeSubject, name: 'Invoices');
+
+        await service.recomputeAll(now: now);
+
+        expect(await bucketOf('c1'), 'later');
+        expect(await bucketOf('invoices-2026'), 'later');
+      });
+
+      test('a classification rule does NOT reach it, and that is known',
+          () async {
+        // The one gap: `classificationOf` reads headers and a gate reason, and
+        // `latestInboundMeta` — this pass's single read of the newest inbound
+        // message — carries neither. New mail is covered at ingest, where the
+        // whole row is in hand. Classification is the LOWEST of the matcher's
+        // four precedences, so a missing one can only lose a match here, never
+        // promote the wrong rule.
+        await seed(
+          'c1',
+          intent: 'request',
+          importance: 'high',
+          headers: {'List-Id': 'news.vendor.example.net'},
+        );
+        await ruleOn(
+          'automated_notification',
+          kind: LabelRule.scopeClassification,
+          name: 'Notifications',
+        );
+
+        await service.recomputeAll(now: now);
+
+        expect(await bucketOf('c1'), isNull);
+        expect(await links(), isEmpty);
+      });
+
+      test('a keep rule about the sender still wins', () async {
+        // Both are the owner's word and the sender rule is the more specific of
+        // the two: somebody who said `keep` about one address meant it over a
+        // rule they wrote about a whole domain.
+        await seed('c1', intent: 'fyi', importance: 'low');
+        await store.setSenderPref('eric@x.com', 'keep');
+        await ruleOn('x.com', kind: LabelRule.scopeDomain, name: 'That lot');
+
+        await service.recomputeAll(now: now);
+
+        expect(await bucketOf('c1'), isNull);
+        expect(await links(), isEmpty);
+      });
+
+      test('an exemption a person asked for is never re-filed', () async {
+        // `user` returns above everything, which is the same word the filing
+        // writes: a thread somebody pulled back out of Later stays out.
+        await seed('c1', intent: 'request', importance: 'high');
+        await store.setConversationBucket('email', 'c1',
+            bucket: null, reason: 'user');
+        await ruleOn('eric@x.com');
+
+        await service.recomputeAll(now: now);
+
+        expect(await bucketOf('c1'), isNull);
+        expect(await links(), isEmpty);
+      });
+
+      test('a hide-needs-you rule files nothing here', () async {
+        await seed('c1', intent: 'request', importance: 'high');
+        await ruleOn('eric@x.com', disposition: LabelRule.hideNeedsYou);
+
+        await service.recomputeAll(now: now);
+
+        expect(await bucketOf('c1'), isNull);
+        expect(await links(), isEmpty);
+      });
+
+      test('sweeping twice counts the thread once', () async {
+        // This pass runs on every list load, and the count has to match what
+        // undo can take back: one link, one count, however many sweeps.
+        await seed('c1', intent: 'request', importance: 'high');
+        final rule = await ruleOn('eric@x.com');
+
+        await service.recomputeAll(now: now);
+        await service.recomputeAll(now: now);
+
+        expect(await links(), hasLength(1));
+        expect((await store.getLabelRule(rule.id))!.hiddenCount, 1);
+      });
+
+      test('a Back date from an older hand-deferral is cleared', () async {
+        // A rule has no "when" in it, so an inherited date would draw a
+        // `Back <when>` the rule would never honour.
+        await seed('c1', intent: 'request', importance: 'high');
+        await store.setConversationBucket('email', 'c1',
+            bucket: 'later', reason: 'low_value');
+        await store.setSnoozedUntil('email', 'c1', '2026-09-05T09:00:00Z');
+        await ruleOn('eric@x.com');
+
+        await service.recomputeAll(now: now);
+
+        expect(await reasonOf('c1'), 'user');
+        expect(
+          (await store.getConversationAi('email', 'c1'))?['snoozed_until'],
+          isNull,
+        );
+      });
     });
   });
 }

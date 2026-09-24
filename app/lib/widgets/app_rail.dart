@@ -101,13 +101,52 @@ String _stripReplyPrefixes(String subject) {
 /// messages the gate kept, and every later gate drop refolds the thread down
 /// (see `docs/pipeline/02-gates.md`). So there is no fourth test: the state
 /// this reads is already the answer.
+///
+/// There is a fourth test, and [_canExplainItself] is it — requirement 8a's
+/// honesty rule. STORED STATE IS UNTOUCHED: the thread still says `needs_reply`
+/// and every other reader still sees it; what changes is that the rail stops
+/// claiming a thread it cannot say one true sentence about.
 bool isNeedsYou(Conversation c, {double threshold = 0}) {
   if (c.bucket == 'later') return false;
   if (c.state == ConversationState.done) return false;
   if ((c.attentionScore ?? 0) < threshold) return false;
-  return c.state == ConversationState.needsReply ||
-      (c.ctaText?.isNotEmpty == true);
+  if (c.ctaText?.isNotEmpty == true) return true;
+  return c.state == ConversationState.needsReply && _canExplainItself(c);
 }
+
+/// Whether anything on this thread can say WHY it needs the owner.
+///
+/// The rail's promise, made good: every Needs You row shows a reason (the ask
+/// banner, the ask chip, or the `Why:` line this round added), so a row with
+/// none of the three was the rail asserting something no surface could back up.
+/// Requirement 8a says such a thread "probably shouldn't be Needs reply", and
+/// this is the read-side half of that — the write side is the pipeline's, and it
+/// is not asked to change.
+///
+/// Three things can explain a thread, and any one of them is enough:
+/// - a needs-you REASON, off the newest kept inbound the pass judged yes. The
+///   `Why:` line and the row's chip draw exactly this.
+/// - an ASK — `cta_text`, folded up from the newest inbound's action items, and
+///   tested by the caller before this is reached because it is also the banner.
+/// - `reply_expected`, triage v2 saying the sender is waiting even where no ask
+///   could be extracted. "Somebody is waiting on you" is a sentence.
+///
+/// The `reply_expected` arm is where the tri-state earns its keep, and it is
+/// read STRICTLY: only an explicit `false` — v2 has judged this message and says
+/// nobody is waiting — lets a thread fall out. NULL is "never judged", which
+/// `schema.drift` is emphatic about and which nothing here may round down: a
+/// message that landed a second ago, and every message in an install with the
+/// processing switch off, reads NULL, and a rail that hid those would hide the
+/// newest mail in the mailbox. So an unjudged thread keeps its place until
+/// something has actually read it. This is deliberately narrower than "reply
+/// expected ≠ 1".
+///
+/// It follows that a read which does not run `loadConversations`' subqueries —
+/// every service read that builds a card out of a conversation row — carries a
+/// null reason and a null `reply_expected` and therefore explains itself here.
+/// That is the right way round: absent data must never look like a verdict.
+bool _canExplainItself(Conversation c) =>
+    (c.needsYouReason?.isNotEmpty == true) || c.replyExpected != false;
 
 /// What the user is on the hook for, loudest first — [isNeedsYou], sorted.
 ///

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/attachments/attachment_retriever.dart';
@@ -445,6 +447,101 @@ void main() {
         'reason': '  ${'why ' * 200}',
       });
       expect(result.reason, hasLength(300));
+    });
+  });
+
+  /// The one authority three paths ask before offering a reply: the draft queue,
+  /// this task's handler, and the composer's Suggest button.
+  group('replySuppressed', () {
+    /// A stored message carrying only the two fields this reads — the gate's own
+    /// word, and the headers the detail fetch wrote.
+    Message message({String? gateReason, Map<String, String>? headers}) =>
+        Message(
+          id: 'm1',
+          outbound: false,
+          fromName: 'Tracker',
+          fromAddress: 'notifications@tracker.example.com',
+          subject: 'Amina left a comment',
+          bodyText: 'View comment <https://tracker.example.com/t/41#c9>',
+          gateReason: gateReason,
+          sourceMetaJson:
+              headers == null ? null : jsonEncode({'headers': headers}),
+        );
+
+    test('every gate reason that says a machine wrote it', () {
+      for (final reason in automatedGateReasons) {
+        expect(
+          replySuppressed(message(gateReason: reason)),
+          isTrue,
+          reason: reason,
+        );
+      }
+      expect(automatedGateReasons, hasLength(5));
+    });
+
+    test('the gate reasons that say nothing about a reply do not suppress', () {
+      // `self`, `sender_rule`, `monitoring` and `machine_sender` all gate mail
+      // for reasons that are not about whether an answer is owed, and
+      // `teams_source` is not a judgement at all.
+      for (final reason in [
+        'self',
+        'sender_rule',
+        'monitoring',
+        'machine_sender',
+        'teams_source',
+      ]) {
+        expect(
+          replySuppressed(message(gateReason: reason)),
+          isFalse,
+          reason: reason,
+        );
+      }
+    });
+
+    test('an ordinary message from a person is not suppressed', () {
+      expect(replySuppressed(message()), isFalse);
+      expect(replySuppressed(inbound()), isFalse);
+    });
+
+    test('headers alone are enough — this is the arm that catches the case', () {
+      // The mail in the report: nothing gated it, and triage read the body's
+      // polite "please approve" as an ask.
+      expect(
+        replySuppressed(message(headers: {'Auto-Submitted': 'auto-generated'})),
+        isTrue,
+      );
+      expect(
+        replySuppressed(
+          message(headers: {'List-Unsubscribe': '<https://x.example.com/u>'}),
+        ),
+        isTrue,
+      );
+    });
+
+    test('an invite and a tracker mention are deliberately NOT suppressed', () {
+      // An invite asks for the reader's time; a tracker's mention is addressed
+      // to the person reading it. The same line `gates.dart` draws.
+      expect(
+        replySuppressed(
+          Message(
+            id: 'm2',
+            outbound: false,
+            sourceMetaJson: jsonEncode({'meeting': 'meetingRequest'}),
+          ),
+        ),
+        isFalse,
+      );
+      // A tracker header AND the list headers on the same message: the tracker
+      // arm answers first, and its answer is not a suppression.
+      expect(
+        replySuppressed(
+          message(headers: {
+            'X-Jira-Fingerprint': 'f-1',
+            'List-Id': 'tracker.example.com',
+          }),
+        ),
+        isFalse,
+      );
     });
   });
 }

@@ -5,6 +5,7 @@ import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'label_chip.dart';
+import 'needs_you_reason.dart';
 import 'processing_hint.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
@@ -191,6 +192,13 @@ class ConversationRow extends StatelessWidget {
                           // taken off, and a chip that swallowed the tap would
                           // cost the row its own.
                           ...labelChips(c.labels),
+                          // Why the row is in Needs you at all, in four words,
+                          // after the owner's labels and before the counts —
+                          // the pipeline's reason ranks under a person's own
+                          // word for the thread and over its arithmetic. Only
+                          // on a thread asking for a reply, and only when the
+                          // pipeline can name why.
+                          ...needsYouReasonChips(c),
                           // What came with the thread, counted at read time
                           // over its non-inline attachments — a signature logo
                           // is not a file somebody sent.

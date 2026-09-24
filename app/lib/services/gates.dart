@@ -7,31 +7,71 @@ import '../models/message_models.dart';
 /// notification has no urgency and asks the reader for nothing. The
 /// gates are pure — no I/O, no clock — so the whole set is table-testable.
 ///
-/// Three gates deliberately do NOT exist:
+/// Two gates deliberately do NOT exist:
 /// - an internal-domain gate. Mail from a colleague is exactly the mail that
 ///   blocks the reader's own work, and skipping it would hide the requests
 ///   this app exists to surface.
-/// - a meeting-invite gate. The delta `$select` this app uses carries no
-///   `@odata.type`, so there is nothing on a stored row that distinguishes an
-///   invite from a message. Adding one would mean a second Graph field on
-///   every page of every sync, for a class of mail the newsletter and
-///   auto-generated gates already catch most of.
 /// - an issue-tracker or code-host gate on the bare local parts those systems
 ///   send from (`jira@`, `github@`, …). On the golden set that exact shape is
 ///   two gold drops AND two gold keeps — the same address sends the digest
 ///   nobody reads and the mention that is addressed to the reader — so no
 ///   name rule can split them. What separates those two populations is which
-///   tenant is talking, which is data (the sender rule below) or a header,
-///   never a pattern compiled into this file.
+///   tenant is talking, which is data or a header, never a pattern compiled
+///   into this file. `label_rule` below is that data arriving: the owner
+///   dismisses one of those digests with a label, the label carries a
+///   standing rule, and the rules table answers for the class of mail no
+///   regex here could name. The refusal stands; it now has a mechanism behind
+///   it instead of only a reason.
 ///
-/// One gate here is not a judgement about the message at all. `sender_rule`
-/// comes from `sender_prefs.disposition = 'drop'`, which the owner writes
-/// through "Drop this sender" — a standing instruction about one address,
-/// and the only per-tenant gate this app has. It sits immediately after
-/// `self`, because a person's own word beats every name rule below it while
-/// the owner's own mail is still their own mail. The gate stays pure: the
-/// disposition arrives as an argument, and the call site in
-/// `triage_queue.dart` is what reads the table.
+/// A MEETING RESPONSE is gated and a meeting INVITE is not, and what draws the
+/// line is the one field on the row that can tell them apart.
+/// `meetingMessageType` — Graph's own word: `meetingAccepted`,
+/// `meetingDeclined`, `meetingCancelled`, the tentative one, `meetingRequest`
+/// — rides the per-message detail `$select` for exactly this purpose, which is
+/// why the older note here ("nothing on a stored row distinguishes an invite
+/// from a message") is no longer true. A response answers a question the
+/// reader themselves asked: nobody replies to "Accepted:", and one of these
+/// threads sat in Needs You marked `Needs reply` while the model's own summary
+/// of it read "no further action required". An invite is the opposite kind of
+/// message — it asks for the reader's time and can be the most important mail
+/// of the day — so `meetingRequest` is never gated, and a test pins that it
+/// never will be. A cancellation IS gated even though it is mildly
+/// informative: it tells the reader to do nothing, and the calendar has
+/// already done it.
+///
+/// Two fallbacks sit under that field, for the rows whose detail fetch never
+/// carried it — every row a build before it wrote, and every row whose fetch
+/// failed. Both are shaped so an invite cannot reach them: each REQUIRES a
+/// response-shaped subject (`Accepted:`, `Declined:`, `Tentative:`,
+/// `Canceled:`) before it looks at anything else. `Content-Class:
+/// urn:content-classes:calendarmessage` is on the invite as much as on the
+/// response, so alone it gates nothing; an empty body is what a calendar
+/// response IS, but alone it is also just a message somebody sent with no
+/// words in it. Where Graph DID say the kind, the fallbacks are not consulted
+/// at all — the server's answer is the whole answer, and a subject line does
+/// not get to re-litigate `meetingRequest`. The localized prefixes Outlook
+/// sends in other languages are deliberately not here: a table of translations
+/// compiled into this file is the pattern the tracker bullet above refuses,
+/// and `label_rule` is the mechanism for them too.
+///
+/// Two gates here are not a judgement about the message at all, and both are
+/// the owner's own standing word arriving as an argument. `sender_rule` comes
+/// from `sender_prefs.disposition = 'drop'`, which the owner writes through
+/// "Drop this sender" — a standing instruction about one address.
+/// `label_rule` comes from a `label_rules` row whose disposition is `drop`,
+/// which the owner writes by dismissing a thread with a label and keeping the
+/// rule — a standing instruction about a CLASS of mail (a classification from
+/// `classification.dart`, a domain, a subject pattern) rather than one
+/// mailbox. Both sit immediately after `self`, because a person's own word
+/// beats every name rule below it while the owner's own mail is still their
+/// own mail; `sender_rule` is asked first of the pair, so where both apply the
+/// reason a reader is shown is the narrower instruction they wrote about this
+/// exact address. The gates stay pure: both dispositions arrive as arguments,
+/// and the call site in `triage_queue.dart` is what reads the tables. A rule's
+/// other dispositions — `later` and `hide_needs_you` — are deliberately NOT
+/// gates: they move a thread's bucket or its needs-you verdict, where a gate
+/// means the model never read the message, which is a larger thing than the
+/// owner asked for.
 ///
 /// The gates are called TWICE per message, and the split is the point. A
 /// delta page carries the sender but no headers, so the first call can only
@@ -40,7 +80,12 @@ import '../models/message_models.dart';
 /// triage worker then fetches that message's detail and asks again, and only
 /// on the second call do the header gates have anything to read. Opening a
 /// thread fetches the same detail, so a message can also arrive here with its
-/// headers already stored.
+/// headers already stored. The meeting-response rung is mostly a second-call
+/// gate for that reason — `meetingMessageType` and `Content-Class` both arrive
+/// with the detail — with one exception worth knowing: a delta row whose
+/// preview came down empty can be caught by the subject-and-empty-body
+/// fallback on the FIRST call, which is a calendar response gated before it
+/// ever cost a round trip.
 ///
 /// A message whose detail fetch failed still reaches the model, with empty
 /// headers and only its preview. Letting a newsletter through costs one model
@@ -136,6 +181,77 @@ bool suspectMachineSender(String localPart) =>
 /// and `normal` are ordinary mail and are deliberately absent.
 const Set<String> _bulkPrecedence = {'bulk', 'list', 'junk', 'auto_reply'};
 
+/// Graph's `meetingMessageType` values that ANSWER rather than ask, lowercased
+/// because a caller folds case before asking: the field is stored verbatim as
+/// the server spelled it, and one spelling is a typo Microsoft shipped.
+///
+/// `meetingTenativelyAccepted` [sic] is that typo — the Outlook REST enum
+/// carried it for years and Graph spells the same value
+/// `meetingTentativelyAccepted` — so both are here and neither is the one to
+/// remove. `meetingCanceled` is the same defence across a regional spelling.
+/// Matching a value the server never sends costs nothing; missing the one it
+/// does send puts a calendar response back in front of the reader as
+/// `Needs reply`.
+///
+/// Shared with `classification.dart`, which answers the same question for a
+/// different purpose and must not keep a second copy of Graph's vocabulary.
+const Set<String> meetingResponseTypes = {
+  'meetingaccepted',
+  'meetingdeclined',
+  'meetingcancelled',
+  'meetingcanceled',
+  'meetingtentativelyaccepted',
+  'meetingtenativelyaccepted',
+};
+
+/// The one `meetingMessageType` value this file will never gate on, named so
+/// that the rule reads as a rule rather than as a string literal buried in a
+/// condition. Lowercased like [meetingResponseTypes].
+const String meetingInviteType = 'meetingrequest';
+
+/// The subject a calendar response arrives under, and the required half of
+/// BOTH header-less fallbacks.
+///
+/// Anchored at the start and ending at the colon, which is what keeps a person
+/// writing "the proposal was declined: here is why" out of it. No invite is
+/// titled this way — Outlook puts the meeting's own subject on a request,
+/// unprefixed — so requiring this before either fallback runs is what makes an
+/// invite unreachable by them.
+final RegExp _meetingResponseSubject = RegExp(
+  r'^\s*(accepted|declined|tentative|tentatively accepted|canceled|cancelled)'
+  r'\s*:',
+  caseSensitive: false,
+);
+
+/// Exchange's marker for a message the calendar wrote. On the invite as much as
+/// on the response, which is why it never answers alone.
+const String _calendarContentClass = 'urn:content-classes:calendarmessage';
+
+/// Whether this message is somebody answering an invitation.
+///
+/// Read the decision record at the top of the file for why the invite is
+/// excluded by construction rather than by a list of exceptions: the moment
+/// Graph has said the kind, nothing below gets a vote.
+bool _isMeetingResponse(Message message) {
+  final meeting = message.meetingMessageType?.trim().toLowerCase();
+  if (meeting != null && meeting.isNotEmpty) {
+    return meetingResponseTypes.contains(meeting);
+  }
+
+  // Nobody said, so the fallbacks — and neither of them starts without a
+  // subject only a response carries.
+  if (!_meetingResponseSubject.hasMatch(message.subject ?? '')) return false;
+
+  final contentClass = message.headers['content-class']?.trim().toLowerCase();
+  if (contentClass == _calendarContentClass) return true;
+
+  // Last resort: a response-shaped subject over a message with nothing in it.
+  // The preview stands in for the body, so this can answer on a delta row that
+  // no detail fetch has touched yet.
+  final body = message.bodyText ?? message.bodyPreview ?? '';
+  return body.trim().isEmpty;
+}
+
 /// Returns a gate reason, or null to proceed to the model.
 ///
 /// The switch is the seam a second connector lands on: a Teams message has
@@ -145,14 +261,26 @@ const Set<String> _bulkPrecedence = {'bulk', 'list', 'junk', 'auto_reply'};
 /// [senderDisposition] is this sender's standing rule as the store holds it,
 /// or null when there is none and when the caller has a reason not to ask.
 /// Passed in rather than read here, so the gates stay pure.
+///
+/// [labelRuleDisposition] is the same thing one step wider: the disposition of
+/// the label rule that matched this message, whatever scope that rule was
+/// written at. Optional because the gates predate it and because a caller with
+/// no rules table in reach — a replay, a test of one rung — is asking a
+/// question the rules do not change.
 String? gateFor(
   Message message, {
   required String? userAddress,
   String? senderDisposition,
+  String? labelRuleDisposition,
 }) =>
     switch (message.source) {
-      'email' => _emailGate(message, userAddress, senderDisposition),
-      'teams' => _teamsGate(message, senderDisposition),
+      'email' => _emailGate(
+          message,
+          userAddress,
+          senderDisposition,
+          labelRuleDisposition,
+        ),
+      'teams' => _teamsGate(message, senderDisposition, labelRuleDisposition),
       _ => null,
     };
 
@@ -197,13 +325,25 @@ String? gateFor(
 /// to nothing, which is what a lone emoji reaction or an image-only post
 /// leaves behind.
 ///
-/// Those two are therefore the WHOLE chat gate, and they run on every chat
-/// message the triage queue claims: bot and self exclusion happened at ingest,
-/// so anything reaching here is a person talking to the user, and the only
-/// reasons to refuse it the model are the owner having said so and the message
-/// having nothing to read.
-String? _teamsGate(Message message, String? senderDisposition) {
+/// Those two are therefore the WHOLE chat gate — three now, since the owner's
+/// standing word comes at two widths — and they run on every chat message the
+/// triage queue claims: bot and self exclusion happened at ingest, so anything
+/// reaching here is a person talking to the user, and the only reasons to
+/// refuse it the model are the owner having said so and the message having
+/// nothing to read.
+///
+/// The label rule reaches chat because the owner's labels are about threads
+/// rather than about mail: a rule written at a domain or a subject pattern
+/// matches nothing here, but one written about a chat sender or a label the
+/// owner applied to a chat thread does, and refusing it on this path would
+/// make the same rule mean two things.
+String? _teamsGate(
+  Message message,
+  String? senderDisposition,
+  String? labelRuleDisposition,
+) {
   if (senderDisposition == 'drop') return 'sender_rule';
+  if (labelRuleDisposition == 'drop') return 'label_rule';
   final body = message.bodyText ?? message.bodyPreview ?? '';
   return body.trim().isEmpty ? 'empty' : null;
 }
@@ -214,6 +354,7 @@ String? _emailGate(
   Message message,
   String? userAddress,
   String? senderDisposition,
+  String? labelRuleDisposition,
 ) {
   final from = message.fromAddress?.toLowerCase() ?? '';
 
@@ -227,6 +368,16 @@ String? _emailGate(
   // The owner's own word about this address, which outranks every pattern
   // below: they have already answered the question the name rules guess at.
   if (senderDisposition == 'drop') return 'sender_rule';
+
+  // The same word about a whole class of mail, asked second so that where the
+  // owner wrote both, the reason they are shown is the one about this address.
+  if (labelRuleDisposition == 'drop') return 'label_rule';
+
+  // Somebody answering an invitation. Above the name rules because it is a
+  // fact about the message rather than a guess from its sender: the colleague
+  // who accepted is an ordinary human address every rule below waves through,
+  // which is how these landed in Needs You saying `Needs reply`.
+  if (_isMeetingResponse(message)) return 'meeting_response';
 
   if (from.isNotEmpty) {
     final at = from.indexOf('@');

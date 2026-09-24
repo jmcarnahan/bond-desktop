@@ -512,6 +512,28 @@ class SyncService implements MailSync {
         await _store.setPref('thread_state_refold', '1');
       }
 
+      // The meeting RESPONSES already in the mailbox, gated after the fact. A
+      // gate only ever speaks about a message on its way past, so the
+      // meeting-response gate says nothing about the forty `Accepted:` threads
+      // sitting on the rail from invitations the owner sent themselves. Same
+      // one-shot idiom, and null until it runs.
+      //
+      // A genuine `meetingRequest` is never touched — see
+      // [MessageStore.regateMeetingResponses], which is where the rule and the
+      // fallback shape live. The refold after it is the same pairing the
+      // one-shot above exists for: gating an inbound can lower a thread off
+      // `needs_reply`, and a gate that told nobody is exactly the lie that
+      // repair was written for. Plain repair mode rather than every thread,
+      // because only the threads this just gated can have moved.
+      int? regatedMeetingResponses;
+      if (await _store.getPref('meeting_regate') == null) {
+        regatedMeetingResponses = await _store.regateMeetingResponses();
+        if (regatedMeetingResponses > 0) {
+          await _store.refoldAllThreadStates();
+        }
+        await _store.setPref('meeting_regate', '1');
+      }
+
       // The threads that were extracted, embedded and filed before a gate
       // could speak first — every inbound in them gated, and the thread still
       // sitting in the clustering pool, some of them inside a storyline. Same
@@ -839,6 +861,7 @@ class SyncService implements MailSync {
           'tidied_mail_previews': ?tidiedMailPreviews,
           'named_participants': ?namedParticipants,
           'refolded_threads': ?refoldedThreads,
+          'regated_meeting_responses': ?regatedMeetingResponses,
           'repaired_gated_conversations': ?repairedGated,
           'requeued_clustering_reembeds': ?requeuedReembeds,
           // The four search-corpus one-shots, counts only, and only on a pass

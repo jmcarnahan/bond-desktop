@@ -18474,6 +18474,15 @@ class ConversationLabels extends Table
     requiredDuringInsert: true,
     $customConstraints: 'NOT NULL',
   );
+  static const VerificationMeta _ruleIdMeta = const VerificationMeta('ruleId');
+  late final GeneratedColumn<String> ruleId = GeneratedColumn<String>(
+    'rule_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
   @override
   List<GeneratedColumn> get $columns => [
     source,
@@ -18481,6 +18490,7 @@ class ConversationLabels extends Table
     labelId,
     appliedBy,
     appliedAt,
+    ruleId,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -18535,6 +18545,12 @@ class ConversationLabels extends Table
     } else if (isInserting) {
       context.missing(_appliedAtMeta);
     }
+    if (data.containsKey('rule_id')) {
+      context.handle(
+        _ruleIdMeta,
+        ruleId.isAcceptableOrUnknown(data['rule_id']!, _ruleIdMeta),
+      );
+    }
     return context;
   }
 
@@ -18564,6 +18580,10 @@ class ConversationLabels extends Table
         DriftSqlType.string,
         data['${effectivePrefix}applied_at'],
       )!,
+      ruleId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}rule_id'],
+      ),
     );
   }
 
@@ -18589,12 +18609,14 @@ class ConversationLabel extends DataClass
   final String labelId;
   final String appliedBy;
   final String appliedAt;
+  final String? ruleId;
   const ConversationLabel({
     required this.source,
     required this.conversationKey,
     required this.labelId,
     required this.appliedBy,
     required this.appliedAt,
+    this.ruleId,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -18604,6 +18626,9 @@ class ConversationLabel extends DataClass
     map['label_id'] = Variable<String>(labelId);
     map['applied_by'] = Variable<String>(appliedBy);
     map['applied_at'] = Variable<String>(appliedAt);
+    if (!nullToAbsent || ruleId != null) {
+      map['rule_id'] = Variable<String>(ruleId);
+    }
     return map;
   }
 
@@ -18614,6 +18639,9 @@ class ConversationLabel extends DataClass
       labelId: Value(labelId),
       appliedBy: Value(appliedBy),
       appliedAt: Value(appliedAt),
+      ruleId: ruleId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(ruleId),
     );
   }
 
@@ -18628,6 +18656,7 @@ class ConversationLabel extends DataClass
       labelId: serializer.fromJson<String>(json['label_id']),
       appliedBy: serializer.fromJson<String>(json['applied_by']),
       appliedAt: serializer.fromJson<String>(json['applied_at']),
+      ruleId: serializer.fromJson<String?>(json['rule_id']),
     );
   }
   @override
@@ -18639,6 +18668,7 @@ class ConversationLabel extends DataClass
       'label_id': serializer.toJson<String>(labelId),
       'applied_by': serializer.toJson<String>(appliedBy),
       'applied_at': serializer.toJson<String>(appliedAt),
+      'rule_id': serializer.toJson<String?>(ruleId),
     };
   }
 
@@ -18648,12 +18678,14 @@ class ConversationLabel extends DataClass
     String? labelId,
     String? appliedBy,
     String? appliedAt,
+    Value<String?> ruleId = const Value.absent(),
   }) => ConversationLabel(
     source: source ?? this.source,
     conversationKey: conversationKey ?? this.conversationKey,
     labelId: labelId ?? this.labelId,
     appliedBy: appliedBy ?? this.appliedBy,
     appliedAt: appliedAt ?? this.appliedAt,
+    ruleId: ruleId.present ? ruleId.value : this.ruleId,
   );
   ConversationLabel copyWithCompanion(ConversationLabelsCompanion data) {
     return ConversationLabel(
@@ -18664,6 +18696,7 @@ class ConversationLabel extends DataClass
       labelId: data.labelId.present ? data.labelId.value : this.labelId,
       appliedBy: data.appliedBy.present ? data.appliedBy.value : this.appliedBy,
       appliedAt: data.appliedAt.present ? data.appliedAt.value : this.appliedAt,
+      ruleId: data.ruleId.present ? data.ruleId.value : this.ruleId,
     );
   }
 
@@ -18674,14 +18707,21 @@ class ConversationLabel extends DataClass
           ..write('conversationKey: $conversationKey, ')
           ..write('labelId: $labelId, ')
           ..write('appliedBy: $appliedBy, ')
-          ..write('appliedAt: $appliedAt')
+          ..write('appliedAt: $appliedAt, ')
+          ..write('ruleId: $ruleId')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode =>
-      Object.hash(source, conversationKey, labelId, appliedBy, appliedAt);
+  int get hashCode => Object.hash(
+    source,
+    conversationKey,
+    labelId,
+    appliedBy,
+    appliedAt,
+    ruleId,
+  );
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -18690,7 +18730,8 @@ class ConversationLabel extends DataClass
           other.conversationKey == this.conversationKey &&
           other.labelId == this.labelId &&
           other.appliedBy == this.appliedBy &&
-          other.appliedAt == this.appliedAt);
+          other.appliedAt == this.appliedAt &&
+          other.ruleId == this.ruleId);
 }
 
 class ConversationLabelsCompanion extends UpdateCompanion<ConversationLabel> {
@@ -18699,6 +18740,7 @@ class ConversationLabelsCompanion extends UpdateCompanion<ConversationLabel> {
   final Value<String> labelId;
   final Value<String> appliedBy;
   final Value<String> appliedAt;
+  final Value<String?> ruleId;
   final Value<int> rowid;
   const ConversationLabelsCompanion({
     this.source = const Value.absent(),
@@ -18706,6 +18748,7 @@ class ConversationLabelsCompanion extends UpdateCompanion<ConversationLabel> {
     this.labelId = const Value.absent(),
     this.appliedBy = const Value.absent(),
     this.appliedAt = const Value.absent(),
+    this.ruleId = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   ConversationLabelsCompanion.insert({
@@ -18714,6 +18757,7 @@ class ConversationLabelsCompanion extends UpdateCompanion<ConversationLabel> {
     required String labelId,
     this.appliedBy = const Value.absent(),
     required String appliedAt,
+    this.ruleId = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : source = Value(source),
        conversationKey = Value(conversationKey),
@@ -18725,6 +18769,7 @@ class ConversationLabelsCompanion extends UpdateCompanion<ConversationLabel> {
     Expression<String>? labelId,
     Expression<String>? appliedBy,
     Expression<String>? appliedAt,
+    Expression<String>? ruleId,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -18733,6 +18778,7 @@ class ConversationLabelsCompanion extends UpdateCompanion<ConversationLabel> {
       if (labelId != null) 'label_id': labelId,
       if (appliedBy != null) 'applied_by': appliedBy,
       if (appliedAt != null) 'applied_at': appliedAt,
+      if (ruleId != null) 'rule_id': ruleId,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -18743,6 +18789,7 @@ class ConversationLabelsCompanion extends UpdateCompanion<ConversationLabel> {
     Value<String>? labelId,
     Value<String>? appliedBy,
     Value<String>? appliedAt,
+    Value<String?>? ruleId,
     Value<int>? rowid,
   }) {
     return ConversationLabelsCompanion(
@@ -18751,6 +18798,7 @@ class ConversationLabelsCompanion extends UpdateCompanion<ConversationLabel> {
       labelId: labelId ?? this.labelId,
       appliedBy: appliedBy ?? this.appliedBy,
       appliedAt: appliedAt ?? this.appliedAt,
+      ruleId: ruleId ?? this.ruleId,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -18773,6 +18821,9 @@ class ConversationLabelsCompanion extends UpdateCompanion<ConversationLabel> {
     if (appliedAt.present) {
       map['applied_at'] = Variable<String>(appliedAt.value);
     }
+    if (ruleId.present) {
+      map['rule_id'] = Variable<String>(ruleId.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -18787,6 +18838,584 @@ class ConversationLabelsCompanion extends UpdateCompanion<ConversationLabel> {
           ..write('labelId: $labelId, ')
           ..write('appliedBy: $appliedBy, ')
           ..write('appliedAt: $appliedAt, ')
+          ..write('ruleId: $ruleId, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class LabelRules extends Table with TableInfo<LabelRules, LabelRule> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  LabelRules(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'PRIMARY KEY',
+  );
+  static const VerificationMeta _labelIdMeta = const VerificationMeta(
+    'labelId',
+  );
+  late final GeneratedColumn<String> labelId = GeneratedColumn<String>(
+    'label_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _scopeKindMeta = const VerificationMeta(
+    'scopeKind',
+  );
+  late final GeneratedColumn<String> scopeKind = GeneratedColumn<String>(
+    'scope_kind',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _scopeValueMeta = const VerificationMeta(
+    'scopeValue',
+  );
+  late final GeneratedColumn<String> scopeValue = GeneratedColumn<String>(
+    'scope_value',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _dispositionMeta = const VerificationMeta(
+    'disposition',
+  );
+  late final GeneratedColumn<String> disposition = GeneratedColumn<String>(
+    'disposition',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _unlessMentionsMeMeta = const VerificationMeta(
+    'unlessMentionsMe',
+  );
+  late final GeneratedColumn<int> unlessMentionsMe = GeneratedColumn<int>(
+    'unless_mentions_me',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 1',
+    defaultValue: const CustomExpression('1'),
+  );
+  static const VerificationMeta _hiddenCountMeta = const VerificationMeta(
+    'hiddenCount',
+  );
+  late final GeneratedColumn<int> hiddenCount = GeneratedColumn<int>(
+    'hidden_count',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  late final GeneratedColumn<String> createdAt = GeneratedColumn<String>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  late final GeneratedColumn<String> updatedAt = GeneratedColumn<String>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    labelId,
+    scopeKind,
+    scopeValue,
+    disposition,
+    unlessMentionsMe,
+    hiddenCount,
+    createdAt,
+    updatedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'label_rules';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<LabelRule> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('label_id')) {
+      context.handle(
+        _labelIdMeta,
+        labelId.isAcceptableOrUnknown(data['label_id']!, _labelIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_labelIdMeta);
+    }
+    if (data.containsKey('scope_kind')) {
+      context.handle(
+        _scopeKindMeta,
+        scopeKind.isAcceptableOrUnknown(data['scope_kind']!, _scopeKindMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_scopeKindMeta);
+    }
+    if (data.containsKey('scope_value')) {
+      context.handle(
+        _scopeValueMeta,
+        scopeValue.isAcceptableOrUnknown(data['scope_value']!, _scopeValueMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_scopeValueMeta);
+    }
+    if (data.containsKey('disposition')) {
+      context.handle(
+        _dispositionMeta,
+        disposition.isAcceptableOrUnknown(
+          data['disposition']!,
+          _dispositionMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_dispositionMeta);
+    }
+    if (data.containsKey('unless_mentions_me')) {
+      context.handle(
+        _unlessMentionsMeMeta,
+        unlessMentionsMe.isAcceptableOrUnknown(
+          data['unless_mentions_me']!,
+          _unlessMentionsMeMeta,
+        ),
+      );
+    }
+    if (data.containsKey('hidden_count')) {
+      context.handle(
+        _hiddenCountMeta,
+        hiddenCount.isAcceptableOrUnknown(
+          data['hidden_count']!,
+          _hiddenCountMeta,
+        ),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  LabelRule map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return LabelRule(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      labelId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}label_id'],
+      )!,
+      scopeKind: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}scope_kind'],
+      )!,
+      scopeValue: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}scope_value'],
+      )!,
+      disposition: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}disposition'],
+      )!,
+      unlessMentionsMe: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}unless_mentions_me'],
+      )!,
+      hiddenCount: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}hidden_count'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}created_at'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}updated_at'],
+      )!,
+    );
+  }
+
+  @override
+  LabelRules createAlias(String alias) {
+    return LabelRules(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class LabelRule extends DataClass implements Insertable<LabelRule> {
+  final String id;
+  final String labelId;
+  final String scopeKind;
+  final String scopeValue;
+  final String disposition;
+  final int unlessMentionsMe;
+  final int hiddenCount;
+  final String createdAt;
+  final String updatedAt;
+  const LabelRule({
+    required this.id,
+    required this.labelId,
+    required this.scopeKind,
+    required this.scopeValue,
+    required this.disposition,
+    required this.unlessMentionsMe,
+    required this.hiddenCount,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['label_id'] = Variable<String>(labelId);
+    map['scope_kind'] = Variable<String>(scopeKind);
+    map['scope_value'] = Variable<String>(scopeValue);
+    map['disposition'] = Variable<String>(disposition);
+    map['unless_mentions_me'] = Variable<int>(unlessMentionsMe);
+    map['hidden_count'] = Variable<int>(hiddenCount);
+    map['created_at'] = Variable<String>(createdAt);
+    map['updated_at'] = Variable<String>(updatedAt);
+    return map;
+  }
+
+  LabelRulesCompanion toCompanion(bool nullToAbsent) {
+    return LabelRulesCompanion(
+      id: Value(id),
+      labelId: Value(labelId),
+      scopeKind: Value(scopeKind),
+      scopeValue: Value(scopeValue),
+      disposition: Value(disposition),
+      unlessMentionsMe: Value(unlessMentionsMe),
+      hiddenCount: Value(hiddenCount),
+      createdAt: Value(createdAt),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory LabelRule.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return LabelRule(
+      id: serializer.fromJson<String>(json['id']),
+      labelId: serializer.fromJson<String>(json['label_id']),
+      scopeKind: serializer.fromJson<String>(json['scope_kind']),
+      scopeValue: serializer.fromJson<String>(json['scope_value']),
+      disposition: serializer.fromJson<String>(json['disposition']),
+      unlessMentionsMe: serializer.fromJson<int>(json['unless_mentions_me']),
+      hiddenCount: serializer.fromJson<int>(json['hidden_count']),
+      createdAt: serializer.fromJson<String>(json['created_at']),
+      updatedAt: serializer.fromJson<String>(json['updated_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'label_id': serializer.toJson<String>(labelId),
+      'scope_kind': serializer.toJson<String>(scopeKind),
+      'scope_value': serializer.toJson<String>(scopeValue),
+      'disposition': serializer.toJson<String>(disposition),
+      'unless_mentions_me': serializer.toJson<int>(unlessMentionsMe),
+      'hidden_count': serializer.toJson<int>(hiddenCount),
+      'created_at': serializer.toJson<String>(createdAt),
+      'updated_at': serializer.toJson<String>(updatedAt),
+    };
+  }
+
+  LabelRule copyWith({
+    String? id,
+    String? labelId,
+    String? scopeKind,
+    String? scopeValue,
+    String? disposition,
+    int? unlessMentionsMe,
+    int? hiddenCount,
+    String? createdAt,
+    String? updatedAt,
+  }) => LabelRule(
+    id: id ?? this.id,
+    labelId: labelId ?? this.labelId,
+    scopeKind: scopeKind ?? this.scopeKind,
+    scopeValue: scopeValue ?? this.scopeValue,
+    disposition: disposition ?? this.disposition,
+    unlessMentionsMe: unlessMentionsMe ?? this.unlessMentionsMe,
+    hiddenCount: hiddenCount ?? this.hiddenCount,
+    createdAt: createdAt ?? this.createdAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+  );
+  LabelRule copyWithCompanion(LabelRulesCompanion data) {
+    return LabelRule(
+      id: data.id.present ? data.id.value : this.id,
+      labelId: data.labelId.present ? data.labelId.value : this.labelId,
+      scopeKind: data.scopeKind.present ? data.scopeKind.value : this.scopeKind,
+      scopeValue: data.scopeValue.present
+          ? data.scopeValue.value
+          : this.scopeValue,
+      disposition: data.disposition.present
+          ? data.disposition.value
+          : this.disposition,
+      unlessMentionsMe: data.unlessMentionsMe.present
+          ? data.unlessMentionsMe.value
+          : this.unlessMentionsMe,
+      hiddenCount: data.hiddenCount.present
+          ? data.hiddenCount.value
+          : this.hiddenCount,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('LabelRule(')
+          ..write('id: $id, ')
+          ..write('labelId: $labelId, ')
+          ..write('scopeKind: $scopeKind, ')
+          ..write('scopeValue: $scopeValue, ')
+          ..write('disposition: $disposition, ')
+          ..write('unlessMentionsMe: $unlessMentionsMe, ')
+          ..write('hiddenCount: $hiddenCount, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    labelId,
+    scopeKind,
+    scopeValue,
+    disposition,
+    unlessMentionsMe,
+    hiddenCount,
+    createdAt,
+    updatedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is LabelRule &&
+          other.id == this.id &&
+          other.labelId == this.labelId &&
+          other.scopeKind == this.scopeKind &&
+          other.scopeValue == this.scopeValue &&
+          other.disposition == this.disposition &&
+          other.unlessMentionsMe == this.unlessMentionsMe &&
+          other.hiddenCount == this.hiddenCount &&
+          other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt);
+}
+
+class LabelRulesCompanion extends UpdateCompanion<LabelRule> {
+  final Value<String> id;
+  final Value<String> labelId;
+  final Value<String> scopeKind;
+  final Value<String> scopeValue;
+  final Value<String> disposition;
+  final Value<int> unlessMentionsMe;
+  final Value<int> hiddenCount;
+  final Value<String> createdAt;
+  final Value<String> updatedAt;
+  final Value<int> rowid;
+  const LabelRulesCompanion({
+    this.id = const Value.absent(),
+    this.labelId = const Value.absent(),
+    this.scopeKind = const Value.absent(),
+    this.scopeValue = const Value.absent(),
+    this.disposition = const Value.absent(),
+    this.unlessMentionsMe = const Value.absent(),
+    this.hiddenCount = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  LabelRulesCompanion.insert({
+    required String id,
+    required String labelId,
+    required String scopeKind,
+    required String scopeValue,
+    required String disposition,
+    this.unlessMentionsMe = const Value.absent(),
+    this.hiddenCount = const Value.absent(),
+    required String createdAt,
+    required String updatedAt,
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       labelId = Value(labelId),
+       scopeKind = Value(scopeKind),
+       scopeValue = Value(scopeValue),
+       disposition = Value(disposition),
+       createdAt = Value(createdAt),
+       updatedAt = Value(updatedAt);
+  static Insertable<LabelRule> custom({
+    Expression<String>? id,
+    Expression<String>? labelId,
+    Expression<String>? scopeKind,
+    Expression<String>? scopeValue,
+    Expression<String>? disposition,
+    Expression<int>? unlessMentionsMe,
+    Expression<int>? hiddenCount,
+    Expression<String>? createdAt,
+    Expression<String>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (labelId != null) 'label_id': labelId,
+      if (scopeKind != null) 'scope_kind': scopeKind,
+      if (scopeValue != null) 'scope_value': scopeValue,
+      if (disposition != null) 'disposition': disposition,
+      if (unlessMentionsMe != null) 'unless_mentions_me': unlessMentionsMe,
+      if (hiddenCount != null) 'hidden_count': hiddenCount,
+      if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  LabelRulesCompanion copyWith({
+    Value<String>? id,
+    Value<String>? labelId,
+    Value<String>? scopeKind,
+    Value<String>? scopeValue,
+    Value<String>? disposition,
+    Value<int>? unlessMentionsMe,
+    Value<int>? hiddenCount,
+    Value<String>? createdAt,
+    Value<String>? updatedAt,
+    Value<int>? rowid,
+  }) {
+    return LabelRulesCompanion(
+      id: id ?? this.id,
+      labelId: labelId ?? this.labelId,
+      scopeKind: scopeKind ?? this.scopeKind,
+      scopeValue: scopeValue ?? this.scopeValue,
+      disposition: disposition ?? this.disposition,
+      unlessMentionsMe: unlessMentionsMe ?? this.unlessMentionsMe,
+      hiddenCount: hiddenCount ?? this.hiddenCount,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (labelId.present) {
+      map['label_id'] = Variable<String>(labelId.value);
+    }
+    if (scopeKind.present) {
+      map['scope_kind'] = Variable<String>(scopeKind.value);
+    }
+    if (scopeValue.present) {
+      map['scope_value'] = Variable<String>(scopeValue.value);
+    }
+    if (disposition.present) {
+      map['disposition'] = Variable<String>(disposition.value);
+    }
+    if (unlessMentionsMe.present) {
+      map['unless_mentions_me'] = Variable<int>(unlessMentionsMe.value);
+    }
+    if (hiddenCount.present) {
+      map['hidden_count'] = Variable<int>(hiddenCount.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<String>(createdAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<String>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('LabelRulesCompanion(')
+          ..write('id: $id, ')
+          ..write('labelId: $labelId, ')
+          ..write('scopeKind: $scopeKind, ')
+          ..write('scopeValue: $scopeValue, ')
+          ..write('disposition: $disposition, ')
+          ..write('unlessMentionsMe: $unlessMentionsMe, ')
+          ..write('hiddenCount: $hiddenCount, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -18937,6 +19566,15 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     'ix_conv_labels_label',
     'CREATE INDEX ix_conv_labels_label ON conversation_labels (label_id, applied_at DESC)',
   );
+  late final LabelRules labelRules = LabelRules(this);
+  late final Index ixLabelRulesScope = Index(
+    'ix_label_rules_scope',
+    'CREATE UNIQUE INDEX ix_label_rules_scope ON label_rules (scope_kind, scope_value)',
+  );
+  late final Index ixLabelRulesLabel = Index(
+    'ix_label_rules_label',
+    'CREATE INDEX ix_label_rules_label ON label_rules (label_id)',
+  );
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -18998,6 +19636,9 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     ixLabelsNameKey,
     conversationLabels,
     ixConvLabelsLabel,
+    labelRules,
+    ixLabelRulesScope,
+    ixLabelRulesLabel,
   ];
 }
 
@@ -27612,6 +28253,7 @@ typedef $ConversationLabelsCreateCompanionBuilder =
       required String labelId,
       Value<String> appliedBy,
       required String appliedAt,
+      Value<String?> ruleId,
       Value<int> rowid,
     });
 typedef $ConversationLabelsUpdateCompanionBuilder =
@@ -27621,6 +28263,7 @@ typedef $ConversationLabelsUpdateCompanionBuilder =
       Value<String> labelId,
       Value<String> appliedBy,
       Value<String> appliedAt,
+      Value<String?> ruleId,
       Value<int> rowid,
     });
 
@@ -27655,6 +28298,11 @@ class $ConversationLabelsFilterComposer
 
   ColumnFilters<String> get appliedAt => $composableBuilder(
     column: $table.appliedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get ruleId => $composableBuilder(
+    column: $table.ruleId,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -27692,6 +28340,11 @@ class $ConversationLabelsOrderingComposer
     column: $table.appliedAt,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get ruleId => $composableBuilder(
+    column: $table.ruleId,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $ConversationLabelsAnnotationComposer
@@ -27719,6 +28372,9 @@ class $ConversationLabelsAnnotationComposer
 
   GeneratedColumn<String> get appliedAt =>
       $composableBuilder(column: $table.appliedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get ruleId =>
+      $composableBuilder(column: $table.ruleId, builder: (column) => column);
 }
 
 class $ConversationLabelsTableManager
@@ -27761,6 +28417,7 @@ class $ConversationLabelsTableManager
                 Value<String> labelId = const Value.absent(),
                 Value<String> appliedBy = const Value.absent(),
                 Value<String> appliedAt = const Value.absent(),
+                Value<String?> ruleId = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ConversationLabelsCompanion(
                 source: source,
@@ -27768,6 +28425,7 @@ class $ConversationLabelsTableManager
                 labelId: labelId,
                 appliedBy: appliedBy,
                 appliedAt: appliedAt,
+                ruleId: ruleId,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -27777,6 +28435,7 @@ class $ConversationLabelsTableManager
                 required String labelId,
                 Value<String> appliedBy = const Value.absent(),
                 required String appliedAt,
+                Value<String?> ruleId = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ConversationLabelsCompanion.insert(
                 source: source,
@@ -27784,6 +28443,7 @@ class $ConversationLabelsTableManager
                 labelId: labelId,
                 appliedBy: appliedBy,
                 appliedAt: appliedAt,
+                ruleId: ruleId,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -27809,6 +28469,282 @@ typedef $ConversationLabelsProcessedTableManager =
         BaseReferences<_$BondDatabase, ConversationLabels, ConversationLabel>,
       ),
       ConversationLabel,
+      PrefetchHooks Function()
+    >;
+typedef $LabelRulesCreateCompanionBuilder =
+    LabelRulesCompanion Function({
+      required String id,
+      required String labelId,
+      required String scopeKind,
+      required String scopeValue,
+      required String disposition,
+      Value<int> unlessMentionsMe,
+      Value<int> hiddenCount,
+      required String createdAt,
+      required String updatedAt,
+      Value<int> rowid,
+    });
+typedef $LabelRulesUpdateCompanionBuilder =
+    LabelRulesCompanion Function({
+      Value<String> id,
+      Value<String> labelId,
+      Value<String> scopeKind,
+      Value<String> scopeValue,
+      Value<String> disposition,
+      Value<int> unlessMentionsMe,
+      Value<int> hiddenCount,
+      Value<String> createdAt,
+      Value<String> updatedAt,
+      Value<int> rowid,
+    });
+
+class $LabelRulesFilterComposer extends Composer<_$BondDatabase, LabelRules> {
+  $LabelRulesFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get labelId => $composableBuilder(
+    column: $table.labelId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get scopeKind => $composableBuilder(
+    column: $table.scopeKind,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get scopeValue => $composableBuilder(
+    column: $table.scopeValue,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get disposition => $composableBuilder(
+    column: $table.disposition,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get unlessMentionsMe => $composableBuilder(
+    column: $table.unlessMentionsMe,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get hiddenCount => $composableBuilder(
+    column: $table.hiddenCount,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $LabelRulesOrderingComposer extends Composer<_$BondDatabase, LabelRules> {
+  $LabelRulesOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get labelId => $composableBuilder(
+    column: $table.labelId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get scopeKind => $composableBuilder(
+    column: $table.scopeKind,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get scopeValue => $composableBuilder(
+    column: $table.scopeValue,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get disposition => $composableBuilder(
+    column: $table.disposition,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get unlessMentionsMe => $composableBuilder(
+    column: $table.unlessMentionsMe,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get hiddenCount => $composableBuilder(
+    column: $table.hiddenCount,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $LabelRulesAnnotationComposer
+    extends Composer<_$BondDatabase, LabelRules> {
+  $LabelRulesAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get labelId =>
+      $composableBuilder(column: $table.labelId, builder: (column) => column);
+
+  GeneratedColumn<String> get scopeKind =>
+      $composableBuilder(column: $table.scopeKind, builder: (column) => column);
+
+  GeneratedColumn<String> get scopeValue => $composableBuilder(
+    column: $table.scopeValue,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get disposition => $composableBuilder(
+    column: $table.disposition,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get unlessMentionsMe => $composableBuilder(
+    column: $table.unlessMentionsMe,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get hiddenCount => $composableBuilder(
+    column: $table.hiddenCount,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<String> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $LabelRulesTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          LabelRules,
+          LabelRule,
+          $LabelRulesFilterComposer,
+          $LabelRulesOrderingComposer,
+          $LabelRulesAnnotationComposer,
+          $LabelRulesCreateCompanionBuilder,
+          $LabelRulesUpdateCompanionBuilder,
+          (LabelRule, BaseReferences<_$BondDatabase, LabelRules, LabelRule>),
+          LabelRule,
+          PrefetchHooks Function()
+        > {
+  $LabelRulesTableManager(_$BondDatabase db, LabelRules table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $LabelRulesFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $LabelRulesOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $LabelRulesAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<String> labelId = const Value.absent(),
+                Value<String> scopeKind = const Value.absent(),
+                Value<String> scopeValue = const Value.absent(),
+                Value<String> disposition = const Value.absent(),
+                Value<int> unlessMentionsMe = const Value.absent(),
+                Value<int> hiddenCount = const Value.absent(),
+                Value<String> createdAt = const Value.absent(),
+                Value<String> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => LabelRulesCompanion(
+                id: id,
+                labelId: labelId,
+                scopeKind: scopeKind,
+                scopeValue: scopeValue,
+                disposition: disposition,
+                unlessMentionsMe: unlessMentionsMe,
+                hiddenCount: hiddenCount,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                required String labelId,
+                required String scopeKind,
+                required String scopeValue,
+                required String disposition,
+                Value<int> unlessMentionsMe = const Value.absent(),
+                Value<int> hiddenCount = const Value.absent(),
+                required String createdAt,
+                required String updatedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => LabelRulesCompanion.insert(
+                id: id,
+                labelId: labelId,
+                scopeKind: scopeKind,
+                scopeValue: scopeValue,
+                disposition: disposition,
+                unlessMentionsMe: unlessMentionsMe,
+                hiddenCount: hiddenCount,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $LabelRulesProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      LabelRules,
+      LabelRule,
+      $LabelRulesFilterComposer,
+      $LabelRulesOrderingComposer,
+      $LabelRulesAnnotationComposer,
+      $LabelRulesCreateCompanionBuilder,
+      $LabelRulesUpdateCompanionBuilder,
+      (LabelRule, BaseReferences<_$BondDatabase, LabelRules, LabelRule>),
+      LabelRule,
       PrefetchHooks Function()
     >;
 
@@ -27869,4 +28805,6 @@ class $BondDatabaseManager {
   $LabelsTableManager get labels => $LabelsTableManager(_db, _db.labels);
   $ConversationLabelsTableManager get conversationLabels =>
       $ConversationLabelsTableManager(_db, _db.conversationLabels);
+  $LabelRulesTableManager get labelRules =>
+      $LabelRulesTableManager(_db, _db.labelRules);
 }

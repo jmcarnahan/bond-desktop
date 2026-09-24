@@ -48,5 +48,87 @@ void main() {
       expect(needsYouFloor({...row(), 'addressed_me': true}), isFalse);
       expect(needsYouFloor({...row(), 'addressed_me': null}), isFalse);
     });
+
+    test('a standing rule with its exception OFF switches the floor off', () {
+      // The one caller allowed to: `LabelRule.unlessMentionsMe` false is the
+      // owner saying "this kind of mail, even when it names me", which in a chat
+      // they are done with is every message in it. Leaving the floor in place
+      // would make that rule inert and give no way to say the thing.
+      expect(needsYouFloor(row(), suppressed: true), isFalse);
+    });
+
+    test('suppression is not a verdict of its own', () {
+      // It cannot raise anything either: a rule with no exception over a chat
+      // that named nobody leaves the floor exactly as silent as it already was.
+      expect(needsYouFloor(row(addressedMe: 0), suppressed: true), isFalse);
+      expect(needsYouFloor(row(source: 'email'), suppressed: true), isFalse);
+    });
+
+    test('the default is the floor standing', () {
+      // Every existing caller passes one argument, and an @mention still beats
+      // a rule that kept its exception — which is the default.
+      expect(needsYouFloor(row(), suppressed: false), isTrue);
+      expect(needsYouFloor(row()), isTrue);
+    });
+
+    test("a stranger's first approach gets no floor", () {
+      // A RANKING, not a drop: the thread stays in the inbox and the model
+      // still reads it. All this withholds is the free pass the envelope would
+      // otherwise have bought.
+      expect(needsYouFloor(row(), coldOutreach: true), isFalse);
+    });
+
+    test('a cold approach cannot raise anything either', () {
+      expect(
+        needsYouFloor(row(addressedMe: 0), coldOutreach: true),
+        isFalse,
+      );
+    });
+
+    test('the two switches are separate facts and both default off', () {
+      // One is the owner's standing word about a class of mail, the other is
+      // arithmetic on an address and a thread's history. A caller reading a
+      // single flag would eventually pass the wrong one.
+      expect(
+        needsYouFloor(row(), suppressed: false, coldOutreach: false),
+        isTrue,
+      );
+      expect(
+        needsYouFloor(row(), suppressed: true, coldOutreach: true),
+        isFalse,
+      );
+    });
+  });
+
+  group('isColdOutreach', () {
+    test('an outsider on a thread the owner has never written on', () {
+      expect(isColdOutreach(external: true, lastOutboundAt: null), isTrue);
+      expect(isColdOutreach(external: true, lastOutboundAt: ''), isTrue);
+      expect(isColdOutreach(external: true, lastOutboundAt: '   '), isTrue);
+    });
+
+    test('an outsider the owner has answered is not cold', () {
+      // The half that keeps this from being a rule about outsiders. Customers,
+      // counsel, candidates and suppliers are all external, and their mail is
+      // some of the most important the inbox carries.
+      expect(
+        isColdOutreach(
+          external: true,
+          lastOutboundAt: '2026-09-01T10:00:00Z',
+        ),
+        isFalse,
+      );
+    });
+
+    test('a colleague is never cold, written to or not', () {
+      expect(isColdOutreach(external: false, lastOutboundAt: null), isFalse);
+      expect(
+        isColdOutreach(
+          external: false,
+          lastOutboundAt: '2026-09-01T10:00:00Z',
+        ),
+        isFalse,
+      );
+    });
   });
 }

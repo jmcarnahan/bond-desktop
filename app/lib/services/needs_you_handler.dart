@@ -1,10 +1,13 @@
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../data/message_store.dart';
+import '../models/label_models.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
+import 'label_rules.dart';
 import 'attachments/attachment_digest_lines.dart';
 import 'ai_worker.dart';
+import 'external_sender.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'attention.dart';
@@ -28,6 +31,17 @@ import 'pipeline_progress.dart';
 /// ([needsYouFloor]) only ever RAISES it, and so does the model below it: what
 /// the floor is silent about is read by [NeedsYouTask], which is the only
 /// thing here that can write a 0.
+///
+/// A standing LABEL RULE is asked before either of them, and it is the one
+/// thing here that can write a 0 without a model call. That is not a hole in
+/// the raise-only rule; it is the owner overruling the judgement in advance —
+/// they looked at a thread of this kind, said "never on my rail again", and a
+/// pass that then asked a model whether they meant it would be reading the
+/// mail rather than the instruction. The floor still goes FIRST, because
+/// `unless_mentions_me` is on by default and an @mention outranks the rule; a
+/// rule written with the exception OFF suppresses the floor
+/// ([needsYouFloor]'s one parameter) and hides the message anyway, which is
+/// what turning it off means.
 ///
 /// The owner's `needs_you_rules` pref REPLACES the default body of the system
 /// prompt outright — an empty pref is the default body. It is read per item,
@@ -103,6 +117,31 @@ class NeedsYouHandler extends WorkHandler {
   /// tiles elsewhere mean.
   final Future<double> Function()? _threshold;
 
+  /// Names the KIND of one message row, for a classification-scoped label rule.
+  ///
+  /// A closure rather than an import because naming the kind of a message is the
+  /// triage side's job and a handler importing it would put two passes'
+  /// definitions of "automated notification" in one file. Null — the default,
+  /// and what every existing test gets — means a classification-scoped rule
+  /// matches nothing here; the sender, domain and subject scopes are unaffected.
+  final String? Function(Map<String, Object?> row)? _classify;
+
+  /// The owner's own mail domains, for [isExternalAddress].
+  ///
+  /// A closure asked ONCE per handler, cached in [_domains] on the same terms
+  /// [memoizedOwner] caches its answer: it comes from the signed-in account, it
+  /// only changes on sign-out, and sign-out disposes the provider that built this
+  /// handler. A read that THREW is forgotten rather than kept, so one hiccup does
+  /// not turn every external sender internal for the life of the session.
+  ///
+  /// Null — the default, and what every existing test gets — means the app does
+  /// not know whose inbox this is, so nobody reads as external and the floor
+  /// behaves exactly as it did before this parameter existed. [isExternalAddress]
+  /// keeps the same discipline for an empty set.
+  final Future<Set<String>> Function()? _ownerDomains;
+
+  Future<Set<String>>? _domains;
+
   NeedsYouHandler(
     this._store,
     this._client, {
@@ -110,6 +149,8 @@ class NeedsYouHandler extends WorkHandler {
     OwnerLookup? owner,
     PipelineProgress progress = const PipelineProgress.disabled(),
     Future<double> Function()? attentionThreshold,
+    this._classify,
+    this._ownerDomains,
   })  : _log = activityLog ?? ActivityLog.disabled(),
         _owner = memoizedOwner(owner ?? (() async => null)),
         _pipeline = progress,
@@ -167,8 +208,39 @@ class NeedsYouHandler extends WorkHandler {
     // of what it was. Stored shape, not Dart's: 0, 1 or null, where null is
     // "never judged" and differs from both.
     final previous = _int(row['needs_you_verdict']);
+    final key = row['conversation_key'] as String? ?? '';
 
-    if (needsYouFloor(row)) {
+    // Read per item, like the rules pref below and for the same reason: an owner
+    // who writes a rule mid-drain means it for the rest of the drain. It is one
+    // indexed read of a table with as many rows as they have written by hand.
+    //
+    // Only `hide_needs_you` is this pass's business. A `later` rule moves a
+    // thread's BUCKET, which is the attention sweep's column, and a `drop` rule
+    // is a gate on mail that never reaches this queue.
+    final rule = matchLabelRule(
+      await _store.listLabelRules(),
+      source: source,
+      senderAddress: row['from_address'] as String?,
+      senderName: row['from_name'] as String?,
+      subject: row['subject'] as String?,
+      classification: _classify?.call(row),
+    );
+    final hiding = rule != null && rule.disposition == LabelRule.hideNeedsYou;
+
+    // A stranger's first approach, read before the floor because it is one of
+    // the two things that can switch the floor off. Costs a query only for a
+    // sender who is actually external, and nothing at all while the app does not
+    // know whose inbox this is.
+    final cold = await _coldOutreach(source, row);
+
+    // The floor first, and suppressed only by a rule whose exception is OFF.
+    // With the exception ON — the default — a chat that named the owner beats
+    // their own standing rule, which is the whole of "unless it mentions me".
+    if (needsYouFloor(
+      row,
+      suppressed: hiding && !rule.unlessMentionsMe,
+      coldOutreach: cold,
+    )) {
       await _store.writeNeedsYouVerdict(
         source,
         id,
@@ -180,9 +252,35 @@ class NeedsYouHandler extends WorkHandler {
       return;
     }
 
-    // Below the floor, which settles nothing: the model reads the text.
+    if (hiding) {
+      await _store.writeNeedsYouVerdict(
+        source,
+        id,
+        verdict: false,
+        reason: rule.verdictReason,
+      );
+      // The label the rule files under, and the tally of what it has filed. The
+      // count follows the LINK rather than the message, so a thread this rule
+      // has already filed is hidden again without being counted twice — the same
+      // discipline `MessageStore.applyLabelRule` keeps, and it has to match,
+      // because undo takes back exactly the links that were counted.
+      if (key.isNotEmpty &&
+          await _store.applyLabelsByRule(
+            source,
+            key,
+            rule.labelId,
+            ruleId: rule.id,
+          )) {
+        await _store.bumpRuleHiddenCount(rule.id);
+      }
+      _log.note({'verdict': false, 'reason': 'label_rule'});
+      await _followChip(source, id, previous: previous, verdict: false);
+      return;
+    }
+
+    // Below the floor and under no rule, which settles nothing: the model reads
+    // the text.
     var message = Message.fromRow(row);
-    final key = row['conversation_key'] as String? ?? '';
     // Hydrated only when the row says there is something to hydrate —
     // `loadThread` does this for a whole thread; a single-row read has to ask.
     if (row['has_attachments'] == 1) {
@@ -238,7 +336,17 @@ class NeedsYouHandler extends WorkHandler {
     // everything it covers, so all this model can do is raise what the floor
     // left alone — and a low-confidence yes stays a no, because the verdict
     // buys an interruption and "possibly" is not grounds for one.
-    final verdict = result.needsYou && result.confidence != 'low';
+    //
+    // A cold approach ([isColdOutreach]) is held to the top of that scale rather
+    // than to the middle of it. Unsolicited outreach is WRITTEN to read as an
+    // ask — "confirm your interest", "please approve if you would like to
+    // proceed" — so `medium` on a stranger's first message is the model agreeing
+    // with the sales copy, and on the thread that prompted this it produced a
+    // drafted reply to a vendor nobody had heard of. A real ask from a real
+    // counterparty comes back `high`, which is what "can still qualify" means
+    // here: the bar moved, the door did not close.
+    final verdict = result.needsYou &&
+        (cold ? result.confidence == 'high' : result.confidence != 'low');
 
     // A throw from the call above — the model being down included — is left to
     // propagate. The verdict stays NULL, the row stays on the worklist, and
@@ -276,6 +384,43 @@ class NeedsYouHandler extends WorkHandler {
       source,
       id,
       threshold: await _thresholdOrDefault(),
+    );
+  }
+
+  /// Whether this row is a stranger's first approach — [isColdOutreach] over the
+  /// two facts this handler can reach.
+  ///
+  /// Ordered so the cheap half runs first. The address test is arithmetic on a
+  /// string the row already carries, and only a sender who passes it costs the
+  /// one indexed read of the conversation row that says whether the owner has
+  /// ever written here. Ordinary internal mail therefore adds no query at all,
+  /// which matters because this runs per item at K=3.
+  ///
+  /// Every way this cannot answer answers FALSE — no domains wired, a read that
+  /// threw, a row with no conversation key, a conversation row that has gone. The
+  /// reason is [isColdOutreach]'s: a true takes a message off the rail, so an
+  /// unknown must never round up into one.
+  Future<bool> _coldOutreach(String source, Map<String, Object?> row) async {
+    final read = _ownerDomains;
+    if (read == null) return false;
+    Set<String> domains;
+    try {
+      domains = await (_domains ??= read());
+    } catch (e) {
+      _domains = null;
+      debugPrint('needs_you: reading the owner domains failed: $e');
+      return false;
+    }
+    if (!isExternalAddress(row['from_address'] as String?, domains)) {
+      return false;
+    }
+    final key = row['conversation_key'] as String? ?? '';
+    if (key.isEmpty) return false;
+    final conversation = await _store.getConversationRow(source, key);
+    if (conversation == null) return false;
+    return isColdOutreach(
+      external: true,
+      lastOutboundAt: conversation['last_outbound_at'] as String?,
     );
   }
 

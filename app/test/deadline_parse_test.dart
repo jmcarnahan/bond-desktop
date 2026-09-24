@@ -145,6 +145,103 @@ void main() {
     });
   });
 
+  group('wording that counts from a start nobody named', () {
+    // A table, because the value of this rule is entirely in where the line
+    // sits: a counter word WITH a number is plan-relative, and the same word in
+    // ordinary English is not.
+    const planRelative = [
+      'Day 1',
+      'day one',
+      'by day 1',
+      'Day1',
+      'week 2',
+      'sprint 2',
+      'Sprint 3 review',
+      'phase 2',
+      'milestone 4',
+      'stage 1',
+      'step 3',
+      'iteration 2',
+      'cycle 5',
+      'T+5',
+      't + 10',
+    ];
+
+    const anchored = [
+      'day after tomorrow',
+      'week of May 5',
+      'tomorrow',
+      'Friday',
+      'next week',
+      'end of week',
+      'end of month',
+      'asap',
+      'before the 15th',
+      '2026-03-20',
+      'Q3',
+      'someday',
+      'every day',
+      'this week',
+    ];
+
+    test('the counter-word-plus-number shapes are recognised', () {
+      for (final text in planRelative) {
+        expect(isPlanRelativeDeadline(text), isTrue, reason: text);
+      }
+    });
+
+    test('ordinary wording is not, whatever words it reuses', () {
+      for (final text in anchored) {
+        expect(isPlanRelativeDeadline(text), isFalse, reason: text);
+      }
+    });
+
+    test('the parser already refuses them — it never invented a date', () {
+      // Worth pinning: the defect this rule answers was a chip showing `Day 1`,
+      // not a fabricated March the 1st. [showableDeadline] is about the WORDS.
+      for (final text in planRelative) {
+        expect(parse(text), isNull, reason: text);
+      }
+    });
+  });
+
+  group('what is worth putting on screen', () {
+    String? show(String? text) => showableDeadline(text, now: now);
+
+    test('plan-relative wording shows no chip at all', () {
+      // A chip that looks like a date and is not is still a chip a reader plans
+      // around.
+      expect(show('Day 1'), isNull);
+      expect(show('day one'), isNull);
+      expect(show('sprint 2'), isNull);
+      expect(show('T+5'), isNull);
+    });
+
+    test("the sender's own words survive verbatim", () {
+      // Nothing is normalised on the way out: the stored words are the only
+      // evidence anybody could check.
+      expect(show('Friday'), 'Friday');
+      expect(show('before the 15th'), 'before the 15th');
+      expect(show('end of month'), 'end of month');
+      expect(show('asap'), 'asap');
+      expect(show('2026-03-20'), '2026-03-20');
+    });
+
+    test('surrounding space goes, an empty deadline is no deadline', () {
+      expect(show('  Friday  '), 'Friday');
+      expect(show(''), isNull);
+      expect(show('   '), isNull);
+      expect(show(null), isNull);
+    });
+
+    test('a plan-relative phrase carrying a real date keeps its chip', () {
+      // The ticket telling the reader when day one is. [parseDeadline] is what
+      // notices, which is why this takes a clock.
+      expect(show('Day 1 (2026-10-05)'), 'Day 1 (2026-10-05)');
+      expect(show('day 1 — Friday'), 'day 1 — Friday');
+    });
+  });
+
   group('the two pills', () {
     test('tomorrow and next week, both at nine', () {
       expect(

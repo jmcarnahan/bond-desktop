@@ -354,6 +354,50 @@ void main() {
           reason: 'exactly one sync_mail row ever names the repair');
     });
 
+    test('the meeting regate runs once, refolds, and reports its count',
+        () async {
+      // A meeting response triaged before the gate existed: still kept, and
+      // its thread still asking for a reply nobody owes anyone.
+      await store.upsertMessage({
+        'source_message_id': 'accepted',
+        'conversation_key': 'resp',
+        'direction': 'inbound',
+        'from_address': 'colleague@example.com',
+        'subject': 'Accepted: Weekly sync',
+        'received_at': isoAgo(const Duration(hours: 20)),
+        'triage_status': 'triaged',
+        'source_meta_json': '{"meeting":"meetingAccepted"}',
+      });
+      await store.upsertConversation({
+        'conversation_key': 'resp',
+        'state': 'needs_reply',
+      });
+
+      await syncReaching(14).syncNow();
+
+      final row = (await store.getMessageRow('email', 'accepted'))!;
+      expect(row['triage_status'], 'skipped');
+      expect(row['gate_reason'], 'meeting_response');
+      // The refold is paired with the regate: a gated row falls out of
+      // "kept", so the thread stops asking.
+      expect((await conversation('resp'))['state'], 'waiting');
+      expect(await store.getPref('meeting_regate'), '1');
+      expect((await syncMailDetail())['regated_meeting_responses'], 1);
+
+      // Once, and the pref is what says so. A later pass omits the key
+      // rather than reporting a zero.
+      graph.requests.clear();
+      await syncReaching(14).syncNow();
+      final named = await db
+          .customSelect(
+            "SELECT COUNT(*) AS n FROM activity_events WHERE kind = 'sync_mail' "
+            "AND detail_json LIKE '%regated_meeting_responses%'",
+          )
+          .getSingle();
+      expect((named.data['n'] as num).toInt(), 1,
+          reason: 'exactly one sync_mail row ever names the regate');
+    });
+
     /// How many `sync_mail` rows name the gate repair at all — the twin of
     /// [reportedRefolds], and the honest question when a later pass is quiet
     /// enough to write no row of its own.

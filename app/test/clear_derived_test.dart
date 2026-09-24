@@ -428,7 +428,7 @@ void main() {
       expect(classified.length, classified.toSet().length);
       expect(MessageStore.derivedTables, hasLength(16));
       expect(MessageStore.syncedTables, hasLength(7));
-      expect(MessageStore.keptTables, hasLength(5));
+      expect(MessageStore.keptTables, hasLength(6));
     });
 
     test('name every retired clustering one-shot', () {

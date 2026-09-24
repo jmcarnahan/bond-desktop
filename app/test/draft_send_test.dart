@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/draft_request.dart';
@@ -9,6 +11,7 @@ import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/progress_bus.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/widgets/composer.dart' show SendCapability;
+import 'package:bond_inbox/widgets/linked_text.dart' show LinkRun;
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1068,6 +1071,131 @@ void main() {
         withRow(status: 'sent', optionsDismissed: 1).suggestable,
         isFalse,
       );
+    });
+
+    test('nor a message a machine wrote, whatever the row says', () {
+      // Asked FIRST, and it is not about the row at all: it is about who sent
+      // the thing being answered. A newsletter with no draft against it has
+      // nothing to lose by every rule above, and a reply to it is still work
+      // spent to produce something the owner could only delete.
+      expect(const DraftState(replySuppressed: true).suggestable, isFalse);
+      expect(
+        DraftState(draft: const {
+          'status': 'dismissed',
+          'body': '',
+          'options_dismissed': 0,
+        }, replySuppressed: true).suggestable,
+        isFalse,
+      );
+    });
+
+    test('and the default is a reply being offered', () {
+      // Every existing caller builds this state without the field.
+      expect(const DraftState().replySuppressed, isFalse);
+      expect(const DraftState().openIn, isNull);
+      expect(const DraftState().suggestable, isTrue);
+    });
+
+    test('copyWith carries the judgement, and can take the link back', () {
+      final run = LinkRun('View comment', Uri.parse('https://t.example.com/1'));
+      final judged =
+          const DraftState().copyWith(replySuppressed: true, openIn: run);
+
+      expect(judged.suggestable, isFalse);
+      expect(judged.openIn?.label, 'View comment');
+      // The `_unset` sentinel: an omitted `openIn` keeps what was there and an
+      // explicit null clears it, which is what a re-load of a thread whose
+      // newest message changed has to be able to say.
+      expect(judged.copyWith(pending: null).openIn, isNotNull);
+      expect(judged.copyWith(openIn: null).openIn, isNull);
+    });
+  });
+
+  /// The judgement `load()` makes about the newest inbound message, which is
+  /// what closes both **Suggest a reply** doorways on the inbox without either
+  /// of them knowing about it.
+  group('a thread whose newest message is automated', () {
+    /// One inbound message with the headers the detail fetch stores, and no
+    /// draft row: a suggestion is exactly what is being refused here.
+    Future<void> seedInbound({
+      Map<String, String>? headers,
+      String body = 'Amina left a comment.\n\n'
+          'View comment <https://tracker.example.com/t/41#c9>',
+    }) =>
+        store.upsertMessage({
+          'source': 'email',
+          'source_message_id': 'inbound-1',
+          'conversation_key': 'conv-1',
+          'direction': 'inbound',
+          'from_name': 'Tracker',
+          'from_address': 'notifications@tracker.example.com',
+          'received_at': '2026-08-29T10:00:00Z',
+          'body_text': body,
+          'source_meta_json':
+              headers == null ? null : jsonEncode({'headers': headers}),
+        });
+
+    test('the row says a machine wrote it, so no reply is offered', () async {
+      await seedInbound(headers: {'List-Id': 'news.tracker.example.com'});
+      final notifier = notifierFor();
+
+      await notifier.load();
+
+      expect(notifier.state.replySuppressed, isTrue);
+      expect(notifier.state.suggestable, isFalse);
+    });
+
+    test('and the way out is the first anchored link in its body', () async {
+      // The button's words come from the sender's own anchor text; this is
+      // where they are read.
+      await seedInbound(headers: {'Auto-Submitted': 'auto-generated'});
+      final notifier = notifierFor();
+
+      await notifier.load();
+
+      expect(notifier.state.openIn?.label, 'View comment');
+      expect(notifier.state.openIn?.target.toString(),
+          'https://tracker.example.com/t/41#c9');
+    });
+
+    test('a machine-written message with nothing to click offers nothing',
+        () async {
+      // Suppression and the way out are two separate facts: the reply is still
+      // refused, and the row simply has no second thing to offer.
+      await seedInbound(
+        headers: {'List-Id': 'news.tracker.example.com'},
+        body: 'Your weekly summary is ready.',
+      );
+      final notifier = notifierFor();
+
+      await notifier.load();
+
+      expect(notifier.state.replySuppressed, isTrue);
+      expect(notifier.state.openIn, isNull);
+    });
+
+    test('an ordinary message is judged no differently than before', () async {
+      // The control, and the shape every other test in this file loads: a
+      // person wrote it, so nothing here changes.
+      await seedDraft();
+      final notifier = notifierFor();
+
+      await notifier.load();
+
+      expect(notifier.state.replySuppressed, isFalse);
+      expect(notifier.state.openIn, isNull);
+    });
+
+    test('a thread with no inbound message at all is not suppressed',
+        () async {
+      // Nothing to read is not evidence of a machine, and a suppression on an
+      // unreadable thread would take the button away for the wrong reason.
+      final notifier = notifierFor(key: 'conv-empty');
+
+      await notifier.load();
+
+      expect(notifier.state.replySuppressed, isFalse);
+      expect(notifier.state.suggestable, isTrue);
     });
   });
 

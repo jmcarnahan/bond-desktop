@@ -4,6 +4,7 @@ import '../models/label_models.dart';
 import '../theme/tokens.dart';
 import 'inline_alert.dart';
 import 'label_chip.dart';
+import 'label_picker.dart' show LabelRuleOffer;
 import 'settings_section.dart';
 import 'settings_segments.dart';
 
@@ -18,8 +19,8 @@ import 'settings_segments.dart';
 ///
 /// Prop-only, reaching for no providers itself, like every other section here.
 /// Every write goes back out through a callback to whatever the host has wired
-/// `labelsProvider` up as, so a test drives the whole section with a list of
-/// labels and three closures.
+/// `labelsProvider` and `labelRulesProvider` up as, so a test drives the whole
+/// section with two lists and five closures.
 ///
 /// Nothing here touches `messages.label`, which is the model's verdict about one
 /// message and never a word the owner chose. See [Label].
@@ -56,6 +57,30 @@ class LabelsSection extends StatefulWidget {
   /// every row.
   final void Function(String id)? onDelete;
 
+  /// Every standing rule the owner has, in any order — grouped onto their labels
+  /// here by [LabelRule.labelId]. Empty, the default, is a section that reads
+  /// exactly as it did before rules existed.
+  ///
+  /// The whole list rather than a per-label lookup, because a rule whose label
+  /// has gone is a row this section must be able to NOT draw: the grouping is
+  /// the filter.
+  final List<LabelRule> rules;
+
+  /// Deletes one rule, by [LabelRule.id]. The label and the threads it has
+  /// already filed stay — removing a rule is "stop doing this from now on", not
+  /// "undo what you did". Null takes Remove off every rule row.
+  final void Function(String ruleId)? onDeleteRule;
+
+  /// Changes what one rule DOES, to one of [LabelRule]'s dispositions. Fired the
+  /// instant a segment is pressed, the discipline every segmented control on this
+  /// screen follows. Null takes the control off every rule row.
+  ///
+  /// The host is where the retro-apply lives: changing a disposition re-files the
+  /// threads the rule already matched, and this section knows nothing about
+  /// threads.
+  final void Function(String ruleId, String disposition)?
+      onRuleDispositionChanged;
+
   /// Whether the screen currently has this section open. The screen owns the
   /// open-set — see the [SettingsSection] doc — so this arrives as a prop.
   final bool expanded;
@@ -72,6 +97,9 @@ class LabelsSection extends StatefulWidget {
     this.onRename,
     this.onToneChanged,
     this.onDelete,
+    this.rules = const [],
+    this.onDeleteRule,
+    this.onRuleDispositionChanged,
   });
 
   static ValueKey<String> rowKeyFor(String id) => ValueKey('label-row-$id');
@@ -97,28 +125,101 @@ class LabelsSection extends StatefulWidget {
 
   static ValueKey<String> keepKeyFor(String id) => ValueKey('label-keep-$id');
 
-  /// `No labels yet` / `1 label` / `3 labels · 12 uses`.
+  /// One standing rule under its label, and its three controls. Keyed by the
+  /// RULE's id, not the label's: a label can carry more than one.
+  static ValueKey<String> ruleRowKeyFor(String ruleId) =>
+      ValueKey('label-rule-$ruleId');
+
+  static ValueKey<String> ruleChangeKeyFor(String ruleId) =>
+      ValueKey('label-rule-change-$ruleId');
+
+  static ValueKey<String> ruleDispositionKeyFor(String ruleId) =>
+      ValueKey('label-rule-disposition-$ruleId');
+
+  static ValueKey<String> ruleRemoveKeyFor(String ruleId) =>
+      ValueKey('label-rule-remove-$ruleId');
+
+  static ValueKey<String> ruleConfirmRemoveKeyFor(String ruleId) =>
+      ValueKey('label-rule-remove-confirm-$ruleId');
+
+  static ValueKey<String> ruleKeepKeyFor(String ruleId) =>
+      ValueKey('label-rule-keep-$ruleId');
+
+  /// `No labels yet` / `1 label` / `3 labels · 12 uses` / `3 labels · 12 uses ·
+  /// 1 rule`.
   ///
   /// The use count joins only once something has been filed: a vocabulary
   /// nobody has applied yet would otherwise read `3 labels · 0 uses`, which
-  /// says the same thing twice and one of them gloomily.
+  /// says the same thing twice and one of them gloomily. The rule count joins on
+  /// the same rule, and it is on the collapsed line at all because a standing
+  /// rule acts on mail the owner never sees — the count is the one place a
+  /// closed section can admit that.
   ///
   /// Static on the widget rather than on its state, because the collapsed line
   /// is pinned by `settings_screen_test.dart` and by the table in
   /// `docs/settings.md`, and a test has to be able to ask for it without
   /// building a section.
-  static String summaryOf(List<Label> labels) {
+  static String summaryOf(List<Label> labels, {int rules = 0}) {
     if (labels.isEmpty) return 'No labels yet';
     final uses = labels.fold<int>(0, (sum, label) => sum + label.useCount);
-    final count = plural(labels.length, 'label');
-    return uses == 0 ? count : '$count · ${plural(uses, 'use')}';
+    final parts = [
+      plural(labels.length, 'label'),
+      if (uses > 0) plural(uses, 'use'),
+      if (rules > 0) plural(rules, 'rule'),
+    ];
+    return parts.join(' · ');
   }
 
   static String plural(int n, String noun) => n == 1 ? '1 $noun' : '$n ${noun}s';
 
+  /// One rule as a sentence a reader can judge: what it does, what it is about,
+  /// and what it has done so far.
+  ///
+  /// `Hide from Needs You · this sender · hid 41 threads`. Three facts and two
+  /// separators, because a rule the owner cannot audit is a rule they will turn
+  /// the feature off over. The scope words come from [LabelRuleOffer], which is
+  /// the same sentence the picker offered when this rule was written — one
+  /// spelling, so the offer and the record cannot read differently.
+  static String ruleWords(LabelRule rule) {
+    final scope =
+        LabelRuleOffer(scopeKind: rule.scopeKind, scopeValue: rule.scopeValue)
+            .words;
+    return '${dispositionWords(rule.disposition)} · $scope · '
+        '${filedWords(rule)}';
+  }
+
+  /// What a disposition DOES, in the words the rest of the app uses for the same
+  /// three places mail can go. An unknown disposition — a rule written by a later
+  /// build — reads as itself rather than as nothing.
+  static String dispositionWords(String disposition) => switch (disposition) {
+        LabelRule.hideNeedsYou => 'Hide from Needs You',
+        LabelRule.sendToLater => 'Send to Later',
+        LabelRule.dropAtGate => 'Drop before reading',
+        _ => disposition.replaceAll('_', ' '),
+      };
+
+  /// What the rule has done, in the past tense of its own disposition. A rule
+  /// that has not fired yet says so rather than reading `hid 0 threads`.
+  static String filedWords(LabelRule rule) {
+    if (rule.hiddenCount == 0) return 'nothing yet';
+    final threads = plural(rule.hiddenCount, 'thread');
+    return switch (rule.disposition) {
+      LabelRule.sendToLater => 'moved $threads',
+      LabelRule.dropAtGate => 'dropped $threads',
+      _ => 'hid $threads',
+    };
+  }
+
   @override
   State<LabelsSection> createState() => _LabelsSectionState();
 }
+
+/// The dispositions this build can draw a segment for.
+const Set<String> _knownDispositions = {
+  LabelRule.hideNeedsYou,
+  LabelRule.sendToLater,
+  LabelRule.dropAtGate,
+};
 
 class _LabelsSectionState extends State<LabelsSection> {
   /// Which row has its name field open, by label id — never an index, which
@@ -138,6 +239,31 @@ class _LabelsSectionState extends State<LabelsSection> {
   /// read, and a second press would be a race over the same row.
   bool _saving = false;
 
+  /// Which rule has its disposition control open, and which is asking a second
+  /// time about Remove — by rule id, for [_editing]'s reason.
+  String? _changingRule;
+  String? _confirmingRule;
+
+  /// The rules this section will draw, under the label each belongs to.
+  ///
+  /// A rule whose label is not in the list is dropped rather than drawn under a
+  /// heading of its own: a rule with no word on it is a row the owner cannot act
+  /// on, and the label list is the section's whole subject.
+  Map<String, List<LabelRule>> get _rulesByLabel {
+    final byLabel = <String, List<LabelRule>>{};
+    final known = {for (final label in widget.labels) label.id};
+    for (final rule in widget.rules) {
+      if (!known.contains(rule.labelId)) continue;
+      byLabel.putIfAbsent(rule.labelId, () => []).add(rule);
+    }
+    // Oldest first, so a second rule on one label appears UNDER the one that was
+    // there yesterday instead of moving it.
+    for (final rules in byLabel.values) {
+      rules.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    }
+    return byLabel;
+  }
+
   @override
   void dispose() {
     _name.dispose();
@@ -154,12 +280,20 @@ class _LabelsSectionState extends State<LabelsSection> {
         id != null && !widget.labels.any((label) => label.id == id);
     if (gone(_editing)) _editing = null;
     if (gone(_confirming)) _confirming = null;
+    // The same rule for rules: one removed here, or by the label going with it.
+    bool ruleGone(String? id) =>
+        id != null && !widget.rules.any((rule) => rule.id == id);
+    if (ruleGone(_changingRule)) _changingRule = null;
+    if (ruleGone(_confirmingRule)) _confirmingRule = null;
   }
 
   @override
   Widget build(BuildContext context) => SettingsSection(
         title: LabelsSection.title,
-        summary: LabelsSection.summaryOf(widget.labels),
+        summary: LabelsSection.summaryOf(
+          widget.labels,
+          rules: _rulesByLabel.values.fold(0, (n, rules) => n + rules.length),
+        ),
         expanded: widget.expanded,
         onToggle: widget.onToggle,
         body: _body(),
@@ -198,12 +332,13 @@ class _LabelsSectionState extends State<LabelsSection> {
             style: BondType.caption.copyWith(color: BondColors.inkMuted),
           ),
         ],
-        for (final label in widget.labels) _row(label),
+        for (final label in widget.labels)
+          _row(label, _rulesByLabel[label.id] ?? const []),
       ],
     );
   }
 
-  Widget _row(Label label) {
+  Widget _row(Label label, List<LabelRule> rules) {
     final editing = _editing == label.id;
     return Padding(
       key: LabelsSection.rowKeyFor(label.id),
@@ -234,8 +369,119 @@ class _LabelsSectionState extends State<LabelsSection> {
           if (editing) _renameField(label),
           const SizedBox(height: BondSpacing.s4),
           _controls(label, editing),
+          for (final rule in rules) _ruleRow(rule),
         ],
       ),
+    );
+  }
+
+  /// One standing rule under the label it files under, indented so it reads as
+  /// something the label DOES rather than as another label.
+  ///
+  /// The sentence is [LabelsSection.ruleWords] and the two answers are the two
+  /// things a reader can want: change what it does, or stop it. Nothing here
+  /// edits the SCOPE — a rule about a different sender is a different rule, and
+  /// the place to write one is the thread it is about, where the reader can see
+  /// what they are deciding from.
+  Widget _ruleRow(LabelRule rule) {
+    // A disposition this build has no segment for — a rule a later one wrote —
+    // reads in words and cannot be edited here: `SegmentedButton` asserts on a
+    // selected value that is not among its segments, so the control is absent
+    // rather than fatal. Remove still works, which is the way out.
+    final onChanged = _knownDispositions.contains(rule.disposition)
+        ? widget.onRuleDispositionChanged
+        : null;
+    final changing = _changingRule == rule.id;
+    return Padding(
+      key: LabelsSection.ruleRowKeyFor(rule.id),
+      padding: const EdgeInsets.only(left: BondSpacing.s16, top: BondSpacing.s8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            LabelsSection.ruleWords(rule),
+            style: BondType.caption.copyWith(color: BondColors.inkSecondary),
+          ),
+          Wrap(
+            spacing: BondSpacing.s12,
+            runSpacing: BondSpacing.s4,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (onChanged != null)
+                TextButton(
+                  key: LabelsSection.ruleChangeKeyFor(rule.id),
+                  onPressed: () => setState(
+                    () => _changingRule = changing ? null : rule.id,
+                  ),
+                  child: Text(changing ? 'Done' : 'Change'),
+                ),
+              if (widget.onDeleteRule != null) _ruleRemoveControls(rule),
+            ],
+          ),
+          if (onChanged != null && changing)
+            SettingsSegments<String>(
+              key: LabelsSection.ruleDispositionKeyFor(rule.id),
+              segments: const [
+                (value: LabelRule.hideNeedsYou, label: 'Hide'),
+                (value: LabelRule.sendToLater, label: 'Later'),
+                (value: LabelRule.dropAtGate, label: 'Drop'),
+              ],
+              selected: rule.disposition,
+              onChanged: (disposition) {
+                setState(() => _changingRule = null);
+                onChanged(rule.id, disposition);
+              },
+              caption: 'Drop is the only one that costs a message its reading; '
+                  'the other two move a thread the app has already read.',
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// The label row's own two-tap Remove, for a rule.
+  Widget _ruleRemoveControls(LabelRule rule) {
+    final onDeleteRule = widget.onDeleteRule!;
+    if (_confirmingRule != rule.id) {
+      return TextButton(
+        key: LabelsSection.ruleRemoveKeyFor(rule.id),
+        onPressed: () => setState(() => _confirmingRule = rule.id),
+        child: const Text('Remove rule'),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Wrap(
+          spacing: BondSpacing.s8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            TextButton(
+              key: LabelsSection.ruleConfirmRemoveKeyFor(rule.id),
+              style: TextButton.styleFrom(foregroundColor: BondColors.error),
+              onPressed: () {
+                setState(() {
+                  _confirmingRule = null;
+                  if (_changingRule == rule.id) _changingRule = null;
+                });
+                onDeleteRule(rule.id);
+              },
+              child: const Text('Stop this rule'),
+            ),
+            TextButton(
+              key: LabelsSection.ruleKeepKeyFor(rule.id),
+              onPressed: () => setState(() => _confirmingRule = null),
+              child: const Text('Keep'),
+            ),
+          ],
+        ),
+        Text(
+          'Stops it filing anything new. The word stays, and so do the threads '
+          'it has already filed.',
+          style: BondType.caption.copyWith(color: BondColors.inkMuted),
+        ),
+      ],
     );
   }
 

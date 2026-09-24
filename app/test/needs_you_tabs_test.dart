@@ -94,6 +94,25 @@ void main() {
     expect(_idsOf(needsYouTabRows(NeedsYouTab.deadlines, rows)), ['dated']);
   });
 
+  test('Deadlines refuses plan-relative wording that names no date', () {
+    // "Day 1" is day one of somebody's plan, not a date the app can stand
+    // behind — a row seated on the Deadlines tab over it would print a
+    // caption that reads like a promise. A phrase that ALSO carries a real
+    // date keeps its seat: the ticket said when day one is.
+    final rows = [
+      _conv(id: 'plan', deadline: 'Day 1'),
+      _conv(id: 'sprint', deadline: 'sprint 2'),
+      _conv(id: 'anchored', deadline: 'Day 1 (2026-10-05)'),
+      _conv(id: 'dated', deadline: 'by Friday'),
+    ];
+
+    expect(
+      _idsOf(needsYouTabRows(NeedsYouTab.deadlines, rows,
+          now: DateTime(2026, 9, 24))),
+      ['anchored', 'dated'],
+    );
+  });
+
   test('Suggested drafts keeps the rows the model has written for', () {
     final rows = [
       _conv(id: 'drafted', pendingDrafts: 1),

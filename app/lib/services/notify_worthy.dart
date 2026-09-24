@@ -1,3 +1,5 @@
+import 'deadline_parse.dart' show showableDeadline;
+
 /// Whether this message is worth interrupting for: a message-level ask AND a
 /// thread-level volume, never one of the two.
 ///
@@ -46,13 +48,19 @@
 /// into it for the newest stage. NULL and 0 add nothing, per the `== 1` rule
 /// above: never judged is not a yes, and judged no is not a veto either — the
 /// other asks stand on their own.
-bool notifyWorthy(Map<String, Object?> row, {required double threshold}) {
+bool notifyWorthy(Map<String, Object?> row,
+    {required double threshold, DateTime? now}) {
   final ask = _int(row['needs_you_verdict']) == 1 ||
       _int(row['reply_expected']) == 1 ||
       _int(row['needs_action']) == 1 ||
       row['urgency'] == 'urgent' ||
       row['urgency'] == 'high' ||
-      (row['deadline'] as String? ?? '').isNotEmpty ||
+      // Through [showableDeadline]: an interruption is the costliest surface
+      // a deadline can buy, and plan-relative wording ("Day 1") has not
+      // earned it. [now] is injectable for the tests; every live caller
+      // means the wall clock.
+      showableDeadline(row['deadline'] as String?, now: now ?? DateTime.now())
+              != null ||
       (ownsCta(row) && (row['cta_text'] as String? ?? '').isNotEmpty);
   final score = (row['attention_score'] as num?)?.toDouble() ?? 0;
   return ask &&

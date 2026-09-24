@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:bond_inbox/data/database.dart';
+// `show BondDatabase`: drift generates a row class named LabelRule from the
+// table, and the rule cases below mean the app's own model.
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/attachment_models.dart';
+import 'package:bond_inbox/models/label_models.dart' show LabelRule;
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -100,6 +103,7 @@ void main() {
     String body = 'Legal wants a look at the DPA.',
     String receivedAt = '2026-08-29T10:00:00Z',
     int hasAttachments = 0,
+    String fromAddress = 'teams:u-1',
   }) async {
     await store.upsertMessage({
       'has_attachments': hasAttachments,
@@ -108,7 +112,7 @@ void main() {
       'conversation_key': 'chat-1',
       'direction': direction,
       'from_name': 'Dana',
-      'from_address': 'teams:u-1',
+      'from_address': fromAddress,
       'to_json': '["lo@x.com"]',
       'received_at': receivedAt,
       'body_text': body,
@@ -339,6 +343,339 @@ void main() {
 
       expect(llm.calls.length, 1);
       expect((await verdictOf('teams', 't1'))['reason'], isNot('teams_direct'));
+    });
+  });
+
+  group("a stranger's first approach", () {
+    // The owner works at `northwind.example.com` throughout — one fictional
+    // domain, which is all the app can derive from a signed-in account today.
+    // Every other domain below is somebody else's.
+    Future<Set<String>> owned() async => {'northwind.example.com'};
+
+    /// Mail from [fromAddress], with the thread row this rule reads the owner's
+    /// own history off. `lastOutboundAt` null is a thread the owner has never
+    /// written on; [thread] false writes no conversation row at all.
+    Future<void> seedMail({
+      String fromAddress = 'sales@vendor.example.net',
+      String? lastOutboundAt,
+      bool thread = true,
+    }) async {
+      await seed(
+        source: 'email',
+        id: 'm1',
+        fromAddress: fromAddress,
+        body: 'Confirm your interest and we will send the proposal over.',
+      );
+      if (thread) {
+        await store.upsertConversation({
+          'source': 'email',
+          'conversation_key': 'chat-1',
+          'subject': 'An introduction',
+          'last_inbound_at': '2026-08-29T10:00:00Z',
+          'last_outbound_at': lastOutboundAt,
+        });
+      }
+    }
+
+    /// The model agreeing with the sales copy: a yes it is not sure about. This
+    /// is the answer the whole rule turns on — `high` and `low` already mean the
+    /// same thing on every sender.
+    const hedged = {
+      'evidence': 'It asks the reader to confirm their interest.',
+      'needs_you': true,
+      'confidence': 'medium',
+    };
+
+    test('a hedged yes from an outsider nobody has written to is a no',
+        () async {
+      await seedMail();
+      final llm = scriptedLlm(hedged);
+
+      await runOne(
+        NeedsYouHandler(store, llm, ownerDomains: owned),
+        source: 'email',
+        id: 'm1',
+      );
+
+      // A RANKING, not a drop: the model was still asked, the verdict is still
+      // written, and the reason is still the model's own sentence — the message
+      // sits in the inbox like any other. All it loses is the rail.
+      expect(llm.calls.length, 1);
+      expect(await verdictOf('email', 'm1'), {
+        'verdict': 0,
+        'reason': 'It asks the reader to confirm their interest.',
+      });
+    });
+
+    test('the same hedged yes from a colleague still raises', () async {
+      // The half that keeps this from being a bar on everybody: internal mail
+      // is judged on exactly the scale it was before.
+      await seedMail(fromAddress: 'sam@northwind.example.com');
+      final llm = scriptedLlm(hedged);
+
+      await runOne(
+        NeedsYouHandler(store, llm, ownerDomains: owned),
+        source: 'email',
+        id: 'm1',
+      );
+
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+    });
+
+    test('an outsider the owner HAS written to is judged like anyone else',
+        () async {
+      // Customers, counsel, candidates and suppliers are all external, and one
+      // reply from the owner is the evidence that this correspondent is theirs.
+      await seedMail(lastOutboundAt: '2026-08-20T09:00:00Z');
+      final llm = scriptedLlm(hedged);
+
+      await runOne(
+        NeedsYouHandler(store, llm, ownerDomains: owned),
+        source: 'email',
+        id: 'm1',
+      );
+
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+    });
+
+    test('a confident yes from a stranger still lands on the rail', () async {
+      // The bar moved; the door did not close. A real ask from a real
+      // counterparty comes back `high`.
+      await seedMail();
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(
+        NeedsYouHandler(store, llm, ownerDomains: owned),
+        source: 'email',
+        id: 'm1',
+      );
+
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+    });
+
+    test('with no owner domains wired nothing reads as cold', () async {
+      // The default, and what every other test in this file gets: an app that
+      // cannot say whose inbox this is judges on the old scale.
+      await seedMail();
+      final llm = scriptedLlm(hedged);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+    });
+
+    test('a domain read that throws is forgotten, not believed', () async {
+      // A keychain hiccup must not quietly move the bar for the session, and it
+      // must not cost the item either.
+      await seedMail();
+      final llm = scriptedLlm(hedged);
+
+      await runOne(
+        NeedsYouHandler(
+          store,
+          llm,
+          ownerDomains: () async => throw StateError('no account'),
+        ),
+        source: 'email',
+        id: 'm1',
+      );
+
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+    });
+
+    test('mail with no thread row yet is not a stranger', () async {
+      // The sweep writes the conversation row, and a message judged before it
+      // lands has no history to read. Unknown answers false, like every other
+      // unknown on this path.
+      await seedMail(thread: false);
+      final llm = scriptedLlm(hedged);
+
+      await runOne(
+        NeedsYouHandler(store, llm, ownerDomains: owned),
+        source: 'email',
+        id: 'm1',
+      );
+
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+    });
+
+    test('a chat that named the owner is untouched by any of this', () async {
+      // The floor is Teams-only and a Teams sender is `teams:<id>`, which names
+      // no domain at all — so no chat can ever read as a stranger's approach,
+      // however the owner's domains are set. This is the regression the rule
+      // most needs pinned: an @mention still costs no model call.
+      await seed();
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm, ownerDomains: owned));
+
+      expect(llm.calls.length, 0);
+      expect(await verdictOf('teams', 't1'),
+          {'verdict': 1, 'reason': 'teams_direct'});
+    });
+  });
+
+  group('standing label rules', () {
+    /// A rule over the seeded chat's sender, or over mail's, with the word it
+    /// files under created alongside it.
+    Future<LabelRule> ruleOn(
+      String scopeValue, {
+      String name = 'Not for me',
+      String kind = LabelRule.scopeSender,
+      String disposition = LabelRule.hideNeedsYou,
+      bool unlessMentionsMe = true,
+    }) async {
+      final label = await store.createLabel(name);
+      return store.createLabelRule(
+        labelId: label.id,
+        scopeKind: kind,
+        scopeValue: scopeValue,
+        disposition: disposition,
+        unlessMentionsMe: unlessMentionsMe,
+      );
+    }
+
+    Future<List<Map<String, Object?>>> links() async => [
+          for (final row in await db
+              .customSelect('SELECT * FROM conversation_labels')
+              .get())
+            row.data,
+        ];
+
+    test('a rule writes the no, and the model is never asked', () async {
+      // The one thing in this handler that can write a 0 without a model call.
+      // It is not a hole in the raise-only rule: the owner overruled the
+      // judgement in advance, and asking a model whether they meant it would be
+      // reading the mail rather than the instruction.
+      await seed(source: 'email', id: 'm1', addressedMe: 1);
+      final rule = await ruleOn('teams:u-1');
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(llm.calls.length, 0);
+      expect(await verdictOf('email', 'm1'),
+          {'verdict': 0, 'reason': 'label_rule:Not for me'});
+      final link = (await links()).single;
+      expect(link['applied_by'], 'rule');
+      expect(link['rule_id'], rule.id);
+      expect((await store.getLabelRule(rule.id))!.hiddenCount, 1);
+    });
+
+    test('a second message in the same thread is hidden without recounting',
+        () async {
+      await seed(source: 'email', id: 'm1');
+      await seed(source: 'email', id: 'm2');
+      final rule = await ruleOn('teams:u-1');
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm2');
+
+      // The count follows the LINK, not the message, because undo takes back
+      // exactly the links that were counted.
+      expect(await links(), hasLength(1));
+      expect((await store.getLabelRule(rule.id))!.hiddenCount, 1);
+      expect((await verdictOf('email', 'm2'))['verdict'], 0);
+    });
+
+    test('a chat that named the owner beats the rule', () async {
+      await seed();
+      await ruleOn('teams:u-1');
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm));
+
+      // `unless_mentions_me` is on by default, and the floor runs first: an
+      // @mention outranks the owner's own standing rule.
+      expect(await verdictOf('teams', 't1'),
+          {'verdict': 1, 'reason': 'teams_direct'});
+      expect(await links(), isEmpty);
+      expect(llm.calls.length, 0);
+    });
+
+    test('with the exception off, the same chat is hidden anyway', () async {
+      await seed();
+      await ruleOn('teams:u-1', unlessMentionsMe: false);
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm));
+
+      expect((await verdictOf('teams', 't1'))['verdict'], 0);
+      expect(llm.calls.length, 0);
+    });
+
+    test('a later rule is not this pass business', () async {
+      await seed(source: 'email', id: 'm1', addressedMe: 0);
+      await ruleOn(
+        'teams:u-1',
+        name: 'Later',
+        disposition: LabelRule.sendToLater,
+      );
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      // A `later` rule moves a thread's BUCKET, which is the attention sweep's
+      // column; it says nothing about whether the message needs an answer.
+      expect(llm.calls.length, 1);
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+      expect(await links(), isEmpty);
+    });
+
+    test('a rule about somebody else leaves the judgement alone', () async {
+      await seed(source: 'email', id: 'm1', addressedMe: 0);
+      await ruleOn('teams:someone-else');
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(llm.calls.length, 1);
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+    });
+
+    test('a classification rule sleeps until a classifier is wired', () async {
+      await seed(source: 'email', id: 'm1', addressedMe: 0);
+      await ruleOn(
+        'meeting_response',
+        name: 'Meeting response',
+        kind: LabelRule.scopeClassification,
+      );
+
+      final unwired = scriptedLlm(needsYouYes);
+      await runOne(NeedsYouHandler(store, unwired), source: 'email', id: 'm1');
+      expect(unwired.calls.length, 1, reason: 'no classifier, no match');
+
+      final wired = scriptedLlm(needsYouYes);
+      await runOne(
+        NeedsYouHandler(
+          store,
+          wired,
+          classify: (row) =>
+              row['from_address'] == 'teams:u-1' ? 'meeting_response' : null,
+        ),
+        source: 'email',
+        id: 'm1',
+      );
+      expect(wired.calls.length, 0);
+      expect((await verdictOf('email', 'm1'))['verdict'], 0);
+    });
+
+    test('a rule written mid-drain reaches the rest of the drain', () async {
+      await seed(source: 'email', id: 'm1', addressedMe: 0);
+      await seed(source: 'email', id: 'm2', addressedMe: 0);
+      final llm = scriptedLlm(needsYouYes);
+      final handler = NeedsYouHandler(store, llm);
+
+      await runOne(handler, source: 'email', id: 'm1');
+      await ruleOn('teams:u-1');
+      await runOne(handler, source: 'email', id: 'm2');
+
+      // Read per item, like the rules pref: someone who writes a rule while the
+      // drain is running means it for the rest of the drain.
+      expect(llm.calls.length, 1);
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+      expect((await verdictOf('email', 'm2'))['verdict'], 0);
     });
   });
 

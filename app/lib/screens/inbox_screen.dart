@@ -26,6 +26,7 @@ import '../providers/draft_provider.dart';
 import '../providers/drafts_inbox_provider.dart';
 import '../providers/files_provider.dart';
 import '../providers/home_provider.dart';
+import '../providers/label_rules_provider.dart';
 import '../providers/labels_provider.dart';
 import '../providers/navigation_provider.dart';
 import '../providers/person_facts_provider.dart';
@@ -37,6 +38,8 @@ import '../providers/storylines_provider.dart';
 import '../providers/why_provider.dart';
 import '../services/ai_workers.dart' show pumpTriageThenWorkersQuietly;
 import '../services/attachments/attachment_bytes.dart';
+import '../services/classification.dart' show classificationOf;
+import '../services/rule_suggestions.dart';
 import '../services/attachments/file_dialogs.dart';
 import '../services/attachments/html_open.dart';
 import '../services/attachments/xlsx_reader.dart';
@@ -518,6 +521,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// package, and this is the request they answer.
   ({String source, String key, bool dismissAfter})? _labelPickerRequest;
 
+  /// The one rule the app is currently offering to write, or null. Computed
+  /// from the owner's own dismissal history through [suggestRules] — best
+  /// evidence first and ONE at a time, because a stack of offers is a chore
+  /// and one is a question. Re-asked behind every triage action, since those
+  /// actions are exactly the evidence it feeds on.
+  RuleSuggestion? _ruleSuggestion;
+
   /// The label lens on the Needs You pile, or null for no lens. Session state
   /// like [_needsYouTab], not a preference: a filter the reader put on to work
   /// through one pile does not belong on tomorrow's inbox.
@@ -719,6 +729,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // row chips, the filter pills and Find's autocomplete all want it from
       // the first frame that draws them.
       unawaited(ref.read(labelsProvider.notifier).load());
+      // The standing rules ride with it — the picker's offer line and the
+      // suggestion row both read the same table — and the first suggestion
+      // is computed once the rules are in hand.
+      unawaited(ref
+          .read(labelRulesProvider.notifier)
+          .load()
+          .then((_) => _loadRuleSuggestion()));
     });
     // LAST of the three, deliberately: this is a keychain read whose only
     // consumers are the People grouping and one avatar, and queueing it ahead
@@ -1908,7 +1925,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   static String _threads(int n) => n == 1 ? '1 thread' : '$n threads';
 
   /// The sender of the newest inbound message with an address, or null.
-  static String? _newestInboundSender(List<Message> messages) {
+  static String? _newestInboundSender(List<Message> messages) =>
+      _newestInboundMessage(messages)?.fromAddress;
+
+  /// The newest inbound message that names its sender, or null. The row every
+  /// per-thread rule is keyed on: whoever spoke last is who the thread is
+  /// "from" for a reader deciding what to do about the next one like it.
+  static Message? _newestInboundMessage(List<Message> messages) {
     Message? newest;
     for (final message in messages) {
       if (message.outbound) continue;
@@ -1918,7 +1941,185 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         newest = message;
       }
     }
-    return newest?.fromAddress;
+    return newest;
+  }
+
+  /// The scopes a standing rule about this thread could take, pre-filled from
+  /// the thread itself: its sender, that sender's domain, the kind of mail it
+  /// is, and its subject shape. Built through [RuleEvidence] so the values
+  /// offered here are folded exactly as `label_rules` stores them and as the
+  /// suggestion engine derives them — three spellings of "this sender" would
+  /// be three rules that miss each other.
+  ///
+  /// The transcript is the best source (headers make the classification
+  /// derivable) and the loaded row is the fallback, so a picker opened from a
+  /// list row whose thread was never fetched still offers the sender and the
+  /// subject. Called lazily — only for a row whose picker is open.
+  List<LabelRuleOffer> _ruleOffersFor(({String source, String key}) target) {
+    final thread = ref.read(threadProvider(
+      (source: target.source, conversationKey: target.key),
+    ));
+    final messages =
+        thread is ThreadLoaded ? thread.messages : const <Message>[];
+    final newest = _newestInboundMessage(messages);
+    final row = _loadedRow(target);
+    final evidence = RuleEvidence(
+      source: target.source,
+      conversationKey: target.key,
+      senderAddress: (newest?.fromAddress ?? row?.primaryEmail ?? '')
+          .trim()
+          .toLowerCase(),
+      subject: (newest?.subject ?? row?.subject ?? '').trim(),
+      classification: newest == null ? null : classificationOf(newest),
+    );
+    final kind = evidence.classification ?? '';
+    final prefix = evidence.subjectPrefix;
+    return [
+      if (evidence.senderAddress.isNotEmpty)
+        LabelRuleOffer(
+          scopeKind: LabelRule.scopeSender,
+          scopeValue: evidence.senderAddress,
+        ),
+      if (evidence.senderDomain.isNotEmpty)
+        LabelRuleOffer(
+          scopeKind: LabelRule.scopeDomain,
+          scopeValue: evidence.senderDomain,
+        ),
+      if (kind.isNotEmpty)
+        LabelRuleOffer(
+          scopeKind: LabelRule.scopeClassification,
+          scopeValue: kind,
+        ),
+      if (prefix != null)
+        LabelRuleOffer(
+          scopeKind: LabelRule.scopeSubject,
+          scopeValue: prefix,
+        ),
+    ];
+  }
+
+  /// Writes one standing rule and says what it did, with the way back on the
+  /// bar. `hide_needs_you` is the disposition every inline creation gets —
+  /// the gentlest of the three, and Settings is where an owner hardens it —
+  /// and creation retro-applies, so the thread the offer was made on leaves
+  /// the pile through the rule itself.
+  Future<void> _writeLabelRule(
+    Label label,
+    String scopeKind,
+    String scopeValue,
+  ) async {
+    final notifier = ref.read(labelRulesProvider.notifier);
+    final moved = await notifier.createRule(
+      labelId: label.id,
+      scopeKind: scopeKind,
+      scopeValue: scopeValue,
+      disposition: LabelRule.hideNeedsYou,
+    );
+    if (!mounted) return;
+    if (moved == null) {
+      _toast(ref.read(labelRulesProvider).error ??
+          "Couldn't save that rule just now.");
+      return;
+    }
+    // Found by its unique scope, because createRule answers with a count:
+    // undo is `undoRule`, which deletes the rule and takes back only what it
+    // filed.
+    final rule = ref
+        .read(labelRulesProvider)
+        .rules
+        .where((r) => r.scopeKind == scopeKind && r.scopeValue == scopeValue)
+        .firstOrNull;
+    _toast(
+      'Rule saved · ${_threads(moved)} moved.',
+      onUndo:
+          rule == null ? null : () => unawaited(notifier.undoRule(rule.id)),
+    );
+    unawaited(_loadRuleSuggestion());
+  }
+
+  /// A scope chip pressed on the picker's offer line. The rule is the answer
+  /// to the picker's question — its retroactive apply moves this thread too —
+  /// so the strip closes and the keys work again, exactly as they do after an
+  /// apply.
+  Future<void> _createRuleFromOffer(Label label, LabelRuleOffer offer) async {
+    _clearLabelPickerRequest();
+    _takeTriageFocus();
+    await _writeLabelRule(label, offer.scopeKind, offer.scopeValue);
+  }
+
+  /// Recomputes the one rule the list header may offer (12d).
+  ///
+  /// Four indexed reads with the store's own caps (400 threads each way), so
+  /// it is cheap enough to re-ask behind every triage action — which are
+  /// exactly the presses the evidence is made of. Everything is read fresh
+  /// rather than cached, because a suggestion computed off stale history
+  /// would offer a rule about mail the owner just changed their mind on.
+  Future<void> _loadRuleSuggestion() async {
+    final store = ref.read(messageStoreProvider);
+    final dismissed = await store.dismissedThreadHistory();
+    final answered = await store.answeredThreadHistory();
+    final suppressed = await store.suppressedRuleSuggestions();
+    final settled = await store.allSenderPrefs();
+    if (!mounted) return;
+    final suggestions = suggestRules(
+      dismissed: [for (final row in dismissed) RuleEvidence.fromRow(row)],
+      kept: [for (final row in answered) RuleEvidence.fromRow(row)],
+      existing: ref.read(labelRulesProvider).rules,
+      settledSenders: settled.keys.toSet(),
+      suppressed: suppressed,
+    );
+    final next = suggestions.firstOrNull;
+    if (next != _ruleSuggestion) setState(() => _ruleSuggestion = next);
+  }
+
+  /// The word a suggested rule's label wears. A classification becomes the
+  /// plural a person would file under; every other scope IS its own value —
+  /// an address or a domain names itself better than any word invented over
+  /// it, and `createLabel` folding on the name means accepting the same
+  /// offer twice reuses the label it made.
+  static String _ruleLabelNameFor(RuleSuggestion s) => switch (s.scopeKind) {
+        LabelRule.scopeClassification => switch (s.scopeValue) {
+            'meeting_response' => 'Meeting responses',
+            'meeting_invite' => 'Meeting invitations',
+            'tracker_notification' => 'Ticket notifications',
+            'automated_notification' => 'Automated notifications',
+            _ => s.scopeValue.replaceAll('_', ' '),
+          },
+        _ => s.scopeValue,
+      };
+
+  /// Accepts the offer: a keep suggestion is a sender preference (the same
+  /// writer the Keep button uses, with its own toast and undo); everything
+  /// else is a `label_rules` row hung off a label, so the hidden threads stay
+  /// findable under a word the owner can see in Settings.
+  Future<void> _acceptRuleSuggestion(RuleSuggestion s) async {
+    if (!s.isLabelRule) {
+      // 'email' is exact, not a guess: `suggestRules` offers a keep only for
+      // a mail-shaped address (a Teams sender is `teams:<id>`, filtered
+      // there), so the sender-preference row lands where the mail pass reads
+      // it.
+      await _keepSender(s.scopeValue, 'email');
+      unawaited(_loadRuleSuggestion());
+      return;
+    }
+    final label = await ref
+        .read(labelsProvider.notifier)
+        .create(_ruleLabelNameFor(s));
+    if (!mounted) return;
+    if (label == null) {
+      _toast(ref.read(labelsProvider).error ??
+          "Couldn't save that rule just now.");
+      return;
+    }
+    await _writeLabelRule(label, s.scopeKind, s.scopeValue);
+  }
+
+  /// "Not now", remembered per offer key so the same question is never asked
+  /// twice — deliberately durable across Clear AI results, unlike the
+  /// evidence it was computed from (see the store's suppression methods).
+  void _declineRuleSuggestion(RuleSuggestion s) {
+    unawaited(ref.read(messageStoreProvider).suppressRuleSuggestion(s.key));
+    setState(() => _ruleSuggestion = null);
   }
 
   Future<void> _keepSender(String address, String source) async {
@@ -2241,6 +2442,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
     await act(target);
     if (!mounted) return;
+    // The suggestion feeds on exactly these presses, so it is re-asked
+    // behind every one — fire-and-forget, four indexed reads.
+    unawaited(_loadRuleSuggestion());
     if (landing != null) {
       _selectTriageRow(landing.source, landing.key);
       return;
@@ -4113,6 +4317,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         _dismissWithoutLabel((source: selected.source, key: selected.id)),
       ),
       onCloseLabelPicker: _clearLabelPickerRequest,
+      // The offer line (11b): scopes pre-filled from this thread, under the
+      // label the thread ALREADY carries — the recurring thread that came
+      // back reopened wearing its word is exactly the one a rule is for; a
+      // first-ever dismissal has no label and draws no line. The recurring
+      // CLASS is the suggestion row's job (12d). Computed only while the
+      // dismiss picker is actually open, so an ordinary rebuild of the panel
+      // never pays the transcript walk — the same laziness the list pane's
+      // callback shape gets for free.
+      ruleOffers:
+          _pickerModeFor(selected.source, selected.id) == LabelPickerMode.dismiss
+              ? _ruleOffersFor((source: selected.source, key: selected.id))
+              : const [],
+      ruleOfferLabel: selected.labels.isEmpty ? null : selected.labels.first,
+      onRuleChosen: (label, offer) =>
+          unawaited(_createRuleFromOffer(label, offer)),
       onReopen: () => ref
           .read(conversationsProvider.notifier)
           .reopenThread(selected.source, selected.id),
@@ -5225,6 +5444,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // belongs where the reader is waiting, which is the end of the
       // transcript.
       streamingOptions: draft.streaming?.options ?? const [],
+      // Where a reply is suppressed (an automated sender wrote the newest
+      // inbound), the bar offers the notification's own way in instead —
+      // "View comment", "Open request" — through the same seam every other
+      // link in the app is launched by. The bar itself decides when: only
+      // where Suggest is withheld and no options are in hand.
+      openIn: draft.openIn,
+      onOpenLink: (url) => unawaited(_launchExternal(url)),
     );
   }
 
@@ -5913,6 +6139,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               _dismissWithoutLabel((source: c.source, key: c.id)),
             ),
             onCloseLabelPicker: (_) => _clearLabelPickerRequest(),
+            // The row-side offer line, on the panel mount's rule: the thread's
+            // own label or nothing. Lazy — the pane asks only for the row
+            // whose picker is open.
+            ruleOffersFor: (c) =>
+                _ruleOffersFor((source: c.source, key: c.id)),
+            ruleOfferLabelFor: (c) =>
+                c.labels.isEmpty ? null : c.labels.first,
+            onRuleChosen: (c, label, offer) =>
+                unawaited(_createRuleFromOffer(label, offer)),
+            // The learned offer (12d), one at a time, over the pile it was
+            // learned from. Accept writes the rule — or the keep preference —
+            // with its own toast and undo; Not now is remembered per offer.
+            ruleSuggestion: _ruleSuggestion,
+            onAcceptRuleSuggestion: (s) => unawaited(_acceptRuleSuggestion(s)),
+            onNotNowRuleSuggestion: _declineRuleSuggestion,
           ),
         ),
       ],

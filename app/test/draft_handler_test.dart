@@ -266,6 +266,7 @@ void main() {
     String body = 'Can we still ship on Thursday?',
     String triageStatus = 'pending',
     String? gateReason,
+    Map<String, String>? headers,
   }) async {
     await store.upsertMessage({
       'source_message_id': id,
@@ -278,6 +279,10 @@ void main() {
       'body_text': body,
       'triage_status': triageStatus,
       'gate_reason': gateReason,
+      // The shape the detail fetch stores them in, which is what a machine
+      // sender is read off.
+      'source_meta_json':
+          headers == null ? null : jsonEncode({'headers': headers}),
     });
   }
 
@@ -579,6 +584,67 @@ void main() {
       });
 
       expect(llm.schemaNames, ['reply_decision', 'draft_reply']);
+    });
+
+    test('a message a machine wrote costs no call at all', () async {
+      // Asked here as well as at the draft queue, because a row can reach this
+      // handler from an older build's queue and because the headers that answer
+      // the question may only have arrived since. Nothing gated this message:
+      // the headers are the whole of the evidence.
+      await seedInbound(headers: {'List-Unsubscribe': '<https://x.example.com/u>'});
+      final llm = draftClient(decision: decision(), draft: answer());
+      final log = _Recorder();
+
+      await runOne(DraftHandler(
+        store,
+        llm,
+        activityLog: log,
+        progress: progress,
+      ));
+
+      // Not even the reply decision: a judgement about whether a machine is
+      // waiting for an answer is not a judgement worth a model call.
+      expect(llm.userMessages, isEmpty);
+      expect(await store.getDraftForMessage('email', 'm2'), isNull);
+      expect((await progressOf('m2'))['draft_state'], 'skipped');
+      expect(log.notes['reason'], 'automated_sender');
+      expect(log.notes['why'], 'a machine wrote this message');
+    });
+
+    test('and it runs ahead of the retrievers, not after them', () async {
+      // The skip sits before `_gather`, which is an embedding call and a set of
+      // attachment reads. A skip after them would spend most of the work it
+      // exists to save.
+      await seedInbound(headers: {'Auto-Submitted': 'auto-generated'});
+      final retriever = FakeRetriever(store);
+
+      await runOne(DraftHandler(
+        store,
+        draftClient(decision: decision(), draft: answer()),
+        attachments: retriever,
+        progress: progress,
+      ));
+
+      expect(retriever.pinnedSeen, isEmpty);
+    });
+
+    test('but a person who presses Draft reply gets one anyway', () async {
+      // The owner overruling this, exactly as an asked-for draft overrules the
+      // decision call. A press that produced an empty box and no sentence would
+      // be a button that silently does nothing.
+      await seedInbound(headers: {'List-Id': 'news.x.example.com'});
+      final llm = draftClient(draft: answer());
+
+      await DraftHandler(store, llm, progress: progress).run({
+        'task_kind': 'draft',
+        'source': 'email',
+        'entity_id': 'm2',
+        'payload_json': '{"asked":true}',
+      });
+
+      expect(llm.schemaNames, ['draft_reply']);
+      expect(await store.getDraftForMessage('email', 'm2'), isNotNull);
+      expect((await progressOf('m2'))['draft_state'], 'done');
     });
   });
 
