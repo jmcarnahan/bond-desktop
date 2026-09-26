@@ -476,7 +476,7 @@ void main() {
           reason: reason,
         );
       }
-      expect(automatedGateReasons, hasLength(5));
+      expect(automatedGateReasons, hasLength(4));
     });
 
     test('the gate reasons that say nothing about a reply do not suppress', () {

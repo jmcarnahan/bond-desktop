@@ -17,8 +17,7 @@ import 'prompt_guard.dart';
 /// call on, read here for the messages that carry one anyway: the `teams_source`
 /// tolerance lets a gated row through the draft queue, a gate can fire on the
 /// second call after a draft was already enqueued, and a row an older build
-/// stored keeps whatever word that build wrote. `label_rule` is the owner's own
-/// standing instruction about a class of mail, which is the loudest of the five.
+/// stored keeps whatever word that build wrote.
 ///
 /// Not every gate reason belongs here. `self`, `sender_rule`, `monitoring` and
 /// `machine_sender` all gate mail for reasons that say nothing about whether a
@@ -28,7 +27,6 @@ const Set<String> automatedGateReasons = {
   'newsletter',
   'auto_generated',
   'meeting_response',
-  'label_rule',
 };
 
 /// Whether no reply may be offered for [message] — ever, by anybody.

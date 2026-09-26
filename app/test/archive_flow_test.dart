@@ -1,7 +1,5 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
-import 'package:bond_inbox/models/label_models.dart' show LabelRule;
-import 'package:bond_inbox/models/message_models.dart' show ConversationState;
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
@@ -223,58 +221,6 @@ void main() {
 
     expect(find.text('Quarterly digest'), findsOneWidget,
         reason: 'the tab survived the trip away and arrival re-read it');
-  });
-
-  testWidgets('arriving at Last 7 days reads the week', (tester) async {
-    // No bus behind this list either: a rule files threads in the background,
-    // so the tab entry is what makes a dismissal appear.
-    final nowIso = DateTime.now().toUtc().toIso8601String();
-    await seedThread('c-closed', 'Vendor renewal', lastMessageAt: nowIso);
-    await store.setConversationState(
-        'email', 'c-closed', ConversationState.done);
-    await pumpScreen(tester);
-
-    expect(find.text('Marked done'), findsNothing);
-
-    await tester.tap(find.widgetWithText(BondFilterPill, 'Last 7 days'));
-    await tester.pump();
-    await tester.pump();
-    await tester.pump();
-
-    expect(find.text('Vendor renewal'), findsOneWidget);
-    expect(find.text('Marked done'), findsOneWidget);
-    expect(find.widgetWithText(TextButton, 'Reopen'), findsOneWidget);
-  });
-
-  testWidgets('Show again brings one thread back and keeps the rule',
-      (tester) async {
-    final nowIso = DateTime.now().toUtc().toIso8601String();
-    await seedThread('c-filed', 'Build 4521 passed', lastMessageAt: nowIso);
-    final label = await store.createLabel('CI noise');
-    final rule = await store.createLabelRule(
-      labelId: label.id,
-      scopeKind: LabelRule.scopeSubject,
-      scopeValue: 'build',
-      disposition: LabelRule.hideNeedsYou,
-    );
-    await store.applyLabelRule(rule.id);
-    await pumpScreen(tester);
-
-    await tester.tap(find.widgetWithText(BondFilterPill, 'Last 7 days'));
-    await tester.pump();
-    await tester.pump();
-    await tester.pump();
-    expect(find.text('Filed by rule "build" · CI noise'), findsOneWidget);
-
-    await tester.tap(find.widgetWithText(TextButton, 'Show again'));
-    await tester.pump();
-    await tester.pump();
-    await tester.pump();
-
-    expect(find.text('Filed by rule "build" · CI noise'), findsNothing);
-    expect(await store.getLabelRule(rule.id), isNotNull,
-        reason: 'Show again is one thread, never the rule\'s undo');
-    expect(await store.labelRuleThreads(rule.id), isEmpty);
   });
 
   testWidgets('a search finds gate-dropped mail without entering its pile',

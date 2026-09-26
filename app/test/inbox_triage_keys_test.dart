@@ -102,7 +102,7 @@ class _RefusingStore extends MessageStore {
   }
 
   @override
-  Future<({String appliedBy, String? ruleId})?> removeLabel(
+  Future<bool> removeLabel(
     String source,
     String conversationKey,
     String labelId,
@@ -115,18 +115,10 @@ class _RefusingStore extends MessageStore {
   Future<bool> restoreLabel(
     String source,
     String conversationKey,
-    String labelId, {
-    required String appliedBy,
-    String? ruleId,
-  }) async {
+    String labelId,
+  ) async {
     if (refuseApply) throw StateError('the disk said no');
-    return super.restoreLabel(
-      source,
-      conversationKey,
-      labelId,
-      appliedBy: appliedBy,
-      ruleId: ruleId,
-    );
+    return super.restoreLabel(source, conversationKey, labelId);
   }
 }
 
@@ -876,34 +868,6 @@ void main() {
     await settleQueues(tester);
   });
 
-  testWidgets("Undo after a chip's ✕ puts back a rule's filing as the rule's",
-      (tester) async {
-    final fyi = await store.createLabel('FYI only');
-    await seedPile();
-    await store.applyLabelsByRule('email', 'c2', fyi.id, ruleId: 'rule-7');
-    await pumpInbox(tester);
-    await press(tester, LogicalKeyboardKey.keyJ);
-    await press(tester, LogicalKeyboardKey.keyJ);
-    await tester.pump();
-
-    await tester.tap(find.byKey(ThreadActionBar.removeLabelKey(fyi.id)));
-    await settleQueues(tester);
-    await press(tester, LogicalKeyboardKey.keyZ);
-    await settleQueues(tester);
-
-    // Hand-applied it would be a filing its rule could neither undo nor
-    // redo; back as the rule's, both still can.
-    final row = await db
-        .customSelect(
-          'SELECT applied_by, rule_id FROM conversation_labels '
-          "WHERE conversation_key = 'c2'",
-        )
-        .getSingle();
-    expect(row.data['applied_by'], 'rule');
-    expect(row.data['rule_id'], 'rule-7');
-    await settleQueues(tester);
-  });
-
   testWidgets('an Undo that cannot put a chip back says so', (tester) async {
     final fyi = await store.createLabel('FYI only');
     await seedPile();
@@ -926,6 +890,33 @@ void main() {
       find.text("Couldn't put that label back just now."),
       findsOneWidget,
     );
+    expect(await store.labelsForConversation('email', 'c2'), isEmpty);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a chip whose link is already gone offers no Undo',
+      (tester) async {
+    final fyi = await store.createLabel('FYI only');
+    await seedPile();
+    await store.applyLabels('email', 'c2', [fyi.id]);
+    await pumpInbox(tester);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await tester.pump();
+    expect(find.byKey(ThreadActionBar.removeLabelKey(fyi.id)), findsOneWidget);
+
+    // The link goes behind the screen's back, so the chip on screen is stale:
+    // its ✕ takes nothing off, and an Undo over it would add a label the
+    // thread never had.
+    await store.removeLabel('email', 'c2', fyi.id);
+    await tester.tap(find.byKey(ThreadActionBar.removeLabelKey(fyi.id)));
+    await settleQueues(tester);
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Removed FYI only.'), findsOneWidget);
+    expect(find.text('Undo'), findsNothing);
     expect(await store.labelsForConversation('email', 'c2'), isEmpty);
     await settleQueues(tester);
   });
@@ -1139,106 +1130,6 @@ void main() {
     expect(rowTitles(tester), contains('Homepage copy'));
     expect(find.text('Marked done.'), findsNothing);
     await settleQueues(tester);
-  });
-
-  testWidgets(
-      'three dismissals of one sender become an offer, accepting writes the '
-      'rule, and z takes it back', (tester) async {
-    await seedPile();
-    // A fourth thread from somebody else, so the pile is not empty once the
-    // three from Dana are cleared — the suggestion row deliberately never
-    // draws over an empty list.
-    final received = ago(4);
-    await store.upsertMessage({
-      'source': 'email',
-      'source_message_id': 'c0-m1',
-      'conversation_key': 'c0',
-      'direction': 'inbound',
-      'subject': 'Budget review',
-      'from_name': 'Priya Nair',
-      'from_address': 'priya@example.com',
-      'received_at': received,
-      'body_text': 'the other paragraph',
-    });
-    await store.upsertConversation({
-      'source': 'email',
-      'conversation_key': 'c0',
-      'subject': 'Budget review',
-      'participants_json': '[{"name":"Priya Nair","email":"priya@example.com"}]',
-      'state': 'needs_reply',
-      'cta_text': 'Review the budget',
-      'cta_urgency': 'normal',
-      'last_message_at': received,
-      'last_inbound_at': received,
-    });
-    await pumpInbox(tester);
-    await settleQueues(tester);
-
-    await press(tester, LogicalKeyboardKey.keyJ);
-    await press(tester, LogicalKeyboardKey.keyE);
-    await press(tester, LogicalKeyboardKey.keyE);
-    await press(tester, LogicalKeyboardKey.keyE);
-    // The suggestion loader runs behind each dismissal; let its reads land.
-    await settleQueues(tester);
-    await tester.pump();
-
-    // Three distinct threads, one sender: the offer names the sender scope
-    // (the most specific kind wins the tie over the shared domain).
-    expect(find.byKey(ConversationListPane.suggestionKey), findsOneWidget);
-
-    await tester.tap(find.byKey(ConversationListPane.suggestionAcceptKey));
-    await tester.pump();
-    await tester.pump();
-    await settleQueues(tester);
-
-    expect(find.text('Rule saved · 3 threads moved.'), findsOneWidget);
-    final rule = (await store.listLabelRules()).single;
-    expect(rule.scopeKind, 'sender');
-    expect(rule.scopeValue, 'dana@example.com');
-    // The label the rule hangs off is the address itself, minted on accept.
-    expect(
-      (await store.listLabels()).map((l) => l.name),
-      contains('dana@example.com'),
-    );
-
-    // One z: the rule is gone and only what IT filed goes with it.
-    await press(tester, LogicalKeyboardKey.keyZ);
-    await settleQueues(tester);
-    expect(await store.listLabelRules(), isEmpty);
-  });
-
-  testWidgets(
-      'the dismiss picker offers a rule under the word the thread already '
-      'wears, and a scope chip writes it', (tester) async {
-    await seedPile();
-    // The thread came back wearing its word — the population the offer line
-    // is for. A first-ever dismissal has no label and draws no line.
-    final label = await store.createLabel('Vendor noise');
-    await store.applyLabels('email', 'c1', [label.id]);
-    await pumpInbox(tester);
-    await settleQueues(tester);
-
-    await press(tester, LogicalKeyboardKey.keyJ);
-    await press(tester, LogicalKeyboardKey.keyE, shift: true);
-
-    expect(find.byKey(LabelPicker.fieldKey), findsOneWidget);
-    expect(find.byKey(LabelPicker.ruleRowKey), findsOneWidget);
-
-    await tester.tap(find.byKey(LabelPicker.ruleKeyFor(const LabelRuleOffer(
-      scopeKind: 'sender',
-      scopeValue: 'dana@example.com',
-    ))));
-    await tester.pump();
-    await tester.pump();
-    await settleQueues(tester);
-
-    // The chip answered the picker's question: the strip is gone, the rule
-    // stands, and its retroactive apply filed every thread of Dana's.
-    expect(find.byKey(LabelPicker.fieldKey), findsNothing);
-    expect(find.text('Rule saved · 3 threads moved.'), findsOneWidget);
-    final rule = (await store.listLabelRules()).single;
-    expect(rule.labelId, label.id);
-    expect(rule.scopeKind, 'sender');
   });
 
   testWidgets(

@@ -288,18 +288,6 @@ void main() {
       expect(secondUse.compareTo(firstUse), greaterThanOrEqualTo(0));
     });
 
-    test('a rule-applied link says so', () async {
-      final fyi = await store.createLabel('Meeting response');
-      await seedConversation('c1');
-
-      await store.applyLabels('email', 'c1', [fyi.id], appliedBy: 'rule');
-
-      final link = await db
-          .customSelect('SELECT * FROM conversation_labels')
-          .getSingle();
-      expect(ConversationLabel.fromRow(link.data).isRule, isTrue);
-    });
-
     test('an empty list writes nothing at all', () async {
       final fyi = await store.createLabel('FYI only');
       await seedConversation('c1');
@@ -338,28 +326,20 @@ void main() {
       expect((await rowOf(fyi.id))['last_used_at'], isNotNull);
     });
 
-    test('answers who put the link there, and restore puts it back '
+    test('answers that a link came off, and restore puts it back '
         'without counting a reach', () async {
       final fyi = await store.createLabel('FYI only');
       await seedConversation('c1');
       await store.applyLabels('email', 'c1', [fyi.id]);
 
-      final link = await store.removeLabel('email', 'c1', fyi.id);
-
-      expect(link, isNotNull);
-      expect(link!.appliedBy, 'user');
-      expect(link.ruleId, isNull);
-      expect(
-        await store.restoreLabel(
-          'email',
-          'c1',
-          fyi.id,
-          appliedBy: link.appliedBy,
-          ruleId: link.ruleId,
-        ),
-        isTrue,
-      );
+      expect(await store.removeLabel('email', 'c1', fyi.id), isTrue);
+      expect(await store.restoreLabel('email', 'c1', fyi.id), isTrue);
       expect(await linkCount(), 1);
+      final row = (await db
+              .customSelect('SELECT applied_by FROM conversation_labels')
+              .get())
+          .single;
+      expect(row.data['applied_by'], 'user');
       expect((await rowOf(fyi.id))['use_count'], 1);
       // And a real reach after it still counts.
       await store.removeLabel('email', 'c1', fyi.id);
@@ -367,51 +347,16 @@ void main() {
       expect((await rowOf(fyi.id))['use_count'], 2);
     });
 
-    test("a rule's filing comes back as the rule's", () async {
-      final fyi = await store.createLabel('FYI only');
-      await seedConversation('c1');
-      await store.applyLabelsByRule('email', 'c1', fyi.id, ruleId: 'r1');
-
-      final link = await store.removeLabel('email', 'c1', fyi.id);
-      expect(link!.appliedBy, 'rule');
-      expect(link.ruleId, 'r1');
-      await store.restoreLabel(
-        'email',
-        'c1',
-        fyi.id,
-        appliedBy: link.appliedBy,
-        ruleId: link.ruleId,
-      );
-
-      // Restored as a hand apply, the rule's own undo could never take it
-      // off again and the rule could never re-file the thread.
-      final row = await db
-          .customSelect('SELECT applied_by, rule_id FROM conversation_labels')
-          .getSingle();
-      expect(row.data['applied_by'], 'rule');
-      expect(row.data['rule_id'], 'r1');
-      expect((await rowOf(fyi.id))['use_count'], 0);
-    });
-
     test('restore refuses once the label itself is gone', () async {
       final fyi = await store.createLabel('FYI only');
       await seedConversation('c1');
       await store.applyLabels('email', 'c1', [fyi.id]);
-      final link = await store.removeLabel('email', 'c1', fyi.id);
+      await store.removeLabel('email', 'c1', fyi.id);
       await store.deleteLabel(fyi.id);
 
       // A fresh link under a deleted label would file the thread under
       // nothing at all — the join draws no chip for it.
-      expect(
-        await store.restoreLabel(
-          'email',
-          'c1',
-          fyi.id,
-          appliedBy: link!.appliedBy,
-          ruleId: link.ruleId,
-        ),
-        isFalse,
-      );
+      expect(await store.restoreLabel('email', 'c1', fyi.id), isFalse);
       expect(await linkCount(), 0);
     });
 
@@ -420,9 +365,9 @@ void main() {
       final fyi = await store.createLabel('FYI only');
       await seedConversation('c1');
 
-      // Null rather than a quiet no-op: a stale chip's ✕ took nothing off,
+      // False rather than a quiet no-op: a stale chip's ✕ took nothing off,
       // and an Undo over it would add a label the thread never had.
-      expect(await store.removeLabel('email', 'c1', fyi.id), isNull);
+      expect(await store.removeLabel('email', 'c1', fyi.id), isFalse);
 
       expect(await linkCount(), 0);
       expect((await rowOf(fyi.id))['use_count'], 0);

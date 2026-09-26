@@ -4,7 +4,6 @@ import 'dart:math' as math;
 import 'package:drift/drift.dart';
 
 import '../models/attachment_models.dart';
-import '../models/dismissed_thread.dart';
 import '../models/drafts_models.dart';
 import '../models/files_models.dart';
 import '../models/home_models.dart';
@@ -48,17 +47,6 @@ import '../services/search_fusion.dart';
 // how the two would come to disagree about what the tip looks like.
 import '../services/mail_body.dart';
 import '../services/mail_text.dart';
-// The fifth, on the same licence: `label_rules.dart` is one comparison over a
-// rule and a message's own fields, with no I/O and no imports above `models/`.
-// [applyLabelRule] has to move exactly the threads the triage gate and the
-// needs-you pass will act on tomorrow, and a second spelling of "what this rule
-// matches" here is how a retroactive apply and the gate come to disagree.
-import '../services/label_rules.dart';
-// The sixth, on the same licence: `needs_you.dart` is three comparisons over one
-// row. A rule's `unless_mentions_me` has to be spent through the same floor the
-// needs-you pass spends it through, or [applyLabelRule] would hide a message
-// here that the next pass would put straight back on the rail.
-import '../services/needs_you.dart';
 import 'attachment_chunk_index.dart';
 import 'conversation_vec_index.dart';
 import 'database.dart' show BondDatabase;
@@ -1000,17 +988,16 @@ WHERE source = ? AND conversation_key = ?
           'LEFT JOIN conversation_ai ai '
           '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
           // The three newest-message rules this read needs, each resolved ONCE
-          // per thread and joined on the message's full key — the
-          // `dismissedThreadHistory` shape. Each seek used to be spelled once
-          // per column (seven correlated subselects, because SQLite takes one
-          // column from a scalar subselect); a join takes every column off the
-          // one row the seek found. A LEFT join on `(source, source_message_id)`,
-          // the primary key, against a subselect that returns at most one id
-          // matches at most one row, so no thread is multiplied or lost, and a
-          // thread with no such message reads NULL in every column exactly as
-          // the subselects did. Every ORDER BY breaks the tie on the id, so a
-          // second message stamped the same second resolves the same way here
-          // as in [getDraft] and the history reads.
+          // per thread and joined on the message's full key. Each seek used to
+          // be spelled once per column (seven correlated subselects, because
+          // SQLite takes one column from a scalar subselect); a join takes
+          // every column off the one row the seek found. A LEFT join on
+          // `(source, source_message_id)`, the primary key, against a subselect
+          // that returns at most one id matches at most one row, so no thread
+          // is multiplied or lost, and a thread with no such message reads NULL
+          // in every column exactly as the subselects did. Every ORDER BY
+          // breaks the tie on the id, so a second message stamped the same
+          // second resolves the same way here as in [getDraft].
           //
           // `ni` — the newest inbound message, whatever the gate did with it:
           // the message a deadline and a waiting draft are about.
@@ -1026,7 +1013,7 @@ WHERE source = ? AND conversation_key = ?
           // `nr` — the newest KEPT inbound the needs-you pass judged yes with a
           // reason. `needs_you_verdict = 1` is load-bearing, not tidiness: a
           // reason on a `0` verdict explains why a message does NOT want the
-          // owner (a rule hid it, or the model read it and said no), and
+          // owner (the model read it and said no), and
           // printing that under "Why does this need a reply" would answer the
           // opposite question. `keptMessageSql` is the other half: a bot post
           // the gate threw out is never "the latest inbound awaiting you"
@@ -1221,9 +1208,9 @@ WHERE source = ? AND conversation_key = ?
   }
 
   /// The `labels` column [loadConversations] projects, for a query whose
-  /// thread is aliased `c` — spelled once so [recentlyDismissed]'s rows draw
-  /// the same chips in the same order as every other list. See the comment at
-  /// its use in [loadConversations] for the separators and the order.
+  /// thread is aliased `c` — spelled once so every list draws the same chips
+  /// in the same order. See the comment at its use in [loadConversations] for
+  /// the separators and the order.
   static String _labelsConcatSql() => '(SELECT GROUP_CONCAT('
       "o.id || '$labelFieldSeparator' || o.name || "
       "'$labelFieldSeparator' || COALESCE(o.tone, ''), "
@@ -1233,100 +1220,6 @@ WHERE source = ? AND conversation_key = ?
       'WHERE cl.source = c.source '
       'AND cl.conversation_key = c.conversation_key '
       'ORDER BY l.use_count DESC, l.last_used_at DESC, l.name ASC) o)';
-
-  /// Every thread that left the owner's sight since [sinceIso], newest first,
-  /// each saying WHAT took it — requirement 12i's Recently dismissed view.
-  ///
-  /// Two populations, because a rule does not dismiss: a `hide_needs_you` rule
-  /// writes a verdict and a `later` rule a bucket, and neither touches
-  /// `conversations.state`. So the read is a UNION of:
-  /// - **the owner's dismissals** — `state = 'done'` stamped on or after
-  ///   [sinceIso]. `state_changed_at` is written only by
-  ///   [setConversationState], which only a person's press reaches (sync's fold
-  ///   never sets `done`), so this half is exactly what somebody closed.
-  /// - **what a rule filed** — a `conversation_labels` link carrying a
-  ///   `rule_id`, applied on or after [sinceIso]. Every rule path files through
-  ///   that link, whatever its disposition, so it is the one record of a rule's
-  ///   hand on a thread. `applied_at` is only the FIRST filing: a re-apply is
-  ///   an `INSERT OR IGNORE` that leaves the stamp alone (and must, because
-  ///   the insert's count is what `hidden_count` and undo are built on). So
-  ///   the rule's LATEST act is read instead: the newer of `applied_at` and
-  ///   the newest inbound message the rule hid — `needs_you_verdict = 0` with
-  ///   a `label_rule:` reason for a `hide_needs_you` rule (verdict 1 with that
-  ///   reason is a "shown despite" raise, which the rule did NOT hide), and
-  ///   any inbound message for a `later` or `drop` rule, which writes no
-  ///   per-message verdict and files the whole thread while its link stands.
-  ///   A rule that has kept a chatty thread hidden for a month, including
-  ///   today's mail, is therefore here today — the case 12i exists for. A
-  ///   rule deleted since acts on nothing, so its link dates from the filing.
-  ///
-  /// One row per thread, carrying the NEWER of its stamps as `dismissed_at`
-  /// and the attribution of whichever event that stamp is: SQLite takes the
-  /// bare `rule_id` and `label_id` of a `MAX()` aggregate from the row the max
-  /// came from, so a thread the owner closed after a rule filed it reads as
-  /// dismissed, and the other way round. The rule's scope and its label's name
-  /// ride along; a rule deleted since ([deleteLabelRule] keeps its links)
-  /// reads with a null scope and still names its label.
-  ///
-  /// NOT read from `feedback_events`, though a dismissal logs one there. That
-  /// table is DERIVED — Clear AI results wipes it — so a view built on it would
-  /// forget every dismissal the moment the owner reset the pipeline, which is
-  /// exactly when they would come looking for what went missing; it also never
-  /// hears about what a rule did, and an undone dismissal leaves its `down`
-  /// row standing (see [dismissedThreadHistory]). The thread's own state and
-  /// the links are the kept facts.
-  ///
-  /// No index of its own: `conversation_labels` holds one row per label per
-  /// thread and the scan is of that small table, and the `conversations` half
-  /// is a filter over one row per thread — both are read when the owner opens
-  /// the tab, never per row.
-  Future<List<DismissedThread>> recentlyDismissed({
-    required String sinceIso,
-  }) async {
-    final rows = await db
-        .customSelect(
-          'SELECT c.*, d.dismissed_at AS dismissed_at, d.rule_id AS rule_id, '
-          '  r.scope_kind AS rule_scope_kind, '
-          '  r.scope_value AS rule_scope_value, '
-          '  rl.name AS rule_label_name, '
-          '  ${_labelsConcatSql()} AS labels '
-          'FROM (SELECT source, conversation_key, MAX(at) AS dismissed_at, '
-          '        rule_id, label_id '
-          '      FROM ('
-          '        SELECT source, conversation_key, state_changed_at AS at, '
-          '          NULL AS rule_id, NULL AS label_id '
-          '        FROM conversations '
-          "        WHERE state = 'done' AND state_changed_at >= ? "
-          '        UNION ALL '
-          '        SELECT source, conversation_key, at, rule_id, label_id '
-          '        FROM ('
-          '          SELECT cl.source, cl.conversation_key, cl.rule_id, '
-          '            cl.label_id, '
-          '            MAX(cl.applied_at, COALESCE(('
-          '              SELECT MAX(m.received_at) FROM messages m '
-          '               WHERE m.source = cl.source '
-          '                 AND m.conversation_key = cl.conversation_key '
-          "                 AND m.direction = 'inbound' "
-          '                 AND r.id IS NOT NULL '
-          "                 AND (r.disposition <> '${LabelRule.hideNeedsYou}' "
-          '                      OR (m.needs_you_verdict = 0 '
-          "                          AND m.needs_you_reason LIKE 'label_rule:%'))"
-          "            ), '')) AS at "
-          '          FROM conversation_labels cl '
-          '          LEFT JOIN label_rules r ON r.id = cl.rule_id '
-          '          WHERE cl.rule_id IS NOT NULL) '
-          '        WHERE at >= ?) '
-          '      GROUP BY source, conversation_key) d '
-          'JOIN conversations c '
-          '  ON c.source = d.source AND c.conversation_key = d.conversation_key '
-          'LEFT JOIN label_rules r ON r.id = d.rule_id '
-          'LEFT JOIN labels rl ON rl.id = d.label_id '
-          'ORDER BY d.dismissed_at DESC, c.source ASC, c.conversation_key ASC',
-          variables: _args([sinceIso, sinceIso]),
-        )
-        .get();
-    return [for (final row in rows) DismissedThread.fromRow(row.data)];
-  }
 
   /// A message the gate KEPT, for one aliased `messages` table.
   ///
@@ -3166,20 +3059,16 @@ RETURNING *
   /// `app_prefs` KEYS that describe one person rather than this machine, and
   /// deletes `sender_prefs` with the mailbox those rules were written about.
   ///
-  /// The three label tables are here because **Clear AI results** must not take
+  /// The two label tables are here because **Clear AI results** must not take
   /// them: a word the owner typed is not something a model produced, and
-  /// re-running the pipeline would never write it back. `label_rules` is the
-  /// same fact one step further on — a standing instruction the owner wrote —
-  /// and it is classified with the words it is made of rather than with the
-  /// verdicts it moves. All three are still deleted by [wipeAll] — see
-  /// [_wipeTables].
+  /// re-running the pipeline would never write it back. They are still deleted
+  /// by [wipeAll] — see [_wipeTables].
   static const List<String> keptTables = [
     'app_prefs',
     'sender_prefs',
     'setup_state',
     'labels',
     'conversation_labels',
-    'label_rules',
   ];
 
   /// The five tables a wipe leaves alone although two of them are derived.
@@ -3252,12 +3141,9 @@ RETURNING *
         // attached to threads that no longer exist and a `use_count` counting
         // applications to them. A sender rule still means something about a
         // person after their mail is gone; "FYI only, on these fourteen
-        // threads" does not. All three tables, because a vocabulary with no
-        // links is not what the owner built, and a rule naming a label that has
-        // gone is a standing instruction about a word nobody can see — with a
-        // `hidden_count` counting threads this just deleted.
+        // threads" does not. Both tables, because a vocabulary with no links
+        // is not what the owner built.
         'conversation_labels',
-        'label_rules',
         'labels',
       ];
 
@@ -4944,155 +4830,6 @@ SELECT conversation_key FROM (
     return (row.data['n'] as num?)?.toInt() ?? 0;
   }
 
-  /// The threads the owner dismissed and never answered, newest first, each
-  /// row shaped for `RuleSuggestion`'s evidence — requirement 12d.
-  ///
-  /// A dismissal in this app is `markDone`, and that writes a `thread`-scoped
-  /// `down` event with origin `implicit` (`conversations_provider._logImplicit`),
-  /// so this read must NOT ask for `explicit` the way
-  /// [explicitIgnoreCountForSender] does: the button IS the signal here, and
-  /// filtering on origin would find nothing at all.
-  ///
-  /// Two predicates keep the evidence honest, and both matter more than the
-  /// count they cost:
-  /// - `state = 'done'` drops a thread whose dismissal was undone. The events
-  ///   table is INSERT-only, so an undo leaves the `down` row where it was and
-  ///   only the thread says the owner took it back.
-  /// - `last_outbound_at IS NULL` drops a thread the owner ANSWERED and then
-  ///   closed, which is the ordinary successful path through the inbox and not a
-  ///   dismissal at all. Without it the most-worked-with senders would be the
-  ///   ones the app offered to hide.
-  ///
-  /// One row per thread, so a thread closed three times is one opinion before
-  /// [limit] is applied — the limit bounds THREADS, which is what the threshold
-  /// counts. The event keys are grouped first so the pass runs on
-  /// `ix_feedback_scope`.
-  ///
-  /// `feedback_events.scope_key` for a thread is the bare conversation key with
-  /// no connector on it, so the join is on the key alone: two connectors that
-  /// coined the same key would credit each other's threads. Left as it is
-  /// because the key formats do not overlap (a message-id against a Teams
-  /// thread id) and widening the stored key is a migration.
-  Future<List<Map<String, Object?>>> dismissedThreadHistory({
-    int limit = 400,
-  }) async {
-    final rows = await db
-        .customSelect(
-          'SELECT c.source AS source, '
-          'c.conversation_key AS conversation_key, '
-          'm.from_address AS from_address, m.from_name AS from_name, '
-          'm.subject AS subject, m.source_meta_json AS source_meta_json '
-          'FROM (SELECT scope_key, MAX(created_at) AS acted_at '
-          'FROM feedback_events '
-          "WHERE scope = 'thread' AND direction = 'down' "
-          'GROUP BY scope_key) f '
-          'JOIN conversations c ON c.conversation_key = f.scope_key '
-          'JOIN messages m ON m.source = c.source '
-          'AND m.conversation_key = c.conversation_key '
-          'AND m.source_message_id = (${_newestKeptInboundSql()}) '
-          "WHERE c.state = 'done' AND c.last_outbound_at IS NULL "
-          'ORDER BY f.acted_at DESC LIMIT ?',
-          variables: _args([limit]),
-        )
-        .get();
-    return [for (final row in rows) row.data];
-  }
-
-  /// The threads the owner REPLIED to, newest reply first, in the same shape —
-  /// the evidence behind 12d's reverse offer.
-  ///
-  /// Read from the mailbox rather than from `feedback_events` on purpose. A sent
-  /// reply records `thread`/`up`/`implicit` (`draft_provider._logSent`), and so
-  /// does merely opening a thread, so the events table cannot tell the strongest
-  /// positive signal there is from the most plentiful one. `last_outbound_at` is
-  /// a fact: somebody wrote back.
-  ///
-  /// The two histories are therefore DISJOINT by construction — a thread with an
-  /// outbound message is in this one and excluded from the other — which is what
-  /// lets `suggestRules` read a sender appearing in both as mixed evidence
-  /// rather than as double-counting.
-  Future<List<Map<String, Object?>>> answeredThreadHistory({
-    int limit = 400,
-  }) async {
-    final rows = await db
-        .customSelect(
-          'SELECT c.source AS source, '
-          'c.conversation_key AS conversation_key, '
-          'm.from_address AS from_address, m.from_name AS from_name, '
-          'm.subject AS subject, m.source_meta_json AS source_meta_json '
-          'FROM conversations c '
-          'JOIN messages m ON m.source = c.source '
-          'AND m.conversation_key = c.conversation_key '
-          'AND m.source_message_id = (${_newestKeptInboundSql()}) '
-          'WHERE c.last_outbound_at IS NOT NULL '
-          'ORDER BY c.last_outbound_at DESC LIMIT ?',
-          variables: _args([limit]),
-        )
-        .get();
-    return [for (final row in rows) row.data];
-  }
-
-  /// Which message of `c` the history rows above describe: the newest kept
-  /// inbound one, which is the message the owner was looking at when they acted.
-  ///
-  /// Written once and interpolated into both reads so the two histories can
-  /// never disagree about which message a thread's sender, subject and kind come
-  /// from. Ordered exactly as `loadConversations`' reason subselects are, ties
-  /// broken on the id, so a second message stamped the same second resolves the
-  /// same way everywhere.
-  static String _newestKeptInboundSql() =>
-      'SELECT m2.source_message_id FROM messages m2 '
-      'WHERE m2.source = c.source '
-      'AND m2.conversation_key = c.conversation_key '
-      "AND m2.direction = 'inbound' AND ${keptMessageSql('m2')} "
-      'ORDER BY m2.received_at DESC, m2.source_message_id DESC LIMIT 1';
-
-  /// The prefix every "Not now" is remembered under, one `app_prefs` row per
-  /// suppressed offer.
-  ///
-  /// A row each rather than one packed value: a suggestion key carries a sender
-  /// address or a subject prefix, which is text out of real mail, and any
-  /// separator a packed list chose could turn up inside one. The value stored is
-  /// the stamp, so a later build can age a refusal out without a migration.
-  static const String ruleSuggestionSnoozePrefix = 'rule_suggestion_not_now:';
-
-  /// Every offer the owner has said "Not now" to — `RuleSuggestion.key`s.
-  ///
-  /// DELIBERATELY not in [derivedOneShotPrefs]: those are one-shot catch-up
-  /// markers over derived corpora, and this is the owner's own answer. The
-  /// evidence behind an offer is derived and a reset forgets it; a refusal is
-  /// something a person said, and asking again because the app cleared its own
-  /// tables would be the app arguing with them.
-  Future<Set<String>> suppressedRuleSuggestions() async {
-    // `substr` rather than LIKE: the prefix carries underscores, which LIKE
-    // reads as single-character wildcards, so a near-miss key could ride in.
-    final rows = await db
-        .customSelect(
-          'SELECT key FROM app_prefs WHERE substr(key, 1, ?) = ?',
-          variables: _args([
-            ruleSuggestionSnoozePrefix.length,
-            ruleSuggestionSnoozePrefix,
-          ]),
-        )
-        .get();
-    final keys = <String>{};
-    for (final row in rows) {
-      final pref = row.data['key'] as String? ?? '';
-      if (pref.length <= ruleSuggestionSnoozePrefix.length) continue;
-      keys.add(pref.substring(ruleSuggestionSnoozePrefix.length));
-    }
-    return keys;
-  }
-
-  /// Remembers a "Not now" for one offer.
-  Future<void> suppressRuleSuggestion(String key, {String? at}) async {
-    if (key.isEmpty) return;
-    await setPref(
-      '$ruleSuggestionSnoozePrefix$key',
-      at ?? DateTime.now().toIso8601String(),
-    );
-  }
-
   /// One app-level setting, or null when it has never been set. Values are TEXT
   /// whatever they mean — a threshold is stored as its `toString()` and parsed
   /// back by the one reader that knows what it is.
@@ -5235,27 +4972,16 @@ SELECT conversation_key FROM (
     );
   }
 
-  /// Deletes a label, every link to it and every standing rule that files
-  /// under it, in one transaction.
+  /// Deletes a label and every link to it, in one transaction.
   ///
-  /// All or none: a label row deleted on its own would leave links naming an id
-  /// nothing can resolve, and the join in [loadConversations] would draw a chip
-  /// with no name on it. The links go first only so a reader inside the
+  /// Both or neither: a label row deleted on its own would leave links naming
+  /// an id nothing can resolve, and the join in [loadConversations] would draw
+  /// a chip with no name on it. The links go first only so a reader inside the
   /// transaction never sees the reverse.
-  ///
-  /// The RULES go too, and that is the one part worth stating: a rule outliving
-  /// its word would go on hiding mail under a label the owner can no longer see
-  /// or find, which is precisely the standing instruction nobody can revoke
-  /// that `label_rules` exists to avoid. Deleting the word is the loudest way
-  /// to say the rule is over.
   Future<void> deleteLabel(String id) async {
     await db.transaction(() async {
       await db.customUpdate(
         'DELETE FROM conversation_labels WHERE label_id = ?',
-        variables: _args([id]),
-      );
-      await db.customUpdate(
-        'DELETE FROM label_rules WHERE label_id = ?',
         variables: _args([id]),
       );
       await db.customUpdate(
@@ -5285,15 +5011,14 @@ SELECT conversation_key FROM (
   /// Files a thread under [labelIds], and records that those words were
   /// reached for.
   ///
-  /// The write is one transaction ([_applyLabels]): the links and the counts
-  /// they feed are one action, and a picker whose chip order came from a
-  /// half-written apply would reorder itself for no reason the owner could see.
+  /// One transaction: the links and the counts they feed are one action, and a
+  /// picker whose chip order came from a half-written apply would reorder
+  /// itself for no reason the owner could see.
   ///
   /// INSERT OR IGNORE on the primary key, so applying a label a thread already
   /// carries is a no-op rather than a second chip — but the use count still
-  /// moves, because the owner did reach for the word. [appliedBy] is `'user'`
-  /// here; a standing rule files through [applyLabelsByRule], which counts
-  /// differently.
+  /// moves, because the owner did reach for the word. [appliedBy] is `'user'`,
+  /// the only writer this build has.
   ///
   /// An unknown label id writes a link nothing resolves; callers pass ids they
   /// read out of [listLabels] or [createLabel], and the join simply omits a
@@ -5303,98 +5028,29 @@ SELECT conversation_key FROM (
     String conversationKey,
     List<String> labelIds, {
     String appliedBy = 'user',
-  }) =>
-      _applyLabels(
-        source,
-        conversationKey,
-        labelIds,
-        appliedBy: appliedBy,
-        ruleId: null,
-        countUse: true,
-      );
-
-  /// Files a thread under one label because a RULE said so, and returns whether
-  /// the link is new.
-  ///
-  /// Two differences from [applyLabels], and both are about the count:
-  ///
-  /// `use_count` and `last_used_at` are left ALONE. They order the picker's
-  /// chips and mean "how often has the owner reached for this word" — a rule
-  /// filing four hundred threads overnight is not four hundred times somebody
-  /// chose it, and letting it count would push a word to the top of a picker
-  /// the owner never used it in. A rule's volume is counted on the rule, in
-  /// `hidden_count`.
-  ///
-  /// The return value is what bumps that count: true only when a link was
-  /// actually inserted, so a thread the rule has already filed is not counted
-  /// twice and one the owner had labelled BY HAND keeps its own link (rule_id
-  /// NULL) and is not counted at all. That is the same set undoing the rule
-  /// takes back, which is what keeps the number the Settings list shows and the
-  /// number undo removes the same number.
-  Future<bool> applyLabelsByRule(
-    String source,
-    String conversationKey,
-    String labelId, {
-    required String ruleId,
   }) async {
-    final written = await _applyLabels(
-      source,
-      conversationKey,
-      [labelId],
-      appliedBy: 'rule',
-      ruleId: ruleId,
-      countUse: false,
-    );
-    return written > 0;
-  }
-
-  /// The one writer behind [applyLabels] and [applyLabelsByRule]. Returns how
-  /// many links were actually inserted.
-  ///
-  /// One transaction: the links and the counts they feed are one action.
-  Future<int> _applyLabels(
-    String source,
-    String conversationKey,
-    List<String> labelIds, {
-    required String appliedBy,
-    required String? ruleId,
-    required bool countUse,
-  }) async {
-    if (labelIds.isEmpty) return 0;
+    if (labelIds.isEmpty) return;
     final now = _nowIso();
-    return db.transaction(() async {
-      var inserted = 0;
+    await db.transaction(() async {
       for (final id in labelIds) {
-        inserted += await db.customUpdate(
+        await db.customUpdate(
           'INSERT OR IGNORE INTO conversation_labels '
-          '(source, conversation_key, label_id, applied_by, applied_at, '
-          'rule_id) '
-          'VALUES (?, ?, ?, ?, ?, ?)',
-          variables: _args([
-            source,
-            conversationKey,
-            id,
-            appliedBy,
-            now,
-            ruleId,
-          ]),
+          '(source, conversation_key, label_id, applied_by, applied_at) '
+          'VALUES (?, ?, ?, ?, ?)',
+          variables: _args([source, conversationKey, id, appliedBy, now]),
         );
-        if (!countUse) continue;
         await db.customUpdate(
           'UPDATE labels SET use_count = use_count + 1, last_used_at = ?, '
           'updated_at = ? WHERE id = ?',
           variables: _args([now, now, id]),
         );
       }
-      return inserted;
     });
   }
 
-  /// Takes one label off one thread, and answers what came off — who put the
-  /// link there and under which rule — or null when there was no link to
-  /// take. The answer is for [restoreLabel]: putting a rule's filing back as
-  /// a hand apply would leave a thread its rule could neither re-file nor,
-  /// undone, un-file.
+  /// Takes one label off one thread, and answers whether a link came off —
+  /// false when there was none to take, so a caller offering an Undo knows
+  /// there is nothing to put back.
   ///
   /// The link goes and `use_count` does NOT come back down. The count is a
   /// popularity signal — how often the owner has reached for this word, which
@@ -5402,35 +5058,20 @@ SELECT conversation_key FROM (
   /// label off one thread does not unsay the twenty times it was the right
   /// word, and a count that fell would quietly demote a chip because of one
   /// correction.
-  Future<({String appliedBy, String? ruleId})?> removeLabel(
+  Future<bool> removeLabel(
     String source,
     String conversationKey,
     String labelId,
   ) async {
-    return db.transaction(() async {
-      final rows = await db
-          .customSelect(
-            'SELECT applied_by, rule_id FROM conversation_labels '
-            'WHERE source = ? AND conversation_key = ? AND label_id = ?',
-            variables: _args([source, conversationKey, labelId]),
-          )
-          .get();
-      if (rows.isEmpty) return null;
-      await db.customUpdate(
-        'DELETE FROM conversation_labels '
-        'WHERE source = ? AND conversation_key = ? AND label_id = ?',
-        variables: _args([source, conversationKey, labelId]),
-      );
-      final row = rows.first.data;
-      return (
-        appliedBy: row['applied_by'] as String? ?? 'user',
-        ruleId: row['rule_id'] as String?,
-      );
-    });
+    final affected = await db.customUpdate(
+      'DELETE FROM conversation_labels '
+      'WHERE source = ? AND conversation_key = ? AND label_id = ?',
+      variables: _args([source, conversationKey, labelId]),
+    );
+    return affected > 0;
   }
 
-  /// The Undo behind [removeLabel]: the link back exactly as it was —
-  /// [appliedBy] and [ruleId] as the removal answered them, and no `use_count`
+  /// The Undo behind [removeLabel]: the link back, and no `use_count`
   /// movement, because putting back what was there is not the owner reaching
   /// for the word again.
   ///
@@ -5439,10 +5080,8 @@ SELECT conversation_key FROM (
   Future<bool> restoreLabel(
     String source,
     String conversationKey,
-    String labelId, {
-    required String appliedBy,
-    String? ruleId,
-  }) async {
+    String labelId,
+  ) async {
     return db.transaction(() async {
       final label = await db
           .customSelect(
@@ -5453,17 +5092,9 @@ SELECT conversation_key FROM (
       if (label.isEmpty) return false;
       await db.customUpdate(
         'INSERT OR IGNORE INTO conversation_labels '
-        '(source, conversation_key, label_id, applied_by, applied_at, '
-        'rule_id) '
-        'VALUES (?, ?, ?, ?, ?, ?)',
-        variables: _args([
-          source,
-          conversationKey,
-          labelId,
-          appliedBy,
-          _nowIso(),
-          ruleId,
-        ]),
+        '(source, conversation_key, label_id, applied_by, applied_at) '
+        "VALUES (?, ?, ?, 'user', ?)",
+        variables: _args([source, conversationKey, labelId, _nowIso()]),
       );
       return true;
     });
@@ -5490,523 +5121,6 @@ SELECT conversation_key FROM (
         )
         .get();
     return [for (final row in rows) Label.fromRow(row.data)];
-  }
-
-  // ── label rules ──────────────────────────────────────────────────────
-  //
-  // A word in the owner's vocabulary pointed at the mail that has not arrived
-  // yet. Requirement 11b in one sentence: the owner dismisses a thread, files
-  // it under `Meeting response`, and says "and every future one of these".
-  //
-  // Nothing in this section decides what a rule matches. `matchLabelRule`
-  // (`services/label_rules.dart`) is the one authority, asked here, at the
-  // triage gate and in the needs-you pass, because a retroactive apply that
-  // moved a different set of threads from the one the gate will act on tomorrow
-  // is the failure one function prevents.
-  //
-  // Rules act through machinery that already exists: `hide_needs_you` writes
-  // the needs-you VERDICT (so the thread leaves the rail and stays in the
-  // inbox), `later` writes the conversation's BUCKET, and `drop` is a gate on
-  // arriving mail and therefore not a write in this file at all. None of the
-  // three is a new state on a thread.
-
-  /// A rule's uniqueness key: the scope value trimmed and lowercased.
-  ///
-  /// One spelling of the rule, because [createLabelRule] folds with it and the
-  /// unique index enforces it, and because [matchLabelRule] is written on the
-  /// promise that the stored value is already folded — it compares against
-  /// `scope_value` without a `LOWER()` per row.
-  static String labelRuleScopeKey(String value) => value.trim().toLowerCase();
-
-  /// The id minted for a new rule: its scope kind plus four hex digits.
-  ///
-  /// The stem is for a human reading a row, exactly as in [_mintLabelId]; the
-  /// suffix is what makes it unique. The scope VALUE is deliberately not in it —
-  /// an address or a subject line in an id would put a real correspondent's
-  /// mailbox into every log line that mentions the rule.
-  static String _mintLabelRuleId(String scopeKind) {
-    final stem = scopeKind.replaceAll(RegExp(r'[^a-z0-9]+'), '');
-    final buffer = StringBuffer('rule-${stem.isEmpty ? 'scope' : stem}-');
-    for (var i = 0; i < 4; i++) {
-      buffer.write(_random.nextInt(16).toRadixString(16));
-    }
-    return buffer.toString();
-  }
-
-  /// Writes a standing rule, or REPLACES the one already standing over the same
-  /// scope, and hands it back.
-  ///
-  /// One rule per (scope kind, scope value), enforced by the unique index, and a
-  /// second rule on the same scope UPDATES the first rather than throwing. The
-  /// reason is the press behind it: the owner is looking at a thread, choosing a
-  /// word and a scope, and a second choice about the same sender is them
-  /// correcting the first — an error message there would turn the one gesture
-  /// this round exists for into a failure. Two standing instructions about one
-  /// address with no way to say which won is the outcome this refuses.
-  ///
-  /// What survives a replacement is the rule's [LabelRule.id], its
-  /// `created_at` and its `hidden_count`, so the links it has already filed stay
-  /// attached to a rule that still exists and undo still takes back exactly what
-  /// the count claims. What changes is the word, the disposition and the
-  /// exception — the three things the owner just re-chose.
-  ///
-  /// [scopeValue] is folded through [labelRuleScopeKey] on the way in, so every
-  /// comparison against it afterwards is case-insensitive by construction.
-  /// A blank scope value is refused with a [StateError]: a rule matching the
-  /// empty string is a rule about everything, which no surface offers and no
-  /// undo could be trusted to find.
-  Future<LabelRule> createLabelRule({
-    required String labelId,
-    required String scopeKind,
-    required String scopeValue,
-    required String disposition,
-    bool unlessMentionsMe = true,
-  }) async {
-    final value = labelRuleScopeKey(scopeValue);
-    if (value.isEmpty) {
-      throw StateError('A rule needs something to match on');
-    }
-    final now = _nowIso();
-    final existing = await db
-        .customSelect(
-          'SELECT * FROM label_rules WHERE scope_kind = ? AND scope_value = ?',
-          variables: _args([scopeKind, value]),
-        )
-        .get();
-    if (existing.isNotEmpty) {
-      final id = LabelRule.fromRow(existing.first.data).id;
-      await db.customUpdate(
-        'UPDATE label_rules SET label_id = ?, disposition = ?, '
-        'unless_mentions_me = ?, updated_at = ? WHERE id = ?',
-        variables: _args([
-          labelId,
-          disposition,
-          unlessMentionsMe ? 1 : 0,
-          now,
-          id,
-        ]),
-      );
-      return (await getLabelRule(id))!;
-    }
-
-    final rule = LabelRule(
-      id: _mintLabelRuleId(scopeKind),
-      labelId: labelId,
-      scopeKind: scopeKind,
-      scopeValue: value,
-      disposition: disposition,
-      unlessMentionsMe: unlessMentionsMe,
-      createdAt: now,
-      updatedAt: now,
-    );
-    await db.customUpdate(
-      'INSERT INTO label_rules (id, label_id, scope_kind, scope_value, '
-      'disposition, unless_mentions_me, hidden_count, created_at, updated_at) '
-      'VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)',
-      variables: _args([
-        rule.id,
-        rule.labelId,
-        rule.scopeKind,
-        rule.scopeValue,
-        rule.disposition,
-        unlessMentionsMe ? 1 : 0,
-        now,
-        now,
-      ]),
-    );
-    return (await getLabelRule(rule.id))!;
-  }
-
-  /// Every standing rule, newest first, each carrying its label's NAME.
-  ///
-  /// The name rides along because both readers need it and neither wants a
-  /// query per row: the needs-you verdict's reason is `label_rule:<name>`, and
-  /// the Settings list draws the word beside the scope. A LEFT join, so a rule
-  /// whose label has somehow gone still appears — a rule nobody can see is a
-  /// rule nobody can revoke, and [deleteLabel] takes the rules with the word
-  /// precisely so that state does not arise.
-  ///
-  /// `id` breaks the tie under `created_at` so the order is stable for rules
-  /// written in the same millisecond.
-  Future<List<LabelRule>> listLabelRules() async {
-    final rows = await db
-        .customSelect(
-          'SELECT r.*, l.name AS label_name FROM label_rules r '
-          'LEFT JOIN labels l ON l.id = r.label_id '
-          'ORDER BY r.created_at DESC, r.id ASC',
-        )
-        .get();
-    return [for (final row in rows) LabelRule.fromRow(row.data)];
-  }
-
-  /// One rule with its label's name, or null when it has been deleted.
-  Future<LabelRule?> getLabelRule(String id) async {
-    final rows = await db
-        .customSelect(
-          'SELECT r.*, l.name AS label_name FROM label_rules r '
-          'LEFT JOIN labels l ON l.id = r.label_id WHERE r.id = ?',
-          variables: _args([id]),
-        )
-        .get();
-    return rows.isEmpty ? null : LabelRule.fromRow(rows.first.data);
-  }
-
-  /// Takes one rule out of standing, leaving the links it filed where they are.
-  ///
-  /// The plain delete, for a caller that means "stop acting on new mail" and
-  /// nothing more. [undoLabelRule] is the other end of it: the one that also
-  /// takes back what the rule already did.
-  Future<void> deleteLabelRule(String id) async {
-    await db.customUpdate(
-      'DELETE FROM label_rules WHERE id = ?',
-      variables: _args([id]),
-    );
-  }
-
-  /// Adds [by] to how many threads a rule has filed.
-  ///
-  /// Additive rather than recomputed, because the count is only ever moved by
-  /// the code that did the filing, and a SELECT COUNT over the links would
-  /// disagree with it the moment the owner removed one chip by hand — the count
-  /// is a tally of what the rule DID, not a live size of what it holds.
-  Future<void> bumpRuleHiddenCount(String id, {int by = 1}) async {
-    if (by == 0) return;
-    await db.customUpdate(
-      'UPDATE label_rules SET hidden_count = MAX(0, hidden_count + ?), '
-      'updated_at = ? WHERE id = ?',
-      variables: _args([by, _nowIso(), id]),
-    );
-  }
-
-  /// Every thread one rule has filed, as (source, conversation key) pairs.
-  ///
-  /// Read off `rule_id`, which is what makes a rule's own work separable from
-  /// the owner's: a link the owner applied by hand carries NULL there and is not
-  /// in this list, whatever word it names.
-  Future<List<({String source, String conversationKey})>> labelRuleThreads(
-    String ruleId,
-  ) async {
-    final rows = await db
-        .customSelect(
-          'SELECT source, conversation_key FROM conversation_labels '
-          'WHERE rule_id = ?',
-          variables: _args([ruleId]),
-        )
-        .get();
-    return [
-      for (final row in rows)
-        (
-          source: row.data['source'] as String? ?? '',
-          conversationKey: row.data['conversation_key'] as String? ?? '',
-        ),
-    ];
-  }
-
-  /// Applies one rule to the mail that is ALREADY here, and returns how many
-  /// threads it moved.
-  ///
-  /// Requirement 11b's last line: "applying a new rule should retroactively move
-  /// the existing matching threads". The count is the number the toast reports,
-  /// on `rebucketSender`'s precedent — threads touched, whether or not the write
-  /// changed a value, so an owner who does this twice sees the same number both
-  /// times.
-  ///
-  /// [sinceIso] bounds the walk, and a caller passes the lookback floor it is
-  /// already working with. Null means every stored message, which is what a
-  /// rule created from the Settings list means.
-  ///
-  /// [classify] names the KIND of one message row for a classification-scoped
-  /// rule. It is a closure rather than a call because naming the kind of a
-  /// message is not this layer's job — a classification-scoped rule with no
-  /// [classify] in hand matches nothing and moves nothing, which is the honest
-  /// answer for a caller that cannot say what kind of mail it is looking at.
-  ///
-  /// Three things this deliberately does NOT touch:
-  /// - a message stamped `gate_override = 'user'`. That is the owner's own hand
-  ///   on the gates, restoring a message from the dropped pile, and it outranks
-  ///   every derivation — including this one.
-  /// - a message the needs-you FLOOR would raise, when the rule carries
-  ///   [LabelRule.unlessMentionsMe]. That is the exception in requirement 11b
-  ///   ("Jira update **unless it mentions me**"), spent the one way this app has
-  ///   of knowing somebody singled the owner out.
-  /// - triage. A rule is not a re-judgement of mail already read: `drop` gates
-  ///   ARRIVING mail and does nothing here beyond what `later` does, exactly as
-  ///   `ConversationsNotifier.dropSender` leaves the threads a dropped sender
-  ///   already owns.
-  Future<int> applyLabelRule(
-    String ruleId, {
-    String? sinceIso,
-    String? Function(Map<String, Object?> row)? classify,
-  }) async {
-    final rule = await getLabelRule(ruleId);
-    if (rule == null) return 0;
-    final since = sinceIso;
-    final rows = await db
-        .customSelect(
-          // No body columns, deliberately: nothing downstream reads one — the
-          // matcher works on sender/subject, `classificationOf` on the meta
-          // blob and headers, the floor on `addressed_me` — and this walk is
-          // unbounded, so projecting bodies would pull the whole mailbox's
-          // text into memory to answer questions about envelopes.
-          'SELECT source, source_message_id, conversation_key, direction, '
-          '  from_address, from_name, subject, addressed_me, received_at, '
-          '  source_meta_json '
-          'FROM messages '
-          "WHERE direction = 'inbound' "
-          "  AND (gate_override IS NULL OR gate_override <> 'user')"
-          '${since == null ? '' : ' AND received_at >= ?'} '
-          'ORDER BY received_at DESC',
-          variables: _args([?since]),
-        )
-        .get();
-
-    // Threads rather than messages, because every disposition files a THREAD:
-    // the label, the bucket and the rail are all per conversation. The verdicts
-    // below are per message, which is why the walk writes them as it goes and
-    // collects the keys for the thread-level work afterwards.
-    final threads = <String, ({String source, String conversationKey})>{};
-    for (final row in rows) {
-      final data = row.data;
-      final match = matchLabelRule(
-        [rule],
-        source: data['source'] as String? ?? 'email',
-        senderAddress: data['from_address'] as String?,
-        senderName: data['from_name'] as String?,
-        subject: data['subject'] as String?,
-        classification: classify?.call(data),
-      );
-      if (match == null) continue;
-      final source = data['source'] as String? ?? 'email';
-      final key = data['conversation_key'] as String? ?? '';
-      if (key.isEmpty) continue;
-
-      if (rule.disposition == LabelRule.hideNeedsYou) {
-        // The exception, and the reason it is a `continue`: this message
-        // singled the owner out, so neither its verdict nor its thread is the
-        // rule's business.
-        if (rule.unlessMentionsMe && needsYouFloor(data)) continue;
-        await writeNeedsYouVerdict(
-          source,
-          data['source_message_id'] as String? ?? '',
-          verdict: false,
-          reason: rule.verdictReason,
-        );
-      }
-      threads['$source\n$key'] = (source: source, conversationKey: key);
-    }
-
-    var filed = 0;
-    for (final thread in threads.values) {
-      if (await applyLabelsByRule(
-        thread.source,
-        thread.conversationKey,
-        rule.labelId,
-        ruleId: rule.id,
-      )) {
-        filed++;
-      }
-      if (rule.disposition == LabelRule.hideNeedsYou) {
-        // The verdict decides the rail; this is the SNAPSHOT of it the settled
-        // rows carry, which the home screen reads. Left standing it would draw
-        // a chip for a thread that is no longer on the rail — the same
-        // disagreement `NeedsYouHandler._followChip` exists to prevent.
-        await clearNeedsYou(thread.source, thread.conversationKey);
-      } else {
-        await _fileThreadToLaterByRule(thread.source, thread.conversationKey);
-      }
-    }
-    await bumpRuleHiddenCount(rule.id, by: filed);
-    return threads.length;
-  }
-
-  /// Files one thread under Later on a rule's behalf.
-  ///
-  /// The reason written is `'user'`, and that is a decision worth stating. A
-  /// standing rule IS the owner's instruction — `resurfaceDue` writes the same
-  /// word for the same reason — and `'user'` is the one reason the attention
-  /// sweep and the extractor both refuse to overrule, which is what a rule
-  /// needs: a thread filed by a rule must not be swept back into the inbox
-  /// because a later pass thought it looked important. Which threads a rule
-  /// filed is recorded on the LINK (`rule_id`) rather than in this word, so undo
-  /// still knows exactly what to take back.
-  ///
-  /// The date goes, for `rebucketSender`'s reason: a rule has no "when" in it,
-  /// and a stale date inherited from an earlier hand-deferral would draw a
-  /// `Back <when>` the rule would never honour.
-  Future<void> _fileThreadToLaterByRule(
-    String source,
-    String conversationKey,
-  ) async {
-    await setConversationBucket(
-      source,
-      conversationKey,
-      bucket: 'later',
-      reason: 'user',
-    );
-    await setSnoozedUntil(source, conversationKey, null);
-  }
-
-  /// Takes a rule back: the rule row, the links it filed, the buckets it wrote,
-  /// and a re-judgement of the verdicts it wrote. Returns how many threads it
-  /// let go.
-  ///
-  /// A RECOMPUTE, not a byte-restore, and that is the whole design of the undo.
-  /// Nothing anywhere remembers what a message's needs-you verdict was before a
-  /// rule overwrote it — storing that would be a second history table for a
-  /// button pressed seconds ago (`ConversationsNotifier.restoreSenderPref`
-  /// documents the same trade). So the verdicts the rule wrote are set back to
-  /// NULL, which is the state that means "never judged", and each message is
-  /// queued for the needs-you pass to judge properly. A thread comes back to
-  /// what the model thinks of it, which is where it would have been if the rule
-  /// had never existed.
-  ///
-  /// The verdicts it takes back are found by their REASON — every one the rule
-  /// wrote reads `label_rule:…` — narrowed to the threads this rule filed. A
-  /// verdict the model wrote keeps its answer and costs no model call.
-  ///
-  /// Links the OWNER applied by hand are never touched: they carry a NULL
-  /// `rule_id`, and this deletes by that column.
-  Future<int> undoLabelRule(String ruleId) async {
-    // Read BEFORE the delete below takes the row: whether this undo owes the
-    // buckets anything is the rule's own disposition, and a `hide_needs_you`
-    // rule never wrote one — clearing unconditionally would discard a Later
-    // the owner set BY HAND on a thread the rule merely labelled.
-    final rule = await getLabelRule(ruleId);
-    final wroteBuckets = rule?.disposition == LabelRule.sendToLater ||
-        rule?.disposition == LabelRule.dropAtGate;
-    final threads = await labelRuleThreads(ruleId);
-
-    // The per-thread recompute runs FIRST and the deletes come last, so a
-    // crash mid-undo leaves the RULE standing over some already-requeued
-    // threads — a state the next needs-you pass re-applies and a second
-    // press finishes — rather than the rule gone with threads still judged
-    // by it, which nothing would ever revisit.
-    for (final thread in threads) {
-      // `LIKE 'label_rule:%'` rather than this rule's own reason, and the
-      // breadth is deliberate: the reason embeds the label's NAME as it was
-      // when the verdict was written, so an exact match would strand every
-      // verdict written before a rename — hidden forever, with the rule
-      // gone. On a thread two rules both filed, the breadth nulls the other
-      // rule's verdicts too; those rows are requeued below and the standing
-      // rule re-applies on the pass, so the wide match heals where the
-      // narrow one cannot.
-      final cleared = await db.customWriteReturning(
-        'UPDATE messages SET needs_you_verdict = NULL, '
-        '  needs_you_reason = NULL, updated_at = ? '
-        'WHERE source = ? AND conversation_key = ? '
-        "  AND needs_you_reason LIKE 'label_rule:%' "
-        "  AND (gate_override IS NULL OR gate_override <> 'user') "
-        'RETURNING source_message_id',
-        variables: _args([_nowIso(), thread.source, thread.conversationKey]),
-      );
-      for (final row in cleared) {
-        await enqueueWork(
-          'needs_you',
-          thread.source,
-          row.data['source_message_id'] as String? ?? '',
-        );
-      }
-      // The bucket a `later` or `drop` rule wrote. Cleared with the same
-      // `'user'` word `ConversationsNotifier.markUndone` writes when a person
-      // puts a thread back by hand, because that is what this press is. Only
-      // for the dispositions that WRITE buckets: a `hide_needs_you` rule never
-      // touched one, and a thread the owner sent to Later by hand under such a
-      // rule must keep that word through the rule's undo.
-      if (wroteBuckets) {
-        await setConversationBucket(
-          thread.source,
-          thread.conversationKey,
-          bucket: null,
-          reason: 'user',
-        );
-      }
-    }
-
-    await db.transaction(() async {
-      await db.customUpdate(
-        'DELETE FROM conversation_labels WHERE rule_id = ?',
-        variables: _args([ruleId]),
-      );
-      await db.customUpdate(
-        'DELETE FROM label_rules WHERE id = ?',
-        variables: _args([ruleId]),
-      );
-    });
-    return threads.length;
-  }
-
-  /// "Show again" for ONE thread a rule filed: the thread comes back and the
-  /// rule stays. Returns false when the rule held no link on the thread, having
-  /// written nothing.
-  ///
-  /// [undoLabelRule]'s per-thread half and nothing more — never that method,
-  /// which deletes the rule and takes back every thread it ever filed. The
-  /// owner looking at one row of the Recently dismissed view is saying "not
-  /// this one", not "never again".
-  ///
-  /// Three writes, the same three the undo makes for each of its threads:
-  /// - the verdicts a rule wrote (`label_rule:…`) go back to NULL and each
-  ///   message is queued for the needs-you pass. Those messages are also
-  ///   stamped `gate_override = 'user'`, which is what makes the press stick:
-  ///   the rule is still standing, and without the stamp the requeued pass
-  ///   would match it again and re-hide the thread it was asked to show. The
-  ///   stamp is Restore's own word for "the owner pulled this back", and
-  ///   every rule consumer already reads it as outside the rule.
-  /// - the bucket a `later` or `drop` rule wrote is cleared under `'user'`,
-  ///   the word the attention sweep refuses to overrule — so the sweep does
-  ///   not file the thread straight back under the same rule.
-  /// - this rule's link on this thread goes, and the rule's tally with it.
-  ///   Links other rules or the owner applied stay.
-  ///
-  /// One transaction: a thread half shown — link gone, verdicts still hiding
-  /// it — would drop out of the view with nothing on the rail to show for it.
-  /// Mail that arrives on the thread LATER still meets the rule, which is the
-  /// rule doing its job; so does a message a `drop` rule gated, which stays in
-  /// the Dropped pile with its own Restore.
-  Future<bool> showRuleFiledThread(
-    String source,
-    String conversationKey, {
-    required String ruleId,
-  }) async {
-    final rule = await getLabelRule(ruleId);
-    final wroteBuckets = rule?.disposition == LabelRule.sendToLater ||
-        rule?.disposition == LabelRule.dropAtGate;
-    return db.transaction(() async {
-      final removed = await db.customUpdate(
-        'DELETE FROM conversation_labels '
-        'WHERE source = ? AND conversation_key = ? AND rule_id = ?',
-        variables: _args([source, conversationKey, ruleId]),
-      );
-      if (removed == 0) return false;
-      // `LIKE 'label_rule:%'` for [undoLabelRule]'s reason: the reason embeds
-      // the label's name as it was when written, so an exact match would miss
-      // every verdict written before a rename.
-      final cleared = await db.customWriteReturning(
-        'UPDATE messages SET needs_you_verdict = NULL, '
-        "  needs_you_reason = NULL, gate_override = 'user', updated_at = ? "
-        'WHERE source = ? AND conversation_key = ? '
-        "  AND needs_you_reason LIKE 'label_rule:%' "
-        'RETURNING source_message_id',
-        variables: _args([_nowIso(), source, conversationKey]),
-      );
-      for (final row in cleared) {
-        await enqueueWork(
-          'needs_you',
-          source,
-          row.data['source_message_id'] as String? ?? '',
-        );
-      }
-      if (wroteBuckets) {
-        await setConversationBucket(
-          source,
-          conversationKey,
-          bucket: null,
-          reason: 'user',
-        );
-      }
-      await bumpRuleHiddenCount(ruleId, by: -removed);
-      return true;
-    });
   }
 
   /// Re-gates the meeting RESPONSES already in the mailbox, and returns how many

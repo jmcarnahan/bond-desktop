@@ -48,9 +48,6 @@ void main() {
     Future<bool> Function(String, String)? onRenameLabel,
     void Function(String, String?)? onLabelToneChanged,
     void Function(String)? onDeleteLabel,
-    List<LabelRule> labelRules = const [],
-    void Function(String)? onDeleteRule,
-    void Function(String, String)? onRuleDispositionChanged,
     bool replySendMarksDone = false,
     void Function(bool)? onReplySendMarksDoneChanged,
   }) async {
@@ -83,9 +80,6 @@ void main() {
           onRenameLabel: onRenameLabel,
           onLabelToneChanged: onLabelToneChanged,
           onDeleteLabel: onDeleteLabel,
-          labelRules: labelRules,
-          onDeleteRule: onDeleteRule,
-          onRuleDispositionChanged: onRuleDispositionChanged,
           replySendMarksDone: replySendMarksDone,
           onReplySendMarksDoneChanged: onReplySendMarksDoneChanged,
         ),
@@ -1128,9 +1122,6 @@ void main() {
       Future<bool> Function(String, String)? onRename,
       void Function(String, String?)? onTone,
       void Function(String)? onDelete,
-      List<LabelRule> rules = const [],
-      void Function(String)? onDeleteRule,
-      void Function(String, String)? onDisposition,
       bool opened = true,
     }) async {
       await open(
@@ -1143,9 +1134,6 @@ void main() {
         onRenameLabel: onRename,
         onLabelToneChanged: onTone,
         onDeleteLabel: onDelete,
-        labelRules: rules,
-        onDeleteRule: onDeleteRule,
-        onRuleDispositionChanged: onDisposition,
       );
       if (opened && labels != null) {
         final toggle = find.byKey(SettingsSection.toggleKey('Labels'));
@@ -1402,223 +1390,5 @@ void main() {
       expect(find.text('Could not read your labels.'), findsOneWidget);
     });
 
-    /// The standing rules a label carries — plan 4.10. The rule ROWS are here
-    /// rather than in a file of their own because the words are pinned in three
-    /// places at once: this file, `docs/settings.md` and the section itself.
-    group('the rules under a word', () {
-      LabelRule rule(
-        String id, {
-        String labelId = 'jira',
-        String kind = LabelRule.scopeSender,
-        String value = 'noreply@jira.example.com',
-        String disposition = LabelRule.hideNeedsYou,
-        int hidden = 41,
-        String createdAt = '2026-09-01T09:00:00Z',
-      }) =>
-          LabelRule(
-            id: id,
-            labelId: labelId,
-            scopeKind: kind,
-            scopeValue: value,
-            disposition: disposition,
-            hiddenCount: hidden,
-            createdAt: createdAt,
-          );
-
-      testWidgets('reads as what it does, what it is about and what it did',
-          (tester) async {
-        await openLabels(tester, labels: vocabulary(), rules: [rule('r1')]);
-
-        expect(
-          find.text('Hide from Needs You · this sender · hid 41 threads'),
-          findsOneWidget,
-        );
-        // Under the word it files under, never a heading of its own.
-        expect(
-          find.descendant(
-            of: find.byKey(LabelsSection.rowKeyFor('jira')),
-            matching: find.byKey(LabelsSection.ruleRowKeyFor('r1')),
-          ),
-          findsOneWidget,
-        );
-        // And never the stored token.
-        expect(find.textContaining('hide_needs_you'), findsNothing);
-      });
-
-      test('every disposition has words, and a count in its own tense', () {
-        expect(
-          LabelsSection.ruleWords(rule('r', disposition: LabelRule.sendToLater)),
-          'Send to Later · this sender · moved 41 threads',
-        );
-        expect(
-          LabelsSection.ruleWords(rule('r',
-              disposition: LabelRule.dropAtGate,
-              kind: LabelRule.scopeDomain,
-              value: 'jira.example.com')),
-          'Drop before reading · this domain · dropped 41 threads',
-        );
-        expect(
-          LabelsSection.ruleWords(rule('r',
-              kind: LabelRule.scopeSubject, value: '[jira]', hidden: 1)),
-          'Hide from Needs You · subjects like "[jira]" · hid 1 thread',
-        );
-        // A rule that has not fired yet says so rather than `hid 0 threads`.
-        expect(
-          LabelsSection.ruleWords(rule('r', hidden: 0)),
-          'Hide from Needs You · this sender · nothing yet',
-        );
-        // A disposition this build never heard of still reads as words.
-        expect(
-          LabelsSection.dispositionWords('send_to_mars'),
-          'send to mars',
-        );
-      });
-
-      testWidgets('the collapsed line counts them', (tester) async {
-        expect(
-          LabelsSection.summaryOf(vocabulary(), rules: 1),
-          '2 labels · 12 uses · 1 rule',
-        );
-
-        await openLabels(
-          tester,
-          labels: vocabulary(),
-          rules: [rule('r1'), rule('r2', labelId: 'legal')],
-          opened: false,
-        );
-
-        expect(find.text('2 labels · 12 uses · 2 rules'), findsOneWidget);
-      });
-
-      testWidgets('a rule whose word has gone is drawn nowhere',
-          (tester) async {
-        await openLabels(
-          tester,
-          labels: vocabulary(),
-          rules: [rule('r1', labelId: 'deleted-label')],
-        );
-
-        expect(find.byKey(LabelsSection.ruleRowKeyFor('r1')), findsNothing);
-        expect(find.textContaining('Hide from Needs You'), findsNothing);
-      });
-
-      testWidgets('Change opens the three places mail can go', (tester) async {
-        final changed = <(String, String)>[];
-        await openLabels(
-          tester,
-          labels: vocabulary(),
-          rules: [rule('r1')],
-          onDisposition: (id, disposition) => changed.add((id, disposition)),
-        );
-
-        // Closed until asked for, like the tone control above it.
-        expect(
-          find.byKey(LabelsSection.ruleDispositionKeyFor('r1')),
-          findsNothing,
-        );
-
-        await tester.tap(find.byKey(LabelsSection.ruleChangeKeyFor('r1')));
-        await tester.pumpAndSettle();
-
-        expect(
-          find.byKey(LabelsSection.ruleDispositionKeyFor('r1')),
-          findsOneWidget,
-        );
-
-        await tester.tap(find.text('Later'));
-        await tester.pumpAndSettle();
-
-        expect(changed, [('r1', LabelRule.sendToLater)]);
-        // Reported the instant it was pressed, and the control closes.
-        expect(
-          find.byKey(LabelsSection.ruleDispositionKeyFor('r1')),
-          findsNothing,
-        );
-      });
-
-      testWidgets('a disposition this build cannot draw is not editable',
-          (tester) async {
-        // `SegmentedButton` asserts on a selected value that is not among its
-        // segments, so a rule a later build wrote reads and can be removed.
-        await openLabels(
-          tester,
-          labels: vocabulary(),
-          rules: [rule('r1', disposition: 'send_to_mars')],
-          onDisposition: (_, _) {},
-          onDeleteRule: (_) {},
-        );
-
-        expect(find.textContaining('send to mars'), findsOneWidget);
-        expect(find.byKey(LabelsSection.ruleChangeKeyFor('r1')), findsNothing);
-        expect(find.byKey(LabelsSection.ruleRemoveKeyFor('r1')), findsOneWidget);
-      });
-
-      testWidgets('Remove rule asks a second time and says what survives',
-          (tester) async {
-        final stopped = <String>[];
-        await openLabels(
-          tester,
-          labels: vocabulary(),
-          rules: [rule('r1')],
-          onDeleteRule: stopped.add,
-        );
-
-        await tester.tap(find.byKey(LabelsSection.ruleRemoveKeyFor('r1')));
-        await tester.pumpAndSettle();
-
-        expect(stopped, isEmpty);
-        expect(
-          find.textContaining('The word stays, and so do the threads'),
-          findsOneWidget,
-        );
-
-        await tester
-            .tap(find.byKey(LabelsSection.ruleConfirmRemoveKeyFor('r1')));
-        await tester.pumpAndSettle();
-
-        expect(stopped, ['r1']);
-        expect(find.byType(Dialog), findsNothing);
-      });
-
-      testWidgets('and Keep disarms it', (tester) async {
-        final stopped = <String>[];
-        await openLabels(
-          tester,
-          labels: vocabulary(),
-          rules: [rule('r1')],
-          onDeleteRule: stopped.add,
-        );
-
-        await tester.tap(find.byKey(LabelsSection.ruleRemoveKeyFor('r1')));
-        await tester.pumpAndSettle();
-        await tester.tap(find.byKey(LabelsSection.ruleKeepKeyFor('r1')));
-        await tester.pumpAndSettle();
-
-        expect(stopped, isEmpty);
-        expect(
-          find.byKey(LabelsSection.ruleConfirmRemoveKeyFor('r1')),
-          findsNothing,
-        );
-      });
-
-      testWidgets('a host that wired no rule mutators draws the words alone',
-          (tester) async {
-        await openLabels(tester, labels: vocabulary(), rules: [rule('r1')]);
-
-        expect(find.byKey(LabelsSection.ruleRowKeyFor('r1')), findsOneWidget);
-        expect(find.byKey(LabelsSection.ruleChangeKeyFor('r1')), findsNothing);
-        expect(find.byKey(LabelsSection.ruleRemoveKeyFor('r1')), findsNothing);
-      });
-
-      testWidgets('and a host with no rules at all draws the old section',
-          (tester) async {
-        await openLabels(tester, labels: vocabulary());
-
-        expect(find.text('Jira update'), findsOneWidget);
-        expect(find.textContaining('Hide from Needs You'), findsNothing);
-        // The collapsed line counts words and uses and says nothing of rules.
-        expect(find.text('2 labels · 12 uses'), findsOneWidget);
-      });
-    });
   });
 }

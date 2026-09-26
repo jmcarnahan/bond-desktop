@@ -26,34 +26,20 @@ library;
 /// holds 0 or 1 — so it is compared against 1 rather than trusted to be
 /// truthy, exactly as `asksForAReply` does in `extract_handler.dart`.
 ///
-/// [suppressed] is the one thing allowed to switch the floor off, and it exists
-/// for exactly one caller: a standing label rule (`LabelRule`) whose
-/// `unless_mentions_me` is OFF. That flag is the owner saying "this kind of mail,
-/// even when it names me" — a chat they have decided they are done with, where
-/// being addressed is precisely what every message in it does. Leaving the floor
-/// in place there would make the rule inert and give no way to express the
-/// choice. It is a parameter rather than a second function because the rule is
-/// still "the row decides", with the owner's one exception written on top, and
-/// two functions would drift.
-///
-/// [coldOutreach] is the second and last thing allowed to switch the floor off,
-/// and it is a RANKING rather than an instruction: see [isColdOutreach]. A
-/// stranger's first approach does not get a floor handed to it by the envelope it
-/// arrived in; it earns the rail through what the message says, or it sits in the
-/// inbox like every other thread. It is a separate parameter from [suppressed]
-/// because the two are different facts with different owners — one is the owner's
-/// standing word about a class of mail, the other is arithmetic on an address and
-/// a thread's own history — and a caller reading a single flag would eventually
-/// pass the wrong one.
+/// [coldOutreach] is the one thing allowed to switch the floor off, and it is a
+/// RANKING rather than an instruction: see [isColdOutreach]. A stranger's first
+/// approach does not get a floor handed to it by the envelope it arrived in; it
+/// earns the rail through what the message says, or it sits in the inbox like
+/// every other thread. It is a parameter rather than a second function because
+/// the rule is still "the row decides", with that one exception written on top,
+/// and two functions would drift.
 ///
 /// Read this as the floor NOT SPEAKING rather than as a "no": a false here still
 /// says nothing about the message, and the judgement still passes on.
 bool needsYouFloor(
   Map<String, Object?> row, {
-  bool suppressed = false,
   bool coldOutreach = false,
 }) =>
-    !suppressed &&
     !coldOutreach &&
     row['direction'] == 'inbound' &&
     row['source'] == 'teams' &&

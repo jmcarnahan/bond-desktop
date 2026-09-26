@@ -49,28 +49,6 @@ void main() {
       expect(needsYouFloor({...row(), 'addressed_me': null}), isFalse);
     });
 
-    test('a standing rule with its exception OFF switches the floor off', () {
-      // The one caller allowed to: `LabelRule.unlessMentionsMe` false is the
-      // owner saying "this kind of mail, even when it names me", which in a chat
-      // they are done with is every message in it. Leaving the floor in place
-      // would make that rule inert and give no way to say the thing.
-      expect(needsYouFloor(row(), suppressed: true), isFalse);
-    });
-
-    test('suppression is not a verdict of its own', () {
-      // It cannot raise anything either: a rule with no exception over a chat
-      // that named nobody leaves the floor exactly as silent as it already was.
-      expect(needsYouFloor(row(addressedMe: 0), suppressed: true), isFalse);
-      expect(needsYouFloor(row(source: 'email'), suppressed: true), isFalse);
-    });
-
-    test('the default is the floor standing', () {
-      // Every existing caller passes one argument, and an @mention still beats
-      // a rule that kept its exception — which is the default.
-      expect(needsYouFloor(row(), suppressed: false), isTrue);
-      expect(needsYouFloor(row()), isTrue);
-    });
-
     test("a stranger's first approach gets no floor", () {
       // A RANKING, not a drop: the thread stays in the inbox and the model
       // still reads it. All this withholds is the free pass the envelope would
@@ -85,18 +63,11 @@ void main() {
       );
     });
 
-    test('the two switches are separate facts and both default off', () {
-      // One is the owner's standing word about a class of mail, the other is
-      // arithmetic on an address and a thread's history. A caller reading a
-      // single flag would eventually pass the wrong one.
-      expect(
-        needsYouFloor(row(), suppressed: false, coldOutreach: false),
-        isTrue,
-      );
-      expect(
-        needsYouFloor(row(), suppressed: true, coldOutreach: true),
-        isFalse,
-      );
+    test('the switch defaults off, so the floor stands', () {
+      // Every caller that does not know the sender's organisation passes one
+      // argument, and an @mention still reaches the rail.
+      expect(needsYouFloor(row(), coldOutreach: false), isTrue);
+      expect(needsYouFloor(row()), isTrue);
     });
   });
 

@@ -71,7 +71,7 @@ class _PartlyRefusingStore extends MessageStore {
   }
 
   @override
-  Future<({String appliedBy, String? ruleId})?> removeLabel(
+  Future<bool> removeLabel(
     String source,
     String conversationKey,
     String labelId,

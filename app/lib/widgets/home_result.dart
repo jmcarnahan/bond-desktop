@@ -33,7 +33,6 @@ const Map<String, String> homeDropLabels = {
   'monitoring': 'Monitoring',
   'machine_sender': 'Machine sender',
   'sender_rule': 'Dropped sender',
-  'label_rule': 'Your rule',
   'meeting_response': 'Meeting response',
   'not_worthy': 'Nothing to do',
   'outbound': 'Outbound',

@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 18;
+  int get schemaVersion => 19;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -674,6 +674,49 @@ UPDATE storylines
                   'CREATE INDEX IF NOT EXISTS ix_label_rules_label '
                   'ON label_rules(label_id)',
                 );
+              },
+              // v19 — the label rules leave (owner decision 2026-09-26; design
+              // parked outside the repo). What they wrote is repaired FIRST,
+              // while `rule_id` still says which links a rule made, then the
+              // table and the column go. Every statement is a no-op on a
+              // replay (db_adoption_test re-runs every step over one file).
+              // Gated messages are re-pended by a sync one-shot through
+              // `rependGatedTriage`, which resets their progress rows in the
+              // same transaction; nothing here enqueues work.
+              from18To19: (m, schema) async {
+                const now = "strftime('%Y-%m-%dT%H:%M:%f', 'now') || '000Z'";
+                if (await _tableExists('label_rules') &&
+                    await _columnExists('conversation_labels', 'rule_id')) {
+                  // A thread a `later` or `drop` rule filed goes back to the
+                  // inbox with no reason, so the attention sweep decides it
+                  // afresh: the rule's filing was never the owner's word.
+                  await customStatement('''
+UPDATE conversation_ai
+SET bucket = NULL, bucket_reason = NULL, snoozed_until = NULL,
+    updated_at = $now
+WHERE bucket = 'later' AND EXISTS (
+  SELECT 1 FROM conversation_labels cl
+  JOIN label_rules r ON r.id = cl.rule_id
+  WHERE cl.source = conversation_ai.source
+    AND cl.conversation_key = conversation_ai.conversation_key
+    AND r.disposition IN ('later', 'drop'))''');
+                }
+                await customStatement(
+                  "DELETE FROM conversation_labels WHERE applied_by = 'rule'",
+                );
+                await customStatement('''
+UPDATE messages SET needs_you_verdict = NULL, needs_you_reason = NULL,
+    updated_at = $now
+WHERE needs_you_reason LIKE 'label_rule:%' ''');
+                await customStatement(
+                  "DELETE FROM app_prefs WHERE \"key\" LIKE 'rule_suggestion_not_now:%'",
+                );
+                await customStatement('DROP INDEX IF EXISTS ix_label_rules_scope');
+                await customStatement('DROP INDEX IF EXISTS ix_label_rules_label');
+                await customStatement('DROP TABLE IF EXISTS label_rules');
+                if (await _columnExists('conversation_labels', 'rule_id')) {
+                  await m.dropColumn(schema.conversationLabels, 'rule_id');
+                }
               },
             ),
           ),

@@ -55,11 +55,67 @@ void main() {
     expect(ids(similarRows(rows, rows[5], SimilarScope.sender)), ['f']);
   });
 
-  test('subject selects what a subject rule on the prefix would', () {
+  test('subject selects the rows that open with the same prefix', () {
     expect(ids(similarRows(rows, rows[1], SimilarScope.subject)), ['a', 'b']);
     expect(ids(similarRows(rows, rows[2], SimilarScope.subject)), ['c']);
     // A reply marker names no kind of mail — see subjectPrefixOf.
     expect(similarRows(rows, rows[3], SimilarScope.subject), isEmpty);
     expect(similarRows(rows, rows[4], SimilarScope.subject), isEmpty);
+  });
+
+  group('the front of a subject', () {
+    String? prefix(String subject) => subjectPrefixOf(subject);
+
+    test('a bracketed tag at the very start, folded', () {
+      expect(prefix('[JIRA] BOND-41 updated'), '[jira]');
+    });
+
+    test('a short leading colon', () {
+      expect(prefix('Accepted: Design review'), 'accepted:');
+    });
+
+    test('a colon in the middle of a sentence is prose', () {
+      expect(
+        prefix('Could you take a look at this before Friday: the copy'),
+        isNull,
+      );
+    });
+
+    test('and two characters are not a prefix', () {
+      expect(prefix('A: yes'), isNull);
+      expect(prefix(''), isNull);
+    });
+
+    // Pinned when the prefix was shared with select-similar: `Re: Budget`
+    // used to answer `re:`, which would have selected every reply.
+    test('a reply or forward marker is not a prefix', () {
+      for (final subject in [
+        'Re: Budget',
+        'RE: Budget',
+        'Fw: Budget',
+        'FWD: Budget',
+        'AW: Budget',
+        'Sv: Budget',
+      ]) {
+        expect(prefix(subject), isNull, reason: subject);
+      }
+    });
+  });
+
+  group('subjectPrefixOf', () {
+    test('the table', () {
+      const table = <String?, String?>{
+        'Accepted: Weekly sync': 'accepted:',
+        '[JIRA] (KEY-12) Fix login': '[jira]',
+        'Re: Budget': null,
+        // The colon sits past character 24, so the front is prose.
+        'This subject runs on well past: the cap': null,
+        '  Declined: Offsite  ': 'declined:',
+        null: null,
+      };
+      table.forEach((subject, want) {
+        expect(subjectPrefixOf(subject), want, reason: '$subject');
+      });
+    });
   });
 }

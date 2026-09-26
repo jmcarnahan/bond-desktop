@@ -257,107 +257,6 @@ void main() {
     });
   });
 
-  /// The same standing word one scope wider: a rule the owner wrote about a
-  /// class of mail rather than about one address. It arrives as an argument
-  /// too, and the call site is what reads the rules table.
-  group('label_rule', () {
-    test('a drop rule gates an ordinary human address', () {
-      expect(
-        gateFor(
-          message(from: 'sarah@example.com'),
-          userAddress: null,
-          labelRuleDisposition: 'drop',
-        ),
-        'label_rule',
-      );
-    });
-
-    test('and is asked before every name rule below it', () {
-      expect(
-        gateFor(
-          message(from: 'noreply@example.com'),
-          userAddress: null,
-          labelRuleDisposition: 'drop',
-        ),
-        'label_rule',
-      );
-    });
-
-    test('but after sender_rule — the narrower instruction is the reason a '
-        'reader is shown', () {
-      expect(
-        gateFor(
-          message(from: 'sarah@example.com'),
-          userAddress: null,
-          senderDisposition: 'drop',
-          labelRuleDisposition: 'drop',
-        ),
-        'sender_rule',
-      );
-    });
-
-    test('and never before self', () {
-      expect(
-        gateFor(
-          message(from: 'lo@bond.com'),
-          userAddress: 'lo@bond.com',
-          labelRuleDisposition: 'drop',
-        ),
-        'self',
-      );
-    });
-
-    test('the dispositions that are not gates change nothing here', () {
-      // `later` moves the bucket and `hide_needs_you` moves the verdict. A
-      // gate means the model never read the message, which is larger than
-      // either of them asked for.
-      for (final disposition in [null, 'later', 'hide_needs_you', 'keep']) {
-        expect(
-          gateFor(
-            message(from: 'sarah@example.com'),
-            userAddress: null,
-            labelRuleDisposition: disposition,
-          ),
-          isNull,
-          reason: 'disposition $disposition',
-        );
-      }
-    });
-
-    test('a chat under a drop rule is gated too, and its other dispositions '
-        'are not', () {
-      final chat = Message(
-        id: 'c1',
-        source: 'teams',
-        outbound: false,
-        fromAddress: 'teams:user-1',
-        bodyText: 'can you send the CD?',
-      );
-      expect(
-        gateFor(chat, userAddress: null, labelRuleDisposition: 'drop'),
-        'label_rule',
-      );
-      for (final disposition in [null, 'later', 'hide_needs_you']) {
-        expect(
-          gateFor(chat, userAddress: null, labelRuleDisposition: disposition),
-          isNull,
-          reason: 'disposition $disposition',
-        );
-      }
-      // The owner's word about the address still outranks the one about the
-      // class, on this path as on the mail one.
-      expect(
-        gateFor(
-          chat,
-          userAddress: null,
-          senderDisposition: 'drop',
-          labelRuleDisposition: 'drop',
-        ),
-        'sender_rule',
-      );
-    });
-  });
-
   /// Somebody answering an invitation, which is the class of mail entry 11a
   /// found sitting in Needs You marked `Needs reply`. The INVITE is the whole
   /// subtlety: every rung here is shaped so one cannot be caught.
@@ -568,7 +467,6 @@ void main() {
             message(from: 'lo@bond.com', meeting: 'meetingAccepted'),
             userAddress: 'lo@bond.com',
             senderDisposition: 'drop',
-            labelRuleDisposition: 'drop',
           ),
           'self',
         );

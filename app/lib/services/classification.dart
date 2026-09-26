@@ -3,22 +3,13 @@
 /// This asks a different question from `gates.dart`. A gate decides whether
 /// the local model reads a message at all, and a false positive there costs
 /// the message. A classification decides nothing: it names the class of mail
-/// and hands the decision to somebody who was told what to do about it. Two
-/// readers ask:
-/// - the owner's own label rules. A `label_rules` row with
-///   `scope_kind = 'classification'` holds one of these strings and matches it
-///   against the message in front of it, which is how "never show me another
-///   meeting response" becomes a rule rather than a regex somebody compiled
-///   in here.
-/// - the reply paths, which have no business drafting an answer to a calendar
-///   response or a ticket digest.
+/// and hands the decision to somebody who was told what to do about it. The
+/// reader is the reply path (`replySuppressed`), which has no business drafting
+/// an answer to a calendar response or a ticket digest.
 ///
-/// The four returned strings are a STORED-DATA CONTRACT, not an internal
-/// enum: a `label_rules` row the owner wrote months ago carries one of them
-/// verbatim, so renaming one does not fail a test, it silently stops a rule
-/// the owner taught from ever matching again. They are
-/// `meeting_response`, `meeting_invite`, `tracker_notification` and
-/// `automated_notification`, and null means "nothing here says".
+/// The four returned strings are `meeting_response`, `meeting_invite`,
+/// `tracker_notification` and `automated_notification`, and null means
+/// "nothing here says".
 ///
 /// Pure, like the gates and for the same reason: no I/O, no clock, nothing
 /// but the stored row, so the whole set is table-testable.
@@ -27,7 +18,7 @@
 /// rule about it. `gates.dart`'s decision record explains why: on the golden
 /// set the same tracker address sends the digest nobody reads AND the mention
 /// addressed to the reader, so the thing that splits those two populations is
-/// data the owner taught, never a host name compiled in here. A header name
+/// data, never a host name compiled in here. A header name
 /// and a display-name suffix are protocol shapes rather than tenants — the
 /// tracker stamped them itself, on its own mail, whoever is running it — so
 /// those are exactly what this file is allowed to read.
@@ -94,8 +85,8 @@ const Set<String> _listHeaders = {
 ///    `X-Atlassian-*` headers, the `(Jira)` display-name suffix, and last the
 ///    bracketed subject tag PAIRED with a sender that looks automated. Above
 ///    the automated rung because it is the more specific answer for the same
-///    mail: a ticket digest carries `List-Id` as well, and the owner who
-///    wrote a rule about tracker mail meant that mail.
+///    mail: a ticket digest carries `List-Id` as well, and "tracker mail" is
+///    the narrower name for it.
 /// 3. The generic automated shapes, `Auto-Submitted` and the `List-*` family.
 ///
 /// Every signal here is a mail shape. A chat or MCP message carries none of
@@ -136,12 +127,12 @@ String? classificationOf(Message message) {
 /// is its second caller — deliberately the loose one rather than a gate's
 /// narrow pattern, because the mailbox a tracker relays through is exactly the
 /// `notifications@`, `jira-noreply@`, `svc-…@` shape it was written for, and
-/// because a false positive here costs a label on a message whose subject
-/// already carried a bracketed tag.
+/// because a false positive here costs an Open-in in place of a drafted reply
+/// on a message whose subject already carried a bracketed tag.
 ///
 /// It leaves the bare `jira@` local part alone, and that is the line holding:
 /// that address is the one the decision record in `gates.dart` says no name
-/// rule may judge, and the owner's own label rule is what answers for it.
+/// rule may judge.
 bool _automatedSenderShape(Message message) {
   final from = message.fromAddress?.toLowerCase() ?? '';
   if (from.isEmpty) return false;

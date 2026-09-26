@@ -85,7 +85,7 @@ page has the same shape in `settings_models_page.dart`.
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
 | Activity log | `onShowActivityLogChanged` wired | `Shown in the sidebar` / `Hidden` |
 | Storylines | `onStorylineNewestFirstChanged` wired | `Newest first` / `Oldest first` |
-| Labels | `labels` wired, avatar-menu scope only | `No labels yet` / `1 label` / `3 labels · 12 uses` / `3 labels · 12 uses · 1 rule` — the use clause only once something has been filed, the rule clause only once a rule exists |
+| Labels | `labels` wired, avatar-menu scope only | `No labels yet` / `1 label` / `3 labels · 12 uses` — the use clause only once something has been filed |
 | Context directories | when wired (both scopes) | `No directories yet` / `N directories · M files` |
 | Processing | any of `onProcessingChanged`, `onClearAiResults`, `onForgetAndResync` is wired (both scopes) | `On` / `Off` |
 | Sync & data | `onRefreshNow` wired | `Not synced yet`; `Mail synced <rel> · Teams <rel>`; a side that never ran says `not synced yet` in words (`Mail synced 4m ago · Teams not synced yet`, `Mail not synced yet · Teams synced 2h ago`) |
@@ -319,10 +319,10 @@ the future simply carries the error and `valueOrNull` is null, so the rows keep
 what the preferences said — but a test that wants the sizes and the disk
 states overrides it with `testManifest()`.
 
-**The Labels section's own wires.** Nine props, all optional. Six come off one
+**The Labels section's own wires.** Six props, all optional, all off one
 `ref.watch(labelsProvider)` — which the host **watches** rather than reads, so a
 label applied from a thread behind an open pane moves the use counts without the
-reader touching anything — and three more off `ref.watch(labelRulesProvider)`:
+reader touching anything:
 
 - `labels: state.labels` — and `null` rather than an empty list is what hides
   the section, which is how an install that has not read the vocabulary yet
@@ -335,20 +335,6 @@ reader touching anything — and three more off `ref.watch(labelRulesProvider)`:
 - `onLabelToneChanged: notifier.setTone` and `onDeleteLabel: notifier.delete`,
   both fire-and-forget: the notifier writes `state.error` on a failure and the
   section is already watching it.
-- `labelRules: rulesState.rules` — an empty list, not null: the section is the
-  vocabulary's, and a mailbox with words but no rules draws exactly the section
-  it drew before rules existed. A rule whose `labelId` is not in `labels` is
-  drawn nowhere at all.
-- `onDeleteRule: rulesNotifier.deleteRule` — "stop doing this from now on". The
-  word stays and so do the threads the rule already filed, which is what the
-  second press's caption says.
-- `onRuleDispositionChanged: (ruleId, disposition) => …` — there is **no
-  store-level "change a disposition"**, and deliberately so: the host calls
-  `labelRulesProvider`'s `createRule` again on the SAME label and scope, which
-  replaces the rule in place (same row, same `created_at`, same `hidden_count`)
-  and retro-applies the new disposition, returning how many threads moved for
-  the toast. One writer for "a rule about this scope now means this", whether it
-  is the first time or the third.
 
 ## Models
 
@@ -1042,43 +1028,8 @@ There is no **Add label** here, deliberately. A label is minted where it is
 first needed — on a thread, from the picker — and a dictionary that could grow
 words nothing is filed under would fill up with them.
 
-### The rules under a word
-
-A label can carry a **standing rule** — the "Apply to future" the picker offers
-when a thread is marked done with a label — and this is the one screen that
-says so. Indented under its
-label, one line per rule, oldest first, each read as a sentence of three facts:
-
-`Hide from Needs You · this sender · hid 41 threads`
-
-The disposition in words (`Hide from Needs You`, `Send to Later`,
-`Drop before reading`), then the scope, then what it has actually done. The
-scope clause comes from `LabelRuleOffer.words` in
-`app/lib/widgets/label_picker.dart` — the same string the picker offered it
-under — so what the owner agreed to and what the record says cannot drift apart.
-A rule that has fired on nothing reads `nothing yet` rather than `hid 0
-threads`, and `later` and `drop` say `moved 12` and `dropped 12` instead of
-hiding them.
-
-Two controls sit beside the sentence:
-
-- **Change**, which opens a `SettingsSegments<String>` on **Hide / Later /
-  Drop** in place and closes again on the choice. A disposition this build has
-  no segment for is shown in the sentence and **not** editable: a segmented
-  control whose selection is not among its segments asserts, and the row a
-  later build wrote is still a row a reader is entitled to see.
-- **Remove rule**, the same inline two-step as everything destructive here — the
-  first tap replaces it with a red **Stop this rule** beside **Keep**, under the
-  caption `Stops it filing anything new. The word stays, and so do the threads
-  it has already filed.` That is `deleteRule`, not `undoRule`: "enough of that",
-  with the threads the owner has stopped thinking about left where the rule put
-  them.
-
-A rule whose label is not in the list is drawn nowhere at all, and a label with
-no rules reads exactly as it always did.
-
-Nothing here reaches for a provider: the section takes two lists and five
-closures, and the host wires them to `labelsProvider` and `labelRulesProvider`.
+Nothing here reaches for a provider: the section takes a list and three
+closures, and the host wires them to `labelsProvider`.
 
 
 ## About

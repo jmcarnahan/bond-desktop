@@ -1,8 +1,7 @@
 import 'package:flutter/foundation.dart' show immutable;
 
 /// The owner's own vocabulary: the words a person files their own threads
-/// under, the link that says which threads each word is on, and the standing
-/// rules a word can carry into the mail that has not arrived yet.
+/// under, and the link that says which threads each word is on.
 ///
 /// Never the same thing as `messages.label`, which is the model's verdict about
 /// one message. The two are never mixed: nothing here is written by the
@@ -133,12 +132,10 @@ class Label {
   String toString() => 'Label($id, $name)';
 }
 
-/// One label on one thread: the link row, for the two callers that care who put
-/// it there rather than just what it says.
+/// One label on one thread: the link row, for the callers that care who put it
+/// there rather than just what it says.
 ///
-/// [appliedBy] is `'user'` for a word the owner chose and `'rule'` for one a
-/// standing rule filed; [ruleId] names which rule, and is null on every link a
-/// person applied by hand.
+/// [appliedBy] is `'user'`, the only value this build writes.
 @immutable
 class ConversationLabel {
   final String source;
@@ -147,20 +144,12 @@ class ConversationLabel {
   final String appliedBy;
   final String appliedAt;
 
-  /// The [LabelRule] that filed this link, or null when the owner did.
-  ///
-  /// Null is load-bearing rather than incidental: undoing a rule deletes the
-  /// links carrying its id and leaves the rest, so a thread the owner had
-  /// already filed under the same word keeps its chip.
-  final String? ruleId;
-
   const ConversationLabel({
     required this.source,
     required this.conversationKey,
     required this.labelId,
     this.appliedBy = 'user',
     this.appliedAt = '',
-    this.ruleId,
   });
 
   /// A row of the `conversation_labels` table.
@@ -171,11 +160,7 @@ class ConversationLabel {
         labelId: row['label_id'] as String? ?? '',
         appliedBy: row['applied_by'] as String? ?? 'user',
         appliedAt: row['applied_at'] as String? ?? '',
-        ruleId: row['rule_id'] as String?,
       );
-
-  /// Whether a standing rule filed this rather than the owner.
-  bool get isRule => appliedBy == 'rule';
 
   @override
   bool operator ==(Object other) =>
@@ -184,156 +169,9 @@ class ConversationLabel {
       other.conversationKey == conversationKey &&
       other.labelId == labelId &&
       other.appliedBy == appliedBy &&
-      other.appliedAt == appliedAt &&
-      other.ruleId == ruleId;
+      other.appliedAt == appliedAt;
 
   @override
   int get hashCode =>
-      Object.hash(source, conversationKey, labelId, appliedBy, appliedAt, ruleId);
-}
-
-/// A label pointed at the mail that has not arrived yet: the owner's word for
-/// what a kind of thread is, plus what should happen to the next one.
-///
-/// The whole of requirement 11b is in the two halves of that sentence. A person
-/// dismisses a thread and files it under `Meeting response`; the rule is them
-/// saying "and every future one of these, too". Nothing here is the model's
-/// judgement — a rule exists because somebody typed a word and chose a scope.
-///
-/// Row-shaped and defensive like [Label] beside it: every field reads through a
-/// nullable cast with a default, so a half-written row draws a rule that does
-/// nothing rather than throwing inside a render.
-@immutable
-class LabelRule {
-  /// Scope kinds, an OPEN set — `context_links.scope_kind` is the precedent.
-  /// A stored kind this build does not know matches nothing, so a rule written
-  /// by a later build is inert rather than fatal in an older one.
-  static const String scopeSender = 'sender';
-  static const String scopeDomain = 'domain';
-  static const String scopeSubject = 'subject';
-  static const String scopeClassification = 'classification';
-
-  /// The dispositions, which are the sender rules' vocabulary minus `keep`:
-  /// only two of these three are gates, and only one of them is about mail that
-  /// has not been read yet.
-  ///
-  /// [dropAtGate] is the one that costs a message its model call, so it is the
-  /// one a wrong rule loses something by. The other two move a thread the app
-  /// has already read and can be undone by moving it back.
-  static const String hideNeedsYou = 'hide_needs_you';
-  static const String sendToLater = 'later';
-  static const String dropAtGate = 'drop';
-
-  /// A slug minted once at creation, like a [Label]'s. Nothing parses it.
-  final String id;
-
-  /// The word this rule files under — a [Label.id], never a name, so renaming
-  /// the label keeps the rule.
-  final String labelId;
-
-  /// One of [scopeSender], [scopeDomain], [scopeSubject],
-  /// [scopeClassification], or a kind a later build added.
-  final String scopeKind;
-
-  /// The address, domain, subject prefix or classification this rule is about,
-  /// stored LOWERCASED. Every comparison against it is case-insensitive, and
-  /// folding once at write time is what keeps the matcher from folding per row.
-  final String scopeValue;
-
-  /// [hideNeedsYou], [sendToLater] or [dropAtGate].
-  final String disposition;
-
-  /// Whether a message that singles the owner out escapes this rule. ON by
-  /// default, because the tracker case needs it: the same address sends the
-  /// digest nobody reads and the @mention addressed to the reader.
-  ///
-  /// Spent through the needs-you FLOOR, which may only raise a verdict — see
-  /// `services/needs_you.dart`. This is not the matcher's business; a rule
-  /// MATCHES either way and its consumers decide what the exception costs.
-  final bool unlessMentionsMe;
-
-  /// How many threads this rule has filed — the number the Settings list shows.
-  /// It counts the rule's own links, so a thread the owner had already labelled
-  /// by hand is hidden without being counted twice, and undo takes back exactly
-  /// what this counted.
-  final int hiddenCount;
-
-  final String createdAt;
-  final String updatedAt;
-
-  /// The label's name, JOINED rather than stored — null when the read did not
-  /// ask for it.
-  ///
-  /// It rides on the rule because both readers need it and neither wants a
-  /// second query per row: the needs-you verdict's reason is
-  /// `label_rule:<name>`, and the Settings list draws the word beside the
-  /// scope. The rule still points at the label by [labelId], so a rename moves
-  /// this and changes nothing else.
-  final String? labelName;
-
-  const LabelRule({
-    required this.id,
-    required this.labelId,
-    required this.scopeKind,
-    required this.scopeValue,
-    required this.disposition,
-    this.unlessMentionsMe = true,
-    this.hiddenCount = 0,
-    this.createdAt = '',
-    this.updatedAt = '',
-    this.labelName,
-  });
-
-  /// A row of the `label_rules` table, optionally carrying `label_name` from a
-  /// join.
-  ///
-  /// The flag comes back as the INTEGER a STRICT column holds, so it is
-  /// compared against 1 rather than trusted to be truthy — `needsYouFloor`'s
-  /// rule, and for the same reason: anything else on the row is a bug upstream
-  /// and must not be rounded up into an exception nobody asked for. A row
-  /// written before the column existed cannot happen (it is NOT NULL DEFAULT 1),
-  /// so a missing value reads as the default the table declares.
-  factory LabelRule.fromRow(Map<String, Object?> row) => LabelRule(
-        id: row['id'] as String? ?? '',
-        labelId: row['label_id'] as String? ?? '',
-        scopeKind: row['scope_kind'] as String? ?? '',
-        scopeValue: row['scope_value'] as String? ?? '',
-        disposition: row['disposition'] as String? ?? '',
-        unlessMentionsMe: (row['unless_mentions_me'] as num?)?.toInt() != 0,
-        hiddenCount: (row['hidden_count'] as num?)?.toInt() ?? 0,
-        createdAt: row['created_at'] as String? ?? '',
-        updatedAt: row['updated_at'] as String? ?? '',
-        labelName: row['label_name'] as String?,
-      );
-
-  /// What the needs-you verdict records when this rule hides a thread.
-  ///
-  /// The NAME rather than the id, because this string is read by a person
-  /// looking at why a thread is not on their rail, and a slug with four hex
-  /// digits on the end answers nothing. The id is the fallback for a rule whose
-  /// read did not join the label.
-  String get verdictReason =>
-      'label_rule:${(labelName == null || labelName!.isEmpty) ? labelId : labelName}';
-
-  @override
-  bool operator ==(Object other) =>
-      other is LabelRule &&
-      other.id == id &&
-      other.labelId == labelId &&
-      other.scopeKind == scopeKind &&
-      other.scopeValue == scopeValue &&
-      other.disposition == disposition &&
-      other.unlessMentionsMe == unlessMentionsMe &&
-      other.hiddenCount == hiddenCount &&
-      other.createdAt == createdAt &&
-      other.updatedAt == updatedAt &&
-      other.labelName == labelName;
-
-  @override
-  int get hashCode => Object.hash(id, labelId, scopeKind, scopeValue,
-      disposition, unlessMentionsMe, hiddenCount, createdAt, updatedAt,
-      labelName);
-
-  @override
-  String toString() => 'LabelRule($id, $scopeKind=$scopeValue, $disposition)';
+      Object.hash(source, conversationKey, labelId, appliedBy, appliedAt);
 }

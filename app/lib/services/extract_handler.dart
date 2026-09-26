@@ -2,16 +2,13 @@ import 'dart:convert';
 
 import '../data/message_store.dart';
 import '../models/draft_policy.dart';
-import '../models/label_models.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'ai_worker.dart';
 import 'attention.dart';
-import 'classification.dart';
 import 'clustering_card.dart';
 import 'conversation_state.dart';
 import 'embed_handler.dart';
-import 'label_rules.dart';
 import 'llm/embeddings_client.dart';
 import 'llm/extract_task.dart';
 import 'llm/json_task.dart';
@@ -406,14 +403,6 @@ class ExtractHandler extends WorkHandler {
     final reason = stored?['bucket_reason'] as String?;
     if (reason == 'user' || reason == 'sender_pref') return;
 
-    // The owner's standing word, asked before the guess. A `later` rule written
-    // today files the mail already in the mailbox
-    // (`MessageStore.applyLabelRule`), and without this the mail
-    // that arrives TOMORROW would land in the inbox anyway — a rule that worked
-    // once and then stopped, which is the complaint.
-    final rule = await _laterRule(source, row);
-    if (rule != null) return _fileLaterByRule(source, key, rule);
-
     final senderPref =
         await _store.getSenderPref(row['from_address'] as String? ?? '');
     // Asked about the THREAD, not about this row's own verdict: the message
@@ -448,88 +437,6 @@ class ExtractHandler extends WorkHandler {
       // clears the guess this pass made last time, and nothing else.
       await _store.setConversationBucket(source, key, bucket: null);
     }
-  }
-
-  /// The owner's standing `later` rule for this message, or null when none of
-  /// their rules is about it.
-  ///
-  /// The same trio the triage gate matches with — [MessageStore.listLabelRules],
-  /// [matchLabelRule] and [classificationOf] — and that is a correctness
-  /// constraint rather than tidiness: the gate, the retroactive apply and this
-  /// pass have to agree about which mail a rule is about, or a rule would file
-  /// yesterday's mail and miss today's, and no owner could tell what their own
-  /// word meant.
-  ///
-  /// ONE rule comes back from the matcher — the most specific of the owner's, by
-  /// its own precedence — and only a `later` one is this pass's business. A
-  /// `hide_needs_you` match answers null on purpose: the owner's nearest word
-  /// about this mail is about the rail, and `NeedsYouHandler` is what spends it.
-  /// A `drop` match never reaches here at all, because the gate refused the
-  /// message before extraction.
-  ///
-  /// [LabelRule.unlessMentionsMe] is deliberately NOT consulted. The exception is
-  /// spent through the needs-you floor (see `services/needs_you.dart`), the
-  /// retroactive apply reads it for `hide_needs_you` and for nothing else, and
-  /// this path has to file exactly the set that one files. A mentioned thread
-  /// filed under Later is still on the Later list with the owner's own word on
-  /// it, and undo takes it back by `rule_id`.
-  Future<LabelRule?> _laterRule(
-    String source,
-    Map<String, Object?> row,
-  ) async {
-    final rules = await _store.listLabelRules();
-    if (rules.isEmpty) return null;
-    final message = Message.fromRow(row);
-    final rule = matchLabelRule(
-      rules,
-      source: source,
-      senderAddress: message.fromAddress,
-      senderName: message.fromName,
-      subject: message.subject,
-      classification: classificationOf(message),
-    );
-    if (rule == null || rule.disposition != LabelRule.sendToLater) return null;
-    return rule;
-  }
-
-  /// Files this thread under Later on a rule's behalf, and files it UNDER the
-  /// rule's word.
-  ///
-  /// Both halves, in the order `MessageStore._fileThreadToLaterByRule` and the
-  /// triage gate's `fileUnderRule` write them, because this is the same two
-  /// facts: the thread moves off the list, and the link carries the rule's id so
-  /// the Settings count and the undo both find it. The count is bumped only for a
-  /// link that is NEW — a thread the owner had already labelled by hand is filed
-  /// without being counted twice, and undo takes back exactly what was counted.
-  ///
-  /// `bucket_reason` is `'user'`, which is the protected word: the attention
-  /// sweep and this handler both refuse to overrule it, and a rule's filing must
-  /// survive a later pass deciding the thread looked important. `'label_rule'`
-  /// would read as a guess and be swept back. Which threads the rule filed is on
-  /// the link, not in this word.
-  Future<void> _fileLaterByRule(
-    String source,
-    String key,
-    LabelRule rule,
-  ) async {
-    await _store.setConversationBucket(
-      source,
-      key,
-      bucket: 'later',
-      reason: 'user',
-    );
-    // A rule has no "when" in it, so a date inherited from an earlier
-    // hand-deferral would draw a `Back <when>` the rule would never honour —
-    // `MessageStore._fileThreadToLaterByRule`'s reason, and the same clear.
-    await _store.setSnoozedUntil(source, key, null);
-    final isNew = await _store.applyLabelsByRule(
-      source,
-      key,
-      rule.labelId,
-      ruleId: rule.id,
-    );
-    if (isNew) await _store.bumpRuleHiddenCount(rule.id);
-    _log.note({'label_rule': rule.disposition});
   }
 
   /// Re-embeds this message's thread, if what the thread says about itself

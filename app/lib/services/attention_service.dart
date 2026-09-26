@@ -1,10 +1,8 @@
 import 'dart:convert';
 
 import '../data/message_store.dart';
-import '../models/label_models.dart';
 import '../models/message_models.dart';
 import 'attention.dart';
-import 'label_rules.dart';
 import 'llm/extract_task.dart';
 
 /// Scores and files the whole mailbox in one pass.
@@ -59,11 +57,6 @@ class AttentionService {
       ...await _store.senderReplyRates(),
       ...await _store.senderReplyRates(source: 'teams'),
     };
-    // The owner's standing label rules, read ONCE for the whole pass for
-    // `allSenderPrefs`' reason: this runs on every list load, and a query per
-    // thread would put hundreds of round trips behind each one. Empty is the
-    // normal case and costs the walk below nothing.
-    final labelRules = await _store.listLabelRules();
 
     var scored = 0;
     for (final conversation in conversations) {
@@ -101,7 +94,6 @@ class AttentionService {
         hasOpenAsk: openAsks.contains(
           MessageStore.openAskKey(conversation.source, conversation.id),
         ),
-        laterRule: _laterRule(labelRules, conversation, address),
       );
     }
     return scored;
@@ -125,20 +117,12 @@ class AttentionService {
   /// [hasOpenAsk] changes none of that ownership. It reaches only the
   /// `low_value` decision, where an unanswered ask on the thread is what stops
   /// the quiet-FYI rule from deferring it — see [bucketFor].
-  ///
-  /// [laterRule] is a standing label rule (see [_laterRule]) and it is read AFTER
-  /// the sender preferences, not before. Both are the owner's word, and the
-  /// sender rule is the more specific of the two: somebody who said `keep` about
-  /// one address meant it over a rule they wrote about the whole domain. A rule
-  /// that has already filed a thread is never reached at all — that bucket reads
-  /// `'user'`, and this returns on it above.
   Future<void> _sweepBucket(
     Conversation conversation, {
     required String? senderPref,
     required ExtractionResult? extraction,
     required String? reason,
     required bool hasOpenAsk,
-    LabelRule? laterRule,
   }) async {
     if (reason == 'user') return;
 
@@ -148,11 +132,6 @@ class AttentionService {
     }
     if (senderPref == 'keep') {
       if (conversation.bucket != null) await _file(conversation, null, null);
-      return;
-    }
-
-    if (laterRule != null) {
-      await _fileLaterByRule(conversation, laterRule);
       return;
     }
 
@@ -172,67 +151,6 @@ class AttentionService {
     } else if (reason == 'low_value') {
       await _file(conversation, null, null);
     }
-  }
-
-  /// The owner's standing `later` rule for one thread, or null.
-  ///
-  /// The matcher the triage gate, the retroactive apply and [ExtractHandler] all
-  /// use, so the four agree about which mail a rule is about; only a `later`
-  /// disposition is this pass's business, for the reason
-  /// `ExtractHandler._laterRule` gives.
-  ///
-  /// [classification] is passed as NULL, and that is a real limitation rather
-  /// than a shortcut: `classificationOf` reads a message's headers and its gate
-  /// reason, and [MessageStore.latestInboundMeta] — the one read this pass has of
-  /// the newest inbound message — carries neither. So a CLASSIFICATION-scoped
-  /// rule does not act here, while sender, domain and subject rules do. The
-  /// direction of that gap is the saving grace: classification is the LOWEST of
-  /// the matcher's four precedences, so a missing one can only lose a match, never
-  /// promote the wrong rule. New mail is covered either way — `ExtractHandler`
-  /// has the whole row and asks with the classification in hand — which leaves
-  /// exactly one case uncovered: mail that arrived BEFORE a classification-scoped
-  /// `later` rule existed and that the retroactive apply did not reach.
-  ///
-  /// The sender name is null for the same reason and matters less: a `sender` or
-  /// `domain` rule matches on the ADDRESS, which this pass has.
-  static LabelRule? _laterRule(
-    List<LabelRule> rules,
-    Conversation conversation,
-    String address,
-  ) {
-    if (rules.isEmpty) return null;
-    final rule = matchLabelRule(
-      rules,
-      source: conversation.source,
-      senderAddress: address.isEmpty ? null : address,
-      senderName: null,
-      subject: conversation.subject,
-      classification: null,
-    );
-    if (rule == null || rule.disposition != LabelRule.sendToLater) return null;
-    return rule;
-  }
-
-  /// Files one thread under Later on a rule's behalf, and under the rule's word.
-  ///
-  /// `ExtractHandler._fileLaterByRule`'s twin, and every decision in it is that
-  /// one's: the reason is the protected `'user'` so no later pass sweeps the
-  /// filing back, the stale deferral date goes because a rule has no "when" in
-  /// it, and the link carries `rule_id` so the Settings count and the undo both
-  /// find the thread. The count is bumped only for a link that is NEW.
-  Future<void> _fileLaterByRule(
-    Conversation conversation,
-    LabelRule rule,
-  ) async {
-    await _file(conversation, 'later', 'user');
-    await _store.setSnoozedUntil(conversation.source, conversation.id, null);
-    final isNew = await _store.applyLabelsByRule(
-      conversation.source,
-      conversation.id,
-      rule.labelId,
-      ruleId: rule.id,
-    );
-    if (isNew) await _store.bumpRuleHiddenCount(rule.id);
   }
 
   Future<void> _file(

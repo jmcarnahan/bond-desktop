@@ -1078,6 +1078,145 @@ void main() {
     );
   });
 
+  test('v18 to v19 takes the rules and what they wrote, and keeps the '
+      "owner's words", () async {
+    // The rules leave. Everything a rule wrote is seeded at v18 beside what
+    // the owner wrote by hand, because the step's whole job is telling the two
+    // apart while `rule_id` still can: a `later` and a `drop` rule both filed
+    // Later, a `hide_needs_you` rule wrote a verdict, and the owner's own
+    // Later, link and snooze must come through untouched — including a Later
+    // on a thread the hide rule also labelled (the disposition clause), and
+    // one on a thread the owner filed by hand under the RULE's own word (the
+    // repair keys on `rule_id`, never on the label).
+    final schema = await verifier.schemaAt(18);
+    final raw = schema.rawDatabase;
+    raw.execute("""
+      INSERT INTO labels (id, name, name_key, created_at, updated_at) VALUES
+        ('tracker-ab12', 'Tracker', 'tracker', 't', 't'),
+        ('mine-cd34', 'Mine', 'mine', 't', 't');
+    """);
+    raw.execute("""
+      INSERT INTO label_rules (id, label_id, scope_kind, scope_value,
+        disposition, created_at, updated_at) VALUES
+        ('r-later', 'tracker-ab12', 'sender', 'a@tracker.example.com',
+          'later', 't', 't'),
+        ('r-drop', 'tracker-ab12', 'domain', 'drop.example.com',
+          'drop', 't', 't'),
+        ('r-hide', 'tracker-ab12', 'subject', '[ci]',
+          'hide_needs_you', 't', 't');
+    """);
+    raw.execute("""
+      INSERT INTO conversation_labels (source, conversation_key, label_id,
+        applied_by, applied_at, rule_id) VALUES
+        ('email', 'c-later', 'tracker-ab12', 'rule', 't', 'r-later'),
+        ('email', 'c-drop', 'tracker-ab12', 'rule', 't', 'r-drop'),
+        ('email', 'c-hide', 'tracker-ab12', 'rule', 't', 'r-hide'),
+        ('email', 'c-hand', 'mine-cd34', 'user', 't', NULL),
+        ('email', 'c-hand-tracker', 'tracker-ab12', 'user', 't', NULL);
+    """);
+    raw.execute("""
+      INSERT INTO conversation_ai (source, conversation_key, updated_at,
+        bucket, bucket_reason, snoozed_until) VALUES
+        ('email', 'c-later', 't', 'later', 'user', NULL),
+        ('email', 'c-drop', 't', 'later', 'user', NULL),
+        ('email', 'c-hand', 't', 'later', 'user', '2026-10-05T09:00:00Z'),
+        ('email', 'c-hide', 't', 'later', 'user', NULL),
+        ('email', 'c-hand-tracker', 't', 'later', 'user',
+          '2026-10-06T09:00:00Z');
+    """);
+    raw.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, created_at, updated_at, triage_status, gate_reason,
+        needs_you_verdict, needs_you_reason) VALUES
+        ('email', 'm-hidden', 'c-hide', 'inbound', 't', 't', 'done', NULL,
+          0, 'label_rule:Tracker'),
+        ('teams', 'm-model', 'c-chat', 'inbound', 't', 't', 'done', NULL,
+          1, 'teams_direct'),
+        ('email', 'm-gated', 'c-drop', 'inbound', 't', 't', 'skipped',
+          'label_rule', NULL, NULL);
+    """);
+    raw.execute("""
+      INSERT INTO app_prefs ("key", value) VALUES
+        ('rule_suggestion_not_now:sender:x@example.com', 't'),
+        ('processing_on', '1');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 19);
+    addTearDown(db.close);
+
+    // Only the owner's own links are left, the one under the rule's word too.
+    final links = await db
+        .customSelect('SELECT conversation_key FROM conversation_labels')
+        .get();
+    expect([for (final r in links) r.data['conversation_key']],
+        unorderedEquals(['c-hand', 'c-hand-tracker']));
+
+    // The threads a rule filed are back in the inbox with NO reason, so the
+    // sweep decides them afresh; the owner's own Later keeps its date.
+    Future<Map<String, Object?>> ai(String key) async => (await db
+            .customSelect(
+              'SELECT * FROM conversation_ai WHERE conversation_key = ?',
+              variables: [Variable<String>(key)],
+            )
+            .getSingle())
+        .data;
+    for (final key in ['c-later', 'c-drop']) {
+      final row = await ai(key);
+      expect(row['bucket'], null, reason: key);
+      expect(row['bucket_reason'], null, reason: key);
+      expect(row['snoozed_until'], null, reason: key);
+    }
+    for (final (key, snooze) in [
+      ('c-hand', '2026-10-05T09:00:00Z'),
+      // A hide rule never filed Later, so this Later is the owner's.
+      ('c-hide', null),
+      // Hand-filed under the rule's own label: only `rule_id` tells it apart.
+      ('c-hand-tracker', '2026-10-06T09:00:00Z'),
+    ]) {
+      final row = await ai(key);
+      expect(row['bucket'], 'later', reason: key);
+      expect(row['bucket_reason'], 'user', reason: key);
+      expect(row['snoozed_until'], snooze, reason: key);
+    }
+
+    // A rule's verdict goes back to "never judged"; the model's stays.
+    Future<Map<String, Object?>> message(String id) async => (await db
+            .customSelect(
+              'SELECT * FROM messages WHERE source_message_id = ?',
+              variables: [Variable<String>(id)],
+            )
+            .getSingle())
+        .data;
+    final hidden = await message('m-hidden');
+    expect(hidden['needs_you_verdict'], null);
+    expect(hidden['needs_you_reason'], null);
+    final model = await message('m-model');
+    expect(model['needs_you_verdict'], 1);
+    expect(model['needs_you_reason'], 'teams_direct');
+    // The gated row is the sync one-shot's to re-pend, with its progress row,
+    // so the migration leaves it exactly as it was.
+    final gated = await message('m-gated');
+    expect(gated['triage_status'], 'skipped');
+    expect(gated['gate_reason'], 'label_rule');
+
+    final prefs = await db.customSelect('SELECT "key" FROM app_prefs').get();
+    expect([for (final r in prefs) r.data['key']], ['processing_on']);
+
+    // The validator does not flag a leftover TABLE, only a leftover column,
+    // so the table's absence is asserted here by name.
+    final leftovers = await db
+        .customSelect(
+            "SELECT name FROM sqlite_master WHERE name LIKE '%label_rules%'")
+        .get();
+    expect(leftovers, isEmpty);
+    final columns = await db
+        .customSelect(
+            "SELECT name FROM pragma_table_info('conversation_labels')")
+        .get();
+    expect([for (final r in columns) r.data['name']], isNot(contains('rule_id')));
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

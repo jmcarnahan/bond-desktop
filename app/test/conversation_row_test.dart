@@ -341,23 +341,6 @@ void main() {
       expect(find.text('teams_direct'), findsNothing);
     });
 
-    testWidgets('a rule reason says the thread was shown DESPITE the rule',
-        (tester) async {
-      // The only way this token reaches a drawn row is the floor raising a
-      // thread past the owner's rule, so the bare label name would claim the
-      // opposite of what happened.
-      await tester.pumpWidget(_host(ConversationRow(
-        conversation: _conv(
-          state: ConversationState.needsReply,
-          reason: 'label_rule:Jira update',
-        ),
-        selected: false,
-        onTap: () {},
-      )));
-
-      expect(chipText(tester), 'Shown despite Jira update');
-    });
-
     testWidgets('a long sentence is clamped to the width of a row',
         (tester) async {
       await tester.pumpWidget(_host(ConversationRow(

@@ -325,10 +325,11 @@ void main() {
     expect(tablesOf(fresh), tablesOf(legacy));
     // 20 through v14, plus the five `context_*` tables v15 adds, plus
     // `setup_state` from v16, plus `labels` and `conversation_labels` from
-    // v17, plus `label_rules` from v18. A literal rather than a derived number,
-    // so a table that appears on ONE side — the failure this whole test exists
-    // to catch — cannot be absorbed by both counts moving together.
-    expect(tablesOf(fresh).length, 29);
+    // v17; `label_rules` came in v18 and left in v19. A literal rather than a
+    // derived number, so a table that appears on ONE side — the failure this
+    // whole test exists to catch — cannot be absorbed by both counts moving
+    // together.
+    expect(tablesOf(fresh).length, 28);
 
     for (final table in tablesOf(legacy)) {
       List<String> columnsOf(raw.Database db) => [

@@ -12,6 +12,7 @@ import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -396,6 +397,88 @@ void main() {
           .getSingle();
       expect((named.data['n'] as num).toInt(), 1,
           reason: 'exactly one sync_mail row ever names the regate');
+    });
+
+    test('the retired label-rule gate re-pends once and reports its count',
+        () async {
+      // Rows a label rule gated before the rules left (v19): `label_rule` is
+      // a gate this build no longer writes, so without the one-shot nothing
+      // would ever read them again. One per connector inside the window, and
+      // one outside it that the floor keeps out.
+      Future<void> gated(String id, String source, Duration ago) =>
+          store.upsertMessage({
+            'source': source,
+            'source_message_id': id,
+            'conversation_key': 'k-$id',
+            'direction': 'inbound',
+            'from_address': 'alerts@tracker.example.com',
+            'subject': '[CI] Build finished',
+            'received_at': isoAgo(ago),
+            'triage_status': 'skipped',
+            'gate_reason': 'label_rule',
+          });
+      await gated('mail-gated', 'email', const Duration(hours: 20));
+      await gated('chat-gated', 'teams', const Duration(hours: 20));
+      await gated('old-gated', 'email', const Duration(days: 40));
+
+      Future<Map<String, Object?>> progress(String source, String id) async =>
+          (await db
+                  .customSelect(
+                    'SELECT triage_state, dropped, outcome FROM '
+                    'message_progress WHERE source = ? '
+                    'AND source_message_id = ?',
+                    variables: [Variable<String>(source), Variable<String>(id)],
+                  )
+                  .getSingle())
+              .data;
+      // The gate wrote a dropped progress row, which is what the re-pend
+      // has to take back as well as the message's own status.
+      expect((await progress('email', 'mail-gated'))['dropped'], 1);
+
+      await syncReaching(14).syncNow();
+
+      // Queued in the SAME pass: the one-shot runs before the backlog
+      // enqueues, so the row it flipped to `pending` is already a needs-you
+      // work item rather than one a sync later.
+      final queued = await db
+          .customSelect(
+            'SELECT COUNT(*) AS n FROM work_items '
+            "WHERE task_kind = 'needs_you' AND source = 'email' "
+            "AND entity_id = 'mail-gated'",
+          )
+          .getSingle();
+      expect((queued.data['n'] as num).toInt(), 1);
+
+      for (final (source, id) in [
+        ('email', 'mail-gated'),
+        ('teams', 'chat-gated'),
+      ]) {
+        final row = (await store.getMessageRow(source, id))!;
+        expect(row['triage_status'], 'pending', reason: id);
+        expect(row['gate_reason'], null, reason: id);
+        final p = await progress(source, id);
+        expect(p['triage_state'], 'pending', reason: id);
+        expect(p['dropped'], 0, reason: id);
+        expect(p['outcome'], 'pending', reason: id);
+      }
+      final old = (await store.getMessageRow('email', 'old-gated'))!;
+      expect(old['triage_status'], 'skipped');
+      expect(old['gate_reason'], 'label_rule');
+      expect(await store.getPref('label_rule_gate_retired'), '1');
+      expect((await syncMailDetail())['repended_label_rule_gates'], 2);
+
+      // Once, and the pref is what says so. A later pass omits the key
+      // rather than reporting a zero.
+      graph.requests.clear();
+      await syncReaching(14).syncNow();
+      final named = await db
+          .customSelect(
+            "SELECT COUNT(*) AS n FROM activity_events WHERE kind = 'sync_mail' "
+            "AND detail_json LIKE '%repended_label_rule_gates%'",
+          )
+          .getSingle();
+      expect((named.data['n'] as num).toInt(), 1,
+          reason: 'exactly one sync_mail row ever names the re-pend');
     });
 
     test('the Day 1 banner strip runs once over stored asks', () async {

@@ -16,12 +16,8 @@ import '../models/message_models.dart';
 ///   two gold drops AND two gold keeps — the same address sends the digest
 ///   nobody reads and the mention that is addressed to the reader — so no
 ///   name rule can split them. What separates those two populations is which
-///   tenant is talking, which is data or a header, never a pattern compiled
-///   into this file. `label_rule` below is that data arriving: the owner
-///   dismisses one of those digests with a label, the label carries a
-///   standing rule, and the rules table answers for the class of mail no
-///   regex here could name. The refusal stands; it now has a mechanism behind
-///   it instead of only a reason.
+///   tenant is talking, which is data (the sender rule below) or a header,
+///   never a pattern compiled into this file.
 ///
 /// A MEETING RESPONSE is gated and a meeting INVITE is not, and what draws the
 /// line is the one field on the row that can tell them apart.
@@ -51,27 +47,16 @@ import '../models/message_models.dart';
 /// at all — the server's answer is the whole answer, and a subject line does
 /// not get to re-litigate `meetingRequest`. The localized prefixes Outlook
 /// sends in other languages are deliberately not here: a table of translations
-/// compiled into this file is the pattern the tracker bullet above refuses,
-/// and `label_rule` is the mechanism for them too.
+/// compiled into this file is the pattern the tracker bullet above refuses.
 ///
-/// Two gates here are not a judgement about the message at all, and both are
-/// the owner's own standing word arriving as an argument. `sender_rule` comes
-/// from `sender_prefs.disposition = 'drop'`, which the owner writes through
-/// "Drop this sender" — a standing instruction about one address.
-/// `label_rule` comes from a `label_rules` row whose disposition is `drop`,
-/// which the owner writes by dismissing a thread with a label and keeping the
-/// rule — a standing instruction about a CLASS of mail (a classification from
-/// `classification.dart`, a domain, a subject pattern) rather than one
-/// mailbox. Both sit immediately after `self`, because a person's own word
-/// beats every name rule below it while the owner's own mail is still their
-/// own mail; `sender_rule` is asked first of the pair, so where both apply the
-/// reason a reader is shown is the narrower instruction they wrote about this
-/// exact address. The gates stay pure: both dispositions arrive as arguments,
-/// and the call site in `triage_queue.dart` is what reads the tables. A rule's
-/// other dispositions — `later` and `hide_needs_you` — are deliberately NOT
-/// gates: they move a thread's bucket or its needs-you verdict, where a gate
-/// means the model never read the message, which is a larger thing than the
-/// owner asked for.
+/// One gate here is not a judgement about the message at all. `sender_rule`
+/// comes from `sender_prefs.disposition = 'drop'`, which the owner writes
+/// through "Drop this sender" — a standing instruction about one address,
+/// and the only per-tenant gate this app has. It sits immediately after
+/// `self`, because a person's own word beats every name rule below it while
+/// the owner's own mail is still their own mail. The gate stays pure: the
+/// disposition arrives as an argument, and the call site in
+/// `triage_queue.dart` is what reads the table.
 ///
 /// The gates are called TWICE per message, and the split is the point. A
 /// delta page carries the sender but no headers, so the first call can only
@@ -261,26 +246,14 @@ bool _isMeetingResponse(Message message) {
 /// [senderDisposition] is this sender's standing rule as the store holds it,
 /// or null when there is none and when the caller has a reason not to ask.
 /// Passed in rather than read here, so the gates stay pure.
-///
-/// [labelRuleDisposition] is the same thing one step wider: the disposition of
-/// the label rule that matched this message, whatever scope that rule was
-/// written at. Optional because the gates predate it and because a caller with
-/// no rules table in reach — a replay, a test of one rung — is asking a
-/// question the rules do not change.
 String? gateFor(
   Message message, {
   required String? userAddress,
   String? senderDisposition,
-  String? labelRuleDisposition,
 }) =>
     switch (message.source) {
-      'email' => _emailGate(
-          message,
-          userAddress,
-          senderDisposition,
-          labelRuleDisposition,
-        ),
-      'teams' => _teamsGate(message, senderDisposition, labelRuleDisposition),
+      'email' => _emailGate(message, userAddress, senderDisposition),
+      'teams' => _teamsGate(message, senderDisposition),
       _ => null,
     };
 
@@ -325,25 +298,13 @@ String? gateFor(
 /// to nothing, which is what a lone emoji reaction or an image-only post
 /// leaves behind.
 ///
-/// Those two are therefore the WHOLE chat gate — three now, since the owner's
-/// standing word comes at two widths — and they run on every chat message the
-/// triage queue claims: bot and self exclusion happened at ingest, so anything
-/// reaching here is a person talking to the user, and the only reasons to
-/// refuse it the model are the owner having said so and the message having
-/// nothing to read.
-///
-/// The label rule reaches chat because the owner's labels are about threads
-/// rather than about mail: a rule written at a domain or a subject pattern
-/// matches nothing here, but one written about a chat sender or a label the
-/// owner applied to a chat thread does, and refusing it on this path would
-/// make the same rule mean two things.
-String? _teamsGate(
-  Message message,
-  String? senderDisposition,
-  String? labelRuleDisposition,
-) {
+/// Those two are therefore the WHOLE chat gate, and they run on every chat
+/// message the triage queue claims: bot and self exclusion happened at ingest,
+/// so anything reaching here is a person talking to the user, and the only
+/// reasons to refuse it the model are the owner having said so and the message
+/// having nothing to read.
+String? _teamsGate(Message message, String? senderDisposition) {
   if (senderDisposition == 'drop') return 'sender_rule';
-  if (labelRuleDisposition == 'drop') return 'label_rule';
   final body = message.bodyText ?? message.bodyPreview ?? '';
   return body.trim().isEmpty ? 'empty' : null;
 }
@@ -354,7 +315,6 @@ String? _emailGate(
   Message message,
   String? userAddress,
   String? senderDisposition,
-  String? labelRuleDisposition,
 ) {
   final from = message.fromAddress?.toLowerCase() ?? '';
 
@@ -368,10 +328,6 @@ String? _emailGate(
   // The owner's own word about this address, which outranks every pattern
   // below: they have already answered the question the name rules guess at.
   if (senderDisposition == 'drop') return 'sender_rule';
-
-  // The same word about a whole class of mail, asked second so that where the
-  // owner wrote both, the reason they are shown is the one about this address.
-  if (labelRuleDisposition == 'drop') return 'label_rule';
 
   // Somebody answering an invitation. Above the name rules because it is a
   // fact about the message rather than a guess from its sender: the colleague

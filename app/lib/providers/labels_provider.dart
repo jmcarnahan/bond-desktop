@@ -27,16 +27,14 @@ import 'conversations_provider.dart';
 const String _staleLabelsMessage =
     "Couldn't re-read your labels just now — showing the last list.";
 
-/// What [LabelsNotifier.remove] did. [link] is what actually came off — who
-/// put it there and under which rule, [LabelsNotifier.restore]'s words for
-/// putting it back — and null when there was no link to take: a stale chip's
-/// ✕ removed nothing, and an Undo over it would add a label the thread never
-/// had.
+/// What [LabelsNotifier.remove] did.
 @immutable
 class LabelRemoval {
-  final ({String appliedBy, String? ruleId})? link;
+  /// False when no link came off: a stale chip's ✕ removed nothing, and an
+  /// Undo over it would add a label the thread never had.
+  final bool removed;
 
-  const LabelRemoval(this.link);
+  const LabelRemoval(this.removed);
 }
 
 @immutable
@@ -211,10 +209,10 @@ class LabelsNotifier extends StateNotifier<LabelsState> {
   }
 
   /// Takes one label off one thread, and says what happened: null when the
-  /// write failed, otherwise what came off — [LabelRemoval.link] null when
-  /// the chip was already gone, so the caller knows there is nothing to offer
-  /// an Undo over. The label's `use_count` stays where it is — see
-  /// [MessageStore.removeLabel].
+  /// write failed, otherwise whether a link came off — [LabelRemoval.removed]
+  /// false when the chip was already gone, so the caller knows there is
+  /// nothing to offer an Undo over. The label's `use_count` stays where it
+  /// is — see [MessageStore.removeLabel].
   ///
   /// The answer is for a caller that reports the act: a toast saying
   /// "Removed" over a write that failed would be the bar lying, and the
@@ -225,10 +223,11 @@ class LabelsNotifier extends StateNotifier<LabelsState> {
     String labelId,
   ) async {
     try {
-      final link = await _store.removeLabel(source, conversationKey, labelId);
+      final removed =
+          await _store.removeLabel(source, conversationKey, labelId);
       await _announce();
       if (mounted) state = state.copyWith(clearError: true);
-      return LabelRemoval(link);
+      return LabelRemoval(removed);
     } catch (e) {
       debugPrint('removing a label failed: $e');
       if (!mounted) return null;
@@ -237,26 +236,18 @@ class LabelsNotifier extends StateNotifier<LabelsState> {
     }
   }
 
-  /// The Undo behind [remove]: the link back exactly as [LabelRemoval.link]
-  /// described it — a rule's filing stays the rule's — and no `use_count`
-  /// movement, because putting back what was there is not the owner reaching
-  /// for the word again. False when the write failed, and when the label has
-  /// been deleted since: either way the chip is not coming back.
+  /// The Undo behind [remove]: the link back, and no `use_count` movement,
+  /// because putting back what was there is not the owner reaching for the
+  /// word again. False when the write failed, and when the label has been
+  /// deleted since: either way the chip is not coming back.
   Future<bool> restore(
     String source,
     String conversationKey,
-    String labelId, {
-    required String appliedBy,
-    String? ruleId,
-  }) async {
+    String labelId,
+  ) async {
     try {
-      final restored = await _store.restoreLabel(
-        source,
-        conversationKey,
-        labelId,
-        appliedBy: appliedBy,
-        ruleId: ruleId,
-      );
+      final restored =
+          await _store.restoreLabel(source, conversationKey, labelId);
       await _announce();
       if (mounted) state = state.copyWith(clearError: true);
       return restored;

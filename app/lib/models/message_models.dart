@@ -265,13 +265,6 @@ class Conversation {
   /// the first.
   final String? latestInboundFrom;
 
-  /// When [state] last moved, as the store stamped it — `setConversationState`
-  /// is the one writer, and it runs only when a person moves a thread (sync's
-  /// fold never does). Null on a thread nobody has moved and on every read that
-  /// does not carry the column. Read by the Recently dismissed view, which is
-  /// the one place "dismissed 3 days ago" is a different row from "just now".
-  final String? stateChangedAt;
-
   const Conversation({
     required this.id,
     this.source = 'email',
@@ -302,7 +295,6 @@ class Conversation {
     this.replyExpected,
     this.latestNeedsYouVerdict,
     this.latestInboundFrom,
-    this.stateChangedAt,
   });
 
   /// Whether this thread came from outside the owner's own organisation.
@@ -387,7 +379,6 @@ class Conversation {
       replyExpected: replyExpected,
       latestNeedsYouVerdict: latestNeedsYouVerdict,
       latestInboundFrom: latestInboundFrom,
-      stateChangedAt: stateChangedAt,
     );
   }
 
@@ -426,7 +417,6 @@ class Conversation {
       replyExpected: replyExpected,
       latestNeedsYouVerdict: latestNeedsYouVerdict,
       latestInboundFrom: latestInboundFrom,
-      stateChangedAt: stateChangedAt,
     );
   }
 
@@ -515,8 +505,6 @@ class Conversation {
       // reads as "cannot tell who this is from", and [isExternalTo] answers
       // false to that rather than calling an unknown sender a stranger.
       latestInboundFrom: row['latest_inbound_from'] as String?,
-      // A column of the thread's own row, so every `c.*` read carries it.
-      stateChangedAt: row['state_changed_at'] as String?,
     );
   }
 }

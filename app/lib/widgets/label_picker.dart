@@ -32,55 +32,6 @@ extension LabelPickerModePrompt on LabelPickerMode {
       };
 }
 
-/// One scope a rule could be written on, offered beside a label the owner has
-/// just filed a thread under — requirement 11b's inline offer.
-///
-/// A candidate, not a rule: it names WHAT a rule would be about and nothing
-/// about what the rule would do. The host computes these from the thread (the
-/// sender's address, its domain, the thread's classification, a subject prefix),
-/// the picker draws them, and pressing one hands the pair straight back. No rule
-/// exists until the host writes one.
-///
-/// Defined here rather than in `models/` because it is a fact about this
-/// widget's offer line and nothing stores it: [LabelRule] is the stored shape,
-/// and it carries a disposition, an id and a count this has no opinion about.
-@immutable
-class LabelRuleOffer {
-  /// One of [LabelRule]'s scope kinds. An open set there and an open set here:
-  /// a kind this build has no words for reads as `this <kind>` rather than as
-  /// nothing, so a later build's offer is legible instead of blank.
-  final String scopeKind;
-
-  /// What the rule would be about — the address, the domain, the classification
-  /// or the subject prefix. Shown only as a tooltip: the chip says which KIND
-  /// of rule, and the thread on screen is where the reader sees the value.
-  final String scopeValue;
-
-  const LabelRuleOffer({required this.scopeKind, required this.scopeValue});
-
-  /// The chip's words. Second person and no jargon, because a chip is the whole
-  /// explanation a reader gets before they press it.
-  String get words => switch (scopeKind) {
-        LabelRule.scopeSender => 'this sender',
-        LabelRule.scopeDomain => 'this domain',
-        LabelRule.scopeClassification => 'this kind of mail',
-        LabelRule.scopeSubject => 'subjects like "$scopeValue"',
-        _ => 'this ${scopeKind.replaceAll('_', ' ')}',
-      };
-
-  @override
-  bool operator ==(Object other) =>
-      other is LabelRuleOffer &&
-      other.scopeKind == scopeKind &&
-      other.scopeValue == scopeValue;
-
-  @override
-  int get hashCode => Object.hash(scopeKind, scopeValue);
-
-  @override
-  String toString() => 'LabelRuleOffer($scopeKind=$scopeValue)';
-}
-
 /// The inline label strip: the whole dismiss-and-file flow, in place.
 ///
 /// No dialog and no menu, which is the house rule, but also the faster shape:
@@ -133,37 +84,6 @@ class LabelPicker extends StatefulWidget {
   /// mounts get theirs.
   final String prompt;
 
-  /// The scopes a rule could be written on for this thread. Empty — the default
-  /// — draws no offer line at all, which is every mount that has not asked for
-  /// one.
-  ///
-  /// The host decides WHEN there is anything to offer, and that is deliberate:
-  /// the offer belongs to the dismiss path, and this widget knows which question
-  /// it is asking only by the words it was handed.
-  final List<LabelRuleOffer> ruleOffers;
-
-  /// The label a rule written here would carry — in practice the label the
-  /// thread ALREADY wears, since the host's dismiss path unmounts this strip
-  /// the moment a label is applied. Null — the default — draws no offer line,
-  /// which is a first-ever dismissal's natural state: the recurring thread
-  /// that came back wearing its word is the one a rule is for, and the
-  /// recurring CLASS is the suggestion row's job.
-  ///
-  /// It arrives from OUTSIDE rather than being remembered here because the
-  /// create path mints the label in the store: the picker knows the name the
-  /// reader typed and not the [Label] it became, and offering a rule for a
-  /// label nobody can name yet would be offering to write a row with a hole in
-  /// it. One source of truth, and it is the host's.
-  final Label? ruleOfferLabel;
-
-  /// The reader chose a scope. The pair is everything a caller needs to write
-  /// the rule; nothing here writes one, and the disposition is the host's to
-  /// decide (Settings is where it is changed afterwards).
-  ///
-  /// Null — the default — draws no offer line, so a host that cannot persist a
-  /// rule never shows one.
-  final void Function(Label label, LabelRuleOffer offer)? onRuleChosen;
-
   /// The ids already on the thread. Their chips carry a ✓, because a picker
   /// that drew the owner's whole vocabulary the same way read as the thread's
   /// own labels — "jira" in the list looked like "this is labelled jira".
@@ -178,9 +98,6 @@ class LabelPicker extends StatefulWidget {
     required this.prompt,
     this.onDismissWithoutLabel,
     this.autofocus = true,
-    this.ruleOffers = const [],
-    this.ruleOfferLabel,
-    this.onRuleChosen,
     this.appliedIds = const {},
   });
 
@@ -201,15 +118,6 @@ class LabelPicker extends StatefulWidget {
   /// a keystroke reorders that row, and a moving key throws away the chip the
   /// reader was aiming at.
   static Key keyFor(Label label) => ValueKey('label-picker-chip-${label.id}');
-
-  /// The offer line's own row, so a test can scope to it rather than to the
-  /// label chips above it.
-  static const Key ruleRowKey = ValueKey('label-picker-rules');
-
-  /// One scope chip, keyed by its KIND: the line holds at most one chip per
-  /// kind, and the kind is what the reader is choosing between.
-  static Key ruleKeyFor(LabelRuleOffer offer) =>
-      ValueKey('label-picker-rule-${offer.scopeKind}');
 
   /// How many chips the row shows. A cap rather than a scroll: the keyboard
   /// flow is the point, and a reader with more words than this narrows them by
@@ -409,66 +317,8 @@ class _LabelPickerState extends State<LabelPicker> {
                 ),
               ),
             ],
-            ?_ruleOffer(),
           ],
         ),
-      ),
-    );
-  }
-
-  /// "And every future one of these": the offer line, under everything else
-  /// because it is about the mail that has not arrived yet and the reader has
-  /// already dealt with the thread in front of them.
-  ///
-  /// Null unless all three parts are present — a label to file under, scopes to
-  /// offer, and somewhere for the answer to go — so every mount that has not
-  /// asked for the line draws exactly the strip it drew before it existed.
-  ///
-  /// The chips are ordinary focusable buttons and nothing binds Enter here: the
-  /// type-ahead keeps the focus it was given, so Enter still means what the hint
-  /// line says it means, and Tab is how a hand that never leaves the keyboard
-  /// reaches a scope.
-  Widget? _ruleOffer() {
-    final label = widget.ruleOfferLabel;
-    final chosen = widget.onRuleChosen;
-    if (label == null || chosen == null || widget.ruleOffers.isEmpty) {
-      return null;
-    }
-    return Padding(
-      padding: const EdgeInsets.only(top: BondSpacing.s12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            "Also file future mail under '${label.name}':",
-            style: BondType.caption,
-          ),
-          const SizedBox(height: BondSpacing.s8),
-          Wrap(
-            key: LabelPicker.ruleRowKey,
-            spacing: BondSpacing.s8,
-            runSpacing: BondSpacing.s8,
-            children: [
-              for (final offer in widget.ruleOffers)
-                Material(
-                  key: LabelPicker.ruleKeyFor(offer),
-                  type: MaterialType.transparency,
-                  // The value the rule would be about, a hover away. It is not
-                  // in the chip because the chip has to stay four words wide,
-                  // and the thread the reader is looking at is the value.
-                  child: Tooltip(
-                    message: offer.scopeValue,
-                    child: InkWell(
-                      onTap: () => chosen(label, offer),
-                      borderRadius: BondRadii.fullAll,
-                      child: BondChip.metric(offer.words),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ],
       ),
     );
   }

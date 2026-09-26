@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show FilteringTextInputFormatter;
 
-import '../models/label_models.dart' show Label, LabelRule;
+import '../models/label_models.dart' show Label;
 import '../providers/app_providers.dart' show ParkedFact;
 import '../providers/context_provider.dart' show ContextDirRow;
 import '../providers/prefs_provider.dart'
@@ -505,24 +505,6 @@ class SettingsScreen extends StatefulWidget {
   /// Deletes one label and every thread link it has.
   final void Function(String id)? onDeleteLabel;
 
-  /// The standing rules those labels carry, from `labelRulesProvider`. Empty —
-  /// the default — is a Labels section that reads exactly as it did before rules
-  /// existed, which is what a host that has not wired this gets.
-  ///
-  /// Read by the host, like [labels]: rules are written from a thread's picker as
-  /// well as read here, so this is a seam onto that notifier rather than a
-  /// settings-only mutator.
-  final List<LabelRule> labelRules;
-
-  /// Stops one rule, by `LabelRule.id`. The label and the threads it has already
-  /// filed stay.
-  final void Function(String ruleId)? onDeleteRule;
-
-  /// Changes what one rule does. The host re-files what the rule already matched
-  /// and owns the toast that says how many moved.
-  final void Function(String ruleId, String disposition)?
-      onRuleDispositionChanged;
-
   /// Which half of the screen to render — see [SettingsScope].
   final SettingsScope scope;
 
@@ -632,9 +614,6 @@ class SettingsScreen extends StatefulWidget {
     this.onRenameLabel,
     this.onLabelToneChanged,
     this.onDeleteLabel,
-    this.labelRules = const [],
-    this.onDeleteRule,
-    this.onRuleDispositionChanged,
   });
 
   /// Keyed because their labels are ordinary words a test would otherwise have
@@ -1076,9 +1055,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
           onRename: widget.onRenameLabel,
           onToneChanged: widget.onLabelToneChanged,
           onDelete: widget.onDeleteLabel,
-          rules: widget.labelRules,
-          onDeleteRule: widget.onDeleteRule,
-          onRuleDispositionChanged: widget.onRuleDispositionChanged,
         ),
       // After Storylines and before Sync & data, in BOTH scopes: what the
       // model is allowed to read is a question about the model, so it belongs

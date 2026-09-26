@@ -47,7 +47,7 @@ class FlakyStore extends MessageStore {
   }
 
   @override
-  Future<({String appliedBy, String? ruleId})?> removeLabel(
+  Future<bool> removeLabel(
     String source,
     String conversationKey,
     String labelId,
@@ -60,18 +60,10 @@ class FlakyStore extends MessageStore {
   Future<bool> restoreLabel(
     String source,
     String conversationKey,
-    String labelId, {
-    required String appliedBy,
-    String? ruleId,
-  }) async {
+    String labelId,
+  ) async {
     if (failWrites) throw StateError('disk is full');
-    return super.restoreLabel(
-      source,
-      conversationKey,
-      labelId,
-      appliedBy: appliedBy,
-      ruleId: ruleId,
-    );
+    return super.restoreLabel(source, conversationKey, labelId);
   }
 }
 
@@ -316,8 +308,7 @@ void main() {
       expect(await flaky.labelsForConversation('email', 'c1'), hasLength(1));
     });
 
-    test('a remove answers what came off, and nothing when nothing did',
-        () async {
+    test('a remove answers whether a link came off', () async {
       final flaky = FlakyStore(db);
       final fyi = await flaky.createLabel('FYI only');
       await flaky.applyLabels('email', 'c1', [fyi.id]);
@@ -325,61 +316,36 @@ void main() {
       await notifier.load();
 
       final removal = await notifier.remove('email', 'c1', fyi.id);
-      expect(removal!.link, isNotNull);
-      expect(removal.link!.appliedBy, 'user');
-      expect(removal.link!.ruleId, isNull);
+      expect(removal!.removed, isTrue);
 
       // A second ✕ on the same chip took nothing off: the write went
       // through, but there is no link to hang an Undo on.
       final again = await notifier.remove('email', 'c1', fyi.id);
       expect(again, isNotNull);
-      expect(again!.link, isNull);
+      expect(again!.removed, isFalse);
     });
 
-    test('a restore carries its words through, and a refused one says no',
+    test('a restore puts the link back uncounted, and a refused one says no',
         () async {
       final flaky = FlakyStore(db);
       final fyi = await flaky.createLabel('FYI only');
-      await flaky.applyLabelsByRule('email', 'c1', fyi.id, ruleId: 'r1');
+      await flaky.applyLabels('email', 'c1', [fyi.id]);
       final notifier = LabelsNotifier(flaky);
       await notifier.load();
-      final removal = await notifier.remove('email', 'c1', fyi.id);
-      final link = removal!.link!;
+      await notifier.remove('email', 'c1', fyi.id);
 
       flaky.failWrites = true;
-      expect(
-        await notifier.restore(
-          'email',
-          'c1',
-          fyi.id,
-          appliedBy: link.appliedBy,
-          ruleId: link.ruleId,
-        ),
-        isFalse,
-      );
+      expect(await notifier.restore('email', 'c1', fyi.id), isFalse);
       expect(
         notifier.state.error,
         "Couldn't put that label back just now.",
       );
 
       flaky.failWrites = false;
-      expect(
-        await notifier.restore(
-          'email',
-          'c1',
-          fyi.id,
-          appliedBy: link.appliedBy,
-          ruleId: link.ruleId,
-        ),
-        isTrue,
-      );
-      // Back exactly as it was: still the rule's filing, still uncounted.
-      expect(await flaky.removeLabel('email', 'c1', fyi.id),
-          (appliedBy: 'rule', ruleId: 'r1'));
-      expect(
-        (await flaky.listLabels()).single.useCount,
-        0,
-      );
+      expect(await notifier.restore('email', 'c1', fyi.id), isTrue);
+      expect(await flaky.labelsForConversation('email', 'c1'), hasLength(1));
+      // Putting back what was there is not a second reach for the word.
+      expect((await flaky.listLabels()).single.useCount, 1);
     });
 
     test('nothing to apply is nothing refused', () async {

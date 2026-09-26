@@ -317,17 +317,6 @@ class ThreadDetailPanel extends StatefulWidget {
   /// Escape, and the strip's own ✕. Sets the host's open state back to null.
   final VoidCallback? onCloseLabelPicker;
 
-  /// The scopes a rule could be written on for this thread — see
-  /// [LabelPicker.ruleOffers]. Empty, the default, draws no offer line.
-  final List<LabelRuleOffer> ruleOffers;
-
-  /// The label the host has just filed this thread under — see
-  /// [LabelPicker.ruleOfferLabel].
-  final Label? ruleOfferLabel;
-
-  /// The reader chose a scope on the offer line. The panel writes no rule.
-  final void Function(Label label, LabelRuleOffer offer)? onRuleChosen;
-
   /// The host's handle on this transcript's jumps — see [TranscriptJumps]. Null
   /// is what every host that binds no keys passes, and the navigator's own
   /// arrows still work.
@@ -385,9 +374,6 @@ class ThreadDetailPanel extends StatefulWidget {
     this.onCreateLabel,
     this.onDismissWithoutLabel,
     this.onCloseLabelPicker,
-    this.ruleOffers = const [],
-    this.ruleOfferLabel,
-    this.onRuleChosen,
     this.jumps,
     this.ownerDomains = const {},
   });
@@ -1305,18 +1291,6 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
               ? widget.onDismissWithoutLabel
               : null,
           onClose: close,
-          // Only the dismiss path offers a rule, on the list pane's reasoning:
-          // a label on a thread that stays put says what the thread IS, and a
-          // dismissal says what should happen to the next one like it.
-          ruleOffers: mode == LabelPickerMode.dismiss
-              ? widget.ruleOffers
-              : const [],
-          ruleOfferLabel: mode == LabelPickerMode.dismiss
-              ? widget.ruleOfferLabel
-              : null,
-          onRuleChosen: mode == LabelPickerMode.dismiss
-              ? widget.onRuleChosen
-              : null,
         ),
       );
     }

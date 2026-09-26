@@ -19,17 +19,10 @@ import 'time_format.dart';
 
 /// The reason slug as words, or null when there is nothing honest to say.
 ///
-/// Three kinds of value reach here and each is treated differently:
+/// Two kinds of value reach here and each is treated differently:
 ///
 ///  * `teams_direct` — the deterministic floor's token, and the one token the
 ///    needs-you pass writes instead of a sentence. Translated.
-///  * `label_rule:<name>` — a thread this token reaches the reader on is one
-///    the floor RAISED past the owner's rule (`needs_you_handler` writes it
-///    with `despite_rule` on exactly that path; the verdict-0 write a rule
-///    makes never surfaces, since the subselect reads only verdict 1). So the
-///    honest words are "shown despite `<name>`": the bare label name alone
-///    would read as the reason the thread needs you — the opposite of what
-///    happened.
 ///  * anything else — the model's `evidence` line, already a sentence in the
 ///    judge's own words. Passed through with its whitespace collapsed and
 ///    clamped to [maxChars]; paraphrasing it would be the app putting words in
@@ -41,18 +34,10 @@ String? needsYouReasonWords(String? reason, {int maxChars = 120}) {
   final text = reason?.trim() ?? '';
   if (text.isEmpty) return null;
   if (text == 'teams_direct') return 'Direct message';
-  if (text.startsWith(_labelRulePrefix)) {
-    final name = text.substring(_labelRulePrefix.length).trim();
-    // A rule with no name behind it explains nothing a reader can act on, so
-    // it reads as nothing rather than as a bare "Shown despite".
-    return name.isEmpty ? null : 'Shown despite $name';
-  }
   final collapsed = text.replaceAll(RegExp(r'\s+'), ' ');
   if (collapsed.length <= maxChars) return collapsed;
   return '${collapsed.substring(0, maxChars).trimRight()}…';
 }
-
-const String _labelRulePrefix = 'label_rule:';
 
 /// Whether [c] has a reason worth drawing: it is asking for a reply AND the
 /// pipeline can name why.

@@ -11,8 +11,7 @@
 ///
 /// NO DOMAIN NAME APPEARS IN THIS FILE, and that is the hard rule about it. The
 /// owner's domains arrive as an argument, derived from the one address the app
-/// knows them by, exactly as `label_rules.dart`'s domain scope compares against
-/// a value the owner wrote. A vendor list compiled in here would be the pattern
+/// knows them by. A vendor list compiled in here would be the pattern
 /// `gates.dart`'s decision record refuses.
 library;
 
@@ -47,15 +46,14 @@ Set<String> ownerDomainsOf(String? ownerAddress) {
 ///   no domain part at all and must never read as external: a colleague's chat
 ///   is the most internal message this app carries, and a federated guest in a
 ///   chat is a question about the tenant's federation rather than about a string
-///   with no domain in it. `label_rules.dart`'s domain scope leans on the same
-///   fact for the same reason.
+///   with no domain in it.
 /// - an empty [ownerDomains]. Signed out, or a tenant that left `mail` and the
 ///   UPN both unset: the app cannot say who the owner is, so it does not get to
 ///   call anybody a stranger.
 ///
 /// A SUBDOMAIN of an owner domain is internal — `eu.example.com` under
-/// `example.com` — the same suffix test `label_rules.dart` applies to a
-/// domain-scoped rule, with the leading dot that keeps `notexample.com` out.
+/// `example.com` — a suffix test with the leading dot that keeps
+/// `notexample.com` out.
 bool isExternalAddress(String? address, Set<String> ownerDomains) {
   if (ownerDomains.isEmpty) return false;
   final raw = address?.trim().toLowerCase() ?? '';

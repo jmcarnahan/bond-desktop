@@ -24,10 +24,8 @@ import '../services/attachments/attachment_digest_handler.dart';
 import '../services/attachments/attachment_retriever.dart';
 import '../services/attachments/attachment_text_handler.dart';
 import '../services/attachments/html_snapshot.dart' show htmlSnapshotPng;
-import '../models/message_models.dart' show Message;
 import '../services/attention.dart';
 import '../services/attention_service.dart';
-import '../services/classification.dart';
 import '../services/backend/attachment_backend.dart';
 import '../services/backend/auth_session.dart';
 import '../services/backend/mail_backend.dart';
@@ -1231,11 +1229,6 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         attentionThreshold:
             attentionThresholdReader(ref.watch(messageStoreProvider)),
         owner: _ownerLookup(ref),
-        // The triage side's own definition of a message's kind, handed in as
-        // a closure for the reason the handler's field gives: two passes, one
-        // vocabulary. This is what lets a classification-scoped rule
-        // ('meeting_response', 'tracker_notification', …) hide a thread.
-        classify: (row) => classificationOf(Message.fromRow(row)),
         // The owner's own organisation, so the handler can tell a stranger's
         // first approach from a colleague's question. Same shape as `owner`
         // above and for the same reason: the account is a keychain read, and

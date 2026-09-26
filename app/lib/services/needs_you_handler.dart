@@ -1,10 +1,8 @@
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../data/message_store.dart';
-import '../models/label_models.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
-import 'label_rules.dart';
 import 'attachments/attachment_digest_lines.dart';
 import 'ai_worker.dart';
 import 'external_sender.dart';
@@ -31,17 +29,6 @@ import 'pipeline_progress.dart';
 /// ([needsYouFloor]) only ever RAISES it, and so does the model below it: what
 /// the floor is silent about is read by [NeedsYouTask], which is the only
 /// thing here that can write a 0.
-///
-/// A standing LABEL RULE is asked before either of them, and it is the one
-/// thing here that can write a 0 without a model call. That is not a hole in
-/// the raise-only rule; it is the owner overruling the judgement in advance —
-/// they looked at a thread of this kind, said "never on my rail again", and a
-/// pass that then asked a model whether they meant it would be reading the
-/// mail rather than the instruction. The floor still goes FIRST, because
-/// `unless_mentions_me` is on by default and an @mention outranks the rule; a
-/// rule written with the exception OFF suppresses the floor
-/// ([needsYouFloor]'s one parameter) and hides the message anyway, which is
-/// what turning it off means.
 ///
 /// The owner's `needs_you_rules` pref REPLACES the default body of the system
 /// prompt outright — an empty pref is the default body. It is read per item,
@@ -117,15 +104,6 @@ class NeedsYouHandler extends WorkHandler {
   /// tiles elsewhere mean.
   final Future<double> Function()? _threshold;
 
-  /// Names the KIND of one message row, for a classification-scoped label rule.
-  ///
-  /// A closure rather than an import because naming the kind of a message is the
-  /// triage side's job and a handler importing it would put two passes'
-  /// definitions of "automated notification" in one file. Null — the default,
-  /// and what every existing test gets — means a classification-scoped rule
-  /// matches nothing here; the sender, domain and subject scopes are unaffected.
-  final String? Function(Map<String, Object?> row)? _classify;
-
   /// The owner's own mail domains, for [isExternalAddress].
   ///
   /// A closure asked ONCE per handler, cached in [_domains] on the same terms
@@ -149,7 +127,6 @@ class NeedsYouHandler extends WorkHandler {
     OwnerLookup? owner,
     PipelineProgress progress = const PipelineProgress.disabled(),
     Future<double> Function()? attentionThreshold,
-    this._classify,
     this._ownerDomains,
   })  : _log = activityLog ?? ActivityLog.disabled(),
         _owner = memoizedOwner(owner ?? (() async => null)),
@@ -208,112 +185,28 @@ class NeedsYouHandler extends WorkHandler {
     // of what it was. Stored shape, not Dart's: 0, 1 or null, where null is
     // "never judged" and differs from both.
     final previous = _int(row['needs_you_verdict']);
-    final key = row['conversation_key'] as String? ?? '';
 
-    // Read per item, like the rules pref below and for the same reason: an owner
-    // who writes a rule mid-drain means it for the rest of the drain. It is one
-    // indexed read of a table with as many rows as they have written by hand.
-    //
-    // Only `hide_needs_you` is this pass's business. A `later` rule moves a
-    // thread's BUCKET, which is the attention sweep's column, and a `drop` rule
-    // is a gate on mail that never reaches this queue.
-    //
-    // A message stamped `gate_override = 'user'` is outside every rule: the
-    // owner's own hand pulled it back (Restore, or "Show again" on a thread a
-    // rule filed — `MessageStore.showRuleFiledThread`), which is the same
-    // exemption `MessageStore.applyLabelRule` and the triage gate already
-    // give it. Without this a requeued "Show again" would be re-hidden by the
-    // very rule the owner just overruled, on the first pass.
-    final overridden = (row['gate_override'] as String?) == 'user';
-    final rule = overridden
-        ? null
-        : matchLabelRule(
-            await _store.listLabelRules(),
-            source: source,
-            senderAddress: row['from_address'] as String?,
-            senderName: row['from_name'] as String?,
-            subject: row['subject'] as String?,
-            classification: _classify?.call(row),
-          );
-    final hiding = rule != null && rule.disposition == LabelRule.hideNeedsYou;
-
-    // A stranger's first approach, read before the floor because it is one of
-    // the two things that can switch the floor off. Costs a query only for a
-    // sender who is actually external, and nothing at all while the app does not
-    // know whose inbox this is.
+    // A stranger's first approach, read before the floor because it is the one
+    // thing that can switch the floor off. Costs a query only for a sender who
+    // is actually external, and nothing at all while the app does not know
+    // whose inbox this is.
     final cold = await _coldOutreach(source, row);
 
-    // The floor first, and suppressed only by a rule whose exception is OFF.
-    // With the exception ON — the default — a chat that named the owner beats
-    // their own standing rule, which is the whole of "unless it mentions me".
-    if (needsYouFloor(
-      row,
-      suppressed: hiding && !rule.unlessMentionsMe,
-      coldOutreach: cold,
-    )) {
-      // A raise the owner's own rule ARGUED AGAINST says so, in the rule's own
-      // token: reaching here with [hiding] true means a `hide_needs_you` rule
-      // matched this message and its `unless_mentions_me` exception — which is
-      // on by default — let the mention through anyway. That is the one case
-      // requirement 12i asks the thread to explain itself for: a reader who
-      // wrote "never this kind of mail again" and finds one on the rail is owed
-      // the name of the rule it got past, and the rail is where they will see
-      // it (`needsYouReasonWords` translates the token; the `teams_direct` one
-      // reads "Direct message" and names no rule).
-      //
-      // In practice this is Teams only, and by construction: the floor reads
-      // `addressed_me` on a chat row, and nothing detects the owner's name in a
-      // mail BODY. Mail's own `addressed_me` is deliberately outside the floor
-      // (`needs_you.dart`), so a mail rule's exception has nothing to fire on.
-      final reason = hiding ? rule.verdictReason : 'teams_direct';
+    if (needsYouFloor(row, coldOutreach: cold)) {
       await _store.writeNeedsYouVerdict(
         source,
         id,
         verdict: true,
-        reason: reason,
+        reason: 'teams_direct',
       );
-      // The FLOOR is what raised it either way, and the log says that rather
-      // than the token: a rule's reason embeds the owner's own label name, and
-      // the hiding branch below keeps that name out of the log for the same
-      // reason.
-      _log.note({
-        'verdict': true,
-        'reason': 'teams_direct',
-        if (hiding) 'despite_rule': true,
-      });
+      _log.note({'verdict': true, 'reason': 'teams_direct'});
       await _followChip(source, id, previous: previous, verdict: true);
       return;
     }
 
-    if (hiding) {
-      await _store.writeNeedsYouVerdict(
-        source,
-        id,
-        verdict: false,
-        reason: rule.verdictReason,
-      );
-      // The label the rule files under, and the tally of what it has filed. The
-      // count follows the LINK rather than the message, so a thread this rule
-      // has already filed is hidden again without being counted twice — the same
-      // discipline `MessageStore.applyLabelRule` keeps, and it has to match,
-      // because undo takes back exactly the links that were counted.
-      if (key.isNotEmpty &&
-          await _store.applyLabelsByRule(
-            source,
-            key,
-            rule.labelId,
-            ruleId: rule.id,
-          )) {
-        await _store.bumpRuleHiddenCount(rule.id);
-      }
-      _log.note({'verdict': false, 'reason': 'label_rule'});
-      await _followChip(source, id, previous: previous, verdict: false);
-      return;
-    }
-
-    // Below the floor and under no rule, which settles nothing: the model reads
-    // the text.
+    // Below the floor, which settles nothing: the model reads the text.
     var message = Message.fromRow(row);
+    final key = row['conversation_key'] as String? ?? '';
     // Hydrated only when the row says there is something to hydrate —
     // `loadThread` does this for a whole thread; a single-row read has to ask.
     if (row['has_attachments'] == 1) {

@@ -387,6 +387,29 @@ class SyncService implements MailSync {
         sinceIso: floor,
       );
 
+      // Messages a label rule gated, back in the queue. The rules are gone
+      // (v19), so `label_rule` is a gate this build no longer writes and
+      // nothing else would ever look at those rows again. Before the backlog
+      // enqueues below, for the same reason as the re-judge above: a row this
+      // flips to `pending` is picked up in the same pass. Same one-shot idiom,
+      // every connector at once, null until it runs; bounded by this pass's
+      // floor for [MessageStore.rependGatedTriage]'s reason. NOT in
+      // `derivedOneShotPrefs`: Clear AI results re-pends these rows itself,
+      // and nothing writes the reason again, so a set key is never wrong.
+      int? rependedLabelRuleGates;
+      if (await _store.getPref('label_rule_gate_retired') == null) {
+        var repended = 0;
+        for (final source in const ['email', 'teams']) {
+          repended += await _store.rependGatedTriage(
+            source: source,
+            gateReason: 'label_rule',
+            sinceIso: floor,
+          );
+        }
+        await _store.setPref('label_rule_gate_retired', '1');
+        rependedLabelRuleGates = repended;
+      }
+
       // The one-time catch-up for mail stored before ingest wrote
       // `addressed_me`. Skipped WITHOUT setting the pref while the address is
       // unknown, so a keychain that has not answered yet costs a retry next
@@ -886,6 +909,7 @@ class SyncService implements MailSync {
           'named_participants': ?namedParticipants,
           'refolded_threads': ?refoldedThreads,
           'regated_meeting_responses': ?regatedMeetingResponses,
+          'repended_label_rule_gates': ?rependedLabelRuleGates,
           'stripped_plan_relative_banners': ?strippedPlanRelative,
           'repaired_gated_conversations': ?repairedGated,
           'requeued_clustering_reembeds': ?requeuedReembeds,
