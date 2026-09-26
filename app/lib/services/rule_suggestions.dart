@@ -200,14 +200,15 @@ class RuleSuggestion {
         keepInNeedsYou => 'You keep coming back to $scopeValue.',
         _ => switch (scopeKind) {
             LabelRule.scopeSender =>
-              "You've dismissed $threadCount threads from $scopeValue.",
+              "You've marked $threadCount threads from $scopeValue done.",
             LabelRule.scopeDomain =>
-              "You've dismissed $threadCount threads from $scopeValue.",
+              "You've marked $threadCount threads from $scopeValue done.",
             LabelRule.scopeClassification =>
-              "You've dismissed $threadCount ${_kindWords(scopeValue)}.",
+              "You've marked $threadCount ${_kindWords(scopeValue)} done.",
             LabelRule.scopeSubject =>
-              "You've dismissed $threadCount threads starting '$scopeValue'.",
-            _ => "You've dismissed $threadCount threads like this.",
+              "You've marked done $threadCount threads starting "
+                  "'$scopeValue'.",
+            _ => "You've marked $threadCount threads like this done.",
           },
       };
 

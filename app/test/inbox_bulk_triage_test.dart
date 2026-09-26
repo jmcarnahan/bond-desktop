@@ -41,6 +41,49 @@ class _FakeSync implements MailSync {
   Future<void> ensureMessageBody(String sourceMessageId) async {}
 }
 
+/// A store that refuses label links on the threads named in [refused], and
+/// records every removal it is asked for — so a bulk Undo can be seen to
+/// take back only what actually went on. [refusedRemovals] is the same for
+/// the Undo's own writes: a refusal there must not stop the rest.
+class _PartlyRefusingStore extends MessageStore {
+  _PartlyRefusingStore(super.db, this.refused);
+
+  final Set<String> refused;
+  final Set<String> refusedRemovals = {};
+  final List<String> removed = [];
+
+  @override
+  Future<void> applyLabels(
+    String source,
+    String conversationKey,
+    List<String> labelIds, {
+    String appliedBy = 'user',
+  }) async {
+    if (refused.contains(conversationKey)) {
+      throw StateError('the disk said no');
+    }
+    return super.applyLabels(
+      source,
+      conversationKey,
+      labelIds,
+      appliedBy: appliedBy,
+    );
+  }
+
+  @override
+  Future<({String appliedBy, String? ruleId})?> removeLabel(
+    String source,
+    String conversationKey,
+    String labelId,
+  ) async {
+    removed.add(conversationKey);
+    if (refusedRemovals.contains(conversationKey)) {
+      throw StateError('the disk said no');
+    }
+    return super.removeLabel(source, conversationKey, labelId);
+  }
+}
+
 class _FakeTeamsSync implements TeamsSync {
   @override
   Future<String?> get lastSyncedAt async => null;
@@ -116,7 +159,11 @@ void main() {
 
   /// [height] tall enough, where a test reaches for a row's box, that the
   /// lazily built list has built that row.
-  Future<void> pumpInbox(WidgetTester tester, {double height = 900}) async {
+  Future<void> pumpInbox(
+    WidgetTester tester, {
+    double height = 900,
+    MessageStore? storeAs,
+  }) async {
     await tester.binding.setSurfaceSize(Size(1400, height));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await store.setPref(attentionThresholdKey, '0');
@@ -129,6 +176,7 @@ void main() {
       teamsSyncProvider.overrideWithValue(_FakeTeamsSync()),
       notificationCoordinatorProvider
           .overrideWithValue(NotificationCoordinator(store)),
+      if (storeAs != null) messageStoreProvider.overrideWithValue(storeAs),
     ]);
     addTearDown(container.dispose);
 
@@ -226,7 +274,8 @@ void main() {
     await settleQueues(tester);
   });
 
-  testWidgets('bulk Dismiss is one bar, counts three, and one Undo is all three',
+  testWidgets('bulk Mark done is one bar, counts three, and one Undo is all '
+      'three',
       (tester) async {
     await seedPile();
     await pumpInbox(tester);
@@ -239,7 +288,7 @@ void main() {
 
     expect(rowTitles(tester), ['Offsite agenda', 'Parking passes']);
     expect(find.byType(SnackBar), findsOneWidget);
-    expect(find.text('Dismissed 3 threads.'), findsOneWidget);
+    expect(find.text('Marked done: 3 threads.'), findsOneWidget);
     expect(find.text('3 of 5 cleared'), findsOneWidget);
     expect(find.byKey(BulkActionBar.barKey), findsNothing);
 
@@ -276,7 +325,7 @@ void main() {
     await settleQueues(tester);
 
     expect(
-      find.text('Dismissed 2 threads. 1 could not be changed.'),
+      find.text('Marked done: 2 threads. 1 could not be changed.'),
       findsOneWidget,
     );
     expect(find.text('2 of 5 cleared'), findsOneWidget);
@@ -367,7 +416,7 @@ void main() {
     await press(tester, LogicalKeyboardKey.keyE);
     await settleQueues(tester);
     expect(rowTitles(tester), ['Offsite agenda', 'Parking passes']);
-    expect(find.text('Dismissed 3 threads.'), findsOneWidget);
+    expect(find.text('Marked done: 3 threads.'), findsOneWidget);
 
     await press(tester, LogicalKeyboardKey.keyZ);
     await settleQueues(tester);
@@ -406,6 +455,117 @@ void main() {
     await settleQueues(tester);
     expect(await store.labelsForConversation('email', 'c1'), isEmpty);
     expect(await store.labelsForConversation('email', 'c2'), isEmpty);
+    await settleQueues(tester);
+  });
+
+  /// Two rows ticked, `l`, `fyi`, Enter: the bulk label strip's apply.
+  Future<void> labelTwo(WidgetTester tester) async {
+    await tickFromTop(tester, 2);
+    await press(tester, LogicalKeyboardKey.keyL);
+    await tester.enterText(find.byKey(LabelPicker.fieldKey), 'fyi');
+    await tester.pump();
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await settleQueues(tester);
+  }
+
+  testWidgets('a bulk label that partly fails says so, and Undo takes back '
+      'only what went on', (tester) async {
+    await store.createLabel('FYI only');
+    await seedPile();
+    final refusing = _PartlyRefusingStore(db, {'c2'});
+    await pumpInbox(tester, storeAs: refusing);
+
+    await labelTwo(tester);
+
+    expect(find.text('Labeled 1 thread FYI only. 1 could not be changed.'),
+        findsOneWidget);
+    expect(await store.labelsForConversation('email', 'c2'), isEmpty);
+
+    await tester.tap(find.text('Undo'));
+    await settleQueues(tester);
+    expect(refusing.removed, ['c1']);
+    expect(await store.labelsForConversation('email', 'c1'), isEmpty);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a bulk label that wholly fails reads as the failure it is',
+      (tester) async {
+    await store.createLabel('FYI only');
+    await seedPile();
+    await pumpInbox(tester, storeAs: _PartlyRefusingStore(db, {'c1', 'c2'}));
+
+    await labelTwo(tester);
+
+    expect(find.text("Couldn't label 2 threads FYI only just now."),
+        findsOneWidget);
+    expect(find.textContaining('Labeled'), findsNothing);
+    expect(find.text('Undo'), findsNothing);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a bulk Undo that hits a refusal still takes the rest back',
+      (tester) async {
+    await store.createLabel('FYI only');
+    await seedPile();
+    final refusing = _PartlyRefusingStore(db, {});
+    await pumpInbox(tester, storeAs: refusing);
+    await labelTwo(tester);
+    expect(find.text('Labeled 2 threads FYI only.'), findsOneWidget);
+
+    refusing.refusedRemovals.add('c2');
+    await tester.tap(find.text('Undo'));
+    await settleQueues(tester);
+    await tester.pump();
+
+    // The refusal is said, and it does not strand the other thread's label.
+    expect(
+      find.text("Couldn't take that label off every thread just now."),
+      findsOneWidget,
+    );
+    expect(await store.labelsForConversation('email', 'c1'), isEmpty);
+    expect(
+      [
+        for (final l in await store.labelsForConversation('email', 'c2'))
+          l.name,
+      ],
+      ['FYI only'],
+    );
+    await settleQueues(tester);
+  });
+
+  testWidgets('the bulk toast counts what wears the word, not what this '
+      'press wrote', (tester) async {
+    final fyi = await store.createLabel('FYI only');
+    await seedPile();
+    // The first row already wears it, the second refuses, the third takes
+    // it: two of three ticked rows end up wearing the word.
+    await store.applyLabels('email', 'c1', [fyi.id]);
+    final refusing = _PartlyRefusingStore(db, {'c2'});
+    await pumpInbox(tester, storeAs: refusing);
+
+    await tickFromTop(tester, 3);
+    await press(tester, LogicalKeyboardKey.keyL);
+    await tester.enterText(find.byKey(LabelPicker.fieldKey), 'fyi');
+    await tester.pump();
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await settleQueues(tester);
+
+    expect(
+      find.text('Labeled 2 threads FYI only. 1 could not be changed.'),
+      findsOneWidget,
+    );
+
+    // And its Undo holds only the link this press actually made.
+    await tester.tap(find.text('Undo'));
+    await settleQueues(tester);
+    expect(
+      [
+        for (final l in await store.labelsForConversation('email', 'c1'))
+          l.name,
+      ],
+      ['FYI only'],
+    );
+    expect(await store.labelsForConversation('email', 'c3'), isEmpty);
     await settleQueues(tester);
   });
 

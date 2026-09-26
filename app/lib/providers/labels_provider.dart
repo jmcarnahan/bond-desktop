@@ -27,6 +27,18 @@ import 'conversations_provider.dart';
 const String _staleLabelsMessage =
     "Couldn't re-read your labels just now — showing the last list.";
 
+/// What [LabelsNotifier.remove] did. [link] is what actually came off — who
+/// put it there and under which rule, [LabelsNotifier.restore]'s words for
+/// putting it back — and null when there was no link to take: a stale chip's
+/// ✕ removed nothing, and an Undo over it would add a label the thread never
+/// had.
+@immutable
+class LabelRemoval {
+  final ({String appliedBy, String? ruleId})? link;
+
+  const LabelRemoval(this.link);
+}
+
 @immutable
 class LabelsState {
   /// The picker's order: most used, then most recently used, then by name.
@@ -174,40 +186,85 @@ class LabelsNotifier extends StateNotifier<LabelsState> {
   /// This is **keep with a label**: the thread stays exactly where it is and
   /// gains a chip. Dismissing WITH a label is one action and belongs to
   /// [ConversationsNotifier.markDone], so that the undo behind it is one step.
-  Future<void> apply(
+  ///
+  /// Says whether the links went on, for the same reason [remove] does: a
+  /// "Labeled" toast, and an Undo behind it, over a write that failed.
+  Future<bool> apply(
     String source,
     String conversationKey,
     List<String> labelIds,
   ) async {
-    if (labelIds.isEmpty) return;
+    if (labelIds.isEmpty) return true;
     try {
       await _store.applyLabels(source, conversationKey, labelIds);
       // The list as well as the threads: an apply moves `use_count`, which is
       // what orders the chips the owner is looking at.
       await load();
       await _announce();
+      return true;
     } catch (e) {
       debugPrint('applying labels failed: $e');
-      if (!mounted) return;
+      if (!mounted) return false;
       state = state.copyWith(error: "Couldn't file that thread just now.");
+      return false;
     }
   }
 
-  /// Takes one label off one thread. The label's `use_count` stays where it is
-  /// — see [MessageStore.removeLabel].
-  Future<void> remove(
+  /// Takes one label off one thread, and says what happened: null when the
+  /// write failed, otherwise what came off — [LabelRemoval.link] null when
+  /// the chip was already gone, so the caller knows there is nothing to offer
+  /// an Undo over. The label's `use_count` stays where it is — see
+  /// [MessageStore.removeLabel].
+  ///
+  /// The answer is for a caller that reports the act: a toast saying
+  /// "Removed" over a write that failed would be the bar lying, and the
+  /// sentence for the failure is already in [LabelsState.error].
+  Future<LabelRemoval?> remove(
     String source,
     String conversationKey,
     String labelId,
   ) async {
     try {
-      await _store.removeLabel(source, conversationKey, labelId);
+      final link = await _store.removeLabel(source, conversationKey, labelId);
       await _announce();
       if (mounted) state = state.copyWith(clearError: true);
+      return LabelRemoval(link);
     } catch (e) {
       debugPrint('removing a label failed: $e');
-      if (!mounted) return;
+      if (!mounted) return null;
       state = state.copyWith(error: "Couldn't take that label off just now.");
+      return null;
+    }
+  }
+
+  /// The Undo behind [remove]: the link back exactly as [LabelRemoval.link]
+  /// described it — a rule's filing stays the rule's — and no `use_count`
+  /// movement, because putting back what was there is not the owner reaching
+  /// for the word again. False when the write failed, and when the label has
+  /// been deleted since: either way the chip is not coming back.
+  Future<bool> restore(
+    String source,
+    String conversationKey,
+    String labelId, {
+    required String appliedBy,
+    String? ruleId,
+  }) async {
+    try {
+      final restored = await _store.restoreLabel(
+        source,
+        conversationKey,
+        labelId,
+        appliedBy: appliedBy,
+        ruleId: ruleId,
+      );
+      await _announce();
+      if (mounted) state = state.copyWith(clearError: true);
+      return restored;
+    } catch (e) {
+      debugPrint('restoring a label failed: $e');
+      if (!mounted) return false;
+      state = state.copyWith(error: "Couldn't put that label back just now.");
+      return false;
     }
   }
 

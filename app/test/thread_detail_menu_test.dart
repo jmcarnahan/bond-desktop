@@ -1,17 +1,26 @@
+import 'package:bond_inbox/models/label_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/widgets/thread_action_bar.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// The overflow menu only — the transcript itself is covered elsewhere.
+/// Where a thread's verbs live: the action bar under the header for what is
+/// done to THIS thread, and the header's ⋯ for what is said about its SENDER.
+/// The transcript itself is covered elsewhere.
 void main() {
   Future<void> pump(
     WidgetTester tester, {
     String? bucket,
+    List<Label> labels = const [],
     VoidCallback? onAddToStoryline,
     VoidCallback? onSendToLater,
     VoidCallback? onDropSender,
     VoidCallback? onKeepInInbox,
+    VoidCallback? onLaterThread,
+    VoidCallback? onContext,
+    void Function(Label)? onRemoveLabel,
+    void Function(Label)? onFindLabel,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -22,6 +31,7 @@ void main() {
             id: 'c1',
             subject: 'Launch date',
             bucket: bucket,
+            labels: labels,
           ),
           messages: const [],
           onMarkDone: () {},
@@ -29,6 +39,10 @@ void main() {
           onSendToLater: onSendToLater,
           onDropSender: onDropSender,
           onKeepInInbox: onKeepInInbox,
+          onLaterThread: onLaterThread,
+          onContext: onContext,
+          onRemoveLabel: onRemoveLabel,
+          onFindLabel: onFindLabel,
         ),
       ),
     ));
@@ -39,112 +53,160 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('a host that wires nothing renders no menu at all',
-      (tester) async {
-    await pump(tester);
-    expect(find.byIcon(Icons.more_horiz), findsNothing);
+  group('the ⋯ menu holds the sender', () {
+    testWidgets('a host that wires nothing renders no menu at all',
+        (tester) async {
+      await pump(tester, onAddToStoryline: () {}, onLaterThread: () {});
+      expect(find.byIcon(Icons.more_horiz), findsNothing);
+    });
+
+    testWidgets('the sender-wide Later says whose it is', (tester) async {
+      await pump(tester, onSendToLater: () {});
+      await openMenu(tester);
+
+      expect(find.text('Send this sender to Later'), findsOneWidget);
+    });
+
+    testWidgets('Drop this sender sits under it, the escalation',
+        (tester) async {
+      await pump(tester, onSendToLater: () {}, onDropSender: () {});
+      await openMenu(tester);
+
+      final later =
+          tester.getTopLeft(find.text('Send this sender to Later')).dy;
+      final drop = tester.getTopLeft(find.text('Drop this sender')).dy;
+      expect(drop, greaterThan(later));
+    });
+
+    testWidgets('each item fires only its own callback', (tester) async {
+      var dropped = 0;
+      var later = 0;
+      await pump(
+        tester,
+        onSendToLater: () => later++,
+        onDropSender: () => dropped++,
+      );
+
+      await openMenu(tester);
+      await tester.tap(find.text('Drop this sender'));
+      await tester.pumpAndSettle();
+      expect((dropped, later), (1, 0));
+
+      await openMenu(tester);
+      await tester.tap(find.text('Send this sender to Later'));
+      await tester.pumpAndSettle();
+      expect((dropped, later), (1, 1));
+    });
+
+    testWidgets('no thread verb is left in it', (tester) async {
+      await pump(
+        tester,
+        bucket: 'later',
+        onSendToLater: () {},
+        onDropSender: () {},
+        onAddToStoryline: () {},
+        onKeepInInbox: () {},
+        onLaterThread: () {},
+      );
+      await openMenu(tester);
+
+      // Exactly the sender's two, whatever a thread verb is called now.
+      expect(
+        find.byWidgetPredicate((w) => w is PopupMenuEntry),
+        findsNWidgets(2),
+      );
+      expect(find.text('Send this sender to Later'), findsOneWidget);
+      expect(find.text('Drop this sender'), findsOneWidget);
+    });
   });
 
-  testWidgets('Send to Later alone is enough to open the menu', (tester) async {
-    await pump(tester, onSendToLater: () {});
-    await openMenu(tester);
+  group('the action bar holds the thread', () {
+    testWidgets('Later defers the thread, and reads Keep once it is in Later',
+        (tester) async {
+      var later = 0;
+      var keep = 0;
+      await pump(
+        tester,
+        onLaterThread: () => later++,
+        onKeepInInbox: () => keep++,
+      );
+      expect(find.byKey(ThreadActionBar.keepKey), findsNothing);
+      await tester.tap(find.byKey(ThreadActionBar.laterKey));
+      expect((later, keep), (1, 0));
 
-    expect(find.text('Send to Later'), findsOneWidget);
+      await pump(
+        tester,
+        bucket: 'later',
+        onLaterThread: () => later++,
+        onKeepInInbox: () => keep++,
+      );
+      expect(find.byKey(ThreadActionBar.laterKey), findsNothing);
+      await tester.tap(find.byKey(ThreadActionBar.keepKey));
+      expect((later, keep), (1, 1));
+    });
+
+    testWidgets('storyline and context are one press each', (tester) async {
+      var picking = 0;
+      var context = 0;
+      await pump(
+        tester,
+        onAddToStoryline: () => picking++,
+        onContext: () => context++,
+      );
+
+      await tester.tap(find.byKey(ThreadActionBar.storylineKey));
+      await tester.tap(find.byKey(ThreadActionBar.contextKey));
+      expect((picking, context), (1, 1));
+    });
+
+    testWidgets('every icon names itself on hover', (tester) async {
+      await pump(tester, onAddToStoryline: () {}, onContext: () {});
+
+      expect(find.byTooltip('Add to storyline'), findsOneWidget);
+      expect(find.byTooltip('Add context'), findsOneWidget);
+    });
   });
 
-  testWidgets('Keep in inbox is hidden on a thread that is not bucketed',
-      (tester) async {
-    // An undo for something that never happened reads as a broken menu item.
-    await pump(tester, onSendToLater: () {}, onKeepInInbox: () {});
-    await openMenu(tester);
+  group('the thread\'s labels', () {
+    const jira = Label(id: 'l-jira', name: 'Jira');
+    const metrics = Label(id: 'l-metrics', name: 'Metrics');
 
-    expect(find.text('Keep in inbox'), findsNothing);
-  });
+    testWidgets('are always on screen, without opening anything',
+        (tester) async {
+      await pump(tester, labels: const [jira, metrics]);
 
-  testWidgets('and shown once it is', (tester) async {
-    await pump(
-      tester,
-      bucket: 'later',
-      onSendToLater: () {},
-      onKeepInInbox: () {},
-    );
-    await openMenu(tester);
+      expect(find.byKey(ThreadActionBar.labelKeyFor('l-jira')), findsOneWidget);
+      expect(
+        find.byKey(ThreadActionBar.labelKeyFor('l-metrics')),
+        findsOneWidget,
+      );
+    });
 
-    expect(find.text('Keep in inbox'), findsOneWidget);
-  });
+    testWidgets('the name finds the label and the ✕ takes it off',
+        (tester) async {
+      final found = <String>[];
+      final removed = <String>[];
+      await pump(
+        tester,
+        labels: const [jira, metrics],
+        onFindLabel: (l) => found.add(l.id),
+        onRemoveLabel: (l) => removed.add(l.id),
+      );
 
-  testWidgets('the menu never lists the storylines themselves', (tester) async {
-    // The choice is a pane with a way back, not a popup full of rows.
-    await pump(tester, onAddToStoryline: () {});
-    await openMenu(tester);
+      await tester.tap(find.text('Jira'));
+      await tester.tap(find.byKey(ThreadActionBar.removeLabelKey('l-metrics')));
 
-    expect(find.text('Add to storyline…'), findsOneWidget);
-    expect(find.text('New storyline…'), findsNothing);
-  });
+      expect(found, ['l-jira']);
+      expect(removed, ['l-metrics']);
+    });
 
-  testWidgets('Drop this sender is absent until a host wires it',
-      (tester) async {
-    // The item writes a standing gate on an address. A host with no address
-    // to key one on gets no item rather than a rule on the empty string.
-    await pump(tester, onSendToLater: () {});
-    await openMenu(tester);
+    testWidgets('a row that cannot be edited draws no ✕', (tester) async {
+      await pump(tester, labels: const [jira]);
 
-    expect(find.text('Drop this sender'), findsNothing);
-  });
-
-  testWidgets('and sits directly under Send to Later once it is',
-      (tester) async {
-    // The order is the escalation: quiet this sender, then stop them.
-    await pump(tester, onSendToLater: () {}, onDropSender: () {});
-    await openMenu(tester);
-
-    final later = tester.getTopLeft(find.text('Send to Later')).dy;
-    final drop = tester.getTopLeft(find.text('Drop this sender')).dy;
-    expect(drop, greaterThan(later));
-  });
-
-  testWidgets('Drop this sender fires its own callback', (tester) async {
-    var dropped = 0;
-    var later = 0;
-    await pump(
-      tester,
-      onSendToLater: () => later++,
-      onDropSender: () => dropped++,
-    );
-
-    await openMenu(tester);
-    await tester.tap(find.text('Drop this sender'));
-    await tester.pumpAndSettle();
-
-    expect((dropped, later), (1, 0));
-  });
-
-  testWidgets('each item fires only its own callback', (tester) async {
-    var later = 0;
-    var keep = 0;
-    var picking = 0;
-
-    await pump(
-      tester,
-      bucket: 'later',
-      onAddToStoryline: () => picking++,
-      onSendToLater: () => later++,
-      onKeepInInbox: () => keep++,
-    );
-
-    await openMenu(tester);
-    await tester.tap(find.text('Send to Later'));
-    await tester.pumpAndSettle();
-    expect((later, keep, picking), (1, 0, 0));
-
-    await openMenu(tester);
-    await tester.tap(find.text('Keep in inbox'));
-    await tester.pumpAndSettle();
-    expect((later, keep), (1, 1));
-
-    await openMenu(tester);
-    await tester.tap(find.text('Add to storyline…'));
-    await tester.pumpAndSettle();
-    expect((later, keep, picking), (1, 1, 1));
+      expect(
+        find.byKey(ThreadActionBar.removeLabelKey('l-jira')),
+        findsNothing,
+      );
+    });
   });
 }

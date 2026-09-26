@@ -2,7 +2,7 @@ import 'package:flutter/foundation.dart' show immutable;
 
 import 'message_models.dart';
 
-/// One row of the Recently dismissed view: a thread that left the owner's
+/// One row of the Archive's Last 7 days view: a thread that left the owner's
 /// sight, when, and what took it — requirement 12i's "with the label and rule
 /// that did it". Built by `MessageStore.recentlyDismissed`, which says why it
 /// unions two populations and why `feedback_events` is not the source.
@@ -61,7 +61,7 @@ class DismissedThread {
   bool get reopenable => conversation.state == ConversationState.done;
 
   /// The line under the row's title, which REPLACES its preview:
-  /// `Dismissed · <labels>` or `Filed by rule "<scope>" · <label>`.
+  /// `Marked done · <labels>` or `Filed by rule "<scope>" · <label>`.
   ///
   /// A rule has no name of its own — it is a word pointed at a scope — so the
   /// scope is the name: it is what the owner typed or picked when they made
@@ -75,6 +75,8 @@ class DismissedThread {
       return label == null ? who : '$who · $label';
     }
     final labels = [for (final l in conversation.labels) l.name];
-    return labels.isEmpty ? 'Dismissed' : 'Dismissed · ${labels.join(', ')}';
+    return labels.isEmpty
+        ? 'Marked done'
+        : 'Marked done · ${labels.join(', ')}';
   }
 }

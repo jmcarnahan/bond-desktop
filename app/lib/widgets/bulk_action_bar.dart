@@ -100,7 +100,8 @@ class BulkActionBar extends StatelessWidget {
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 Text('$count selected', style: BondType.small),
-                if (onDismiss != null) _button(dismissKey, 'Dismiss', onDismiss!),
+                if (onDismiss != null)
+                  _button(dismissKey, 'Mark done', onDismiss!),
                 if (onLabel != null) _button(labelKey, 'Label…', onLabel!),
                 if (onLater != null) _button(laterKey, 'Later', onLater!),
                 if (onDropSenders != null) _button(dropKey, 'Drop senders', onDropSenders!),

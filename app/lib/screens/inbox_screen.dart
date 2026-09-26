@@ -2054,6 +2054,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         inner();
       };
     }
+    if (onUndo != null) {
+      // The bar's Undo and `z` share one slot: the button empties it as it
+      // runs, or pressing it and `z` a breath later would run the same undo
+      // twice. Only its own slot — a newer act may hold it by the time an
+      // old bar is pressed.
+      final inner = onUndo;
+      late final VoidCallback once;
+      once = () {
+        if (_lastUndo == once) _lastUndo = null;
+        inner();
+      };
+      onUndo = once;
+    }
     // Every correction in the app already says what it did through this one
     // call, which makes it the one place the keyboard's undo can be fed from:
     // the sender rules, the thread actions and anything added later populate the
@@ -2067,6 +2080,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       SnackBar(
         content: Text(message),
         duration: _undoDuration,
+        // Stated, because the framework's default is the opposite: a bar
+        // with an action PERSISTS until it is pressed, so every undoable bar
+        // sat over the rail until the reader hit Undo just to be rid of it.
+        // The window is the undo's life; `z` reaches the same undo after the
+        // bar has gone, from the slot above. Except an undoable bar under a
+        // screen reader, which is who that default exists for: walking to the
+        // Undo takes longer than the window, so there it stays until closed.
+        // A bar with nothing to press times out for everybody.
+        persist: onUndo != null && MediaQuery.accessibleNavigationOf(context),
+        // And a way to be rid of it sooner that is not undoing the thing.
+        showCloseIcon: true,
         action: onUndo == null
             ? null
             : SnackBarAction(label: 'Undo', onPressed: onUndo),
@@ -2524,6 +2548,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _triageFocus.requestFocus();
   }
 
+  /// [_takeTriageFocus] for the far side of an await, a frame later and only
+  /// if the reader is not typing by then. A label write is normally instant,
+  /// but by the time a slow one's toast lands the cursor may be in Find or a
+  /// composer — boxes a toast is no reason to pull it out of mid-word. The
+  /// frame's delay also lets the strip the press unmounted actually go, so
+  /// the typing being asked about is the reader's, not the dead strip's.
+  void _takeTriageFocusSoon() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_editingText) _takeTriageFocus();
+    });
+  }
+
   /// A palette pick (12h): the intent travels UP from the triage region's own
   /// focus, never from the Find field's — the `Actions` map lives inside
   /// [_triageScope], deliberately not over the rail, and an invoke from the
@@ -2701,7 +2737,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final notifier = ref.read(conversationsProvider.notifier);
     await _dismissOne(target);
     _toast(
-      'Dismissed.',
+      'Marked done.',
       onUndo: () => notifier.reopenThread(target.source, target.key),
     );
   }
@@ -2821,7 +2857,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           final undo =
               await notifier.markDone(t.source, t.key, labelIds: [label.id]);
           _toast(
-            'Dismissed · ${label.name}.',
+            'Marked done · ${label.name}.',
             onUndo: undo == null
                 ? null
                 : () => unawaited(notifier.undoMarkDone(undo)),
@@ -2831,17 +2867,125 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       );
       return;
     }
+    // Already on the thread — a ✓ chip, or a typed name that resolved to one.
+    // Applying it would change nothing, and the bar's Undo would then take
+    // off a label the owner put there BEFORE this press: the one undo in the
+    // app that would destroy something it never did.
+    final List<Label> existing;
+    try {
+      existing = await ref
+          .read(messageStoreProvider)
+          .labelsForConversation(target.source, target.key);
+    } catch (e) {
+      // Unread is not "not there": applying blind is exactly what could hand
+      // the bar an Undo over a label it never put on.
+      debugPrint('reading the thread\'s labels failed: $e');
+      if (!mounted) return;
+      _toast("Couldn't file that thread just now.");
+      _takeTriageFocusSoon();
+      return;
+    }
+    if (!mounted) return;
+    if (existing.any((l) => l.id == label.id)) {
+      _toast('Already labeled ${label.name}.');
+      _takeTriageFocusSoon();
+      return;
+    }
     final labels = ref.read(labelsProvider.notifier);
-    await labels.apply(target.source, target.key, [label.id]);
+    final applied = await labels.apply(target.source, target.key, [label.id]);
+    if (!mounted) return;
+    if (!applied) {
+      _toast(ref.read(labelsProvider).error ??
+          "Couldn't file that thread just now.");
+      _takeTriageFocusSoon();
+      return;
+    }
     _toast(
       'Labeled ${label.name}.',
-      onUndo: () =>
-          unawaited(labels.remove(target.source, target.key, label.id)),
+      onUndo: () => _labelUndo(
+        () async =>
+            await labels.remove(target.source, target.key, label.id) != null,
+        "Couldn't take that label off just now.",
+      ),
     );
     // The strip the cursor was in has just unmounted, and nothing advanced to
     // take focus in its place: hand it back, or `z` on the toast this very
     // action raised would land nowhere.
-    if (mounted) _takeTriageFocus();
+    if (mounted) _takeTriageFocusSoon();
+  }
+
+  /// The chip's ✕: one label off one thread, with the way back on the bar —
+  /// [_applyPickedLabel]'s toast, said the other way round.
+  Future<void> _removeLabel(
+    ({String source, String key}) target,
+    Label label,
+  ) async {
+    final labels = ref.read(labelsProvider.notifier);
+    final removal = await labels.remove(target.source, target.key, label.id);
+    if (!mounted) return;
+    if (removal == null) {
+      _toast(ref.read(labelsProvider).error ??
+          "Couldn't take that label off just now.");
+      return;
+    }
+    final link = removal.link;
+    _toast(
+      'Removed ${label.name}.',
+      // The link back EXACTLY as it was — a rule's filing stays the rule's,
+      // or undoing the rule later could never take it off — and no undo at
+      // all over a chip that was already gone, which removed nothing.
+      onUndo: link == null
+          ? null
+          : () => _labelUndo(
+              () => labels.restore(
+                target.source,
+                target.key,
+                label.id,
+                appliedBy: link.appliedBy,
+                ruleId: link.ruleId,
+              ),
+              "Couldn't put that label back just now.",
+            ),
+    );
+  }
+
+  /// A label toast's Undo, loud when it fails. The provider keeps the
+  /// sentence in [LabelsState.error], which only an open picker draws, so an
+  /// Undo — or its `z` — that failed behind a shut one would say nothing.
+  void _labelUndo(Future<bool> Function() write, String failed) {
+    unawaited(() async {
+      if (await write() || !mounted) return;
+      _toast(ref.read(labelsProvider).error ?? failed);
+    }());
+  }
+
+  /// The chip's name: the rail's live lists narrowed to that label, in the
+  /// Find field — the box that already reads `label:`, filter-only, which the
+  /// semantic search over the inbox does not. LIVE lists only: Find narrows
+  /// Needs You and the rooms, so a thread closed under the label is on the
+  /// Done shelf rather than here, and the chip's tooltip says "Filter Needs
+  /// You" to match. The facet is written by [completeLabelFacet], so a name
+  /// with a space in it comes back quoted exactly as the box's own completion
+  /// would quote it.
+  ///
+  /// The section moves with it by [sectionForLabelFind] — deliberately none
+  /// of [_selectSection]'s resets: the thread being read stays open, and so
+  /// does a room or storyline it was opened beside, which outranks the
+  /// section in the main pane. Back out of that room then lands
+  /// on People with the `label:` still in Find, which a room cannot match —
+  /// the facet is the reader's to clear, as any needle is. The needle itself
+  /// is [withLabelFacet]'s: added to what the reader typed, never over it.
+  void _findLabel(Label label) {
+    final text = withLabelFacet(_find, label.name);
+    _findText.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    setState(() {
+      _find = text;
+      _section = sectionForLabelFind(_section);
+    });
+    _focusFind(selectAll: false);
   }
 
   /// Enter on a name no chip carries: the vocabulary grows by one word and the
@@ -3136,8 +3280,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         return undo == null ? null : () => notifier.undoMarkDone(undo);
       },
       words: (n) => label == null
-          ? 'Dismissed ${_threads(n)}.'
-          : 'Dismissed ${_threads(n)} · ${label.name}.',
+          ? 'Marked done: ${_threads(n)}.'
+          : 'Marked done: ${_threads(n)} · ${label.name}.',
     );
   }
 
@@ -3255,24 +3399,42 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (picked.isEmpty) return;
     final labels = ref.read(labelsProvider.notifier);
     final filed = <({String source, String key})>[];
+    // Counted, so the toast says what happened rather than what was asked,
+    // and the Undo holds only the links that actually went on.
+    var failed = 0;
     for (final c in picked) {
       if (c.labels.any((l) => l.id == label.id)) continue;
-      await labels.apply(c.source, c.id, [label.id]);
-      filed.add((source: c.source, key: c.id));
+      if (await labels.apply(c.source, c.id, [label.id])) {
+        filed.add((source: c.source, key: c.id));
+      } else {
+        failed++;
+      }
     }
     if (!mounted) return;
+    // "Labeled" counts every row that now wears the word, the ones that
+    // already did included — that is the state the reader asked for. With
+    // nothing wearing it, the sentence is the failure alone.
+    final wearing = picked.length - failed;
     _toast(
-      'Labeled ${_threads(picked.length)} ${label.name}.',
+      failed == 0
+          ? 'Labeled ${_threads(picked.length)} ${label.name}.'
+          : wearing == 0
+          ? "Couldn't label ${_threads(failed)} ${label.name} just now."
+          : 'Labeled ${_threads(wearing)} ${label.name}. '
+                '$failed could not be changed.',
       cleared: 0,
       onUndo: filed.isEmpty
           ? null
-          : () => unawaited(() async {
-                for (final t in filed.reversed) {
-                  await labels.remove(t.source, t.key, label.id);
-                }
-              }()),
+          : () => _labelUndo(() async {
+              var ok = true;
+              for (final t in filed.reversed) {
+                ok = await labels.remove(t.source, t.key, label.id) != null &&
+                    ok;
+              }
+              return ok;
+            }, "Couldn't take that label off every thread just now."),
     );
-    _takeTriageFocus();
+    _takeTriageFocusSoon();
   }
 
   /// Enter on a new name in the bar's picker: create it, then
@@ -3358,7 +3520,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             key: const ValueKey('bulk-label-picker'),
             labels: labels,
             prompt: request.dismissAfter
-                ? 'Dismiss ${_threads(n)} with a label…'
+                ? 'Mark ${_threads(n)} done with a label…'
                 : 'Label ${_threads(n)}',
             onApply: (label) => unawaited(_applyBulkLabel(label)),
             onCreate: (name) => unawaited(_createAndApplyBulkLabel(name)),
@@ -3939,7 +4101,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// the overlay this same call opened has been laid out. The selection goes
   /// with it: ⌘K on a box that already holds a needle should let the reader
   /// type straight over it, which is what every switcher does.
-  void _focusFind() {
+  ///
+  /// [selectAll] false leaves the cursor at the end instead — a needle the app
+  /// just wrote for the reader (a label chip's `label:`) is one to add words
+  /// to, not one to type over.
+  void _focusFind({bool selectAll = true}) {
     setState(() {
       if (MediaQuery.sizeOf(context).width < _twoPaneBreakpoint) {
         _railOpen = true;
@@ -3948,10 +4114,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _findFocus.requestFocus();
-      _findText.selection = TextSelection(
-        baseOffset: 0,
-        extentOffset: _findText.text.length,
-      );
+      _findText.selection = selectAll
+          ? TextSelection(baseOffset: 0, extentOffset: _findText.text.length)
+          : TextSelection.collapsed(offset: _findText.text.length);
     });
   }
 
@@ -3995,7 +4160,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // question, and leaving it up would leave the column filtered around a
     // thread the reader has already opened.
     _clearFind();
+    // Onto the triage keys rather than just off the field: a bare unfocus
+    // left focus on the route's scope, above the keys, so the thread Find
+    // had just opened answered no `e`, `j` or `z` until it was clicked.
     _findFocus.unfocus();
+    _takeTriageFocus();
   }
 
   Widget _railAction(IconData icon, String tooltip, VoidCallback onPressed) {
@@ -5142,6 +5311,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ? () => _dropSender(dropAddress!, selected.source)
           : null,
       onKeepInInbox: () => _keepThread(selected.source, selected.id),
+      // The action bar's Later: THIS thread, on the path `s` takes, with its
+      // advance and its undo. The sender-wide deferral above stays in the ⋯.
+      onLaterThread: () => unawaited(_triageAndAdvance(
+        _laterThread,
+        on: (source: selected.source, key: selected.id),
+      )),
+      onRemoveLabel: (label) => unawaited(_removeLabel(
+        (source: selected.source, key: selected.id),
+        label,
+      )),
+      onFindLabel: _findLabel,
       // Compose is a whole pane, which a thread being read BESIDE something
       // else has no business opening: the ✕ and the ⤢ are the two ways out of
       // the side panel.

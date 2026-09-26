@@ -13,7 +13,10 @@ import 'inline_alert.dart';
 import 'later_digest.dart';
 
 /// The three piles Archive holds, in the order they are offered, and the
-/// cross-pile look back at the last week's dismissals.
+/// cross-pile look back at the last week: what the owner marked done and what
+/// a rule filed away. Named for the WINDOW rather than an act, because it
+/// holds two acts, and "Recently done" beside a tab called Done read as a
+/// subset of Done that it is not.
 enum ArchiveTab { later, done, dropped, recent }
 
 extension ArchiveTabLabel on ArchiveTab {
@@ -21,7 +24,7 @@ extension ArchiveTabLabel on ArchiveTab {
         ArchiveTab.later => 'Later',
         ArchiveTab.done => 'Done',
         ArchiveTab.dropped => 'Dropped',
-        ArchiveTab.recent => 'Recently dismissed',
+        ArchiveTab.recent => 'Last 7 days',
       };
 }
 
@@ -97,7 +100,7 @@ class ArchivePane extends StatefulWidget {
 
   final VoidCallback onLoadMoreDropped;
 
-  /// The Recently dismissed tab, newest first: what the owner closed and what
+  /// The Last 7 days tab, newest first: what the owner closed and what
   /// a rule filed in the last week, each row saying which (requirement 12i).
   /// Empty by default, so a host that never shows the tab passes nothing.
   final List<DismissedThread> recentRows;
@@ -422,7 +425,7 @@ class _ArchivePaneState extends State<ArchivePane> {
       };
 }
 
-/// The Recently dismissed tab: one [ConversationRow] per thread, its preview
+/// The Last 7 days tab: one [ConversationRow] per thread, its preview
 /// line replaced by what took it, and the way back beside it.
 ///
 /// The buttons sit OUTSIDE the row for [_withRestore]'s reason. Which one a
@@ -470,7 +473,7 @@ class _RecentList extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.all(BondSpacing.s32),
         child: Text(
-          'Nothing dismissed in the last 7 days.',
+          'Nothing marked done or filed in the last 7 days.',
           style: BondType.small,
           textAlign: TextAlign.center,
         ),

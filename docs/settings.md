@@ -111,7 +111,7 @@ an implementation detail at somebody who moved a slider.
 
 The section's last control is a switch, **Sending a reply marks it done** — *A
 thread leaves Needs You as soon as you answer it, instead of waiting for you to
-dismiss it.* — keyed `settings-reply-send-marks-done` and wired by
+mark it done.* — keyed `settings-reply-send-marks-done` and wired by
 `onReplySendMarksDoneChanged`. It is **off by default**, because a sent reply and
 a cleared thread are two different claims: an answer that asks a question back is
 still the reader's to watch. It is last in the section because everything above
@@ -1045,7 +1045,8 @@ words nothing is filed under would fill up with them.
 ### The rules under a word
 
 A label can carry a **standing rule** — the "Apply to future" the picker offers
-on a dismissal — and this is the one screen that says so. Indented under its
+when a thread is marked done with a label — and this is the one screen that
+says so. Indented under its
 label, one line per rule, oldest first, each read as a sentence of three facts:
 
 `Hide from Needs You · this sender · hid 41 threads`

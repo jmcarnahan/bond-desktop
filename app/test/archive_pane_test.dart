@@ -134,10 +134,10 @@ void main() {
     expect(find.text('Later'), findsOneWidget);
     expect(find.text('Done'), findsOneWidget);
     expect(find.text('Dropped'), findsOneWidget);
-    expect(find.text('Recently dismissed'), findsOneWidget);
+    expect(find.text('Last 7 days'), findsOneWidget);
   });
 
-  group('Recently dismissed', () {
+  group('Last 7 days', () {
     final closed = DismissedThread(
       conversation: _conv(
         id: 'closed',
@@ -169,7 +169,7 @@ void main() {
       );
 
       expect(find.text('Vendor renewal'), findsOneWidget);
-      expect(find.text('Dismissed'), findsOneWidget);
+      expect(find.text('Marked done'), findsOneWidget);
       expect(find.text('Build 4521 passed'), findsOneWidget);
       expect(find.text('Filed by rule "builds@ci.example.com" · CI noise'),
           findsOneWidget);
@@ -211,7 +211,7 @@ void main() {
         (tester) async {
       await pump(tester, conversations: const [], tab: ArchiveTab.recent);
 
-      expect(find.text('Nothing dismissed in the last 7 days.'),
+      expect(find.text('Nothing marked done or filed in the last 7 days.'),
           findsOneWidget);
     });
   });

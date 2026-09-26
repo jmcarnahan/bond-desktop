@@ -26,6 +26,7 @@ import 'message_row.dart';
 import 'needs_you_reason.dart';
 import 'preview/preview_kind.dart';
 import 'room_header.dart';
+import 'thread_action_bar.dart';
 import 'time_format.dart';
 import 'triage_intents.dart';
 
@@ -109,9 +110,9 @@ class TranscriptJumps {
 /// messages, runs collapsed under one header — rather than as a chat of
 /// facing bubbles.
 ///
-/// It renders a transcript and a header, and nothing else: the composer is
-/// docked UNDER this panel by the host, which is what keeps the panel ignorant
-/// of drafts and sending.
+/// It renders a header, the action bar under it, the ask and a transcript, and
+/// nothing else: the composer is docked UNDER this panel by the host, which is
+/// what keeps the panel ignorant of drafts and sending.
 ///
 /// A thread carrying files wears TABS — Messages and Files (n) — because "where
 /// is that attachment" is a question about the whole conversation rather than
@@ -136,16 +137,17 @@ class ThreadDetailPanel extends StatefulWidget {
   final VoidCallback? onBack;
 
   /// Opens the pane that picks — or names — the storyline this thread goes
-  /// into. The menu does not list the storylines itself: the choice is a pane
-  /// with a way back, because the house rule is screens rather than popups.
-  /// Null hides the item, so a host that knows nothing about storylines
-  /// renders exactly what it used to.
+  /// into: the action bar's storyline button. It does not list the storylines
+  /// itself: the choice is a pane with a way back, because the house rule is
+  /// screens rather than popups. Null hides the button, so a host that knows
+  /// nothing about storylines renders exactly what it used to.
   final VoidCallback? onAddToStoryline;
 
-  /// Defers this thread's sender. Sender-scoped rather than thread-scoped
-  /// because that is the correction worth collecting: one thread going quiet
-  /// changes one row, a sender going quiet changes the shape of the inbox.
-  /// Null hides the item.
+  /// Defers this thread's sender — the ⋯'s "Send this sender to Later".
+  /// Sender-scoped because that is the correction worth collecting: one
+  /// thread going quiet changes one row, a sender going quiet changes the
+  /// shape of the inbox. [onLaterThread] is the one-thread deferral. Null
+  /// hides the item.
   final VoidCallback? onSendToLater;
 
   /// Stops this thread's sender reaching the model at all — a gate the owner
@@ -154,10 +156,23 @@ class ThreadDetailPanel extends StatefulWidget {
   /// this refuses what comes next. Null hides the item.
   final VoidCallback? onDropSender;
 
-  /// Brings a deferred thread back. Only shown when the thread is actually in
-  /// a bucket — an "undo" for something that never happened is a menu item
-  /// that reads as broken.
+  /// Brings a deferred thread back: the action bar's Keep in inbox, in Later's
+  /// place. Only shown when the thread is actually in a bucket — an "undo" for
+  /// something that never happened is a button that reads as broken.
   final VoidCallback? onKeepInInbox;
+
+  /// Defers THIS thread — the action bar's Later, and the `s` key's path. The
+  /// sender-wide [onSendToLater] stays in the ⋯, where the corrections about
+  /// a sender live. Null hides the button.
+  final VoidCallback? onLaterThread;
+
+  /// Takes one label off this thread (the chip's ✕). Null draws chips with no
+  /// ✕.
+  final void Function(Label label)? onRemoveLabel;
+
+  /// Finds every thread under one label (the chip's name). Null draws chips
+  /// that do not answer a tap.
+  final void Function(Label label)? onFindLabel;
 
   /// Rendered at the END of the transcript, inside the same scroll view and
   /// indented to the message body column, so it reads as attached to the last
@@ -242,9 +257,9 @@ class ThreadDetailPanel extends StatefulWidget {
   /// no library behind it.
   final VoidCallback? onContext;
 
-  /// How many directories this thread links directly. It rides on the
-  /// action's LABEL rather than as a badge, because the label is the tooltip
-  /// on an icon button and a count nobody hovers is a count nobody reads.
+  /// How many directories this thread links directly: the action bar's
+  /// Context icon carries it twice — a small badge, because a count nobody
+  /// hovers is a count nobody reads, and the tooltip ("Context · 3").
   /// Inherited storyline links are deliberately not counted here: they are
   /// not this thread's to turn off, and a number that included them would
   /// promise switches the panel does not draw.
@@ -281,9 +296,9 @@ class ThreadDetailPanel extends StatefulWidget {
   /// could not apply what it was asked for is worse than no picker.
   final LabelPickerMode? labelPicker;
 
-  /// Asks the host to open the picker in one of its two modes — what the two
-  /// affordances under the banner do. Null hides both, and the panel renders
-  /// exactly what it always did.
+  /// Asks the host to open the picker in one of its two modes — what the action
+  /// bar's "Mark done with a label" choice and its Add label do. Null hides
+  /// both, and Mark done then acts at once rather than offering choices.
   final void Function(LabelPickerMode mode)? onOpenLabelPicker;
 
   /// An existing label was chosen. The host applies it, and on the dismiss path
@@ -341,6 +356,9 @@ class ThreadDetailPanel extends StatefulWidget {
     this.onSendToLater,
     this.onDropSender,
     this.onKeepInInbox,
+    this.onLaterThread,
+    this.onRemoveLabel,
+    this.onFindLabel,
     this.afterTranscript,
     this.suggestionFor,
     this.onOpenReply,
@@ -377,13 +395,6 @@ class ThreadDetailPanel extends StatefulWidget {
   /// The `External` chip beside the state chip, for a test that wants the chip
   /// in this header rather than the one on a row behind it.
   static const Key externalChipKey = ValueKey('thread-external');
-
-  /// The one-click dismissal entry 1b asked for: it opens the picker rather than
-  /// closing the thread on the spot, because the reason is the point.
-  static const Key dismissWithLabelKey = ValueKey('thread-dismiss-with-label');
-
-  /// File the thread under a word without closing it — "keep with a label".
-  static const Key labelKey = ValueKey('thread-label');
 
   /// How long an arrived-at row stays lit. Long enough to catch the eye that
   /// was moving, short enough that it is gone before the reader starts reading
@@ -1026,6 +1037,10 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
         children: [
           _header(files, tab),
           const Divider(height: 1, color: BondColors.border),
+          _actionBar(),
+          // The open picker straight under the bar that opened it: pressed in
+          // one place, it must not appear a banner and a mention strip lower.
+          ?_labelStrip(),
           // Above the ask and under the header: the ask says what the thread
           // wants, and this says where in the thread it is wanted of you.
           ?_mentionStrip(),
@@ -1060,10 +1075,6 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
               at: widget.conversation.needsYouReasonAt,
               onTap: _toReasonMessage,
             ),
-          // Under the banner, because the banner says what the thread wants and
-          // this is the answer "nothing, and here is why" — the one reply that
-          // is not typed.
-          ?_labelStrip(),
           Expanded(
             child: tab == ThreadTab.files
                 ? _filesBody(files)
@@ -1259,24 +1270,23 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
     );
   }
 
-  /// The dismiss-and-file strip under the banner: two affordances while it is
-  /// collapsed, the inline picker in their place while the host has it open, and
-  /// null for every host that wired none of it.
+  /// The inline label picker while the host has it open, and null otherwise.
   ///
-  /// Two buttons rather than one, because they are two different acts: Dismiss
-  /// files the thread away with a word saying why, Label leaves it where it is
-  /// and puts the word on it. Both open the SAME strip, which is what keeps the
-  /// keyboard flow (`Shift+E` and `l`) and the pointer flow one code path.
+  /// Two acts open it: Mark done with a label files the thread away with a
+  /// word saying why, Add label leaves it where it is and puts the word on
+  /// it. Both open the SAME strip from the action bar, which is what keeps
+  /// the keyboard flow (`Shift+E` and `l`) and the pointer flow one code
+  /// path.
   Widget? _labelStrip() {
     final mode = widget.labelPicker;
     final apply = widget.onApplyLabel;
     final create = widget.onCreateLabel;
     final close = widget.onCloseLabelPicker;
-    final open = widget.onOpenLabelPicker;
 
+    // Tight under the bar above it, which brings its own bottom padding.
     const padding = EdgeInsets.fromLTRB(
       BondSpacing.s16,
-      BondSpacing.s12,
+      BondSpacing.s4,
       BondSpacing.s16,
       0,
     );
@@ -1286,6 +1296,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
         padding: padding,
         child: LabelPicker(
           labels: widget.labels,
+          appliedIds: {for (final l in widget.conversation.labels) l.id},
           prompt: mode.prompt,
           onApply: apply,
           onCreate: create,
@@ -1310,48 +1321,42 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       );
     }
 
-    if (open == null) return null;
+    // Collapsed, the strip is nothing: its two openers live on the action
+    // bar now — Mark done's "with a label" choice and the label row's Add
+    // label.
+    return null;
+  }
 
-    return Padding(
-      padding: padding,
-      child: Row(
-        children: [
-          TextButton.icon(
-            key: ThreadDetailPanel.dismissWithLabelKey,
-            onPressed: () => open(LabelPickerMode.dismiss),
-            icon: const Icon(Icons.check, size: 16),
-            label: const Text('Dismiss…'),
-            style: _stripButtonStyle,
-          ),
-          const SizedBox(width: BondSpacing.s8),
-          TextButton.icon(
-            key: ThreadDetailPanel.labelKey,
-            onPressed: () => open(LabelPickerMode.label),
-            icon: const Icon(Icons.label_outline, size: 16),
-            label: const Text('Label…'),
-            style: _stripButtonStyle,
-          ),
-        ],
-      ),
+  /// The thread's verbs and its labels, under the header — see
+  /// [ThreadActionBar] for why one row replaced three places.
+  ///
+  /// Mark done and Mark done with a label are [onMarkDone] and the
+  /// dismiss-mode picker, the same two paths `e` and `Shift+E` take; Add
+  /// label is the label-mode picker `l` opens. So a button and its key can
+  /// never do different things.
+  Widget _actionBar() {
+    final open = widget.onOpenLabelPicker;
+    final c = widget.conversation;
+    return ThreadActionBar(
+      done: c.state == ConversationState.done,
+      inLater: c.bucket != null,
+      onDone: widget.onMarkDone,
+      onDoneWithReason:
+          open == null ? null : () => open(LabelPickerMode.dismiss),
+      onReopen: widget.onReopen,
+      onLater: widget.onLaterThread,
+      onKeepInInbox: widget.onKeepInInbox,
+      onStoryline: widget.onAddToStoryline,
+      onContext: widget.onContext,
+      contextLinked: widget.contextLinked,
+      onCompose: widget.onCompose,
+      labels: c.labels,
+      onAddLabel: open == null ? null : () => open(LabelPickerMode.label),
+      onRemoveLabel: widget.onRemoveLabel,
+      onFindLabel: widget.onFindLabel,
     );
   }
 
-  static final ButtonStyle _stripButtonStyle = TextButton.styleFrom(
-    padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
-    minimumSize: const Size(0, 32),
-    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-    textStyle: BondType.small,
-  );
-
-  /// The room this thread is: what it is about, who is on it, where it stands,
-  /// and the few things that can be done to the whole conversation. Filing it —
-  /// into a storyline, or out of the inbox — sits behind the ⋯, because those
-  /// are corrections rather than part of reading mail, and the automatic passes
-  /// are supposed to get them right without being asked.
-  ///
-  /// The storyline half is one item that opens a pane. Listing every storyline
-  /// in the menu would put the whole choice in a popup, and the house rule is a
-  /// screen with a way back.
   /// Whether the person this thread is waiting on writes from outside the
   /// owner's domains — the newest inbound message's sender, and nobody else's,
   /// which is [Conversation.isExternalTo]'s rule.
@@ -1394,14 +1399,14 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
     );
   }
 
+  /// The room this thread is: what it is about, who is on it and where it
+  /// stands. What can be done to it is the action bar under it; the ⋯ keeps
+  /// only the corrections about the sender.
   Widget _header(List<AttachmentRef> files, ThreadTab tab) {
     final participants = widget.conversation.participants
         .map((p) => p.display)
         .where((d) => d.isNotEmpty)
         .join(', ');
-
-    final bucketed = widget.conversation.bucket != null;
-    final showKeep = widget.onKeepInInbox != null && bucketed;
 
     return RoomHeader<ThreadTab>(
       // One tab is a label pretending to be a choice, so a thread with no
@@ -1436,76 +1441,26 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       onPeopleTap: widget.onPeople,
       stateChip: _chips(),
       onBack: widget.onBack,
-      actions: [
-        // First, and before Message: what this room READS is a standing fact
-        // about the room, where writing to it is one thing to do in it.
-        if (widget.onContext != null)
-          RoomAction(
-            icon: Icons.folder_open_outlined,
-            label: widget.contextLinked > 0
-                ? 'Context · ${widget.contextLinked}'
-                : 'Context',
-            onTap: widget.onContext,
-            key: const Key('thread-context'),
-          ),
-        // Before the state chip's neighbours, because writing to these people
-        // is something to DO with the thread. An icon rather than a labelled
-        // button: this header shares its width with the attachment preview in
-        // the split, and every label here comes out of the title.
-        if (widget.onCompose != null)
-          RoomAction(
-            icon: Icons.edit_outlined,
-            label: 'Message',
-            onTap: widget.onCompose,
-            key: const Key('thread-compose'),
-          ),
-        // The same button in the same place saying the opposite thing, because
-        // a thread closed by mistake is reopened from here.
-        if (widget.conversation.state != ConversationState.done)
-          RoomAction(label: 'Mark done', onTap: widget.onMarkDone)
-        else if (widget.onReopen != null)
-          RoomAction(label: 'Reopen', onTap: widget.onReopen),
-      ],
+      // Every verb about the THREAD is on the action bar under this header.
+      // What stays here is about the SENDER — a standing rule, not a filing
+      // of this one conversation — which is why it is behind the ⋯.
       moreItems: [
-        if (widget.onAddToStoryline != null)
-          RoomMenuItem(
-            value: _addToStorylineValue,
-            label: 'Add to storyline…',
-            onTap: widget.onAddToStoryline,
-          ),
         if (widget.onSendToLater != null)
           RoomMenuItem(
             value: _sendToLaterValue,
-            label: 'Send to Later',
+            label: 'Send this sender to Later',
             onTap: widget.onSendToLater,
-            dividerBefore: widget.onAddToStoryline != null,
           ),
-        // The same correction as Later, said harder, so no rule between the
-        // two — but it takes Later's divider when Later is not there, so the
-        // sender corrections still sit apart from the storyline item.
         if (widget.onDropSender != null)
           RoomMenuItem(
             value: _dropSenderValue,
             label: 'Drop this sender',
             onTap: widget.onDropSender,
-            dividerBefore: widget.onAddToStoryline != null &&
-                widget.onSendToLater == null,
-          ),
-        if (showKeep)
-          RoomMenuItem(
-            value: _keepInInboxValue,
-            label: 'Keep in inbox',
-            dividerBefore: widget.onAddToStoryline != null &&
-                widget.onSendToLater == null &&
-                widget.onDropSender == null,
-            onTap: widget.onKeepInInbox,
           ),
       ],
     );
   }
 
-  static const String _addToStorylineValue = '__add_to_storyline__';
   static const String _sendToLaterValue = '__send_to_later__';
   static const String _dropSenderValue = '__drop_sender__';
-  static const String _keepInInboxValue = '__keep_in_inbox__';
 }

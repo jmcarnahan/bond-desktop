@@ -526,8 +526,12 @@ const String commandPrefix = '>';
 /// key some later round intends to bind would be this file teaching a
 /// shortcut that does nothing.
 const List<FindCommand> findCommands = [
-  FindCommand('Dismiss', DismissThreadIntent(), keyHint: 'e'),
-  FindCommand('Dismiss with label…', DismissWithLabelIntent(), keyHint: '⇧E'),
+  FindCommand('Mark done', DismissThreadIntent(), keyHint: 'e'),
+  FindCommand(
+    'Mark done with a label…',
+    DismissWithLabelIntent(),
+    keyHint: '⇧E',
+  ),
   FindCommand('Label…', LabelThreadIntent(), keyHint: 'l'),
   FindCommand('Later', LaterThreadIntent(), keyHint: 's'),
   FindCommand('Drop sender', DropSenderIntent(), keyHint: 'm'),

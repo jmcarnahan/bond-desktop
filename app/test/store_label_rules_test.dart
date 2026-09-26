@@ -958,7 +958,7 @@ void main() {
       expect(row.reopenable, isTrue);
       expect(row.dismissedAt, closedAt);
       expect(row.conversation.stateChangedAt, closedAt);
-      expect(row.caption, 'Dismissed');
+      expect(row.caption, 'Marked done');
     });
 
     test('a dismissal names the labels the owner filed it under', () async {
@@ -969,7 +969,7 @@ void main() {
 
       final row = (await store.recentlyDismissed(sinceIso: daysAgo(7))).single;
 
-      expect(row.caption, 'Dismissed · Waiting on legal');
+      expect(row.caption, 'Marked done · Waiting on legal');
     });
 
     test('a reopened thread is not dismissed any more', () async {
@@ -1052,7 +1052,7 @@ void main() {
       final dismissed = rows.first;
       expect(dismissed.dismissedAt, closedAt);
       expect(dismissed.byRule, isFalse);
-      expect(dismissed.caption, startsWith('Dismissed'));
+      expect(dismissed.caption, startsWith('Marked done'));
       final filed = rows.last;
       expect(filed.dismissedAt, filedAt);
       expect(filed.ruleId, rule.id);

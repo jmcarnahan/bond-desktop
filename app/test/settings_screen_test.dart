@@ -196,7 +196,7 @@ void main() {
       expect(
         find.text(
           'A thread leaves Needs You as soon as you answer it, instead of '
-          'waiting for you to dismiss it.',
+          'waiting for you to mark it done.',
         ),
         findsOneWidget,
       );
@@ -1209,7 +1209,7 @@ void main() {
         (tester) async {
       await openLabels(tester, labels: const []);
 
-      expect(find.textContaining('Dismiss a thread with a word'), findsOneWidget);
+      expect(find.textContaining('mark it done with a label'), findsOneWidget);
     });
 
     testWidgets('renaming keeps the label and closes the field', (tester) async {

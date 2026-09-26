@@ -102,8 +102,8 @@ class ConversationListPane extends StatelessWidget {
 
   /// Quiets the whole sender, current and future — the standing correction
   /// behind entry 6b. Drawn only on a row whose sender has a name to put in the
-  /// tooltip, because "Dismiss everything from Unknown sender" is not an offer
-  /// anybody can judge.
+  /// tooltip, because "Drop sender Unknown sender" is not an offer anybody can
+  /// judge.
   final void Function(Conversation conversation)? onDismissSender;
 
   /// The owner's vocabulary for the inline picker, in the order the picker wants
@@ -557,7 +557,7 @@ class ConversationListPane extends StatelessWidget {
       if (dismiss != null)
         HoverAction(
           icon: Icons.check,
-          tooltip: 'Dismiss',
+          tooltip: 'Mark done',
           onTap: () => dismiss(c),
           key: dismissKeyFor(c),
         ),
@@ -580,7 +580,10 @@ class ConversationListPane extends StatelessWidget {
       if (sender != null && who.isNotEmpty)
         HoverAction(
           icon: Icons.block_outlined,
-          tooltip: 'Dismiss everything from $who',
+          // The ⋯ menu's and the palette's word: dropping gates the sender's
+          // new mail and files what is here in Later, so "everything" would
+          // overclaim.
+          tooltip: 'Drop sender $who',
           onTap: () => sender(c),
           key: dismissSenderKeyFor(c),
         ),
@@ -649,6 +652,10 @@ class ConversationListPane extends StatelessWidget {
     return LabelPicker(
       key: pickerKeyFor(c),
       labels: labels,
+      // The ✓ on what the thread already wears, exactly as the panel's
+      // picker draws it — `l` on a row and `l` on the open thread are the
+      // same question and must offer the same answers.
+      appliedIds: {for (final l in c.labels) l.id},
       prompt: mode.prompt,
       onApply: (label) => apply(c, label),
       onCreate: (name) => create(c, name),

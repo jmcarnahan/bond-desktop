@@ -67,13 +67,13 @@ const List<CheatSheetEntry> cheatSheetEntries = [
   CheatSheetEntry(
     CheatSheetGroup.triage,
     ['e'],
-    'Dismiss, then move to the next row',
+    'Mark done, then move to the next row',
     intents: [DismissThreadIntent],
   ),
   CheatSheetEntry(
     CheatSheetGroup.triage,
     ['⇧E'],
-    'Dismiss with a label',
+    'Mark done with a label',
     intents: [DismissWithLabelIntent],
   ),
   CheatSheetEntry(

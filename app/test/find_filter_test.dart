@@ -185,6 +185,114 @@ void main() {
     });
   });
 
+  group('withLabelFacet — what a label chip leaves in Find', () {
+    test('an empty box gets the facet alone, quoted when it has a space', () {
+      expect(withLabelFacet('', 'ops'), 'label:ops ');
+      expect(withLabelFacet('', 'FYI only'), 'label:"FYI only" ');
+    });
+
+    test('a needle already there is kept, and the facet added after it', () {
+      expect(withLabelFacet('from:eric', 'ops'), 'from:eric label:ops ');
+      expect(withLabelFacet('invoice  ', 'ops'), 'invoice label:ops ');
+    });
+
+    test('a box already asking for it gains nothing, however it spelled it',
+        () {
+      expect(withLabelFacet('label:ops', 'ops'), 'label:ops ');
+      expect(withLabelFacet('LABEL:OPS from:eric', 'Ops'),
+          'LABEL:OPS from:eric ');
+      expect(withLabelFacet('label:"FYI only"', 'FYI only'),
+          'label:"FYI only" ');
+    });
+
+    test('a longer name that starts the same is a different label', () {
+      // A substring check once read `label:opsx` as already asking for ops.
+      expect(withLabelFacet('label:opsx', 'ops'), 'label:opsx label:ops ');
+      expect(withLabelFacet('label:"FYI only"', 'FYI'),
+          'label:"FYI only" label:FYI ');
+    });
+
+    test('the same word excluded is taken out, and another is kept', () {
+      expect(withLabelFacet('-label:ops', 'ops'), 'label:ops ');
+      expect(withLabelFacet('from:eric -label:"Ops" x', 'ops'),
+          'from:eric x label:ops ');
+      expect(withLabelFacet('-label:jira', 'ops'), '-label:jira label:ops ');
+    });
+
+    test('what it writes reads back as that label', () {
+      final query = FindQuery.parse(withLabelFacet('-label:ops', 'ops'));
+      expect(query.labels, ['ops']);
+      expect(query.withoutLabels, isEmpty);
+    });
+
+    test('a half-typed label term is finished, not doubled', () {
+      // `label: label:ops` would put a stray `label:` word in the text no
+      // row contains, and the list would go empty under the press.
+      expect(withLabelFacet('label:', 'ops'), 'label:ops ');
+      expect(withLabelFacet('label:op', 'ops'), 'label:ops ');
+      expect(
+        withLabelFacet('from:eric label:', 'ops'),
+        'from:eric label:ops ',
+      );
+      expect(withLabelFacet('label:"FYI on', 'FYI only'), 'label:"FYI only" ');
+      // A WHOLE other label under the caret is an ask of its own and keeps.
+      expect(withLabelFacet('label:jira', 'ops'), 'label:jira label:ops ');
+      // A half-typed exclusion that spells this chip completes into the
+      // exclusion the press itself cancels: the stub never survives.
+      expect(withLabelFacet('x -label:op', 'ops'), 'x label:ops ');
+    });
+
+    test("quoted phrases are the reader's words, not facets", () {
+      // An exclusion inside quotes is being SEARCHED FOR, and stays.
+      expect(
+        withLabelFacet('"x -label:ops y"', 'ops'),
+        '"x -label:ops y" label:ops ',
+      );
+      // And the spaces inside a phrase stay exactly as typed.
+      expect(withLabelFacet('"a  b" -label:ops', 'ops'), '"a  b" label:ops ');
+      // A quote left open would swallow the facet into the phrase: closed.
+      final closed = withLabelFacet('"vendor', 'ops');
+      expect(closed, '"vendor" label:ops ');
+      final query = FindQuery.parse(closed);
+      expect(query.labels, ['ops']);
+      expect(query.text, 'vendor');
+    });
+
+    test('an exclusion in any casing comes out, and only as its own term', () {
+      expect(withLabelFacet('-LABEL:ops x', 'ops'), 'x label:ops ');
+      // `x-label:ops` is a word that happens to contain the spelling.
+      expect(
+        withLabelFacet('x-label:ops', 'ops'),
+        'x-label:ops label:ops ',
+      );
+    });
+  });
+
+  group('sectionForLabelFind — where the column goes for it', () {
+    test('a column already on the Needs You stack stays put', () {
+      expect(sectionForLabelFind(null), isNull);
+      expect(sectionForLabelFind(RailSection.home), RailSection.home);
+      expect(sectionForLabelFind(RailSection.needsYou), RailSection.needsYou);
+    });
+
+    test('Drafts & sent stays, so its pane is not swapped out', () {
+      expect(sectionForLabelFind(RailSection.drafts), RailSection.drafts);
+    });
+
+    test('a column the facet cannot narrow moves to Needs You', () {
+      for (final section in const [
+        RailSection.storylines,
+        RailSection.people,
+        RailSection.files,
+        RailSection.archive,
+        RailSection.ai,
+      ]) {
+        expect(sectionForLabelFind(section), RailSection.needsYou,
+            reason: section.name);
+      }
+    });
+  });
+
   group('facets', () {
     test('label: keeps the threads filed under that word', () {
       final filed = _conv(id: 'a', labels: ['Waiting on legal']);
@@ -236,6 +344,14 @@ void main() {
 
       expect(conversationMatches(done, 'is:dismissed'), isTrue);
       expect(conversationMatches(open, 'is:dismissed'), isFalse);
+    });
+
+    test('is:done is the same facet, in the word the screen now uses', () {
+      final done = _conv(id: 'a', state: ConversationState.done);
+      final open = _conv(id: 'b');
+
+      expect(conversationMatches(done, 'is:done'), isTrue);
+      expect(conversationMatches(open, 'is:done'), isFalse);
     });
 
     test('has:attachment keeps the threads whose paperclip is drawn', () {

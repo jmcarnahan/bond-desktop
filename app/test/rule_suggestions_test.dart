@@ -146,7 +146,7 @@ void main() {
       expect(out.single.threadCount, 3);
       expect(
         out.single.words,
-        "You've dismissed 3 threads from noreply@jira.example.com. "
+        "You've marked 3 threads from noreply@jira.example.com done. "
         'Hide these from Needs You in future?',
       );
     });

@@ -9,6 +9,7 @@ import 'package:bond_inbox/widgets/mention_navigator.dart';
 import 'package:bond_inbox/widgets/message_row.dart';
 import 'package:bond_inbox/widgets/needs_you_reason.dart';
 import 'package:bond_inbox/widgets/quote_block.dart';
+import 'package:bond_inbox/widgets/thread_action_bar.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:bond_inbox/widgets/time_format.dart';
 import 'package:flutter/gestures.dart';
@@ -117,6 +118,7 @@ void main() {
     VoidCallback? onDismissWithoutLabel,
     VoidCallback? onCloseLabelPicker,
     String source = 'email',
+    List<Label> threadLabels = const [],
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -132,6 +134,7 @@ void main() {
             needsYouReason: reason,
             needsYouReasonAt: reasonAt,
             needsYouReasonMessageId: reasonMessageId,
+            labels: threadLabels,
           ),
           messages: messages,
           jumps: jumps,
@@ -742,7 +745,7 @@ void main() {
   });
 
   group('reopen', () {
-    testWidgets('a done thread offers it where Mark done used to sit',
+    testWidgets('a done thread offers it where Done used to sit',
         (tester) async {
       await pump(
         tester,
@@ -752,7 +755,8 @@ void main() {
       );
 
       expect(find.text('Reopen'), findsOneWidget);
-      expect(find.text('Mark done'), findsNothing);
+      // By key: the header's state chip says "Done" on a closed thread.
+      expect(find.byKey(ThreadActionBar.doneKey), findsNothing);
     });
 
     testWidgets('tapping it asks the host', (tester) async {
@@ -777,7 +781,7 @@ void main() {
         onReopen: () {},
       );
 
-      expect(find.text('Mark done'), findsOneWidget);
+      expect(find.byKey(ThreadActionBar.doneKey), findsOneWidget);
       expect(find.text('Reopen'), findsNothing);
     });
 
@@ -1054,15 +1058,20 @@ void main() {
     });
   });
 
-  group('the dismiss-and-file strip', () {
+  group('the label picker strip', () {
     final one = [_msg(id: 'a', receivedAt: '2026-08-25T09:00:00')];
     const fyi = Label(id: 'fyi', name: 'FYI only');
 
     testWidgets('is absent until a host wires it', (tester) async {
       await pump(tester, messages: one);
 
-      expect(find.byKey(ThreadDetailPanel.dismissWithLabelKey), findsNothing);
-      expect(find.byKey(ThreadDetailPanel.labelKey), findsNothing);
+      // Mark done is always there, and with no second way to finish it acts
+      // rather than opening choices.
+      expect(find.byKey(ThreadActionBar.doneKey), findsOneWidget);
+      await tester.tap(find.byKey(ThreadActionBar.doneKey));
+      await tester.pump();
+      expect(find.byKey(ThreadActionBar.doneChoicesKey), findsNothing);
+      expect(find.byKey(ThreadActionBar.addLabelKey), findsNothing);
       expect(find.byType(LabelPicker), findsNothing);
       // And the panel is the one it always was.
       expect(find.text('Reply to Dana'), findsOneWidget);
@@ -1078,13 +1087,20 @@ void main() {
         onOpenLabelPicker: opened.add,
       );
 
-      expect(find.text('Dismiss…'), findsOneWidget);
-      expect(find.text('Label…'), findsOneWidget);
+      // On the action bar now: Mark done opens its choices in place (no
+      // menu), and the label row leads with Add label.
+      expect(find.byKey(ThreadActionBar.doneKey), findsOneWidget);
+      expect(find.text('Add label'), findsOneWidget);
       expect(find.byType(LabelPicker), findsNothing);
+      expect(find.byKey(ThreadActionBar.doneChoicesKey), findsNothing);
 
-      await tester.tap(find.byKey(ThreadDetailPanel.dismissWithLabelKey));
+      await tester.tap(find.byKey(ThreadActionBar.doneKey));
       await tester.pump();
-      await tester.tap(find.byKey(ThreadDetailPanel.labelKey));
+      expect(find.byKey(ThreadActionBar.doneChoicesKey), findsOneWidget);
+      await tester.tap(find.byKey(ThreadActionBar.doneWithReasonKey));
+      await tester.pump();
+      expect(find.byKey(ThreadActionBar.doneChoicesKey), findsNothing);
+      await tester.tap(find.byKey(ThreadActionBar.addLabelKey));
       await tester.pump();
 
       expect(opened, [LabelPickerMode.dismiss, LabelPickerMode.label]);
@@ -1104,13 +1120,41 @@ void main() {
         onCloseLabelPicker: () {},
       );
 
-      expect(find.text('Dismiss with a label…'), findsOneWidget);
+      expect(find.text('Mark done with a label…'), findsOneWidget);
       expect(find.text('FYI only'), findsOneWidget);
       expect(find.byKey(LabelPicker.noLabelKey), findsOneWidget);
-      // The affordances are what it grew out of, so they are not beside it.
-      expect(find.byKey(ThreadDetailPanel.dismissWithLabelKey), findsNothing);
+      // The choices it grew out of have shut: the picker stands alone.
+      expect(find.byKey(ThreadActionBar.doneChoicesKey), findsNothing);
       // Nothing opened over the thread: the transcript is still there.
       expect(find.text('Body of a.'), findsOneWidget);
+    });
+
+    testWidgets('opens right under the bar, and ticks the thread\'s own words',
+        (tester) async {
+      const jira = Label(id: 'jira', name: 'jira');
+      await pump(
+        tester,
+        messages: one,
+        labels: const [fyi, jira],
+        threadLabels: const [jira],
+        labelPicker: LabelPickerMode.label,
+        onOpenLabelPicker: (_) {},
+        onApplyLabel: (_) {},
+        onCreateLabel: (_) {},
+        onCloseLabelPicker: () {},
+      );
+
+      // What the thread already wears carries a ✓; the rest of the
+      // vocabulary does not.
+      expect(find.text('✓ jira'), findsOneWidget);
+      expect(find.text('FYI only'), findsOneWidget);
+      // Pressed on the bar, it opens against the bar — above the ask, not a
+      // banner lower.
+      final picker = tester.getRect(find.byType(LabelPicker));
+      final bar = tester.getRect(find.byType(ThreadActionBar));
+      final ask = tester.getRect(find.text('Reply to Dana'));
+      expect(picker.top, greaterThanOrEqualTo(bar.bottom - 1));
+      expect(picker.bottom, lessThanOrEqualTo(ask.top));
     });
 
     testWidgets('the label-only mode offers no way out with no label',
@@ -1162,7 +1206,8 @@ void main() {
       );
 
       expect(find.byType(LabelPicker), findsNothing);
-      expect(find.byKey(ThreadDetailPanel.dismissWithLabelKey), findsOneWidget);
+      // Collapsed, not broken: the bar still offers the way to ask again.
+      expect(find.byKey(ThreadActionBar.addLabelKey), findsOneWidget);
     });
   });
 

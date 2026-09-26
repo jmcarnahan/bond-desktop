@@ -5,6 +5,7 @@ import '../models/needs_you_sort.dart';
 import '../models/storyline_models.dart';
 import '../services/attention.dart';
 import 'app_rail.dart';
+import 'find_field.dart' show completeLabelFacet, labelFacetPrefixOf;
 import 'people_rooms.dart';
 
 /// What the Find field does to the list column, as pure functions.
@@ -64,9 +65,11 @@ class FindQuery {
   /// "from" a reader can see. Every one must match.
   final List<String> senders;
 
-  /// `is:dismissed` — the thread is done. The one state facet, because it is
-  /// the one state a reader looks for by name: needing a reply is what the
-  /// whole column is already about.
+  /// `is:done` (or its older spelling `is:dismissed`) — the thread is done.
+  /// The one state facet, because it is the one state a reader looks for by
+  /// name: needing a reply is what the whole column is already about. Both
+  /// words, because the screen says Mark done and a needle typed before it
+  /// did still says dismissed.
   final bool dismissedOnly;
 
   /// `has:attachment` — the thread carries a file. The same count the row's
@@ -140,7 +143,7 @@ class FindQuery {
               senders.add(value);
               continue;
             case 'is':
-              if (value == 'dismissed') {
+              if (value == 'done' || value == 'dismissed') {
                 dismissedOnly = true;
                 continue;
               }
@@ -443,3 +446,73 @@ FindTarget? firstFindTarget({
       return null;
   }
 }
+
+/// The needle a label chip's press leaves in Find: [needle] with
+/// `label:<name>` added — once, and read as a query rather than as text, so a
+/// box holding `label:opsx` or `-label:ops` still gains the chip's `ops`,
+/// and one already asking for it (in any case, quoted or bare) gains nothing.
+///
+/// A `-label:` of the same word is taken OUT: the chip asks for the label,
+/// and leaving its exclusion beside it would narrow to nothing. Everything
+/// else the reader typed — a `from:`, plain words — survives in place. The
+/// facet is spelled by [completeLabelFacet], so a name with a space in it is
+/// quoted exactly as the box's own completion quotes it, and the result
+/// always ends in a space, ready for the next word.
+String withLabelFacet(String needle, String name) {
+  final facet = completeLabelFacet('label:', name);
+  final wanted = normalizeFind(name);
+  // A half-typed label term under the caret — `label:` or `label:op` with no
+  // space yet — is this same ask, mid-word: finish that term, the box's own
+  // suggestion-press rule, rather than leaving its stub beside a second copy
+  // for the parser to read as a word no row contains. Only while what is
+  // typed still spells this chip's name; a WHOLE other label there is an ask
+  // of its own and keeps. A half-typed `-label:` that spells it completes
+  // too, into the exclusion the removal below cancels — either way the stub
+  // does not survive the press.
+  final typed = labelFacetPrefixOf(needle);
+  final base = typed != null && wanted.startsWith(typed)
+      ? completeLabelFacet(needle, name)
+      : needle;
+  var kept = base
+      .replaceAllMapped(_labelExclusion, (m) {
+        // Inside a quoted phrase this is the reader's words, not a facet: an
+        // odd number of quotes before the match means one is open over it.
+        if ('"'.allMatches(base.substring(0, m.start)).length.isOdd) {
+          return m[0]!;
+        }
+        final value = m[1] ?? m[2] ?? '';
+        return normalizeFind(value) == wanted ? '' : m[0]!;
+      })
+      .trim();
+  // A quote left open swallows everything after it into one quoted word —
+  // the facet about to be added included. Closing it keeps the reader's
+  // half-quoted words as the words they typed and the facet as a facet.
+  if ('"'.allMatches(kept).length.isOdd) kept = '$kept"';
+  if (kept.isEmpty) return facet;
+  if (FindQuery.parse(kept).labels.contains(wanted)) return '$kept ';
+  return '$kept $facet';
+}
+
+/// One `-label:` term as [FindQuery.parse] reads it, quoted or bare, with the
+/// whitespace after it — taken out along with the term, so a removal leaves
+/// no double space and the spaces INSIDE a quoted phrase are never touched.
+final RegExp _labelExclusion =
+    RegExp(r'(?<!\S)-label:(?:"([^"]*)"|(\S+))\s*', caseSensitive: false);
+
+/// Where the column goes when a label chip writes its facet into Find, from
+/// the section it is on. Find narrows whatever the column is scoped to, so
+/// from Storylines or People the facet would filter storylines or rooms and
+/// the chip's "Filter Needs You" would be a lie: those move to Needs You.
+/// The Inbox and Needs You already show the Needs You stack, and so does
+/// Drafts & sent, a row of the Inbox stack whose MAIN pane is its own list —
+/// moving the section there swapped that list for the Needs You overview
+/// under a reader who was still using it — so those stay. Elsewhere the
+/// overview a thread sits beside follows the section to Needs You, which is
+/// the list the chip asked for.
+///
+/// Null (the Inbox, never yet moved off) stays null.
+RailSection? sectionForLabelFind(RailSection? here) => switch (here) {
+      null => null,
+      RailSection.home || RailSection.needsYou || RailSection.drafts => here,
+      _ => RailSection.needsYou,
+    };

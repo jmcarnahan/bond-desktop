@@ -22,7 +22,7 @@ import 'app_providers.dart';
 /// current.
 
 const String _recentStaleMessage =
-    "Couldn't read what was dismissed just now — showing what was already here.";
+    "Couldn't read the last 7 days just now — showing what was already here.";
 
 @immutable
 class RecentlyDismissedState {

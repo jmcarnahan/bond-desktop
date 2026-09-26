@@ -23,6 +23,7 @@ import 'package:bond_inbox/widgets/storyline_pickers.dart';
 import 'package:bond_inbox/widgets/room_header.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
+import 'package:bond_inbox/widgets/thread_action_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -547,12 +548,9 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    // The menu route animates; a settle would never come back over the
-    // screen's periodic timer, so the pumps are bounded.
-    await tester.tap(find.byIcon(Icons.more_horiz));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-    await tester.tap(find.text('Add to storyline…'));
+    // One press on the thread's action bar; the pumps stay bounded, since a
+    // settle would never come back over the screen's periodic timer.
+    await tester.tap(find.byKey(ThreadActionBar.storylineKey));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 

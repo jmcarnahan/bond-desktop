@@ -372,7 +372,7 @@ void main() {
       // Every command, because a palette that hid two of its entries would
       // only serve a reader who already knew they were there.
       expect(all.length, findCommands.length);
-      expect(all.first.label, 'Dismiss');
+      expect(all.first.label, 'Mark done');
       // Every command names a key, because teaching them is half the reason
       // the palette is worth having.
       expect(all.every((c) => c.keyHint != null), isTrue);
@@ -386,13 +386,19 @@ void main() {
     });
 
     test('the words narrow it, and a leading match leads', () {
-      // `Dismiss with label…`, `Quick reply` and `Select row` contain an l
+      // `Mark done with a label…`, `Quick reply` and `Select row` contain an l
       // as well and come after: what the reader is spelling is the start of a
       // pill, and the rest follow it rather than being refused — the label
       // strip's own rule.
       expect(
         [for (final c in commandsFor('>l')) c.label],
-        ['Label…', 'Later', 'Dismiss with label…', 'Quick reply', 'Select row'],
+        [
+          'Label…',
+          'Later',
+          'Mark done with a label…',
+          'Quick reply',
+          'Select row',
+        ],
       );
       // Contained rather than leading: the reader typed the word they think in,
       // which is not always the first one on the pill.
@@ -410,7 +416,7 @@ void main() {
         expect(command.intent, isA<Intent>(), reason: command.label);
       }
       expect(
-        commandsFor('>dismiss').first.intent,
+        commandsFor('>mark done').first.intent,
         isA<DismissThreadIntent>(),
       );
     });
@@ -446,8 +452,8 @@ void main() {
       await type(tester, '>');
 
       expect(find.byKey(FindField.commandsKey), findsOneWidget);
-      expect(find.byKey(FindField.commandKeyFor('Dismiss')), findsOneWidget);
-      expect(find.text('Dismiss'), findsOneWidget);
+      expect(find.byKey(FindField.commandKeyFor('Mark done')), findsOneWidget);
+      expect(find.text('Mark done'), findsOneWidget);
       expect(find.text('e'), findsOneWidget);
       // The same place the label strip draws: nothing opens over the list.
       expect(

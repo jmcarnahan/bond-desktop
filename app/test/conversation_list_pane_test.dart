@@ -16,6 +16,7 @@ Conversation _conv({
   String source = 'email',
   String subject = 'Homepage copy',
   ConversationState state = ConversationState.done,
+  List<Label> labels = const [],
 }) {
   return Conversation(
     id: id,
@@ -26,6 +27,7 @@ Conversation _conv({
     ],
     state: state,
     lastMessageAt: '2026-01-14T10:00:00',
+    labels: labels,
   );
 }
 
@@ -217,7 +219,7 @@ void main() {
 
       expect(find.byKey(ConversationListPane.dismissKeyFor(needsYou)),
           findsNothing);
-      expect(find.byTooltip('Dismiss'), findsNothing);
+      expect(find.byTooltip('Mark done'), findsNothing);
       // The row is the row it always was.
       expect(find.text('Access to the analytics tool'), findsOneWidget);
     });
@@ -236,15 +238,15 @@ void main() {
       );
 
       // Nothing until a pointer arrives.
-      expect(find.byTooltip('Dismiss'), findsNothing);
+      expect(find.byTooltip('Mark done'), findsNothing);
 
       await hover(tester, rowFor(needsYou));
 
-      expect(find.byTooltip('Dismiss'), findsOneWidget);
+      expect(find.byTooltip('Mark done'), findsOneWidget);
       expect(find.byTooltip('Label…'), findsOneWidget);
       expect(find.byTooltip('Later'), findsOneWidget);
       // Short on the button, the whole sender in the tooltip.
-      expect(find.byTooltip('Dismiss everything from Alex Rivera'),
+      expect(find.byTooltip('Drop sender Alex Rivera'),
           findsOneWidget);
 
       for (final key in [
@@ -276,7 +278,7 @@ void main() {
 
       await hover(tester, rowFor(needsYou));
 
-      expect(find.byTooltip('Dismiss'), findsOneWidget);
+      expect(find.byTooltip('Mark done'), findsOneWidget);
       expect(find.byTooltip('Later'), findsNothing);
       expect(find.byTooltip('Label…'), findsNothing);
     });
@@ -299,7 +301,7 @@ void main() {
 
       await hover(tester, rowFor(anonymous));
 
-      expect(find.byTooltip('Dismiss'), findsOneWidget);
+      expect(find.byTooltip('Mark done'), findsOneWidget);
       expect(
         find.byKey(ConversationListPane.dismissSenderKeyFor(anonymous)),
         findsNothing,
@@ -314,14 +316,14 @@ void main() {
         onDismiss: (_) {},
       );
 
-      expect(find.byTooltip('Dismiss'), findsNothing);
+      expect(find.byTooltip('Mark done'), findsNothing);
 
       // No pointer anywhere: the row takes focus by traversal, the way a
       // keyboard-first pass through the list reaches it.
       await tester.sendKeyEvent(LogicalKeyboardKey.tab);
       await tester.pump();
 
-      expect(find.byTooltip('Dismiss'), findsOneWidget);
+      expect(find.byTooltip('Mark done'), findsOneWidget);
     });
 
     testWidgets('the label action expands the picker for THAT row',
@@ -397,6 +399,33 @@ void main() {
       );
       expect(find.byKey(ConversationListPane.dismissKeyFor(needsYou)),
           findsOneWidget);
+    });
+
+    testWidgets("a word the row already wears carries the picker's ✓",
+        (tester) async {
+      // `l` on a row and `l` on the open thread are the same question, and
+      // must offer the same answers.
+      await pump(
+        tester,
+        conversations: [
+          _conv(
+            id: 'c1',
+            state: ConversationState.needsReply,
+            subject: 'Access to the analytics tool',
+            labels: const [fyi],
+          ),
+        ],
+        filter: InboxFilter.needsReply,
+        labels: const [fyi, Label(id: 'jira', name: 'jira')],
+        labelPickerFor: (_) => LabelPickerMode.label,
+        onApplyLabel: (_, _) {},
+        onCreateLabel: (_, _) {},
+        onCloseLabelPicker: (_) {},
+      );
+
+      expect(find.text('✓ FYI only'), findsOneWidget);
+      expect(find.text('jira'), findsOneWidget);
+      expect(find.text('✓ jira'), findsNothing);
     });
 
     group('the rule offer inside that picker', () {
@@ -486,8 +515,8 @@ void main() {
       );
 
       expect(
-        find.text("You've dismissed 41 threads from noreply@jira.example.com. "
-            'Hide these from Needs You in future?'),
+        find.text("You've marked 41 threads from noreply@jira.example.com "
+            'done. Hide these from Needs You in future?'),
         findsOneWidget,
       );
       expect(find.text('Hide these'), findsOneWidget);

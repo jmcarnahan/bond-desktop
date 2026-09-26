@@ -30,10 +30,11 @@ void main() {
     WidgetTester tester, {
     required List<Label> labels,
     bool withoutLabel = true,
-    String prompt = 'Dismiss with a label…',
+    String prompt = 'Mark done with a label…',
     List<LabelRuleOffer> offers = const [],
     Label? offerLabel,
     bool onRule = false,
+    Set<String> appliedIds = const {},
   }) async {
     await tester.binding.setSurfaceSize(const Size(600, 500));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -50,6 +51,7 @@ void main() {
           ruleOfferLabel: offerLabel,
           onRuleChosen:
               onRule ? (label, offer) => rules.add((label, offer)) : null,
+          appliedIds: appliedIds,
         ),
       ),
     ));
@@ -87,7 +89,7 @@ void main() {
     await pump(tester, labels: [fyi], prompt: LabelPickerMode.label.prompt);
 
     expect(find.text('Label…'), findsOneWidget);
-    expect(find.text('Dismiss with a label…'), findsNothing);
+    expect(find.text('Mark done with a label…'), findsNothing);
   });
 
   testWidgets('a tone word tints the chip through the tone map',
@@ -154,13 +156,13 @@ void main() {
     expect(applied, isEmpty);
   });
 
-  testWidgets('an empty box dismisses with no label where that is wired',
+  testWidgets('an empty box marks done with no label where that is wired',
       (tester) async {
     // An empty box with labels in the list still means "apply the top chip";
     // the no-label meaning is the one with nothing to apply either.
     await pump(tester, labels: const []);
 
-    expect(hint(tester), 'Enter — dismiss with no label');
+    expect(hint(tester), 'Enter — mark done with no label');
     expect(find.byKey(LabelPicker.noLabelKey), findsOneWidget);
 
     await tester.testTextInput.receiveAction(TextInputAction.done);
@@ -185,7 +187,7 @@ void main() {
     expect(created, isEmpty);
   });
 
-  testWidgets('the no-label button dismisses too', (tester) async {
+  testWidgets('the no-label button marks done too', (tester) async {
     await pump(tester, labels: [fyi]);
 
     await tester.tap(find.byKey(LabelPicker.noLabelKey));
@@ -361,6 +363,48 @@ void main() {
           onRule: true);
       expect(widgetCount(tester), greaterThan(baseline));
       expect(find.byKey(LabelPicker.ruleRowKey), findsOneWidget);
+    });
+  });
+
+  group('what is already on the thread', () {
+    testWidgets('carries a ✓ and says so, and the rest do not', (tester) async {
+      // The label mode: no way out with no label, so a chip only adds.
+      await pump(
+        tester,
+        labels: [fyi, handled],
+        appliedIds: {'fyi'},
+        withoutLabel: false,
+      );
+
+      expect(find.text('✓ FYI only'), findsOneWidget);
+      expect(find.text('Handled elsewhere'), findsOneWidget);
+      expect(find.byTooltip('Already on this thread'), findsOneWidget);
+      expect(find.byTooltip('Add Handled elsewhere'), findsOneWidget);
+    });
+
+    testWidgets('in the dismiss mode a chip says it closes the thread',
+        (tester) async {
+      await pump(
+        tester,
+        labels: [fyi, handled],
+        appliedIds: {'fyi'},
+        withoutLabel: true,
+      );
+
+      expect(find.byTooltip('Mark done under Handled elsewhere'),
+          findsOneWidget);
+      expect(find.byTooltip('Mark done — already labeled FYI only'),
+          findsOneWidget);
+      expect(find.byTooltip('Add Handled elsewhere'), findsNothing);
+    });
+
+    testWidgets('a tap still reaches the host, which decides', (tester) async {
+      // The picker does not second-guess: in the dismiss mode a label already
+      // on the thread is a legitimate reason to close it with.
+      await pump(tester, labels: [fyi], appliedIds: {'fyi'});
+      await tester.tap(find.byKey(LabelPicker.keyFor(fyi)));
+
+      expect(applied, [fyi]);
     });
   });
 }

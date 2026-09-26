@@ -1,7 +1,10 @@
+import 'dart:async' show Completer;
+
 // `show BondDatabase`: drift generates row classes whose names collide with
 // the app's own models.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/label_models.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
@@ -9,7 +12,7 @@ import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
-import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
+import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
 import 'package:bond_inbox/widgets/cheat_sheet_panel.dart';
 import 'package:bond_inbox/widgets/composer.dart';
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
@@ -17,6 +20,7 @@ import 'package:bond_inbox/widgets/conversation_row.dart';
 import 'package:bond_inbox/widgets/find_field.dart';
 import 'package:bond_inbox/widgets/label_picker.dart';
 import 'package:bond_inbox/widgets/side_panel.dart';
+import 'package:bond_inbox/widgets/thread_action_bar.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -47,6 +51,83 @@ class _FakeSync implements MailSync {
 
   @override
   Future<void> ensureMessageBody(String sourceMessageId) async {}
+}
+
+/// A store whose label writes can be refused, for the toasts that must not
+/// say "Labeled" or "Removed" over a write that never happened. The flags are
+/// live, so a test can let an apply through and then refuse its undo.
+class _RefusingStore extends MessageStore {
+  _RefusingStore(
+    super.db, {
+    this.refuseApply = false,
+    this.refuseRemove = false,
+  });
+
+  bool refuseApply;
+  bool refuseRemove;
+
+  /// The read [_applyPickedLabel] guards with — refused, the press must not
+  /// file blind.
+  bool refuseLabelRead = false;
+
+  /// Set, an apply waits on it: the moment between a press and its toast,
+  /// held open long enough for the reader to have moved on.
+  Completer<void>? holdApply;
+
+  @override
+  Future<List<Label>> labelsForConversation(
+    String source,
+    String conversationKey,
+  ) async {
+    if (refuseLabelRead) throw StateError('the disk said no');
+    return super.labelsForConversation(source, conversationKey);
+  }
+
+  @override
+  Future<void> applyLabels(
+    String source,
+    String conversationKey,
+    List<String> labelIds, {
+    String appliedBy = 'user',
+  }) async {
+    final hold = holdApply;
+    if (hold != null) await hold.future;
+    if (refuseApply) throw StateError('the disk said no');
+    return super.applyLabels(
+      source,
+      conversationKey,
+      labelIds,
+      appliedBy: appliedBy,
+    );
+  }
+
+  @override
+  Future<({String appliedBy, String? ruleId})?> removeLabel(
+    String source,
+    String conversationKey,
+    String labelId,
+  ) async {
+    if (refuseRemove) throw StateError('the disk said no');
+    return super.removeLabel(source, conversationKey, labelId);
+  }
+
+  @override
+  Future<bool> restoreLabel(
+    String source,
+    String conversationKey,
+    String labelId, {
+    required String appliedBy,
+    String? ruleId,
+  }) async {
+    if (refuseApply) throw StateError('the disk said no');
+    return super.restoreLabel(
+      source,
+      conversationKey,
+      labelId,
+      appliedBy: appliedBy,
+      ruleId: ruleId,
+    );
+  }
 }
 
 class _FakeTeamsSync implements TeamsSync {
@@ -121,7 +202,7 @@ void main() {
     await tester.pump(HomeFeedNotifier.metricsDebounce);
   }
 
-  Future<void> pumpInbox(WidgetTester tester) async {
+  Future<void> pumpInbox(WidgetTester tester, {MessageStore? storeAs}) async {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
@@ -137,6 +218,7 @@ void main() {
       teamsSyncProvider.overrideWithValue(_FakeTeamsSync()),
       notificationCoordinatorProvider
           .overrideWithValue(NotificationCoordinator(store)),
+      if (storeAs != null) messageStoreProvider.overrideWithValue(storeAs),
     ]);
     addTearDown(container.dispose);
 
@@ -282,7 +364,7 @@ void main() {
     // The row that took its place, not the top of the list and not an empty
     // pane: this is the whole reason the keys are quicker than the mouse.
     expect(litRow(tester), 'Vendor quote');
-    expect(find.text('Dismissed.'), findsOneWidget);
+    expect(find.text('Marked done.'), findsOneWidget);
     expect(find.text('Undo'), findsOneWidget);
     await settleQueues(tester);
   });
@@ -318,6 +400,36 @@ void main() {
     expect(find.text('Undo'), findsNothing);
 
     await press(tester, LogicalKeyboardKey.keyZ);
+    expect(rowTitles(tester), contains('Homepage copy'));
+    await settleQueues(tester);
+  });
+
+  testWidgets('the bar closes on its ✕, and z still reaches the undo',
+      (tester) async {
+    // An undoable bar persists by the framework's default; this one must not,
+    // and it must be dismissable without undoing what it reports.
+    await seedPile();
+    await pumpInbox(tester);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyE);
+    expect(find.text('Undo'), findsOneWidget);
+    // Let the bar finish sliding in before aiming at it.
+    for (var i = 0; i < 4; i++) {
+      await tester.pump(const Duration(milliseconds: 250));
+    }
+
+    await tester.tap(find.descendant(
+      of: find.byType(SnackBar),
+      matching: find.byIcon(Icons.close),
+    ));
+    for (var i = 0; i < 4; i++) {
+      await tester.pump(const Duration(milliseconds: 250));
+    }
+    expect(find.text('Undo'), findsNothing);
+    expect(rowTitles(tester), isNot(contains('Homepage copy')));
+
+    await press(tester, LogicalKeyboardKey.keyZ);
+    await settleQueues(tester);
     expect(rowTitles(tester), contains('Homepage copy'));
     await settleQueues(tester);
   });
@@ -389,7 +501,7 @@ void main() {
     // disabled action leaves the event unhandled, so the letter goes on to the
     // text layer instead of dying in a shortcut map.
     expect(rowTitles(tester), contains('Homepage copy'));
-    expect(find.text('Dismissed.'), findsNothing);
+    expect(find.text('Marked done.'), findsNothing);
     expect(unhandled, contains(LogicalKeyboardKey.keyE));
 
     // And so is every other single letter in the map.
@@ -440,7 +552,7 @@ void main() {
     expect(find.byKey(LabelPicker.fieldKey), findsOneWidget);
     expect(rowTitles(tester), hasLength(3));
     expect(litRow(tester), 'Homepage copy');
-    expect(find.text('Dismissed.'), findsNothing);
+    expect(find.text('Marked done.'), findsNothing);
 
     await press(tester, LogicalKeyboardKey.escape);
     expect(find.byKey(LabelPicker.fieldKey), findsNothing);
@@ -451,7 +563,7 @@ void main() {
     expect(unhandled, isEmpty);
     expect(find.byKey(LabelPicker.fieldKey), findsOneWidget);
     expect(rowTitles(tester), hasLength(3));
-    expect(find.text('Dismissed.'), findsNothing);
+    expect(find.text('Marked done.'), findsNothing);
     await settleQueues(tester);
   });
 
@@ -481,7 +593,7 @@ void main() {
     // link is really in the store.
     expect(rowTitles(tester), ['Invoice 4471', 'Vendor quote']);
     expect(litRow(tester), 'Invoice 4471');
-    expect(find.text('Dismissed · Vendor outreach.'), findsOneWidget);
+    expect(find.text('Marked done · Vendor outreach.'), findsOneWidget);
     final linked = await store.labelsForConversation('email', 'c1');
     expect([for (final l in linked) l.name], ['Vendor outreach']);
 
@@ -532,6 +644,484 @@ void main() {
     await settleQueues(tester);
   });
 
+  testWidgets('a label already on the thread is not applied again, so no '
+      'undo can take it off', (tester) async {
+    final fyi = await store.createLabel('FYI only');
+    await seedPile();
+    await store.applyLabels('email', 'c2', [fyi.id]);
+    final countBefore = (await store.listLabels()).single.useCount;
+    await pumpInbox(tester);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    expect(litRow(tester), 'Invoice 4471');
+
+    await press(tester, LogicalKeyboardKey.keyL);
+    await tester.enterText(find.byKey(LabelPicker.fieldKey), 'fyi');
+    await tester.pump();
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await settleQueues(tester);
+    await tester.pump();
+
+    expect(find.text('Already labeled FYI only.'), findsOneWidget);
+    expect(find.text('Undo'), findsNothing);
+    // And `z` has nothing of this press to take back: the label the owner put
+    // there before stays.
+    await press(tester, LogicalKeyboardKey.keyZ);
+    await settleQueues(tester);
+    final linked = await store.labelsForConversation('email', 'c2');
+    expect([for (final l in linked) l.name], ['FYI only']);
+    expect((await store.listLabels()).single.useCount, countBefore);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a label chip\'s ✕ takes it off, and Undo puts it back uncounted',
+      (tester) async {
+    final fyi = await store.createLabel('FYI only');
+    await seedPile();
+    await store.applyLabels('email', 'c2', [fyi.id]);
+    final countBefore = (await store.listLabels()).single.useCount;
+    await pumpInbox(tester);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await tester.pump();
+
+    await tester.tap(find.byKey(ThreadActionBar.removeLabelKey(fyi.id)));
+    await settleQueues(tester);
+    await tester.pump();
+    expect(find.text('Removed FYI only.'), findsOneWidget);
+    expect(await store.labelsForConversation('email', 'c2'), isEmpty);
+
+    await press(tester, LogicalKeyboardKey.keyZ);
+    await settleQueues(tester);
+    final linked = await store.labelsForConversation('email', 'c2');
+    expect([for (final l in linked) l.name], ['FYI only']);
+    // Putting back what was there is not a reach for the word.
+    expect((await store.listLabels()).single.useCount, countBefore);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a label chip\'s name writes its label: facet into Find, quoted',
+      (tester) async {
+    final fyi = await store.createLabel('FYI only');
+    await seedPile();
+    await store.applyLabels('email', 'c2', [fyi.id]);
+    await pumpInbox(tester);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await tester.pump();
+
+    await tester.tap(find.descendant(
+      of: find.byType(ThreadActionBar),
+      matching: find.text('FYI only'),
+    ));
+    await tester.pump();
+    await tester.pump();
+
+    final box = tester.widget<TextField>(find.descendant(
+      of: find.byType(FindField),
+      matching: find.byType(TextField),
+    ));
+    const facet = 'label:"FYI only" ';
+    expect(box.controller!.text, facet);
+    // A needle written for the reader is one to add to: the cursor at its end,
+    // not the whole of it selected for typing over.
+    expect(
+      box.controller!.selection,
+      const TextSelection.collapsed(offset: facet.length),
+    );
+    // And the rail is narrowed by it, not just the box filled.
+    await tester.pump();
+    Finder railRow(String text) =>
+        find.descendant(of: find.byType(AppRail), matching: find.text(text));
+    expect(railRow('Sign the invoice · Dana Whitfield'), findsOneWidget);
+    expect(railRow('Confirm the launch date · Dana Whitfield'), findsNothing);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a chip\'s facet is added to a needle already in Find',
+      (tester) async {
+    final fyi = await store.createLabel('FYI only');
+    await seedPile();
+    await store.applyLabels('email', 'c2', [fyi.id]);
+    await pumpInbox(tester);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await tester.enterText(find.byKey(FindField.fieldKey), 'Invoice');
+    await tester.pump();
+
+    await tester.tap(find.descendant(
+      of: find.byType(ThreadActionBar),
+      matching: find.text('FYI only'),
+    ));
+    await tester.pump();
+    await tester.pump();
+
+    final box = tester.widget<TextField>(find.byKey(FindField.fieldKey));
+    expect(box.controller!.text, 'Invoice label:"FYI only" ');
+    await settleQueues(tester);
+  });
+
+  testWidgets('a remove that fails says so, and offers no undo',
+      (tester) async {
+    final fyi = await store.createLabel('FYI only');
+    await seedPile();
+    await store.applyLabels('email', 'c2', [fyi.id]);
+    await pumpInbox(tester, storeAs: _RefusingStore(db, refuseRemove: true));
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await tester.pump();
+
+    await tester.tap(find.byKey(ThreadActionBar.removeLabelKey(fyi.id)));
+    await settleQueues(tester);
+    await tester.pump();
+
+    expect(find.text("Couldn't take that label off just now."), findsOneWidget);
+    expect(find.text('Removed FYI only.'), findsNothing);
+    expect(find.text('Undo'), findsNothing);
+    final linked = await store.labelsForConversation('email', 'c2');
+    expect([for (final l in linked) l.name], ['FYI only']);
+    await settleQueues(tester);
+  });
+
+  /// `l` on the second row, `fyi` typed, Enter: the label strip's apply.
+  Future<void> labelSecondRow(WidgetTester tester) async {
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyL);
+    await tester.enterText(find.byKey(LabelPicker.fieldKey), 'fyi');
+    await tester.pump();
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await settleQueues(tester);
+    await tester.pump();
+  }
+
+  testWidgets('a label that will not go on says so, with nothing to undo',
+      (tester) async {
+    await store.createLabel('FYI only');
+    await seedPile();
+    await pumpInbox(tester, storeAs: _RefusingStore(db, refuseApply: true));
+
+    await labelSecondRow(tester);
+
+    expect(find.text("Couldn't file that thread just now."), findsOneWidget);
+    expect(find.text('Labeled FYI only.'), findsNothing);
+    expect(find.text('Undo'), findsNothing);
+    expect(await store.labelsForConversation('email', 'c2'), isEmpty);
+    await settleQueues(tester);
+  });
+
+  testWidgets('an Undo that fails says so rather than nothing',
+      (tester) async {
+    await store.createLabel('FYI only');
+    await seedPile();
+    final refusing = _RefusingStore(db);
+    await pumpInbox(tester, storeAs: refusing);
+    await labelSecondRow(tester);
+    expect(find.text('Labeled FYI only.'), findsOneWidget);
+
+    refusing.refuseRemove = true;
+    await press(tester, LogicalKeyboardKey.keyZ);
+    await settleQueues(tester);
+    await tester.pump();
+
+    // The failure is on screen, not only in a picker that is shut.
+    expect(find.text("Couldn't take that label off just now."), findsOneWidget);
+    final linked = await store.labelsForConversation('email', 'c2');
+    expect([for (final l in linked) l.name], ['FYI only']);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a thread whose labels cannot be read is not filed blind',
+      (tester) async {
+    await store.createLabel('FYI only');
+    await seedPile();
+    final refusing = _RefusingStore(db);
+    await pumpInbox(tester, storeAs: refusing);
+
+    refusing.refuseLabelRead = true;
+    await labelSecondRow(tester);
+
+    // Unread is not "not there": applying blind could hand the toast an
+    // Undo over a label this press never put on.
+    expect(find.text("Couldn't file that thread just now."), findsOneWidget);
+    expect(find.text('Undo'), findsNothing);
+    expect(await store.labelsForConversation('email', 'c2'), isEmpty);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a slow label write does not pull the cursor out of Find',
+      (tester) async {
+    await store.createLabel('FYI only');
+    await seedPile();
+    final refusing = _RefusingStore(db)..holdApply = Completer<void>();
+    await pumpInbox(tester, storeAs: refusing);
+
+    // The label press, with its write held open under it…
+    await labelSecondRow(tester);
+    // …while the reader has already moved on into Find.
+    await tester.showKeyboard(find.byKey(FindField.fieldKey));
+    await tester.pump();
+
+    refusing.holdApply!.complete();
+    await settleQueues(tester);
+    await tester.pump();
+
+    // The toast lands; the cursor stays where the reader put it.
+    expect(find.text('Labeled FYI only.'), findsOneWidget);
+    final editable = tester.widget<EditableText>(find.descendant(
+      of: find.byKey(FindField.fieldKey),
+      matching: find.byType(EditableText),
+    ));
+    expect(editable.focusNode.hasFocus, isTrue);
+    await settleQueues(tester);
+  });
+
+  testWidgets("Undo after a chip's ✕ puts back a rule's filing as the rule's",
+      (tester) async {
+    final fyi = await store.createLabel('FYI only');
+    await seedPile();
+    await store.applyLabelsByRule('email', 'c2', fyi.id, ruleId: 'rule-7');
+    await pumpInbox(tester);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await tester.pump();
+
+    await tester.tap(find.byKey(ThreadActionBar.removeLabelKey(fyi.id)));
+    await settleQueues(tester);
+    await press(tester, LogicalKeyboardKey.keyZ);
+    await settleQueues(tester);
+
+    // Hand-applied it would be a filing its rule could neither undo nor
+    // redo; back as the rule's, both still can.
+    final row = await db
+        .customSelect(
+          'SELECT applied_by, rule_id FROM conversation_labels '
+          "WHERE conversation_key = 'c2'",
+        )
+        .getSingle();
+    expect(row.data['applied_by'], 'rule');
+    expect(row.data['rule_id'], 'rule-7');
+    await settleQueues(tester);
+  });
+
+  testWidgets('an Undo that cannot put a chip back says so', (tester) async {
+    final fyi = await store.createLabel('FYI only');
+    await seedPile();
+    await store.applyLabels('email', 'c2', [fyi.id]);
+    final refusing = _RefusingStore(db);
+    await pumpInbox(tester, storeAs: refusing);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await tester.pump();
+    await tester.tap(find.byKey(ThreadActionBar.removeLabelKey(fyi.id)));
+    await settleQueues(tester);
+    expect(find.text('Removed FYI only.'), findsOneWidget);
+
+    refusing.refuseApply = true;
+    await press(tester, LogicalKeyboardKey.keyZ);
+    await settleQueues(tester);
+    await tester.pump();
+
+    expect(
+      find.text("Couldn't put that label back just now."),
+      findsOneWidget,
+    );
+    expect(await store.labelsForConversation('email', 'c2'), isEmpty);
+    await settleQueues(tester);
+  });
+
+  testWidgets('the bar\'s Later defers this thread the way s does',
+      (tester) async {
+    await seedPile();
+    await pumpInbox(tester);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    expect(litRow(tester), 'Invoice 4471');
+
+    await tester.tap(find.byKey(ThreadActionBar.laterKey));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    // Later, not a dismissal, with the same landing and the same way back.
+    expect(rowTitles(tester), ['Homepage copy', 'Vendor quote']);
+    expect(litRow(tester), 'Vendor quote');
+    expect(find.text('Sent to Later.'), findsOneWidget);
+    expect(find.text('Marked done.'), findsNothing);
+
+    await press(tester, LogicalKeyboardKey.keyZ);
+    await settleQueues(tester);
+    expect(rowTitles(tester), contains('Invoice 4471'));
+    await settleQueues(tester);
+  });
+
+  group('Mark done\'s choices and the keys', () {
+    Future<void> openChoices(WidgetTester tester) async {
+      await tester.tap(find.byKey(ThreadActionBar.doneKey));
+      // One frame to draw them, one for the post-frame focus.
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(ThreadActionBar.doneChoicesKey), findsOneWidget);
+    }
+
+    testWidgets('beside the list, Escape shuts the choices and not the panel',
+        (tester) async {
+      await seedPile();
+      await pumpInbox(tester);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      expect(find.byType(SidePanelHost), findsOneWidget);
+      await openChoices(tester);
+
+      await press(tester, LogicalKeyboardKey.escape);
+
+      expect(find.byKey(ThreadActionBar.doneChoicesKey), findsNothing);
+      expect(find.byType(SidePanelHost), findsOneWidget);
+      expect(litRow(tester), 'Invoice 4471');
+      // The keys are still live: focus went back where it came from.
+      await press(tester, LogicalKeyboardKey.keyE);
+      expect(find.text('Marked done.'), findsOneWidget);
+      expect(rowTitles(tester), ['Homepage copy', 'Vendor quote']);
+      await settleQueues(tester);
+    });
+
+    testWidgets('in the pane, Escape shuts the choices and e still works',
+        (tester) async {
+      await seedPile();
+      await pumpInbox(tester);
+      // Find's pick opens the thread in the main pane.
+      await tester.enterText(find.byKey(FindField.fieldKey), 'Invoice');
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(SidePanelHost), findsNothing);
+      expect(find.byType(ThreadDetailPanel), findsOneWidget);
+      await openChoices(tester);
+
+      await press(tester, LogicalKeyboardKey.escape);
+
+      expect(find.byKey(ThreadActionBar.doneChoicesKey), findsNothing);
+      expect(find.byType(ThreadDetailPanel), findsOneWidget);
+      await press(tester, LogicalKeyboardKey.keyE);
+      expect(find.text('Marked done.'), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('e with the choices up closes the thread, and the keys stay '
+        'live on the next one', (tester) async {
+      await seedPile();
+      await pumpInbox(tester);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await openChoices(tester);
+
+      // The panel is keyed by thread, so this advance throws the bar that
+      // held focus away.
+      await press(tester, LogicalKeyboardKey.keyE);
+      expect(rowTitles(tester), ['Invoice 4471', 'Vendor quote']);
+      expect(find.byKey(ThreadActionBar.doneChoicesKey), findsNothing);
+      unhandled.clear();
+
+      await press(tester, LogicalKeyboardKey.keyE);
+
+      expect(unhandled, isEmpty);
+      expect(rowTitles(tester), ['Vendor quote']);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a thread Find opened answers e without a click first',
+        (tester) async {
+      await seedPile();
+      await pumpInbox(tester);
+      await tester.enterText(find.byKey(FindField.fieldKey), 'Invoice');
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      unhandled.clear();
+
+      await press(tester, LogicalKeyboardKey.keyE);
+
+      expect(unhandled, isEmpty);
+      expect(find.text('Marked done.'), findsOneWidget);
+      await settleQueues(tester);
+    });
+  });
+
+  group('the toast\'s life', () {
+    Future<void> pumpFor(WidgetTester tester, Duration total) async {
+      const step = Duration(milliseconds: 250);
+      for (var t = Duration.zero; t < total; t += step) {
+        await tester.pump(step);
+      }
+    }
+
+    testWidgets('an undoable bar leaves on its own, and z outlives it',
+        (tester) async {
+      await seedPile();
+      await pumpInbox(tester);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await press(tester, LogicalKeyboardKey.keyE);
+      expect(find.text('Marked done.'), findsOneWidget);
+
+      await pumpFor(tester, const Duration(seconds: 7));
+
+      expect(find.byType(SnackBar), findsNothing);
+      await press(tester, LogicalKeyboardKey.keyZ);
+      await settleQueues(tester);
+      expect(rowTitles(tester), contains('Homepage copy'));
+      await settleQueues(tester);
+    });
+
+    testWidgets('under a screen reader a bar with nothing to undo still leaves',
+        (tester) async {
+      tester.platformDispatcher.accessibilityFeaturesTestValue =
+          const FakeAccessibilityFeatures(accessibleNavigation: true);
+      addTearDown(
+        tester.platformDispatcher.clearAccessibilityFeaturesTestValue,
+      );
+      final fyi = await store.createLabel('FYI only');
+      await seedPile();
+      await store.applyLabels('email', 'c2', [fyi.id]);
+      await pumpInbox(tester);
+      await labelSecondRow(tester);
+      expect(find.text('Already labeled FYI only.'), findsOneWidget);
+
+      await pumpFor(tester, const Duration(seconds: 7));
+
+      // Staying is for walking to an Undo; with none there, it only covers
+      // the rail.
+      expect(find.text('Already labeled FYI only.'), findsNothing);
+      await settleQueues(tester);
+    });
+
+    testWidgets('under a screen reader an undoable bar stays until closed',
+        (tester) async {
+      tester.platformDispatcher.accessibilityFeaturesTestValue =
+          const FakeAccessibilityFeatures(accessibleNavigation: true);
+      addTearDown(
+        tester.platformDispatcher.clearAccessibilityFeaturesTestValue,
+      );
+      await seedPile();
+      await pumpInbox(tester);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await press(tester, LogicalKeyboardKey.keyE);
+
+      await pumpFor(tester, const Duration(seconds: 7));
+
+      expect(find.text('Marked done.'), findsOneWidget);
+      await tester.tap(find.descendant(
+        of: find.byType(SnackBar),
+        matching: find.byIcon(Icons.close),
+      ));
+      await pumpFor(tester, const Duration(seconds: 1));
+      expect(find.byType(SnackBar), findsNothing);
+      await settleQueues(tester);
+    });
+  });
+
   testWidgets('the keys are chrome-free: a letter over the rail is a letter',
       (tester) async {
     await seedPile();
@@ -547,7 +1137,7 @@ void main() {
     await press(tester, LogicalKeyboardKey.keyE);
 
     expect(rowTitles(tester), contains('Homepage copy'));
-    expect(find.text('Dismissed.'), findsNothing);
+    expect(find.text('Marked done.'), findsNothing);
     await settleQueues(tester);
   });
 

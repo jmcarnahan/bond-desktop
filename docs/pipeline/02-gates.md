@@ -48,7 +48,7 @@ back and re-files the threads from it.
 
 **The label rule is the second data gate** (schema v18). It comes from a
 `label_rules` row whose disposition is `drop`, which the owner writes by
-dismissing a thread with a label and keeping the rule — a standing instruction
+marking a thread done with a label and keeping the rule — a standing instruction
 about a CLASS of mail (a sender, a domain, a subject prefix, or a
 classification from `app/lib/services/classification.dart`) rather than one
 address. `_triageClaimed` reads the table once per claim and matches through

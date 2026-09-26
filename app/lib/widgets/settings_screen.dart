@@ -2241,7 +2241,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             subtitle: Text(
               'A thread leaves Needs You as soon as you answer it, instead of '
-              'waiting for you to dismiss it.',
+              'waiting for you to mark it done.',
               style: BondType.caption,
             ),
             onChanged: (value) {

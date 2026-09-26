@@ -28,7 +28,7 @@ extension LabelPickerModePrompt on LabelPickerMode {
   /// the picker says what the next keystroke does.
   String get prompt => switch (this) {
         LabelPickerMode.label => 'Label…',
-        LabelPickerMode.dismiss => 'Dismiss with a label…',
+        LabelPickerMode.dismiss => 'Mark done with a label…',
       };
 }
 
@@ -164,6 +164,11 @@ class LabelPicker extends StatefulWidget {
   /// rule never shows one.
   final void Function(Label label, LabelRuleOffer offer)? onRuleChosen;
 
+  /// The ids already on the thread. Their chips carry a ✓, because a picker
+  /// that drew the owner's whole vocabulary the same way read as the thread's
+  /// own labels — "jira" in the list looked like "this is labelled jira".
+  final Set<String> appliedIds;
+
   const LabelPicker({
     super.key,
     required this.labels,
@@ -176,6 +181,7 @@ class LabelPicker extends StatefulWidget {
     this.ruleOffers = const [],
     this.ruleOfferLabel,
     this.onRuleChosen,
+    this.appliedIds = const {},
   });
 
   /// The type-ahead box.
@@ -356,12 +362,17 @@ class _LabelPickerState extends State<LabelPicker> {
                     Material(
                       key: LabelPicker.keyFor(label),
                       type: MaterialType.transparency,
-                      child: InkWell(
-                        onTap: () => _apply(label),
-                        borderRadius: BondRadii.fullAll,
-                        child: BondChip.semantic(
-                          label.name,
-                          labelToneOf(label.tone),
+                      child: Tooltip(
+                        message: _chipTip(label),
+                        child: InkWell(
+                          onTap: () => _apply(label),
+                          borderRadius: BondRadii.fullAll,
+                          child: BondChip.semantic(
+                            widget.appliedIds.contains(label.id)
+                                ? '✓ ${label.name}'
+                                : label.name,
+                            labelToneOf(label.tone),
+                          ),
                         ),
                       ),
                     ),
@@ -394,7 +405,7 @@ class _LabelPickerState extends State<LabelPicker> {
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     textStyle: BondType.caption,
                   ),
-                  child: const Text('Dismiss with no label'),
+                  child: const Text('Mark done with no label'),
                 ),
               ),
             ],
@@ -462,10 +473,23 @@ class _LabelPickerState extends State<LabelPicker> {
     );
   }
 
+  /// What a chip's press will do, said the way the strip's mode means it:
+  /// in the dismiss mode a chip closes the thread under the word, and "Add"
+  /// would promise a label and nothing more.
+  String _chipTip(Label label) {
+    final applied = widget.appliedIds.contains(label.id);
+    if (widget.onDismissWithoutLabel != null) {
+      return applied
+          ? 'Mark done — already labeled ${label.name}'
+          : 'Mark done under ${label.name}';
+    }
+    return applied ? 'Already on this thread' : 'Add ${label.name}';
+  }
+
   String _hintText() => switch (_enter) {
         _Apply(label: final label) => "Enter — apply '${label.name}'",
         _Create(name: final name) => "Enter — create '$name'",
-        _NoLabel() => 'Enter — dismiss with no label',
+        _NoLabel() => 'Enter — mark done with no label',
         _Inert() => 'Type a name and press Enter to create it',
       };
 }

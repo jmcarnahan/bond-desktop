@@ -327,8 +327,8 @@ class _LabelsSectionState extends State<LabelsSection> {
         if (widget.labels.isEmpty && !widget.loading) ...[
           const SizedBox(height: BondSpacing.s12),
           Text(
-            'Nothing filed yet. Dismiss a thread with a word and it turns up '
-            'here.',
+            'Nothing filed yet. Label a thread, or mark it done with a label, '
+            'and the word turns up here.',
             style: BondType.caption.copyWith(color: BondColors.inkMuted),
           ),
         ],

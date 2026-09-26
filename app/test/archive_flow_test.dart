@@ -225,7 +225,7 @@ void main() {
         reason: 'the tab survived the trip away and arrival re-read it');
   });
 
-  testWidgets('arriving at Recently dismissed reads the week', (tester) async {
+  testWidgets('arriving at Last 7 days reads the week', (tester) async {
     // No bus behind this list either: a rule files threads in the background,
     // so the tab entry is what makes a dismissal appear.
     final nowIso = DateTime.now().toUtc().toIso8601String();
@@ -234,15 +234,15 @@ void main() {
         'email', 'c-closed', ConversationState.done);
     await pumpScreen(tester);
 
-    expect(find.text('Dismissed'), findsNothing);
+    expect(find.text('Marked done'), findsNothing);
 
-    await tester.tap(find.widgetWithText(BondFilterPill, 'Recently dismissed'));
+    await tester.tap(find.widgetWithText(BondFilterPill, 'Last 7 days'));
     await tester.pump();
     await tester.pump();
     await tester.pump();
 
     expect(find.text('Vendor renewal'), findsOneWidget);
-    expect(find.text('Dismissed'), findsOneWidget);
+    expect(find.text('Marked done'), findsOneWidget);
     expect(find.widgetWithText(TextButton, 'Reopen'), findsOneWidget);
   });
 
@@ -260,7 +260,7 @@ void main() {
     await store.applyLabelRule(rule.id);
     await pumpScreen(tester);
 
-    await tester.tap(find.widgetWithText(BondFilterPill, 'Recently dismissed'));
+    await tester.tap(find.widgetWithText(BondFilterPill, 'Last 7 days'));
     await tester.pump();
     await tester.pump();
     await tester.pump();

@@ -5390,7 +5390,11 @@ SELECT conversation_key FROM (
     });
   }
 
-  /// Takes one label off one thread.
+  /// Takes one label off one thread, and answers what came off — who put the
+  /// link there and under which rule — or null when there was no link to
+  /// take. The answer is for [restoreLabel]: putting a rule's filing back as
+  /// a hand apply would leave a thread its rule could neither re-file nor,
+  /// undone, un-file.
   ///
   /// The link goes and `use_count` does NOT come back down. The count is a
   /// popularity signal — how often the owner has reached for this word, which
@@ -5398,16 +5402,71 @@ SELECT conversation_key FROM (
   /// label off one thread does not unsay the twenty times it was the right
   /// word, and a count that fell would quietly demote a chip because of one
   /// correction.
-  Future<void> removeLabel(
+  Future<({String appliedBy, String? ruleId})?> removeLabel(
     String source,
     String conversationKey,
     String labelId,
   ) async {
-    await db.customUpdate(
-      'DELETE FROM conversation_labels '
-      'WHERE source = ? AND conversation_key = ? AND label_id = ?',
-      variables: _args([source, conversationKey, labelId]),
-    );
+    return db.transaction(() async {
+      final rows = await db
+          .customSelect(
+            'SELECT applied_by, rule_id FROM conversation_labels '
+            'WHERE source = ? AND conversation_key = ? AND label_id = ?',
+            variables: _args([source, conversationKey, labelId]),
+          )
+          .get();
+      if (rows.isEmpty) return null;
+      await db.customUpdate(
+        'DELETE FROM conversation_labels '
+        'WHERE source = ? AND conversation_key = ? AND label_id = ?',
+        variables: _args([source, conversationKey, labelId]),
+      );
+      final row = rows.first.data;
+      return (
+        appliedBy: row['applied_by'] as String? ?? 'user',
+        ruleId: row['rule_id'] as String?,
+      );
+    });
+  }
+
+  /// The Undo behind [removeLabel]: the link back exactly as it was —
+  /// [appliedBy] and [ruleId] as the removal answered them, and no `use_count`
+  /// movement, because putting back what was there is not the owner reaching
+  /// for the word again.
+  ///
+  /// False when the label itself has been deleted since: its links died with
+  /// it, and writing a fresh one would file the thread under nothing.
+  Future<bool> restoreLabel(
+    String source,
+    String conversationKey,
+    String labelId, {
+    required String appliedBy,
+    String? ruleId,
+  }) async {
+    return db.transaction(() async {
+      final label = await db
+          .customSelect(
+            'SELECT 1 FROM labels WHERE id = ?',
+            variables: _args([labelId]),
+          )
+          .get();
+      if (label.isEmpty) return false;
+      await db.customUpdate(
+        'INSERT OR IGNORE INTO conversation_labels '
+        '(source, conversation_key, label_id, applied_by, applied_at, '
+        'rule_id) '
+        'VALUES (?, ?, ?, ?, ?, ?)',
+        variables: _args([
+          source,
+          conversationKey,
+          labelId,
+          appliedBy,
+          _nowIso(),
+          ruleId,
+        ]),
+      );
+      return true;
+    });
   }
 
   /// One thread's labels, in the same order [loadConversations]' join emits
