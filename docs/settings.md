@@ -119,6 +119,12 @@ it decides what ENTERS the pile and this one says when a thread leaves. It does
 not appear in the section summary: the summary already carries three clauses, and
 the threshold is the thing a reader scans that line for.
 
+With it on, a sent reply on a thread of the Needs You pile is marked done the
+way `e` does it, so the view lands on the next row and the progress count
+moves. A thread opened from Archive or Home is marked done in place and stays
+open. Either way the toast reads `Reply sent · Marked done.` with an Undo. See
+[pipeline/07-replies.md](pipeline/07-replies.md).
+
 ## What commits, and when
 
 **Toggles, segments and the slider apply instantly.** The activity-log switch,
@@ -1027,6 +1033,20 @@ offers them in too):
 There is no **Add label** here, deliberately. A label is minted where it is
 first needed — on a thread, from the picker — and a dictionary that could grow
 words nothing is filed under would fill up with them.
+
+The picker (`app/lib/widgets/label_picker.dart`) ranks an exact,
+case-insensitive name match first, and Enter applies the top match. When the
+typed word is not an existing name, a trailing `Create "<word>"` chip
+(`LabelPicker.createChipKey`) is offered after the matches, so a word that is
+only part of an existing label, "Vendor" beside "Vendor outreach", can still
+be minted. A name containing a double quote is refused with `A label can't
+contain a quote mark.`, because the `label:` facet in Find quotes a spaced
+name with `"` and could never quote it back. The picker says so on its hint
+line, and the store refuses the same name on create and on rename
+(`createLabel`, `renameLabel` in `message_store.dart`). Minting closes the
+picker and hands focus back before the write, so the new label files the
+thread it was minted for even if the reader has moved on; until the create
+settles the strip is busy and ignores every way out.
 
 Nothing here reaches for a provider: the section takes a list and three
 closures, and the host wires them to `labelsProvider`.

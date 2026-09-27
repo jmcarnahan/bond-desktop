@@ -351,7 +351,8 @@ no line at all.
 
 All three are clamped to 160 characters, and the clamp bites the text *inside*
 the angle brackets so the closing `⟩` survives. `_recapLineCap = 400` still applies
-to the message text before its aside, and `StorylineRecapTask._messagesCap =
+to the message text before its aside, after its markers and link targets
+(`stripLinkTargets`) come off, and `StorylineRecapTask._messagesCap =
 6000` is the final clamp on the whole window — there is no third one.
 
 **The gate** is the `recap_through` watermark (schema v10): the pass returns

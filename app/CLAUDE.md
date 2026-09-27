@@ -24,6 +24,16 @@ enforce the ones that are commands.
    drift_schema_vN.json`, `test/drift/bond/generated/schema_vN.dart`,
    `lib/data/database.g.dart`, `lib/data/database.steps.dart`.
    `test/drift/bond/migration_test.dart` covers every version pair.
+5. `make app-migrations` refuses when the current version's JSON already
+   exists and differs, or when any JSON has a higher version than
+   `schemaVersion`. Bump the version and add the step FIRST, with no JSON for
+   the new version present, then run it.
+6. Drift's `migrateAndValidate` flags a leftover COLUMN but not a leftover
+   TABLE (`validateDropped` defaults false). A migration test that drops a
+   table asserts its absence through `sqlite_master`.
+7. `db_adoption_test` replays every step from v1 over one file, so each step
+   must be a no-op on a re-run: `DROP … IF EXISTS`, and guard `dropColumn` /
+   `addColumn` with the `_columnExists` helper.
 
 ## Tests
 
@@ -109,6 +119,11 @@ enforce the ones that are commands.
   `test/fixtures/memory_token_store.dart`.
 - A `DropdownButton` whose value is not among its items asserts. A picker's
   value falls back to the stored id, then the default, then null with a hint.
+- `SingleActivator` defaults `includeRepeats: true`. A destructive key sets
+  `includeRepeats: false`, and its test holds the key (a repeat event) and
+  expects one act.
+- `LinkedText` returns a Column with a hover caption when `onOpenLink` is
+  set, so a widget test that finds `RichText` in a body takes `.first`.
 
 ## Working rules
 
@@ -119,6 +134,9 @@ enforce the ones that are commands.
 - `unnecessary_import` fires when one file imports both a re-exporting library
   and the library it re-exports. The fix is `show` on the wider import, naming
   what that file actually uses, never dropping the narrower one.
+- This SDK still needs `import 'dart:async'` for `FutureOr`: without it the
+  analyzer reports `Undefined class 'FutureOr'`, so an "unused import" nit on
+  it is wrong.
 - `services/` never imports `providers/`; no dialogs or popups
   (`test/no_dialogs_test.dart`) — every surface is a screen or pane with a
   back button.

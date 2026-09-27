@@ -43,7 +43,7 @@ const Set<String> automatedGateReasons = {
 /// no verdict is overwritten, and a message whose headers arrive later — the
 /// detail fetch is what gives [classificationOf] anything to read — simply gets
 /// a different answer the next time somebody asks. A stored suppression would
-/// be a fourth opinion about mail the gates, the rules and the model already
+/// be a third opinion about mail the gates and the model already
 /// have one each.
 ///
 /// TWO signals, and the second is the one that does the work. The `gate_reason`

@@ -25,8 +25,15 @@ its own, without `addressed_me`. Together those are what lift a 1:1 Teams FYI
 the stage read as a real ask over the default threshold.
 
 The two fences are asymmetric on purpose: `!= true` on the temper, `== true` on
-the boost, so NULL (never judged) and 0 (judged no) move **nothing** and score
-exactly as they did before the stage existed. And the verdict deliberately does
+the boost, so NULL (never judged) and 0 (judged no) move **nothing** in the
+score and score exactly as they did before the stage existed. The SCORE is not
+the whole story for a judged no, though: the readers that decide whether a
+thread is on Needs You treat 0 on the newest KEPT inbound as a veto that
+outranks triage's ask. `isNeedsYou` (`app/lib/widgets/app_rail.dart`, the
+rail) returns false on `latestNeedsYouVerdict == false` before it reads the
+CTA, and `_liveNeedsYouThread` (`message_store.dart`, the Home tile and the
+Needs You filter) spells the same term in SQL off the same message. NULL is
+still "not judged" and keeps its place in both. And the verdict deliberately does
 not touch the **threshold** — it raises the score through the same arithmetic
 every other signal uses, and the user's slider still gates what reaches the
 rail. The one thing it does bypass is **Later**: an open ask on the thread
@@ -88,6 +95,23 @@ is a week off), `end of week` / `eow`, `end of month` / `eom`, `next week`, and
 `eod` / `tonight`. Anything else is null, which reads upstream as "the message
 named no date anyone can act on" rather than as a guess.
 
+**Plan-relative words are not deadlines.** `isPlanRelativeDeadline` (same
+file) matches wording that counts from a start nobody named: a counter word
+with a small number ("Day 1", "sprint 2", "week 3", "phase two") or `T+5`. The
+number is required, so "day after tomorrow" and "week of May 5" still count as
+dates. `showableDeadline` is the deadline worth putting on screen: null for
+plan-relative wording, unless the phrase also carries a date `parseDeadline`
+can read ("Day 1 (2026-10-05)"), and everything else exactly as stored.
+`messages.deadline` keeps the sender's words either way. Its readers are the
+triage CTA suffix, which is why a "— by Day 1" banner is never written
+([03-triage.md](03-triage.md)); the quiet-FYI temper in `attentionScore`,
+where a plan-relative phrase does not stop a thread reading as quiet; the
+message-row chip, the Why panel and the Needs You deadlines lens; and
+`notifyWorthy`'s deadline ask
+([09-notifications.md](09-notifications.md)). The `plan_relative_banner_strip`
+one-shot (`stripPlanRelativeBanners`) takes a trailing "— by …" that
+`showableDeadline` refuses off the stored `cta_text` written before the fix.
+
 **Two pills, and one method behind them.** Each Later digest line gains a
 `Back <when>` caption when it has a date (`untilLabel` in `time_format.dart` —
 `tomorrow`, `in 3 days`, `in 2 weeks`, then the absolute day) and two quiet
@@ -132,3 +156,8 @@ thread's `done`, its last reply, the attention floor), ticking each row it
 raises. Without it a message judged yes came back to the inbox with no chip,
 for good. A sender rule lifting (`restoreSenderPref`) does not yet do this —
 recorded as a follow-up.
+
+The opposite repair ran once too. The `needs_you_flag_veto` one-shot
+(`PipelineProgress.lowerVetoedNeedsYou`) clears the settled chips that stood on
+triage's ask before a judged no was allowed to outrank it, ticking each row so
+the live screen re-reads it (see [11-needs-you.md](11-needs-you.md)).

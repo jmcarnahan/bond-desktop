@@ -19,6 +19,15 @@ handler's own `skipped` check stays as the belt, for an Ignore that lands
 between the claim and the run and for rows an older build enqueued. Every
 other work kind is untouched by the clause.
 
+Work the sync window can no longer reach is re-offered at sync by
+`MessageStore.reviveOwedMessageStages`: a kept inbound whose triage is done
+and whose extract stage is still pending, typically mail triaged inside the
+bootstrap window that the rolling floor overtook. It files `extract`,
+`needs_you` and `embed_message` rows with `INSERT OR IGNORE`, at most 150 per
+kind per pass for mail (`backlogEnqueueCap`) and 100 for Teams
+(`TeamsSync._extractCap`), so a restart or a narrowed window loses
+nothing (see [01-sync-ingest.md](01-sync-ingest.md)).
+
 **A thread for extraction, measured and not given (2026-09-17).** The task can
 take one. `ExtractionInput(message, now, {thread, threadDigest})` renders, in
 order, the date line, a `thread_digest` fence when a digest is passed, a
@@ -63,11 +72,22 @@ be re-run against a future prompt, not because anything calls them.
    admits while fewer than ten drafts are in flight, and `all` queues whatever
    `asksForAReply(row)` admits. Either way this is the cheap filter in front of
    the 27B's reply decision, and the reason for a skip goes on the activity row
-   as `draft: on_demand | not_prefetched | prefetch_cap | no_cue`.
+   as `draft: on_demand | automated_sender | not_prefetched | prefetch_cap |
+   no_cue`.
+
+   `automated_sender` is asked right after `onDemand` and ahead of every
+   other mode, because it is not a preference: `replySuppressed`
+   (`app/lib/services/llm/reply_decision_task.dart`) says a machine wrote the
+   message, from an automated `gate_reason` or `classificationOf` answering
+   `automated_notification`. It is the same authority the draft handler and
+   the composer ask, so the three cannot disagree (see
+   [07-replies.md](07-replies.md)).
 
    `asksForAReply` takes five signals off the row, any one enough:
    `needs_you_verdict = 1`, `reply_expected`, `needs_action`, an urgent/high
-   urgency, or a named deadline. `prefetchWorthy` keeps the two that do not
+   urgency, or a named deadline. The deadline arm still admits any non-empty
+   `deadline`, a plan-relative "Day 1" included (it does not go through
+   `showableDeadline`); that is a recorded follow-up. `prefetchWorthy` keeps the two that do not
    fire on ordinary mail — `needs_you_verdict = 1` or an urgent/high urgency —
    and drops `reply_expected`, `needs_action` and the deadline, which a
    receipt, a reminder and a calendar invitation trip between them.
@@ -92,6 +112,11 @@ It also embeds the message's own document vector on the fast path
 | Slot | **fast / bulk** by default (`stageLlmClientProvider('extraction')`; re-pointable per stage in Settings → Models, see [10-model-routing.md](10-model-routing.md)) |
 | Params | **temperature 0** (set in `extract_handler.dart`), maxTokens 512 |
 | Concurrency | 3 (the handler's `concurrency` override) |
+
+The `inbound_message` fence is `buildMessageBlock`
+(`app/lib/services/llm/message_block.dart`), so the body is link-stripped
+(`stripLinkTargets`, keeping each label) before its cap, the same block triage
+reads.
 
 **What the prompt instructs.** Pull the stable facts out of one message, with
 the evidence sentence first to force grounding. The prompt's bullets restate

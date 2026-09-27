@@ -98,6 +98,9 @@ A body that is nothing BUT markers gets a synthesised stand-in
 (`attachmentStandIn` in `message_block.dart`): a rendered card's text if there
 is one, else `Shared a file: <names>`, else `Shared an image`. Otherwise the
 model would be told the message said nothing, which is the opposite of true.
+A Teams quote-reply is not a file and is never in the stand-in: the prompt
+reads it as a line above the body, `↪ replying to <sender>: <preview>`
+(`quotedReplyLines`, same file), so the model knows which turn is answered.
 
 ## The text policy
 
@@ -185,8 +188,13 @@ would double the shelf. It never contains `|`, which is what
 `attachmentEntityId` splits a work item's id on.
 
 **Parsed in `SyncService._fetchDetailInto`, once**, because the detail fetch is
-the first and only moment the body exists — and both mail connectors deliver
-plain text bodies, so one parse serves both. Rows are numbered from the count
+the first and only moment the body exists. Graph delivers HTML, which
+`mailBodyFromDetail` converts before the parse (see
+[01-sync-ingest.md](01-sync-ingest.md)); the MCP server delivers text. The
+regex takes either converter's run: Graph's own text conversion wrote the icon
+as `[<icon url>]`, while this app's mail profile drops the icon image and
+writes one space before the bracket, so the icon group is optional
+(`owa_links.dart`). One parse serves both. Rows are numbered from the count
 of the connector's own entries, so a real attachment always keeps the lower
 ordinal and the per-message cap counts real files first. Each accepted run
 becomes an `[[att:<id>]]` marker in `body_text`, so `layOutBody` places the chip
@@ -194,7 +202,8 @@ exactly where the link sat, and the same marker rules as a chat's apply: no
 prompt and no embedding ever sees one. Any U+200B left over from a run the
 regex did not match is stripped. `has_attachments` is RAISED to 1 when a link
 was found and never lowered — a link the connector never counted is still a
-file on the message, and the paperclip is how a card says so.
+file on the message. The card's 📎 count reads the `reference` row itself,
+not the flag.
 
 The row is born `kind = 'reference'`, `size = 0`, `content_type = NULL`, with
 the target in `source_url` — which is what the text policy accepts, so the link
@@ -412,7 +421,19 @@ re-encoded; then, for a Teams shared file, OneDrive's own rendering at
 a document this app never downloaded, and which is why it comes BEFORE the PDF
 branch for a chat file; then a PDF's first page, drawn through the
 `PdfThumbnailer` seam from the same cached bytes the preview will want, and
-refused above `maxPreviewBytes` before any fetch.
+refused above `maxPreviewBytes` before any fetch; and last, a web page drawn
+through the `HtmlThumbnailer` seam (`html_snapshot.dart`) at 320 × 240.
+
+The page rung is the Runner's own WebKit
+(`app/macos/Runner/WebSnapshotChannel.swift`), and that file holds the whole
+security posture: scripting off (`allowsContentJavaScript = false`), a
+non-persistent data store, a content rule list that blocks every resource the
+page asks for and fails CLOSED (a list that will not compile means no
+snapshot), a navigation delegate that cancels every navigation after the initial
+load, a 4-second
+timeout, and one snapshot in flight at a time (a second call answers `busy`).
+Every failure, including no channel under `flutter test`, is null, and the card
+draws its glyph.
 
 The PDF branch is a **typedef, not a call**: the engine that can draw a page is
 pdfrx, and pdfium must not be reachable from `services/` or a native library
@@ -659,8 +680,12 @@ The panel is the shell's now, not the thread pane's: `_side` holds one
 `SidePanel` — a `FilePanel` here; the five kinds are tabled in
 [../shell.md](../shell.md#what-opens-where) — and `_wide()` renders it as
 the last column of the shell's `Row`, so a file opens beside a thread, beside a
-storyline's spine, and beside a thread that is itself in the side panel (where
-it REPLACES that thread, one thing at a time on that side of the seam).
+storyline's spine, and beside a thread that is itself in the side panel.
+The side is a back STACK (`_sideStack`): a file, a Why or a history opened
+from INSIDE the panel is pushed over the thread it came from, the header draws
+a `← Back to <title>` row (`SidePanelHost.backKey`), and the ✕ or Escape pops
+back to it. Opening something from outside the panel, the main pane, the rail
+or a list row, still replaces what is there.
 
 The width is measured **post-rail** — the window less `IconRail.width`,
 `AppRail.width`, the 1 px divider and the 16 px seam — and the two-pane
@@ -725,7 +750,8 @@ answers for a link and for a file over the cap too.
 | document (docx, pptx) | the server's words, under OneDrive's picture for a chat file | the same | **no** |
 | eml / `item` | `EmlPreview` — a `MessageRow`, because a forwarded message is a message | the body | **no** |
 | reference (a mail link) | whatever its name or type says — a PDF renders as a PDF, with the drive's own thumbnail | the server's words | **yes**, by url |
-| link (card, message\_reference, and a reference nothing could name) | "This is a link, not a file." + Open in Outlook/Teams, or the OneDrive sentence + Open link | — | **no** |
+| link (card, and a reference nothing could name) | "This is a link, not a file." + Open in Outlook/Teams, or the OneDrive sentence + Open link | — | **no** |
+| html (`.html`, `.htm`, `.xhtml`, `text/html`) | `HtmlPreview`: a WebKit snapshot of the page, its converted words, and **Open in browser** | the words, converted at extraction | yes |
 | unsupported (heic, tiff, xls, everything else) | `UnsupportedPreview` | the server's words | **no** |
 
 `previewKindFor` reads the **name before the content type**, because Graph
@@ -735,8 +761,23 @@ unsupported on purpose — the first two are images Flutter cannot decode, the
 third a binary workbook `xlsx_reader.dart` does not read, and a broken frame
 says less than a line naming the file.
 
-Two refusals come before any fetch. A **link** — a card, a quoted message, a
-reference nothing could name — has no file to draw and offers the url out
+A `message_reference` never reaches this table: a quote-reply is drawn as a
+quote block above the reply (`widgets/quote_block.dart`) and sits on no file
+shelf, so no chip opens it. `previewKindFor` still maps it to `link` as a
+belt. Every count of files skips it the same way: the list card's paperclip
+and number (`attachment_count` in `loadConversations`), the triage prompt's
+`Attachments:` line (`_attachmentLine`), and the `has:file` search facet
+(`_hasFileExists`), so a quote-only thread shows no paperclip and is not found
+as one with a file. `messages.has_attachments` stays 1 for it, because the
+handlers read that flag to hydrate the rows the `↪` line is built from.
+
+An HTML attachment's text is converted where it is stored:
+`AttachmentTextHandler` runs `htmlToText` in the document profile, so the
+Text segment, the digest, the passages and the draft context all read the
+words rather than `<table>` and inline CSS.
+
+Two refusals come before any fetch. A **link** — a card or a reference
+nothing could name — has no file to draw and offers the url out
 instead. A file over the **live** cap — `bytes.maxPreviewBytes`, per
 connector, never the `attachmentTooLargeBytes` constant — says how big it is and
 offers the same link; Open and Save are hidden there too, since there is nothing
@@ -816,9 +857,17 @@ web pages and `.svg` — or by content type where the connector named the file
 better than its sender did. The panel renders a caption where Open was, so the
 missing control reads as a decision rather than as a bug, and
 `_openAttachmentInOs` checks again behind it. **Previews are unaffected**: an
-`.xlsm` still renders as a sheet and an `.html` still shows as text, because
-reading a file is not running it and this app's own renderers are the safe way
-to look inside one.
+`.xlsm` still renders as a sheet and an `.html` still shows its words and a
+picture of itself, because reading a file is not running it and this app's own
+renderers are the safe way to look inside one.
+
+A page has one narrower door beside that refusal: `HtmlPreview`'s **Open in
+browser** (`openHtmlInBrowser`, `html_open.dart`), a labelled control with a
+caution under it. It writes the cached bytes to a temp copy, one folder per
+attachment under `bond-pages` in the system temp directory, swept of folders
+untouched for a day, with a sanitised `.html` name, and launches that file.
+It never writes into the content-addressed attachment cache. `openRefused`
+still answers true for a page, so the generic Open stays withheld.
 
 The save panel's suggested name is clamped by `safeSuggestedName`
 (`attachment_format.dart`). It comes off the wire, so it can carry a path, a
@@ -845,8 +894,8 @@ the half somebody meant to show. Two or more become an `ImageGrid`: up to four
 a `BondColors.ink` scrim, where N counts the tile under it too. Tapping the
 counter opens that picture; the rest are reached from there.
 
-**Links.** `kind` in `{reference, message_reference, card}` renders as a
-`LinkUnfurl` instead: a 3px accent strip down the left, then `🔗 <site>`, the
+**Links.** `kind` in `{reference, card}` (`linkAttachmentKinds`) renders as
+a `LinkUnfurl` instead: a 3px accent strip down the left, then `🔗 <site>`, the
 name, the digest line, and an `Open link` button. `linkSiteLabel(url)` is the
 site — `SharePoint`, `OneDrive`, `Teams`, or the bare host with `www.`
 stripped, and `''` for anything `webUriOf` refuses. The site is said BEFORE the
@@ -885,8 +934,10 @@ because `inlineImageMinBytes` is about inline pictures, which are already gone.
 
 The kind runs **in SQL**, as `FilesKind { all, documents, images, links }`:
 images are `kind = 'image' OR lower(content_type) LIKE 'image/%'` (minus the
-three link kinds — a link to a picture is a link), links are the
-three link kinds, documents are everything else. It has to be SQL because the
+two link kinds — a link to a picture is a link), links are the
+two link kinds (`reference`, `card`), documents are everything else. A
+quote-reply is on no shelf, All included (`_notAQuote`), which keeps the three
+shelves adding up to All. It has to be SQL because the
 read is paged, and a page plus a client-side filter cannot both be honest. The
 edge that buys: a `.png` Graph reported as `application/octet-stream` files
 under **Documents**, because reading the file name in SQL cannot use an index.

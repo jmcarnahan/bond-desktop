@@ -199,7 +199,9 @@ inside the one statement that answers everything else, so a thread settling
 between two reads cannot land in one number and not another. It is also the one
 tile that counts THREADS: the rail's own rule — `isNeedsYou` spelled in SQL as
 `_liveNeedsYouThread` over the thread's live state, bucket, score and ask,
-bound to the same attention threshold the rail reads — and under that filter
+and the judge's no on its newest kept inbound as a veto
+([11-needs-you.md](11-needs-you.md)), bound to the same attention threshold
+the rail reads — and under that filter
 the table shows one row per thread, its newest kept message. "Kept" is
 `MessageStore.keptMessageSql` on `messages` (`triage_status <> 'skipped' OR
 gate_reason = 'teams_source'`), a fact about the message the gate judged rather

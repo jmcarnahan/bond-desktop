@@ -90,8 +90,8 @@ success or failure, so a failed pass never silences the next one.
 put back what an outage, a crash or a race left behind: `reviveErroredTriage`
 and `reviveErroredWork` for what failed, `reclaimStaleTriage` /
 `reclaimStaleWork` for claims nobody is holding, and `reviveTerminalTriage` /
-`reviveTerminalWork` for one more try a day past those ceilings. Two more join
-them here.
+`reviveTerminalWork` for one more try a day past those ceilings. Three more
+join them here.
 
 `reviveOwedStorylineStages` heals the settle race. The notification
 coordinator can settle a message in the middle of a sync — before this pass's
@@ -104,16 +104,37 @@ and it reports `revived_storyline` on the sync event only when it found any.
 `writeStorylineProgress` is what lets the pass it queues actually land (see
 [09-notifications.md](09-notifications.md)).
 
+`reviveOwedMessageStages` heals what no window can reach any more: mail
+triaged inside the bootstrap window whose extract, needs-you and embed work
+the rolling floor overtook before the paced enqueue got there. It reads "owed"
+off the progress row (triage done, extract still pending, outcome pending, not
+dropped, a kept inbound), so a row it re-offers is one the next sync does not
+repeat. It files `extract`, `needs_you` and `embed_message` rows with
+`INSERT OR IGNORE`, the embed arm only where no vector exists, at most
+the cap that sync's own backlog enqueue uses, per kind per pass:
+`backlogEnqueueCap` (150) for mail, `TeamsSync._extractCap` (100) for Teams.
+Both syncs call it after their embed backlog, and it reports `revived_owed_work` (the extract count; the two
+twins ride along) only when it queued any. See
+[04-extraction.md](04-extraction.md) and [11-needs-you.md](11-needs-you.md).
+
 The one-shot `needs_you_flag_backfill` runs once, beside the other one-shots,
 raising the Needs You chip on rows that settled before the verdict column
 existed. It reports `backfilled_needs_you` (see
-[11-needs-you.md](11-needs-you.md)). Every one-shot marker is deleted by
+[11-needs-you.md](11-needs-you.md)). Its lowering twin, `needs_you_flag_veto`,
+runs once beside it and clears the settled chips that stood on triage's ask
+before a judged no was allowed to outrank it (`lowerVetoedNeedsYou`, ticking
+each row), reported as `vetoed_needs_you`. Every one-shot marker is deleted by
 `wipeAll`, so a sign-out-and-wipe lets them run again on the next account.
 
 `rependGatedTriage` — the Teams sync's catch-up for the retired `teams_source`
 gate — now resets the progress rows it re-pends in the same transaction. A
 re-pended message is about to be triaged again, and the gate cascade left on
-its row would otherwise read as a finished pipeline.
+its row would otherwise read as a finished pipeline. The mail sync calls it
+once more under the `label_rule_gate_retired` one-shot: the label rules were
+removed in 2026-09 (schema v19), so a message the old `label_rule` gate skipped
+would never be looked at again. Before the backlog enqueues, it re-pends those
+rows for email and Teams inside this pass's floor, and reports
+`repended_label_rule_gates`.
 
 **Reconcile.** The delta feed is trusted for position, and has still been
 seen to skip a message: on one day two of nine inbound messages never appeared
@@ -172,7 +193,18 @@ written before the fold learned to wait for the gate, walking every
 `needs_reply` thread on every connector with the lowering rule and reporting
 `refolded_threads` on the `sync_mail` event.
 
-A second one-shot beside it, `gated_conversation_repair`, walks what a late
+Two more one-shots repair stored text and verdicts that a later rule would
+have written differently. `meeting_regate_crlf` gates the meeting RESPONSES
+already in the mailbox (`regateMeetingResponses`, then a refold when it gated
+any), because a gate only speaks about a message on its way past. The key is
+the second one: the first pass read Exchange's `\r\n` empty body as somebody
+talking and gated none of the fallback-shape rows. It reports
+`regated_meeting_responses`. `plan_relative_banner_strip` takes a trailing
+plan-relative "— by Day 1" off the stored ask banners through
+`showableDeadline` (`stripPlanRelativeBanners`), reported as
+`stripped_plan_relative_banners` (see [08-attention.md](08-attention.md)).
+
+Beside `thread_state_refold`, the one-shot `gated_conversation_repair` walks what a late
 gate leaves BUILT rather than what it leaves said: every conversation carrying
 an embedding whose inbound messages were all gated loses that embedding, its
 automatic storyline memberships and its pending `storyline` row. It walks at
@@ -228,6 +260,14 @@ row.
 Both are public statics because the send paths call them too — a locally
 written reply and the copy the next drain folds in must agree on every column.
 
+**Teams senders.** A chat sender's name is a ladder in `TeamsSync._sender`:
+the `displayName` Graph gave, then `Bot` for an application it named nothing,
+then `Unknown sender` for a message with no `from` at all. A PERSON with no
+name keeps a null name, so the roster does not list two `Unknown sender`
+entries. Rows stored before the ladder are fixed at display time by
+`displaySenderName` and `isBotSender` (`app/lib/services/sender_display.dart`),
+which never show a `teams:` pseudo-address.
+
 **Local echo rows.** A mail reply sent from this app is written immediately,
 under the id `local:<draftId>`, by `mailEchoRow`
 (`app/lib/services/mail_echo.dart`) through `MessageStore.insertLocalEcho`.
@@ -262,23 +302,74 @@ like any Sent Items copy, so the Dropped tab lists it for the minute it
 exists, but reviving it would queue work on a row the next drain deletes.
 
 **Attachments.** Sync is where a message learns what came with it. The
-paperclip (`messages.has_attachments`) rides the mail delta page, so a list
-card shows it before any body is fetched. The attachment LIST arrives later
+flag (`messages.has_attachments`) rides the mail delta page and is the
+handlers' cue to hydrate a message's attachment rows; the list card's 📎
+count reads the rows themselves (`attachment_count` in `loadConversations`),
+so for mail it appears once the detail fetch has written them. The attachment LIST arrives later
 and differently per connector: mail writes rows inside `_fetchDetailInto`,
 because the detail fetch is the first moment a list exists; chat writes them
-in `_ingestChat`'s insert loop, because chat has no detail step. Both then
+in `_ingestChat`'s insert loop, because chat has no detail step. A Teams
+quote-reply arrives as a `message_reference` entry, and its quote lands on the
+columns mail's `item` rows own: `item_from` is who was quoted, `card_text` the
+snippet and `content_id` the quoted message's id. It is a quote, not a file
+(see [12-attachments.md](12-attachments.md)). Teams still sets
+`has_attachments` for a quote-only message. No paperclip or file count reads
+that flag: the handlers read it only as the cue to hydrate a message's
+attachment rows, which is how the quote reaches their prompts. Both then
 queue `attachment_text` work for the rows the text policy accepts — and only
 that kind, since a digest of a document nobody has extracted yet is a call
 that can only fail. Rows are written on EVERY sighting, not only the first: an
 edit can add a file, and the upsert preserves everything the handlers and the
 owner wrote.
 
+**The body is converted here.** The Graph detail fetch asks for HTML
+(`Prefer: outlook.body-content-type="html"` in `graph_mail.dart`), because
+Graph's own text conversion writes `label <href>` for every anchor and `[alt]`
+for every image, and in automated mail that noise is most of the message.
+`_fetchDetailInto` is the one conversion site: `mailBodyFromDetail`
+(`app/lib/services/mail_body.dart`) reads the connector's `contentType`, runs
+HTML through the mail profile of the core in `app/lib/services/html_text.dart`,
+and only tidies a body that arrived as text, which is what the MCP server
+sends. The mail profile's rules, each pinned by a test:
+
+- **Source whitespace is HTML whitespace.** Between tags, a run of
+  `[\t\r\n ]` folds to one space; tags and `<pre>` bodies stay as written.
+  Exchange's plain-text mail (`line<br>\r\n`) is therefore single-spaced. The
+  fold runs in the document profile too.
+- **Divs and breaks.** A run of div boundaries is one newline (`_mailDivRun`);
+  a `<div><br></div>` keeps the blank line its `<br>` writes, and `<p>` keeps
+  its paragraph gap.
+- **Links** become `label <url>` runs through `canonicalLinkRun`. The href
+  drops tab, CR and LF the way a browser does. A label that is the address
+  again prints once, an anchor with no label (a linked logo) drops whole, and
+  an unopenable target keeps only the label. A Safe Links wrapper with no label, or
+  a URL-shaped one, gets a label rebuilt from the address it carries; a
+  worded label keeps its words.
+- **Deceptive labels yield.** A URL-looking label whose HOST differs from the
+  href's host is replaced by the href; a label carrying userinfo names no
+  host, so it yields too. An email label over a `mailto:` for a different
+  address yields. A label on the same host with another path keeps its words.
+  A bare domain such as `bank.example` is not read as a claim, because
+  `Report.xlsx` looks the same; the transcript's hover caption shows the real
+  host instead.
+- **Pictures.** An inline `cid:` image becomes a `[cid:X]` token the
+  transcript splices the bytes onto; every other image is dropped with no
+  placeholder. U+200B is kept, because it delimits Outlook's attach-as-link
+  runs.
+- **Bounded input.** Mail is cut to `htmlInputCap` (2 Mi characters) after scripts,
+  styles and pictures are dropped, so a base64 chart costs nothing; the cut
+  backs off to a tag start within 64 Ki characters and never splits a surrogate pair.
+  The attachment preview caps with `capProse: true`, and context extraction
+  never caps. Every tag pattern is `[^<>]*`, and the comment, `<pre>`, anchor
+  and open-head bodies cannot run past a later opener, so malformed input
+  stays linear.
+
 The mail detail fetch also REWRITES the body it stores. Outlook's "attach as
 link" is not in Graph's attachment list at all — it is a zero-width-space
 delimited run in the body — so `_fetchDetailInto` parses it out
 (`owa_links.dart`), replaces the run with an `[[att:<id>]]` marker, writes a
-`reference` row numbered after the connector's own, and raises the paperclip
-even though the message said `hasAttachments: false`. See
+`reference` row numbered after the connector's own, and raises
+`has_attachments` even though the message said `hasAttachments: false`. See
 [12-attachments.md](12-attachments.md).
 
 It also takes off what the sender never wrote. Exchange prepends its
@@ -292,3 +383,37 @@ search index and every prompt see the sender's own first sentence. A one-off
 behind the `sender_tip_strip` pref rewrites the rows stored before this
 build, reported as `stripped_sender_tips` on the sync's activity row; it
 moves `updated_at` with the text so the keyword index refiles them.
+
+The tenant's "External Email … use caution" banner goes the same way:
+`stripExternalBanner` removes it from the head of the text, and nowhere else,
+in the tidy step both paths share. The delta page's `bodyPreview` is Graph's
+own text conversion whatever the detail prefers, so the preview is tidied and
+link-stripped (`stripLinkTargets`) at ingest: a list card has two lines, and
+the label is the snippet.
+
+A body that converts to nothing, such as a notification that is one linked
+image, is SETTLED rather than stored empty (`_settledEmptyBody`). An empty
+body is what `ensureBodies` reads as "no body stored", so every open would
+fetch it again. The stored preview becomes the body, or a single space when
+there is not even a preview.
+
+The detail's `$select` also asks for `meetingMessageType`, Graph's word for
+the kind of invitation. It is stored under `meeting` in `source_meta_json`
+beside `headers`, each key omitted when it has nothing to say; the
+meeting-response gate reads it ([02-gates.md](02-gates.md)).
+
+Two one-shots repair what earlier builds stored, and neither stamps
+`messages.updated_at`, so the keyword index keeps the old text until the refill (see
+[05-embeddings.md](05-embeddings.md)). `mail_html_rebuild_2` runs
+`clearLegacyMailBodies` and then `clearDoubleSpacedMailBodies` over the
+lookback window, reported as `cleared_mail_bodies`. It superseded the first
+`mail_html_rebuild` key, because the first converter kept the source's CR/LF
+beside every `<br>` newline and double-spaced plain-text mail. The second
+clear nulls nearly every in-window email body once; each refills lazily
+through `ensureBodies` when its thread is opened. Until then, draft style
+examples and thread history read the 255-character preview. Both clears spare
+`local:` echoes, which could never be refetched, and rows whose triage is
+pending or processing or that have open work items, whose stages would
+otherwise read the preview. `mail_preview_tidy` rewrites the stored previews,
+on messages and conversations, through the same link rules
+(`tidyMailPreviews`), reported as `tidied_mail_previews`.

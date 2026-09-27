@@ -6,9 +6,18 @@ cannot disagree: `notifyWorthy` counts `needs_you_verdict = 1` as a
 message-level ask; `needsYouSql` counts it in the same position, so the settle
 sweep's backstop writes the same `message_progress.needs_you`; and
 `_isComplete` holds a candidate open while its `needs_you` work item is still
-`pending` or `processing`. It is the **ask half only** — the attention
+`pending` or `processing`. A yes is the **ask half only** — the attention
 threshold, the `later` bucket and the `done` state gate a judged yes exactly as
-they gate every other ask.
+they gate every other ask. A **no is a veto**: verdict 0 outranks every ask in
+`notifyWorthy` and in `needsYouSql`'s live arm, so a judged no never chips or
+toasts. The frozen v8 migration arm is unchanged.
+
+**The rail and the tile** read it too, as the same veto. `isNeedsYou`
+(`app/lib/widgets/app_rail.dart`) drops a thread whose newest KEPT inbound was
+judged no, through `Conversation.latestNeedsYouVerdict`, before it reads the
+ask; `_liveNeedsYouThread` in `message_store.dart` spells the same term for
+the Home tile and the Needs You filter. NULL keeps its place in both. See
+[08-attention.md](08-attention.md).
 
 **Bucket filing** reads it too. A thread holding an unanswered judged yes is
 never filed to Later by the automatic rule, in either writer — see
@@ -51,6 +60,15 @@ the model reads.
 The floor can only **raise** the verdict. A message it says nothing about is
 handed on rather than written down as a no.
 
+**Cold outreach switches the floor off.** `isColdOutreach` (same file) marks
+a stranger's first approach: a sender outside the owner's domains
+(`isExternalAddress` over the handler's `ownerDomains` read) on a conversation
+whose `last_outbound_at` is empty, meaning the owner has never written on it.
+Both halves are required, so customers and suppliers the owner answers are
+not caught. `needsYouFloor(row, coldOutreach: true)` does not fire, and the
+model reads the message like any other. Every way the check cannot answer
+answers false, because a true takes a message off the rail.
+
 **The model branch.** Everything below the floor goes to `NeedsYouTask`
 (`app/lib/services/llm/needs_you_task.dart`) on the **fast** slot — bulk work,
 one small answer per message, see `10-model-routing.md`. Temperature 0 and 256
@@ -90,6 +108,10 @@ spec.
 verdict = needs_you && confidence != 'low'
 ```
 
+For cold outreach the bar is higher: `needs_you && confidence == 'high'`.
+Unsolicited outreach is written to read as an ask, so only a confident yes
+raises it.
+
 The floor has already said yes to everything it covers, so all the model can do
 is raise what the floor left alone — and a low-confidence yes stays a no,
 because the verdict buys an interruption and "possibly" is not grounds for one.
@@ -110,7 +132,9 @@ pass still does not look at them: a verdict built on another model's verdict
 inherits its mistakes, and the one case a per-message judgement exists for —
 a busy thread where the owner gets one direct question — is the case triage's
 thread-level answer loses. The handler reads the message body and the thread
-behind it, and nothing else. (The one thing it does read from triage is the
+behind it, plus two facts for the cold-outreach check: the owner's domains
+and the conversation's `last_outbound_at`, the latter read only for an
+external sender. (The one thing it does read from triage is the
 `skipped` **gate**, which is a guard against judging a newsletter, not a
 judgement it defers to.)
 
@@ -261,6 +285,11 @@ run). Raise-only, and carrying the same guards as the live path — both guard o
 `dropped = 0`, so a gate cascade, which also writes `settle_state = 'done'`,
 stays dropped either way.
 
+Its lowering twin, `needs_you_flag_veto`, ran once for the veto:
+`PipelineProgress.lowerVetoedNeedsYou` clears the settled chips that stood on
+triage's ask beside a judged no, ticking each row, reported as
+`vetoed_needs_you`.
+
 **The chip follows the thread out of Later, too.** The verdict rule above has
 a hole the two rules before it cannot see: a message that settles while its
 thread sits in Later takes a 0 on the strength of the bucket alone, and
@@ -289,6 +318,14 @@ predicate is deliberately simple, and the price is that gated and outbound rows
 with a NULL verdict are revived too and leave again through the handler's own
 guards — one queue row each, once.
 
+**The standing revive.** `INSERT OR IGNORE` also never re-offers a row the
+window stopped reaching before its work was queued. `reviveOwedMessageStages`
+runs on every sync, both sources, and files `needs_you` beside `extract` and
+`embed_message` for kept inbound rows whose triage is done and whose extract
+stage is still pending, at most 150 per kind per pass for mail and 100 for
+Teams (see
+[01-sync-ingest.md](01-sync-ingest.md)).
+
 **Handler position and failure behavior.** First in the `aiWorkerProvider`
 handler list, ahead of extraction; `concurrency` 3, since an item touches only
 its own row. It early-returns *done* on the shapes the queue can hand over
@@ -306,7 +343,12 @@ parks the whole kind rather than burning attempts on it.
 
 The Needs You overview is five lenses on one pile, as a
 `BondFilterPillRow<NeedsYouTab>` (`Key('needs-you-tabs')`) above the list:
-**All · Asked of me · Waiting on others · Deadlines · Suggested drafts**.
+**All · Asked of me · Waiting on others · Deadlines · Suggested drafts**. A
+sixth filter, not a sixth tab, sits under them as a second pill row when the
+owner has labels:
+the label lens (`NeedsYouLabelFilter`, `needsYouLabelRows`) narrows the same
+ranked pile to the threads wearing one label, and a null pick is the whole
+pile.
 
 `All` leads and is the default, so arriving at the stop shows exactly what the
 stop always showed — the ranked list, at the same threshold as the rail, so the
@@ -326,7 +368,9 @@ schema changed for either:
 
 - `latest_deadline` — the newest inbound message's `deadline`, in the sender's
   own words. The newest one's and nobody else's: a date named three replies ago
-  has already been answered or overtaken.
+  has already been answered or overtaken. The Deadlines tab keeps a row only
+  when `showableDeadline` answers for it, so a plan-relative "Day 1" does not
+  put a thread there (see [08-attention.md](08-attention.md)).
 - `pending_draft_count` — suggestions in `('suggested','edited')` against that
   same newest inbound message. The subselect is `getDraft`'s, so a thread this
   counts and a thread whose composer is full are the same thread.
@@ -349,8 +393,12 @@ standing in, and ⤢ on the panel is how a thread gets the whole pane. See
 The pile has ONE order everywhere it is drawn — the rail's Needs You section,
 this overview, and the row Enter opens from Find — and the reader chooses it:
 `By priority` (`needsYouRows`' own ranking: needs-reply first, then attention
-score; the default) or `Newest first` (`lastMessageAt` descending, stable, an
-undated row last). The choice lives on the overview's order control
+score; the default), `Newest first` (`lastMessageAt` descending, stable, an
+undated row last), `Quick wins` (a partition: threads `isQuickWin` can see an
+end to, meaning triage expected no reply or the thread has no ask and at most
+three messages, move above the rest, each half keeping its ranking) or
+`Oldest first` (the clock backwards, still stable, an undated row still
+last). The choice lives on the overview's order control
 (`Key('needs-you-sort')`, a `PopupMenuButton` beside the pills) and is kept in
 the `needs_you_sort` preference, so it survives a restart and reaches every
 place the pile is drawn.
@@ -363,6 +411,56 @@ agreeing: `+N more` opens the list in the order the rail showed, Enter opens the
 row under the reader's eyes, and a tab filters an ordered pile rather than
 reordering it. It never adds or drops a row, so the badge over the section is
 unaffected by it.
+
+## Keys on the overview
+
+The pile is worked from the keyboard through one `Shortcuts` + `Actions` pair
+over the list and the thread (`triageKeys` in
+`app/lib/screens/inbox_screen.dart`, the intents in
+`app/lib/widgets/triage_intents.dart`), so a key, a row's button and the cheat
+sheet run the same code. Every single letter is inert while the cursor is in
+something that takes typing (`_keysLive`); Escape is not.
+
+- **Walking keys repeat.** `j` / ↓ and `k` / ↑ step to the next and previous
+  row, `]` / `[` to the next and previous mention in the open thread, `z` (or
+  ⌘Z) replays the last toast's Undo, and `?` opens the cheat sheet beside.
+  Escape closes an open picker or quick reply, or with none open clears the
+  ticked rows, and hands focus back to the list.
+- **Acting keys fire once per press.** `e` marks done and advances, Shift+E
+  marks done with a label, `l` labels and keeps the thread, `s` sends it to
+  Later, `r` opens the quick reply, `m` drops the sender and `x` ticks the row.
+  These set `includeRepeats: false`, so a held key acts once rather than
+  clearing rows the reader never looked at.
+
+**One act at a time.** `_triageAndAdvance` works out where the reader lands
+before the list moves, runs the act, then lands them. The `_triaging` latch
+holds while it runs, and a key or button pressed mid-act is DROPPED: its
+surface is still on screen, so the reader sees where the first act landed and
+presses again. Three callers whose surface has already gone QUEUE instead
+(`queue: true`, waiting on `_triageIdle`): the picker's apply when it marks
+done after labelling, its mark-done-without-label way out, and a sent reply's
+mark-done. A queued act reads its target and landing after the wait. If the
+reader moved to another thread while an act's write was out, that choice
+stands and the landing is skipped.
+
+**Where a thread stood.** `_lastPileIds` is the pile as last read while the
+open thread was in it, or while nothing was open. A thread that leaves the
+pile while open, such as a sent reply that flips it to waiting, still walks
+with `j` / `k` from where it stood and lands on the nearest row still drawn
+(below it, else above). A thread that was never in the pile, opened from
+Archive, Home or a room, goes nowhere on `j`. `_resetPileProgress` clears the
+memory whenever the pile on screen changes: the rail moving, a tab pick, the
+label lens.
+
+**Bulk keys need the overview on screen.** With rows ticked, `e`, Shift+E,
+`l`, `s` and `m` act on the selection only while `_selectionActive`: something
+ticked is drawn AND `_highlightedSection` is Needs You, meaning the main pane
+shows the overview. A thread open BESIDE the overview hides nothing, so the
+selection stays live there. A thread opened in the main pane, Settings, the
+composer or the activity log hides the ticks, and the keys act on the thing in
+front of the reader. The ticks survive either way, so the reader can open a
+thread, look, and come back to the selection. `j`, `k` and `r` are always
+about one row.
 
 ## What the documents on a message say
 

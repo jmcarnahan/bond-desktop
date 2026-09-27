@@ -27,10 +27,19 @@ bond-desktop is not a thin UI over a server — the long-running work lives
 | --- | --- | --- |
 | Managed `llama-server` child | `app/lib/services/server/model_server_supervisor.dart` | Spawned `ProcessStartMode.normal` (not detached), health-checked on a 2s timer. **Killed on quit** by `AppDelegate.applicationWillTerminate` and `ServerBootstrap`'s `AppLifecycleListener(onExitRequested:)`. |
 | AI pipeline drains + triage | `app/lib/services/ai_workers.dart`, `ai_worker.dart`, `triage_queue.dart` | Three `AiWorker` lanes (fast / storyline / draft) as Riverpod providers. Claim rows from the Drift DB, so **state is durable** — `main.dart` resets interrupted claims on launch. |
-| Microsoft Graph sync poll | `app/lib/services/sync_service.dart` | The 60s periodic driver is a `Timer.periodic` **on the `InboxScreen` widget** (`inbox_screen.dart:217`), cancelled in `dispose()`. Most tightly coupled to a window being alive. |
+| Microsoft Graph sync poll | `app/lib/services/sync_service.dart` | The 60s periodic driver is a `Timer.periodic` **on the `InboxScreen` widget** (the `_poll` field, started in `_InboxScreenState` with `_pollInterval` and calling `_refresh`), cancelled in `dispose()`. Most tightly coupled to a window being alive. |
 
 Because the pipeline is DB-backed, restarts are safe — the concern is
 continuity, not data loss.
+
+**What survives a restart today.** On launch, `main.dart` resets interrupted
+triage and work claims (`resetInterruptedTriage`, `resetInterruptedWork`), so
+nothing in flight is lost. At every sync, `reviveOwedMessageStages` re-offers
+the extract, needs-you and embed work of kept messages whose triage finished
+but whose work the rolling sync window overtook, at most 150 per kind per
+pass for mail and 100 for Teams. See [pipeline/04-extraction.md](pipeline/04-extraction.md) and
+[pipeline/11-needs-you.md](pipeline/11-needs-you.md). None of this runs while
+the app is closed; it catches up on the next launch and sync.
 
 ## Facts that shape the options
 

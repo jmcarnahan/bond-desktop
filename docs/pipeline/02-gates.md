@@ -9,7 +9,7 @@ strings and headers.
 
 ## Tier 1 — sender-only, on delta fields
 
-Before fetching anything, five questions about the address, in this order, and
+Before fetching anything, six questions about the message, in this order, and
 the first answer wins. `gateFor` in `app/lib/services/gates.dart` dispatches to
 `_emailGate` / `_teamsGate` per source, driven from the claim loop in
 `app/lib/services/triage_queue.dart`.
@@ -18,6 +18,7 @@ the first answer wins. `gateFor` in `app/lib/services/gates.dart` dispatches to
 | --- | --- |
 | `self` | the user's own address, however the message came back to them |
 | `sender_rule` | an address the owner dropped by hand — below |
+| `meeting_response` | an Accepted / Declined / Tentative / Canceled reply to an invitation — a fact about the message, so it outranks every name guess below it, `no_reply` included. It mostly fires at tier 2, because `meetingMessageType` arrives with the detail fetch; at tier 1 only the subject-and-empty-body fallback can catch it (see Meeting responses) |
 | `no_reply` | `noreply` / `donotreply` anywhere in the local part — the compact word as a plain substring (`noreply@`, `orders-noreply@`, `noreply+billing@`, `noreply2@`, `opsnoreplyrelay@`), the punctuated spellings (`no-reply`, `do.not.reply`) as delimited TOKENS — plus the prefix family `notifications?`, `alerts?`, `mailer-daemon`, `postmaster`, `bounces?` |
 | `monitoring` | `monitoring@`, `monitoring-eu@`, `prod-monitoring@` |
 | `machine_sender` | `svc-…@`, `bot-…@`, `…-bot@`, and the exact local parts `pipelines@`, `builds@`, `ci@` |
@@ -90,9 +91,10 @@ subject-and-empty-body fallback. A meeting INVITE (`meetingRequest`) is never
 gated, and both fallbacks require a response-shaped subject before reading
 anything else, precisely so an invite cannot reach them — the header comment
 in `gates.dart` walks the whole line. Rows a build before v18 already triaged
-are re-gated once by the `meeting_regate` one-shot
+are re-gated once by the `meeting_regate_crlf` one-shot
 (`app/lib/services/sync_service.dart`), which then refolds the affected
-threads; `clearDerived` re-pends such rows like any others and the gate simply
+threads (the key is the second one, because the first pass read Exchange's
+`\r\n` empty body as somebody talking); `clearDerived` re-pends such rows like any others and the gate simply
 re-applies at the next claim.
 
 ## A gate drop and the thread
@@ -197,6 +199,12 @@ true no matter who pumps what. The chained launch is what makes triage get
 there FIRST in the ordinary case: `AiWorker.pump` takes its `DrainGate`
 synchronously while `TriageQueue.pump` awaits an `_emit()` before it reaches
 the gate, so launching both back to back would let the worker win the FIFO.
+That `_emit()` runs inside the pump's `try`, after `_running` is latched, and
+its counts decide whether the gate is taken at all: an empty queue returns
+there, before the drain gate, with the latch released in the `finally`. A
+pump over nothing therefore never sits ticketless behind a long worker drain
+holding `_running`, and the first pump that finds new mail asks for the yield
+and enqueues in the same step.
 Since Round C the gate those two share is the FAST lane's alone
 ([10-model-routing.md](10-model-routing.md)) — which is the only lane the
 argument was ever about, because the storyline and draft lanes read rows
