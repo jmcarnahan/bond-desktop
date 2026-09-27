@@ -607,6 +607,45 @@ void main() {
       expect((await store.loadConversations()).single.attachmentCount, 0);
     });
 
+    // A Teams quote-reply is stored as an attachment row, and it is the
+    // message being answered rather than a file anybody sent.
+    Future<void> seedTeamsThread() => store.upsertConversation({
+          'source': 'teams',
+          'conversation_key': 'chat-1',
+          'subject': 'Deck review',
+          'state': 'waiting',
+          'last_message_at': '2026-09-04T11:00:00.000Z',
+        });
+
+    Map<String, Object?> quoteRow() => {
+          ...row('att-quote', kind: quoteAttachmentKind),
+          'name': null,
+          'content_type': 'messageReference',
+        };
+
+    test('a quote-reply alone carries no paperclip', () async {
+      await seedTeamsThread();
+      await seedMessage('t1', source: 'teams', key: 'chat-1');
+      await store.upsertAttachments('teams', 't1', [quoteRow()]);
+
+      final teams = await store.loadConversations(sources: ['teams']);
+
+      expect(teams.single.attachmentCount, 0);
+    });
+
+    test('a quote-reply beside a real file counts the file only', () async {
+      await seedTeamsThread();
+      await seedMessage('t1', source: 'teams', key: 'chat-1');
+      await store.upsertAttachments('teams', 't1', [
+        quoteRow(),
+        row('att-deck', ordinal: 1, name: 'Report.pptx'),
+      ]);
+
+      final teams = await store.loadConversations(sources: ['teams']);
+
+      expect(teams.single.attachmentCount, 1);
+    });
+
     test('clearing the blobs forgets the paths and keeps the metadata',
         () async {
       // What Settings' "Clear attachment cache" costs: the files, and nothing

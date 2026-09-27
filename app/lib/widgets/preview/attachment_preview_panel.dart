@@ -236,7 +236,11 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
     final text = await stored;
     if (kind != PreviewKind.html || text == null || text.isEmpty) return text;
     if (!_stillMarkup.hasMatch(text)) return text;
-    return htmlToText(text, profile: HtmlProfile.document);
+    // `capProse` because this runs on the UI isolate: the converter cuts the
+    // page to `htmlInputCap` once its scripts are gone, so an export whose
+    // findings follow megabytes of script still shows them. Context
+    // extraction, off the isolate, asks for no cap.
+    return htmlToText(text, profile: HtmlProfile.document, capProse: true);
   }
 
   /// Every future this panel memoises, acknowledged at birth.

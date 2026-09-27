@@ -1,5 +1,6 @@
 import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/linked_text.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -357,6 +358,114 @@ void main() {
         _host(const LinkedText('Ask words', selectable: false)),
       );
       expect(find.byType(SelectionArea), findsNothing);
+    });
+
+    // The hovered link's host on a caption line under the text: a line in the
+    // layout, never a tooltip. The text is ONE run and centred, so the middle
+    // of the paragraph is the middle of the link.
+    const hoverKey = ValueKey('linked-text-hover-host');
+    Widget centred(LinkedText child) => _host(Center(child: child));
+
+    Future<TestGesture> mouseAt(WidgetTester tester, Offset at) async {
+      final gesture =
+          await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await gesture.addPointer(location: const Offset(1, 1));
+      await gesture.moveTo(at);
+      await tester.pump();
+      return gesture;
+    }
+
+    testWidgets('hovering a link shows its host, and leaving hides it',
+        (tester) async {
+      await tester.pumpWidget(centred(LinkedText(
+        'Statement <https://bank.example/s/1>',
+        onOpenLink: (_) {},
+      )));
+      expect(find.byKey(hoverKey), findsNothing);
+
+      final gesture =
+          await mouseAt(tester, tester.getCenter(find.byType(RichText)));
+
+      expect(find.byKey(hoverKey), findsOneWidget);
+      expect(tester.widget<Text>(find.byKey(hoverKey)).data, 'bank.example');
+
+      await gesture.moveTo(
+        tester.getBottomRight(find.byType(Scaffold)) - const Offset(4, 4),
+      );
+      await tester.pump();
+
+      expect(find.byKey(hoverKey), findsNothing);
+      await gesture.removePointer();
+    });
+
+    testWidgets('hovering keeps the paragraph and its selection area',
+        (tester) async {
+      // Only the caption comes and goes. A root that flipped between the body
+      // and a column would remount both, and drop a selection mid-drag.
+      await tester.pumpWidget(centred(LinkedText(
+        'Statement <https://bank.example/s/1>',
+        onOpenLink: (_) {},
+      )));
+      final area = tester.state(find.byType(SelectionArea));
+      final paragraph = tester.renderObject(find.byType(RichText).first);
+
+      final gesture =
+          await mouseAt(tester, tester.getCenter(find.byType(RichText).first));
+
+      expect(find.byKey(hoverKey), findsOneWidget);
+      expect(identical(tester.state(find.byType(SelectionArea)), area), isTrue);
+      expect(
+        identical(tester.renderObject(find.byType(RichText).first), paragraph),
+        isTrue,
+      );
+      await gesture.removePointer();
+    });
+
+    testWidgets('a Safe Links wrapper shows the host it carries',
+        (tester) async {
+      const wrapper = 'https://nam02.safelinks.protection.outlook.com/'
+          '?url=https%3A%2F%2Fvendor.example%2Fdoc&data=05%7C01%7C';
+      await tester.pumpWidget(centred(LinkedText(
+        'Proposal <$wrapper>',
+        onOpenLink: (_) {},
+      )));
+
+      final gesture =
+          await mouseAt(tester, tester.getCenter(find.byType(RichText)));
+
+      expect(tester.widget<Text>(find.byKey(hoverKey)).data, 'vendor.example');
+      await gesture.removePointer();
+    });
+
+    testWidgets('a mailto link shows the address it writes to',
+        (tester) async {
+      await tester.pumpWidget(centred(LinkedText(
+        'Write to us <mailto:help@example.com>',
+        onOpenLink: (_) {},
+        selectable: false,
+      )));
+
+      final gesture =
+          await mouseAt(tester, tester.getCenter(find.byType(RichText)));
+
+      expect(
+        tester.widget<Text>(find.byKey(hoverKey)).data,
+        'help@example.com',
+      );
+      await gesture.removePointer();
+    });
+
+    testWidgets('words with nowhere to send a tap never show a host',
+        (tester) async {
+      await tester.pumpWidget(centred(const LinkedText(
+        'Statement <https://bank.example/s/1>',
+      )));
+
+      final gesture =
+          await mouseAt(tester, tester.getCenter(find.byType(RichText)));
+
+      expect(find.byKey(hoverKey), findsNothing);
+      await gesture.removePointer();
     });
 
     testWidgets('new text gets new recognizers and the old ones go',

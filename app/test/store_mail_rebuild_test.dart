@@ -46,6 +46,7 @@ void main() {
     String? bodyPreview,
     required String receivedAt,
     String conversationKey = 'conv-1',
+    String triageStatus = 'done',
   }) =>
       store.upsertMessage(SyncService.mailRow(
         id: id,
@@ -58,7 +59,7 @@ void main() {
         isRead: true,
         bodyText: bodyText,
         bodyPreview: bodyPreview,
-        triageStatus: 'done',
+        triageStatus: triageStatus,
       ));
 
   Future<void> chat({
@@ -153,6 +154,115 @@ void main() {
       final since = ago(const Duration(days: 1));
       expect(await store.clearLegacyMailBodies(sinceIso: since), 1);
       expect(await store.clearLegacyMailBodies(sinceIso: since), 0);
+    });
+  });
+
+  group('clearDoubleSpacedMailBodies', () {
+    // What the branch's first converter wrote for Exchange plain-text mail:
+    // the `<br>` newline and the source's own CR/LF, one blank line per line.
+    const doubled = 'Hi Dana,\n\nThe renewal is attached.\n\nThanks';
+    const single = 'Hi Dana,\nThe renewal is attached.\nThanks';
+
+    test('forgets an in-window email body with a blank line and nothing else',
+        () async {
+      await mail(id: 'm-doubled', bodyText: doubled, receivedAt: ago(const Duration(hours: 2)));
+      await mail(id: 'm-single', bodyText: single, receivedAt: ago(const Duration(hours: 3)));
+      // Behind the floor: outside the window this pass ran with.
+      await mail(
+        id: 'm-old',
+        bodyText: doubled,
+        receivedAt: ago(const Duration(days: 30)),
+      );
+      // A chat body never went through the mail converter.
+      await chat(id: 'c1', bodyText: doubled, receivedAt: ago(const Duration(hours: 2)));
+
+      final cleared = await store.clearDoubleSpacedMailBodies(
+        sinceIso: ago(const Duration(days: 1)),
+      );
+
+      expect(cleared, 1);
+      expect((await row('email', 'm-doubled'))['body_text'], isNull);
+      expect((await row('email', 'm-single'))['body_text'], single);
+      expect((await row('email', 'm-old'))['body_text'], doubled);
+      expect((await row('teams', 'c1'))['body_text'], doubled);
+    });
+
+    test('leaves every updated_at byte-identical', () async {
+      // The same keyword-index watermark `clearLegacyMailBodies` protects.
+      await mail(id: 'm1', bodyText: doubled, receivedAt: ago(const Duration(hours: 2)));
+      await mail(id: 'm2', bodyText: single, receivedAt: ago(const Duration(hours: 3)));
+
+      final before = {
+        for (final id in ['m1', 'm2'])
+          id: (await row('email', id))['updated_at'],
+      };
+      expect(before.values, everyElement(isNotNull));
+
+      await store.clearDoubleSpacedMailBodies(
+        sinceIso: ago(const Duration(days: 1)),
+      );
+
+      expect((await row('email', 'm1'))['body_text'], isNull);
+      for (final id in before.keys) {
+        expect((await row('email', id))['updated_at'], before[id], reason: id);
+      }
+    });
+  });
+
+  group('what neither clear may touch', () {
+    const doubled = 'Hi Dana,\n\nThanks for the numbers.';
+
+    test('a local echo keeps the body the owner typed', () async {
+      // The detail fetch refuses a `local:` id, so a nulled echo would never
+      // be refilled. A typed reply nearly always has a blank line, and one
+      // with a link in it matches the legacy patterns as well.
+      await mail(id: 'local:d1', bodyText: doubled, receivedAt: ago(const Duration(hours: 2)));
+      await mail(id: 'local:d2', bodyText: anchorTail, receivedAt: ago(const Duration(hours: 2)));
+
+      final since = ago(const Duration(days: 1));
+      expect(await store.clearDoubleSpacedMailBodies(sinceIso: since), 0);
+      expect(await store.clearLegacyMailBodies(sinceIso: since), 0);
+
+      expect((await row('email', 'local:d1'))['body_text'], doubled);
+      expect((await row('email', 'local:d2'))['body_text'], anchorTail);
+    });
+
+    test('a row with a pending work item keeps its body', () async {
+      // Needs-you, extraction and the embedding read the body, or else the
+      // 255-character preview; a verdict from the preview is final.
+      await mail(id: 'm-doubled', bodyText: doubled, receivedAt: ago(const Duration(hours: 2)));
+      await mail(id: 'm-anchor', bodyText: anchorTail, receivedAt: ago(const Duration(hours: 2)));
+      await store.enqueueWork('needs_you', 'email', 'm-doubled');
+      await store.enqueueWork('extract', 'email', 'm-anchor');
+
+      final since = ago(const Duration(days: 1));
+      expect(await store.clearDoubleSpacedMailBodies(sinceIso: since), 0);
+      expect(await store.clearLegacyMailBodies(sinceIso: since), 0);
+
+      expect((await row('email', 'm-doubled'))['body_text'], doubled);
+      expect((await row('email', 'm-anchor'))['body_text'], anchorTail);
+    });
+
+    test('a row triage is still processing keeps its body', () async {
+      await mail(
+        id: 'm-busy',
+        bodyText: doubled,
+        receivedAt: ago(const Duration(hours: 2)),
+        triageStatus: 'processing',
+      );
+      await mail(
+        id: 'm-pending',
+        bodyText: anchorTail,
+        receivedAt: ago(const Duration(hours: 2)),
+        triageStatus: 'pending',
+      );
+
+      final since = ago(const Duration(days: 1));
+      expect(await store.clearDoubleSpacedMailBodies(sinceIso: since), 0);
+      expect(await store.clearLegacyMailBodies(sinceIso: since), 0);
+
+      expect((await row('email', 'm-busy'))['body_text'], doubled);
+      expect((await row('email', 'm-pending'))['body_text'], anchorTail);
     });
   });
 

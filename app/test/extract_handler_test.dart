@@ -1372,7 +1372,7 @@ void main() {
         'conversation_key': 'conv-1',
         'direction': 'inbound',
         'subject': 'Design review',
-        'from_address': 'sarah@x.com',
+        'from_address': 'sarah@example.com',
         'received_at': '2026-08-29T10:00:00Z',
         'body_text': 'Thursday at ten?',
         'source_meta_json': jsonEncode({'meeting': 'meetingRequest'}),

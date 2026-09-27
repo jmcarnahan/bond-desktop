@@ -464,8 +464,8 @@ void main() {
       test('self still wins over everything', () {
         expect(
           gateFor(
-            message(from: 'lo@bond.com', meeting: 'meetingAccepted'),
-            userAddress: 'lo@bond.com',
+            message(from: 'lo@example.com', meeting: 'meetingAccepted'),
+            userAddress: 'lo@example.com',
             senderDisposition: 'drop',
           ),
           'self',

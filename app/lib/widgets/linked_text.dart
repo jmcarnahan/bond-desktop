@@ -1,6 +1,7 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
+import '../services/html_text.dart' show safeLinksTargetOf;
 import '../theme/tokens.dart';
 
 /// The canonical link run a stored body carries: `label <url>` — the words a
@@ -282,6 +283,12 @@ String _withoutTrailingPunctuation(String url) {
 /// Selection copies what is PAINTED, which for a canonical run is the label
 /// rather than the address. That is the accepted trade: the reader who wants
 /// the address clicks it.
+///
+/// Hovering a live link writes the host it opens on a caption line under the
+/// text, and leaving it takes the line away. A label is the sender's words and
+/// the host is where the click actually goes, so the reader can see both
+/// before deciding. A line in the layout rather than a tooltip, because this
+/// app has no popups.
 class LinkedText extends StatefulWidget {
   final String text;
 
@@ -329,6 +336,10 @@ class _LinkedTextState extends State<LinkedText> {
 
   late List<InlineSpan> _spans;
 
+  /// The target of the live link under the mouse, or null. What the caption
+  /// line under the text names.
+  Uri? _hovered;
+
   @override
   void initState() {
     super.initState();
@@ -365,6 +376,9 @@ class _LinkedTextState extends State<LinkedText> {
 
   void _buildSpans() {
     _disposeRecognizers();
+    // New spans are new links: a target hovered in the old text may not be in
+    // this one, and its exit event will never come.
+    _hovered = null;
     final live = widget.onOpenLink != null;
     final linkStyle = (widget.style ?? const TextStyle()).copyWith(
       color: BondColors.primary,
@@ -385,10 +399,36 @@ class _LinkedTextState extends State<LinkedText> {
                   style: linkStyle,
                   recognizer: _recognizerFor(target),
                   mouseCursor: SystemMouseCursors.click,
+                  onEnter: (_) => _hover(target),
+                  onExit: (_) => _hover(null),
                 )
               : TextSpan(text: label),
         },
     ];
+  }
+
+  void _hover(Uri? target) {
+    if (!mounted || _hovered == target) return;
+    setState(() => _hovered = target);
+  }
+
+  /// What the caption says for [target]: the host, which is the part of an
+  /// address a person checks; the address itself for `mailto:`, which has no
+  /// host; the whole target for anything else.
+  ///
+  /// A Safe Links wrapper is read through to the address it carries. The
+  /// stored target stays the wrapper so the tenant's scan runs, but its host
+  /// is Microsoft's on every wrapped link in an M365 mailbox, and a caption
+  /// that says so for all of them tells the reader nothing about where one
+  /// goes.
+  static String _hostOf(Uri target) {
+    final unwrapped = safeLinksTargetOf(target.toString());
+    final unwrappedHost =
+        unwrapped == null ? '' : Uri.tryParse(unwrapped)?.host ?? '';
+    if (unwrappedHost.isNotEmpty) return unwrappedHost;
+    if (target.host.isNotEmpty) return target.host;
+    if (target.scheme.toLowerCase() == 'mailto') return target.path;
+    return target.toString();
   }
 
   TapGestureRecognizer _recognizerFor(Uri target) {
@@ -409,6 +449,32 @@ class _LinkedTextState extends State<LinkedText> {
     // Selection comes from a SelectionArea rather than `SelectableText.rich`:
     // SelectableText's only tap hook is the whole-widget `onTap` and it ignores
     // a span's recognizer, which would leave every link in a body dead.
-    return widget.selectable ? SelectionArea(child: text) : text;
+    final body = widget.selectable ? SelectionArea(child: text) : text;
+    if (widget.onOpenLink == null) return body;
+    // A live body is ALWAYS in the column, and only the caption comes and
+    // goes. Returning the bare body when nothing is hovered would change the
+    // root widget's type on every enter and exit, which remounts the paragraph
+    // and its SelectionArea: a drag-select crossing a link would lose its
+    // selection mid-gesture.
+    final hovered = _hovered;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        body,
+        if (hovered != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(
+              _hostOf(hovered),
+              key: const ValueKey('linked-text-hover-host'),
+              style:
+                  BondType.caption.copyWith(color: BondColors.inkSecondary),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+      ],
+    );
   }
 }

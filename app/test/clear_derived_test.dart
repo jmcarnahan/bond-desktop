@@ -898,7 +898,7 @@ void main() {
         'backfill_addressed_me_teams',
         'sender_tip_strip',
         'participant_names_backfill',
-        'mail_html_rebuild',
+        'mail_html_rebuild_2',
         'mail_preview_tidy',
         mailLastReconcileKey,
         activityLastSyncMailKey,
@@ -920,7 +920,7 @@ void main() {
         // The mail bodies and previews a server converted: what this pair
         // repairs is the message as it arrived, not a verdict about it, so a
         // clear must not hand either one back.
-        'mail_html_rebuild',
+        'mail_html_rebuild_2',
         'mail_preview_tidy',
         // And these describe the sync, which has not been undone.
         mailLastReconcileKey,

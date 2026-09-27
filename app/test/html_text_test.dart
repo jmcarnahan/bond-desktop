@@ -311,6 +311,107 @@ void main() {
       );
     });
 
+    test('an address over a different address yields to the real one', () {
+      // The label reads as a destination and names the wrong one: the words
+      // go, and where the click really lands is what the reader sees.
+      expect(
+        canonicalLinkRun(
+          label: 'https://bank.example',
+          target: 'https://evil.example',
+        ),
+        'https://evil.example',
+      );
+      expect(
+        canonicalLinkRun(
+          label: 'www.bank.example',
+          target: 'https://login.evil.example/session',
+        ),
+        'https://login.evil.example/session',
+      );
+    });
+
+    test('a label hiding its host behind userinfo yields to the target', () {
+      // Dart and a browser both read this label's host as evil.example; a
+      // reader reads bank.example. The label claims nothing checkable.
+      expect(
+        canonicalLinkRun(
+          label: 'https://bank.example@evil.example',
+          target: 'https://evil.example/',
+        ),
+        'https://evil.example/',
+      );
+    });
+
+    test('an address over itself, give or take the scheme, is still it', () {
+      expect(
+        canonicalLinkRun(
+          label: 'http://www.bank.example/',
+          target: 'https://bank.example',
+        ),
+        'https://bank.example',
+      );
+    });
+
+    test('the claim is about the host, so a same-host label keeps its words',
+        () {
+      // Leaving off a tracking query is not a false claim, and yielding to
+      // the target would paint the query back into the text.
+      expect(
+        canonicalLinkRun(
+          label: 'https://bank.example/a',
+          target: 'https://bank.example/a?utm=1',
+        ),
+        'https://bank.example/a <https://bank.example/a?utm=1>',
+      );
+      expect(
+        canonicalLinkRun(
+          label: 'www.bank.example',
+          target: 'https://bank.example/statements?id=7',
+        ),
+        'www.bank.example <https://bank.example/statements?id=7>',
+      );
+    });
+
+    test('an address label over a composer for another address yields', () {
+      expect(
+        canonicalLinkRun(
+          label: 'ceo@bank.example',
+          target: 'mailto:attacker@evil.example',
+        ),
+        'mailto:attacker@evil.example',
+      );
+      // The same address, whatever its case, is still just the words.
+      expect(
+        canonicalLinkRun(
+          label: 'Dana@Example.com',
+          target: 'mailto:dana@example.com',
+        ),
+        'Dana@Example.com',
+      );
+    });
+
+    test('a bare domain is not read as a claim', () {
+      // `Report.xlsx` and `Node.js` have the same shape; the hover caption
+      // shows the host for these.
+      expect(
+        canonicalLinkRun(
+          label: 'bank.example',
+          target: 'https://evil.example/login',
+        ),
+        'bank.example <https://evil.example/login>',
+      );
+    });
+
+    test('words over an address are a label, not a claim', () {
+      expect(
+        canonicalLinkRun(
+          label: 'Sign in to your bank',
+          target: 'https://evil.example',
+        ),
+        'Sign in to your bank <https://evil.example>',
+      );
+    });
+
     test('a built label is capped rather than becoming the wall again', () {
       final long = 'https://eu01.safelinks.protection.outlook.com/?url='
           'https%3A%2F%2F${'segment-and-more.' * 4}example.com%2Fdeeply';
@@ -320,6 +421,223 @@ void main() {
 
       expect(label.length, lessThanOrEqualTo(60));
       expect(label, endsWith('…'));
+    });
+  });
+
+  group('an anchor\'s label in mail', () {
+    test('a line break inside the label is a space, not nothing', () {
+      expect(
+        htmlToText(
+          '<a href="https://shop.example.com/o/1">View<br>order</a>',
+          profile: HtmlProfile.mail,
+        ),
+        'View order <https://shop.example.com/o/1>',
+      );
+      expect(
+        htmlToText(
+          '<a href="https://shop.example.com/o/1"><div>View</div>'
+          '<div>order</div></a>',
+          profile: HtmlProfile.mail,
+        ),
+        'View order <https://shop.example.com/o/1>',
+      );
+    });
+
+    test('a label escaped twice is decoded once, as it is outside an anchor',
+        () {
+      expect(
+        htmlToText(
+          '<p>Use &amp;lt;b&amp;gt;</p>',
+          profile: HtmlProfile.mail,
+        ),
+        'Use &lt;b&gt;',
+      );
+      expect(
+        htmlToText(
+          '<a href="https://x.example.com">Use &amp;lt;b&amp;gt;</a>',
+          profile: HtmlProfile.mail,
+        ),
+        'Use &lt;b&gt; <https://x.example.com>',
+      );
+    });
+
+    test('an escaped query separator in a target is decoded exactly once', () {
+      expect(
+        htmlToText(
+          '<a href="https://x.example.com/r?a=1&amp;b=2&amp;amp;c=3">Report</a>',
+          profile: HtmlProfile.mail,
+        ),
+        'Report <https://x.example.com/r?a=1&b=2&amp;c=3>',
+      );
+    });
+
+    test('a line break inside an address is dropped, as a browser does', () {
+      expect(
+        htmlToText(
+          '<a href="https://x.example.com/a\r\nb\tc">Doc</a>',
+          profile: HtmlProfile.mail,
+        ),
+        'Doc <https://x.example.com/abc>',
+      );
+    });
+
+    test('an unclosed anchor does not swallow the anchors after it', () {
+      expect(
+        htmlToText(
+          '<p><a href="https://a.example.com">Broken</p>'
+          '<p><a href="https://b.example.com">Second</a></p>',
+          profile: HtmlProfile.mail,
+        ),
+        'Broken\n\nSecond <https://b.example.com>',
+      );
+    });
+  });
+
+  group('the whitespace fold in a document', () {
+    test('a paragraph wrapped in the source is one line', () {
+      expect(
+        htmlToText(
+          '<h2>Findings</h2><p>Retention held\r\nthrough the quarter.</p>',
+          profile: HtmlProfile.document,
+        ),
+        '## Findings\n\nRetention held through the quarter.',
+      );
+    });
+  });
+
+  group('the cost of a hostile body', () {
+    // Twenty thousand stray `<` with no `>` anywhere after them. A tag
+    // pattern that could run across a `<` made every one of them scan to the
+    // end of the text. The bound is generous on purpose: this is a test of
+    // the SHAPE of the cost, and a busy machine must not fail it.
+    final hostile = List.filled(20000, 'a < b ').join();
+
+    for (final profile in HtmlProfile.values) {
+      test('twenty thousand stray brackets convert quickly ($profile)', () {
+        final clock = Stopwatch()..start();
+        final text = htmlToText(hostile, profile: profile);
+        clock.stop();
+
+        expect(clock.elapsed, lessThan(const Duration(seconds: 3)));
+        expect(text, contains('a < b'));
+      });
+    }
+
+    // Every tag shape with no `>` after it, twenty thousand times. Each one
+    // scanned to the end of the text once per opener while its pattern could
+    // run across a `<`, and the unclosed comment did the same across later
+    // comments.
+    for (final shape in [
+      '<div ',
+      '<img ',
+      '<a ',
+      '<script ',
+      '<!--x',
+      '<head>x',
+    ]) {
+      final shaped = List.filled(20000, shape).join();
+      for (final profile in HtmlProfile.values) {
+        test('twenty thousand unclosed "${shape.trim()}" convert quickly '
+            '($profile)', () {
+          final clock = Stopwatch()..start();
+          htmlToText(shaped, profile: profile);
+          clock.stop();
+
+          expect(clock.elapsed, lessThan(const Duration(seconds: 3)));
+        });
+      }
+    }
+
+    test('a mail with megabytes of base64 picture keeps its sentence', () {
+      // A report mailed with its chart as a `data:` picture. A cut on the raw
+      // markup landed inside the `<img>` and stored the base64 as the body.
+      final html = '<div><img src="data:image/png;base64,'
+          '${'A' * (3 * 1024 * 1024)}"></div>'
+          '<div>Hi Dana, the numbers are below.</div>';
+
+      expect(
+        htmlToText(html, profile: HtmlProfile.mail),
+        'Hi Dana, the numbers are below.',
+      );
+    });
+
+    test('a mail with megabytes of style keeps its words', () {
+      final html = '<style>${'.a{color:#123456}' * (2600 * 1024 ~/ 17)}'
+          '</style><p>Body words</p>';
+      expect(html.length, greaterThan(htmlInputCap));
+
+      expect(htmlToText(html, profile: HtmlProfile.mail), 'Body words');
+    });
+
+    test('the cap backs off rather than cut a tag in half', () {
+      final kept = 'a' * (htmlInputCap - 10);
+      final html = '$kept<span class="${'x' * 40}">tail</span>';
+
+      expect(capHtmlInput(html), kept);
+    });
+
+    test('a stray bracket in prose is not a tag the cap backs off to', () {
+      // `x < y`, then two megabytes of words with no `>` anywhere: the only
+      // `<` is prose, and backing off to it would keep two characters.
+      final words = List.filled(htmlInputCap ~/ 5 + 1000, 'word ').join();
+      final html = 'x < y $words';
+
+      expect(capHtmlInput(html).length, htmlInputCap);
+      expect(
+        htmlToText('<p>$html</p>', profile: HtmlProfile.mail).length,
+        greaterThan(htmlInputCap - 16),
+      );
+    });
+
+    test('a mail body over the cap is cut to it', () {
+      final html = '<p>${List.filled(htmlInputCap ~/ 5 + 1000, 'word ').join()}'
+          '</p>';
+      expect(html.length, greaterThan(htmlInputCap));
+
+      final text = htmlToText(html, profile: HtmlProfile.mail);
+
+      expect(text.length, lessThanOrEqualTo(htmlInputCap));
+      expect(text, startsWith('word word'));
+    });
+
+    test('a capped document is cut after its script, not before it', () {
+      // The Plotly shape: megabytes of script, then the page. A cap on the
+      // raw markup would keep the script and lose the findings.
+      final script = 'var d = [1, 2, 3];\n' * (3 * 1024 * 1024 ~/ 19 + 1);
+      final html = '<script>$script</script><p>Findings here</p>';
+      expect(html.length, greaterThan(htmlInputCap));
+
+      final text = htmlToText(
+        html,
+        profile: HtmlProfile.document,
+        capProse: true,
+      );
+
+      expect(text, 'Findings here');
+    });
+
+    test('a capped document with more prose than the cap is cut to it', () {
+      final html = '<p>${List.filled(htmlInputCap ~/ 5 + 1000, 'word ').join()}'
+          '</p>';
+
+      final text = htmlToText(
+        html,
+        profile: HtmlProfile.document,
+        capProse: true,
+      );
+
+      expect(text.length, lessThanOrEqualTo(htmlInputCap));
+      expect(text, startsWith('word word'));
+    });
+
+    test('the cap never splits a surrogate pair', () {
+      // An emoji whose high half is the last character under the cap.
+      final html = '${'a' * (htmlInputCap - 1)}\u{1F600}tail';
+
+      final capped = capHtmlInput(html);
+
+      expect(capped.length, htmlInputCap - 1);
+      expect(capHtmlInput('short'), 'short');
     });
   });
 

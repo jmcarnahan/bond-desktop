@@ -506,10 +506,22 @@ class SyncService implements MailSync {
       // text are NOT re-judged. They finished `done` and nothing here re-pends
       // them. Rejudging a mailbox is Clear AI results, which is a decision the
       // owner makes in Settings and not a side effect of an upgrade.
+      //
+      // The key was bumped once, to `mail_html_rebuild_2`, because the first
+      // converter kept the source's CR/LF beside the newline every `<br>`
+      // wrote and so double-spaced plain-text mail. So the pass clears twice:
+      // the legacy patterns first, then every in-window body carrying a blank
+      // line, which is the one mark that converter left on a message with no
+      // link in it. Both are nulled and refilled on open, one lazy refetch per
+      // thread somebody reads. Neither touches a local echo, which could never
+      // be refilled, or a row the pipeline still owes work on, whose stages
+      // would read the preview instead.
       int? clearedMailBodies;
-      if (await _store.getPref('mail_html_rebuild') == null) {
+      if (await _store.getPref('mail_html_rebuild_2') == null) {
         clearedMailBodies = await _store.clearLegacyMailBodies(sinceIso: floor);
-        await _store.setPref('mail_html_rebuild', '1');
+        clearedMailBodies +=
+            await _store.clearDoubleSpacedMailBodies(sinceIso: floor);
+        await _store.setPref('mail_html_rebuild_2', '1');
       }
 
       // And the previews, which have no HTML part to go back to and so are

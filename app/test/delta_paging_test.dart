@@ -1165,6 +1165,13 @@ void main() {
       const converted = 'View comment <https://requests.example.com/r/42#c7>';
       await stored('m-converted', body: converted, preview: converted);
       await stored('m-clean', body: 'See you Thursday.', preview: 'See you Thursday.');
+      // Double-spaced by the first converter and carrying no link at all: the
+      // blank line is the only mark it left, and the second clear reads it.
+      await stored(
+        'm-doubled',
+        body: 'Hi Dana,\n\nSee you Thursday.',
+        preview: 'Hi Dana, See you Thursday.',
+      );
 
       await syncEmptyPage('c1');
 
@@ -1173,9 +1180,10 @@ void main() {
       // the rows with no body.
       expect((await messageRow('m-converted'))['body_text'], isNull);
       expect((await messageRow('m-clean'))['body_text'], 'See you Thursday.');
+      expect((await messageRow('m-doubled'))['body_text'], isNull);
       // The preview has no HTML part behind it, so it is repaired in place.
       expect((await messageRow('m-converted'))['body_preview'], 'View comment');
-      expect(await store.getPref('mail_html_rebuild'), '1');
+      expect(await store.getPref('mail_html_rebuild_2'), '1');
       expect(await store.getPref('mail_preview_tidy'), '1');
 
       // Once means once. A row written after the prefs are set, inside the
@@ -1185,6 +1193,15 @@ void main() {
 
       expect((await messageRow('m-after-pref'))['body_text'], converted);
       expect((await messageRow('m-after-pref'))['body_preview'], converted);
+
+      // And once means once for the blank-line clear too.
+      await stored('m-doubled-after', body: 'Hi Dana,\n\nThanks.');
+      await syncEmptyPage('c3');
+
+      expect(
+        (await messageRow('m-doubled-after'))['body_text'],
+        'Hi Dana,\n\nThanks.',
+      );
     });
 
     test('a forgotten body is what the next thread open fetches', () async {

@@ -398,6 +398,61 @@ void main() {
     });
   });
 
+  group('the source\'s own whitespace is HTML whitespace', () {
+    test('Exchange plain-text mail is single-spaced, not double', () {
+      // What Exchange stores for a message typed as plain text: every line
+      // ends in a `<br>` AND the CR/LF the sender typed. Only the `<br>` is a
+      // line break.
+      expect(
+        mailTextFromHtml(
+          '<div class="PlainText">line1<br>\r\nline2<br>\r\nline3</div>',
+        ),
+        'line1\nline2\nline3',
+      );
+    });
+
+    test('a paragraph the sender\'s client wrapped is one sentence', () {
+      expect(
+        mailTextFromHtml(
+          '<p>This sentence was\r\nwrapped by the sender\'s client.</p>',
+        ),
+        "This sentence was wrapped by the sender's client.",
+      );
+    });
+
+    test('a pre block keeps its lines', () {
+      // The newlines are the layout inside `<pre>`, so they survive. The two
+      // leading spaces of the middle line do not: the whitespace pass trims
+      // the blanks around every newline, pre or not.
+      expect(mailTextFromHtml('<pre>a\r\n  b\r\nc</pre>'), 'a\nb\nc');
+    });
+
+    test('the zero-width delimiters survive the fold', () {
+      const url = 'https://files.example.com/:x:/s/deals/EqRsTuVwXyZ';
+      final body = mailTextFromHtml(
+        '<p>Please review\r\n$zwsp<a href="$url">Budget.xlsx</a>$zwsp\r\n'
+        'today</p>',
+      );
+
+      expect(body, 'Please review ${zwsp}Budget.xlsx <$url>$zwsp today');
+      expect(zwsp.allMatches(body).length, 2);
+    });
+
+    test('two divs are two lines, with no blank line between', () {
+      // Outlook writes one `<div>` per line, and a browser draws them with no
+      // gap; the CR/LF between them is source whitespace like any other.
+      expect(mailTextFromHtml('<div>one</div>\r\n<div>two</div>'), 'one\ntwo');
+      expect(mailTextFromHtml('<div>one</div><div>two</div>'), 'one\ntwo');
+    });
+
+    test('a blank line the sender typed between divs is kept', () {
+      expect(
+        mailTextFromHtml('<div>one</div><div><br></div><div>two</div>'),
+        'one\n\ntwo',
+      );
+    });
+  });
+
   group('stripLinkTargets over a converted body', () {
     test('the labels stay and the addresses go', () {
       final text = mailTextFromHtml(

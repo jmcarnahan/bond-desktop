@@ -677,8 +677,24 @@ cmd_down() {
   local tg; tg=$(tg_arn)
   set -- $(rule_for_path)
   if [ $# -ge 1 ]; then
-    [ -z "$tg" ] || [ "$3" = "$tg" ] || die "the rule on $BOX_PATH/* forwards to something that is not ours; leaving it"
-    aws elbv2 delete-rule --rule-arn "$1" && log "removed the listener rule for $BOX_PATH/*"
+    # Ours when it forwards to our target group. When that group is already
+    # gone (a half-finished down, or one deleted by hand) the forward proves
+    # nothing, so the rule's own tag decides: create-rule tags it
+    # bond-models=$NAME, and a rule without that tag belongs to somebody else
+    # even though it sits on our path. Such a rule is left and logged, and
+    # teardown carries on: a rule we do not own must never stop the instance
+    # from terminating, because the box bills by the hour.
+    local ours=1
+    if [ -z "$tg" ] || [ "$3" != "$tg" ]; then
+      local owner
+      owner=$(aws elbv2 describe-tags --resource-arns "$1" \
+                --query "TagDescriptions[0].Tags[?Key=='bond-models'].Value|[0]" --output text 2>/dev/null)
+      if [ "$owner" != "$NAME" ]; then
+        ours=0
+        log "the rule on $BOX_PATH/* (priority $2) is not ours: it forwards elsewhere and is not tagged bond-models=$NAME; leaving it"
+      fi
+    fi
+    [ "$ours" = 1 ] && aws elbv2 delete-rule --rule-arn "$1" && log "removed the listener rule for $BOX_PATH/*"
   fi
   [ -n "$tg" ] && aws elbv2 delete-target-group --target-group-arn "$tg" && log "removed target group $PREFIX"
   if find_instance; then

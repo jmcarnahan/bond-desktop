@@ -915,13 +915,17 @@ WHERE source = ? AND conversation_key = ?
           "     AND w.status IN ('pending','processing')) AS ai_busy_thread, "
           // Non-inline only: a paperclip on a list card means "somebody sent
           // something with this", and counting the signature logos on ten
-          // replies would put a 12 on a thread carrying no files at all.
+          // replies would put a 12 on a thread carrying no files at all. A
+          // Teams quote-reply is stored as an attachment row of kind
+          // `message_reference`, which is a quoted message rather than a file,
+          // so it is left out for the same reason.
           '  (SELECT COUNT(*) FROM attachments a '
           '   JOIN messages m2 ON m2.source = a.source '
           '     AND m2.source_message_id = a.source_message_id '
           '   WHERE a.source = c.source '
           '     AND m2.conversation_key = c.conversation_key '
-          '     AND a.is_inline = 0) AS attachment_count, '
+          '     AND a.is_inline = 0 '
+          "     AND a.kind <> '$quoteAttachmentKind') AS attachment_count, "
           // The newest inbound message's deadline, in the sender's own words.
           // The newest one's and nobody else's: a date somebody named three
           // replies ago is history, and a Deadlines tab that surfaced it would
@@ -3955,15 +3959,69 @@ FROM messages
   /// which costs that thread one refetch and gets the same text back — the
   /// wrong answer would be leaving a legacy body in place, so the patterns
   /// stay generous.
+  ///
+  /// A local echo (the `local:` key range) is never cleared: its body is what
+  /// the owner typed, and the detail fetch refuses a `local:` id, so a nulled
+  /// echo could never be refilled.
+  ///
+  /// Nor is a row the pipeline still owes work on, for the reason
+  /// [clearDoubleSpacedMailBodies] gives.
   Future<int> clearLegacyMailBodies({required String sinceIso}) =>
       db.customUpdate(
         'UPDATE messages SET body_text = NULL '
         "WHERE source = 'email' AND body_text IS NOT NULL "
         'AND received_at >= ? '
+        'AND NOT (source_message_id >= ? AND source_message_id < ?) '
+        '$_noOpenWork'
         "AND (body_text LIKE '%<http%' "
         "  OR body_text LIKE '% <mailto:%' "
         "  OR body_text LIKE '%[cid:%')",
-        variables: _args([sinceIso]),
+        variables:
+            _args([sinceIso, localEchoPrefix, _localEchoPrefixEnd]),
+      );
+
+  /// The rows a body clear leaves alone because a stage has yet to read them:
+  /// triage not finished, or any work item still pending or running.
+  static const String _noOpenWork =
+      "AND triage_status NOT IN ('pending','processing') "
+      'AND NOT EXISTS (SELECT 1 FROM work_items w '
+      '  WHERE w.source = messages.source '
+      '    AND w.entity_id = messages.source_message_id '
+      "    AND w.status IN ('pending','processing')) ";
+
+  /// Forgets the in-window mail bodies that carry a blank line, and returns how
+  /// many rows were cleared.
+  ///
+  /// The first HTML converter kept the source's CR/LF beside the newline every
+  /// `<br>` wrote, so plain-text Exchange mail came out double-spaced. Most of
+  /// those bodies carry no link run and no `[cid:…]` token, which leaves them
+  /// outside [clearLegacyMailBodies]'s patterns. A blank line is the only mark
+  /// that converter left, so the pattern is generous on purpose: a body THIS
+  /// build wrote with a real paragraph break costs its thread one refetch that
+  /// returns the same text, and the wrong answer would be leaving a
+  /// double-spaced body in place. It runs only inside the
+  /// `mail_html_rebuild_2` one-shot and never again.
+  ///
+  /// Nulled rather than rewritten, and `updated_at` does not move, for the
+  /// reasons [clearLegacyMailBodies] gives. A local echo is left alone for
+  /// the reason given there too, and a typed reply nearly always has a blank
+  /// line.
+  ///
+  /// A row the pipeline still owes work on keeps its body. Triage refetches a
+  /// missing body, but needs-you, extraction and the embedding fall back to
+  /// the 255-character preview, and a verdict written from that is `done`
+  /// for good. Such a row keeps its old spacing, which is cosmetic and far
+  /// cheaper.
+  Future<int> clearDoubleSpacedMailBodies({required String sinceIso}) =>
+      db.customUpdate(
+        'UPDATE messages SET body_text = NULL '
+        "WHERE source = 'email' AND body_text IS NOT NULL "
+        'AND received_at >= ? '
+        'AND NOT (source_message_id >= ? AND source_message_id < ?) '
+        '$_noOpenWork'
+        'AND instr(body_text, char(10) || char(10)) > 0',
+        variables:
+            _args([sinceIso, localEchoPrefix, _localEchoPrefixEnd]),
       );
 
   /// Rewrites the stored mail previews through the converter's link rules and
