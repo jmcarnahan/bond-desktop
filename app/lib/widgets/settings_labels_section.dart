@@ -147,7 +147,7 @@ class _LabelsSectionState extends State<LabelsSection> {
   @override
   void didUpdateWidget(LabelsSection oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // A label that has gone — deleted here, or by a rule elsewhere — must not
+    // A label that has gone from the list the host passes in must not
     // leave the section holding an open field or an armed confirmation for an id
     // nothing renders. The next Remove would then arrive already confirmed.
     bool gone(String? id) =>
