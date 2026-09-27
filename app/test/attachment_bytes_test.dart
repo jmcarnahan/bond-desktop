@@ -529,6 +529,36 @@ void main() {
       expect(backend.fetchCalls, 1);
     });
 
+    test('a page crosses to WebKit with every link element stripped',
+        () async {
+      // A preconnect may open a connection the Swift rule list never sees,
+      // and a host unique to this recipient tells the sender it was opened.
+      String? asked;
+      final withHtml = StoreAttachmentBytes(
+        store: store,
+        backend: backend,
+        cache: cache,
+        htmlThumbnailer: (html, {int width = 320, int height = 240}) async {
+          asked = html;
+          return Uint8List.fromList(onePixelPng);
+        },
+      );
+      final attachment = ref(name: 'page.html', contentType: 'text/html');
+      await seed(attachment);
+      backend.bytesByKey[FakeAttachmentBackend.keyOf(attachment)] = payload(
+        '<html><head>'
+        '<link rel="preconnect" href="https://u123.tracker.example">'
+        '<LINK REL=dns-prefetch HREF=//u123.tracker.example>'
+        '<link\nrel="stylesheet" href="https://cdn.example.com/a.css"/>'
+        '</head><body><h1>Access review</h1></body></html>',
+      );
+
+      expect(await withHtml.thumbnailFor(attachment), isNotNull);
+      expect(asked!.toLowerCase(), isNot(contains('<link')));
+      expect(asked, isNot(contains('tracker.example')));
+      expect(asked, contains('<h1>Access review</h1>'));
+    });
+
     test('a page named by nothing but its content type is still drawn',
         () async {
       // Graph hands a mailed page a name often enough, but not always.

@@ -161,7 +161,13 @@ class ConversationListPane extends StatelessWidget {
 
   /// Sends what the reader typed in that row's box. The pane owns no send path
   /// — this is the composer's own [onSend] one row up the tree.
-  final void Function(Conversation conversation, String body)? onQuickReplySend;
+  ///
+  /// `FutureOr` and handed straight through to [QuickReplyBox.onSend]: the box
+  /// lets go of its send latch when the returned future settles. A host that
+  /// returns nothing leaves the box waiting on an error or notice that CHANGES,
+  /// and the same error twice in a row never does.
+  final FutureOr<void> Function(Conversation conversation, String body)?
+      onQuickReplySend;
 
   /// Escape, Cancel, or a send the host decided closes the box.
   final void Function(Conversation conversation)? onCloseQuickReply;

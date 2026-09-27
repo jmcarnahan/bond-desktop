@@ -455,7 +455,11 @@ void main() {
   group('replySuppressed', () {
     /// A stored message carrying only the two fields this reads — the gate's own
     /// word, and the headers the detail fetch wrote.
-    Message message({String? gateReason, Map<String, String>? headers}) =>
+    Message message({
+      String? gateReason,
+      Map<String, String>? headers,
+      String? gateOverride,
+    }) =>
         Message(
           id: 'm1',
           outbound: false,
@@ -464,6 +468,7 @@ void main() {
           subject: 'Amina left a comment',
           bodyText: 'View comment <https://tracker.example.com/t/41#c9>',
           gateReason: gateReason,
+          gateOverride: gateOverride,
           sourceMetaJson:
               headers == null ? null : jsonEncode({'headers': headers}),
         );
@@ -515,6 +520,28 @@ void main() {
           message(headers: {'List-Unsubscribe': '<https://x.example.com/u>'}),
         ),
         isTrue,
+      );
+    });
+
+    test('a message the owner restored is not suppressed by its headers', () {
+      // A colleague writing through a team list: gated as a newsletter, then
+      // restored. Restore is the escape hatch from every gate, and the
+      // classification is the judgement the owner just overruled.
+      const list = {'List-Id': 'team.example.com'};
+      expect(replySuppressed(message(headers: list)), isTrue);
+      expect(
+        replySuppressed(message(headers: list, gateOverride: 'user')),
+        isFalse,
+      );
+      // And the column arrives from a stored row.
+      expect(
+        replySuppressed(Message.fromRow({
+          'source_message_id': 'm1',
+          'direction': 'inbound',
+          'source_meta_json': jsonEncode({'headers': list}),
+          'gate_override': 'user',
+        })),
+        isFalse,
       );
     });
 

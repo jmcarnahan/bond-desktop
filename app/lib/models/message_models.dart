@@ -244,15 +244,22 @@ class Conversation {
   /// judgement.
   final bool? replyExpected;
 
-  /// The needs-you pass's verdict on the newest KEPT inbound message — the
-  /// same message [replyExpected] is read off. TRI-STATE on that field's rule:
-  /// null is "not judged yet" (or a read that did not run the subquery), and
-  /// only an explicit `false` is the judge saying no.
+  /// Whether the needs-you pass has vetoed this THREAD: its newest kept
+  /// inbound was judged no, AND no kept inbound newer than the thread's last
+  /// outbound carries a yes (with no outbound at all, no kept inbound does).
+  ///
+  /// Computed in SQL by `MessageStore`'s one veto fragment, the same one the
+  /// Needs You tile and filter read, and never recomputed here from partial
+  /// data. A no on the newest message alone is not enough: the judge rates
+  /// THAT message, so a reply-all "adding Jordan for visibility" judged no
+  /// must not hide an older ask the owner has not answered.
   ///
   /// It outranks triage's ask and `reply_expected` in [isNeedsYou]: the judge
   /// reads the thread before the message and answers the narrower question —
   /// is this the owner's — where triage answers "does anyone owe a reply".
-  final bool? latestNeedsYouVerdict;
+  /// False on every read that did not run the fragment, which leaves the
+  /// thread where the other terms put it.
+  final bool needsYouVetoed;
 
   /// The envelope address of the newest KEPT inbound message — who the thread
   /// is waiting on. Null on every read that does not run the subquery in
@@ -293,7 +300,7 @@ class Conversation {
     this.needsYouReasonMessageId,
     this.needsYouReasonAt,
     this.replyExpected,
-    this.latestNeedsYouVerdict,
+    this.needsYouVetoed = false,
     this.latestInboundFrom,
   });
 
@@ -377,7 +384,7 @@ class Conversation {
       needsYouReasonMessageId: needsYouReasonMessageId,
       needsYouReasonAt: needsYouReasonAt,
       replyExpected: replyExpected,
-      latestNeedsYouVerdict: latestNeedsYouVerdict,
+      needsYouVetoed: needsYouVetoed,
       latestInboundFrom: latestInboundFrom,
     );
   }
@@ -415,7 +422,7 @@ class Conversation {
       needsYouReasonMessageId: needsYouReasonMessageId,
       needsYouReasonAt: needsYouReasonAt,
       replyExpected: replyExpected,
-      latestNeedsYouVerdict: latestNeedsYouVerdict,
+      needsYouVetoed: needsYouVetoed,
       latestInboundFrom: latestInboundFrom,
     );
   }
@@ -499,8 +506,9 @@ class Conversation {
       // Null survives as null, exactly as it does on [Message.replyExpected]:
       // a message triage v2 has never judged is not a message it judged "no".
       replyExpected: _boolFromInt(row['reply_expected']),
-      // Tri-state on the same rule, off the same row.
-      latestNeedsYouVerdict: _boolFromInt(row['latest_needs_you_verdict']),
+      // The thread veto, computed by the store's one fragment; absent reads
+      // as no veto.
+      needsYouVetoed: _boolFromInt(row['needs_you_vetoed']) ?? false,
       // The last subquery, and null on every read that does not run it — which
       // reads as "cannot tell who this is from", and [isExternalTo] answers
       // false to that rather than calling an unknown sender a stranger.
@@ -536,6 +544,19 @@ class Message {
 
   /// Why the triage gate skipped this message (bulk sender, no body, …).
   final String? gateReason;
+
+  /// The row's `has_attachments` flag, as the delta page or the detail fetch
+  /// last set it. False when the column is absent or null. The meeting gate's
+  /// empty-body fallback asks it: a calendar response carries no file, so an
+  /// `Accepted:` mail with a PDF on it is somebody sending a document.
+  final bool hasAttachments;
+
+  /// `'user'` when the owner pressed Restore on this message, which clears
+  /// [gateReason] and exempts the row from every gate. Null otherwise, and on
+  /// every read that did not select the column. Reply suppression asks it, so
+  /// a restored message is not refused a draft on the same classification the
+  /// owner just overruled.
+  final String? gateOverride;
 
   /// The connector-specific blob stored alongside the message — for email,
   /// `{"headers": {...}, "meeting": "…"}` from the per-message detail fetch,
@@ -616,6 +637,8 @@ class Message {
     this.isRead = true,
     this.bodyPreview,
     this.gateReason,
+    this.hasAttachments = false,
+    this.gateOverride,
     this.sourceMetaJson,
     this.urgency,
     this.category,
@@ -663,6 +686,8 @@ class Message {
         isRead: isRead,
         bodyPreview: bodyPreview,
         gateReason: gateReason,
+        hasAttachments: hasAttachments,
+        gateOverride: gateOverride,
         sourceMetaJson: sourceMetaJson,
         urgency: urgency,
         category: category,
@@ -703,6 +728,28 @@ class Message {
       };
     } on FormatException {
       return const {};
+    }
+  }
+
+  /// Whether the stored body was written by an older converter and is owed a
+  /// refetch — the `body_stale` key the `mail_html_rebuild_2` one-shot sets.
+  ///
+  /// The old text stays readable meanwhile: every stage that is not the
+  /// transcript reads it as it stands, and `ensureBodies` refetches a stale
+  /// row as if it had no body. Any detail answer clears the key, a 200 or a
+  /// permanent refusal alike, so a message the server no longer has keeps its
+  /// old text and stops being asked for. False for a blob that is null,
+  /// invalid or silent about the key.
+  bool get bodyStale {
+    final raw = sourceMetaJson;
+    if (raw == null || raw.isEmpty) return false;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return false;
+      final stale = decoded['body_stale'];
+      return stale == 1 || stale == true;
+    } on FormatException {
+      return false;
     }
   }
 
@@ -780,6 +827,8 @@ class Message {
       isRead: _boolFromInt(row['is_read']) ?? true,
       bodyPreview: row['body_preview'] as String?,
       gateReason: row['gate_reason'] as String?,
+      hasAttachments: _boolFromInt(row['has_attachments']) ?? false,
+      gateOverride: row['gate_override'] as String?,
       sourceMetaJson: row['source_meta_json'] as String?,
       urgency: row['urgency'] as String?,
       category: row['category'] as String?,

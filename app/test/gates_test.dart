@@ -17,6 +17,7 @@ Message message({
   String? meeting,
   String? body,
   String? preview,
+  bool hasAttachments = false,
 }) =>
     Message(
       id: 'm1',
@@ -26,6 +27,7 @@ Message message({
       subject: subject,
       bodyText: body,
       bodyPreview: preview,
+      hasAttachments: hasAttachments,
       sourceMetaJson: headers == null && meeting == null
           ? null
           : jsonEncode({
@@ -410,6 +412,30 @@ void main() {
         expect(
           gateFor(message(subject: 'Canceled: weekly sync'), userAddress: null),
           'meeting_response',
+        );
+      });
+
+      test('a file with no text does NOT: that is somebody sending a document',
+          () {
+        // A calendar response never carries an attachment, and an
+        // "Accepted: signed offer letter" with only a PDF on it is a person.
+        expect(
+          gateFor(
+            message(
+              subject: 'Accepted: signed offer letter',
+              body: '',
+              hasAttachments: true,
+            ),
+            userAddress: null,
+          ),
+          isNull,
+        );
+        expect(
+          gateFor(
+            message(subject: 'Declined: expense report', hasAttachments: true),
+            userAddress: null,
+          ),
+          isNull,
         );
       });
 

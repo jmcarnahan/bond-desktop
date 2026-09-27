@@ -38,6 +38,9 @@ class _FakeMail implements MailBackend {
   _FakeMail({this.refuse = const {}, this.error});
 
   @override
+  Future<void> deleteDraft(String draftId) async {}
+
+  @override
   Future<List<String>> markRead(
     List<String> messageIds, {
     bool isRead = true,

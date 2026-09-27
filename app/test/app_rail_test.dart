@@ -47,7 +47,7 @@ Conversation _conv({
   String source = 'email',
   String? reason,
   bool? replyExpected,
-  bool? verdict,
+  bool vetoed = false,
 }) {
   return Conversation(
     id: id,
@@ -63,7 +63,7 @@ Conversation _conv({
     aiPendingCount: pending,
     needsYouReason: reason,
     replyExpected: replyExpected,
-    latestNeedsYouVerdict: verdict,
+    needsYouVetoed: vetoed,
   );
 }
 
@@ -237,32 +237,22 @@ void main() {
     // The judge outranks triage: an ask folded out of a broadcast about
     // somebody else's ticket, on a thread nobody answered, is still not the
     // owner's once the needs-you pass has read it and said so.
-    test('drops an asked, reply-expected thread the judge said no to', () {
+    test('drops an asked, reply-expected thread the judge vetoed', () {
       final rows = needsYouRows([
         _conv(
           id: 'broadcast',
           state: ConversationState.needsReply,
           cta: 'Review the issue description',
           replyExpected: true,
-          verdict: false,
+          vetoed: true,
         ),
       ]);
       expect(rows, isEmpty);
     });
 
-    test('keeps the same thread when the judge said yes', () {
-      final rows = needsYouRows([
-        _conv(
-          id: 'mine',
-          state: ConversationState.needsReply,
-          cta: 'Review the issue description',
-          verdict: true,
-        ),
-      ]);
-      expect(rows.map((c) => c.id), ['mine']);
-    });
-
-    test('an unjudged verdict is not a no', () {
+    test('an unvetoed thread, judged or not, keeps its place', () {
+      // What counts as a veto is the store's one SQL fragment; the rail reads
+      // only its answer. The store tests drive the verdict shapes.
       final rows = needsYouRows([
         _conv(
           id: 'fresh',

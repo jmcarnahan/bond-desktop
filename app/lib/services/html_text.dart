@@ -166,28 +166,133 @@ final RegExp _htmlComment = RegExp(r'<!--(?:(?!<!--)[\s\S])*?-->');
 /// the first `>` inside a value and leaked a fragment too.
 final RegExp _htmlAnyTag = RegExp(r'<[^<>]*>');
 
+/// An attribute whose value is longer than any address a server would take.
+///
+/// A mailed report carries its data inside the markup as often as beside it:
+/// `<a download href="data:text/csv;base64,…">` (a pandas or nbconvert
+/// export), `style="background-image:url(data:…)"`. Those megabytes are not
+/// in an `<img>`, so the mail profile's picture drop leaves them, and the cap
+/// then keeps two megabytes of base64 as the body; the cap's tag back-off
+/// looks only [_tagBackOffLimit] behind the cut, so it cannot save it.
+///
+/// Any quoted or unquoted value of eight kilobytes or more is blanked,
+/// whatever is in it, rather than only a value that starts `data:`. That one
+/// rule catches the style case too, where the `data:` sits inside `url(…)`,
+/// and a value that long is never an address a click could use: common
+/// servers refuse a request line past eight kilobytes.
+///
+/// Linear on hostile input, which is why it is this shape and not a smarter
+/// one. Each attempt starts at whitespace and an attribute name, and each
+/// value run stops at the character that could open the next attempt: a
+/// double-quoted value at `"`, a single-quoted one at `'`, an unquoted one at
+/// whitespace, a quote or `=`. So no two attempts of one kind scan the same
+/// characters, and a run that falls short fails in one step back per
+/// character. `<` and `>` end every run as well, so a value can never reach
+/// past its own tag. The cost: a value of that length holding a raw `<` or
+/// `>` is not blanked, and the cap sees it as before. It is applied only to
+/// the text of an opening tag of eight kilobytes or more, never to prose: a
+/// CI log in a `<pre>` holds `token=` and nine kilobytes of base64, and that
+/// is the sender's text.
+final RegExp _longAttrValue = RegExp(
+  r'''(\s[A-Za-z_:][-\w:.]*\s*=\s*)'''
+  r'''(?:"[^"<>]{8192,}"|'[^'<>]{8192,}'|[^\s"'<>=]{8192,})''',
+);
+
 /// Comments first (one can contain a `</script>` that would otherwise close a
 /// block early), then every matched block, then an unclosed head, and only
 /// then the unclosed tail — asking for the tail first would eat the rest of
 /// the page from the first `<script>` in a file that closes it perfectly
 /// well, and an unclosed script inside an unclosed head is a script the head
-/// sweep has already taken.
+/// sweep has already taken. The long attribute values go last, once the
+/// scripts and styles whose text could look like one are gone, and before
+/// either profile's cap.
 String _dropNonProse(String raw) => raw
     .replaceAll(_htmlComment, '')
     .replaceAll(_htmlDropped, '')
     .replaceAll(_htmlOpenHead, '')
-    .replaceAll(_htmlUnclosed, '');
+    .replaceAll(_htmlUnclosed, '')
+    .replaceAllMapped(_htmlOpenTag, (t) => t[0]!.length < 8192
+        ? t[0]!
+        : t[0]!.replaceAllMapped(_longAttrValue, (m) => '${m[1]}""'));
 
-/// A `<pre>` block, a tag, or a run of the whitespace HTML itself treats as
-/// one space.
+/// An opening tag, read whole so that [_longAttrValue] only ever looks inside
+/// one. `[^<>]*` for the reason [_htmlAnyTag] gives.
+final RegExp _htmlOpenTag = RegExp(r'<[A-Za-z][^<>]*>');
+
+/// A `<pre>` or `<textarea>` block, an opening tag that MAY start a styled
+/// block, any other tag, or a run of the whitespace HTML itself treats as one
+/// space.
 ///
-/// The `<pre>` body cannot run past a later `<pre`, for the same reason
-/// [_mailAnchor] cannot run past a later `<a`: an unclosed one must not scan
-/// the rest of the page once per opening tag.
+/// The protected blocks are `<pre>`, `<textarea>`, and an element from
+/// [_preStyledTags] whose inline `style` sets `white-space: pre`, `pre-wrap`
+/// or `pre-line` (ticketing and CI mailers write comment bodies that way, and
+/// a pasted Google Docs span does too).
+///
+/// A block's body cannot run past a later opening tag of its OWN name, for
+/// the same reason [_mailAnchor] cannot run past a later `<a`: an unclosed one
+/// must not scan the rest of the page once per opening tag. That is also the
+/// limit: an element nested inside another of the same name ends the outer
+/// one's protection, so a styled `<div>` holding a plain `<div>` finds that
+/// `<div` before its own `</div>`, is not protected, and folds.
+///
+/// The styled block is NOT matched here, only its opening tag, and that is
+/// what keeps the fold linear. As one pattern it had to ask the body scan
+/// again for every `style=` and every `white-space:pre` a single tag repeated,
+/// and an unclosed tag with a thousand of them ahead of a megabyte walked the
+/// megabyte a thousand times. [_foldSourceWhitespace] gives each opener ONE
+/// attempt instead: [_preStyle] reads the tag's own text, and
+/// [_styledBlockEnd] looks for the closer no further than the next opener of
+/// that name. The styled names are a fixed list for the same reason: each
+/// name's attempts stop at that name's next opener, so a character is walked
+/// at most once per name in the list, where a thousand invented names each
+/// styled and unclosed would walk the rest of the page once per name.
 final RegExp _sourceWhitespace = RegExp(
-  r'(<pre\b[^<>]*>(?:(?!<pre\b)[\s\S])*?</pre\s*>)|(<[^<>]*>)|[\t\r\n ]+',
+  r'(<(pre|textarea)\b[^<>]*>(?:(?!<\2\b)[\s\S])*?</\2\s*>)'
+  '|(<($_preStyledTags)\\b[^<>]*>)'
+  r'|(<[^<>]*>)|[\t\r\n ]+',
   caseSensitive: false,
 );
+
+/// The elements a `white-space: pre` style protects: the ones mail writes a
+/// comment body into. See [_sourceWhitespace] for why the list is fixed.
+const String _preStyledTags =
+    'div|span|p|td|th|li|code|blockquote|font|section|article';
+
+/// An inline style that keeps source whitespace, read on ONE tag's text.
+///
+/// Linear on that text: every value run starts after a quote and stops at the
+/// next one, so repeated `style=` attributes never scan the same characters
+/// twice, and the first `white-space:pre` found is the answer.
+final RegExp _preStyle = RegExp(
+  r'''\bstyle\s*=\s*["'][^"'<>]*?white-space\s*:\s*pre''',
+  caseSensitive: false,
+);
+
+/// The next opening or closing tag of each styled name, for
+/// [_styledBlockEnd]. Built once per name.
+final Map<String, RegExp> _sameNameEdge = {
+  for (final name in _preStyledTags.split('|'))
+    name: RegExp('<(/?)$name\\b', caseSensitive: false),
+};
+
+/// What must follow `</name` for it to be a closing tag.
+final RegExp _closeTail = RegExp(r'\s*>');
+
+/// Where the styled block whose opening tag ends at [from] ends, or null
+/// when a later opener of the same [name] (or the end of the input) comes
+/// before its closer. Scans no further than that next opener, which is what
+/// bounds each opener to one walk of its own body.
+int? _styledBlockEnd(String html, int from, String name) {
+  for (final edge in _sameNameEdge[name]!.allMatches(html, from)) {
+    if (edge.group(1)!.isEmpty) return null;
+    final tail = _closeTail.matchAsPrefix(html, edge.end);
+    if (tail != null) return tail.end;
+  }
+  return null;
+}
+
+String _lineFeeds(String block) =>
+    block.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
 
 /// The source's own line breaks as what they are in HTML: a space.
 ///
@@ -201,7 +306,9 @@ final RegExp _sourceWhitespace = RegExp(
 /// A `<pre>` block is the exception, because there the source's newlines ARE
 /// the layout: its body is kept as written, with CR/LF read as LF. Its
 /// newlines survive every later pass; the indentation does not, because
-/// [_normalizeWhitespace] trims the blanks around each newline.
+/// [_normalizeWhitespace] trims the blanks around each newline. A
+/// `<textarea>` and an element styled `white-space: pre…` are kept the same
+/// way, with the nesting limit [_sourceWhitespace] states.
 ///
 /// A tag is left as written too. Whitespace inside one separates attributes,
 /// which every tag pattern already reads with `\s`, or sits inside an
@@ -211,14 +318,33 @@ final RegExp _sourceWhitespace = RegExp(
 ///
 /// U+00A0 is left for [_normalizeWhitespace], and U+200B is in no class here,
 /// for the reason given there.
-String _foldSourceWhitespace(String html) =>
-    html.replaceAllMapped(_sourceWhitespace, (m) {
-      final pre = m.group(1);
-      if (pre != null) {
-        return pre.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+String _foldSourceWhitespace(String html) {
+  final out = StringBuffer();
+  var written = 0;
+  for (final m in _sourceWhitespace.allMatches(html)) {
+    // Inside a styled block already written whole.
+    if (m.start < written) continue;
+    out.write(html.substring(written, m.start));
+    written = m.end;
+    final pre = m.group(1);
+    if (pre != null) {
+      out.write(_lineFeeds(pre));
+      continue;
+    }
+    final opener = m.group(3);
+    if (opener != null && _preStyle.hasMatch(opener)) {
+      final end = _styledBlockEnd(html, m.end, m.group(4)!.toLowerCase());
+      if (end != null) {
+        out.write(_lineFeeds(html.substring(m.start, end)));
+        written = end;
+        continue;
       }
-      return m.group(2) ?? ' ';
-    });
+    }
+    out.write(opener ?? m.group(5) ?? ' ');
+  }
+  out.write(html.substring(written));
+  return out.toString();
+}
 
 /// Runs of spaces collapse; tabs survive, because they are what separates one
 /// table cell from the next and a row read as one word is a row nobody can
@@ -429,7 +555,15 @@ String _imageToken(String tag) {
   if (!src.toLowerCase().startsWith('cid:')) return '';
   final cid = src.substring(4).replaceAll(RegExp(r'^<|>$'), '').trim();
   if (cid.isEmpty) return '';
-  return '[cid:$cid]';
+  // The id is decoded already, so its `&`, `<` and `>` ride behind the marks
+  // through the whole-text decode and the tag strip, the way a link run's do
+  // (see [_ampMark]): `cid:a&amp;amp;b` names `a&amp;b`, and decoding it a
+  // second time would name a picture that is not in the message.
+  final held = cid
+      .replaceAll('&', _ampMark)
+      .replaceAll('<', _openMark)
+      .replaceAll('>', _closeMark);
+  return '[cid:$held]';
 }
 
 String _anchorRun(Match match) {
@@ -622,8 +756,7 @@ String canonicalLinkRun({required String label, required String target}) {
       return text;
     }
     // An address painted over a composer for a different one.
-    if (_bareAddress.hasMatch(text) &&
-        text.toLowerCase() != uri.path.trim().toLowerCase()) {
+    if (_bareAddress.hasMatch(text) && labelClaimsOtherHost(text, href)) {
       return href;
     }
   } else {
@@ -643,18 +776,60 @@ String canonicalLinkRun({required String label, required String target}) {
   if (_looksLikeUrl(text) && _comparable(text) == _comparable(href)) {
     return href;
   }
-  if (_looksLikeUrl(text)) {
-    // A `mailto:` label over anything else, or an address on another host
-    // (or one that will not parse): the label is discarded, because the words
-    // would promise a destination the click does not reach.
-    if (text.toLowerCase().startsWith('mailto:')) return href;
-    final claimed = _labelHost(text);
-    if (claimed == null ||
-        claimed != _bareHost(Uri.tryParse(href)?.host ?? '')) {
-      return href;
-    }
-  }
+  // A label that promises a destination the click does not reach is
+  // discarded: see [labelClaimsOtherHost], the rule the painter applies too.
+  if (labelClaimsOtherHost(text, href)) return href;
   return '$text <$href>';
+}
+
+/// Whether [label], painted over a link to [target], claims a destination the
+/// click does not reach.
+///
+/// ONE rule for two places. [canonicalLinkRun] applies it to a real anchor as
+/// the body is converted, and `linkSpansOf` (`widgets/linked_text.dart`)
+/// applies it again when a `label <url>` run is painted, because a stored body
+/// reaches the painter by paths the converter never saw: escaped
+/// `&lt;url&gt;` text, a body Graph converted itself (the MCP connection), a
+/// Teams message.
+///
+/// True for:
+///
+/// - an address-shaped label (`https://…`, `www.…`, `mailto:…`) that is not
+///   the target again and names another host, or no host a reader can check
+///   (it will not parse, or it carries userinfo). The claim is about the HOST:
+///   a label on the target's own host that leaves off a path or a tracking
+///   query is true;
+/// - a `mailto:` label over anything but that same address;
+/// - a label that is exactly one email address, over a `mailto:` naming a
+///   different one.
+///
+/// A Safe Links wrapper is read through to the address it carries, so the
+/// claim is judged against where the click finally lands.
+///
+/// A bare domain (`bank.example`) is never a claim, because `Report.xlsx` and
+/// `Node.js` look the same; the hover caption shows the host instead. Nor is
+/// an email address over a web link, which is a person's name for a page.
+bool labelClaimsOtherHost(String label, String target) {
+  final text = label.trim();
+  final href = target.trim();
+  if (text.isEmpty || href.isEmpty) return false;
+  final uri = Uri.tryParse(href);
+  final mailto = uri != null && uri.scheme.toLowerCase() == 'mailto';
+  if (mailto && _bareAddress.hasMatch(text)) {
+    return text.toLowerCase() != uri.path.trim().toLowerCase();
+  }
+  if (!_looksLikeUrl(text)) return false;
+  // A Safe Links wrapper is judged by the address it carries, as
+  // [canonicalLinkRun] reads it: the label that function built for it
+  // (`www.bank.example/statements`) names the wrapped host, never Microsoft's,
+  // and a painter that compared it with the wrapper would repaint every such
+  // run as two hundred characters of wrapper.
+  final lands = safeLinksTargetOf(href) ?? href;
+  if (_comparable(text) == _comparable(lands)) return false;
+  if (text.toLowerCase().startsWith('mailto:')) return true;
+  final claimed = _labelHost(text);
+  return claimed == null ||
+      claimed != _bareHost(Uri.tryParse(lands)?.host ?? '');
 }
 
 /// A label that is exactly one email address.
@@ -706,33 +881,117 @@ bool _isBreak(String ch) => ch == '\n' || ch == '\t' || ch == ' ';
 
 // ── entities ───────────────────────────────────────────────────────────
 
-const Map<String, String> _namedEntities = {
-  '&amp;': '&',
-  '&lt;': '<',
-  '&gt;': '>',
-  '&quot;': '"',
-  '&#39;': "'",
-  '&apos;': "'",
-  '&nbsp;': ' ',
+/// Every named character reference HTML 4.01 defines (all 252 of them), plus
+/// `&apos;`, as a code point.
+///
+/// Mail used to reach this app through Graph's own text conversion, which
+/// decoded them; since the HTML part is converted here, a newsletter that
+/// escapes its punctuation by name (`We&rsquo;re`, `&copy; 2026`, the
+/// `&zwnj;` padding behind a preheader) would otherwise be stored, shown,
+/// indexed and prompted with the entity spelled out. HTML 4.01 rather than
+/// HTML5's two thousand: it is the set every mail template writer reaches for,
+/// it is small enough to review by eye, and it needs no new dependency.
+///
+/// Names are case-sensitive, as HTML says (`&Eacute;` is É and `&eacute;` is
+/// é), and every one needs its `;`. A name not in the table is left as typed.
+const Map<String, int> _namedEntities = {
+  // Latin-1 (U+00A0 to U+00FF).
+  // A plain space rather than U+00A0, as this decoder has always answered:
+  // both profiles fold U+00A0 into a space anyway, and a caller of
+  // [decodeHtmlEntities] outside them gets the same answer they always did.
+  'nbsp': 0x20,
+  'iexcl': 0xA1, 'cent': 0xA2, 'pound': 0xA3, 'curren': 0xA4,
+  'yen': 0xA5, 'brvbar': 0xA6, 'sect': 0xA7, 'uml': 0xA8, 'copy': 0xA9,
+  'ordf': 0xAA, 'laquo': 0xAB, 'not': 0xAC, 'shy': 0xAD, 'reg': 0xAE,
+  'macr': 0xAF, 'deg': 0xB0, 'plusmn': 0xB1, 'sup2': 0xB2, 'sup3': 0xB3,
+  'acute': 0xB4, 'micro': 0xB5, 'para': 0xB6, 'middot': 0xB7, 'cedil': 0xB8,
+  'sup1': 0xB9, 'ordm': 0xBA, 'raquo': 0xBB, 'frac14': 0xBC, 'frac12': 0xBD,
+  'frac34': 0xBE, 'iquest': 0xBF, 'Agrave': 0xC0, 'Aacute': 0xC1, 'Acirc': 0xC2,
+  'Atilde': 0xC3, 'Auml': 0xC4, 'Aring': 0xC5, 'AElig': 0xC6, 'Ccedil': 0xC7,
+  'Egrave': 0xC8, 'Eacute': 0xC9, 'Ecirc': 0xCA, 'Euml': 0xCB, 'Igrave': 0xCC,
+  'Iacute': 0xCD, 'Icirc': 0xCE, 'Iuml': 0xCF, 'ETH': 0xD0, 'Ntilde': 0xD1,
+  'Ograve': 0xD2, 'Oacute': 0xD3, 'Ocirc': 0xD4, 'Otilde': 0xD5, 'Ouml': 0xD6,
+  'times': 0xD7, 'Oslash': 0xD8, 'Ugrave': 0xD9, 'Uacute': 0xDA, 'Ucirc': 0xDB,
+  'Uuml': 0xDC, 'Yacute': 0xDD, 'THORN': 0xDE, 'szlig': 0xDF, 'agrave': 0xE0,
+  'aacute': 0xE1, 'acirc': 0xE2, 'atilde': 0xE3, 'auml': 0xE4, 'aring': 0xE5,
+  'aelig': 0xE6, 'ccedil': 0xE7, 'egrave': 0xE8, 'eacute': 0xE9, 'ecirc': 0xEA,
+  'euml': 0xEB, 'igrave': 0xEC, 'iacute': 0xED, 'icirc': 0xEE, 'iuml': 0xEF,
+  'eth': 0xF0, 'ntilde': 0xF1, 'ograve': 0xF2, 'oacute': 0xF3, 'ocirc': 0xF4,
+  'otilde': 0xF5, 'ouml': 0xF6, 'divide': 0xF7, 'oslash': 0xF8, 'ugrave': 0xF9,
+  'uacute': 0xFA, 'ucirc': 0xFB, 'uuml': 0xFC, 'yacute': 0xFD, 'thorn': 0xFE,
+  'yuml': 0xFF,
+  // Symbols, Greek letters, arrows and mathematical operators.
+  'fnof': 0x192, 'Alpha': 0x391, 'Beta': 0x392, 'Gamma': 0x393, 'Delta': 0x394,
+  'Epsilon': 0x395, 'Zeta': 0x396, 'Eta': 0x397, 'Theta': 0x398, 'Iota': 0x399,
+  'Kappa': 0x39A, 'Lambda': 0x39B, 'Mu': 0x39C, 'Nu': 0x39D, 'Xi': 0x39E,
+  'Omicron': 0x39F, 'Pi': 0x3A0, 'Rho': 0x3A1, 'Sigma': 0x3A3, 'Tau': 0x3A4,
+  'Upsilon': 0x3A5, 'Phi': 0x3A6, 'Chi': 0x3A7, 'Psi': 0x3A8, 'Omega': 0x3A9,
+  'alpha': 0x3B1, 'beta': 0x3B2, 'gamma': 0x3B3, 'delta': 0x3B4,
+  'epsilon': 0x3B5, 'zeta': 0x3B6, 'eta': 0x3B7, 'theta': 0x3B8, 'iota': 0x3B9,
+  'kappa': 0x3BA, 'lambda': 0x3BB, 'mu': 0x3BC, 'nu': 0x3BD, 'xi': 0x3BE,
+  'omicron': 0x3BF, 'pi': 0x3C0, 'rho': 0x3C1, 'sigmaf': 0x3C2, 'sigma': 0x3C3,
+  'tau': 0x3C4, 'upsilon': 0x3C5, 'phi': 0x3C6, 'chi': 0x3C7, 'psi': 0x3C8,
+  'omega': 0x3C9, 'thetasym': 0x3D1, 'upsih': 0x3D2, 'piv': 0x3D6,
+  'bull': 0x2022, 'hellip': 0x2026, 'prime': 0x2032, 'Prime': 0x2033,
+  'oline': 0x203E, 'frasl': 0x2044, 'weierp': 0x2118, 'image': 0x2111,
+  'real': 0x211C, 'trade': 0x2122, 'alefsym': 0x2135, 'larr': 0x2190,
+  'uarr': 0x2191, 'rarr': 0x2192, 'darr': 0x2193, 'harr': 0x2194,
+  'crarr': 0x21B5, 'lArr': 0x21D0, 'uArr': 0x21D1, 'rArr': 0x21D2,
+  'dArr': 0x21D3, 'hArr': 0x21D4, 'forall': 0x2200, 'part': 0x2202,
+  'exist': 0x2203, 'empty': 0x2205, 'nabla': 0x2207, 'isin': 0x2208,
+  'notin': 0x2209, 'ni': 0x220B, 'prod': 0x220F, 'sum': 0x2211, 'minus': 0x2212,
+  'lowast': 0x2217, 'radic': 0x221A, 'prop': 0x221D, 'infin': 0x221E,
+  'ang': 0x2220, 'and': 0x2227, 'or': 0x2228, 'cap': 0x2229, 'cup': 0x222A,
+  'int': 0x222B, 'there4': 0x2234, 'sim': 0x223C, 'cong': 0x2245,
+  'asymp': 0x2248, 'ne': 0x2260, 'equiv': 0x2261, 'le': 0x2264, 'ge': 0x2265,
+  'sub': 0x2282, 'sup': 0x2283, 'nsub': 0x2284, 'sube': 0x2286, 'supe': 0x2287,
+  'oplus': 0x2295, 'otimes': 0x2297, 'perp': 0x22A5, 'sdot': 0x22C5,
+  'lceil': 0x2308, 'rceil': 0x2309, 'lfloor': 0x230A, 'rfloor': 0x230B,
+  'lang': 0x2329, 'rang': 0x232A, 'loz': 0x25CA, 'spades': 0x2660,
+  'clubs': 0x2663, 'hearts': 0x2665, 'diams': 0x2666,
+  // Markup-significant and internationalization characters.
+  'quot': 0x22, 'amp': 0x26, 'lt': 0x3C, 'gt': 0x3E, 'OElig': 0x152,
+  'oelig': 0x153, 'Scaron': 0x160, 'scaron': 0x161, 'Yuml': 0x178,
+  'circ': 0x2C6, 'tilde': 0x2DC, 'ensp': 0x2002, 'emsp': 0x2003,
+  'thinsp': 0x2009, 'zwnj': 0x200C, 'zwj': 0x200D, 'lrm': 0x200E, 'rlm': 0x200F,
+  'ndash': 0x2013, 'mdash': 0x2014, 'lsquo': 0x2018, 'rsquo': 0x2019,
+  'sbquo': 0x201A, 'ldquo': 0x201C, 'rdquo': 0x201D, 'bdquo': 0x201E,
+  'dagger': 0x2020, 'Dagger': 0x2021, 'permil': 0x2030, 'lsaquo': 0x2039,
+  'rsaquo': 0x203A, 'euro': 0x20AC,
+  // Not in HTML 4.01, but XHTML and HTML5 both define it and mail uses it.
+  'apos': 0x27,
 };
 
-final RegExp _numericEntity = RegExp(r'&#(x?)([0-9a-fA-F]+);');
+/// One reference: numeric (`&#8217;`, `&#x2019;`) or named (`&rsquo;`). A name
+/// is a letter and then one to eight letters or digits, which covers the
+/// longest in the table (`thetasym`) and nothing longer.
+final RegExp _entity =
+    RegExp(r'&(?:#(x?)([0-9a-fA-F]+)|([A-Za-z][A-Za-z0-9]{1,8}));');
 
-/// [text] with its entities as characters. `&amp;` LAST, so a double-escaped
-/// `&amp;lt;` becomes `&lt;` and not `<`.
+/// [text] with its entities as characters.
+///
+/// ONE pass, and that is what keeps `&amp;` last in effect: a replacement is
+/// never scanned again, so a double-escaped `&amp;rsquo;` becomes `&rsquo;`
+/// and not `’`, and `&amp;lt;` becomes `&lt;` and not `<`. It is also what
+/// keeps the decode linear: one scan with a map lookup per match, never one
+/// `replaceAll` per table entry.
 String decodeHtmlEntities(String text) {
-  var out = text;
-  for (final entry in _namedEntities.entries) {
-    if (entry.key == '&amp;') continue;
-    out = out.replaceAll(entry.key, entry.value);
-  }
-  out = out.replaceAllMapped(_numericEntity, (m) {
-    final code = int.tryParse(m.group(2)!, radix: m.group(1)!.isEmpty ? 10 : 16);
-    // Out of range, a surrogate half, or unparseable: left as it was typed
-    // rather than turned into a replacement character. The surrogate range is
-    // named explicitly and it is the one that matters: half a pair is a
-    // string Dart will hold and UTF-8 cannot encode, so it would travel this
-    // far and then throw at the database write or the embedding POST.
+  if (!text.contains('&')) return text;
+  return text.replaceAllMapped(_entity, (m) {
+    final name = m.group(3);
+    final int? code;
+    if (name != null) {
+      code = _namedEntities[name];
+    } else {
+      code = int.tryParse(m.group(2)!, radix: m.group(1)!.isEmpty ? 10 : 16);
+    }
+    // Unknown, out of range, a surrogate half, or unparseable: left as it was
+    // typed rather than turned into a replacement character. The surrogate
+    // range is named explicitly and it is the one that matters: half a pair is
+    // a string Dart will hold and UTF-8 cannot encode, so it would travel this
+    // far and then throw at the database write or the embedding POST. Under
+    // 32 is refused so that no `&#3;` in a body can forge one of the mail
+    // profile's markers.
     if (code == null ||
         code < 32 ||
         code > 0x10ffff ||
@@ -741,5 +1000,4 @@ String decodeHtmlEntities(String text) {
     }
     return String.fromCharCode(code);
   });
-  return out.replaceAll('&amp;', '&');
 }

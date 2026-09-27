@@ -523,6 +523,33 @@ void main() {
       });
     }
 
+    // One styled opener that repeats its claim a thousand times, and never
+    // closes, ahead of a megabyte of words. A pattern that retried the body
+    // scan once per repeat walked the megabyte a thousand times.
+    final body = List.filled(200000, 'word ').join();
+    for (final (name, opener) in [
+      (
+        'white-space:pre repeated in one tag',
+        '<div style="${'white-space:pre;' * 1000}">',
+      ),
+      (
+        'style= repeated in one tag',
+        '<div ${'style="white-space:pre" ' * 1000}>',
+      ),
+    ]) {
+      for (final profile in HtmlProfile.values) {
+        test('$name, unclosed before a megabyte, converts quickly ($profile)',
+            () {
+          final clock = Stopwatch()..start();
+          final text = htmlToText('$opener\n$body', profile: profile);
+          clock.stop();
+
+          expect(clock.elapsed, lessThan(const Duration(seconds: 3)));
+          expect(text, startsWith('word word'));
+        });
+      }
+    }
+
     // Every tag shape with no `>` after it, twenty thousand times. Each one
     // scanned to the end of the text once per opener while its pattern could
     // run across a `<`, and the unclosed comment did the same across later
@@ -534,6 +561,18 @@ void main() {
       '<script ',
       '<!--x',
       '<head>x',
+      // The fold's protected blocks, unclosed: each must stop at the next
+      // opener of its own name rather than scan to the end.
+      '<pre>x\n',
+      '<textarea>x\n',
+      '<div style="white-space:pre">x\n',
+      '<span style="white-space:pre-wrap"><td style="white-space:pre">x\n',
+      // Attribute values that never reach the long-value length, and one
+      // that never closes.
+      ' a="x',
+      " a='x",
+      ' a=x',
+      '&rsquo;&bogus;&#x2019;',
     ]) {
       final shaped = List.filled(20000, shape).join();
       for (final profile in HtmlProfile.values) {
@@ -558,6 +597,60 @@ void main() {
       expect(
         htmlToText(html, profile: HtmlProfile.mail),
         'Hi Dana, the numbers are below.',
+      );
+    });
+
+    test('a mail with a megabytes data: download link keeps its words', () {
+      // A pandas or nbconvert report mailed with its data inside the anchor.
+      // The value is not an `<img>`, so the picture drop left it and the cap
+      // stored two megabytes of base64 as the body.
+      final html = '<div>Hi Dana, the export is attached below.</div>'
+          '<a download="data.csv" href="data:text/csv;base64,'
+          '${'A' * (3 * 1024 * 1024)}">Download CSV</a>';
+
+      expect(
+        htmlToText(html, profile: HtmlProfile.mail),
+        'Hi Dana, the export is attached below.\nDownload CSV',
+      );
+      expect(
+        htmlToText(html, profile: HtmlProfile.document, capProse: true),
+        'Hi Dana, the export is attached below.\nDownload CSV',
+      );
+    });
+
+    test('a mail with a megabytes style url(data:) keeps its words', () {
+      final html = '<div style="background-image:url(\'data:image/png;base64,'
+          '${'A' * (3 * 1024 * 1024)}\')">Hi Dana</div>'
+          '<div>The chart is above.</div>';
+
+      expect(
+        htmlToText(html, profile: HtmlProfile.mail),
+        'Hi Dana\nThe chart is above.',
+      );
+    });
+
+    test('a long token in the prose of a pre block is the sender\'s text', () {
+      // A CI log: `token=` and nine kilobytes of base64, outside any tag.
+      final token = 'A' * 9000;
+      final html = '<pre>log: token=$token</pre>';
+
+      expect(htmlToText(html, profile: HtmlProfile.mail), 'log: token=$token');
+      expect(
+        htmlToText(html, profile: HtmlProfile.document),
+        'log: token=$token',
+      );
+    });
+
+    test('a long value never touches an inline picture or a short link', () {
+      final html = '<p title="${'x' * 9000}">'
+          '<img src="cid:chart@01" alt="c"> and '
+          '<a href="https://docs.example.com/a?q=${'y' * 2000}">the doc</a>'
+          '</p>';
+
+      expect(
+        htmlToText(html, profile: HtmlProfile.mail),
+        '[cid:chart@01] and the doc '
+        '<https://docs.example.com/a?q=${'y' * 2000}>',
       );
     });
 

@@ -1,4 +1,5 @@
 import 'package:bond_inbox/screens/inbox_screen.dart' show triageKeys;
+import 'package:bond_inbox/widgets/triage_intents.dart';
 import 'package:bond_inbox/widgets/cheat_sheet_panel.dart';
 import 'package:bond_inbox/widgets/find_field.dart' show findCommands;
 import 'package:flutter/material.dart';
@@ -72,6 +73,47 @@ void main() {
       (e) => e.description.contains('selection'),
     );
     expect(rule.keys, containsAll(['e', 's', 'm', 'l', '⇧E']));
+  });
+
+  test('the keys that act on a thread fire once per press', () {
+    // The one-act latch does not absorb a key repeat, so the flag is the only
+    // thing between a held `m` and a run of dropped senders down the pile.
+    const acting = {
+      DismissThreadIntent,
+      DismissWithLabelIntent,
+      LabelThreadIntent,
+      LaterThreadIntent,
+      QuickReplyIntent,
+      DropSenderIntent,
+      ToggleCheckedIntent,
+    };
+    final seen = <Type>{};
+    for (final MapEntry(key: activator, value: intent) in triageKeys.entries) {
+      if (!acting.contains(intent.runtimeType)) continue;
+      seen.add(intent.runtimeType);
+      expect((activator as SingleActivator).includeRepeats, isFalse,
+          reason: '${keyLabel(activator)} → ${intent.runtimeType} repeats');
+    }
+    // Every acting intent is bound, so the loop above checked each of them.
+    expect(seen, acting);
+  });
+
+  test('and the movement keys still repeat', () {
+    final moving = {
+      LogicalKeyboardKey.keyJ,
+      LogicalKeyboardKey.keyK,
+      LogicalKeyboardKey.arrowDown,
+      LogicalKeyboardKey.arrowUp,
+    };
+    final found = <LogicalKeyboardKey>{};
+    for (final activator in triageKeys.keys) {
+      if (activator is! SingleActivator) continue;
+      if (!moving.contains(activator.trigger)) continue;
+      found.add(activator.trigger);
+      expect(activator.includeRepeats, isTrue,
+          reason: '${keyLabel(activator)} should repeat when held');
+    }
+    expect(found, moving);
   });
 
   test('every group has something under it', () {

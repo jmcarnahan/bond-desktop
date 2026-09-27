@@ -138,6 +138,21 @@ class StoreAttachmentBytes implements AttachmentBytes {
   /// page is.
   static const int _htmlThumbnailHeight = 240;
 
+  /// A `<link>` element, of any `rel`, stripped from a page before WebKit
+  /// draws it.
+  ///
+  /// WebKit's `<link rel=preconnect>` opens a connection through the loader's
+  /// preconnect path, not through a resource load, so the Swift rule list,
+  /// which filters resource loads, may never see it; and preconnect is driven
+  /// by the parser, so scripting off does not stop it either. A connection to
+  /// a host unique to this recipient tells the sender the page was opened,
+  /// which is what the block list exists to prevent. A thumbnail loses nothing:
+  /// a stylesheet link is blocked by the rule list anyway. `[^<>]*` keeps the
+  /// pattern linear, as every tag pattern in `html_text.dart` is. A meta
+  /// refresh needs nothing here: the Swift navigation delegate cancels it.
+  static final RegExp _linkElement =
+      RegExp(r'<link\b[^<>]*>', caseSensitive: false);
+
   /// Kinds that are a POINTER to something that is not a file at all.
   ///
   /// A card is a rendering of a message, a `message_reference` is a quote of
@@ -353,16 +368,19 @@ class StoreAttachmentBytes implements AttachmentBytes {
   /// [_pdfThumbnail] is: a thumbnail is worth downloading an ordinary report and
   /// never worth downloading a thirty-megabyte page of embedded data.
   ///
-  /// Nothing here is a rendering DECISION — the scripting, the resources and
-  /// the navigation are all refused on the Swift side, which is the only place
-  /// that can refuse them. A thumbnailer that answers null is a page WebKit
-  /// would not draw, a timeout, or a host with no channel at all, and all three
-  /// are a chip with a glyph on it.
+  /// The scripting, the resources and the navigation are all refused on the
+  /// Swift side, which is the only place that can refuse them. A thumbnailer
+  /// that answers null is a page WebKit would not draw, a timeout, or a host
+  /// with no channel at all, and all three are a chip with a glyph on it.
+  ///
+  /// One thing is taken out HERE, before the page crosses the channel: every
+  /// `<link>` element (see [_linkElement]).
   Future<Uint8List?> _htmlThumbnail(AttachmentRef ref) async {
     if (ref.size > backend.maxPreviewBytes) return null;
     final blob = await _ensure(ref);
     final drawn = await htmlThumbnailer!(
-      utf8.decode(blob.bytes, allowMalformed: true),
+      utf8.decode(blob.bytes, allowMalformed: true)
+          .replaceAll(_linkElement, ''),
       width: _thumbnailWidth,
       height: _htmlThumbnailHeight,
     );

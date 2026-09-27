@@ -161,16 +161,28 @@ class WhyPanelBody extends StatelessWidget {
   /// The verdict in three words, tri-state preserved. "Not judged yet" is a
   /// different answer from "Not flagged" and the panel never collapses them:
   /// the unjudged rows are the pass's own worklist.
+  ///
+  /// A NULL verdict WITH a reason is a fourth reading: a hedge, a yes the
+  /// pass was not sure enough of to raise. It is neither a no nor unjudged,
+  /// and the panel says so rather than claiming either.
   String _headline(Message m) => switch (m.needsYouVerdict) {
         true => 'Needs you',
         false => 'Not flagged',
+        null when _hedged(m) => 'Not sure',
         null => 'Not judged yet',
       };
+
+  /// Whether the pass judged this message a hedge: NULL verdict, reason kept.
+  static bool _hedged(Message m) =>
+      m.needsYouVerdict == null && (m.needsYouReason?.trim() ?? '').isNotEmpty;
 
   List<String> _verdictLines(Message m) {
     final lines = <String>[];
     final reason = m.needsYouReason?.trim() ?? '';
     switch (m.needsYouVerdict) {
+      case null when _hedged(m):
+        lines.add('The pass leaned yes but was not sure, so triage decides. '
+            '${_reasonSentence(reason)}');
       case null:
         lines.add('The needs-you pass has not reached this message.');
       case true:

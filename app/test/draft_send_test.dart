@@ -47,6 +47,16 @@ class InMemoryTokenStore implements TokenStore {
   Future<void> deleteAll() async => values.clear();
 }
 
+/// A store whose echo write refuses, as a locked or busy database would: the
+/// first local write after a send the server already accepted.
+class _EchoRefusingStore extends MessageStore {
+  _EchoRefusingStore(super.db);
+
+  @override
+  Future<bool> insertLocalEcho(Map<String, Object?> row) async =>
+      throw StateError('database is locked');
+}
+
 /// Records every Graph call the send flow makes, in order.
 class RecordingMail extends GraphMail {
   final List<String> calls = [];
@@ -98,7 +108,23 @@ class RecordingMail extends GraphMail {
   }) async {
     calls.add('recipients:$draftId');
     ccLines.add([...cc]);
-    final error = failure;
+    final error = failure ?? recipientsFailure;
+    if (error != null) throw error;
+  }
+
+  /// Thrown by the recipients PATCH alone, when set: the step the send's own
+  /// comment calls the one most likely to be refused.
+  Object? recipientsFailure;
+
+  /// Thrown by the draft delete, when set.
+  Object? deleteFailure;
+
+  /// Overridden for the same reason as [updateDraftRecipients]: the inherited
+  /// one would dial Microsoft.
+  @override
+  Future<void> deleteDraft(String draftId) async {
+    calls.add('delete:$draftId');
+    final error = deleteFailure;
     if (error != null) throw error;
   }
 
@@ -620,6 +646,149 @@ void main() {
       // No epoch bump: the composer keeps the words for the retry.
       expect(notifier.state.sendEpoch, 0);
       expect(notifier.state.body, 'Friday works.');
+    });
+
+    test('a refused Cc deletes the draft it had already created', () async {
+      await seedDraft();
+      mail.recipientsFailure =
+          const GraphMailException('Graph refused the Cc line.', 400);
+      final notifier = notifierFor();
+      await notifier.load();
+      notifier.setAddedRecipients([
+        const Person(
+          id: 'user-dana',
+          displayName: 'Dana Okoye',
+          mail: 'dana@example.com',
+        ),
+      ]);
+
+      final outcome = await notifier.send('Friday works.');
+
+      expect(outcome, SendOutcome.failed);
+      // No body and no send after the refusal, and the empty reply the server
+      // built is taken back out of Drafts rather than left there per retry.
+      expect(mail.calls, [
+        'createReply:inbound-1',
+        'recipients:graph-draft-1',
+        'delete:graph-draft-1',
+      ]);
+      expect(notifier.state.error, 'Graph refused the Cc line.');
+      expect(notifier.state.sending, isFalse);
+      // Nothing went out, so the people stay for the retry.
+      expect(notifier.state.addedRecipients, hasLength(1));
+    });
+
+    test('a delete that fails too never hides why the send stopped', () async {
+      await seedDraft();
+      mail.recipientsFailure =
+          const GraphMailException('Graph refused the Cc line.', 400);
+      mail.deleteFailure =
+          const GraphMailException('Could not delete the draft.', 500);
+      final notifier = notifierFor();
+      await notifier.load();
+      notifier.setAddedRecipients([
+        const Person(
+          id: 'user-dana',
+          displayName: 'Dana Okoye',
+          mail: 'dana@example.com',
+        ),
+      ]);
+
+      final outcome = await notifier.send('Friday works.');
+
+      expect(outcome, SendOutcome.failed);
+      expect(mail.calls.last, 'delete:graph-draft-1');
+      expect(notifier.state.error, 'Graph refused the Cc line.');
+      expect(notifier.state.sending, isFalse);
+    });
+
+    test('a draft that was never created is never deleted', () async {
+      await seedDraft();
+      mail.failure = const GraphMailException('Mailbox is over quota.');
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.send('Friday works.');
+
+      expect(mail.calls, ['createReply:inbound-1']);
+    });
+
+    test('a local write that fails after the send still reports it sent',
+        () async {
+      // The reply is in somebody's inbox the moment `sendDraft` returns. A
+      // "Could not send" here, with the text and the Cc still up, is an
+      // invitation to send the same reply twice.
+      final echoRefusing = _EchoRefusingStore(db);
+      store = echoRefusing;
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+      notifier.setAddedRecipients([
+        const Person(
+          id: 'user-dana',
+          displayName: 'Dana Okoye',
+          mail: 'dana@example.com',
+        ),
+      ]);
+      final epochBefore = notifier.state.sendEpoch;
+
+      final outcome = await notifier.send('Friday works.');
+
+      expect(outcome, SendOutcome.sent);
+      expect(notifier.state.error, isNull);
+      expect(notifier.state.notice, DraftNotifier.localCopyFailedNotice);
+      expect(notifier.state.sending, isFalse);
+      // Retired exactly as a clean send retires it: the epoch rebuilds the box
+      // empty, and the chips are on the mail that went out.
+      expect(notifier.state.sendEpoch, epochBefore + 1);
+      expect(notifier.state.addedRecipients, isEmpty);
+      // The writes after the echo still ran, so the card does not offer the
+      // reply again.
+      expect((await store.getDraft('email', 'conv-1'))!['status'], 'sent');
+      expect(notifier.state.body, isNull);
+      expect(syncsAfterSend, 1);
+      // And the draft that went out is not "cleaned up" after.
+      expect(mail.calls, isNot(contains('delete:graph-draft-1')));
+
+      // A second press lands on an empty composer and sends nothing.
+      expect(await notifier.send(''), SendOutcome.failed);
+      expect(mail.calls.where((c) => c.startsWith('send:')), hasLength(1));
+    });
+
+    test('a second press while the target is being looked up sends once',
+        () async {
+      // No stored draft, so the send awaits the store for the newest inbound
+      // message before anything else. A press landing in that gap used to
+      // find `sending` still false.
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'newest-inbound',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'received_at': '2026-08-30T10:00:00Z',
+      });
+      final notifier = notifierFor();
+      await notifier.load();
+
+      final first = notifier.send('Typed from scratch.');
+      final second = notifier.send('Typed from scratch.');
+
+      expect(await second, SendOutcome.failed);
+      expect(await first, SendOutcome.sent);
+      expect(mail.calls.where((c) => c.startsWith('createReply:')),
+          hasLength(1));
+    });
+
+    test('a refusal before anything is created leaves nothing in flight',
+        () async {
+      final notifier = notifierFor();
+      await notifier.load();
+
+      expect(await notifier.send('Friday works.'), SendOutcome.failed);
+
+      expect(notifier.state.sending, isFalse);
+      expect(notifier.state.error,
+          'There is nothing to reply to in this thread yet.');
     });
 
     test('empty text never reaches Graph', () async {

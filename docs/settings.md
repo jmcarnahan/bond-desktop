@@ -122,7 +122,9 @@ the threshold is the thing a reader scans that line for.
 With it on, a sent reply on a thread of the Needs You pile is marked done the
 way `e` does it, so the view lands on the next row and the progress count
 moves. A thread opened from Archive or Home is marked done in place and stays
-open. Either way the toast reads `Reply sent · Marked done.` with an Undo. See
+open. Either way the toast reads `Reply sent · Marked done.` with an Undo. A
+mark-done whose write fails reads `Reply sent. Couldn't mark it done.` with no
+Undo, and the reader stays where they are. See
 [pipeline/07-replies.md](pipeline/07-replies.md).
 
 ## What commits, and when
@@ -330,10 +332,13 @@ states overrides it with `testManifest()`.
 label applied from a thread behind an open pane moves the use counts without the
 reader touching anything:
 
-- `labels: state.labels` — and `null` rather than an empty list is what hides
-  the section, which is how an install that has not read the vocabulary yet
-  draws no Labels row at all instead of an empty one.
-- `labelsLoading: !state.loaded` and `labelsError: state.error`. The error is
+- `labels: state.labels` — always a list, because `LabelsState.labels` is
+  never null, so the section is always present in the avatar scope. `null` is
+  what hides it, and only a host without the wiring (a widget test) passes
+  that. An empty list renders the section saying nothing has been filed yet.
+- `labelsLoading: !state.loaded` and `labelsError: state.error`. Until the
+  first read lands the section draws `Loading…` under its rows rather than
+  the nothing-filed line. The error is
   the same field a refused rename lands in, which is why the section draws it
   under the open field when there is one and at the top of the body otherwise.
 - `onRenameLabel: notifier.rename` — it already returns `Future<bool>`, and

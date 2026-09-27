@@ -11,6 +11,7 @@ import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart'
     show NeedsYouTask, needsYouDefaultRules, needsYouOutputContract;
 import 'package:bond_inbox/services/needs_you_handler.dart';
+import 'package:bond_inbox/services/notify_worthy.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/progress_bus.dart';
 import 'package:drift/drift.dart' show Variable;
@@ -383,7 +384,7 @@ void main() {
       'confidence': 'medium',
     };
 
-    test('a hedged yes from an outsider nobody has written to is a no',
+    test('a hedged yes from an outsider nobody has written to is a hedge',
         () async {
       await seedMail();
       final llm = scriptedLlm(hedged);
@@ -394,14 +395,28 @@ void main() {
         id: 'm1',
       );
 
-      // A RANKING, not a drop: the model was still asked, the verdict is still
-      // written, and the reason is still the model's own sentence — the message
-      // sits in the inbox like any other. All it loses is the rail.
+      // A RANKING, not a drop: the model was still asked, and the reason is
+      // still the model's own sentence. The verdict is NULL, not 0: a medium
+      // yes on a stranger's mail buys no interruption, and it is no veto
+      // either, so the message sits in the inbox like any other.
       expect(llm.calls.length, 1);
       expect(await verdictOf('email', 'm1'), {
-        'verdict': 0,
+        'verdict': null,
         'reason': 'It asks the reader to confirm their interest.',
       });
+
+      // So triage's own ask still reaches the chip and the toast: a new
+      // customer's "please send the signed contract by Friday" is not taken
+      // off every Needs You surface by the cold bar.
+      await db.customUpdate(
+        "UPDATE messages SET reply_expected = 1 WHERE source_message_id = 'm1'",
+      );
+      await db.customUpdate(
+        "UPDATE conversations SET state = 'needs_reply' "
+        "WHERE conversation_key = 'chat-1'",
+      );
+      final row = await store.notifyRowFor('email', 'm1');
+      expect(notifyWorthy(row!, threshold: 0), isTrue);
     });
 
     test('the same hedged yes from a colleague still raises', () async {
@@ -598,9 +613,10 @@ void main() {
       });
     });
 
-    test('a hesitant yes is a no', () async {
+    test('a hesitant yes is a hedge: no raise and no veto', () async {
       // The raise policy. The verdict buys an interruption, and "possibly" is
-      // not grounds for one.
+      // not grounds for one. Nor is it a no, so it is stored NULL with its
+      // evidence and triage decides.
       await seedAmbiguousMail();
       final llm = scriptedLlm(const {
         'evidence': 'It might be asking the owner to look at the numbers.',
@@ -610,8 +626,19 @@ void main() {
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
-      expect((await verdictOf('email', 'm1'))['verdict'], 0);
+      expect(await verdictOf('email', 'm1'), {
+        'verdict': null,
+        'reason': 'It might be asking the owner to look at the numbers.',
+      });
+      await db.customUpdate(
+        "UPDATE messages SET reply_expected = 1 WHERE source_message_id = 'm1'",
+      );
+      final row = await store.notifyRowFor('email', 'm1');
+      expect(notifyWorthy(row!, threshold: 0), isTrue,
+          reason: "triage's ask decides a hedged message");
     });
+
+
 
     test('a model that fails leaves the verdict unjudged and throws', () async {
       // The row stays on the worklist and the worker's retry machinery owns
@@ -921,6 +948,35 @@ void main() {
       expect(await verdictOf('teams', 't1'),
           {'verdict': 1, 'reason': 'teams_direct'});
       expect(await flagOf('teams', 't1'), 0);
+    });
+
+    test('a hedge over an old no is a change the chip follows', () async {
+      // Old hedges were stored 0, and 0 vetoed triage's ask. Re-judged, the
+      // NULL that replaces it is a different stored answer, so the chip is
+      // recomputed and triage's ask raises it.
+      await seedSettled(source: 'email', id: 'm1', addressedMe: 1);
+      await store.writeNeedsYouVerdict('email', 'm1',
+          verdict: false, reason: 'It might be asking.');
+      await db.customUpdate(
+        "UPDATE messages SET reply_expected = 1 WHERE source_message_id = 'm1'",
+      );
+
+      await runOne(
+        NeedsYouHandler(
+          store,
+          scriptedLlm(const {
+            'evidence': 'It might be asking the owner to look at the numbers.',
+            'needs_you': true,
+            'confidence': 'low',
+          }),
+          progress: progress,
+        ),
+        source: 'email',
+        id: 'm1',
+      );
+
+      expect((await verdictOf('email', 'm1'))['verdict'], isNull);
+      expect(await flagOf('email', 'm1'), 1);
     });
 
     test('and a handler with no recorder judges exactly as before', () async {

@@ -76,6 +76,23 @@ class _SilentMcp implements BondMcpClient {
   Future<void> close() async {}
 }
 
+/// An MCP client that only counts: a call that should not happen is one.
+class _CountingMcp implements BondMcpClient {
+  int calls = 0;
+
+  @override
+  Future<Map<String, dynamic>> callTool(
+    String name,
+    Map<String, Object?> args,
+  ) async {
+    calls++;
+    return <String, dynamic>{};
+  }
+
+  @override
+  Future<void> close() async {}
+}
+
 /// A backend that can amend recipients and does nothing but say it was asked.
 /// The seam's forward is what this exists to catch.
 class _RecordingEditor implements MailBackend, DraftRecipientsEditor {
@@ -121,6 +138,9 @@ class _RecordingEditor implements MailBackend, DraftRecipientsEditor {
 
   @override
   Future<SentDraft> sendDraft(String draftId) => throw UnimplementedError();
+
+  @override
+  Future<void> deleteDraft(String draftId) async {}
 
   @override
   Future<List<String>> markRead(
@@ -391,6 +411,45 @@ void main() {
     });
   });
 
+  group('deleting a draft a failed reply left behind', () {
+    test('is one DELETE of that message, and a 204 is done', () async {
+      final mail = mailWith((_) => http.Response('', 204));
+
+      await mail.deleteDraft('draft/1');
+
+      expect(seen.single.method, 'DELETE');
+      expect(seen.single.url.path, '/v1.0/me/messages/draft%2F1');
+    });
+
+    test('a draft already gone counts as deleted', () async {
+      final mail = mailWith((_) => http.Response('', 404));
+
+      await mail.deleteDraft('draft-1');
+
+      expect(seen, hasLength(1));
+    });
+
+    test('anything else is a mail failure the caller can swallow', () async {
+      final mail = mailWith((_) => http.Response('busy', 500));
+
+      await expectLater(
+        mail.deleteDraft('draft-1'),
+        throwsA(isA<GraphMailException>()
+            .having((e) => e.statusCode, 'statusCode', 500)),
+      );
+    });
+
+    test('the MCP server has no delete, so it asks nothing and says so',
+        () async {
+      // `manage_draft` has no delete action; the orphan is accepted there.
+      final mcp = _CountingMcp();
+
+      await McpMailBackend(mcp).deleteDraft('draft-1');
+
+      expect(mcp.calls, 0);
+    });
+  });
+
   group('the capability', () {
     test('a Graph connection can amend a reply', () {
       final MailBackend mail = mailWith((_) => jsonOk({'id': 'draft-1'}));
@@ -464,6 +523,16 @@ void main() {
     Finder bodyField() => find.byType(TextField).last;
     Finder pickerField() => find.byType(TextField).first;
 
+    /// Whether the field [field] finds holds the keyboard. Read off its
+    /// `EditableText`, whose node is never null, where a `TextField` built
+    /// without one reports none.
+    bool hasFocus(WidgetTester tester, Finder field) => tester
+        .widget<EditableText>(
+          find.descendant(of: field, matching: find.byType(EditableText)),
+        )
+        .focusNode
+        .hasFocus;
+
     Future<void> settle(WidgetTester tester) async {
       await tester.pump(const Duration(milliseconds: 300));
       await tester.pump();
@@ -480,18 +549,118 @@ void main() {
       expect(find.byType(TextField), findsOneWidget);
     });
 
-    testWidgets('an @ in the body opens the picker and says who this goes to',
-        (tester) async {
+    testWidgets('an @ and a letter in the body open the picker and say who '
+        'this goes to', (tester) async {
       await pumpHost(tester);
 
       await tester.enterText(bodyField(), 'Looping in @');
       await tester.pump();
+      // Mail waits for the character after the `@`: on its own it may be the
+      // start of "@ 3pm", which is prose.
+      expect(find.byKey(Composer.recipientsKey), findsNothing);
+
+      await tester.enterText(bodyField(), 'Looping in @d');
+      await tester.pump();
+      await tester.pump();
 
       expect(find.byKey(Composer.recipientsKey), findsOneWidget);
       expect(find.text('Reply to the sender only'), findsOneWidget);
-      // The @ is left in the text: swallowing it would read as a keystroke the
-      // box refused.
-      expect(find.text('Looping in @'), findsOneWidget);
+      // The @ and the letter are left in the text: swallowing them would read
+      // as keystrokes the box refused.
+      expect(find.text('Looping in @d'), findsOneWidget);
+      // And the cursor went to the picker, as it always did.
+      expect(hasFocus(tester, pickerField()), isTrue);
+      expect(hasFocus(tester, bodyField()), isFalse);
+    });
+
+    testWidgets('the letter after a mail @ is where the search starts',
+        (tester) async {
+      final queries = <String>[];
+      Future<RecipientResults> recording(String query) {
+        queries.add(query);
+        return _findsDana(query);
+      }
+
+      await pumpHost(tester, search: recording);
+
+      await tester.enterText(bodyField(), 'Copying in @d');
+      await tester.pump();
+      await settle(tester);
+
+      final picker = tester.widget<EditableText>(
+        find.descendant(of: pickerField(), matching: find.byType(EditableText)),
+      );
+      expect(picker.controller.text, 'd');
+      expect(queries, contains('d'));
+      // And the offer it found can be picked, replacing "@d" in the body.
+      await tester.tap(find.byKey(const Key('recipient-option-user-dana')));
+      await tester.pump();
+      expect(find.text('Copying in @Dana Okoye '), findsOneWidget);
+    });
+
+    testWidgets('a second mail @ with the picker already open searches for '
+        'its own letter', (tester) async {
+      final queries = <String>[];
+      Future<RecipientResults> recording(String query) {
+        queries.add(query);
+        return _findsDana(query);
+      }
+
+      await pumpHost(tester, search: recording);
+      await tester.enterText(bodyField(), 'Copying in @d');
+      await tester.pump();
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('recipient-option-user-dana')));
+      await tester.pump();
+
+      // The field is still on screen, built long ago with the first seed.
+      await tester.enterText(bodyField(), 'Copying in @Dana Okoye and @r');
+      await tester.pump();
+      await settle(tester);
+
+      final picker = tester.widget<EditableText>(
+        find.descendant(of: pickerField(), matching: find.byType(EditableText)),
+      );
+      expect(picker.controller.text, 'r');
+      expect(queries, contains('r'));
+    });
+
+    testWidgets('a new seed never replaces a query the owner typed',
+        (tester) async {
+      await pumpHost(tester);
+      await tester.enterText(bodyField(), 'Copying in @d');
+      await tester.pump();
+      await settle(tester);
+      await tester.enterText(pickerField(), 'rafi');
+      await tester.pump();
+
+      await tester.enterText(bodyField(), 'Copying in @d and @r');
+      await tester.pump();
+      await settle(tester);
+
+      final picker = tester.widget<EditableText>(
+        find.descendant(of: pickerField(), matching: find.byType(EditableText)),
+      );
+      expect(picker.controller.text, 'rafi');
+    });
+
+    testWidgets('a bare @ in mail prose keeps the cursor and the words in the '
+        'body', (tester) async {
+      await pumpHost(tester);
+
+      // Typed a keystroke at a time, the way a person writes it.
+      const sentence = "Let's meet @ 3pm";
+      await tester.tap(bodyField());
+      await tester.pump();
+      for (var i = 1; i <= sentence.length; i++) {
+        await tester.enterText(bodyField(), sentence.substring(0, i));
+        await tester.pump();
+        await tester.pump();
+      }
+
+      expect(find.byKey(Composer.recipientsKey), findsNothing);
+      expect(find.text(sentence), findsOneWidget);
+      expect(hasFocus(tester, bodyField()), isTrue);
     });
 
     testWidgets('an address in the body is not a request for a picker',
@@ -509,7 +678,7 @@ void main() {
       final changes = <List<Person>>[];
       await pumpHost(tester, changes: changes);
 
-      await tester.enterText(bodyField(), 'Copying in @');
+      await tester.enterText(bodyField(), 'Copying in @d');
       await tester.pump();
       await tester.enterText(pickerField(), 'dana');
       await settle(tester);
@@ -520,7 +689,8 @@ void main() {
       // Cc by default, which is what the line says out loud.
       expect(find.text('Reply to the sender, plus 1 person in Cc'),
           findsOneWidget);
-      // And the name went into the sentence somebody was writing.
+      // And the name went into the sentence somebody was writing, in place of
+      // the `@` and the letter that asked for the picker.
       expect(find.text('Copying in @Dana Okoye '), findsOneWidget);
     });
 
@@ -592,7 +762,12 @@ void main() {
         (tester) async {
       await pumpHost(tester, canEditRecipients: false);
 
+      // A bare `@` is prose on mail, so it draws nothing yet.
       await tester.enterText(bodyField(), 'Looping in @');
+      await tester.pump();
+      expect(find.byKey(Composer.recipientsRefusedKey), findsNothing);
+
+      await tester.enterText(bodyField(), 'Looping in @d');
       await tester.pump();
 
       expect(find.byKey(Composer.recipientsRefusedKey), findsOneWidget);

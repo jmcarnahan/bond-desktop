@@ -62,6 +62,9 @@ class _RecordingMail implements MailBackend {
   @override
   Future<SentDraft> sendDraft(String draftId) => throw UnimplementedError();
   @override
+  Future<void> deleteDraft(String draftId) async {}
+
+  @override
   Future<List<String>> markRead(List<String> messageIds,
           {bool isRead = true}) =>
       throw UnimplementedError();

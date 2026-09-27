@@ -1,3 +1,5 @@
+import 'package:bond_inbox/services/mail_body.dart'
+    show canonicalLinkRun, mailTextFromHtml;
 import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/linked_text.dart';
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
@@ -193,6 +195,137 @@ void main() {
       );
     });
 
+    test('an address label claiming another host paints the target', () {
+      // Escaped text in a body (`&lt;url&gt;` in the source) never met the
+      // converter's rule, so the painter applies it again.
+      expect(
+        _runs('Sign in: www.bank.example <https://evil.example/login> now'),
+        [
+          'plain:Sign in: ',
+          'link:https://evil.example/login → https://evil.example/login',
+          'plain: now',
+        ],
+      );
+      expect(
+        _runs('https://bank.example/login <https://evil.example/login>'),
+        ['link:https://evil.example/login → https://evil.example/login'],
+      );
+    });
+
+    // A Safe Links wrapper, as the tenant rewrites every link in the mail.
+    String wrapper(String url) =>
+        'https://nam12.safelinks.protection.outlook.com/?url='
+        '${Uri.encodeComponent(url)}&data=05%7C02%7Cx&reserved=0';
+
+    test('a stored Safe Links run keeps the readable label it was built with',
+        () {
+      // `canonicalLinkRun` builds `www.bank.example/statements` from the
+      // wrapped address; judged against the wrapper's own host, the painter
+      // repainted it as the whole wrapper.
+      final target = wrapper('https://www.bank.example/statements');
+      final run = canonicalLinkRun(
+        label: 'https://www.bank.example/statements',
+        target: target,
+      );
+
+      expect(run, startsWith('www.bank.example/statements <https://nam12.'));
+      expect(_runs(run).single, startsWith('link:www.bank.example/statements → '));
+    });
+
+    test('a URL label over a Safe Links wrapper paints its label (MCP shape)',
+        () {
+      // Graph's own conversion on the MCP connection writes the anchor's text
+      // as it was, which is the bare address, then the wrapper.
+      final target = wrapper('https://www.bank.example/statements');
+      expect(
+        _runs('https://www.bank.example/statements <$target>').single,
+        startsWith('link:https://www.bank.example/statements → '),
+      );
+      expect(
+        _runs('www.bank.example <$target>').single,
+        startsWith('link:www.bank.example → '),
+      );
+    });
+
+    test('a Safe Links wrapper hiding another host is still a false claim',
+        () {
+      final target = wrapper('https://evil.example/login');
+      expect(
+        _runs('www.bank.example <$target>').single,
+        startsWith('link:https://nam12.safelinks.protection.outlook.com/'),
+      );
+    });
+
+    test('an email label over a composer for another address paints it', () {
+      expect(
+        _runs('ceo@bank.example <mailto:attacker@evil.example>'),
+        [
+          'link:mailto:attacker@evil.example → '
+              'mailto:attacker@evil.example',
+        ],
+      );
+    });
+
+    test('a same-host label, a bare domain and a sentence keep their words',
+        () {
+      expect(
+        _runs('www.bank.example <https://bank.example/login?utm=1>'),
+        ['link:www.bank.example → https://bank.example/login?utm=1'],
+      );
+      expect(
+        _runs('ceo@bank.example <mailto:ceo@bank.example?subject=Hi>'),
+        ['link:ceo@bank.example → mailto:ceo@bank.example?subject=Hi'],
+      );
+      // A bare domain is not a claim (the hover caption covers it), and a
+      // label that is words is not one either.
+      expect(
+        _runs('bank.example <https://evil.example/login>'),
+        ['link:bank.example → https://evil.example/login'],
+      );
+    });
+
+    test('a same-host address label is one link, not the address twice', () {
+      final body =
+          mailTextFromHtml('<a href="HTTPS://BANK.EXAMPLE/x">https://bank.example/</a>');
+
+      expect(body, 'https://bank.example/ <https://bank.example/x>');
+      expect(
+        _runs(body),
+        ['link:https://bank.example/ → https://bank.example/x'],
+      );
+      expect(
+        _runs('See https://bank.example/ <https://bank.example/x> today.'),
+        [
+          'plain:See ',
+          'link:https://bank.example/ → https://bank.example/x',
+          'plain: today.',
+        ],
+      );
+    });
+
+    test('a bare address paired with a bracket on another host paints it', () {
+      expect(
+        _runs('https://bank.example/ <https://evil.example/x> then'),
+        [
+          'link:https://evil.example/x → https://evil.example/x',
+          'plain: then',
+        ],
+      );
+    });
+
+    test('a bare address ending a sentence is not paired with what follows',
+        () {
+      // The full stop was trimmed off the address, so the bracket is not its
+      // tail: the address keeps its own target and the bracket is a run of
+      // its own (whatever label the old inference gives it).
+      final runs = _runs('Read https://a.example/x. <https://b.example/y>');
+      expect(runs.take(2), [
+        'plain:Read ',
+        'link:https://a.example/x → https://a.example/x',
+      ]);
+      expect(runs.last, endsWith('→ https://b.example/y'));
+    });
+
     test('text with no links in it is one untouched run', () {
       expect(_runs('Just words, <not a link> at all.'),
           ['plain:Just words, <not a link> at all.']);
@@ -262,6 +395,16 @@ void main() {
       // the run this refuses.
       final long = List.filled(bodyMaxLabelWords + 4, 'word').join(' ');
       expect(cta('$long <https://tracker.example.com/x>'), isNull);
+    });
+
+    test('a label claiming another host is no button', () {
+      // The button used to wear `www.bank.example` and open evil.example.
+      expect(cta('www.bank.example <https://evil.example/login>'), isNull);
+      expect(
+        cta('www.bank.example <https://evil.example/login>\n'
+            'View order <https://shop.example.com/o/7>'),
+        'View order → https://shop.example.com/o/7',
+      );
     });
 
     test('a percent-encoded wrapper behind real words is still an anchor', () {

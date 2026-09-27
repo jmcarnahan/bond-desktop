@@ -398,6 +398,67 @@ void main() {
     });
   });
 
+  group('named entities decode, the whole HTML 4.01 set', () {
+    test('a newsletter that escapes its punctuation by name reads as text', () {
+      expect(
+        mailTextFromHtml(
+          '<p>We&rsquo;re glad &mdash; &copy; 2026 Fictional Co&trade; '
+          '&bull; Unsubscribe&hellip;</p>',
+        ),
+        'We’re glad — © 2026 Fictional Co™ • Unsubscribe…',
+      );
+    });
+
+    test('Latin-1 letters, quotes and the euro', () {
+      expect(
+        mailTextFromHtml('<p>Caf&eacute; &ldquo;q&rdquo; &euro;5</p>'),
+        'Café “q” €5',
+      );
+    });
+
+    test('preheader padding is the invisible joiner, never the word', () {
+      final text = mailTextFromHtml(
+        '<div>Your weekly summary</div>'
+        '<div>&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;</div>',
+      );
+
+      expect(text, isNot(contains('&')));
+      expect(text, 'Your weekly summary\n\u200c \u200c \u200c');
+    });
+
+    test('a double-escaped name decodes once, inside an anchor and out', () {
+      expect(
+        mailTextFromHtml(
+          '<p>Write &amp;rsquo; for it. '
+          '<a href="https://docs.example.com/e">the &amp;rsquo; page</a></p>',
+        ),
+        'Write &rsquo; for it. the &rsquo; page <https://docs.example.com/e>',
+      );
+    });
+
+    test('an unknown name, or one without its semicolon, is left as typed',
+        () {
+      expect(
+        mailTextFromHtml('<p>&bogus; &copy &nbspx</p>'),
+        '&bogus; &copy &nbspx',
+      );
+    });
+
+    test('names are case-sensitive', () {
+      expect(
+        mailTextFromHtml('<p>&Eacute;t&eacute; &EACUTE; &Amp;</p>'),
+        'Été &EACUTE; &Amp;',
+      );
+    });
+
+    test('an inline picture id is decoded once, like an anchor', () {
+      expect(
+        mailTextFromHtml('<p><img src="cid:a&amp;amp;b@01"> here</p>'),
+        '[cid:a&amp;b@01] here',
+      );
+    });
+  });
+
   group('the source\'s own whitespace is HTML whitespace', () {
     test('Exchange plain-text mail is single-spaced, not double', () {
       // What Exchange stores for a message typed as plain text: every line
@@ -425,6 +486,46 @@ void main() {
       // leading spaces of the middle line do not: the whitespace pass trims
       // the blanks around every newline, pre or not.
       expect(mailTextFromHtml('<pre>a\r\n  b\r\nc</pre>'), 'a\nb\nc');
+    });
+
+    test('a white-space:pre-wrap element keeps its lines', () {
+      // A ticketing or CI mailer's comment body: the browser draws the
+      // source's newline as a line break, so the converter must too.
+      expect(
+        mailTextFromHtml(
+          '<div style="font-size:12px; white-space: pre-wrap">'
+          'line1\r\nline2</div>',
+        ),
+        'line1\nline2',
+      );
+      expect(
+        mailTextFromHtml("<SPAN style='white-space:pre'>a\nb</span> c"),
+        'a\nb c',
+      );
+    });
+
+    test('a textarea keeps its lines', () {
+      expect(mailTextFromHtml('<textarea>a\nb</textarea>'), 'a\nb');
+    });
+
+    test('an ordinary div, or one styled otherwise, still folds', () {
+      expect(mailTextFromHtml('<div>line1\nline2</div>'), 'line1 line2');
+      expect(
+        mailTextFromHtml('<div style="white-space:normal">line1\nline2</div>'),
+        'line1 line2',
+      );
+    });
+
+    test('a same-name element nested inside ends the protection (the limit)',
+        () {
+      // Documented at `_sourceWhitespace`: the body cannot run past a later
+      // opener of its own name, so this div is not protected and folds.
+      expect(
+        mailTextFromHtml(
+          '<div style="white-space:pre-wrap">a\nb<div>c</div></div>',
+        ),
+        'a b\nc',
+      );
     });
 
     test('the zero-width delimiters survive the fold', () {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
 
@@ -680,7 +682,12 @@ class QuickReplyBox extends StatefulWidget {
   /// Sends what is in the box. The host owns the path: this widget knows
   /// nothing about drafts, grants or the network, exactly as the composer's own
   /// Send does not.
-  final void Function(String body) onSend;
+  ///
+  /// A host that answers with a future lets the box know when its send has
+  /// settled, which is when an error or notice it reports is the answer to
+  /// THIS press rather than a leftover from the last one; see
+  /// `_QuickReplyBoxState._submitted`.
+  final FutureOr<void> Function(String body) onSend;
 
   /// Closes the box — Escape, Cancel, or a send the host decided ends it.
   final VoidCallback onClose;
@@ -716,6 +723,30 @@ class _QuickReplyBoxState extends State<QuickReplyBox> {
   /// Its own node so ⌘Enter can be heard around the field rather than in it.
   final FocusNode _focus = FocusNode(debugLabel: 'quick-reply');
 
+  /// The words in the box have been handed to the host, and the box is inert
+  /// until the host says how that went.
+  ///
+  /// The box's own latch, because the host's [QuickReply.sending] is not
+  /// enough on its own. After a send lands, the host writes `sending: false`
+  /// and only then reloads the list, and only that reload takes the row — and
+  /// this box — away; in between, the box was enabled and still held the sent
+  /// words, and a second ⌘Enter sent them again. Set BEFORE the host is
+  /// called, so no await anywhere in the host's path can open that gap.
+  ///
+  /// Cleared when the host reports an error or a notice for this box, or
+  /// when the host replaces the box's words. Never on a clean send: the row
+  /// is leaving, and the sent words stay visible and inert until it has.
+  bool _submitted = false;
+
+  /// The host's future for the press in flight has completed. From then on,
+  /// an error or notice on screen is this press's answer, even when it is the
+  /// same sentence the last press drew and so never "changed".
+  bool _settled = false;
+
+  /// Whether the box takes input: nothing is in flight, from the host's side
+  /// or from this box's.
+  bool get _busy => widget.reply.sending || _submitted;
+
   @override
   void initState() {
     super.initState();
@@ -737,7 +768,16 @@ class _QuickReplyBoxState extends State<QuickReplyBox> {
     final prefill = widget.reply.body;
     if (prefill != oldWidget.reply.body && _body.text == oldWidget.reply.body) {
       _body.text = prefill;
+      // New words from the host are not the words that were submitted.
+      _release();
+      return;
     }
+    if (!_submitted) return;
+    final error = widget.reply.error;
+    final notice = widget.reply.notice;
+    final answered = (error != null && error != oldWidget.reply.error) ||
+        (notice != null && notice != oldWidget.reply.notice);
+    if (answered || _settled) _answerIfReported();
   }
 
   @override
@@ -748,10 +788,44 @@ class _QuickReplyBoxState extends State<QuickReplyBox> {
   }
 
   void _send() {
-    if (widget.reply.sending) return;
+    if (_busy) return;
     final text = _body.text.trim();
     if (text.isEmpty) return;
-    widget.onSend(text);
+    setState(() {
+      _submitted = true;
+      _settled = false;
+    });
+    final result = widget.onSend(text);
+    if (result is Future<void>) {
+      result.whenComplete(() {
+        if (!mounted || !_submitted) return;
+        _settled = true;
+        _answerIfReported();
+      }).ignore();
+    }
+  }
+
+  /// Lets go of the latch if the host has said something about this box.
+  ///
+  /// An error means the words did not leave, so they stay in the box for the
+  /// retry. A notice means they did — sent with something to add, or copied
+  /// to the clipboard — so the box is emptied as it is released: re-enabled
+  /// with the words still in it, one more ⌘Enter would send them twice.
+  void _answerIfReported() {
+    if (widget.reply.error != null) {
+      _release();
+    } else if (widget.reply.notice != null) {
+      _body.clear();
+      _release();
+    }
+  }
+
+  void _release() {
+    if (!_submitted && !_settled) return;
+    setState(() {
+      _submitted = false;
+      _settled = false;
+    });
   }
 
   /// Who a send from this box reaches, in the composer's own words.
@@ -807,7 +881,7 @@ class _QuickReplyBoxState extends State<QuickReplyBox> {
               // that opened beside the keyboard rather than under it would cost
               // the reader a reach for the mouse to use a keyboard shortcut.
               autofocus: true,
-              enabled: !widget.reply.sending,
+              enabled: !_busy,
               minLines: 1,
               maxLines: 6,
               style: BondType.body,
@@ -840,7 +914,7 @@ class _QuickReplyBoxState extends State<QuickReplyBox> {
               builder: (context, value, _) => Row(
                 children: [
                   Text(
-                    widget.reply.sending ? 'Sending…' : '⌘Enter sends',
+                    _busy ? 'Sending…' : '⌘Enter sends',
                     style: BondType.caption,
                   ),
                   const Spacer(),
@@ -854,9 +928,7 @@ class _QuickReplyBoxState extends State<QuickReplyBox> {
                   TextButton(
                     key: QuickReplyBox.sendKey,
                     onPressed:
-                        value.text.trim().isEmpty || widget.reply.sending
-                            ? null
-                            : _send,
+                        value.text.trim().isEmpty || _busy ? null : _send,
                     style: _quietButton,
                     child: const Text('Send'),
                   ),

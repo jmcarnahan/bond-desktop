@@ -23,9 +23,11 @@ import 'pipeline_progress.dart';
 /// lose.
 ///
 /// The verdict is TRI-STATE on `messages`, and the third state is the point.
-/// NULL means this pass has never judged the row — which is what makes the
-/// unjudged rows a worklist — 0 is a judgement that the message does not need
-/// the owner, and 1 that it does. The deterministic floor
+/// NULL means this pass has never judged the row, or judged it a HEDGE, a yes
+/// below the confidence bar, which buys neither an interruption nor a veto;
+/// 0 is a judgement that the message does not need the owner, and 1 that it
+/// does. The work row, not the NULL, is what says whether a message was
+/// judged. The deterministic floor
 /// ([needsYouFloor]) only ever RAISES it, and so does the model below it: what
 /// the floor is silent about is read by [NeedsYouTask], which is the only
 /// thing here that can write a 0.
@@ -258,10 +260,16 @@ class NeedsYouHandler extends WorkHandler {
       maxTokens: _maxTokens,
     );
 
-    // Raise-only, hesitation included. The floor has already said yes to
-    // everything it covers, so all this model can do is raise what the floor
-    // left alone — and a low-confidence yes stays a no, because the verdict
-    // buys an interruption and "possibly" is not grounds for one.
+    // Three answers, not two. A real no (`needsYou == false`) is written 0,
+    // and 0 is a veto: it outranks triage's ask on the chip, the toast, the
+    // rail and the tile. A yes that clears the confidence bar is written 1.
+    // A yes that does NOT clear it is a HEDGE, written NULL with the evidence
+    // kept as the reason: a hedge buys no interruption, since "possibly" is
+    // not grounds for one, and no veto either, since the model did not say
+    // no. Triage decides such a message, exactly as it decides an unjudged
+    // one. Writing a hedge as 0 let a medium yes on a new customer's "please
+    // send the signed contract by Friday" take the thread off every Needs You
+    // surface over triage's own ask.
     //
     // A cold approach ([isColdOutreach]) is held to the top of that scale rather
     // than to the middle of it. Unsolicited outreach is WRITTEN to read as an
@@ -270,9 +278,11 @@ class NeedsYouHandler extends WorkHandler {
     // with the sales copy, and on the thread that prompted this it produced a
     // drafted reply to a vendor nobody had heard of. A real ask from a real
     // counterparty comes back `high`, which is what "can still qualify" means
-    // here: the bar moved, the door did not close.
-    final verdict = result.needsYou &&
-        (cold ? result.confidence == 'high' : result.confidence != 'low');
+    // here: the bar moved, the door did not close. Below the bar is a hedge
+    // like any other, so a stranger's medium yes neither raises nor vetoes.
+    final clearsBar =
+        cold ? result.confidence == 'high' : result.confidence != 'low';
+    final bool? verdict = !result.needsYou ? false : (clearsBar ? true : null);
 
     // A throw from the call above — the model being down included — is left to
     // propagate. The verdict stays NULL, the row stays on the worklist, and
@@ -291,7 +301,10 @@ class NeedsYouHandler extends WorkHandler {
   /// changed the answer.
   ///
   /// The comparison is against the STORED shape, so a first verdict (`null` →
-  /// 0 or 1) counts as a change and a repeat of either answer does not. That
+  /// 0 or 1) counts as a change and a repeat of any answer does not. A hedge
+  /// is stored NULL, so an old 0 becoming a hedge is a change too, and the
+  /// chip is recomputed through `notifyWorthy`, which reads NULL as no veto
+  /// and lets triage's ask decide. That
   /// asymmetry is the point: a repeat must write nothing, or a chip the user
   /// cleared by replying would come back every time the row was re-judged.
   ///
@@ -303,9 +316,9 @@ class NeedsYouHandler extends WorkHandler {
     String source,
     String id, {
     required int? previous,
-    required bool verdict,
+    required bool? verdict,
   }) async {
-    if (previous == (verdict ? 1 : 0)) return;
+    if (previous == (verdict == null ? null : (verdict ? 1 : 0))) return;
     await _pipeline.refreshNeedsYou(
       source,
       id,

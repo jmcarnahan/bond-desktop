@@ -625,6 +625,13 @@ INSERT OR IGNORE INTO message_progress (
   /// Writes what only the per-message detail fetch knows. Every column
   /// COALESCEs against itself, so a detail call that came back thin cannot
   /// blank a body, a header set, or an attachment flag already stored.
+  ///
+  /// This is the write of a detail that ANSWERED, so it always ends with no
+  /// `body_stale` key in the blob, whichever blob survives the COALESCE: a new
+  /// one never carries the key, and an old one kept by a null has it removed.
+  /// A 200 with no body keeps the old text and still clears the mark, because
+  /// asking again would get the same thin answer. An invalid old blob is left
+  /// as it was; it carries no mark to clear.
   Future<void> updateMessageDetail(
     String source,
     String sourceMessageId, {
@@ -636,7 +643,12 @@ INSERT OR IGNORE INTO message_progress (
       'UPDATE messages SET '
       'body_text = COALESCE(?, body_text), '
       'has_attachments = COALESCE(?, has_attachments), '
-      'source_meta_json = COALESCE(?, source_meta_json), '
+      // `?3`, the blob, three times: a numbered parameter can be read more
+      // than once, and the plain `?` after it takes the next number, 4.
+      'source_meta_json = CASE '
+      '  WHEN json_valid(COALESCE(?3, source_meta_json)) '
+      "  THEN json_remove(COALESCE(?3, source_meta_json), '\$.body_stale') "
+      '  ELSE COALESCE(?3, source_meta_json) END, '
       'updated_at = ? '
       'WHERE source = ? AND source_message_id = ?',
       variables: _args([
@@ -983,10 +995,10 @@ WHERE source = ? AND conversation_key = ?
           // reads on different rules would let the chip and the ask describe
           // different people.
           '  nk.reply_expected AS reply_expected, '
-          // And the needs-you pass's verdict on that same message, tri-state
-          // on the same rule — `isNeedsYou` lets an explicit no outrank the
-          // ask triage folded up.
-          '  nk.needs_you_verdict AS latest_needs_you_verdict, '
+          // And the needs-you pass's veto on the THREAD, off the one fragment
+          // the tile and the filter read too — `isNeedsYou` lets it outrank
+          // the ask triage folded up. See [needsYouVetoedSql].
+          '  ${needsYouVetoedSql('c')} AS needs_you_vetoed, '
           '  nk.from_address AS latest_inbound_from '
           'FROM conversations c '
           'LEFT JOIN conversation_ai ai '
@@ -3932,96 +3944,89 @@ FROM messages
     return changed;
   }
 
-  /// Forgets the mail bodies a server's own HTML→text conversion produced, so
-  /// the lazy body fetch can bring them back through this app's converter.
-  /// Returns how many rows were cleared.
+  /// Marks the in-window mail bodies an older converter wrote as owed a
+  /// refetch, and returns how many rows it marked.
   ///
-  /// Nulling rather than rewriting, because the noise is not recoverable: the
-  /// address in `label <https://…>` is all that is left of an anchor whose
-  /// label a table cell swallowed, and the `[Main Logo]` line is all that is
-  /// left of an image. Only a refetch of the HTML can say what the message
-  /// was, and `ensureBodies` already fetches exactly the rows with no body —
-  /// so the thread the owner opens next fills itself in and nothing is
-  /// refetched for a thread nobody reads.
+  /// MARKED, never nulled. The mark is `body_stale` in `source_meta_json`, and
+  /// the text stays where it is until a refetch has actually answered. A body
+  /// nulled first is a body lost for good whenever that refetch cannot answer:
+  /// Graph ids are not immutable here, so a message the owner archived or
+  /// filed in Outlook after ingest keeps an id that now 404s, and a sender
+  /// policy on the MCP server answers 403. `ensureBodies` refetches a stale row
+  /// exactly as it does one with no body, so the thread the owner opens next
+  /// fills itself in through this app's converter, and a thread nobody opens
+  /// costs nothing. Every other reader, the stages, the index, the prompts,
+  /// keeps reading the old text meanwhile, which is far better than the
+  /// 255-character preview they would fall back to. So a row the pipeline
+  /// still owes work on is marked like any other: nothing loses text now.
   ///
-  /// `updated_at` DOES NOT MOVE, and that is the whole reason this is one
-  /// statement of its own rather than a branch in
-  /// [stripSenderIdentificationTips]. The column is the keyword index's
-  /// watermark: restamping it here would offer the index a row whose body is
-  /// NULL, which indexes the message as having no words at all until somebody
-  /// opens its thread. Left alone, the row keeps the text it had until the
-  /// refill writes the new body through [updateMessageDetail], whose own stamp
-  /// is what hands the index the converted text exactly once.
+  /// `updated_at` DOES NOT MOVE. The column is the keyword index's watermark,
+  /// and the mark changes no text the index would file. The refill writes the
+  /// new body through [updateMessageDetail], whose own stamp is what hands the
+  /// index the converted text exactly once.
   ///
-  /// The three patterns are what a text conversion leaves and a person does
-  /// not: an address inside angle brackets, a `mailto:` run after a label, an
-  /// `[cid:…]` token. They also match a body THIS build's converter wrote,
-  /// which costs that thread one refetch and gets the same text back — the
-  /// wrong answer would be leaving a legacy body in place, so the patterns
-  /// stay generous.
+  /// Four marks, each something an older conversion left and a person does
+  /// not:
+  /// - an address inside angle brackets, a `mailto:` run after a label, or an
+  ///   `[cid:…]` token, which are what a server's own HTML→text conversion
+  ///   writes for anchors and inline images;
+  /// - a blank line, because the branch's first converter kept the source's
+  ///   CR/LF beside the newline every `<br>` wrote and so double-spaced
+  ///   plain-text Exchange mail, and a blank line is the only mark it left on
+  ///   a message with no link in it;
+  /// - a literal named entity, `&` then letters then `;` somewhere after,
+  ///   because that converter decoded only seven entities and left
+  ///   `We&rsquo;re` in every templated mail. The GLOB stays linear: SQLite
+  ///   gives up the outer star as soon as the inner one finds no `;`.
   ///
-  /// A local echo (the `local:` key range) is never cleared: its body is what
-  /// the owner typed, and the detail fetch refuses a `local:` id, so a nulled
-  /// echo could never be refilled.
+  /// The patterns are generous on purpose. A body THIS build wrote with a real
+  /// paragraph break, or a person's `AT&T;`, costs its thread one refetch that
+  /// returns the same text; the wrong answer would be leaving an old body in
+  /// place. It runs only inside the `mail_html_rebuild_2` one-shot.
   ///
-  /// Nor is a row the pipeline still owes work on, for the reason
-  /// [clearDoubleSpacedMailBodies] gives.
-  Future<int> clearLegacyMailBodies({required String sinceIso}) =>
+  /// A row already marked is not counted again, so the count is rows marked by
+  /// THIS call. A local echo (the `local:` key range) is never marked: its body
+  /// is what the owner typed, and the detail fetch refuses a `local:` id, so
+  /// the mark could never be cleared.
+  Future<int> markStaleMailBodies({required String sinceIso}) =>
       db.customUpdate(
-        'UPDATE messages SET body_text = NULL '
+        'UPDATE messages SET source_meta_json = json_set('
+        "  CASE WHEN json_valid(source_meta_json) THEN source_meta_json ELSE '{}' END, "
+        "  '\$.body_stale', 1) "
         "WHERE source = 'email' AND body_text IS NOT NULL "
         'AND received_at >= ? '
         'AND NOT (source_message_id >= ? AND source_message_id < ?) '
-        '$_noOpenWork'
+        'AND NOT $_bodyStaleSql '
         "AND (body_text LIKE '%<http%' "
         "  OR body_text LIKE '% <mailto:%' "
-        "  OR body_text LIKE '%[cid:%')",
+        "  OR body_text LIKE '%[cid:%' "
+        '  OR instr(body_text, char(10) || char(10)) > 0 '
+        "  OR body_text GLOB '*&[A-Za-z]*;*')",
         variables:
             _args([sinceIso, localEchoPrefix, _localEchoPrefixEnd]),
       );
 
-  /// The rows a body clear leaves alone because a stage has yet to read them:
-  /// triage not finished, or any work item still pending or running.
-  static const String _noOpenWork =
-      "AND triage_status NOT IN ('pending','processing') "
-      'AND NOT EXISTS (SELECT 1 FROM work_items w '
-      '  WHERE w.source = messages.source '
-      '    AND w.entity_id = messages.source_message_id '
-      "    AND w.status IN ('pending','processing')) ";
+  /// Whether a `messages` row carries the stale-body mark, as SQL. A blob that
+  /// is null or invalid JSON carries no mark. A CASE and not an AND, because
+  /// SQLite does not promise to skip the `json_extract` when `json_valid` is
+  /// false, and on an invalid blob it throws "malformed JSON".
+  static const String _bodyStaleSql =
+      '(CASE WHEN json_valid(source_meta_json) '
+      "THEN json_extract(source_meta_json, '\$.body_stale') END) IS 1";
 
-  /// Forgets the in-window mail bodies that carry a blank line, and returns how
-  /// many rows were cleared.
+  /// Drops the stale-body mark and keeps the stored text, for a message whose
+  /// detail the server refused for good (403, 404 or 410).
   ///
-  /// The first HTML converter kept the source's CR/LF beside the newline every
-  /// `<br>` wrote, so plain-text Exchange mail came out double-spaced. Most of
-  /// those bodies carry no link run and no `[cid:…]` token, which leaves them
-  /// outside [clearLegacyMailBodies]'s patterns. A blank line is the only mark
-  /// that converter left, so the pattern is generous on purpose: a body THIS
-  /// build wrote with a real paragraph break costs its thread one refetch that
-  /// returns the same text, and the wrong answer would be leaving a
-  /// double-spaced body in place. It runs only inside the
-  /// `mail_html_rebuild_2` one-shot and never again.
-  ///
-  /// Nulled rather than rewritten, and `updated_at` does not move, for the
-  /// reasons [clearLegacyMailBodies] gives. A local echo is left alone for
-  /// the reason given there too, and a typed reply nearly always has a blank
-  /// line.
-  ///
-  /// A row the pipeline still owes work on keeps its body. Triage refetches a
-  /// missing body, but needs-you, extraction and the embedding fall back to
-  /// the 255-character preview, and a verdict written from that is `done`
-  /// for good. Such a row keeps its old spacing, which is cosmetic and far
-  /// cheaper.
-  Future<int> clearDoubleSpacedMailBodies({required String sinceIso}) =>
+  /// The old text is the best this message will ever have, and a mark left in
+  /// place would refetch the same refusal on every thread open. `updated_at`
+  /// does not move, because no text changed.
+  Future<void> clearBodyStale(String source, String sourceMessageId) =>
       db.customUpdate(
-        'UPDATE messages SET body_text = NULL '
-        "WHERE source = 'email' AND body_text IS NOT NULL "
-        'AND received_at >= ? '
-        'AND NOT (source_message_id >= ? AND source_message_id < ?) '
-        '$_noOpenWork'
-        'AND instr(body_text, char(10) || char(10)) > 0',
-        variables:
-            _args([sinceIso, localEchoPrefix, _localEchoPrefixEnd]),
+        'UPDATE messages SET source_meta_json = '
+        "json_remove(source_meta_json, '\$.body_stale') "
+        'WHERE source = ? AND source_message_id = ? '
+        'AND json_valid(source_meta_json)',
+        variables: _args([source, sourceMessageId]),
       );
 
   /// Rewrites the stored mail previews through the converter's link rules and
@@ -4040,14 +4045,12 @@ FROM messages
   /// The message row's `updated_at` DOES NOT MOVE, and this is the one writer of
   /// a message text column that leaves it alone. The keyword index files
   /// `COALESCE(NULLIF(body_text, ''), body_preview, '')`, so a preview rewrite
-  /// changes the text the index would file only on a row with NO body — and
-  /// those are exactly the rows [clearLegacyMailBodies] just emptied in the same
-  /// pass, whose index entry still holds the words of the body it forgot.
-  /// Restamping them would trade a whole body for a 255-character snippet until
-  /// somebody opens the thread, which is the guarantee that method's own
-  /// still-column is there to make. On a row that DOES have a body the preview
-  /// is invisible to the index, so a stamp would re-file byte-identical text.
-  /// Neither kind of row is better off for a stamp and one is plainly worse, so
+  /// changes the text the index would file only on a row with NO body. No
+  /// repair empties a body any more ([markStaleMailBodies] marks and keeps the
+  /// text), so such a row is one whose detail never came, and the refill that
+  /// eventually brings its body stamps it then. On a row that DOES have a body
+  /// the preview is invisible to the index, so a stamp would re-file
+  /// byte-identical text. Neither kind of row gains anything from a stamp, so
   /// there is no case left to write one in — and the two other readers of this
   /// column, [reclaimStaleTriage] and [reviveTerminalTriage], both count
   /// BACKWARDS from now, so a stamp here would only postpone a stuck row's
@@ -5228,19 +5231,29 @@ SELECT conversation_key FROM (
   /// 'user'` is the owner's own hand and is left alone for the same reason it is
   /// everywhere else.
   ///
-  /// `json_valid` guards the extract: a malformed blob would otherwise make
-  /// sqlite throw for the whole statement rather than skip one row.
+  /// `json_valid` guards the extract inside a CASE: a malformed blob would
+  /// otherwise make sqlite throw for the whole statement rather than skip one
+  /// row, and an AND does not promise to skip the extract.
+  ///
+  /// The fallback also requires no attachment, for the gate's reason: a
+  /// calendar response never carries a file.
   ///
   /// "Nothing in it" is read with [_blank] and not a bare `TRIM`: sqlite's
   /// one-argument TRIM strips spaces only, and Exchange stores an empty
   /// response body as `\r\n` — so the bare form read every real one as
   /// somebody talking, and the rail kept them.
-  Future<int> regateMeetingResponses() async {
-    const String stored = "json_extract(source_meta_json, '\$.meeting')";
-    const String hasMeeting =
-        'source_meta_json IS NOT NULL AND json_valid(source_meta_json) '
-        'AND $stored IS NOT NULL';
-    return db.customUpdate(
+  Future<int> regateMeetingResponses() async =>
+      (await regateMeetingResponseIds()).length;
+
+  /// [regateMeetingResponses], answering with the ids it gated rather than
+  /// how many. The sync needs them: a response drafted for before this build
+  /// still shows its suggestion when the thread is opened, and the ids are
+  /// what it dismisses those by.
+  Future<List<String>> regateMeetingResponseIds() async {
+    const String stored = '(CASE WHEN json_valid(source_meta_json) '
+        "THEN json_extract(source_meta_json, '\$.meeting') END)";
+    const String hasMeeting = '$stored IS NOT NULL';
+    final rows = await db.customWriteReturning(
       'UPDATE messages '
       "SET triage_status = 'skipped', gate_reason = 'meeting_response', "
       '  updated_at = ? '
@@ -5255,10 +5268,13 @@ SELECT conversation_key FROM (
       "      AND (subject LIKE 'Accepted:%' OR subject LIKE 'Declined:%' "
       "        OR subject LIKE 'Tentative:%' OR subject LIKE 'Canceled:%') "
       "      AND (body_text IS NULL OR TRIM(body_text, $_blank) = '') "
-      "      AND (body_preview IS NULL OR TRIM(body_preview, $_blank) = ''))"
-      '  )',
+      "      AND (body_preview IS NULL OR TRIM(body_preview, $_blank) = '') "
+      '      AND has_attachments IS NOT 1)'
+      '  ) '
+      'RETURNING source_message_id',
       variables: _args([_nowIso()]),
     );
+    return [for (final row in rows) row.data['source_message_id'] as String];
   }
 
   /// Takes a plan-relative deadline back off every stored ask banner, and
@@ -6493,6 +6509,47 @@ FROM storylines s''';
     // One transaction for the whole batch: two hundred separate writes on a
     // Save is two hundred fsyncs, and the queue is only meaningful once every
     // row in the window is on it.
+    await db.transaction(() async {
+      for (final row in rows) {
+        await requeueWork(
+          'needs_you',
+          row.data['source'] as String? ?? '',
+          row.data['source_message_id'] as String? ?? '',
+        );
+      }
+    });
+    return rows.length;
+  }
+
+  /// Puts the needs-you verdict of every in-window inbound message judged NO
+  /// back on the queue, and returns how many messages that was.
+  ///
+  /// The one-shot behind `needs_you_hedge_rejudge`. A hedge, a yes below the
+  /// confidence bar, used to be written as 0, and 0 is a veto over triage's
+  /// ask on the chip, the toast, the rail and the tile. A hedge is now written
+  /// NULL, but the old ones cannot be told apart from a real no, so every 0 in
+  /// the window is asked again and the handler writes each one the way it now
+  /// answers. The chip follows through the handler's own tail when the stored
+  /// answer moves.
+  ///
+  /// Both connectors, bounded by [sinceIso] like [requeueNeedsYouRejudge], and
+  /// on [requeueWork], which revives a `done` or `error` row and leaves one
+  /// already queued where it is. Uncapped, because what it re-asks is a set
+  /// that happened once and the window bounds it.
+  Future<int> requeueZeroNeedsYouVerdicts({required String sinceIso}) async {
+    final rows = await db
+        .customSelect(
+          'SELECT source, source_message_id FROM messages '
+          "WHERE direction = 'inbound' "
+          "  AND source IN ('email', 'teams') "
+          '  AND needs_you_verdict = 0 '
+          '  AND received_at >= ? '
+          'ORDER BY received_at DESC, source_message_id DESC',
+          variables: _args([sinceIso]),
+        )
+        .get();
+    // One transaction for the whole batch, for [requeueNeedsYouRejudge]'s
+    // reason: separate writes are separate fsyncs.
     await db.transaction(() async {
       for (final row in rows) {
         await requeueWork(
@@ -8322,25 +8379,58 @@ WHERE p.received_at >= ? AND p.source IN ($places)
   /// for whoever wants the tile narrowed rather than riding along with the
   /// rail's honesty fix. Until then the tile can read HIGHER than the rail.
   ///
-  /// The judge's explicit no IS spelled here, and ahead of the ask, because it
-  /// is the term that moves the most threads: triage folds an ask out of any
-  /// Jira broadcast, and a tile still counting those would read dozens above
-  /// the rail rather than a handful. Off the newest kept inbound — the `nk`
-  /// message `loadConversations` reads `latest_needs_you_verdict` from — so the
-  /// Dart and SQL spellings name the same row. `ix_messages_conv` makes the
-  /// seek an index walk per thread. `-1` stands in for NULL: an unjudged
-  /// message keeps its place, as it does in [isNeedsYou].
+  /// The judge's veto IS spelled here, and ahead of the ask, because it is the
+  /// term that moves the most threads: triage folds an ask out of any Jira
+  /// broadcast, and a tile still counting those would read dozens above the
+  /// rail rather than a handful. It is [needsYouVetoedSql], the same fragment
+  /// `loadConversations` loads as `needs_you_vetoed` for the rail, so the Dart
+  /// and SQL readers cannot name different rules.
   static final String _liveNeedsYouThread = '''
 COALESCE(ai.bucket, '') <> 'later'
 AND c.state <> 'done'
 AND COALESCE(ai.attention_score, 0) >= ?
-AND COALESCE((SELECT nv.needs_you_verdict FROM messages nv
-               WHERE nv.source = c.source
-                 AND nv.conversation_key = c.conversation_key
-                 AND nv.direction = 'inbound' AND ${keptMessageSql('nv')}
-               ORDER BY nv.received_at DESC, nv.source_message_id DESC
-               LIMIT 1), -1) <> 0
+AND NOT ${needsYouVetoedSql('c')}
 AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
+
+  /// Whether the needs-you pass has vetoed the thread behind the
+  /// `conversations` alias [c], as a boolean SQL expression with no
+  /// placeholders. The ONE spelling of the rule: the rail reads it through
+  /// `Conversation.needsYouVetoed`, and the Needs You tile and filter read it
+  /// inside [_liveNeedsYouThread].
+  ///
+  /// Vetoed only when BOTH hold:
+  /// - the newest KEPT inbound was judged an explicit no (`0`). NULL, never
+  ///   judged or a hedged yes, is no veto, which is what `-1` stands in for;
+  /// - no kept inbound NEWER than the thread's last outbound carries a yes. A
+  ///   thread with no outbound compares against `''`, so every kept inbound
+  ///   counts.
+  ///
+  /// The second clause is why this is a fragment and not the newest verdict.
+  /// The judge rates ONE message, and its own rule lets an earlier open ask
+  /// count only when this message pushes on it. So Alex's "approve the budget
+  /// by Friday", judged yes and unanswered, followed by Sam's reply-all
+  /// "adding Jordan for visibility", judged no because the owner is a
+  /// bystander on it, must keep the thread on the rail: the ask is still open.
+  /// Once the owner replies, an older yes is answered and a newer no vetoes.
+  ///
+  /// `ix_messages_conv` makes each seek an index walk per thread.
+  static String needsYouVetoedSql(String c) => '''
+(COALESCE((SELECT nv.needs_you_verdict FROM messages nv
+            WHERE nv.source = $c.source
+              AND nv.conversation_key = $c.conversation_key
+              AND nv.direction = 'inbound' AND ${keptMessageSql('nv')}
+            ORDER BY nv.received_at DESC, nv.source_message_id DESC
+            LIMIT 1), -1) = 0
+ AND NOT EXISTS (SELECT 1 FROM messages ny
+            WHERE ny.source = $c.source
+              AND ny.conversation_key = $c.conversation_key
+              AND ny.direction = 'inbound' AND ${keptMessageSql('ny')}
+              AND ny.needs_you_verdict = 1
+              AND ny.received_at > COALESCE(
+                (SELECT MAX(ob.received_at) FROM messages ob
+                  WHERE ob.source = $c.source
+                    AND ob.conversation_key = $c.conversation_key
+                    AND ob.direction = 'outbound'), '')))''';
 
   /// The WHERE fragment one [HomeFilter] stands for, with no leading `AND`
   /// and never empty — every filter narrows something, so a caller can always

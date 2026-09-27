@@ -90,12 +90,19 @@ a delta row whose preview came down empty can be caught at tier 1 by the
 subject-and-empty-body fallback. A meeting INVITE (`meetingRequest`) is never
 gated, and both fallbacks require a response-shaped subject before reading
 anything else, precisely so an invite cannot reach them — the header comment
-in `gates.dart` walks the whole line. Rows a build before v18 already triaged
+in `gates.dart` walks the whole line. The empty-body fallback never gates a
+message that has attachments, in the live gate and in
+`regateMeetingResponses` alike: a calendar response never carries a file, and
+"Accepted: signed offer letter" with a PDF and no text is somebody sending a
+document. Rows a build before v18 already triaged
 are re-gated once by the `meeting_regate_crlf` one-shot
 (`app/lib/services/sync_service.dart`), which then refolds the affected
 threads (the key is the second one, because the first pass read Exchange's
-`\r\n` empty body as somebody talking); `clearDerived` re-pends such rows like any others and the gate simply
-re-applies at the next claim.
+`\r\n` empty body as somebody talking). It also dismisses a `suggested` draft
+on each message it re-gates, since nothing else would take it away and the
+thread would leave the rail but still show the draft when opened. A draft the
+owner edited, saved or sent is theirs and stays. `clearDerived` re-pends such
+rows like any others and the gate simply re-applies at the next claim.
 
 ## A gate drop and the thread
 

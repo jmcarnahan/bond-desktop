@@ -468,6 +468,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   List<Conversation> _rows = const [];
   List<PersonRoom> _rooms = const [];
 
+  /// Whether the last layout gave the pane to something other than the main
+  /// pane's own content: a side panel too wide to sit beside it, any side
+  /// panel at the narrow width, or a file opened full-pane. With it set, the
+  /// Needs You overview and its ticked rows are not on screen, and
+  /// [_selectionActive] and [_toggleTargetChecked] stand down.
+  ///
+  /// A plain field written by [_wide] and [_narrow], for [_rows]'s reason: it
+  /// is derived from the layout every frame, nothing renders it, and the keys
+  /// read it later in response to a press.
+  bool _overviewCovered = false;
+
   /// Whether the main pane is showing the activity log. Exclusive with the
   /// three selections above for the same reason they are exclusive with each
   /// other: the pane shows exactly one thing, and every setter clears the rest
@@ -1926,6 +1937,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                     : SidePanelHost.fileMinWidth,
                 mainMinWidth: SidePanelHost.mainMinWidth,
               );
+        // What the keys need to know about this layout — see
+        // [_overviewCovered]. Written here, where the replace-or-split call is
+        // made, so the two can never disagree.
+        _overviewCovered = _sideFull || (beside != null && width == null);
 
         return Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1975,6 +1990,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     List<PersonRoom> rooms,
     String? loadError,
   ) {
+    // [_wide]'s write, for this width: any side panel has the whole pane
+    // here, and so does a file opened full-pane.
+    _overviewCovered = _side != null;
     return Stack(
       children: [
         Column(
@@ -2608,8 +2626,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// And the landing yields to the reader: if the thread in front of them
   /// changed while the act's write was out — they clicked another row — that
   /// choice stands, and neither the landing nor the close runs over it.
+  ///
+  /// [act] answers whether its write landed. False means the thread is still
+  /// where it was: the act has already said so in a bar with no Undo (which
+  /// [_toast] does not count), and the reader stays on the thread with the
+  /// cursor handed back, since moving them on would claim it was cleared.
   Future<void> _triageAndAdvance(
-    Future<void> Function(({String source, String key}) target) act, {
+    Future<bool> Function(({String source, String key}) target) act, {
     ({String source, String key})? on,
     bool queue = false,
   }) async {
@@ -2636,14 +2659,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // is that an unrelated bar landing in those few frames would be counted,
       // which the clamp bounds and a progress line can afford.
       _countingCleared = inPile;
+      final bool landed;
       try {
-        await act(target);
+        landed = await act(target);
       } finally {
         _countingCleared = false;
       }
       if (!mounted) return;
-      // The reader moved while the write was out: where they went wins.
-      if (_triageTarget != before) {
+      // The reader moved while the write was out: where they went wins. And
+      // a write that failed moves nobody — see [act] above.
+      if (!landed || _triageTarget != before) {
         _takeTriageFocus();
         return;
       }
@@ -2675,14 +2700,30 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// [ConversationsNotifier.reopenThread] is the undo rather than a stored
   /// previous state, because that is what the Reopen button already is — see its
   /// doc for why the state it lands in is re-derived.
-  Future<void> _dismissThread(({String source, String key}) target) async {
+  ///
+  /// A null [MarkDoneUndo] is a write that failed and a row already put back,
+  /// so the bar says that instead, with no Undo: an Undo over nothing would
+  /// run [ConversationsNotifier.reopenThread], which re-derives a state and
+  /// can move a thread the reader never touched.
+  Future<bool> _dismissThread(({String source, String key}) target) async {
     final notifier = ref.read(conversationsProvider.notifier);
-    await _dismissOne(target);
+    final done = await _dismissOne(target);
+    if (!mounted) return done != null;
+    if (done == null) {
+      _toast(_markDoneFailed);
+      return false;
+    }
     _toast(
       'Marked done.',
       onUndo: () => notifier.reopenThread(target.source, target.key),
     );
+    return true;
   }
+
+  /// The bar's sentence for a single Mark done whose write failed. One
+  /// wording for the key, the button and the label path, in the house's
+  /// "Couldn't … just now." form.
+  static const String _markDoneFailed = "Couldn't mark that thread done just now.";
 
   /// [_dismissThread]'s do-step, with no bar: the [MarkDoneUndo] the store
   /// handed back, or null for a row whose write failed. A bulk dismiss undoes
@@ -2701,9 +2742,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// the thread's own newest inbound message asked for, else seven days out.
   /// [ConversationsNotifier.keepThreadInInbox] is the undo, which is exactly
   /// what [_keepThread] offers in the other direction.
-  Future<void> _laterThread(({String source, String key}) target) async {
+  ///
+  /// Always answers true: [ConversationsNotifier.sendThreadToLater] throws on
+  /// a failed write rather than returning a sentinel, so a failure never
+  /// reaches the bar here.
+  Future<bool> _laterThread(({String source, String key}) target) async {
     final undo = await _laterOne(target);
     _toast('Sent to Later.', onUndo: () => unawaited(undo()));
+    return true;
   }
 
   /// [_laterThread]'s do-step: defers the thread and hands back its way out,
@@ -2720,7 +2766,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// whoever sent the newest inbound message where the transcript is loaded,
   /// else the row's own participant. [_dropSender] carries the toast and the
   /// undo that restores whatever rule was there before.
-  Future<void> _dropSenderForThread(({String source, String key}) target) async {
+  ///
+  /// Answers true, the no-sender case included, for [_laterThread]'s reason:
+  /// [ConversationsNotifier.dropSender] throws rather than returning a
+  /// sentinel.
+  Future<bool> _dropSenderForThread(({String source, String key}) target) async {
     final thread = ref.read(threadProvider(
       (source: target.source, conversationKey: target.key),
     ));
@@ -2730,9 +2780,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         _loadedRow(target)?.primaryEmail;
     if (address == null || address.isEmpty) {
       _toast('No sender on that thread to make a rule about.');
-      return;
+      return true;
     }
     await _dropSender(address, target.source);
+    return true;
   }
 
   /// One loaded conversation by target, or null if the list does not hold it.
@@ -2811,12 +2862,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           final notifier = ref.read(conversationsProvider.notifier);
           final undo =
               await notifier.markDone(t.source, t.key, labelIds: [label.id]);
+          if (!mounted) return undo != null;
+          // Worded from the result, never from what was asked: a failed
+          // state write is not done, and a failed label write is done
+          // without the word. The second still clears the thread, so its
+          // bar keeps the Undo that reopens it.
+          if (undo == null) {
+            _toast(_markDoneFailed);
+            return false;
+          }
           _toast(
-            'Marked done · ${label.name}.',
-            onUndo: undo == null
-                ? null
-                : () => unawaited(notifier.undoMarkDone(undo)),
+            undo.labelWriteFailed
+                ? "Marked done. Couldn't add ${label.name} just now."
+                : 'Marked done · ${label.name}.',
+            onUndo: () => unawaited(notifier.undoMarkDone(undo)),
           );
+          return true;
         },
         on: target,
         queue: true,
@@ -2884,16 +2945,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           "Couldn't take that label off just now.");
       return;
     }
+    // A chip that was already gone removed nothing, and says nothing. This is
+    // the second press of a double-click on ✕, landing while the first
+    // removal's reload is still out: a bar here would replace the first
+    // press's bar and take its Undo and `z` with it, the only way back for a
+    // label that really did come off.
+    if (!removal.removed) return;
     _toast(
       'Removed ${label.name}.',
-      // No undo at all over a chip that was already gone, which removed
-      // nothing.
-      onUndo: !removal.removed
-          ? null
-          : () => _labelUndo(
-              () => labels.restore(target.source, target.key, label.id),
-              "Couldn't put that label back just now.",
-            ),
+      onUndo: () => _labelUndo(
+        () => labels.restore(target.source, target.key, label.id),
+        "Couldn't put that label back just now.",
+      ),
     );
   }
 
@@ -3076,15 +3139,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// Whether the keys should act on the selection instead of on one row:
   /// something is ticked AND drawn, on the one stop that draws boxes, AND that
-  /// overview is what the main pane is showing ([_highlightedSection]). A
-  /// thread opened in the main pane from the rail column, Settings, the
-  /// composer or the activity log hides the ticked rows, and `e` there means
-  /// the thing in front of the reader, never rows they cannot see. A thread
-  /// open BESIDE the overview hides nothing, so the selection stays live
-  /// there. The ticks themselves are kept either way: the reader can open a
-  /// thread, look, and come back to the selection they made.
+  /// overview is actually on screen. Two things can hide it. A thread opened
+  /// in the main pane from the rail column, Settings, the composer or the
+  /// activity log takes the main pane ([_highlightedSection]). And a side
+  /// panel can take the whole pane: below the two-pane split (a window under
+  /// 1293px), at the narrow width, or as a full-pane file
+  /// ([_overviewCovered]). Either way `e` means the thing in front of the
+  /// reader, never rows they cannot see. Only a thread open BESIDE the
+  /// overview, with room for both, leaves the selection live. The ticks
+  /// themselves are kept either way: the reader can open a thread, look, and
+  /// come back to the selection they made.
   bool get _selectionActive =>
       _highlightedSection == RailSection.needsYou &&
+      !_overviewCovered &&
       _liveChecked(_triageRows(ref.read(appPrefsProvider))).isNotEmpty;
 
   /// A box pressed, or a card Shift-clicked. A range ticks everything between
@@ -3116,9 +3183,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   /// `x`: [_toggleChecked] on the row the keys act on, if it is in the pile —
-  /// a thread open from another stop has no box to tick.
+  /// a thread open from another stop has no box to tick, and neither does a
+  /// thread whose panel covers the overview ([_overviewCovered]): a tick the
+  /// reader cannot see is one the next `e` would act on behind their back.
   void _toggleTargetChecked() {
     if (_section != RailSection.needsYou) return;
+    if (_overviewCovered) return;
     final target = _triageTarget;
     if (target == null) return;
     for (final c in _triageRows(ref.read(appPrefsProvider))) {
@@ -3256,17 +3326,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   Future<void> _bulkDismiss({Label? label}) {
     final notifier = ref.read(conversationsProvider.notifier);
+    // Rows that went to done without the word: [markDone] keeps the flip when
+    // only the label write fails, so the bar must not claim the label on
+    // them. Counted here and said in the sentence rather than left to the
+    // provider's banner.
+    var unlabelled = 0;
     return _bulkAct(
       (t) async {
         final undo = await _dismissOne(
           t,
           labelIds: label == null ? const [] : [label.id],
         );
+        if (undo?.labelWriteFailed ?? false) unlabelled++;
         return undo == null ? null : () => notifier.undoMarkDone(undo);
       },
       words: (n) => label == null
           ? 'Marked done: ${_threads(n)}.'
-          : 'Marked done: ${_threads(n)} · ${label.name}.',
+          : unlabelled == 0
+          ? 'Marked done: ${_threads(n)} · ${label.name}.'
+          : 'Marked done: ${_threads(n)}. '
+                "Couldn't add ${label.name} to $unlabelled.",
     );
   }
 
@@ -4127,6 +4206,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// instead. That is the honest escalation — Find only ever looked at what is
   /// on the rail, search looks at the whole index — and it is what keeps a
   /// needle nothing on the rail answers from being a dead end.
+  ///
+  /// Except a needle carrying a facet Home's search cannot read: `label:`,
+  /// `-label:`, `is:done` and `is:external`. There it would hunt for the
+  /// literal string "is:done" and answer nothing useful, so the reader stays
+  /// where they are and the rail's own empty state says nothing matched.
+  /// `from:` and `has:` are part of Home's grammar and still escalate.
   void _submitFind() {
     final target = firstFindTarget(
       scope: _section ?? RailSection.home,
@@ -4149,6 +4234,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       case null:
         final text = _find.trim();
         if (text.isEmpty) return;
+        final query = FindQuery.parse(_find);
+        // Only the facets Home's grammar cannot read. `from:` and `has:` are
+        // honoured there (search_grammar.dart), so they still escalate.
+        if (query.labels.isNotEmpty ||
+            query.withoutLabels.isNotEmpty ||
+            query.dismissedOnly ||
+            query.externalOnly) {
+          return;
+        }
         _selectSection(RailSection.home);
         ref.read(homeFeedProvider.notifier).submitSearch(text);
         return;
@@ -6736,16 +6830,23 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         final prefs = ref.read(appPrefsProvider);
         if (prefs.replySendMarksDone) {
           final thread = (source: target.source, key: target.conversationKey);
-          Future<void> markDone(({String source, String key}) t) async {
+          // The reply went out whatever happens here, so the bar always says
+          // so. A null [MarkDoneUndo] is a state write that failed: the bar
+          // says the thread is not done, with no Undo, and on the pile path
+          // [_triageAndAdvance] reads the false and does not move the reader.
+          Future<bool> markDone(({String source, String key}) t) async {
             final conversations = ref.read(conversationsProvider.notifier);
             final undo = await conversations.markDone(t.source, t.key);
-            if (!mounted) return;
+            if (!mounted) return undo != null;
+            if (undo == null) {
+              _toast("Reply sent. Couldn't mark it done.");
+              return false;
+            }
             _toast(
               'Reply sent · Marked done.',
-              onUndo: undo == null
-                  ? null
-                  : () => unawaited(conversations.undoMarkDone(undo)),
+              onUndo: () => unawaited(conversations.undoMarkDone(undo)),
             );
+            return true;
           }
 
           // A thread of the pile — still drawn, or remembered where it stood
@@ -7225,9 +7326,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                     quickReplyOn.key == c.id
                 ? quickReply
                 : null,
-            onQuickReplySend: (c, body) => unawaited(
-              _sendQuickReply((source: c.source, key: c.id), body),
-            ),
+            // The future itself, not `unawaited`: the box releases its send
+            // latch when it settles — see [ConversationListPane.onQuickReplySend].
+            onQuickReplySend: (c, body) =>
+                _sendQuickReply((source: c.source, key: c.id), body),
             onCloseQuickReply: (_) => _clearQuickReply(),
             // The selection gutter (12c): the boxes only — the set, the anchor
             // and every act on them are this screen's.

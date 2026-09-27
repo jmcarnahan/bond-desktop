@@ -24,6 +24,7 @@ import 'package:bond_inbox/widgets/composer.dart';
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/widgets/conversation_row.dart';
 import 'package:bond_inbox/widgets/find_field.dart';
+import 'package:bond_inbox/widgets/icon_rail.dart' show IconRail;
 import 'package:bond_inbox/widgets/quick_replies.dart' show QuickReplyBox;
 import 'package:bond_inbox/widgets/label_picker.dart';
 import 'package:bond_inbox/widgets/side_panel.dart';
@@ -95,6 +96,11 @@ class _RefusingStore extends MessageStore {
   /// refusal, so the host falls back to its generic sentence.
   bool refuseCreate = false;
 
+  /// Set, a write that would mark a thread done fails the way a locked
+  /// database does. Every other state write lands, so a sent reply can still
+  /// move its thread to waiting while its mark-done fails.
+  bool refuseDoneWrite = false;
+
   /// Every thread state write, by key, in order: how a test tells one
   /// mark-done from the same one run twice.
   final List<String> stateWrites = [];
@@ -116,6 +122,9 @@ class _RefusingStore extends MessageStore {
     stateWrites.add(conversationKey);
     final hold = holdStateWrite;
     if (hold != null) await hold.future;
+    if (refuseDoneWrite && state == ConversationState.done) {
+      throw StateError('database is locked');
+    }
     return super.setConversationState(source, conversationKey, state);
   }
 
@@ -206,6 +215,9 @@ class _SendingMail implements MailBackend {
       SentDraft(draftId: draftId);
 
   @override
+  Future<void> deleteDraft(String draftId) async {}
+
+  @override
   Future<List<String>> markRead(
     List<String> messageIds, {
     bool isRead = true,
@@ -214,6 +226,18 @@ class _SendingMail implements MailBackend {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
+}
+
+/// A backend whose reply drafts are always refused, the same way each time:
+/// a send that fails with the SAME error on every press.
+class _RefusingMail extends _SendingMail {
+  int drafts = 0;
+
+  @override
+  Future<Map<String, dynamic>> createReplyDraft(String messageId) async {
+    drafts++;
+    throw Exception('the server said no');
+  }
 }
 
 /// Everything a send needs, so the composer is armed rather than offering a
@@ -1038,9 +1062,45 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(find.text('Removed FYI only.'), findsOneWidget);
+    // Nothing came off, so nothing is said: a bar here would be a claim, and
+    // it would take the Undo of whatever bar stood before it.
+    expect(find.text('Removed FYI only.'), findsNothing);
+    expect(find.byType(SnackBar), findsNothing);
     expect(find.text('Undo'), findsNothing);
     expect(await store.labelsForConversation('email', 'c2'), isEmpty);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a double-click on a chip\'s ✕ keeps the first press\'s Undo',
+      (tester) async {
+    final fyi = await store.createLabel('FYI only');
+    await seedPile();
+    await store.applyLabels('email', 'c2', [fyi.id]);
+    await pumpInbox(tester);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await press(tester, LogicalKeyboardKey.keyJ);
+    await tester.pump();
+
+    // Both presses before a frame: the second lands on the same ✕ while the
+    // first removal's reload is still out, and removes nothing.
+    final cross = find.byKey(ThreadActionBar.removeLabelKey(fyi.id));
+    await tester.tap(cross);
+    await tester.tap(cross);
+    await settleQueues(tester);
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Removed FYI only.'), findsOneWidget);
+    expect(find.text('Undo'), findsOneWidget);
+    expect(await store.labelsForConversation('email', 'c2'), isEmpty);
+
+    await press(tester, LogicalKeyboardKey.keyZ);
+    await settleQueues(tester);
+    expect(
+      [for (final l in await store.labelsForConversation('email', 'c2'))
+        l.name],
+      ['FYI only'],
+    );
     await settleQueues(tester);
   });
 
@@ -1518,6 +1578,43 @@ void main() {
       await settleQueues(tester);
     }
 
+    testWidgets('the in-list box comes back after the same refusal twice',
+        (tester) async {
+      final mail = _RefusingMail();
+      await seedPile();
+      await pumpInbox(tester, mail: mail);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await tester.pump();
+      await tester.pump();
+
+      await press(tester, LogicalKeyboardKey.keyR);
+      await tester.enterText(find.byKey(QuickReplyBox.fieldKey), 'On it.');
+      await tester.pump();
+      for (var i = 0; i < 2; i++) {
+        await tester.tap(find.byKey(QuickReplyBox.sendKey));
+        await tester.pump();
+        await tester.pump();
+        await tester.pump();
+        await settleQueues(tester);
+      }
+
+      // Two presses reached the backend, and the second one's answer (word
+      // for word the first's) still gave the box back: the words are there
+      // for a retry, not frozen under "Sending…".
+      expect(mail.drafts, 2);
+      expect(find.byKey(QuickReplyBox.fieldKey), findsOneWidget);
+      expect(find.text('Sending…'), findsNothing);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(QuickReplyBox.fieldKey))
+            .controller!
+            .text,
+        'On it.',
+      );
+      await settleQueues(tester);
+    });
+
     testWidgets('j after a reply opens the row that stood under it',
         (tester) async {
       final mail = await openInvoice(tester);
@@ -1618,6 +1715,212 @@ void main() {
       // Stepping "next" from here would teleport the reader to the top of a
       // pile they are not on.
       expect(openThread(tester), 'Old contract');
+      await settleQueues(tester);
+    });
+  });
+
+  group('a failed mark-done never reads as a success', () {
+    Finder undo() => find.text('Undo');
+
+    testWidgets('e whose write fails says so, offers no Undo, counts nothing '
+        'and leaves the reader where they were', (tester) async {
+      final held = _RefusingStore(db)..refuseDoneWrite = true;
+      await seedPile();
+      await pumpInbox(tester, storeAs: held);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      expect(litRow(tester), 'Invoice 4471');
+
+      await press(tester, LogicalKeyboardKey.keyE);
+      await settleQueues(tester);
+
+      expect(find.text("Couldn't mark that thread done just now."),
+          findsOneWidget);
+      expect(find.text('Marked done.'), findsNothing);
+      expect(undo(), findsNothing);
+      expect(
+        rowTitles(tester),
+        ['Homepage copy', 'Invoice 4471', 'Vendor quote'],
+      );
+      expect(litRow(tester), 'Invoice 4471');
+      expect(find.byKey(ConversationListPane.progressKey), findsNothing);
+      unhandled.clear();
+
+      // The keys still answer: the cursor came back to the list.
+      await press(tester, LogicalKeyboardKey.keyJ);
+      expect(unhandled, isEmpty);
+      expect(litRow(tester), 'Vendor quote');
+      await settleQueues(tester);
+    });
+
+    testWidgets('Shift+E whose done write fails says so, with no Undo',
+        (tester) async {
+      await store.createLabel('FYI only');
+      final held = _RefusingStore(db)..refuseDoneWrite = true;
+      await seedPile();
+      await pumpInbox(tester, storeAs: held);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await press(tester, LogicalKeyboardKey.keyE, shift: true);
+
+      await tester.enterText(find.byKey(LabelPicker.fieldKey), 'fyi');
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await settleQueues(tester);
+      await tester.pump();
+
+      expect(find.text("Couldn't mark that thread done just now."),
+          findsOneWidget);
+      expect(find.textContaining('Marked done'), findsNothing);
+      expect(undo(), findsNothing);
+      expect(litRow(tester), 'Homepage copy');
+      expect(rowTitles(tester), hasLength(3));
+      expect(find.byKey(ConversationListPane.progressKey), findsNothing);
+      await settleQueues(tester);
+    });
+
+    testWidgets('Shift+E whose label write fails is done without the word, '
+        'and says so', (tester) async {
+      await store.createLabel('FYI only');
+      final held = _RefusingStore(db, refuseApply: true);
+      await seedPile();
+      await pumpInbox(tester, storeAs: held);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await press(tester, LogicalKeyboardKey.keyE, shift: true);
+
+      await tester.enterText(find.byKey(LabelPicker.fieldKey), 'fyi');
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await settleQueues(tester);
+      await tester.pump();
+
+      expect(find.text("Marked done. Couldn't add FYI only just now."),
+          findsOneWidget);
+      expect(find.text('Marked done · FYI only.'), findsNothing);
+      // The thread did leave, so the reader moves on and z brings it back.
+      expect(rowTitles(tester), ['Invoice 4471', 'Vendor quote']);
+      expect(litRow(tester), 'Invoice 4471');
+      expect(await store.labelsForConversation('email', 'c1'), isEmpty);
+
+      await press(tester, LogicalKeyboardKey.keyZ);
+      await settleQueues(tester);
+      expect(
+        rowTitles(tester),
+        ['Homepage copy', 'Invoice 4471', 'Vendor quote'],
+      );
+      await settleQueues(tester);
+    });
+
+    testWidgets('a reply whose mark-done fails says the reply went and the '
+        'thread is not done', (tester) async {
+      await store.setPref(replySendMarksDoneKey, 'true');
+      final held = _RefusingStore(db)..refuseDoneWrite = true;
+      final mail = _SendingMail();
+      await seedPile();
+      await pumpInbox(tester, storeAs: held, mail: mail);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await tester.pump();
+      await tester.pump();
+      expect(litRow(tester), 'Invoice 4471');
+
+      await tester.enterText(
+        find.descendant(
+          of: find.byType(Composer),
+          matching: find.byType(TextField),
+        ),
+        'Signed and sent back.',
+      );
+      await tester.pump();
+      await tester.tap(find.descendant(
+        of: find.byType(Composer),
+        matching: find.text('Send'),
+      ));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      await settleQueues(tester);
+
+      expect(mail.bodies, ['Signed and sent back.']);
+      expect(find.text("Reply sent. Couldn't mark it done."), findsOneWidget);
+      expect(find.text('Reply sent · Marked done.'), findsNothing);
+      expect(undo(), findsNothing);
+      expect(find.byKey(ConversationListPane.progressKey), findsNothing);
+      final stored = await store.loadConversations();
+      expect(
+        [for (final c in stored) if (c.state == ConversationState.done) c.id],
+        isEmpty,
+      );
+      // No landing: the thread the reader answered is still the one open.
+      final panels = tester.widgetList<ThreadDetailPanel>(
+        find.byType(ThreadDetailPanel),
+      );
+      expect(panels.last.conversation.subject, 'Invoice 4471');
+      await settleQueues(tester);
+    });
+  });
+
+  group('Enter in Find with nothing matching', () {
+    Future<void> submitFind(WidgetTester tester, String needle) async {
+      final field = find.descendant(
+        of: find.byType(FindField),
+        matching: find.byType(TextField),
+      );
+      await tester.showKeyboard(field);
+      await tester.enterText(field, needle);
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+    }
+
+    RailSection? stop(WidgetTester tester) =>
+        tester.widget<IconRail>(find.byType(IconRail)).selected;
+
+    testWidgets('a facet needle stays put rather than becoming a Home search',
+        (tester) async {
+      await seedPile();
+      await pumpInbox(tester);
+      expect(stop(tester), RailSection.needsYou);
+
+      await submitFind(tester, 'is:done');
+
+      // Home's search reads text, so "is:done" there would be a search for
+      // the literal string.
+      expect(stop(tester), RailSection.needsYou);
+      expect(find.byType(ConversationListPane), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a label: needle stays put too', (tester) async {
+      await seedPile();
+      await pumpInbox(tester);
+
+      await submitFind(tester, 'label:Receipts');
+
+      expect(stop(tester), RailSection.needsYou);
+      await settleQueues(tester);
+    });
+
+    testWidgets('from: is Home grammar, so a from: needle still escalates',
+        (tester) async {
+      await seedPile();
+      await pumpInbox(tester);
+
+      await submitFind(tester, 'from:dana budget');
+
+      expect(stop(tester), RailSection.home);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a plain word nothing on the rail answers still goes to Home',
+        (tester) async {
+      await seedPile();
+      await pumpInbox(tester);
+
+      await submitFind(tester, 'zebracorn');
+
+      expect(stop(tester), RailSection.home);
       await settleQueues(tester);
     });
   });

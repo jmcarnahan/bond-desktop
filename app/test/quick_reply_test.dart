@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:bond_inbox/providers/draft_provider.dart' show PendingSend;
 import 'package:bond_inbox/services/llm/draft_task.dart' show DraftOption;
 import 'package:bond_inbox/theme/tokens.dart' show BondColors;
@@ -1020,6 +1022,155 @@ void main() {
       expect(line.data, copied);
       // The copy worked: the line is its limit, not a failure to retry.
       expect(line.style?.color, isNot(BondColors.error));
+    });
+
+    group('a send the host is still holding', () {
+      Future<void> pumpWith(
+        WidgetTester tester,
+        QuickReply reply,
+        FutureOr<void> Function(String) onSend,
+      ) =>
+          tester.pumpWidget(MaterialApp(
+            home: Scaffold(
+              body: QuickReplyBox(
+                reply: reply,
+                onSend: onSend,
+                onClose: () {},
+              ),
+            ),
+          ));
+
+      Future<void> commandEnter(WidgetTester tester) async {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.meta);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.meta);
+        await tester.pump();
+      }
+
+      testWidgets('two ⌘Enter presses around it send once', (tester) async {
+        // The host has not said `sending` yet — the gap between the press and
+        // the host's first write, and again between `sending: false` and the
+        // list reload that takes the row away.
+        final sent = <String>[];
+        final held = Completer<void>();
+        Future<void> onSend(String body) {
+          sent.add(body);
+          return held.future;
+        }
+
+        await pumpWith(tester, const QuickReply(), onSend);
+        await tester.pump();
+        await tester.enterText(find.byKey(QuickReplyBox.fieldKey), 'On it.');
+        await tester.pump();
+
+        await commandEnter(tester);
+        await commandEnter(tester);
+        await tester.tap(find.byKey(QuickReplyBox.sendKey));
+        await tester.pump();
+
+        expect(sent, ['On it.']);
+        // Inert, and the words still visible until the row leaves.
+        final field = tester.widget<TextField>(
+          find.byKey(QuickReplyBox.fieldKey),
+        );
+        expect(field.enabled, isFalse);
+        expect(find.text('On it.'), findsOneWidget);
+        expect(find.text('Sending…'), findsOneWidget);
+
+        // Landing cleanly changes nothing: the host closes the box.
+        held.complete();
+        await tester.pump();
+        await commandEnter(tester);
+        expect(sent, ['On it.']);
+      });
+
+      testWidgets('an error from the host gives the box back', (tester) async {
+        final sent = <String>[];
+        final held = Completer<void>();
+        Future<void> onSend(String body) {
+          sent.add(body);
+          return held.future;
+        }
+
+        await pumpWith(tester, const QuickReply(), onSend);
+        await tester.pump();
+        await tester.enterText(find.byKey(QuickReplyBox.fieldKey), 'On it.');
+        await tester.pump();
+        await commandEnter(tester);
+        expect(sent, ['On it.']);
+
+        // The host's send failed: its error arrives and its future settles.
+        await pumpWith(
+          tester,
+          const QuickReply(error: 'Graph said no.'),
+          onSend,
+        );
+        held.complete();
+        await tester.pump();
+
+        final field = tester.widget<TextField>(
+          find.byKey(QuickReplyBox.fieldKey),
+        );
+        expect(field.enabled, isTrue);
+        // The words stay for the retry.
+        expect(find.text('On it.'), findsOneWidget);
+        await tester.tap(find.byKey(QuickReplyBox.sendKey));
+        await tester.pump();
+        expect(sent, ['On it.', 'On it.']);
+      });
+
+      testWidgets('the same error twice still gives the box back once the '
+          'send settles', (tester) async {
+        // A refusal that repeats word for word never "changes", so only the
+        // host's settled future can say it is this press's answer.
+        final sent = <String>[];
+        await pumpWith(
+          tester,
+          const QuickReply(error: 'There is nothing to reply to.'),
+          (body) async => sent.add(body),
+        );
+        await tester.pump();
+        await tester.enterText(find.byKey(QuickReplyBox.fieldKey), 'On it.');
+        await tester.pump();
+
+        await commandEnter(tester);
+        await tester.pump();
+        await commandEnter(tester);
+        await tester.pump();
+
+        expect(sent, ['On it.', 'On it.']);
+      });
+
+      testWidgets('a notice means the words left, so the box empties as it '
+          'lets go', (tester) async {
+        final sent = <String>[];
+        final held = Completer<void>();
+        Future<void> onSend(String body) {
+          sent.add(body);
+          return held.future;
+        }
+
+        await pumpWith(tester, const QuickReply(), onSend);
+        await tester.pump();
+        await tester.enterText(find.byKey(QuickReplyBox.fieldKey), 'On it.');
+        await tester.pump();
+        await commandEnter(tester);
+
+        await pumpWith(
+          tester,
+          const QuickReply(
+            notice: "Sent. The local copy didn't save; it will appear after "
+                'the next sync.',
+          ),
+          onSend,
+        );
+        held.complete();
+        await tester.pump();
+
+        expect(find.text('On it.'), findsNothing);
+        await commandEnter(tester);
+        expect(sent, ['On it.']);
+      });
     });
 
     testWidgets('a late prefill fills an untouched box and never a typed one',

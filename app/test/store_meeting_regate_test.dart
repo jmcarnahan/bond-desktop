@@ -54,6 +54,7 @@ void main() {
     String? bodyPreview = 'Please take a look',
     String? meta,
     String direction = 'inbound',
+    int hasAttachments = 0,
   }) async {
     await seedConversation(conversationKey, source: source, subject: subject);
     await store.upsertMessage({
@@ -70,6 +71,7 @@ void main() {
       'body_preview': bodyPreview,
       'addressed_me': addressedMe,
       'source_meta_json': meta,
+      'has_attachments': hasAttachments,
     });
   }
 
@@ -97,6 +99,25 @@ void main() {
         expect(row['triage_status'], 'skipped', reason: words[i]);
         expect(row['gate_reason'], 'meeting_response', reason: words[i]);
       }
+    });
+
+    test('an empty-bodied Accepted: with a file on it is not a response',
+        () async {
+      // A calendar response carries no attachment; this is somebody sending a
+      // signed document with a response-shaped subject.
+      await seedMessage(
+        'm1',
+        subject: 'Accepted: signed offer letter',
+        bodyText: null,
+        bodyPreview: null,
+        hasAttachments: 1,
+      );
+
+      expect(await store.regateMeetingResponses(), 0);
+      expect(
+        (await store.getMessageRow('email', 'm1'))!['triage_status'],
+        'pending',
+      );
     });
 
     test('an invitation is never touched', () async {

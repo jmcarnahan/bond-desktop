@@ -284,8 +284,8 @@ void main() {
       final threads = {
         for (final c in await store.loadConversations()) c.id: c,
       };
-      expect(threads['a']!.latestNeedsYouVerdict, isNull);
-      expect(threads['b']!.latestNeedsYouVerdict, isFalse);
+      expect(threads['a']!.needsYouVetoed, isFalse);
+      expect(threads['b']!.needsYouVetoed, isTrue);
       expect(isNeedsYou(threads['a']!), isTrue);
       expect(isNeedsYou(threads['b']!), isFalse);
       expect(
@@ -305,6 +305,132 @@ void main() {
       );
       expect(metrics.needsYou, 1);
       expect(rows.map((r) => r.sourceMessageId), ['a-new']);
+    });
+
+    group('an older yes under a newer no', () {
+      /// The owner's own reply on a thread, which answers every inbound older
+      /// than it.
+      Future<void> reply(String id, String conversationKey, String at) =>
+          store.upsertMessage({
+            'source': 'email',
+            'source_message_id': id,
+            'conversation_key': conversationKey,
+            'direction': 'outbound',
+            'subject': 'Launch date',
+            'from_address': 'dana@example.com',
+            'received_at': at,
+            'created_at': at,
+            'updated_at': at,
+            'triage_status': 'skipped',
+            'gate_reason': 'outbound',
+          });
+
+      Future<void> verdicts(Map<String, int> byId) async {
+        for (final entry in byId.entries) {
+          await db.customUpdate(
+            'UPDATE messages SET needs_you_verdict = ? '
+            'WHERE source_message_id = ?',
+            variables: [Variable(entry.value), Variable(entry.key)],
+          );
+        }
+      }
+
+      Future<List<String>> railIds() async => [
+            for (final c in needsYouRows(await store.loadConversations()))
+              c.id,
+          ];
+
+      Future<int> tile() async => (await store.homeMetrics(
+            sinceIso: '2026-09-01T00:00:00Z',
+            stalledBeforeIso: stalledCutoff,
+            threshold: 0,
+          ))
+              .needsYou;
+
+      Future<List<String>> filterIds() async => [
+            for (final r in await store.pageHomeFeed(
+              filter: HomeFilter.needsYou,
+              sinceIso: '2026-09-01T00:00:00Z',
+            ))
+              r.sourceMessageId,
+          ];
+
+      test('an unanswered yes keeps the thread on the rail, tile and filter',
+          () async {
+        // Alex asks the owner to approve the budget, judged yes; Sam's
+        // reply-all "adding Jordan for visibility" is judged no, because the
+        // owner is a bystander on THAT message. The ask is still open.
+        await seed('ask',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T09:00:00Z',
+            threadState: 'needs_reply');
+        await seed('fyi',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T10:00:00Z',
+            threadState: 'needs_reply');
+        await verdicts({'ask': 1, 'fyi': 0});
+
+        final thread = (await store.loadConversations()).single;
+        expect(thread.needsYouVetoed, isFalse);
+        expect(await railIds(), ['budget']);
+        expect(await tile(), 1);
+        expect(await filterIds(), ['fyi']);
+      });
+
+      test('a no with no open yes still drops', () async {
+        await seed('fyi',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T10:00:00Z',
+            threadState: 'needs_reply');
+        await seed('older',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T09:00:00Z',
+            threadState: 'needs_reply');
+        // Unjudged is not a yes: only a verdict of 1 holds a thread open.
+        await verdicts({'fyi': 0});
+
+        expect((await store.loadConversations()).single.needsYouVetoed, isTrue);
+        expect(await railIds(), isEmpty);
+        expect(await tile(), 0);
+        expect(await filterIds(), isEmpty);
+      });
+
+      test('a yes the owner answered does not hold off a newer no', () async {
+        await seed('ask',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T09:00:00Z',
+            threadState: 'needs_reply');
+        await reply('sent', 'budget', '2026-09-01T09:30:00Z');
+        await seed('fyi',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T10:00:00Z',
+            threadState: 'needs_reply');
+        await verdicts({'ask': 1, 'fyi': 0});
+
+        expect((await store.loadConversations()).single.needsYouVetoed, isTrue);
+        expect(await railIds(), isEmpty);
+        expect(await tile(), 0);
+        expect(await filterIds(), isEmpty);
+      });
+
+      test('a gated yes holds nothing open', () async {
+        // "Kept" means what it means everywhere: a yes on a message the gate
+        // threw out is not an open ask.
+        await seed('ask',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T09:00:00Z',
+            triageStatus: 'skipped',
+            gateReason: 'newsletter',
+            threadState: 'needs_reply');
+        await seed('fyi',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T10:00:00Z',
+            threadState: 'needs_reply');
+        await verdicts({'ask': 1, 'fyi': 0});
+
+        expect((await store.loadConversations()).single.needsYouVetoed, isTrue);
+        expect(await tile(), 0);
+      });
     });
 
     test('the veto one-shot clears chips a judged no no longer earns',

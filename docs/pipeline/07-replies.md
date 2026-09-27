@@ -36,7 +36,12 @@ you* / *For every reply-worthy message* / *Only when asked*.
 `automated_notification` (an `Auto-Submitted` or list header on mail nothing
 gated), has nobody waiting for an answer. Its draft stage closes as
 `automated_sender`. It is a judgement at read time and stores nothing, and it
-deliberately spares meeting invites and tracker notifications. The same
+deliberately spares meeting invites and tracker notifications. A message the
+owner restored (`gate_override = 'user'`) skips the classification arm: tier
+two already gates list and `Auto-Submitted` mail, so that arm fires mostly on
+exactly those restored rows, and keeping it would refuse the draft on the
+judgement the owner just overruled. The gate-reason arm needs no exemption,
+because Restore clears `gate_reason`. The same
 function is asked by `DraftHandler` before `_gather`, for rows an older build
 queued or whose headers arrived since, and by the composer (below). **Draft
 reply** stays exempt there: an asked-for draft is the owner overruling it.
@@ -439,6 +444,20 @@ reads as a send that failed.
   on `internet_message_id`. See [01-sync-ingest.md](01-sync-ingest.md) for the
   reconciliation and its race guard.
 
+**A send is in flight from the first press.** The mail arm sets `sending`
+before it looks up the message it answers, so a second press landing in that
+await cannot start a second reply. A reply that fails after its Graph draft
+was created, on a refused Cc, body or send, deletes that draft best-effort
+(`_deleteUnsentDraft`), so a refusal leaves nothing in the owner's Drafts; on
+MCP the draft stays in Drafts, because that server has no delete. Once the
+server has accepted a send, on either arm, the send always reports sent and
+clears the text and chips, since a "Could not send" with the chips still up
+invites the same reply twice. If a local write failed (the echo, the fold,
+the recap, the draft status or the state), it says `Sent. The local copy
+didn't save; it will appear after the next sync.` A chat reply whose stored
+message is missing a requested mention says so as a notice and is never
+resent; a server that reports no mentions at all says nothing.
+
 **Added people.** The composer's **Add people** puts people on a reply, and
 the scope line above the box says who it reaches: `Reply to the sender only`,
 or `Reply to the sender, plus N people in Cc` (the in-list quick reply says
@@ -451,9 +470,13 @@ mentioning N people` instead.
   because `/createReply` chose the To line and a PATCH replaces a whole line.
   A line with nothing to add is left out of the body, because an empty array
   is Graph's instruction to clear it; `createDraft` omits an empty Cc for the
-  same reason. The MCP mail backend cannot amend a draft's recipients, so the
-  composer draws no picker there. If the owner reaches for one by typing `@`,
-  it shows `This connection cannot add people
+  same reason. On mail a word-initial `@` asks for the picker only once a
+  non-space character follows it, so "meet @ 3pm" stays prose; the picker
+  then opens already searching for that letter (`RecipientsField`'s
+  `initialQuery`), and a pick replaces the `@` and the letter. On a chat the
+  bare `@` still opens it. The MCP mail backend cannot amend a draft's
+  recipients, so the composer draws no picker there. If the owner reaches for
+  one by typing `@` and a letter, it shows `This connection cannot add people
   to a reply, so this one goes to the sender only. Open it in Outlook to add
   anybody.` If people are still held, `send` refuses with a sentence rather
   than sending without them.
@@ -499,12 +522,17 @@ is queued behind any act still running rather than dropped. A thread opened
 from anywhere else, such as Archive or Home, is marked done in place and
 stays open, since there is no pile under it to land on. Either way the toast
 reads `Reply sent · Marked done.` with an Undo; with the switch off it reads
-`Reply sent.`
+`Reply sent.` A mark-done whose write fails says `Reply sent. Couldn't mark it
+done.` with no Undo, and the reader is not moved to the next row.
 
 **`r` is the quick reply.** On the Needs You overview, `r` opens the in-list
 reply box on the row the reader is on (`_openQuickReply`). It sends through
 the same `_send`, stays up on a failure or a notice, and closes on anything
-else. See [11-needs-you.md](11-needs-you.md) for the rest of the keys.
+else. The box locks on the first send with its own latch, set before the
+host is called, because the row leaves only after the list reloads and a
+second ⌘Enter in that gap sent the words again. An error unlocks it with the
+words kept for the retry; a notice unlocks it emptied, since those words
+already left. See [11-needs-you.md](11-needs-you.md) for the rest of the keys.
 
 ### Reply-to from the transcript
 

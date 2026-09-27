@@ -346,13 +346,12 @@ pass ABSENT, not the search broken.
   one filed — the ordinary writers that touch text (`upsertMessage`,
   `updateMessageDetail`, `writeTriage`) stamp `updated_at` with the current
   time and none accepts a stamp from outside, so the column only moves forward
-  and a row below the mark is a row already filed. Two one-shot text writers
-  deliberately do NOT stamp it: the `mail_html_rebuild_2` body clears
-  (`clearLegacyMailBodies`, `clearDoubleSpacedMailBodies`) and
-  `tidyMailPreviews`. A stamp on a nulled body would file the message as
-  having no words. So the index keeps the old body until the refetch writes
-  the converted one through `updateMessageDetail`, whose own stamp refiles it
-  exactly once. The `body` column is the stored text as it is, so it keeps
+  and a row below the mark is a row already filed. Two one-shot writers
+  deliberately do NOT stamp it: the `mail_html_rebuild_2` stale-body mark
+  (`markStaleMailBodies`, which changes no text the index files) and
+  `tidyMailPreviews`. No repair nulls a mail body any more, so the index and
+  every stage keep the old body until a refetch writes the converted one
+  through `updateMessageDetail`, whose own stamp refiles it exactly once. The `body` column is the stored text as it is, so it keeps
   the raw `label <url>` runs; only the prompts and the embedding card strip
   the targets. The one door a past value
   could come through is `upsertMessage`'s `row['updated_at']`, which must never

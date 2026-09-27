@@ -399,6 +399,123 @@ void main() {
           reason: 'exactly one sync_mail row ever names the regate');
     });
 
+    test('the meeting regate dismisses a suggested reply, and only that',
+        () async {
+      // Responses drafted for before this build: the thread leaves the rail,
+      // and opening it must not still show a suggestion.
+      for (final id in ['accepted', 'declined']) {
+        await store.upsertMessage({
+          'source_message_id': id,
+          'conversation_key': 'k-$id',
+          'direction': 'inbound',
+          'from_address': 'colleague@example.com',
+          'subject': 'Accepted: Weekly sync',
+          'received_at': isoAgo(const Duration(hours: 20)),
+          'triage_status': 'triaged',
+          'source_meta_json': '{"meeting":"meetingAccepted"}',
+        });
+      }
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'k-accepted',
+        replyToMessageId: 'accepted',
+        body: 'Thanks, see you there.',
+      );
+      // An edited draft is the owner's own work and stays.
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'k-declined',
+        replyToMessageId: 'declined',
+        body: 'Sorry to miss it.',
+        status: 'edited',
+      );
+
+      await syncReaching(14).syncNow();
+
+      expect((await store.getDraftForMessage('email', 'accepted'))!['status'],
+          'dismissed');
+      expect((await store.getDraftForMessage('email', 'declined'))!['status'],
+          'edited');
+      expect((await syncMailDetail())['regated_meeting_responses'], 2);
+    });
+
+    test('the hedge re-judge re-queues in-window verdict-0 inbound once',
+        () async {
+      // Old hedges were stored 0 and cannot be told from a real no, so every
+      // in-window 0 is asked again. Mail and chat alike; a yes, an unjudged
+      // row, an outbound and a row behind the floor are left alone.
+      Future<void> judged(
+        String id, {
+        String source = 'email',
+        int? verdict = 0,
+        String direction = 'inbound',
+        Duration ago = const Duration(hours: 20),
+      }) async {
+        await store.upsertMessage({
+          'source': source,
+          'source_message_id': id,
+          'conversation_key': 'k-$id',
+          'direction': direction,
+          'from_address': 'sam@example.com',
+          'subject': 'Numbers',
+          'received_at': isoAgo(ago),
+          'triage_status': 'triaged',
+        });
+        if (verdict != null) {
+          await store.writeNeedsYouVerdict(source, id,
+              verdict: verdict == 1, reason: 'Judged.');
+        }
+        // Finished once already, which is the row the enqueue will never
+        // offer again.
+        await store.enqueueWork('needs_you', source, id);
+        await db.customUpdate(
+          "UPDATE work_items SET status = 'done' WHERE entity_id = ?",
+          variables: [Variable<String>(id)],
+        );
+      }
+
+      // The older revive one-shot re-asks every done row with a NULL verdict,
+      // and it has closed on every installed machine. Closed here too, so the
+      // unjudged row below says what THIS one-shot leaves alone.
+      await store.setPref('needs_you_model_revive', '1');
+      await judged('mail-no');
+      await judged('chat-no', source: 'teams');
+      await judged('mail-yes', verdict: 1);
+      await judged('mail-unjudged', verdict: null);
+      await judged('sent-no', direction: 'outbound');
+      await judged('old-no', ago: const Duration(days: 40));
+
+      Future<Map<String, String>> statuses() async => {
+            for (final row in (await db
+                    .customSelect(
+                      'SELECT entity_id, status FROM work_items '
+                      "WHERE task_kind = 'needs_you'",
+                    )
+                    .get()))
+              row.data['entity_id'] as String: row.data['status'] as String,
+          };
+
+      await syncReaching(14).syncNow();
+
+      final after = await statuses();
+      expect(after['mail-no'], 'pending');
+      expect(after['chat-no'], 'pending');
+      for (final id in ['mail-yes', 'mail-unjudged', 'sent-no', 'old-no']) {
+        expect(after[id], 'done', reason: id);
+      }
+      expect(await store.getPref('needs_you_hedge_rejudge'), '1');
+      expect((await syncMailDetail())['requeued_needs_you_hedges'], 2);
+      expect(MessageStore.derivedOneShotPrefs,
+          isNot(contains('needs_you_hedge_rejudge')));
+
+      // Once: a row judged 0 again after the pref is set stays done.
+      await db.customUpdate(
+        "UPDATE work_items SET status = 'done' WHERE task_kind = 'needs_you'",
+      );
+      await syncReaching(14).syncNow();
+      expect((await statuses())['mail-no'], 'done');
+    });
+
     test('the retired label-rule gate re-pends once and reports its count',
         () async {
       // Rows a label rule gated before the rules left (v19): `label_rule` is

@@ -1,27 +1,26 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
 
-/// The two repairs behind the mail bodies a server converted for us.
+/// The two repairs behind the mail bodies an older converter wrote.
 ///
 /// The detail fetch asks Graph for HTML now and this app converts it, so every
 /// body stored before that switch carries what Graph's own conversion wrote:
-/// `label <href>` for every anchor, `[alt]` for every image. There is no way
-/// to recover the message from that text, so [MessageStore
-/// .clearLegacyMailBodies] forgets those bodies and lets the lazy fetch bring
-/// them back — and there is no HTML part behind a PREVIEW at all, so
-/// [MessageStore.tidyMailPreviews] rewrites those in place instead.
+/// `label <href>` for every anchor, `[alt]` for every image. The branch's
+/// first converter left its own marks, a blank line and literal entities.
+/// [MessageStore.markStaleMailBodies] MARKS those bodies stale and keeps their
+/// text, so the lazy fetch brings them back and a message whose id no longer
+/// answers keeps what it had. There is no HTML part behind a PREVIEW at all,
+/// so [MessageStore.tidyMailPreviews] rewrites those in place instead.
 ///
 /// The load-bearing claim is the one nothing about the text shows: a message
 /// row's `updated_at` must not move, in EITHER repair. It is the keyword
-/// index's watermark, and a NULL body offered to the index is a message indexed
-/// as having no words. The two run in the same pass over largely the same rows,
-/// so a stamp from the preview rewrite would undo the clear's guarantee just as
-/// surely as a stamp from the clear itself — which is what the last group is
-/// for. The conversation row is the exception and keeps its stamp.
+/// index's watermark. The conversation row is the exception and keeps its
+/// stamp.
 
 void main() {
   late BondDatabase db;
@@ -96,14 +95,34 @@ void main() {
   const inlineImage = 'Signed and scanned.\n[cid:image001@example]';
   const clean = 'Could you look at the renewal before Thursday?';
 
-  group('clearLegacyMailBodies', () {
-    test('forgets the converted bodies and nothing else', () async {
+  /// Whether the row carries the stale-body mark, as the model reads it.
+  Future<bool> stale(String source, String id) async =>
+      Message.fromRow(await row(source, id)).bodyStale;
+
+  // What the branch's first converter wrote for Exchange plain-text mail:
+  // the `<br>` newline and the source's own CR/LF, one blank line per line.
+  const doubled = 'Hi Dana,\n\nThe renewal is attached.\n\nThanks';
+  const single = 'Hi Dana,\nThe renewal is attached.\nThanks';
+  // And the entities it did not decode.
+  const entity = 'We&rsquo;re glad &mdash; see you Thursday.';
+
+  group('markStaleMailBodies', () {
+    test('marks every old shape in window, keeps the text, and nothing else',
+        () async {
       await mail(id: 'm-anchor', bodyText: anchorTail, receivedAt: ago(const Duration(hours: 2)));
       await mail(id: 'm-mailto', bodyText: mailtoTail, receivedAt: ago(const Duration(hours: 3)));
       await mail(id: 'm-cid', bodyText: inlineImage, receivedAt: ago(const Duration(hours: 4)));
+      await mail(id: 'm-doubled', bodyText: doubled, receivedAt: ago(const Duration(hours: 4)));
+      await mail(id: 'm-entity', bodyText: entity, receivedAt: ago(const Duration(hours: 4)));
       await mail(id: 'm-clean', bodyText: clean, receivedAt: ago(const Duration(hours: 5)));
-      // Behind the floor: outside the window this pass ran with, so outside
-      // what it is allowed to forget.
+      await mail(id: 'm-single', bodyText: single, receivedAt: ago(const Duration(hours: 5)));
+      // A bare ampersand is a person's own punctuation, not an entity.
+      await mail(
+        id: 'm-amp',
+        bodyText: 'Tom & Jerry are in.',
+        receivedAt: ago(const Duration(hours: 5)),
+      );
+      // Behind the floor: outside the window this pass ran with.
       await mail(
         id: 'm-old',
         bodyText: anchorTail,
@@ -113,156 +132,150 @@ void main() {
       // message whole — so the source is part of the match.
       await chat(id: 'c1', bodyText: anchorTail, receivedAt: ago(const Duration(hours: 2)));
 
-      final cleared = await store.clearLegacyMailBodies(
+      final marked = await store.markStaleMailBodies(
         sinceIso: ago(const Duration(days: 1)),
       );
 
-      expect(cleared, 3);
-      expect((await row('email', 'm-anchor'))['body_text'], isNull);
-      expect((await row('email', 'm-mailto'))['body_text'], isNull);
-      expect((await row('email', 'm-cid'))['body_text'], isNull);
-      expect((await row('email', 'm-clean'))['body_text'], clean);
-      expect((await row('email', 'm-old'))['body_text'], anchorTail);
-      expect((await row('teams', 'c1'))['body_text'], anchorTail);
+      expect(marked, 5);
+      for (final id in ['m-anchor', 'm-mailto', 'm-cid', 'm-doubled', 'm-entity']) {
+        expect(await stale('email', id), isTrue, reason: id);
+      }
+      for (final id in ['m-clean', 'm-single', 'm-amp', 'm-old']) {
+        expect(await stale('email', id), isFalse, reason: id);
+      }
+      expect(await stale('teams', 'c1'), isFalse);
+      // Nothing loses its text.
+      expect((await row('email', 'm-anchor'))['body_text'], anchorTail);
+      expect((await row('email', 'm-doubled'))['body_text'], doubled);
+      expect((await row('email', 'm-entity'))['body_text'], entity);
+    });
+
+    test('keeps the blob a detail fetch wrote beside the mark', () async {
+      await mail(id: 'm1', bodyText: anchorTail, receivedAt: ago(const Duration(hours: 2)));
+      await store.updateMessageDetail('email', 'm1',
+          sourceMetaJson: '{"headers":{"list-id":"team.example.com"}}');
+      // An invalid blob is replaced by one holding the mark alone.
+      await mail(id: 'm2', bodyText: anchorTail, receivedAt: ago(const Duration(hours: 2)));
+      await db.customUpdate(
+        "UPDATE messages SET source_meta_json = 'not json' "
+        "WHERE source_message_id = 'm2'",
+      );
+
+      await store.markStaleMailBodies(sinceIso: ago(const Duration(days: 1)));
+
+      final m1 = Message.fromRow(await row('email', 'm1'));
+      expect(m1.bodyStale, isTrue);
+      expect(m1.headers['list-id'], 'team.example.com');
+      expect(await stale('email', 'm2'), isTrue);
     });
 
     test('leaves every updated_at byte-identical', () async {
       // The keyword index resyncs from `MAX(indexed_updated_at)` against this
-      // column. A row restamped here would be offered to the index with a NULL
-      // body and indexed as a message with no words in it, until somebody
-      // happened to open its thread; left alone, the row keeps the text it has
-      // and the refill's own stamp hands over the converted body once.
+      // column, and the mark changes no text it files. The refill's own stamp
+      // hands over the converted body once.
       await mail(id: 'm1', bodyText: anchorTail, receivedAt: ago(const Duration(hours: 2)));
-      await mail(id: 'm2', bodyText: clean, receivedAt: ago(const Duration(hours: 3)));
+      await mail(id: 'm2', bodyText: doubled, receivedAt: ago(const Duration(hours: 3)));
+      await mail(id: 'm3', bodyText: clean, receivedAt: ago(const Duration(hours: 3)));
 
       final before = {
-        for (final id in ['m1', 'm2'])
+        for (final id in ['m1', 'm2', 'm3'])
           id: (await row('email', id))['updated_at'],
       };
       expect(before.values, everyElement(isNotNull));
 
-      await store.clearLegacyMailBodies(sinceIso: ago(const Duration(days: 1)));
+      await store.markStaleMailBodies(sinceIso: ago(const Duration(days: 1)));
 
+      expect(await stale('email', 'm1'), isTrue);
       for (final id in before.keys) {
         expect((await row('email', id))['updated_at'], before[id], reason: id);
       }
     });
 
-    test('a second pass finds nothing left to forget', () async {
+    test('a second pass finds nothing left to mark', () async {
       await mail(id: 'm1', bodyText: anchorTail, receivedAt: ago(const Duration(hours: 2)));
 
       final since = ago(const Duration(days: 1));
-      expect(await store.clearLegacyMailBodies(sinceIso: since), 1);
-      expect(await store.clearLegacyMailBodies(sinceIso: since), 0);
-    });
-  });
-
-  group('clearDoubleSpacedMailBodies', () {
-    // What the branch's first converter wrote for Exchange plain-text mail:
-    // the `<br>` newline and the source's own CR/LF, one blank line per line.
-    const doubled = 'Hi Dana,\n\nThe renewal is attached.\n\nThanks';
-    const single = 'Hi Dana,\nThe renewal is attached.\nThanks';
-
-    test('forgets an in-window email body with a blank line and nothing else',
-        () async {
-      await mail(id: 'm-doubled', bodyText: doubled, receivedAt: ago(const Duration(hours: 2)));
-      await mail(id: 'm-single', bodyText: single, receivedAt: ago(const Duration(hours: 3)));
-      // Behind the floor: outside the window this pass ran with.
-      await mail(
-        id: 'm-old',
-        bodyText: doubled,
-        receivedAt: ago(const Duration(days: 30)),
-      );
-      // A chat body never went through the mail converter.
-      await chat(id: 'c1', bodyText: doubled, receivedAt: ago(const Duration(hours: 2)));
-
-      final cleared = await store.clearDoubleSpacedMailBodies(
-        sinceIso: ago(const Duration(days: 1)),
-      );
-
-      expect(cleared, 1);
-      expect((await row('email', 'm-doubled'))['body_text'], isNull);
-      expect((await row('email', 'm-single'))['body_text'], single);
-      expect((await row('email', 'm-old'))['body_text'], doubled);
-      expect((await row('teams', 'c1'))['body_text'], doubled);
+      expect(await store.markStaleMailBodies(sinceIso: since), 1);
+      expect(await store.markStaleMailBodies(sinceIso: since), 0);
     });
 
-    test('leaves every updated_at byte-identical', () async {
-      // The same keyword-index watermark `clearLegacyMailBodies` protects.
-      await mail(id: 'm1', bodyText: doubled, receivedAt: ago(const Duration(hours: 2)));
-      await mail(id: 'm2', bodyText: single, receivedAt: ago(const Duration(hours: 3)));
-
-      final before = {
-        for (final id in ['m1', 'm2'])
-          id: (await row('email', id))['updated_at'],
-      };
-      expect(before.values, everyElement(isNotNull));
-
-      await store.clearDoubleSpacedMailBodies(
-        sinceIso: ago(const Duration(days: 1)),
-      );
-
-      expect((await row('email', 'm1'))['body_text'], isNull);
-      for (final id in before.keys) {
-        expect((await row('email', id))['updated_at'], before[id], reason: id);
-      }
-    });
-  });
-
-  group('what neither clear may touch', () {
-    const doubled = 'Hi Dana,\n\nThanks for the numbers.';
-
-    test('a local echo keeps the body the owner typed', () async {
-      // The detail fetch refuses a `local:` id, so a nulled echo would never
-      // be refilled. A typed reply nearly always has a blank line, and one
-      // with a link in it matches the legacy patterns as well.
-      await mail(id: 'local:d1', bodyText: doubled, receivedAt: ago(const Duration(hours: 2)));
-      await mail(id: 'local:d2', bodyText: anchorTail, receivedAt: ago(const Duration(hours: 2)));
-
-      final since = ago(const Duration(days: 1));
-      expect(await store.clearDoubleSpacedMailBodies(sinceIso: since), 0);
-      expect(await store.clearLegacyMailBodies(sinceIso: since), 0);
-
-      expect((await row('email', 'local:d1'))['body_text'], doubled);
-      expect((await row('email', 'local:d2'))['body_text'], anchorTail);
-    });
-
-    test('a row with a pending work item keeps its body', () async {
-      // Needs-you, extraction and the embedding read the body, or else the
-      // 255-character preview; a verdict from the preview is final.
-      await mail(id: 'm-doubled', bodyText: doubled, receivedAt: ago(const Duration(hours: 2)));
-      await mail(id: 'm-anchor', bodyText: anchorTail, receivedAt: ago(const Duration(hours: 2)));
-      await store.enqueueWork('needs_you', 'email', 'm-doubled');
-      await store.enqueueWork('extract', 'email', 'm-anchor');
-
-      final since = ago(const Duration(days: 1));
-      expect(await store.clearDoubleSpacedMailBodies(sinceIso: since), 0);
-      expect(await store.clearLegacyMailBodies(sinceIso: since), 0);
-
-      expect((await row('email', 'm-doubled'))['body_text'], doubled);
-      expect((await row('email', 'm-anchor'))['body_text'], anchorTail);
-    });
-
-    test('a row triage is still processing keeps its body', () async {
-      await mail(
-        id: 'm-busy',
-        bodyText: doubled,
-        receivedAt: ago(const Duration(hours: 2)),
-        triageStatus: 'processing',
-      );
+    test('a row the pipeline still owes work on is marked too', () async {
+      // Nothing loses text now, so there is nothing to protect a stage from:
+      // needs-you, extraction and the embedding read the old body, never the
+      // preview, including on a row whose work the paced backlog has not
+      // queued yet.
+      await mail(id: 'm-queued', bodyText: doubled, receivedAt: ago(const Duration(hours: 2)));
+      await store.enqueueWork('needs_you', 'email', 'm-queued');
       await mail(
         id: 'm-pending',
         bodyText: anchorTail,
         receivedAt: ago(const Duration(hours: 2)),
         triageStatus: 'pending',
       );
+      // Triaged, with its extract owed on the progress row and no work item.
+      await mail(id: 'm-owed', bodyText: entity, receivedAt: ago(const Duration(hours: 2)));
 
-      final since = ago(const Duration(days: 1));
-      expect(await store.clearDoubleSpacedMailBodies(sinceIso: since), 0);
-      expect(await store.clearLegacyMailBodies(sinceIso: since), 0);
-
-      expect((await row('email', 'm-busy'))['body_text'], doubled);
+      expect(
+        await store.markStaleMailBodies(sinceIso: ago(const Duration(days: 1))),
+        3,
+      );
+      expect((await row('email', 'm-queued'))['body_text'], doubled);
       expect((await row('email', 'm-pending'))['body_text'], anchorTail);
+      expect((await row('email', 'm-owed'))['body_text'], entity);
+    });
+
+    test('a local echo is never marked', () async {
+      // The detail fetch refuses a `local:` id, so its mark could never clear.
+      await mail(id: 'local:d1', bodyText: doubled, receivedAt: ago(const Duration(hours: 2)));
+      await mail(id: 'local:d2', bodyText: anchorTail, receivedAt: ago(const Duration(hours: 2)));
+
+      expect(
+        await store.markStaleMailBodies(sinceIso: ago(const Duration(days: 1))),
+        0,
+      );
+      expect(await stale('email', 'local:d1'), isFalse);
+      expect(await stale('email', 'local:d2'), isFalse);
+    });
+  });
+
+  group('clearing the mark', () {
+    setUp(() async {
+      await mail(id: 'm1', bodyText: anchorTail, receivedAt: ago(const Duration(hours: 2)));
+      await store.updateMessageDetail('email', 'm1',
+          sourceMetaJson: '{"meeting":"meetingAccepted"}');
+      await store.markStaleMailBodies(sinceIso: ago(const Duration(days: 1)));
+      expect(await stale('email', 'm1'), isTrue);
+    });
+
+    test('clearBodyStale keeps the text, the blob and the stamp', () async {
+      final before = await row('email', 'm1');
+
+      await store.clearBodyStale('email', 'm1');
+
+      final after = Message.fromRow(await row('email', 'm1'));
+      expect(after.bodyStale, isFalse);
+      expect(after.bodyText, anchorTail);
+      expect(after.meetingMessageType, 'meetingAccepted');
+      expect((await row('email', 'm1'))['updated_at'], before['updated_at']);
+    });
+
+    test('a detail write with no blob keeps the old one, minus the mark',
+        () async {
+      await store.updateMessageDetail('email', 'm1', bodyText: 'New text.');
+
+      final after = Message.fromRow(await row('email', 'm1'));
+      expect(after.bodyStale, isFalse);
+      expect(after.bodyText, 'New text.');
+      expect(after.meetingMessageType, 'meetingAccepted');
+    });
+
+    test('a detail write with no body keeps the text and drops the mark',
+        () async {
+      await store.updateMessageDetail('email', 'm1');
+
+      final after = Message.fromRow(await row('email', 'm1'));
+      expect(after.bodyStale, isFalse);
+      expect(after.bodyText, anchorTail);
     });
   });
 
@@ -390,19 +403,11 @@ void main() {
   });
 
   group('both repairs over one row', () {
-    test('a forgotten body and a tidied preview move no watermark at all',
+    test('a marked body and a tidied preview move no watermark at all',
         () async {
       // The order the sync runs them in, over the row they both match — which
       // is most of them, because a message whose body carries a converted link
       // run usually carries one in its snippet too.
-      //
-      // The collision this pins: if the preview rewrite restamped, the keyword
-      // index would resume over a row whose body had just been nulled and file
-      // it from the snippet, which is 255 characters of a message it already
-      // held whole. The body would come back on the next thread open and the
-      // index would never hear about it, because its mark is now above the
-      // row. So the first repair's still column is only a guarantee if the
-      // second one honours it.
       await mail(
         id: 'm1',
         bodyText: anchorTail,
@@ -412,17 +417,14 @@ void main() {
       final before = (await row('email', 'm1'))['updated_at'];
       expect(before, isNotNull);
 
-      await store.clearLegacyMailBodies(sinceIso: ago(const Duration(days: 1)));
+      await store.markStaleMailBodies(sinceIso: ago(const Duration(days: 1)));
       await store.tidyMailPreviews();
 
       final after = await row('email', 'm1');
-      expect(after['body_text'], isNull);
+      expect(after['body_text'], anchorTail);
+      expect(Message.fromRow(after).bodyStale, isTrue);
       expect(after['body_preview'], 'View comment');
-      expect(
-        after['updated_at'],
-        before,
-        reason: 'a bodyless row must not be offered to the index',
-      );
+      expect(after['updated_at'], before);
     });
   });
 }

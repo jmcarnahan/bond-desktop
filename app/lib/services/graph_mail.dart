@@ -452,6 +452,25 @@ class GraphMail implements MailBackend, DraftRecipientsEditor {
     );
   }
 
+  /// `DELETE /me/messages/{id}`: the draft a failed reply left behind.
+  ///
+  /// 204 is the answer; 404 and 410 mean the draft is already gone, which is
+  /// the outcome this call exists for, so they are not failures either. The
+  /// caller swallows a throw — see `DraftNotifier.send` — so the throw only
+  /// has to be honest, not friendly.
+  @override
+  Future<void> deleteDraft(String draftId) async {
+    final response = await _request(
+      'DELETE',
+      Uri.parse('$_base/me/messages/${Uri.encodeComponent(draftId)}'),
+    );
+    final status = response.statusCode;
+    if (status == 204 || status == 200 || status == 404 || status == 410) {
+      return;
+    }
+    throw _describe(response, 'Microsoft Graph could not delete the draft');
+  }
+
   /// Everything a local echo row needs off a draft that is about to stop
   /// existing.
   static const String _sentSelect = 'id,conversationId,internetMessageId,'
@@ -572,6 +591,7 @@ class GraphMail implements MailBackend, DraftRecipientsEditor {
         response = switch (method) {
           'POST' => await _http.post(uri, headers: sent, body: body),
           'PATCH' => await _http.patch(uri, headers: sent, body: body),
+          'DELETE' => await _http.delete(uri, headers: sent),
           _ => await _http.get(uri, headers: sent),
         };
       } on http.ClientException catch (e) {

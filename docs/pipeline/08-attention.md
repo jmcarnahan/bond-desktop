@@ -28,12 +28,17 @@ The two fences are asymmetric on purpose: `!= true` on the temper, `== true` on
 the boost, so NULL (never judged) and 0 (judged no) move **nothing** in the
 score and score exactly as they did before the stage existed. The SCORE is not
 the whole story for a judged no, though: the readers that decide whether a
-thread is on Needs You treat 0 on the newest KEPT inbound as a veto that
-outranks triage's ask. `isNeedsYou` (`app/lib/widgets/app_rail.dart`, the
-rail) returns false on `latestNeedsYouVerdict == false` before it reads the
-CTA, and `_liveNeedsYouThread` (`message_store.dart`, the Home tile and the
-Needs You filter) spells the same term in SQL off the same message. NULL is
-still "not judged" and keeps its place in both. And the verdict deliberately does
+thread is on Needs You treat it as a veto that outranks triage's ask, on a
+thread rule. A thread is vetoed only when its newest KEPT inbound is judged no
+AND no kept inbound newer than the thread's last outbound is judged yes, so a
+bystander's reply-all judged no cannot hide an older ask still unanswered. The
+rule is one SQL fragment, `MessageStore.needsYouVetoedSql`: `isNeedsYou`
+(`app/lib/widgets/app_rail.dart`, the rail) returns false on
+`Conversation.needsYouVetoed`, which `loadConversations` loads from it, before
+it reads the CTA, and `_liveNeedsYouThread` (`message_store.dart`, the Home
+tile and the Needs You filter) splices the same fragment. NULL, never judged
+or a hedged yes, keeps its place in all three (see
+[11-needs-you.md](11-needs-you.md)). And the verdict deliberately does
 not touch the **threshold** — it raises the score through the same arithmetic
 every other signal uses, and the user's slider still gates what reaches the
 rail. The one thing it does bypass is **Later**: an open ask on the thread

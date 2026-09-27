@@ -1160,27 +1160,39 @@ void main() {
       await sync.syncNow();
     }
 
-    test('a sync forgets the bodies a server converted, and tidies the '
-        'previews, exactly once', () async {
+    /// Whether the row carries the stale-body mark, read the way the store's
+    /// own predicate reads it.
+    Future<bool> stale(String id) async {
+      final row = await messageRow(id);
+      return Message.fromRow(row).bodyStale;
+    }
+
+    test('a sync marks the bodies an older converter wrote, keeps their text, '
+        'and tidies the previews, exactly once', () async {
       const converted = 'View comment <https://requests.example.com/r/42#c7>';
       await stored('m-converted', body: converted, preview: converted);
       await stored('m-clean', body: 'See you Thursday.', preview: 'See you Thursday.');
       // Double-spaced by the first converter and carrying no link at all: the
-      // blank line is the only mark it left, and the second clear reads it.
+      // blank line is the only mark it left.
       await stored(
         'm-doubled',
         body: 'Hi Dana,\n\nSee you Thursday.',
         preview: 'Hi Dana, See you Thursday.',
       );
+      // The first converter decoded seven entities and left the rest literal.
+      await stored('m-entity', body: 'We&rsquo;re glad you came.');
 
       await syncEmptyPage('c1');
 
-      // The body is forgotten rather than rewritten: only a refetch of the
-      // HTML can say what the message was, and `ensureBodies` fetches exactly
-      // the rows with no body.
-      expect((await messageRow('m-converted'))['body_text'], isNull);
-      expect((await messageRow('m-clean'))['body_text'], 'See you Thursday.');
-      expect((await messageRow('m-doubled'))['body_text'], isNull);
+      // Marked, and the text stays: every reader but the transcript keeps
+      // reading it until a refetch has answered.
+      expect((await messageRow('m-converted'))['body_text'], converted);
+      expect(await stale('m-converted'), isTrue);
+      expect(await stale('m-doubled'), isTrue);
+      expect(await stale('m-entity'), isTrue);
+      expect((await messageRow('m-entity'))['body_text'],
+          'We&rsquo;re glad you came.');
+      expect(await stale('m-clean'), isFalse);
       // The preview has no HTML part behind it, so it is repaired in place.
       expect((await messageRow('m-converted'))['body_preview'], 'View comment');
       expect(await store.getPref('mail_html_rebuild_2'), '1');
@@ -1189,44 +1201,113 @@ void main() {
       // Once means once. A row written after the prefs are set, inside the
       // window, so the prefs are the only thing that can be leaving it alone.
       await stored('m-after-pref', body: converted, preview: converted);
+      await stored('m-doubled-after', body: 'Hi Dana,\n\nThanks.');
       await syncEmptyPage('c2');
 
-      expect((await messageRow('m-after-pref'))['body_text'], converted);
+      expect(await stale('m-after-pref'), isFalse);
       expect((await messageRow('m-after-pref'))['body_preview'], converted);
-
-      // And once means once for the blank-line clear too.
-      await stored('m-doubled-after', body: 'Hi Dana,\n\nThanks.');
-      await syncEmptyPage('c3');
-
-      expect(
-        (await messageRow('m-doubled-after'))['body_text'],
-        'Hi Dana,\n\nThanks.',
-      );
+      expect(await stale('m-doubled-after'), isFalse);
     });
 
-    test('a forgotten body is what the next thread open fetches', () async {
-      await stored(
-        'm1',
-        body: 'Go to comment <https://files.example.com/d/9?e=1>',
-      );
-      await syncEmptyPage('c1');
-      expect((await messageRow('m1'))['body_text'], isNull);
+    group('a stale body', () {
+      const old = 'Go to comment <https://files.example.com/d/9?e=1>';
 
-      // Which is the whole reason the one-shot may null a column: this is the
-      // path that refills it, and it looks for exactly the rows with no body.
-      graph.details['m1'] = () => jsonOk({
-            'id': 'm1',
-            'uniqueBody': {
-              'contentType': 'html',
-              'content': '<p>Dana left a comment.</p>'
-                  '<p><a href="https://files.example.com/d/9">Go to comment</a></p>',
-            },
-          });
-      await sync.ensureBodies('conv-old');
+      setUp(() async {
+        await stored('m1', body: old);
+        await syncEmptyPage('c1');
+        expect(await stale('m1'), isTrue);
+        graph.requests.clear();
+      });
 
-      final body = (await messageRow('m1'))['body_text'] as String;
-      expect(body, contains('Dana left a comment.'));
-      expect(body, contains('Go to comment <https://files.example.com/d/9>'));
+      test('is what the next thread open fetches, and a 200 replaces it',
+          () async {
+        graph.details['m1'] = () => jsonOk({
+              'id': 'm1',
+              'uniqueBody': {
+                'contentType': 'html',
+                'content': '<p>Dana left a comment.</p>'
+                    '<p><a href="https://files.example.com/d/9">Go to comment</a></p>',
+              },
+            });
+        await sync.ensureBodies('conv-old');
+
+        final body = (await messageRow('m1'))['body_text'] as String;
+        expect(body, contains('Dana left a comment.'));
+        expect(body, contains('Go to comment <https://files.example.com/d/9>'));
+        expect(await stale('m1'), isFalse);
+
+        // Settled: the second open asks the network for nothing.
+        graph.requests.clear();
+        await sync.ensureBodies('conv-old');
+        expect(graph.requests, isEmpty);
+      });
+
+      test('keeps its text and loses the mark when the message is gone',
+          () async {
+        // Archived in Outlook since ingest: the id this row holds now 404s.
+        graph.details['m1'] = () => http.Response('{"error":"gone"}', 404);
+        await sync.ensureBodies('conv-old');
+
+        expect((await messageRow('m1'))['body_text'], old);
+        expect(await stale('m1'), isFalse);
+
+        // And the refusal is not asked for again on every open.
+        graph.requests.clear();
+        await sync.ensureBodies('conv-old');
+        expect(graph.requests, isEmpty);
+      });
+
+      test('keeps its text and loses the mark on a 200 with no body',
+          () async {
+        graph.details['m1'] = () => jsonOk({'id': 'm1'});
+        await sync.ensureBodies('conv-old');
+
+        expect((await messageRow('m1'))['body_text'], old);
+        expect(await stale('m1'), isFalse);
+      });
+
+      test('keeps its text when the new body converts to nothing', () async {
+        // An image-only answer: the stored words beat a preview or a space.
+        graph.details['m1'] = () => jsonOk({
+              'id': 'm1',
+              'uniqueBody': {
+                'contentType': 'html',
+                'content': '<table><tr><td></td></tr></table>',
+              },
+            });
+        await sync.ensureBodies('conv-old');
+
+        expect((await messageRow('m1'))['body_text'], old);
+        expect(await stale('m1'), isFalse);
+      });
+
+      test('keeps the mark through a transient failure', () async {
+        graph.details['m1'] = () => http.Response('boom', 500);
+        await expectLater(
+          sync.ensureBodies('conv-old'),
+          throwsA(isA<GraphMailException>()),
+        );
+
+        expect((await messageRow('m1'))['body_text'], old);
+        expect(await stale('m1'), isTrue);
+      });
+
+      test('a detail that brings headers still ends with no mark', () async {
+        // The new blob replaces the old one, so the mark cannot ride along.
+        graph.details['m1'] = () => jsonOk({
+              'id': 'm1',
+              'uniqueBody': {'content': 'Fresh text.'},
+              'internetMessageHeaders': [
+                {'name': 'List-Id', 'value': 'team.example.com'},
+              ],
+            });
+        await sync.ensureBodies('conv-old');
+
+        final row = await messageRow('m1');
+        expect(row['body_text'], 'Fresh text.');
+        expect(await stale('m1'), isFalse);
+        expect(Message.fromRow(row).headers['list-id'], 'team.example.com');
+      });
     });
   });
 }

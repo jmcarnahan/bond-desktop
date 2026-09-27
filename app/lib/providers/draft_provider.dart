@@ -15,7 +15,7 @@ import '../services/backend/auth_session.dart';
 import '../services/backend/backend_types.dart';
 import '../services/backend/mail_backend.dart';
 import '../services/backend/teams_backend.dart';
-import '../services/chat_mentions.dart' show ChatMention;
+import '../services/chat_mentions.dart' show ChatMention, missingMentionIds;
 import '../services/draft_stream.dart';
 import '../services/graph_mail.dart';
 import '../services/graph_teams.dart' show GraphTeamsException;
@@ -1163,6 +1163,12 @@ class DraftNotifier extends StateNotifier<DraftState> {
     // create, no message to reply TO, and no Outlook rung to fall back to.
     if (_source == 'teams') return _sendChat(text, replyTo: replyTo);
 
+    // In flight from HERE, before the first await, rather than from the first
+    // network call. The target lookup below can await the store, and a second
+    // press landing in that gap found `sending` still false and started a
+    // second reply. Every return before the network try below puts it back.
+    state = state.copyWith(sending: true, error: null, notice: null);
+
     // The card's own message first, then the composer's row. A thread only
     // earns a generated draft when it ranks high enough, but the user can reply
     // to ANY thread — so a missing draft row falls back to the newest inbound
@@ -1170,11 +1176,18 @@ class DraftNotifier extends StateNotifier<DraftState> {
     var target = replyTo;
     if (target == null || target.isEmpty) target = state.replyToMessageId;
     if (target == null || target.isEmpty) {
-      final newest = await _store.newestInboundMessage(_source, conversationKey);
-      target = newest?['source_message_id'] as String?;
+      try {
+        final newest =
+            await _store.newestInboundMessage(_source, conversationKey);
+        target = newest?['source_message_id'] as String?;
+      } catch (_) {
+        if (mounted) state = state.copyWith(sending: false);
+        rethrow;
+      }
     }
     if (target == null || target.isEmpty) {
       state = state.copyWith(
+        sending: false,
         error: 'There is nothing to reply to in this thread yet.',
       );
       return SendOutcome.failed;
@@ -1186,11 +1199,15 @@ class DraftNotifier extends StateNotifier<DraftState> {
     try {
       cc = _addedAddresses();
     } on _UnaddressableRecipients catch (e) {
-      state = state.copyWith(error: e.message);
+      state = state.copyWith(sending: false, error: e.message);
       return SendOutcome.failed;
     }
 
-    state = state.copyWith(sending: true, error: null, notice: null);
+    // The draft the server built for this reply, once it has one: what a
+    // failure before the send deletes, so a refused step does not leave an
+    // empty reply sitting in the owner's Drafts. Null again once the send has
+    // gone out — a sent draft is not ours to delete.
+    String? unsentDraftId;
     try {
       final draft = await _mail.createReplyDraft(target);
       final draftId = draft['id'] as String? ?? '';
@@ -1200,6 +1217,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
           'Microsoft Graph created a draft with no id.',
         );
       }
+      unsentDraftId = draftId;
       // Between the draft and its body, and Cc rather than To: the server's own
       // `/createReply` owns the To line — the person being answered is on it —
       // and everybody the owner added is a copy to somebody, not a redirection
@@ -1215,95 +1233,30 @@ class DraftNotifier extends StateNotifier<DraftState> {
       await _mail.updateDraftBody(draftId, text);
 
       if (state.capability == SendCapability.draftToOutlook) {
+        // The draft IS the outcome on this rung — the owner finishes it in
+        // Outlook — so it is never cleaned up after, whatever follows.
+        unsentDraftId = null;
         return await _handOffToOutlook(target, draftId, webLink, text);
       }
 
       final sent = await _mail.sendDraft(draftId);
-      // Read AFTER the send, and never allowed to fail it: the reply has gone,
-      // and a keychain that will not open is no reason to report a sent reply
-      // as failed. An echo with no owner renders as `You` like every other
-      // outbound row, so the only thing a null costs is the sender column.
-      AccountInfo? owner;
-      try {
-        owner = await _auth.storedAccount;
-      } catch (_) {
-        owner = null;
-      }
-      // On screen NOW, from what the server said went out. The reply is real
-      // mail the moment `sendDraft` returns; waiting a minute for `sentitems`
-      // to confirm it reads as a send that failed, and gets sent again.
-      //
-      // The write is refused when the Sent Items copy has already landed — a
-      // poll that started before this send can beat it — and is replaced by
-      // that copy when it does land, matched on the internet message id. See
-      // `mail_echo.dart` for the whole contract.
-      await _store.insertLocalEcho(mailEchoRow(
+      unsentDraftId = null;
+      return await _recordMailSent(
         sent: sent,
         text: text,
-        conversationKey: conversationKey,
-        owner: owner,
-      ));
-      // Counts alone would leave the thread where it was in the rail, still
-      // previewing the message it just answered — and it would never heal,
-      // because the fold below is the only one this row will ever get.
-      await _store.foldOutboundSend(
-        _source,
-        conversationKey,
-        receivedAt: sent.sentAt ?? nowSecondsZ(),
-        preview: firstLine(text),
-        subject: sent.subject,
+        target: target,
+        draftId: draftId,
       );
-      await _queueRecap();
-      // Keyed on the message just replied to — which is the message the stored
-      // draft answers whenever there is one, and the newest inbound message
-      // when there is not. A thread with no suggestion has no row to update
-      // and this write lands on nothing, which is the same as it always was.
-      await _store.updateDraftStatus(
-        _source,
-        target,
-        status: 'sent',
-        body: text,
-        graphDraftId: draftId,
-      );
-      // The strongest positive signal the app collects, and implicit rather
-      // than explicit: the user did not press a rating, they answered the mail.
-      await _logSent();
-      // The reply leaving IS the needs-you exit, and it says so now rather
-      // than whenever the next sync gets around to folding the sent copy in.
-      // Both writes are idempotent: the sync's own fold to `waiting` lands on
-      // a thread already there, and clearing the CTA is exactly what "the ask
-      // was answered" means — the user just answered it.
-      await _store.setConversationState(
-        _source,
-        conversationKey,
-        ConversationState.waiting,
-      );
-      await _store.clearCta(_source, conversationKey);
-      // The chip goes with the CTA — from here, not a sync later. The sync's
-      // own `resolvesAsk` clear will land on rows already at zero.
-      await _pipeline.clearNeedsYou(_source, conversationKey);
-      await _reloadDrafts();
-      state = state.copyWith(
-        sending: false,
-        sendEpoch: state.sendEpoch + 1,
-        // They are on the mail that just went out, so they are not pending on
-        // anything any more. Cleared in the same write as the epoch, which is
-        // what rebuilds the composer: chips left behind would read as people
-        // waiting to be added to the NEXT reply.
-        addedRecipients: const [],
-      );
-      // The list, last: everything this thread needed has already been
-      // written, and the echo above is what the transcript shows until the
-      // Sent Items copy folds in and takes its place.
-      await _onSent?.call();
-      return SendOutcome.sent;
     } on AuthException catch (e) {
+      await _deleteUnsentDraft(unsentDraftId);
       state = state.copyWith(sending: false, error: e.message);
       return SendOutcome.failed;
     } on GraphMailException catch (e) {
+      await _deleteUnsentDraft(unsentDraftId);
       state = state.copyWith(sending: false, error: e.message);
       return SendOutcome.failed;
     } catch (e) {
+      await _deleteUnsentDraft(unsentDraftId);
       state = state.copyWith(sending: false, error: 'Could not send: $e');
       return SendOutcome.failed;
     } finally {
@@ -1313,6 +1266,164 @@ class DraftNotifier extends StateNotifier<DraftState> {
       // say the opposite.
       if (mounted) state = state.copyWith(inFlightBody: null);
     }
+  }
+
+  /// The best-effort clean-up of a reply draft that failed before its send:
+  /// a refused Cc, a refused body, or a refused send each leave one behind.
+  ///
+  /// Its own failure is SWALLOWED. It runs inside the handling of the failure
+  /// the owner needs to see, and a delete that did not work either must not
+  /// replace that reason with its own. Null — nothing created yet, or the
+  /// send already went — asks nothing. On a connection that cannot delete a
+  /// draft the call does nothing and the orphan is accepted; see
+  /// [MailBackend.deleteDraft].
+  Future<void> _deleteUnsentDraft(String? draftId) async {
+    if (draftId == null || draftId.isEmpty) return;
+    try {
+      await _mail.deleteDraft(draftId);
+    } catch (_) {
+      // Deliberately silent — the original failure is the one on screen.
+    }
+  }
+
+  /// What a send says when the reply went out and this machine's own record
+  /// of it did not all save.
+  ///
+  /// A notice, never an error: nothing the owner can retry failed, and an
+  /// error would invite the one press that must not happen — a second send.
+  /// The next sync folds the Sent Items copy in, which is the record this
+  /// app would have written.
+  static const String localCopyFailedNotice =
+      "Sent. The local copy didn't save; it will appear after the next sync.";
+
+  /// Everything a mail send does AFTER the server accepted it.
+  ///
+  /// Once `sendDraft` has returned, the reply is real mail in somebody's
+  /// inbox, and nothing that fails from here may report the send as failed:
+  /// a "Could not send" with the text and chips still up is an invitation to
+  /// send the same reply twice, Cc included. So each local write runs on its
+  /// own — one that throws does not stop the rest, the draft-status write in
+  /// particular, which is what keeps the card from offering the reply again
+  /// — and whatever happens the composer is retired exactly as a clean send
+  /// retires it, with [localCopyFailedNotice] said if anything did not save.
+  Future<SendOutcome> _recordMailSent({
+    required SentDraft sent,
+    required String text,
+    required String target,
+    required String draftId,
+  }) async {
+    var localFailed = false;
+    Future<void> step(Future<void> Function() write) async {
+      try {
+        await write();
+      } catch (_) {
+        localFailed = true;
+      }
+    }
+
+    // Read AFTER the send, and never allowed to fail it: the reply has gone,
+    // and a keychain that will not open is no reason to report a sent reply
+    // as failed. An echo with no owner renders as `You` like every other
+    // outbound row, so the only thing a null costs is the sender column.
+    AccountInfo? owner;
+    try {
+      owner = await _auth.storedAccount;
+    } catch (_) {
+      owner = null;
+    }
+    // On screen NOW, from what the server said went out. The reply is real
+    // mail the moment `sendDraft` returns; waiting a minute for `sentitems`
+    // to confirm it reads as a send that failed, and gets sent again.
+    //
+    // The write is refused when the Sent Items copy has already landed — a
+    // poll that started before this send can beat it — and is replaced by
+    // that copy when it does land, matched on the internet message id. See
+    // `mail_echo.dart` for the whole contract.
+    await step(() => _store.insertLocalEcho(mailEchoRow(
+          sent: sent,
+          text: text,
+          conversationKey: conversationKey,
+          owner: owner,
+        )));
+    // Counts alone would leave the thread where it was in the rail, still
+    // previewing the message it just answered — and it would never heal,
+    // because the fold below is the only one this row will ever get.
+    await step(() => _store.foldOutboundSend(
+          _source,
+          conversationKey,
+          receivedAt: sent.sentAt ?? nowSecondsZ(),
+          preview: firstLine(text),
+          subject: sent.subject,
+        ));
+    await step(_queueRecap);
+    // Keyed on the message just replied to — which is the message the stored
+    // draft answers whenever there is one, and the newest inbound message
+    // when there is not. A thread with no suggestion has no row to update
+    // and this write lands on nothing, which is the same as it always was.
+    await step(() => _store.updateDraftStatus(
+          _source,
+          target,
+          status: 'sent',
+          body: text,
+          graphDraftId: draftId,
+        ));
+    // The strongest positive signal the app collects, and implicit rather
+    // than explicit: the user did not press a rating, they answered the mail.
+    await _logSent();
+    // The reply leaving IS the needs-you exit, and it says so now rather
+    // than whenever the next sync gets around to folding the sent copy in.
+    // Both writes are idempotent: the sync's own fold to `waiting` lands on
+    // a thread already there, and clearing the CTA is exactly what "the ask
+    // was answered" means — the user just answered it.
+    await step(() => _store.setConversationState(
+          _source,
+          conversationKey,
+          ConversationState.waiting,
+        ));
+    await step(() => _store.clearCta(_source, conversationKey));
+    // The chip goes with the CTA — from here, not a sync later. The sync's
+    // own `resolvesAsk` clear will land on rows already at zero.
+    await step(() => _pipeline.clearNeedsYou(_source, conversationKey));
+    await step(_reloadDrafts);
+    return _retireSent(localFailed: localFailed);
+  }
+
+  /// The end of every send that went out, clean or not: the composer is
+  /// retired and the list reloads.
+  ///
+  /// The chips go in the same write as the epoch, which is what rebuilds the
+  /// composer: they are on the message that just went out, so they are not
+  /// pending on anything any more, and left behind they would read as people
+  /// waiting to be added to — or mentioned on — the NEXT reply.
+  ///
+  /// [notice] is what the send wants said though it worked; a local write
+  /// that failed adds [localCopyFailedNotice] to it. The list reload runs
+  /// last and may not fail the send either: everything this thread needed
+  /// has already been written, and the echo is what the transcript shows
+  /// until the sent copy folds in.
+  Future<SendOutcome> _retireSent({
+    required bool localFailed,
+    String? notice,
+  }) async {
+    final said = [
+      if (localFailed) localCopyFailedNotice,
+      ?notice,
+    ];
+    if (mounted) {
+      state = state.copyWith(
+        sending: false,
+        sendEpoch: state.sendEpoch + 1,
+        addedRecipients: const [],
+        error: null,
+        notice: said.isEmpty ? null : said.join(' '),
+      );
+    }
+    try {
+      await _onSent?.call();
+    } catch (_) {
+      // The list heals on the next load; the reply is still sent.
+    }
+    return SendOutcome.sent;
   }
 
   /// Posts [text] to a chat and writes the reply into the transcript.
@@ -1337,71 +1448,114 @@ class DraftNotifier extends StateNotifier<DraftState> {
     }
 
     state = state.copyWith(sending: true, error: null, notice: null);
+    final mentions = _addedMentions();
+    final Map<String, dynamic> sent;
     try {
-      final sent = await teams.sendChatMessage(
+      sent = await teams.sendChatMessage(
         conversationKey,
         text,
-        mentions: _addedMentions(),
+        mentions: mentions,
       );
-      // The row, the fold and the recap, all in the writer compose-new shares
-      // — see `outbound_chat.dart` for why a chat's own row is written here at
-      // all, and for the null the writer answers when Graph hands back
-      // something that is not a chat message.
-      await writeOutboundChatRow(_store, sent, conversationKey, text);
-      // A chat send never marked a draft row before. That was fine while only
-      // the newest suggestion was tappable — the row it would have marked was
-      // the only one on screen — and it is wrong now that an older message's
-      // card can send: without this, that card's row stays 'suggested' and the
-      // transcript offers the reply again straight after it went.
-      if (replyTo != null && replyTo.isNotEmpty) {
-        await _store.updateDraftStatus(
-          _source,
-          replyTo,
-          status: 'sent',
-          body: text,
-        );
+    } on AuthException catch (e) {
+      return _chatFailed(e.message);
+    } on GraphTeamsException catch (e) {
+      return _chatFailed(e.message);
+    } catch (e) {
+      return _chatFailed('Could not send: $e');
+    }
+
+    // From here the message is in the chat, and nothing below may report the
+    // send as failed — the same rule, and the same reason, as the mail arm's
+    // [_recordMailSent]: a "Could not send" with the chips still up is how the
+    // same people get mentioned twice. Each write runs on its own.
+    var localFailed = false;
+    Future<void> step(Future<void> Function() write) async {
+      try {
+        await write();
+      } catch (_) {
+        localFailed = true;
       }
-      // Same two writes the mail path makes, and for the same reason: the reply
-      // leaving IS the needs-you exit and the CTA's answer, said now rather
-      // than whenever the user next refreshes Teams — which, under Microsoft's
-      // polling terms, may be a while.
-      await _store.setConversationState(
-        _source,
-        conversationKey,
-        ConversationState.waiting,
-      );
-      await _store.clearCta(_source, conversationKey);
-      // For a chat this clear can ONLY happen here: the outbound row written
-      // above is one the next pull deliberately skips as already-seen, so the
-      // sync's `resolvesAsk` arm never runs for it and a chip left to that
-      // path would never come off.
-      await _pipeline.clearNeedsYou(_source, conversationKey);
-      await _logSent();
-      await _reloadDrafts();
-      // The chips go in the same write as the epoch: left behind, they would
-      // mention the same people again on the next reply. A failed send never
-      // reaches here, so they stay for the retry.
+    }
+
+    // The row, the fold and the recap, all in the writer compose-new shares
+    // — see `outbound_chat.dart` for why a chat's own row is written here at
+    // all, and for the null the writer answers when Graph hands back
+    // something that is not a chat message.
+    await step(() => writeOutboundChatRow(_store, sent, conversationKey, text));
+    // A chat send never marked a draft row before. That was fine while only
+    // the newest suggestion was tappable — the row it would have marked was
+    // the only one on screen — and it is wrong now that an older message's
+    // card can send: without this, that card's row stays 'suggested' and the
+    // transcript offers the reply again straight after it went.
+    if (replyTo != null && replyTo.isNotEmpty) {
+      await step(() => _store.updateDraftStatus(
+            _source,
+            replyTo,
+            status: 'sent',
+            body: text,
+          ));
+    }
+    // Same two writes the mail path makes, and for the same reason: the reply
+    // leaving IS the needs-you exit and the CTA's answer, said now rather
+    // than whenever the user next refreshes Teams — which, under Microsoft's
+    // polling terms, may be a while.
+    await step(() => _store.setConversationState(
+          _source,
+          conversationKey,
+          ConversationState.waiting,
+        ));
+    await step(() => _store.clearCta(_source, conversationKey));
+    // For a chat this clear can ONLY happen here: the outbound row written
+    // above is one the next pull deliberately skips as already-seen, so the
+    // sync's `resolvesAsk` arm never runs for it and a chip left to that
+    // path would never come off.
+    await step(() => _pipeline.clearNeedsYou(_source, conversationKey));
+    await _logSent();
+    await step(_reloadDrafts);
+    final outcome = await _retireSent(
+      localFailed: localFailed,
+      notice: _droppedMentionsNotice(mentions, sent),
+    );
+    // Same rule as the mail arm: the row is stored by here, so
+    // [DraftState.bubbleBody] hands the bubble over rather than dropping it.
+    if (mounted) state = state.copyWith(inFlightBody: null);
+    return outcome;
+  }
+
+  /// A chat send that did not go out: the reason on the alert, and the bubble
+  /// cleared with it, because a bubble beside the error would say the
+  /// opposite. The chips stay for the retry.
+  SendOutcome _chatFailed(String message) {
+    if (mounted) {
       state = state.copyWith(
         sending: false,
-        sendEpoch: state.sendEpoch + 1,
-        addedRecipients: const [],
+        error: message,
+        inFlightBody: null,
       );
-      await _onSent?.call();
-      return SendOutcome.sent;
-    } on AuthException catch (e) {
-      state = state.copyWith(sending: false, error: e.message);
-      return SendOutcome.failed;
-    } on GraphTeamsException catch (e) {
-      state = state.copyWith(sending: false, error: e.message);
-      return SendOutcome.failed;
-    } catch (e) {
-      state = state.copyWith(sending: false, error: 'Could not send: $e');
-      return SendOutcome.failed;
-    } finally {
-      // Same rule as the mail arm: the row is stored by here, so
-      // [DraftState.bubbleBody] hands the bubble over rather than dropping it.
-      if (mounted) state = state.copyWith(inFlightBody: null);
     }
+    return SendOutcome.failed;
+  }
+
+  /// What to say when a chat reply went out and some of the people it
+  /// mentioned are not mentioned on the message the server stored, or null
+  /// when there is nothing to say.
+  ///
+  /// The message has already gone, so this is said and never retried: a
+  /// resend would post the words twice to reach the people once. See
+  /// [missingMentionIds] for how the stored message is read, including a
+  /// server that reports no mentions at all, which says nothing.
+  static String? _droppedMentionsNotice(
+    List<ChatMention> asked,
+    Map<String, dynamic> sent,
+  ) {
+    final missing = missingMentionIds(asked, sent);
+    if (missing.isEmpty) return null;
+    final count = missing.length;
+    return count == 1
+        ? "Sent, but 1 mention didn't go through — that person wasn't "
+            'notified.'
+        : "Sent, but $count mentions didn't go through — those people "
+            "weren't notified.";
   }
 
   /// Wakes the recap of every storyline this thread is filed in, because the

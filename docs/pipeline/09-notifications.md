@@ -12,11 +12,16 @@ message-level ask AND thread-level volume. `needs_you_verdict = 1` is one of
 the asks — the only one decided about the whole message rather than read off a
 triage field — and it is the ask half **only**: a judged yes is still gated by
 the attention threshold, the `later` bucket and the `done` state, like every
-other ask. NULL adds nothing: never judged is not a yes. A 0 is a VETO that
-outranks every ask: `notifyWorthy` (`app/lib/services/notify_worthy.dart`)
-returns false on a judged no before it reads any other field, the same rule
-`isNeedsYou` applies on the rail, so the chip, the toast and the rail cannot
-disagree about one message. Triage folds an ask out of any message with a task
+other ask. NULL adds nothing: never judged is not a yes, and neither is a
+hedge, a yes below the needs-you pass's confidence bar, which is now stored
+NULL and so no longer vetoes (see [11-needs-you.md](11-needs-you.md)). A 0 is
+a VETO that outranks every ask: `notifyWorthy`
+(`app/lib/services/notify_worthy.dart`) returns false on a judged no before it
+reads any other field, so the chip and the toast cannot disagree about one
+message. The rail and the tile apply a thread-level form of the veto,
+`MessageStore.needsYouVetoedSql`, which also asks that no kept inbound newer
+than the last outbound was judged yes; this per-message rule is unchanged.
+Triage folds an ask out of any message with a task
 in it, and the needs-you pass, which reads the thread first, is the one that
 can say the task is somebody else's. A message settled before the judge
 answers is corrected by `refreshNeedsYou` when it does.

@@ -1,7 +1,8 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
-import '../services/html_text.dart' show safeLinksTargetOf;
+import '../services/html_text.dart'
+    show labelClaimsOtherHost, safeLinksTargetOf;
 import '../theme/tokens.dart';
 
 /// The canonical link run a stored body carries: `label <url>` — the words a
@@ -14,6 +15,10 @@ final RegExp _runPattern = RegExp(
   r'<([^<>\s]+)>|(https?://[^\s<>]+)',
   caseSensitive: false,
 );
+
+/// A canonical run's ` <url>` tail, read where a bare address ends. See the
+/// pair rule in [linkSpansOf].
+final RegExp _tailAfterBare = RegExp(r' <([^<>\s]+)>');
 
 /// A zero-width space. `mail_text` leaves them in bodies as soft break points,
 /// and one riding on the end of an address is not part of the address.
@@ -123,6 +128,22 @@ Uri? linkTargetOf(String raw) {
 /// brackets and all, because a body must never hide what it could not vouch
 /// for. Everything outside a run is untouched.
 ///
+/// A label that claims a destination the click does not reach
+/// (`www.bank.example <https://evil.example/login>`, or
+/// `ceo@bank.example <mailto:attacker@evil.example>`) is not painted: the
+/// target paints itself in its place, the answer `canonicalLinkRun` gives the
+/// same anchor, through the same [labelClaimsOtherHost]. The converter judged
+/// only the anchors it converted, and a stored body also arrives as escaped
+/// text, as Graph's own conversion on the MCP connection, and from Teams.
+///
+/// A bare address followed at once by ` <url>` is ONE link, not two: that is
+/// the run the converter writes for an anchor whose label is an address on the
+/// target's own host (`https://bank.example/ <https://bank.example/x?utm=…>`),
+/// and painting both halves shows the address twice. The bare address is the
+/// label, the bracket is the target, and the host rule above applies to the
+/// pair. The label caps do not: a single address is one word the sender's
+/// anchor wrote, and it painted in full before this rule too.
+///
 /// [maxLabelChars] and [maxLabelWords] say how much text may be a label — see
 /// [defaultMaxLabelChars] for why a body and an ask line answer differently.
 List<LinkedRun> linkSpansOf(
@@ -141,6 +162,8 @@ List<LinkedRun> linkSpansOf(
   }
 
   for (final match in _runPattern.allMatches(text)) {
+    // The bracket a bare address took as its target is already painted.
+    if (match.start < cursor) continue;
     final bracketed = match.group(1);
     if (bracketed != null) {
       final target = linkTargetOf(bracketed);
@@ -159,10 +182,17 @@ List<LinkedRun> linkSpansOf(
           .substring(labelStart, labelEnd)
           .replaceAll(_zeroWidth, '')
           .trim();
-      if (label.isEmpty ||
+      final address = bracketed.replaceAll(_zeroWidth, '');
+      if (label.isNotEmpty && labelClaimsOtherHost(label, address)) {
+        // The label's words go with it, as they do from the converter: shown
+        // unlinked beside the real address they would still read as where
+        // this link goes.
+        addPlain(cursor, labelStart);
+        runs.add(LinkRun(address, target));
+      } else if (label.isEmpty ||
           !_isLabelShaped(label, maxLabelChars, maxLabelWords)) {
         addPlain(cursor, match.start);
-        runs.add(LinkRun(bracketed.replaceAll(_zeroWidth, ''), target));
+        runs.add(LinkRun(address, target));
       } else {
         addPlain(cursor, labelStart);
         runs.add(LinkRun(label, target));
@@ -179,6 +209,23 @@ List<LinkedRun> linkSpansOf(
     final target = linkTargetOf(url);
     if (target == null) continue;
     addPlain(cursor, match.start);
+    // The pair rule: nothing trimmed off the address, then one space and a
+    // bracket holding an openable target.
+    final tail = kept.length == match.group(2)!.length
+        ? _tailAfterBare.matchAsPrefix(text, match.end)
+        : null;
+    final tailAddress = tail?.group(1)!.replaceAll(_zeroWidth, '');
+    final tailTarget = tailAddress == null ? null : linkTargetOf(tailAddress);
+    if (tail != null && tailAddress != null && tailTarget != null) {
+      runs.add(
+        labelClaimsOtherHost(url, tailAddress)
+            ? LinkRun(tailAddress, tailTarget)
+            : LinkRun(url, tailTarget),
+      );
+      cursor = tail.end;
+      floor = cursor;
+      continue;
+    }
     runs.add(LinkRun(url, target));
     cursor = match.start + kept.length;
     floor = cursor;

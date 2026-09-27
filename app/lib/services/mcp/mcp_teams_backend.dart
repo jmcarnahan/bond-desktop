@@ -235,6 +235,15 @@ class McpTeamsBackend implements TeamsBackend {
   /// Retrying without the mentions would post a reply the owner believes
   /// notified somebody it never reached.
   ///
+  /// A server that ACCEPTS the `options` and then ignores them is the other
+  /// way a mention can vanish, and it cannot be refused here: the message is
+  /// already in the chat. [_messageShape] carries the server's
+  /// `mentioned_user_ids` through as Graph's `mentions`, and the caller reads
+  /// it against what it asked for with `missingMentionIds` — the draft send
+  /// says so as a notice and never resends. A server that reports no
+  /// `mentioned_user_ids` at all leaves the key out, and that reads as
+  /// "nothing to conclude", not as every mention dropped.
+  ///
   /// The reply comes back through [_messageShape], so what the caller writes
   /// into its own outbound row is shape-identical to a message the sync would
   /// have folded in — id included, which is what keeps the next pull from

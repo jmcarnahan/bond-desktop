@@ -74,6 +74,37 @@ class UnwritableStore extends MessageStore {
   }
 }
 
+/// A store whose label links fail while every state write lands — the
+/// mark-done label step failing after the done flip has committed.
+class LabelRefusingStore extends MessageStore {
+  LabelRefusingStore(super.db);
+
+  bool refuseApply = true;
+  bool refuseRemove = false;
+
+  @override
+  Future<void> applyLabels(
+    String source,
+    String conversationKey,
+    List<String> labelIds, {
+    String appliedBy = 'user',
+  }) async {
+    if (refuseApply) throw StateError('database is locked');
+    return super.applyLabels(source, conversationKey, labelIds,
+        appliedBy: appliedBy);
+  }
+
+  @override
+  Future<bool> removeLabel(
+    String source,
+    String conversationKey,
+    String labelId,
+  ) async {
+    if (refuseRemove) throw StateError('database is locked');
+    return super.removeLabel(source, conversationKey, labelId);
+  }
+}
+
 void main() {
   late BondDatabase db;
   late MessageStore store;
@@ -423,6 +454,88 @@ void main() {
       final state = notifier.state as ConversationsLoaded;
       expect(state.conversations.single.state, ConversationState.needsReply);
       expect(state.conversations.single.labels, isEmpty);
+    });
+  });
+
+  group('markDone with a label that fails to save', () {
+    test('keeps the done flip, says the label did not save, and undo reopens',
+        () async {
+      await seedConversation('c1');
+      final fyi = await store.createLabel('FYI only');
+      final refusing = LabelRefusingStore(db);
+      final notifier = ConversationsNotifier(refusing, sync);
+      await notifier.load();
+
+      final undo = await notifier.markDone('email', 'c1', labelIds: [fyi.id]);
+
+      // The store says done, so the screen says done: a row snapped back to
+      // needs-reply over a done thread would leave the pile at the next load
+      // with no Undo.
+      expect(
+        (await store.loadConversations(sources: const ['email'])).single.state,
+        ConversationState.done,
+      );
+      final state = notifier.state as ConversationsLoaded;
+      expect(state.conversations.single.state, ConversationState.done);
+      expect(state.conversations.single.labels, isEmpty);
+      expect(await store.labelsForConversation('email', 'c1'), isEmpty);
+      expect(state.loadError, "Marked done, but the label didn't save.");
+      expect(undo, isNotNull);
+      expect(undo!.appliedLabelIds, isEmpty);
+      expect(undo.labelWriteFailed, isTrue);
+
+      await notifier.undoMarkDone(undo);
+
+      expect(
+        (await store.loadConversations(sources: const ['email'])).single.state,
+        ConversationState.needsReply,
+      );
+      expect(
+        (notifier.state as ConversationsLoaded).conversations.single.state,
+        ConversationState.needsReply,
+      );
+    });
+
+    test('a clean label write reports no failure', () async {
+      await seedConversation('c1');
+      final fyi = await store.createLabel('FYI only');
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.load();
+
+      final undo = await notifier.markDone('email', 'c1', labelIds: [fyi.id]);
+
+      expect(undo!.labelWriteFailed, isFalse);
+    });
+  });
+
+  group('undoMarkDone with a label that fails to come off', () {
+    test('keeps the restored state on screen and says the label stayed',
+        () async {
+      await seedConversation('c1');
+      final fyi = await store.createLabel('FYI only');
+      final refusing = LabelRefusingStore(db)..refuseApply = false;
+      final notifier = ConversationsNotifier(refusing, sync);
+      await notifier.load();
+      final undo = await notifier.markDone('email', 'c1', labelIds: [fyi.id]);
+      refusing.refuseRemove = true;
+
+      await notifier.undoMarkDone(undo!);
+
+      // The store holds the restored state, so the screen does too.
+      expect(
+        (await store.loadConversations(sources: const ['email'])).single.state,
+        ConversationState.needsReply,
+      );
+      final state = notifier.state as ConversationsLoaded;
+      expect(state.conversations.single.state, ConversationState.needsReply);
+      // And the chip the store still holds is still on the row.
+      expect([for (final l in state.conversations.single.labels) l.id],
+          [fyi.id]);
+      expect(
+        [for (final l in await store.labelsForConversation('email', 'c1')) l.id],
+        [fyi.id],
+      );
+      expect(state.loadError, 'The thread is back, but the label is still on it.');
     });
   });
 

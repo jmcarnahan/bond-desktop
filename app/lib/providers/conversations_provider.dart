@@ -108,11 +108,17 @@ class MarkDoneUndo {
   /// here and undo leaves it alone.
   final List<String> appliedLabelIds;
 
+  /// The thread went to done but the labels asked for did not go on. The
+  /// caller's toast reads this rather than [appliedLabelIds]: an empty list
+  /// also means "every word asked for was already there", which is success.
+  final bool labelWriteFailed;
+
   const MarkDoneUndo({
     required this.source,
     required this.conversationKey,
     required this.previousState,
     this.appliedLabelIds = const [],
+    this.labelWriteFailed = false,
   });
 }
 
@@ -476,8 +482,16 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// `LabelsNotifier.apply` beside this, because dismiss-with-a-label is ONE
   /// thing the owner did and therefore one thing to undo. What comes back is
   /// what [undoMarkDone] needs to put it all back; null when there was nothing
-  /// to do (no list yet, no such row) or when the write failed and the row has
-  /// already been restored.
+  /// to do (no list yet, no such row) or when the state write failed and the
+  /// row has already been restored. A caller reads null as "not done" and says
+  /// so, never as success.
+  ///
+  /// The label write is a separate step with its own failure. By the time it
+  /// runs the thread IS done in the store, so a refused link must not put the
+  /// row back on screen: that would show a needs-reply row over a done thread,
+  /// and the next load would take it off the pile with no Undo. The flip
+  /// stands, the error names the label, and the undo record carries no links
+  /// with [MarkDoneUndo.labelWriteFailed] set.
   ///
   /// `messages.label` — the model's verdict — is not touched here or anywhere
   /// near here.
@@ -541,10 +555,6 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       // with it. After the state write, so a failed write leaves the row
       // exactly as it was — chip included.
       await _pipeline.clearNeedsYou(source, conversationKey);
-      if (applying.isNotEmpty) {
-        await _store.applyLabels(source, conversationKey, applying);
-        await _refreshLabels(source, conversationKey);
-      }
       // On the success path only. Closing a thread is the quietest "I am done
       // with this" the user ever gives, and it is worth recording — but recording
       // one for a write that failed would teach the app from something that
@@ -560,12 +570,39 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       return null;
     }
 
+    // Its own try, after the done flip has landed — see the doc above.
+    var labelWriteFailed = false;
+    if (applying.isNotEmpty) {
+      try {
+        await _store.applyLabels(source, conversationKey, applying);
+      } catch (e) {
+        debugPrint('applying labels on mark-done failed: $e');
+        labelWriteFailed = true;
+      }
+      // Re-read either way: a failed batch may have linked some ids before it
+      // threw, and the chips should show what the store holds.
+      await _refreshLabels(source, conversationKey);
+      if (labelWriteFailed) {
+        final latest = state;
+        if (latest is ConversationsLoaded) {
+          state = latest.withRows(
+            latest.conversations,
+            "Marked done, but the label didn't save.",
+          );
+        }
+      }
+    }
+
     if (previousState == null) return null;
     return MarkDoneUndo(
       source: source,
       conversationKey: conversationKey,
       previousState: previousState,
-      appliedLabelIds: applying,
+      // No links named after a failed write: whatever the batch left behind
+      // is not something this action can claim it put on, and Undo must still
+      // reopen the thread.
+      appliedLabelIds: labelWriteFailed ? const [] : applying,
+      labelWriteFailed: labelWriteFailed,
     );
   }
 
@@ -585,6 +622,11 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// [reopenThread] does not raise one: nothing stored which messages carried
   /// it, and the triage pass writes one again if the thread still asks
   /// something. Undo returns the thread, not the pipeline's opinion of it.
+  ///
+  /// The label removal is [markDone]'s mirror: once the state is restored in
+  /// the store, a refused unlink keeps the restored row on screen and says
+  /// the label is still on, rather than snapping the row back to done over a
+  /// store that no longer says done.
   Future<void> undoMarkDone(MarkDoneUndo undo) async {
     final current = state;
     if (current is! ConversationsLoaded) return;
@@ -603,12 +645,6 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         undo.conversationKey,
         undo.previousState,
       );
-      for (final id in undo.appliedLabelIds) {
-        await _store.removeLabel(undo.source, undo.conversationKey, id);
-      }
-      if (undo.appliedLabelIds.isNotEmpty) {
-        await _refreshLabels(undo.source, undo.conversationKey);
-      }
       // The mirror of the `down` [markDone] recorded, and for the same reason
       // [reopenThread] records one: the thread came back. The `down` stays in
       // the history — it happened — and this is the correction beside it.
@@ -620,6 +656,28 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         current.conversations,
         "Couldn't undo that just now — the thread is unchanged.",
       );
+      return;
+    }
+
+    if (undo.appliedLabelIds.isEmpty) return;
+    var labelRemovalFailed = false;
+    for (final id in undo.appliedLabelIds) {
+      try {
+        await _store.removeLabel(undo.source, undo.conversationKey, id);
+      } catch (e) {
+        debugPrint('removing a label on undo failed: $e');
+        labelRemovalFailed = true;
+      }
+    }
+    await _refreshLabels(undo.source, undo.conversationKey);
+    if (labelRemovalFailed) {
+      final latest = state;
+      if (latest is ConversationsLoaded) {
+        state = latest.withRows(
+          latest.conversations,
+          "The thread is back, but the label is still on it.",
+        );
+      }
     }
   }
 

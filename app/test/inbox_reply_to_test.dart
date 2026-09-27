@@ -91,6 +91,9 @@ class _RecordingMail implements MailBackend {
   }
 
   @override
+  Future<void> deleteDraft(String draftId) async {}
+
+  @override
   Future<List<String>> markRead(
     List<String> messageIds, {
     bool isRead = true,

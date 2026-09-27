@@ -308,6 +308,23 @@ class _ComposerState extends State<Composer> {
   /// is no pending one. Cleared by the pick, and by the caret moving off it.
   int? _mentionAt;
 
+  /// Where the text a pick replaces ends: just past the `@` on a chat, and
+  /// past the first letter typed after it on mail, which waits for that letter
+  /// before it opens anything (see [_mentionAnchor]).
+  int? _mentionEnd;
+
+  /// What the body holds between a pending `@` and the end a pick replaces:
+  /// the letter that opened the picker on mail, and nothing on a chat.
+  String get _mentionQuery {
+    final at = _mentionAt;
+    final end = _mentionEnd;
+    final text = _body.text;
+    if (at == null || end == null || end > text.length || at + 1 > end) {
+      return '';
+    }
+    return text.substring(at + 1, end);
+  }
+
   /// Somebody reached for the feature on a connection that cannot apply it.
   ///
   /// Latched, because the reach is the thing worth answering: the sentence
@@ -388,26 +405,43 @@ class _ComposerState extends State<Composer> {
 
   // ── Adding people ─────────────────────────────────────────────────────
 
-  /// The `@` the caret is sitting behind, if it is one that means "who".
+  /// The `@` that means "who", if the caret has just asked for one: the offset
+  /// of the `@` and the end of what a pick should replace.
   ///
   /// Read off the CARET rather than by diffing the text, so it answers the same
   /// whether the character was typed, pasted or arrowed back to. The `@` has to
   /// begin a word — the one before it is whitespace, or there is none — which is
   /// what keeps a typed address out of it: the caret after the `@` in
   /// `dana@example.com` is not a request for a people picker.
-  int? _mentionAnchor(String value) {
+  ///
+  /// On a chat the caret sitting right behind the `@` is the request, as it
+  /// always was: a chat is written to its members, and `@` there means a name.
+  /// On MAIL it waits one character. Mail is prose, and "meet @ 3pm" is a
+  /// sentence, not a search: taking the cursor into the picker on the bare `@`
+  /// turned " 3pm" into a directory query and left a dangling `@` in the body.
+  /// So mail asks only once the character after the `@` is not whitespace,
+  /// and that character stays in the body where it was typed, inside the
+  /// range a pick replaces.
+  ({int at, int end})? _mentionAnchor(String value) {
     final selection = _body.selection;
     if (!selection.isValid || !selection.isCollapsed) return null;
     final caret = selection.baseOffset;
     if (caret <= 0 || caret > value.length) return null;
-    if (value[caret - 1] != '@') return null;
-    if (caret >= 2 && value[caret - 2].trim().isNotEmpty) return null;
-    return caret - 1;
+    bool beginsWord(int at) => at == 0 || value[at - 1].trim().isEmpty;
+    if (_isChat) {
+      if (value[caret - 1] != '@' || !beginsWord(caret - 1)) return null;
+      return (at: caret - 1, end: caret);
+    }
+    if (caret < 2) return null;
+    if (value[caret - 2] != '@' || !beginsWord(caret - 2)) return null;
+    if (value[caret - 1].trim().isEmpty) return null;
+    return (at: caret - 2, end: caret);
   }
 
-  /// What a body keystroke does about recipients: open the picker on an `@`,
-  /// or — where the connection cannot apply people — say so and leave the `@`
-  /// alone.
+  /// What a body keystroke does about recipients: open the picker on an `@`
+  /// that asks for one — on mail, only once a letter follows it — or, where
+  /// the connection cannot apply people, say so at that same moment and leave
+  /// the text alone.
   ///
   /// Saying so is the whole point of the branch. Swallowing the `@` and drawing
   /// nothing would read as a feature that does not exist; adding people that
@@ -424,7 +458,8 @@ class _ComposerState extends State<Composer> {
       return;
     }
     setState(() {
-      _mentionAt = anchor;
+      _mentionAt = anchor.at;
+      _mentionEnd = anchor.end;
       _showRecipients = true;
     });
     // After the frame that builds the field: a node that is not in the tree yet
@@ -509,7 +544,11 @@ class _ComposerState extends State<Composer> {
     final name =
         person.displayName.isNotEmpty ? person.displayName : person.address;
     final written = '@$name ';
-    final next = text.replaceRange(anchor, anchor + 1, written);
+    // The `@` alone on a chat; on mail, the `@` and the letter that asked for
+    // the picker, so "@d" becomes the name rather than the name followed by a
+    // stray "d". Clamped, because the body may have been edited since.
+    final end = (_mentionEnd ?? anchor + 1).clamp(anchor + 1, text.length);
+    final next = text.replaceRange(anchor, end, written);
     _body.value = TextEditingValue(
       text: next,
       selection: TextSelection.collapsed(offset: anchor + written.length),
@@ -768,6 +807,10 @@ class _ComposerState extends State<Composer> {
             allowTypedAddress: !_isChat,
             focusNode: _recipientsFocus,
             photos: widget.recipientPhotos,
+            // The letters typed after a mail `@`, which is what asked for this
+            // field; empty on a chat, where the bare `@` asks, and from the
+            // button. Read once, when the field is first built.
+            initialQuery: _mentionQuery,
             hint: _isChat
                 ? 'Mention people in this reply'
                 : 'Add people to this reply',

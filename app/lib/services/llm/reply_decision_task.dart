@@ -57,9 +57,19 @@ const Set<String> automatedGateReasons = {
 /// invite asks for the reader's time and can be the most important mail of the
 /// day, and a tracker's mention is addressed to the person reading it — the
 /// same line `gates.dart` draws, and for the same reason.
+///
+/// A message the owner RESTORED (`gate_override = 'user'`) skips the
+/// classification arm. Restore is the escape hatch from every gate, and tier
+/// two already gates any `List-*` or `Auto-Submitted` mail, so the
+/// classification fires mostly on exactly those restored rows: a colleague
+/// writing through a team list, gated as a newsletter and restored. Keeping
+/// the suppression would refuse the draft on the very judgement the owner
+/// just overruled. The gate-reason arm needs no exemption, because Restore
+/// clears `gate_reason`.
 bool replySuppressed(Message message) =>
     automatedGateReasons.contains(message.gateReason) ||
-    classificationOf(message) == 'automated_notification';
+    (message.gateOverride != 'user' &&
+        classificationOf(message) == 'automated_notification');
 
 /// The rules half of the reply-decision system prompt. Const, and never
 /// interpolated into: see [JsonTask.systemPrompt] for why one changed

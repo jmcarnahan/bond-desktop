@@ -89,6 +89,14 @@ class RecipientsField extends StatefulWidget {
   /// nothing — a chat row keeps its icon either way.
   final ProfilePhotos? photos;
 
+  /// What the search box starts with, read once when the field is built.
+  ///
+  /// The composer's mail `@` opens this field only after the letter that
+  /// follows it, and that letter was typed into the body; handed on here, it
+  /// is also the first letter of the search, so "@d" searches for "d" rather
+  /// than for whatever is typed next. Empty starts an empty box, as always.
+  final String initialQuery;
+
   const RecipientsField({
     super.key,
     required this.value,
@@ -102,6 +110,7 @@ class RecipientsField extends StatefulWidget {
     this.onChatPicked,
     this.debounce = const Duration(milliseconds: 250),
     this.photos,
+    this.initialQuery = '',
   });
 
   @override
@@ -167,12 +176,39 @@ class _RecipientsFieldState extends State<RecipientsField> {
     _debounce = Debounced(delay: widget.debounce);
     _focused = _node.hasFocus;
     _node.addListener(_onFocusChanged);
+    _seedAfterFrame(widget.initialQuery, replacing: '');
   }
 
   @override
   void didUpdateWidget(RecipientsField oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!identical(oldWidget.value, widget.value)) _current = widget.value;
+    // A second mail `@x` while this field is already on screen hands a new
+    // seed to a field that was built long ago. It is applied only over a box
+    // still holding nothing or the previous seed — never over a query the
+    // owner typed.
+    if (widget.initialQuery != oldWidget.initialQuery) {
+      _seedAfterFrame(widget.initialQuery, replacing: oldWidget.initialQuery);
+    }
+  }
+
+  /// Puts [seed] in the search box after the current frame, if the box still
+  /// holds nothing or [replacing].
+  ///
+  /// After the frame rather than now: the autocomplete runs its search when
+  /// the controller CHANGES, and a value set before it is listening — or in
+  /// the middle of a build — would sit in the box with no options under it.
+  void _seedAfterFrame(String seed, {required String replacing}) {
+    if (seed.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final current = _text.text;
+      if (current.isNotEmpty && current != replacing) return;
+      _text.value = TextEditingValue(
+        text: seed,
+        selection: TextSelection.collapsed(offset: seed.length),
+      );
+    });
   }
 
   @override

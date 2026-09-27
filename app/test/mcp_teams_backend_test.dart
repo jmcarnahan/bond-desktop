@@ -950,6 +950,87 @@ void main() {
         );
       });
 
+      test('a server that posts and echoes every mention leaves nothing '
+          'missing', () async {
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            {
+              'message':
+                  _wireMessage(id: 'sent-1', mentionedUserIds: ['aad-ada']),
+            },
+          ],
+        });
+
+        final sent = await _build(mcp)
+            .sendChatMessage('chat-1', '@Ada Park on it', mentions: const [ada]);
+
+        expect(missingMentionIds(const [ada], sent), isEmpty);
+      });
+
+      test('a server that takes the options and drops a mention is caught '
+          'without a resend', () async {
+        // The client stripped `@Ada Park` before the call, so a server that
+        // silently ignores the options posts "on it" naming nobody. The
+        // message is already in the chat: this is said, never retried.
+        const ben = ChatMention(userId: 'aad-ben', displayName: 'Ben Ito');
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            {
+              'message':
+                  _wireMessage(id: 'sent-1', mentionedUserIds: ['aad-ben']),
+            },
+          ],
+        });
+
+        final sent = await _build(mcp).sendChatMessage(
+          'chat-1',
+          '@Ada Park @Ben Ito on it',
+          mentions: const [ada, ben],
+        );
+
+        expect(missingMentionIds(const [ada, ben], sent), ['aad-ada']);
+        expect(mcp.argsOf('send_teams_message'), hasLength(1));
+      });
+
+      test('a server that reports no mentions at all concludes nothing',
+          () async {
+        // An older server leaves `mentioned_user_ids` out entirely. Warning on
+        // every message there would be a warning nobody could act on.
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            {'message': _wireMessage(id: 'sent-1')},
+          ],
+        });
+
+        final sent = await _build(mcp)
+            .sendChatMessage('chat-1', 'on it', mentions: const [ada]);
+
+        expect(sent.containsKey('mentions'), isFalse);
+        expect(missingMentionIds(const [ada], sent), isEmpty);
+      });
+
+      test('a validator that throws about extra inputs is the refusal too',
+          () async {
+        // The pydantic phrasing of the same refusal, arriving as a thrown
+        // tool error rather than a result.
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            const McpToolException(
+              '1 validation error for send_teams_message\noptions\n  '
+              'Extra inputs are not permitted',
+            ),
+          ],
+        });
+
+        await expectLater(
+          _build(mcp)
+              .sendChatMessage('chat-1', 'On it.', mentions: const [ada]),
+          throwsA(isA<GraphTeamsException>()
+              .having((e) => e.message, 'message', refusal)),
+        );
+        expect(mcp.argsOf('send_teams_message'), hasLength(1));
+      });
+
       test('and so does one whose argument check throws', () async {
         final mcp = _FakeMcp({
           'send_teams_message': [

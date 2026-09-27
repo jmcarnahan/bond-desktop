@@ -287,6 +287,18 @@ class McpMailBackend implements MailBackend {
     );
   }
 
+  /// Does nothing: the server has no way to delete a draft.
+  ///
+  /// `manage_draft` takes create, reply, update_body, add_attachment and send,
+  /// and no other mail tool deletes a message. So a reply that fails after its
+  /// draft was created leaves that draft in the owner's Drafts on this
+  /// connection, and that orphan is ACCEPTED rather than papered over: a throw
+  /// here would only be swallowed by the caller, and a fake delete would
+  /// claim a cleanup that never happened. Turning it on is a `manage_draft`
+  /// action on the server, not a change here.
+  @override
+  Future<void> deleteDraft(String draftId) async {}
+
   /// `[{name, address}]` off the wire, with anything unreadable DROPPED.
   ///
   /// An entry with no address names nobody: it cannot be stored, cannot be

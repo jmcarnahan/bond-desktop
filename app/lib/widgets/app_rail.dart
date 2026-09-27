@@ -107,20 +107,21 @@ String _stripReplyPrefixes(String subject) {
 /// and every other reader still sees it; what changes is that the rail stops
 /// claiming a thread it cannot say one true sentence about.
 ///
-/// And a fifth, which outranks the ask: the needs-you pass said NO about the
-/// newest kept inbound. Triage folds an ask up out of any message with an
-/// action in it — a Jira broadcast to four people describing somebody else's
-/// ticket reads as "Review the issue…" — and the thread says `needs_reply`
-/// for any unanswered inbound at all. Neither is the question the rail asks.
-/// The judge is: it reads the thread before the message, holds an older
-/// still-open ask as a yes, and answers "is this the owner's". Only an
-/// explicit `false` counts; an unjudged message keeps its place, on
-/// [_canExplainItself]'s rule for null.
+/// And a fifth, which outranks the ask: the needs-you pass vetoed the thread
+/// ([Conversation.needsYouVetoed]). Triage folds an ask up out of any message
+/// with an action in it — a Jira broadcast to four people describing somebody
+/// else's ticket reads as "Review the issue…" — and the thread says
+/// `needs_reply` for any unanswered inbound at all. Neither is the question
+/// the rail asks. The veto needs the newest kept inbound judged an explicit
+/// no AND no unanswered yes before it: the judge rates one message, so a later
+/// bystander no must not hide an older ask still open. An unjudged message
+/// keeps its place, on [_canExplainItself]'s rule for null. The store spells
+/// the veto once and the tile and the Needs You filter read the same SQL.
 bool isNeedsYou(Conversation c, {double threshold = 0}) {
   if (c.bucket == 'later') return false;
   if (c.state == ConversationState.done) return false;
   if ((c.attentionScore ?? 0) < threshold) return false;
-  if (c.latestNeedsYouVerdict == false) return false;
+  if (c.needsYouVetoed) return false;
   if (c.ctaText?.isNotEmpty == true) return true;
   return c.state == ConversationState.needsReply && _canExplainItself(c);
 }

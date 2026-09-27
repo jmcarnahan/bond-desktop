@@ -123,7 +123,11 @@ existed. It reports `backfilled_needs_you` (see
 [11-needs-you.md](11-needs-you.md)). Its lowering twin, `needs_you_flag_veto`,
 runs once beside it and clears the settled chips that stood on triage's ask
 before a judged no was allowed to outrank it (`lowerVetoedNeedsYou`, ticking
-each row), reported as `vetoed_needs_you`. Every one-shot marker is deleted by
+each row), reported as `vetoed_needs_you`. After them, `needs_you_hedge_rejudge`
+re-queues needs-you work once for every in-window inbound mail and chat
+message whose verdict is 0 (`requeueZeroNeedsYouVerdicts`), because earlier
+builds stored a hedge as 0 and a hedge is NULL now; it reports
+`requeued_needs_you_hedges` and Clear AI results does not reset it. Every one-shot marker is deleted by
 `wipeAll`, so a sign-out-and-wipe lets them run again on the next account.
 
 `rependGatedTriage` — the Teams sync's catch-up for the retired `teams_source`
@@ -333,9 +337,21 @@ and only tidies a body that arrived as text, which is what the MCP server
 sends. The mail profile's rules, each pinned by a test:
 
 - **Source whitespace is HTML whitespace.** Between tags, a run of
-  `[\t\r\n ]` folds to one space; tags and `<pre>` bodies stay as written.
-  Exchange's plain-text mail (`line<br>\r\n`) is therefore single-spaced. The
-  fold runs in the document profile too.
+  `[\t\r\n ]` folds to one space; tags stay as written, and so do the blocks
+  whose source newlines are their layout: `<pre>`, `<textarea>`, and a div,
+  span, p, td, th, li, code, blockquote, font, section or article whose inline
+  `style` sets `white-space: pre`, `pre-wrap` or `pre-line` (ticketing and CI
+  mailers write comment bodies that way). A styled block is found one opener
+  at a time, its style read from that tag's own text, and its closer looked
+  for no further than the next opener of the same name, so an element nested
+  inside another of the same name ends the outer one's protection. That is
+  what keeps the fold linear on hostile input, such as one tag repeating
+  `style=` a thousand times. Exchange's plain-text mail (`line<br>\r\n`) is therefore
+  single-spaced. The fold runs in the document profile too.
+- **Entities.** `decodeHtmlEntities` knows all 252 HTML 4.01 named entities
+  plus `&apos;`, case-sensitively, in ONE pass: a replacement is never scanned
+  again, so `&amp;rsquo;` stays `&rsquo;`. An unknown name stays as typed, and
+  `&nbsp;` is a plain space.
 - **Divs and breaks.** A run of div boundaries is one newline (`_mailDivRun`);
   a `<div><br></div>` keeps the blank line its `<br>` writes, and `<p>` keeps
   its paragraph gap.
@@ -351,12 +367,24 @@ sends. The mail profile's rules, each pinned by a test:
   address yields. A label on the same host with another path keeps its words.
   A bare domain such as `bank.example` is not read as a claim, because
   `Report.xlsx` looks the same; the transcript's hover caption shows the real
-  host instead.
+  host instead. A Safe Links wrapper is read through to the address it
+  carries, so a readable label built from a wrapper is not a claim against
+  the wrapper's own host. The rule is ONE function, `labelClaimsOtherHost`, and the
+  painter (`linkSpansOf` in `linked_text.dart`) applies it again to every
+  stored `label <url>` run, because a body also reaches the transcript as
+  escaped text, as Graph's own conversion on the MCP connection, and from
+  Teams. A bare address followed at once by ` <url>` paints as one link
+  labelled with the address, under the same host rule.
 - **Pictures.** An inline `cid:` image becomes a `[cid:X]` token the
-  transcript splices the bytes onto; every other image is dropped with no
+  transcript splices the bytes onto; its id is entity-decoded once, like a
+  link run's label and target. Every other image is dropped with no
   placeholder. U+200B is kept, because it delimits Outlook's attach-as-link
   runs.
-- **Bounded input.** Mail is cut to `htmlInputCap` (2 Mi characters) after scripts,
+- **Bounded input.** Before either profile's cap, any attribute value of 8 KB
+  or more inside an opening tag is blanked (text between tags is never
+  touched, so a long token in a `<pre>` log stays), so a `data:` download link or a style `url(data:…)`
+  leaves no megabytes of base64 behind. Mail is then cut to `htmlInputCap`
+  (2 Mi characters) after scripts,
   styles and pictures are dropped, so a base64 chart costs nothing; the cut
   backs off to a tag start within 64 Ki characters and never splits a surrogate pair.
   The attachment preview caps with `capProse: true`, and context extraction
@@ -395,7 +423,9 @@ A body that converts to nothing, such as a notification that is one linked
 image, is SETTLED rather than stored empty (`_settledEmptyBody`). An empty
 body is what `ensureBodies` reads as "no body stored", so every open would
 fetch it again. The stored preview becomes the body, or a single space when
-there is not even a preview.
+there is not even a preview. A row that already holds words is the
+exception: that is a stale body (below) whose refetch came back empty, and
+`_settledEmptyBody` keeps the words it has rather than a preview or a space.
 
 The detail's `$select` also asks for `meetingMessageType`, Graph's word for
 the kind of invitation. It is stored under `meeting` in `source_meta_json`
@@ -403,17 +433,27 @@ beside `headers`, each key omitted when it has nothing to say; the
 meeting-response gate reads it ([02-gates.md](02-gates.md)).
 
 Two one-shots repair what earlier builds stored, and neither stamps
-`messages.updated_at`, so the keyword index keeps the old text until the refill (see
-[05-embeddings.md](05-embeddings.md)). `mail_html_rebuild_2` runs
-`clearLegacyMailBodies` and then `clearDoubleSpacedMailBodies` over the
-lookback window, reported as `cleared_mail_bodies`. It superseded the first
-`mail_html_rebuild` key, because the first converter kept the source's CR/LF
-beside every `<br>` newline and double-spaced plain-text mail. The second
-clear nulls nearly every in-window email body once; each refills lazily
-through `ensureBodies` when its thread is opened. Until then, draft style
-examples and thread history read the 255-character preview. Both clears spare
-`local:` echoes, which could never be refetched, and rows whose triage is
-pending or processing or that have open work items, whose stages would
-otherwise read the preview. `mail_preview_tidy` rewrites the stored previews,
+`messages.updated_at`, so the keyword index keeps the old text until a
+refetch replaces it (see [05-embeddings.md](05-embeddings.md)).
+`mail_html_rebuild_2` MARKS old bodies rather than nulling them
+(`markStaleMailBodies`, reported as `stale_mail_bodies`): it sets
+`body_stale` in `source_meta_json` and leaves the text where it is. A body
+nulled first would be lost for good whenever the refetch cannot answer,
+because Graph ids are not immutable here and a message filed in Outlook
+since ingest now 404s. The marks are what an older conversion left and a
+person does not: a `<http` run, a ` <mailto:` run, a `[cid:` token, a blank
+line, or a literal named entity. The key superseded the first
+`mail_html_rebuild`, because the first converter kept the source's CR/LF
+beside every `<br>` newline, double-spacing plain-text mail, and decoded only
+seven entities. It skips `local:` echoes, whose id the detail fetch refuses
+so the mark could never clear, and marks rows the pipeline still owes work on
+like any other, since nothing loses text now. `ensureBodies` refetches a
+stale row exactly as it does one with no body. Any 200 clears the mark
+(`updateMessageDetail`) and replaces the body only when words came back; a
+403, 404 or 410 clears it through `clearBodyStale` and keeps the old text;
+a transient error keeps the mark so the next open tries again. Every other
+reader, the stages, the index and the prompts, reads the old text meanwhile.
+The verdicts and summaries written from it are not re-judged: that is Clear
+AI results, an owner decision. `mail_preview_tidy` rewrites the stored previews,
 on messages and conversations, through the same link rules
 (`tidyMailPreviews`), reported as `tidied_mail_previews`.

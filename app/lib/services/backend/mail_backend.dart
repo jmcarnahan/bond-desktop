@@ -73,6 +73,19 @@ abstract class MailBackend {
   /// Items copy is later matched against.
   Future<SentDraft> sendDraft(String draftId);
 
+  /// Deletes a draft this app created and could not finish, so a reply that
+  /// failed halfway does not leave an empty draft behind in the owner's Drafts.
+  ///
+  /// Only ever called on a draft that was NOT sent: a sent draft is already
+  /// gone from Drafts, and its id may name the Sent Items copy by then.
+  ///
+  /// A draft that is already gone counts as deleted. Anything else throws,
+  /// and the caller treats this as best-effort: the failure it is cleaning up
+  /// after is the one the owner needs to see, not this one. A connection with
+  /// no way to delete a draft answers without doing anything and says so on
+  /// its own implementation.
+  Future<void> deleteDraft(String draftId);
+
   /// Marks messages read (or unread) on the server.
   ///
   /// A best-effort ACK of a decision the local store has already made: the

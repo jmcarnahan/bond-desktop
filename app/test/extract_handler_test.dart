@@ -1325,6 +1325,20 @@ void main() {
       expect(await store.getExtraction('email', 'm1'), isNotNull);
     });
 
+    test('a list message the owner restored is queued', () async {
+      // Gated as a newsletter, restored by the owner: Restore clears the gate
+      // reason and stamps `gate_override`, and the list headers that remain
+      // must not refuse the draft on the judgement the owner overruled.
+      await seedMessage(headers: {'List-Id': 'team.example.com'});
+      await seedConversation();
+      await store.restoreMessage('email', 'm1');
+      await triageSaid(replyExpected: true, needsAction: true);
+
+      await extract();
+
+      expect(await queuedDrafts(), ['m1']);
+    });
+
     test('an Auto-Submitted header is the same answer', () async {
       await seedMessage(headers: {'Auto-Submitted': 'auto-generated'});
       await seedConversation();

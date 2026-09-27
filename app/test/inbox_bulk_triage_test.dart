@@ -1,28 +1,41 @@
+import 'dart:async' show Completer;
+
 // `show BondDatabase`: drift generates row classes whose names collide with
 // the app's own models.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/label_models.dart' show Label;
 import 'package:bond_inbox/models/message_models.dart' show ConversationState;
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
+import 'package:bond_inbox/services/attachments/xlsx_reader.dart'
+    show WorkbookTables;
 import 'package:bond_inbox/services/select_similar.dart' show SimilarScope;
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
+import 'package:bond_inbox/widgets/attachment_card.dart';
 import 'package:bond_inbox/widgets/bulk_action_bar.dart';
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
+import 'package:bond_inbox/widgets/conversation_row.dart';
 import 'package:bond_inbox/widgets/find_field.dart';
 import 'package:bond_inbox/widgets/icon_rail.dart' show IconRail;
 import 'package:bond_inbox/widgets/label_picker.dart';
+import 'package:bond_inbox/widgets/preview/attachment_viewer_pane.dart';
+import 'package:bond_inbox/widgets/preview/preview_engines.dart';
+import 'package:bond_inbox/widgets/side_panel.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_attachment_bytes.dart';
+import 'fixtures/fake_pdf_renderer.dart';
+import 'fixtures/png_fixture.dart';
 import 'fixtures/test_db.dart';
 
 /// Bulk triage over a real store — requirement 12c: the selection, the bar,
@@ -53,6 +66,22 @@ class _PartlyRefusingStore extends MessageStore {
   final Set<String> refused;
   final Set<String> refusedRemovals = {};
   final List<String> removed = [];
+
+  /// Set, a label create waits on it: the picker's write held open while the
+  /// reader presses Enter again. `inbox_triage_keys_test`'s fixture, for the
+  /// bar's picker.
+  Completer<void>? holdCreate;
+
+  /// Set, a label create fails the way a disk does.
+  bool refuseCreate = false;
+
+  @override
+  Future<Label> createLabel(String name, {String? tone}) async {
+    final hold = holdCreate;
+    if (hold != null) await hold.future;
+    if (refuseCreate) throw Exception('the disk said no');
+    return super.createLabel(name, tone: tone);
+  }
 
   @override
   Future<void> applyLabels(
@@ -161,12 +190,18 @@ void main() {
 
   /// [height] tall enough, where a test reaches for a row's box, that the
   /// lazily built list has built that row.
+  ///
+  /// [width] 1400 leaves room for a thread beside the overview. Below 1293 a
+  /// panel takes the whole pane. [bytes], when given, arms the file preview
+  /// so a thread's attachment can open, and open full-pane.
   Future<void> pumpInbox(
     WidgetTester tester, {
     double height = 900,
+    double width = 1400,
     MessageStore? storeAs,
+    FakeAttachmentBytes? bytes,
   }) async {
-    await tester.binding.setSurfaceSize(Size(1400, height));
+    await tester.binding.setSurfaceSize(Size(width, height));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await store.setPref(attentionThresholdKey, '0');
     final prefs = await AppPrefsNotifier.read(store);
@@ -184,7 +219,17 @@ void main() {
 
     await tester.pumpWidget(UncontrolledProviderScope(
       container: container,
-      child: const MaterialApp(home: InboxScreen()),
+      child: MaterialApp(
+        home: bytes == null
+            ? const InboxScreen()
+            : InboxScreen(
+                previewEngines: PreviewEngines(
+                  pdf: FakePdfRenderer(),
+                  workbook: _noWorkbook,
+                ),
+                attachmentBytes: bytes,
+              ),
+      ),
     ));
     await tester.pump();
     await tester.pump();
@@ -222,6 +267,16 @@ void main() {
   }
 
   Finder checkFor(String key) => find.byKey(ValueKey('row-check-email|$key'));
+
+  /// The lit row's own words, or null.
+  String? litRow(WidgetTester tester) {
+    for (final row in tester.widgetList<ConversationRow>(
+      find.byType(ConversationRow),
+    )) {
+      if (row.selected) return row.conversation.subject;
+    }
+    return null;
+  }
 
   /// `j` then `x`, [times] over: ticks that many rows from the top.
   Future<void> tickFromTop(WidgetTester tester, int times) async {
@@ -770,4 +825,261 @@ void main() {
       await settleQueues(tester);
     });
   });
+
+  group('the bulk keys stand down when a panel covers the overview', () {
+    Future<List<String>> doneKeys() async => [
+          for (final c in await store.loadConversations())
+            if (c.state == ConversationState.done) c.id,
+        ];
+
+    Future<void> resize(WidgetTester tester, double width) async {
+      await tester.binding.setSurfaceSize(Size(width, 900));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+    }
+
+    testWidgets('below the split, e acts on the open thread and not on the '
+        'ticks it covers', (tester) async {
+      await seedPile();
+      await pumpInbox(tester);
+      await settleQueues(tester);
+      await tickFromTop(tester, 2);
+      expect(tickedTitles(tester), ['Homepage copy', 'Invoice 4471']);
+
+      // A 1200px window: the thread open beside now has the whole pane, and
+      // the overview with its ticked rows is gone from the screen.
+      await resize(tester, 1200);
+      expect(find.byType(ConversationListPane), findsNothing);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      expect(
+        tester
+            .widget<ThreadDetailPanel>(find.byType(ThreadDetailPanel))
+            .conversation
+            .subject,
+        'Vendor quote',
+      );
+
+      await press(tester, LogicalKeyboardKey.keyE);
+      await settleQueues(tester);
+
+      expect(find.text('Marked done.'), findsOneWidget);
+      expect(find.text('Marked done: 2 threads.'), findsNothing);
+      expect(await doneKeys(), ['c3']);
+
+      // x ticks no box the reader cannot see, and l asks for the thread's
+      // own picker rather than the hidden bar's.
+      await press(tester, LogicalKeyboardKey.keyX);
+      await press(tester, LogicalKeyboardKey.keyL);
+      expect(find.byKey(const ValueKey('bulk-label-picker')), findsNothing);
+      expect(find.byKey(LabelPicker.fieldKey), findsOneWidget);
+      await press(tester, LogicalKeyboardKey.escape);
+
+      // Back at a width with room for both, the selection is as it was left.
+      await resize(tester, 1400);
+      expect(find.text('2 selected'), findsOneWidget);
+      expect(tickedTitles(tester), ['Homepage copy', 'Invoice 4471']);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a file opened full-pane covers the ticks too',
+        (tester) async {
+      await seedPile();
+      // The third row carries a file.
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'c3-m1',
+        'conversation_key': 'c3',
+        'direction': 'inbound',
+        'subject': 'Vendor quote',
+        'from_name': 'Dana Whitfield',
+        'from_address': 'dana@example.com',
+        'received_at': ago(3),
+        'body_text': 'the hero paragraph',
+        'has_attachments': 1,
+      });
+      await store.upsertAttachments('email', 'c3-m1', [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Quote.pdf',
+          'content_type': 'application/pdf',
+          'size': 240 * 1024,
+        },
+      ]);
+      final bytes = FakeAttachmentBytes();
+      bytes.bytesByKey['email|c3-m1|a1'] = Uint8List.fromList(onePixelPng);
+      await pumpInbox(tester, bytes: bytes);
+      await settleQueues(tester);
+      await tickFromTop(tester, 2);
+      await press(tester, LogicalKeyboardKey.keyJ);
+
+      await tester.tap(find.widgetWithText(AttachmentCard, 'Quote.pdf'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.byKey(SidePanelHost.expandKey));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(AttachmentViewerPane), findsOneWidget);
+      expect(find.byType(ConversationListPane), findsNothing);
+
+      await press(tester, LogicalKeyboardKey.keyE);
+      await settleQueues(tester);
+
+      expect(find.text('Marked done: 2 threads.'), findsNothing);
+      final done = await doneKeys();
+      expect(done, isNot(contains('c1')));
+      expect(done, isNot(contains('c2')));
+      await settleQueues(tester);
+    });
+
+    testWidgets('with room for both, a thread beside leaves bulk e on the '
+        'ticks', (tester) async {
+      await seedPile();
+      await pumpInbox(tester);
+      await settleQueues(tester);
+      await tickFromTop(tester, 2);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      expect(find.byType(ConversationListPane), findsOneWidget);
+      expect(find.byType(ThreadDetailPanel), findsOneWidget);
+
+      await press(tester, LogicalKeyboardKey.keyE);
+      await settleQueues(tester);
+
+      expect(find.text('Marked done: 2 threads.'), findsOneWidget);
+      expect(await doneKeys(), unorderedEquals(['c1', 'c2']));
+      await settleQueues(tester);
+    });
+  });
+
+  group('bulk Shift+E with a new word', () {
+    Future<void> typeNewWord(WidgetTester tester, String word) async {
+      await tester.enterText(find.byKey(LabelPicker.fieldKey), word);
+      await tester.pump();
+    }
+
+    testWidgets('Enter twice while the create is out: one label, both done, '
+        'one z back', (tester) async {
+      await seedPile();
+      final held = _PartlyRefusingStore(db, {});
+      await pumpInbox(tester, storeAs: held);
+      await settleQueues(tester);
+      await tickFromTop(tester, 2);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyE);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('bulk-label-picker')), findsOneWidget);
+      held.holdCreate = Completer<void>();
+
+      await typeNewWord(tester, 'Vendor outreach');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(LabelPicker.fieldKey), findsNothing);
+
+      held.holdCreate!.complete();
+      await settleQueues(tester);
+      await tester.pump();
+      await tester.pump();
+
+      expect([for (final l in await store.listLabels()) l.name],
+          ['Vendor outreach']);
+      for (final key in ['c1', 'c2']) {
+        expect(
+          [for (final l in await store.labelsForConversation('email', key))
+            l.name],
+          ['Vendor outreach'],
+          reason: key,
+        );
+      }
+      expect(rowTitles(tester),
+          ['Vendor quote', 'Offsite agenda', 'Parking passes']);
+      expect(find.text('Marked done: 2 threads · Vendor outreach.'),
+          findsOneWidget);
+
+      await press(tester, LogicalKeyboardKey.keyZ);
+      await settleQueues(tester);
+      expect(rowTitles(tester), [
+        'Homepage copy',
+        'Invoice 4471',
+        'Vendor quote',
+        'Offsite agenda',
+        'Parking passes',
+      ]);
+      expect(await store.labelsForConversation('email', 'c1'), isEmpty);
+      expect(await store.labelsForConversation('email', 'c2'), isEmpty);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a row whose label will not go on is done without it, and '
+        'the bar says so', (tester) async {
+      await store.createLabel('FYI only');
+      await seedPile();
+      await pumpInbox(tester, storeAs: _PartlyRefusingStore(db, {'c2'}));
+      await settleQueues(tester);
+      await tickFromTop(tester, 2);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyE);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      await tester.pump();
+      await typeNewWord(tester, 'fyi');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await settleQueues(tester);
+
+      // Both rows are done; only one wears the word, and the bar does not
+      // claim it on the other.
+      expect(rowTitles(tester),
+          ['Vendor quote', 'Offsite agenda', 'Parking passes']);
+      expect(
+        find.text("Marked done: 2 threads. Couldn't add FYI only to 1."),
+        findsOneWidget,
+      );
+      expect(find.text('Marked done: 2 threads · FYI only.'), findsNothing);
+      expect(await store.labelsForConversation('email', 'c2'), isEmpty);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a create that fails says so and hands the keys back',
+        (tester) async {
+      await seedPile();
+      final held = _PartlyRefusingStore(db, {})..refuseCreate = true;
+      await pumpInbox(tester, storeAs: held);
+      await settleQueues(tester);
+      await tickFromTop(tester, 2);
+      expect(litRow(tester), 'Invoice 4471');
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyE);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      await tester.pump();
+      await typeNewWord(tester, 'Receipts');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await settleQueues(tester);
+      await tester.pump();
+
+      expect(find.text("Couldn't save that label just now."), findsOneWidget);
+      expect(find.byKey(LabelPicker.fieldKey), findsNothing);
+      expect(rowTitles(tester), hasLength(5));
+
+      // The strip the cursor was in is gone; the list has it now.
+      await press(tester, LogicalKeyboardKey.keyJ);
+      expect(litRow(tester), 'Vendor quote');
+      await settleQueues(tester);
+    });
+  });
 }
+
+/// A workbook nothing in this file opens: the screen needs a decoder, and
+/// no thread here carries a spreadsheet.
+Future<WorkbookTables> _noWorkbook(Uint8List bytes) async =>
+    throw UnimplementedError();

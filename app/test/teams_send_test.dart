@@ -50,6 +50,11 @@ class _FakeTeams implements TeamsBackend {
   /// Thrown from [sendChatMessage] instead of answering.
   Object? error;
 
+  /// The people the stored message says it mentions, in Graph's
+  /// `mentions[].mentioned.user.id` shape. Null leaves the key out, which is
+  /// what a server that does not report mentions answers.
+  List<String>? echoMentionIds;
+
   int nextId = 1;
 
   @override
@@ -103,6 +108,15 @@ class _FakeTeams implements TeamsBackend {
       'from': {
         'user': {'id': _myId, 'displayName': 'Jordan Bond'},
       },
+      if (echoMentionIds case final ids?)
+        'mentions': [
+          for (final id in ids)
+            {
+              'mentioned': {
+                'user': {'id': id},
+              },
+            },
+        ],
     };
     stored.add(message);
     return message;
@@ -111,6 +125,21 @@ class _FakeTeams implements TeamsBackend {
   @override
   Future<EnsuredChat> ensureChat(List<String> userIds, {String? topic}) =>
       throw UnimplementedError();
+}
+
+/// A store whose OUTBOUND row write refuses, as a locked database would — the
+/// first local write after a chat post the server already accepted. Inbound
+/// rows still land, so the fixture can be seeded through it.
+class _OutboundRefusingStore extends MessageStore {
+  _OutboundRefusingStore(super.db);
+
+  @override
+  Future<String?> upsertMessage(Map<String, Object?> row) async {
+    if (row['direction'] == 'outbound') {
+      throw StateError('database is locked');
+    }
+    return super.upsertMessage(row);
+  }
 }
 
 /// A mail backend that would throw if a chat send ever reached it. It must not:
@@ -508,6 +537,61 @@ void main() {
 
       expect(notifier.state.addedRecipients, [ada]);
       expect(notifier.state.error, 'Graph said no');
+    });
+
+    test('a local write that fails after the post still reports it sent',
+        () async {
+      // The message is in the chat the moment the post returns. Reported as
+      // failed with the chips still up, the retry would post it again and
+      // mention the same people twice.
+      store = _OutboundRefusingStore(db);
+      await seedChat();
+      final notifier = await loaded();
+      notifier.setAddedRecipients(const [ada]);
+
+      final outcome = await notifier.send('Looping in @Ada Park.');
+
+      expect(outcome, SendOutcome.sent);
+      expect(notifier.state.error, isNull);
+      expect(notifier.state.notice, DraftNotifier.localCopyFailedNotice);
+      expect(notifier.state.sending, isFalse);
+      expect(notifier.state.sendEpoch, 1);
+      expect(notifier.state.addedRecipients, isEmpty);
+      // The writes after the row still ran: the thread is answered.
+      expect((await conversation())['state'], 'waiting');
+      expect((await conversation())['cta_text'], isNull);
+      expect(syncsAfterSend, 1);
+
+      // A second press lands on an empty composer and posts nothing.
+      expect(await notifier.send(''), SendOutcome.failed);
+      expect(teams.sends, hasLength(1));
+    });
+
+    test('a mention the stored message dropped is said, and never resent',
+        () async {
+      await seedChat();
+      teams.echoMentionIds = const [];
+      final notifier = await loaded();
+      notifier.setAddedRecipients(const [ada]);
+
+      final outcome = await notifier.send('Looping in @Ada Park.');
+
+      expect(outcome, SendOutcome.sent);
+      expect(notifier.state.error, isNull);
+      expect(notifier.state.notice, contains("1 mention didn't go through"));
+      expect(teams.sends, hasLength(1));
+      expect(notifier.state.addedRecipients, isEmpty);
+    });
+
+    test('every mention echoed back says nothing', () async {
+      await seedChat();
+      teams.echoMentionIds = const ['aad-ada'];
+      final notifier = await loaded();
+      notifier.setAddedRecipients(const [ada]);
+
+      expect(await notifier.send('Looping in @Ada Park.'), SendOutcome.sent);
+
+      expect(notifier.state.notice, isNull);
     });
 
     test('a reply that adds nobody mentions nobody', () async {

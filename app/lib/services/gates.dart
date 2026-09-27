@@ -232,7 +232,10 @@ bool _isMeetingResponse(Message message) {
 
   // Last resort: a response-shaped subject over a message with nothing in it.
   // The preview stands in for the body, so this can answer on a delta row that
-  // no detail fetch has touched yet.
+  // no detail fetch has touched yet. Nothing in it includes no file: a
+  // calendar response never carries an attachment, and "Accepted: signed
+  // offer letter" with a PDF and no text is somebody sending a document.
+  if (message.hasAttachments) return false;
   final body = message.bodyText ?? message.bodyPreview ?? '';
   return body.trim().isEmpty;
 }

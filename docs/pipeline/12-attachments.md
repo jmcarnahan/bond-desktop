@@ -433,7 +433,13 @@ snapshot), a navigation delegate that cancels every navigation after the initial
 load, a 4-second
 timeout, and one snapshot in flight at a time (a second call answers `busy`).
 Every failure, including no channel under `flutter test`, is null, and the card
-draws its glyph.
+draws its glyph. One thing is taken out on the Dart side, in
+`attachment_bytes.dart`, before the page crosses the channel: every `<link>`
+element, of any `rel`. WebKit's `<link rel=preconnect>` opens a connection
+through the loader's preconnect path, which the rule list may never see and
+scripting off does not stop, and a connection to a host unique to this
+recipient tells the sender the page was opened. A meta refresh needs nothing
+here, because the navigation delegate cancels it.
 
 The PDF branch is a **typedef, not a call**: the engine that can draw a page is
 pdfrx, and pdfium must not be reachable from `services/` or a native library

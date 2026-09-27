@@ -45,6 +45,40 @@ List<ChatMention> distinctMentions(List<ChatMention> mentions) {
   ];
 }
 
+/// The ids in [asked] that the stored message [sent] does not mention.
+///
+/// [sent] is a chat message in Graph's shape — what both backends hand back
+/// from a send, the MCP one after reshaping the server's flat
+/// `mentioned_user_ids` into `mentions[].mentioned.user.id`. A server that
+/// quietly ignored the mentions would post the text with every `@Name`
+/// already stripped and nobody notified, and this is how the send notices.
+///
+/// A message with NO `mentions` key answers empty: that is a server which
+/// does not report mentions at all, and nothing can be concluded from it —
+/// the send keeps its old behaviour there rather than warning on every
+/// message. A key that is present but short of someone is the drop.
+List<String> missingMentionIds(
+  List<ChatMention> asked,
+  Map<String, dynamic> sent,
+) {
+  final people = distinctMentions(asked);
+  if (people.isEmpty) return const [];
+  final raw = sent['mentions'];
+  if (raw is! List) return const [];
+  final stored = <String>{};
+  for (final entry in raw) {
+    if (entry is! Map) continue;
+    final mentioned = entry['mentioned'];
+    final user = mentioned is Map ? mentioned['user'] : null;
+    final id = user is Map ? user['id'] : null;
+    if (id is String && id.isNotEmpty) stored.add(id);
+  }
+  return [
+    for (final person in people)
+      if (!stored.contains(person.userId)) person.userId,
+  ];
+}
+
 /// [text] as the chat HTML Graph wants beside a mentions array.
 ///
 /// The first `@Name` for each person becomes `<at id="i">Name</at>` — the `@`
