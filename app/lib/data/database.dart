@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 16;
+  int get schemaVersion => 19;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -609,6 +609,113 @@ UPDATE storylines
               from15To16: (m, schema) async {
                 if (!await _tableExists('setup_state')) {
                   await m.createTable(schema.setupState);
+                }
+              },
+              // v17 — the labels round. Two tables: `labels`, the OWNER'S
+              // vocabulary, and `conversation_labels`, which of their threads
+              // each word is on. Neither has anything to do with
+              // `messages.label`, the model's verdict about one message —
+              // that column is untouched here and stays untouched.
+              //
+              // Nothing to backfill. A label exists only once a person has
+              // typed one, and a mailbox that predates this round has no
+              // vocabulary rather than an empty one.
+              //
+              // The two indexes are hand-written with IF NOT EXISTS for the
+              // v6 reason (a generated `Index` entity carries a bare CREATE
+              // INDEX, which throws on a replay over a torn state); names and
+              // columns match the generated entities exactly, which is what
+              // the fresh-vs-migrated parity test compares.
+              from16To17: (m, schema) async {
+                if (!await _tableExists('labels')) {
+                  await m.createTable(schema.labels);
+                }
+                if (!await _tableExists('conversation_labels')) {
+                  await m.createTable(schema.conversationLabels);
+                }
+                await customStatement(
+                  'CREATE UNIQUE INDEX IF NOT EXISTS ix_labels_name_key '
+                  'ON labels(name_key)',
+                );
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_conv_labels_label '
+                  'ON conversation_labels(label_id, applied_at DESC)',
+                );
+              },
+              // v18 — a label becomes a STANDING RULE. `label_rules` holds the
+              // scope (a sender, a domain, a subject prefix, a kind of
+              // message), the disposition and the exception that lets an
+              // @mention through, and `conversation_labels.rule_id` names which
+              // rule filed a link — NULL for every word the owner applied by
+              // hand, which is what makes undoing a rule take back its own
+              // links and nothing else.
+              //
+              // Nothing to backfill: every link that exists at this version was
+              // applied by a person, and NULL is what that reads as. The column
+              // is appended, so the migrated table's column order matches the
+              // fresh one (`db_adoption_test.dart` compares them ordered).
+              //
+              // Indexes hand-written with IF NOT EXISTS for the v17 reason.
+              from17To18: (m, schema) async {
+                if (!await _tableExists('label_rules')) {
+                  await m.createTable(schema.labelRules);
+                }
+                if (!await _columnExists('conversation_labels', 'rule_id')) {
+                  await m.addColumn(
+                    schema.conversationLabels,
+                    schema.conversationLabels.ruleId,
+                  );
+                }
+                await customStatement(
+                  'CREATE UNIQUE INDEX IF NOT EXISTS ix_label_rules_scope '
+                  'ON label_rules(scope_kind, scope_value)',
+                );
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_label_rules_label '
+                  'ON label_rules(label_id)',
+                );
+              },
+              // v19 — the label rules leave (owner decision 2026-09-26; design
+              // parked outside the repo). What they wrote is repaired FIRST,
+              // while `rule_id` still says which links a rule made, then the
+              // table and the column go. Every statement is a no-op on a
+              // replay (db_adoption_test re-runs every step over one file).
+              // Gated messages are re-pended by a sync one-shot through
+              // `rependGatedTriage`, which resets their progress rows in the
+              // same transaction; nothing here enqueues work.
+              from18To19: (m, schema) async {
+                const now = "strftime('%Y-%m-%dT%H:%M:%f', 'now') || '000Z'";
+                if (await _tableExists('label_rules') &&
+                    await _columnExists('conversation_labels', 'rule_id')) {
+                  // A thread a `later` or `drop` rule filed goes back to the
+                  // inbox with no reason, so the attention sweep decides it
+                  // afresh: the rule's filing was never the owner's word.
+                  await customStatement('''
+UPDATE conversation_ai
+SET bucket = NULL, bucket_reason = NULL, snoozed_until = NULL,
+    updated_at = $now
+WHERE bucket = 'later' AND EXISTS (
+  SELECT 1 FROM conversation_labels cl
+  JOIN label_rules r ON r.id = cl.rule_id
+  WHERE cl.source = conversation_ai.source
+    AND cl.conversation_key = conversation_ai.conversation_key
+    AND r.disposition IN ('later', 'drop'))''');
+                }
+                await customStatement(
+                  "DELETE FROM conversation_labels WHERE applied_by = 'rule'",
+                );
+                await customStatement('''
+UPDATE messages SET needs_you_verdict = NULL, needs_you_reason = NULL,
+    updated_at = $now
+WHERE needs_you_reason LIKE 'label_rule:%' ''');
+                await customStatement(
+                  "DELETE FROM app_prefs WHERE \"key\" LIKE 'rule_suggestion_not_now:%'",
+                );
+                await customStatement('DROP INDEX IF EXISTS ix_label_rules_scope');
+                await customStatement('DROP INDEX IF EXISTS ix_label_rules_label');
+                await customStatement('DROP TABLE IF EXISTS label_rules');
+                if (await _columnExists('conversation_labels', 'rule_id')) {
+                  await m.dropColumn(schema.conversationLabels, 'rule_id');
                 }
               },
             ),

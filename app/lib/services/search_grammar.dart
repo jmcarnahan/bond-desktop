@@ -208,7 +208,12 @@ List<SearchHit> filterHits(SearchQuery query, List<SearchHit> hits) {
       final address = row.fromAddress?.toLowerCase() ?? '';
       if (!name.contains(needle) && !address.contains(needle)) return false;
     }
-    if (query.hasFile && !row.hasAttachments) return false;
+    // The row's own `hasFile`, which the store answers with an EXISTS over the
+    // attachment rows that are not quote-replies — deliberately not
+    // `messages.has_attachments`, which a Teams quote-reply sets as well. A
+    // reader searching `has:file` wants something to open, and a quote is a
+    // piece of the conversation with no name and no bytes behind it.
+    if (query.hasFile && !row.hasFile) return false;
     if (before != null || after != null) {
       final at = row.receivedAt;
       if (at.isEmpty) return false;

@@ -2,6 +2,7 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/home_models.dart';
 import 'package:bond_inbox/models/home_sort.dart';
+import 'package:bond_inbox/widgets/app_rail.dart' show isNeedsYou, needsYouRows;
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -224,6 +225,238 @@ void main() {
       expect(metrics.storylined, 1);
       expect(metrics.inFlight, 1);
       expect(metrics.errored, 1);
+    });
+
+    test('the judge saying no takes a thread off the tile and the filter',
+        () async {
+      // Both threads owe a reply by state; only one of them is the owner's.
+      await seed('mine', threadState: 'needs_reply');
+      await seed('broadcast', threadState: 'needs_reply', conversationKey: 'c2');
+      await db.customUpdate(
+        'UPDATE messages SET needs_you_verdict = 0 '
+        "WHERE source_message_id = 'broadcast'",
+      );
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+      final rows = await store.pageHomeFeed(
+        filter: HomeFilter.needsYou,
+        sinceIso: '2026-09-01T00:00:00Z',
+      );
+
+      expect(metrics.needsYou, 1);
+      expect(rows.map((r) => r.sourceMessageId), ['mine']);
+    });
+
+    test('the verdict read is the newest KEPT inbound, on the rail, the tile '
+        'and the filter alike', () async {
+      // A: judged no once, then a newer message the gate kept and nobody has
+      // judged yet — the no is about an older message, so the thread stays.
+      await seed('a-old',
+          conversationKey: 'a',
+          receivedAt: '2026-09-01T09:00:00Z',
+          threadState: 'needs_reply');
+      await seed('a-new',
+          conversationKey: 'a',
+          receivedAt: '2026-09-01T10:00:00Z',
+          threadState: 'needs_reply');
+      // B: judged no, then a newer message the gate threw out. The newest
+      // message the app KEPT is still the judged no, so the thread goes.
+      await seed('b-old',
+          conversationKey: 'b',
+          receivedAt: '2026-09-01T09:00:00Z',
+          threadState: 'needs_reply');
+      await seed('b-new',
+          conversationKey: 'b',
+          receivedAt: '2026-09-01T10:00:00Z',
+          triageStatus: 'skipped',
+          gateReason: 'newsletter',
+          threadState: 'needs_reply');
+      await db.customUpdate(
+        'UPDATE messages SET needs_you_verdict = 0 '
+        "WHERE source_message_id IN ('a-old', 'b-old')",
+      );
+
+      // The rail's read: `loadConversations`' `nk` row and `isNeedsYou`.
+      final threads = {
+        for (final c in await store.loadConversations()) c.id: c,
+      };
+      expect(threads['a']!.needsYouVetoed, isFalse);
+      expect(threads['b']!.needsYouVetoed, isTrue);
+      expect(isNeedsYou(threads['a']!), isTrue);
+      expect(isNeedsYou(threads['b']!), isFalse);
+      expect(
+        [for (final c in needsYouRows(threads.values.toList())) c.id],
+        ['a'],
+      );
+
+      // The tile and the filter: `_liveNeedsYouThread`, the same row.
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+      final rows = await store.pageHomeFeed(
+        filter: HomeFilter.needsYou,
+        sinceIso: '2026-09-01T00:00:00Z',
+      );
+      expect(metrics.needsYou, 1);
+      expect(rows.map((r) => r.sourceMessageId), ['a-new']);
+    });
+
+    group('an older yes under a newer no', () {
+      /// The owner's own reply on a thread, which answers every inbound older
+      /// than it.
+      Future<void> reply(String id, String conversationKey, String at) =>
+          store.upsertMessage({
+            'source': 'email',
+            'source_message_id': id,
+            'conversation_key': conversationKey,
+            'direction': 'outbound',
+            'subject': 'Launch date',
+            'from_address': 'dana@example.com',
+            'received_at': at,
+            'created_at': at,
+            'updated_at': at,
+            'triage_status': 'skipped',
+            'gate_reason': 'outbound',
+          });
+
+      Future<void> verdicts(Map<String, int> byId) async {
+        for (final entry in byId.entries) {
+          await db.customUpdate(
+            'UPDATE messages SET needs_you_verdict = ? '
+            'WHERE source_message_id = ?',
+            variables: [Variable(entry.value), Variable(entry.key)],
+          );
+        }
+      }
+
+      Future<List<String>> railIds() async => [
+            for (final c in needsYouRows(await store.loadConversations()))
+              c.id,
+          ];
+
+      Future<int> tile() async => (await store.homeMetrics(
+            sinceIso: '2026-09-01T00:00:00Z',
+            stalledBeforeIso: stalledCutoff,
+            threshold: 0,
+          ))
+              .needsYou;
+
+      Future<List<String>> filterIds() async => [
+            for (final r in await store.pageHomeFeed(
+              filter: HomeFilter.needsYou,
+              sinceIso: '2026-09-01T00:00:00Z',
+            ))
+              r.sourceMessageId,
+          ];
+
+      test('an unanswered yes keeps the thread on the rail, tile and filter',
+          () async {
+        // Alex asks the owner to approve the budget, judged yes; Sam's
+        // reply-all "adding Jordan for visibility" is judged no, because the
+        // owner is a bystander on THAT message. The ask is still open.
+        await seed('ask',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T09:00:00Z',
+            threadState: 'needs_reply');
+        await seed('fyi',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T10:00:00Z',
+            threadState: 'needs_reply');
+        await verdicts({'ask': 1, 'fyi': 0});
+
+        final thread = (await store.loadConversations()).single;
+        expect(thread.needsYouVetoed, isFalse);
+        expect(await railIds(), ['budget']);
+        expect(await tile(), 1);
+        expect(await filterIds(), ['fyi']);
+      });
+
+      test('a no with no open yes still drops', () async {
+        await seed('fyi',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T10:00:00Z',
+            threadState: 'needs_reply');
+        await seed('older',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T09:00:00Z',
+            threadState: 'needs_reply');
+        // Unjudged is not a yes: only a verdict of 1 holds a thread open.
+        await verdicts({'fyi': 0});
+
+        expect((await store.loadConversations()).single.needsYouVetoed, isTrue);
+        expect(await railIds(), isEmpty);
+        expect(await tile(), 0);
+        expect(await filterIds(), isEmpty);
+      });
+
+      test('a yes the owner answered does not hold off a newer no', () async {
+        await seed('ask',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T09:00:00Z',
+            threadState: 'needs_reply');
+        await reply('sent', 'budget', '2026-09-01T09:30:00Z');
+        await seed('fyi',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T10:00:00Z',
+            threadState: 'needs_reply');
+        await verdicts({'ask': 1, 'fyi': 0});
+
+        expect((await store.loadConversations()).single.needsYouVetoed, isTrue);
+        expect(await railIds(), isEmpty);
+        expect(await tile(), 0);
+        expect(await filterIds(), isEmpty);
+      });
+
+      test('a gated yes holds nothing open', () async {
+        // "Kept" means what it means everywhere: a yes on a message the gate
+        // threw out is not an open ask.
+        await seed('ask',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T09:00:00Z',
+            triageStatus: 'skipped',
+            gateReason: 'newsletter',
+            threadState: 'needs_reply');
+        await seed('fyi',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T10:00:00Z',
+            threadState: 'needs_reply');
+        await verdicts({'ask': 1, 'fyi': 0});
+
+        expect((await store.loadConversations()).single.needsYouVetoed, isTrue);
+        expect(await tile(), 0);
+      });
+    });
+
+    test('the veto one-shot clears chips a judged no no longer earns',
+        () async {
+      await seed('vetoed', needsYou: true);
+      await seed('kept', needsYou: true, conversationKey: 'c2');
+      await seed('unjudged', needsYou: true, conversationKey: 'c3');
+      await db.customUpdate(
+        "UPDATE messages SET needs_you_verdict = CASE source_message_id "
+        "WHEN 'vetoed' THEN 0 WHEN 'kept' THEN 1 END",
+      );
+
+      final lowered = await store.lowerNeedsYouFromVerdicts();
+      expect(lowered.map((r) => r.sourceMessageId), ['vetoed']);
+
+      final chips = await db
+          .customSelect(
+            'SELECT source_message_id, needs_you FROM message_progress '
+            'ORDER BY source_message_id',
+          )
+          .get();
+      expect(
+        {for (final r in chips) r.data['source_message_id']: r.data['needs_you']},
+        {'kept': 1, 'unjudged': 1, 'vetoed': 0},
+      );
+      expect(await store.lowerNeedsYouFromVerdicts(), isEmpty);
     });
 
     test('a message counts as urgent on either of the two loud words',
@@ -1742,10 +1975,32 @@ void main() {
     });
   });
 
-  group('has_attachments rides the shared projection', () {
-    test('a feed row says whether its message carried anything', () async {
+  group('has_file rides the shared projection', () {
+    Map<String, Object?> attachment(
+      String id, {
+      String kind = 'file',
+      String? name,
+      bool isInline = false,
+    }) =>
+        {
+          'attachment_id': id,
+          'ordinal': 0,
+          'kind': kind,
+          'name': name,
+          'content_type': kind == 'file' ? 'application/pdf' : null,
+          'is_inline': isInline,
+        };
+
+    test('a feed row says whether its message carries a file', () async {
       await seed('plain');
-      await seed('attached', receivedAt: '2026-09-02T10:00:00Z', hasAttachments: true);
+      await seed(
+        'attached',
+        receivedAt: '2026-09-02T10:00:00Z',
+        hasAttachments: true,
+      );
+      await store.upsertAttachments('email', 'attached', [
+        attachment('a1', name: 'Terms.pdf'),
+      ]);
 
       final rows = await store.pageHomeFeed();
 
@@ -1753,9 +2008,50 @@ void main() {
       // shares — so `has:file` can be answered off a hit without a second
       // query per row.
       expect(
-        {for (final row in rows) row.sourceMessageId: row.hasAttachments},
+        {for (final row in rows) row.sourceMessageId: row.hasFile},
         {'attached': true, 'plain': false},
       );
+    });
+
+    test('the flag alone is not a file, and a quote-reply is not one either',
+        () async {
+      // A Teams quote-reply arrives AS an attachment, so the sync sets
+      // `has_attachments` for a message carrying nothing to open. The flag has
+      // to stay 1 — three handlers read it before they hydrate attachments at
+      // all — so the projection asks the attachment rows instead.
+      await seed('flag-only', hasAttachments: true);
+      await seed(
+        'quote-only',
+        source: 'teams',
+        conversationKey: 'chat-1',
+        receivedAt: '2026-09-02T10:00:00Z',
+        hasAttachments: true,
+      );
+      await store.upsertAttachments('teams', 'quote-only', [
+        attachment('q1', kind: 'message_reference'),
+      ]);
+
+      final rows = await store.pageHomeFeed();
+
+      expect(
+        {for (final row in rows) row.sourceMessageId: row.hasFile},
+        {'flag-only': false, 'quote-only': false},
+      );
+    });
+
+    test('a file beside a quote is still a file', () async {
+      await seed(
+        'both',
+        source: 'teams',
+        conversationKey: 'chat-1',
+        hasAttachments: true,
+      );
+      await store.upsertAttachments('teams', 'both', [
+        attachment('q1', kind: 'message_reference'),
+        {...attachment('a1', name: 'Deck.pptx'), 'ordinal': 1},
+      ]);
+
+      expect((await store.pageHomeFeed()).single.hasFile, isTrue);
     });
   });
 }

@@ -269,4 +269,62 @@ void main() {
       expect(isCloudFileUrl('x.sharepoint.com'), isFalse);
     });
   });
+
+  group('whichever converter wrote the run', () {
+    // Two converters produce the same entity. Graph's server-side text
+    // conversion renders the icon image as `[<icon url>]` and glues the name
+    // to the bracket — the shape every case above is written in. Ours
+    // (`html_text.dart`, the mail profile) drops every non-inline image with
+    // no placeholder at all and writes one space before the bracket. Both
+    // have to parse, because a mailbox synced before the switch and one
+    // synced after it are the same mailbox.
+    test('a run with no icon at all is a file', () {
+      final result = extractOwaLinks('Please review $zwsp'
+          'HARBORLIGHT TALENT AGREEMENT.pdf<$pdfUrl>$zwsp thanks');
+
+      expect(result.rows.single['name'], 'HARBORLIGHT TALENT AGREEMENT.pdf');
+      expect(result.rows.single['source_url'], pdfUrl);
+      expect(result.body, contains('[[att:${linkAttachmentId(pdfUrl)}]]'));
+      expect(result.body, isNot(contains(zwsp)));
+    });
+
+    test('one space before the bracket is a file, and not part of the name',
+        () {
+      final result =
+          extractOwaLinks('$zwsp' 'Budget.xlsx <$xlsxUrl>$zwsp');
+
+      expect(result.rows.single['name'], 'Budget.xlsx');
+      expect(result.rows.single['source_url'], xlsxUrl);
+      expect(result.body, '[[att:${linkAttachmentId(xlsxUrl)}]]');
+    });
+
+    test('an icon-less run on a host the connectors cannot read is cleaned',
+        () {
+      const drive = 'https://drive.google.com/file/d/1AbCdEfGhIjK/view';
+
+      final result = extractOwaLinks('$zwsp' 'Budget.xlsx <$drive>$zwsp');
+
+      expect(result.rows, isEmpty);
+      expect(result.body, 'Budget.xlsx <$drive>');
+    });
+
+    test('an icon-less run with no name is still not a file', () {
+      final result = extractOwaLinks('See $zwsp   <$pdfUrl>$zwsp please');
+
+      expect(result.rows, isEmpty);
+      expect(result.body, 'See $pdfUrl please');
+    });
+
+    test('an ordinary hyperlink with a space is still not an attachment', () {
+      // The delimiters are the whole discrimination. Loosening the shape does
+      // not loosen that: a canonical run our own converter wrote for an
+      // ordinary anchor looks exactly like this and must stay text.
+      const body = 'Findings.docx <https://x.sharepoint.com/:w:/s/a/EqRs>';
+
+      final result = extractOwaLinks(body);
+
+      expect(identical(result.body, body), isTrue);
+      expect(result.rows, isEmpty);
+    });
+  });
 }

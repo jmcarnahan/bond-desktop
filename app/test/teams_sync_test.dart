@@ -6,6 +6,7 @@ import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
+import 'package:bond_inbox/services/sender_display.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -336,6 +337,92 @@ void main() {
       // person beside it goes to the model like any mail.
       expect((await row('human'))['triage_status'], 'pending');
       expect((await row('human'))['gate_reason'], isNull);
+    });
+
+    // The three rungs of the sender-name ladder, and the reason it exists: the
+    // address is the `teams:<id>` identity key, so a row with no name has
+    // nothing SHOWABLE on it, and the facilitator bot was rendering as
+    // `teams:8e55a7b1-…` with a "T" for a face. The address is unchanged on
+    // every rung — it is what the row is filed by.
+    test('an application Graph named keeps its name', () async {
+      graph.messages['chat-1'] = [
+        _message(
+          id: 'bot',
+          userId: null,
+          applicationId: 'app-9',
+          displayName: 'Pipeline Bot',
+        ),
+      ];
+      await build().syncNow();
+
+      expect((await row('bot'))['from_name'], 'Pipeline Bot');
+      expect((await row('bot'))['from_address'], 'teams:app-9');
+    });
+
+    test('an application Graph named nothing is called Bot', () async {
+      // The reported case. Graph leaves `displayName` null for some bots, and
+      // the MCP backend's wire carries no application name at all, so both
+      // arrive here the same way and both get the same word.
+      graph.messages['chat-1'] = [
+        _message(
+          id: 'bot',
+          userId: null,
+          applicationId: 'app-9',
+          displayName: null,
+        ),
+        _message(
+          id: 'blank',
+          chatId: 'chat-1',
+          userId: null,
+          applicationId: 'app-8',
+          displayName: '   ',
+        ),
+      ];
+      await build().syncNow();
+
+      expect((await row('bot'))['from_name'], botSenderName);
+      expect((await row('blank'))['from_name'], botSenderName);
+      // Still filed by the application's id: the name is for the reader, the
+      // address is for the sender rules and the roster.
+      expect((await row('bot'))['from_address'], 'teams:app-9');
+    });
+
+    test('a message with no sender at all is from Unknown sender', () async {
+      graph.messages['chat-1'] = [_message(id: 'nobody', userId: null)];
+      await build().syncNow();
+
+      expect((await row('nobody'))['from_name'], unknownSenderName);
+      expect((await row('nobody'))['from_address'], isNull);
+    });
+
+    test('the app’s own message is still You, however Graph echoed it',
+        () async {
+      // The composer builds its transcript row from the POST response, which
+      // need not carry a `from`. A stand-in name stored there would beat the
+      // `You` the transcript draws for an outbound message.
+      final row = TeamsSync.messageRow(
+        {'id': 'mine', 'messageType': 'message', 'body': null},
+        'chat-1',
+        outbound: true,
+      )!;
+
+      expect(row['from_name'], isNull);
+      expect(row['from_address'], isNull);
+    });
+
+    test('a person Graph named nothing keeps a null name', () async {
+      // The one rung the ladder stops short of, deliberately: on screen it
+      // reads `Unknown sender` either way, and the people roster drops a
+      // `teams:` sighting with no name as unshowable — where a stored
+      // `Unknown sender` would become a directory entry, and two of them one
+      // entry wearing a label instead of a name.
+      graph.messages['chat-1'] = [
+        _message(id: 'nameless', userId: 'u7', displayName: null),
+      ];
+      await build().syncNow();
+
+      expect((await row('nameless'))['from_name'], isNull);
+      expect((await row('nameless'))['from_address'], 'teams:u7');
     });
 
     test('a bot’s message does not ask for a reply', () async {

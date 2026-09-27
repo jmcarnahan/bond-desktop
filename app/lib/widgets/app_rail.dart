@@ -7,6 +7,7 @@ import '../models/storyline_models.dart';
 import '../services/attention.dart';
 import '../services/llm/storyline_tasks.dart' show NameStorylineTask;
 import '../services/profile_photos.dart';
+import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 import 'bond_avatar.dart';
 import 'dismissed_storylines_fold.dart';
@@ -100,13 +101,64 @@ String _stripReplyPrefixes(String subject) {
 /// messages the gate kept, and every later gate drop refolds the thread down
 /// (see `docs/pipeline/02-gates.md`). So there is no fourth test: the state
 /// this reads is already the answer.
+///
+/// There is a fourth test, and [_canExplainItself] is it — requirement 8a's
+/// honesty rule. STORED STATE IS UNTOUCHED: the thread still says `needs_reply`
+/// and every other reader still sees it; what changes is that the rail stops
+/// claiming a thread it cannot say one true sentence about.
+///
+/// And a fifth, which outranks the ask: the needs-you pass vetoed the thread
+/// ([Conversation.needsYouVetoed]). Triage folds an ask up out of any message
+/// with an action in it — a Jira broadcast to four people describing somebody
+/// else's ticket reads as "Review the issue…" — and the thread says
+/// `needs_reply` for any unanswered inbound at all. Neither is the question
+/// the rail asks. The veto needs the newest kept inbound judged an explicit
+/// no AND no unanswered yes before it: the judge rates one message, so a later
+/// bystander no must not hide an older ask still open. An unjudged message
+/// keeps its place, on [_canExplainItself]'s rule for null. The store spells
+/// the veto once and the tile and the Needs You filter read the same SQL.
 bool isNeedsYou(Conversation c, {double threshold = 0}) {
   if (c.bucket == 'later') return false;
   if (c.state == ConversationState.done) return false;
   if ((c.attentionScore ?? 0) < threshold) return false;
-  return c.state == ConversationState.needsReply ||
-      (c.ctaText?.isNotEmpty == true);
+  if (c.needsYouVetoed) return false;
+  if (c.ctaText?.isNotEmpty == true) return true;
+  return c.state == ConversationState.needsReply && _canExplainItself(c);
 }
+
+/// Whether anything on this thread can say WHY it needs the owner.
+///
+/// The rail's promise, made good: every Needs You row shows a reason (the ask
+/// banner, the ask chip, or the `Why:` line this round added), so a row with
+/// none of the three was the rail asserting something no surface could back up.
+/// Requirement 8a says such a thread "probably shouldn't be Needs reply", and
+/// this is the read-side half of that — the write side is the pipeline's, and it
+/// is not asked to change.
+///
+/// Three things can explain a thread, and any one of them is enough:
+/// - a needs-you REASON, off the newest kept inbound the pass judged yes. The
+///   `Why:` line and the row's chip draw exactly this.
+/// - an ASK — `cta_text`, folded up from the newest inbound's action items, and
+///   tested by the caller before this is reached because it is also the banner.
+/// - `reply_expected`, triage v2 saying the sender is waiting even where no ask
+///   could be extracted. "Somebody is waiting on you" is a sentence.
+///
+/// The `reply_expected` arm is where the tri-state earns its keep, and it is
+/// read STRICTLY: only an explicit `false` — v2 has judged this message and says
+/// nobody is waiting — lets a thread fall out. NULL is "never judged", which
+/// `schema.drift` is emphatic about and which nothing here may round down: a
+/// message that landed a second ago, and every message in an install with the
+/// processing switch off, reads NULL, and a rail that hid those would hide the
+/// newest mail in the mailbox. So an unjudged thread keeps its place until
+/// something has actually read it. This is deliberately narrower than "reply
+/// expected ≠ 1".
+///
+/// It follows that a read which does not run `loadConversations`' subqueries —
+/// every service read that builds a card out of a conversation row — carries a
+/// null reason and a null `reply_expected` and therefore explains itself here.
+/// That is the right way round: absent data must never look like a verdict.
+bool _canExplainItself(Conversation c) =>
+    (c.needsYouReason?.isNotEmpty == true) || c.replyExpected != false;
 
 /// What the user is on the hook for, loudest first — [isNeedsYou], sorted.
 ///
@@ -258,7 +310,14 @@ List<Storyline> storylinesBySource(List<Storyline> all, String? source) {
 /// `withSourceGlyph`. At this width the participant's name is often all the
 /// two have to tell them apart, and the same colleague can be on both.
 String railTitleFor(Conversation c) {
-  final who = c.primaryParticipant?.display ?? '';
+  final who = displaySenderName(
+    name: c.primaryParticipant?.name,
+    address: c.primaryParticipant?.email,
+    // Empty rather than a word, so a row with nobody showable falls through to
+    // its subject exactly as it did before. A chat participant's address is a
+    // `teams:<id>` and is never the thing that falls through.
+    fallback: '',
+  );
   if (who.isNotEmpty) return withSourceGlyph(c.source, who);
   final subject = _stripReplyPrefixes(c.subject ?? '');
   if (subject.isNotEmpty) return withSourceGlyph(c.source, subject);
@@ -287,7 +346,14 @@ String needsYouTitleFor(Conversation c) {
 /// The dimmed `' · who'` a Needs You row carries after its ask, or null when
 /// the row is ALREADY the person and repeating them would be noise.
 String? needsYouWhoFor(Conversation c) {
-  final who = c.primaryParticipant?.display ?? '';
+  final who = displaySenderName(
+    name: c.primaryParticipant?.name,
+    address: c.primaryParticipant?.email,
+    // Empty rather than a word, so a row with nobody showable falls through to
+    // its subject exactly as it did before. A chat participant's address is a
+    // `teams:<id>` and is never the thing that falls through.
+    fallback: '',
+  );
   if (who.isEmpty) return null;
   final title = needsYouTitleFor(c);
   if (title == who || title == withSourceGlyph(c.source, who)) return null;
@@ -432,6 +498,11 @@ class AppRail extends StatefulWidget {
   /// hide their own work by mistyping a name.
   final String find;
 
+  /// What `is:external` in [find] measures against — see
+  /// [conversationMatches]. Empty, the default, makes that facet match
+  /// nothing, which is what it matched before it existed.
+  final Set<String> ownerDomains;
+
   /// Whether to draw only rows with something unread on them. Threads and
   /// rooms answer to it; storylines do not — a storyline is not read or
   /// unread, and hiding one under a filter about mail would make the toggle
@@ -499,6 +570,7 @@ class AppRail extends StatefulWidget {
     this.selectedRoomKey,
     this.photos,
     this.find = '',
+    this.ownerDomains = const {},
     this.unreadOnly = false,
     this.pendingDraftCount = 0,
     this.filesKind = FilesKind.all,
@@ -617,7 +689,8 @@ class _AppRailState extends State<AppRail> {
     final needle = normalizeFind(widget.find);
     final matching = [
       for (final c in needsYou)
-        if (conversationMatches(c, needle) &&
+        if (conversationMatches(c, needle,
+                ownerDomains: widget.ownerDomains) &&
             (!widget.unreadOnly || c.hasUnread))
           c,
     ];

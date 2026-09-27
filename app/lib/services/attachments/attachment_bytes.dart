@@ -9,6 +9,7 @@ import '../../data/message_store.dart';
 import '../../models/attachment_models.dart';
 import '../backend/attachment_backend.dart';
 import 'attachment_cache.dart';
+import 'attachment_policy.dart' show isHtmlAttachment;
 
 /// The MCP server's bytes-mode ceiling, and the number a preview test means
 /// when it says "too large".
@@ -31,6 +32,22 @@ const int attachmentTooLargeBytes = 10 * 1024 * 1024;
 typedef PdfThumbnailer = Future<Uint8List?> Function(
   Uint8List pdfBytes, {
   int maxWidth,
+});
+
+/// Turning a web page into a picture of itself.
+///
+/// The same shape and the same reason as [PdfThumbnailer]: the only thing that
+/// can render HTML is the Runner's own WebKit, reached over a method channel,
+/// and `services/` must be renderable by a test that has no Runner behind it.
+/// `html_snapshot.dart` is the real one and answers null wherever the channel is
+/// absent, which is every test process.
+///
+/// A STRING and not bytes, because that is what `loadHTMLString` takes — the
+/// decode happens on this side, once, where the lenient codec already lives.
+typedef HtmlThumbnailer = Future<Uint8List?> Function(
+  String html, {
+  int width,
+  int height,
 });
 
 /// Bytes, paths, thumbnails and words for one attachment, cache first.
@@ -91,11 +108,18 @@ class StoreAttachmentBytes implements AttachmentBytes {
   /// reaches pdfium; `main.dart` is the one place that supplies it.
   final PdfThumbnailer? pdfThumbnailer;
 
+  /// How a web page gets a picture, or null when nothing in this build can draw
+  /// one. Optional for [pdfThumbnailer]'s reason, one step softer: the real one
+  /// answers null off a missing channel by itself, so a provider build can hold
+  /// it safely — a test that wants no snapshot at all still passes nothing.
+  final HtmlThumbnailer? htmlThumbnailer;
+
   StoreAttachmentBytes({
     required this.store,
     required this.backend,
     required this.cache,
     this.pdfThumbnailer,
+    this.htmlThumbnailer,
   });
 
   @override
@@ -105,6 +129,29 @@ class StoreAttachmentBytes implements AttachmentBytes {
   /// the row's content column on a retina display, and anything larger is
   /// pixels nobody sees paid for on every scroll.
   static const int _thumbnailWidth = 320;
+
+  /// The viewport a page is drawn in, which has to be a SHAPE and not just a
+  /// width: a document renderer is handed a page and a page has proportions,
+  /// but a web page is as tall as it is, and asking WebKit for a 320-wide
+  /// snapshot of a report would produce one pixel-tall strip per screenful.
+  /// Four by three is the top of the page, which is the part that says what the
+  /// page is.
+  static const int _htmlThumbnailHeight = 240;
+
+  /// A `<link>` element, of any `rel`, stripped from a page before WebKit
+  /// draws it.
+  ///
+  /// WebKit's `<link rel=preconnect>` opens a connection through the loader's
+  /// preconnect path, not through a resource load, so the Swift rule list,
+  /// which filters resource loads, may never see it; and preconnect is driven
+  /// by the parser, so scripting off does not stop it either. A connection to
+  /// a host unique to this recipient tells the sender the page was opened,
+  /// which is what the block list exists to prevent. A thumbnail loses nothing:
+  /// a stylesheet link is blocked by the rule list anyway. `[^<>]*` keeps the
+  /// pattern linear, as every tag pattern in `html_text.dart` is. A meta
+  /// refresh needs nothing here: the Swift navigation delegate cancels it.
+  static final RegExp _linkElement =
+      RegExp(r'<link\b[^<>]*>', caseSensitive: false);
 
   /// Kinds that are a POINTER to something that is not a file at all.
   ///
@@ -182,6 +229,13 @@ class StoreAttachmentBytes implements AttachmentBytes {
       // is paid once.
       if (pdfThumbnailer != null && _isPdf(ref)) {
         return await _pdfThumbnail(ref);
+      }
+      // And a page has nothing but this build either. Last, beside the PDF
+      // rung: a page that lives on a drive was already offered the drive's own
+      // rendering above, which costs one small fetch against this one's whole
+      // file plus a WebKit load.
+      if (htmlThumbnailer != null && _isHtml(ref)) {
+        return await _htmlThumbnail(ref);
       }
       return null;
     } on Object catch (e) {
@@ -308,6 +362,39 @@ class StoreAttachmentBytes implements AttachmentBytes {
     return drawn;
   }
 
+  /// A web page drawn by the Runner's WebKit, kept beside its blob.
+  ///
+  /// Refused above the connector's ceiling BEFORE the fetch, exactly as
+  /// [_pdfThumbnail] is: a thumbnail is worth downloading an ordinary report and
+  /// never worth downloading a thirty-megabyte page of embedded data.
+  ///
+  /// The scripting, the resources and the navigation are all refused on the
+  /// Swift side, which is the only place that can refuse them. A thumbnailer
+  /// that answers null is a page WebKit would not draw, a timeout, or a host
+  /// with no channel at all, and all three are a chip with a glyph on it.
+  ///
+  /// One thing is taken out HERE, before the page crosses the channel: every
+  /// `<link>` element (see [_linkElement]).
+  Future<Uint8List?> _htmlThumbnail(AttachmentRef ref) async {
+    if (ref.size > backend.maxPreviewBytes) return null;
+    final blob = await _ensure(ref);
+    final drawn = await htmlThumbnailer!(
+      utf8.decode(blob.bytes, allowMalformed: true)
+          .replaceAll(_linkElement, ''),
+      width: _thumbnailWidth,
+      height: _htmlThumbnailHeight,
+    );
+    if (drawn == null) return null;
+    final path = await cache.putThumbnail(blob.sha, drawn);
+    await store.setAttachmentBlob(
+      ref.source,
+      ref.messageId,
+      ref.attachmentId,
+      thumbPath: path,
+    );
+    return drawn;
+  }
+
   /// OneDrive's own rendering of a file that lives on a drive — a chat's
   /// shared file, a mail link.
   ///
@@ -381,6 +468,14 @@ class StoreAttachmentBytes implements AttachmentBytes {
     final type = (ref.contentType ?? '').split(';').first.trim().toLowerCase();
     if (type == 'application/pdf') return true;
     return (ref.name ?? '').trim().toLowerCase().endsWith('.pdf');
+  }
+
+  /// Whether this is a web page. The one rule, in `attachment_policy.dart`,
+  /// because the text handler asks the same question about the same file and
+  /// the two answers must be the same answer.
+  static bool _isHtml(AttachmentRef ref) {
+    if (_linkKinds.contains(ref.kind)) return false;
+    return isHtmlAttachment(contentType: ref.contentType, name: ref.name);
   }
 
   static String _keyOf(AttachmentRef ref) =>

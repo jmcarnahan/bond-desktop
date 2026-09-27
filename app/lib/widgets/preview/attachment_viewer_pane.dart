@@ -43,6 +43,12 @@ class AttachmentViewerPane extends StatelessWidget {
   final bool pinned;
   final void Function(String url)? onOpenLink;
 
+  /// The page card's own way out — see [AttachmentPreviewPanel.onOpenInBrowser].
+  /// Threaded rather than dropped because the full pane is where a long report
+  /// is actually read, and deciding the browser is worth it is a decision made
+  /// after reading it.
+  final void Function(AttachmentRef attachment)? onOpenInBrowser;
+
   const AttachmentViewerPane({
     super.key,
     required this.attachment,
@@ -55,7 +61,14 @@ class AttachmentViewerPane extends StatelessWidget {
     this.onPinToStoryline,
     this.pinned = false,
     this.onOpenLink,
+    this.onOpenInBrowser,
+    this.senderIsExternal = false,
   });
+
+  /// Passed through to [AttachmentPreviewPanel.senderIsExternal]: the full
+  /// pane says External where the split panel would, or the chip would vanish
+  /// on the ⤢ that is supposed to show MORE of the same file.
+  final bool senderIsExternal;
 
   @override
   Widget build(BuildContext context) {
@@ -79,6 +92,8 @@ class AttachmentViewerPane extends StatelessWidget {
         onPinToStoryline: onPinToStoryline,
         pinned: pinned,
         onOpenLink: onOpenLink,
+        onOpenInBrowser: onOpenInBrowser,
+        senderIsExternal: senderIsExternal,
       ),
     );
   }

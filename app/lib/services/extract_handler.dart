@@ -13,6 +13,7 @@ import 'llm/embeddings_client.dart';
 import 'llm/extract_task.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
+import 'llm/reply_decision_task.dart' show replySuppressed;
 import 'pipeline_progress.dart';
 
 // The card builders moved to `clustering_card.dart` in Round E Phase 1, and
@@ -267,6 +268,21 @@ class ExtractHandler extends WorkHandler {
 
     if (policy == DraftPolicy.onDemand) {
       return _skipDraft(source, id, 'on_demand');
+    }
+
+    // Ahead of every mode, because it is not a preference: a message a machine
+    // wrote has nobody waiting for an answer, and drafting one is work spent to
+    // produce a reply the owner could only delete. [replySuppressed] is the one
+    // authority on that question — the same one `draft_handler.dart` and
+    // `DraftState.suggestable` ask — so the three cannot drift into offering a
+    // reply the other two refuse.
+    //
+    // It sits in `_queueDraft` rather than inside [asksForAReply] or
+    // [prefetchWorthy] deliberately: those two are pure readings of the row's
+    // own cues, and folding a second question into them would make "did this
+    // message ask for something" answer "and is anybody there to ask".
+    if (replySuppressed(Message.fromRow(row))) {
+      return _skipDraft(source, id, 'automated_sender');
     }
 
     if (policy == DraftPolicy.all) {

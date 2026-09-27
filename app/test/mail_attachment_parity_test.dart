@@ -199,9 +199,16 @@ void main() {
     return (detail['attachments'] as List).cast<Map<String, Object?>>();
   }
 
-  /// The body [GraphMail.getMessageDetail] answers with, for a message whose
-  /// only attachment is one the connector never lists.
-  Future<String?> sdkBody(String body) async {
+  /// The whole `uniqueBody` [GraphMail.getMessageDetail] answers with.
+  ///
+  /// The map and not just its content, because `contentType` is half of the
+  /// seam now: the ingest converter reads it to decide whether a body is
+  /// markup, and a backend that dropped or rewrote it would send every message
+  /// down the other path.
+  Future<Map<String, Object?>> sdkUniqueBody(
+    String body, {
+    String? contentType,
+  }) async {
     final tokens = _InMemoryTokenStore();
     tokens.values['refresh_token'] = 'rt';
 
@@ -220,7 +227,10 @@ void main() {
       return http.Response(
         jsonEncode({
           'id': 'msg-1',
-          'uniqueBody': {'content': body},
+          'uniqueBody': {
+            'content': body,
+            'contentType': ?contentType,
+          },
           'internetMessageHeaders': <Object?>[],
           'hasAttachments': false,
           'attachments': <Object?>[],
@@ -235,11 +245,11 @@ void main() {
       httpClient: client,
     );
     final detail = await mail.getMessageDetail('msg-1');
-    return (detail['uniqueBody'] as Map)['content'] as String?;
+    return Map<String, Object?>.from(detail['uniqueBody'] as Map);
   }
 
   /// The same, through the server.
-  Future<String?> mcpBody(String body) async {
+  Future<Map<String, Object?>> mcpUniqueBody(String body) async {
     final mcp = _FakeMcp({
       'read_email': {
         'body_text': body,
@@ -249,7 +259,7 @@ void main() {
       },
     });
     final detail = await McpMailBackend(mcp).getMessageDetail('msg-1');
-    return (detail['uniqueBody'] as Map)['content'] as String?;
+    return Map<String, Object?>.from(detail['uniqueBody'] as Map);
   }
 
   /// An entry without the one key the two paths are allowed to disagree on.
@@ -357,11 +367,34 @@ void main() {
     expect(sdk.map((e) => e['kind']), ['unknown', 'unknown']);
   });
 
+  test('each connector states what its body is, and neither converts it',
+      () async {
+    // The contentType seam. Graph is asked for HTML at the detail fetch and
+    // hands over whatever it answered, word for word; the MCP server's tool is
+    // named `body_text` and its wrapper says so. Conversion happens once, in
+    // `SyncService._fetchDetailInto` — a backend that did it here would give
+    // this app two copies of the rules and the parity below nothing to compare.
+    const markup = '<p>Please review the attached plan.</p>';
+    final sdkHtml = await sdkUniqueBody(markup, contentType: 'html');
+    expect(sdkHtml['contentType'], 'html');
+    expect(sdkHtml['content'], markup, reason: 'verbatim: no tag was stripped');
+
+    final mcpText = await mcpUniqueBody('Please review the attached plan.');
+    expect(mcpText['contentType'], 'text');
+    expect(mcpText['content'], 'Please review the attached plan.');
+
+    // A Graph answer with no contentType at all passes through as one: the
+    // converter reads an absent type as text, and inventing one here would put
+    // the decision in the backend.
+    expect(await sdkUniqueBody('Just words.'), {'content': 'Just words.'});
+  });
+
   test('a file attached as a link reads the same on both connectors', () async {
     // The one attachment neither backend can list. Outlook's "attach as link"
-    // is a U+200B-delimited run in the BODY, and both connectors deliver plain
-    // text bodies — so the parse belongs to the sync, once, and the only thing
-    // parity can mean here is that the two hand the sync the same string.
+    // is a U+200B-delimited run in the BODY, and a text body is what both
+    // connectors carry it in — so the parse belongs to the sync, once, and the
+    // only thing parity can mean here is that the two hand the sync the same
+    // string.
     const zwsp = '\u200b';
     const linkUrl =
         'https://contoso2-my.sharepoint.com/:b:/g/personal/'
@@ -370,8 +403,9 @@ void main() {
         '$zwsp[https://res-1.cdn.office.net/files/assets/pdf.svg]'
         'HARBORLIGHT TALENT AGREEMENT.pdf<$linkUrl>$zwsp\n\nThanks';
 
-    final sdk = await sdkBody(body);
-    final mcp = await mcpBody(body);
+    final sdk =
+        (await sdkUniqueBody(body, contentType: 'text'))['content'] as String?;
+    final mcp = (await mcpUniqueBody(body))['content'] as String?;
 
     expect(sdk, mcp);
     expect(sdk, body);

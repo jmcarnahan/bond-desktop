@@ -23,6 +23,7 @@ import '../services/attachments/attachment_cache.dart';
 import '../services/attachments/attachment_digest_handler.dart';
 import '../services/attachments/attachment_retriever.dart';
 import '../services/attachments/attachment_text_handler.dart';
+import '../services/attachments/html_snapshot.dart' show htmlSnapshotPng;
 import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/attachment_backend.dart';
@@ -41,6 +42,7 @@ import '../services/draft_stream.dart';
 import '../services/drain_gate.dart';
 import '../services/embed_handler.dart';
 import '../services/extract_handler.dart';
+import '../services/external_sender.dart';
 import '../services/gate_repair_service.dart';
 import '../services/graph_attachment_backend.dart';
 import '../services/graph_auth.dart';
@@ -748,6 +750,18 @@ final attachmentCacheProvider = Provider<AttachmentCache>(
 /// has no PDF thumbnail.
 final pdfThumbnailerProvider = Provider<PdfThumbnailer?>((_) => null);
 
+/// How a web page becomes a picture — the REAL one by default, unlike the PDF
+/// thumbnailer above, and the difference is the whole reason this comment
+/// exists.
+///
+/// There is no binary behind it. `htmlSnapshotPng` is a method channel, and a
+/// process with no Runner registering that channel — every `flutter test` — gets
+/// a `MissingPluginException` the wrapper already turns into null. So the
+/// default can be the thing that works in the app without dragging anything
+/// into a test, and `main.dart` has no override to remember.
+final htmlThumbnailerProvider =
+    Provider<HtmlThumbnailer?>((_) => htmlSnapshotPng);
+
 /// What the UI asks for a file: cache first, connector second, row updated.
 final attachmentBytesProvider = Provider<AttachmentBytes>(
   (ref) => StoreAttachmentBytes(
@@ -755,6 +769,7 @@ final attachmentBytesProvider = Provider<AttachmentBytes>(
     backend: ref.watch(attachmentBackendProvider),
     cache: ref.watch(attachmentCacheProvider),
     pdfThumbnailer: ref.watch(pdfThumbnailerProvider),
+    htmlThumbnailer: ref.watch(htmlThumbnailerProvider),
   ),
 );
 
@@ -1214,6 +1229,11 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         attentionThreshold:
             attentionThresholdReader(ref.watch(messageStoreProvider)),
         owner: _ownerLookup(ref),
+        // The owner's own organisation, so the handler can tell a stranger's
+        // first approach from a colleague's question. Same shape as `owner`
+        // above and for the same reason: the account is a keychain read, and
+        // most builds of this provider never drain.
+        ownerDomains: _ownerDomainsLookup(ref),
       ),
       // Extraction next, and it drains completely before either storyline
       // handler starts. That order is the point: extraction is what writes the
@@ -1566,6 +1586,32 @@ OwnerLookup _ownerLookup(Ref ref) => () =>
                   name: account.displayName,
                   address: account.mail ?? account.userPrincipalName,
                 ),
+        );
+
+/// Which mail domains count as INSIDE the owner's organisation, from the same
+/// account [_ownerLookup] reads.
+///
+/// One domain, taken off the signed-in address, and no way yet for the owner to
+/// add a second. That is a deliberate floor rather than the finished feature:
+/// an owner with a parent company, an acquired brand or a personal address that
+/// is really theirs has more than one, and the list they would type belongs in
+/// Settings. Until it exists, the one domain the app can KNOW is better than
+/// none — see [isColdOutreach] for why a wrong answer here costs a ranking and
+/// never a message.
+///
+/// Normalised exactly the way `IdentityGuard` normalises the owner's address —
+/// `mail` first, `userPrincipalName` behind it, trimmed and lower-cased — so the
+/// two never disagree about who the owner is. An account that has not arrived,
+/// or one with no address at all, yields the EMPTY set, which
+/// [isExternalAddress] reads as "cannot tell" and answers false to: no account
+/// means no strangers, which is the reading that changes nothing.
+Future<Set<String>> Function() _ownerDomainsLookup(Ref ref) => () =>
+    ref.read(authSessionProvider).storedAccount.then(
+          (account) => ownerDomainsOf(
+            account == null
+                ? null
+                : account.mail ?? account.userPrincipalName,
+          ),
         );
 
 /// Reads the processing switch, for a drain that asks on every launch

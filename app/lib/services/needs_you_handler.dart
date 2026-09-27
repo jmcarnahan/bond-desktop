@@ -5,6 +5,7 @@ import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'attachments/attachment_digest_lines.dart';
 import 'ai_worker.dart';
+import 'external_sender.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'attention.dart';
@@ -22,9 +23,11 @@ import 'pipeline_progress.dart';
 /// lose.
 ///
 /// The verdict is TRI-STATE on `messages`, and the third state is the point.
-/// NULL means this pass has never judged the row — which is what makes the
-/// unjudged rows a worklist — 0 is a judgement that the message does not need
-/// the owner, and 1 that it does. The deterministic floor
+/// NULL means this pass has never judged the row, or judged it a HEDGE, a yes
+/// below the confidence bar, which buys neither an interruption nor a veto;
+/// 0 is a judgement that the message does not need the owner, and 1 that it
+/// does. The work row, not the NULL, is what says whether a message was
+/// judged. The deterministic floor
 /// ([needsYouFloor]) only ever RAISES it, and so does the model below it: what
 /// the floor is silent about is read by [NeedsYouTask], which is the only
 /// thing here that can write a 0.
@@ -103,6 +106,22 @@ class NeedsYouHandler extends WorkHandler {
   /// tiles elsewhere mean.
   final Future<double> Function()? _threshold;
 
+  /// The owner's own mail domains, for [isExternalAddress].
+  ///
+  /// A closure asked ONCE per handler, cached in [_domains] on the same terms
+  /// [memoizedOwner] caches its answer: it comes from the signed-in account, it
+  /// only changes on sign-out, and sign-out disposes the provider that built this
+  /// handler. A read that THREW is forgotten rather than kept, so one hiccup does
+  /// not turn every external sender internal for the life of the session.
+  ///
+  /// Null — the default, and what every existing test gets — means the app does
+  /// not know whose inbox this is, so nobody reads as external and the floor
+  /// behaves exactly as it did before this parameter existed. [isExternalAddress]
+  /// keeps the same discipline for an empty set.
+  final Future<Set<String>> Function()? _ownerDomains;
+
+  Future<Set<String>>? _domains;
+
   NeedsYouHandler(
     this._store,
     this._client, {
@@ -110,6 +129,7 @@ class NeedsYouHandler extends WorkHandler {
     OwnerLookup? owner,
     PipelineProgress progress = const PipelineProgress.disabled(),
     Future<double> Function()? attentionThreshold,
+    this._ownerDomains,
   })  : _log = activityLog ?? ActivityLog.disabled(),
         _owner = memoizedOwner(owner ?? (() async => null)),
         _pipeline = progress,
@@ -168,7 +188,13 @@ class NeedsYouHandler extends WorkHandler {
     // "never judged" and differs from both.
     final previous = _int(row['needs_you_verdict']);
 
-    if (needsYouFloor(row)) {
+    // A stranger's first approach, read before the floor because it is the one
+    // thing that can switch the floor off. Costs a query only for a sender who
+    // is actually external, and nothing at all while the app does not know
+    // whose inbox this is.
+    final cold = await _coldOutreach(source, row);
+
+    if (needsYouFloor(row, coldOutreach: cold)) {
       await _store.writeNeedsYouVerdict(
         source,
         id,
@@ -234,11 +260,29 @@ class NeedsYouHandler extends WorkHandler {
       maxTokens: _maxTokens,
     );
 
-    // Raise-only, hesitation included. The floor has already said yes to
-    // everything it covers, so all this model can do is raise what the floor
-    // left alone — and a low-confidence yes stays a no, because the verdict
-    // buys an interruption and "possibly" is not grounds for one.
-    final verdict = result.needsYou && result.confidence != 'low';
+    // Three answers, not two. A real no (`needsYou == false`) is written 0,
+    // and 0 is a veto: it outranks triage's ask on the chip, the toast, the
+    // rail and the tile. A yes that clears the confidence bar is written 1.
+    // A yes that does NOT clear it is a HEDGE, written NULL with the evidence
+    // kept as the reason: a hedge buys no interruption, since "possibly" is
+    // not grounds for one, and no veto either, since the model did not say
+    // no. Triage decides such a message, exactly as it decides an unjudged
+    // one. Writing a hedge as 0 let a medium yes on a new customer's "please
+    // send the signed contract by Friday" take the thread off every Needs You
+    // surface over triage's own ask.
+    //
+    // A cold approach ([isColdOutreach]) is held to the top of that scale rather
+    // than to the middle of it. Unsolicited outreach is WRITTEN to read as an
+    // ask — "confirm your interest", "please approve if you would like to
+    // proceed" — so `medium` on a stranger's first message is the model agreeing
+    // with the sales copy, and on the thread that prompted this it produced a
+    // drafted reply to a vendor nobody had heard of. A real ask from a real
+    // counterparty comes back `high`, which is what "can still qualify" means
+    // here: the bar moved, the door did not close. Below the bar is a hedge
+    // like any other, so a stranger's medium yes neither raises nor vetoes.
+    final clearsBar =
+        cold ? result.confidence == 'high' : result.confidence != 'low';
+    final bool? verdict = !result.needsYou ? false : (clearsBar ? true : null);
 
     // A throw from the call above — the model being down included — is left to
     // propagate. The verdict stays NULL, the row stays on the worklist, and
@@ -257,7 +301,10 @@ class NeedsYouHandler extends WorkHandler {
   /// changed the answer.
   ///
   /// The comparison is against the STORED shape, so a first verdict (`null` →
-  /// 0 or 1) counts as a change and a repeat of either answer does not. That
+  /// 0 or 1) counts as a change and a repeat of any answer does not. A hedge
+  /// is stored NULL, so an old 0 becoming a hedge is a change too, and the
+  /// chip is recomputed through `notifyWorthy`, which reads NULL as no veto
+  /// and lets triage's ask decide. That
   /// asymmetry is the point: a repeat must write nothing, or a chip the user
   /// cleared by replying would come back every time the row was re-judged.
   ///
@@ -269,13 +316,50 @@ class NeedsYouHandler extends WorkHandler {
     String source,
     String id, {
     required int? previous,
-    required bool verdict,
+    required bool? verdict,
   }) async {
-    if (previous == (verdict ? 1 : 0)) return;
+    if (previous == (verdict == null ? null : (verdict ? 1 : 0))) return;
     await _pipeline.refreshNeedsYou(
       source,
       id,
       threshold: await _thresholdOrDefault(),
+    );
+  }
+
+  /// Whether this row is a stranger's first approach — [isColdOutreach] over the
+  /// two facts this handler can reach.
+  ///
+  /// Ordered so the cheap half runs first. The address test is arithmetic on a
+  /// string the row already carries, and only a sender who passes it costs the
+  /// one indexed read of the conversation row that says whether the owner has
+  /// ever written here. Ordinary internal mail therefore adds no query at all,
+  /// which matters because this runs per item at K=3.
+  ///
+  /// Every way this cannot answer answers FALSE — no domains wired, a read that
+  /// threw, a row with no conversation key, a conversation row that has gone. The
+  /// reason is [isColdOutreach]'s: a true takes a message off the rail, so an
+  /// unknown must never round up into one.
+  Future<bool> _coldOutreach(String source, Map<String, Object?> row) async {
+    final read = _ownerDomains;
+    if (read == null) return false;
+    Set<String> domains;
+    try {
+      domains = await (_domains ??= read());
+    } catch (e) {
+      _domains = null;
+      debugPrint('needs_you: reading the owner domains failed: $e');
+      return false;
+    }
+    if (!isExternalAddress(row['from_address'] as String?, domains)) {
+      return false;
+    }
+    final key = row['conversation_key'] as String? ?? '';
+    if (key.isEmpty) return false;
+    final conversation = await _store.getConversationRow(source, key);
+    if (conversation == null) return false;
+    return isColdOutreach(
+      external: true,
+      lastOutboundAt: conversation['last_outbound_at'] as String?,
     );
   }
 

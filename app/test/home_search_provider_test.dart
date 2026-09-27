@@ -54,7 +54,7 @@ HomeFeedRow _row(
   String subject = 'Subject',
   String? fromName = 'Dana Whitfield',
   String receivedAt = '2026-09-03T09:00:00Z',
-  bool hasAttachments = false,
+  bool hasFile = false,
 }) =>
     HomeFeedRow(
       source: 'email',
@@ -70,7 +70,7 @@ HomeFeedRow _row(
       dropped: false,
       subject: subject,
       fromName: fromName,
-      hasAttachments: hasAttachments,
+      hasFile: hasFile,
     );
 
 MessageSearchHits _hits(String query, List<String> ids) => MessageSearchHits(
@@ -496,7 +496,7 @@ void main() {
         MessageSearchHits('invoice', [
           SearchHit(row: _row('plain'), score: 0.5, matchedBy: MatchedBy.meaning),
           SearchHit(
-            row: _row('attached', hasAttachments: true),
+            row: _row('attached', hasFile: true),
             score: 0.5,
             matchedBy: MatchedBy.meaning,
           ),

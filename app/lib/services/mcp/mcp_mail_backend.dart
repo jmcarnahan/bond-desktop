@@ -18,6 +18,17 @@ import 'bond_mcp_client.dart';
 /// callers already route on it, and one of them routes on its status code.
 /// Auth failures — [NotSignedIn], [ReconsentRequired], [AuthException] — pass
 /// through UNWRAPPED, exactly as they do from `graph_mail.dart`.
+///
+/// One thing this backend deliberately does NOT do is implement
+/// [DraftRecipientsEditor], which is what makes
+/// `MailBackendRecipients.canEditDraftRecipients` false here and a call to
+/// `updateDraftRecipients` through the seam a [StateError]. `manage_draft` takes
+/// `to` and `cc` on `action: 'create'` and on no other action, so a reply draft
+/// this server built cannot have anybody added to it: there is no tool call to
+/// make. The composer reads the capability and says so where somebody reaches
+/// for the feature, rather than adding people to a reply that would go out
+/// without them. Turning it on is a `manage_draft` action on the server, not a
+/// change here.
 
 /// The HTTP status inside a tool's failure text, when it names one.
 ///
@@ -114,7 +125,12 @@ class McpMailBackend implements MailBackend {
     final headers = result['headers'];
     final attachments = result['attachments'];
     return {
-      'uniqueBody': {'content': result['body_text']},
+      // `text`, stated rather than left out. The server's tool is named
+      // `body_text` and answers Graph's own server-side conversion, so the
+      // ingest converter must take the tidy path over it and not the HTML one
+      // — and an unstated type reads as text anyway, which would make this
+      // connector's shape depend on that default rather than on what it sends.
+      'uniqueBody': {'content': result['body_text'], 'contentType': 'text'},
       'internetMessageHeaders': [
         if (headers is Map)
           for (final entry in headers.entries)
@@ -270,6 +286,18 @@ class McpMailBackend implements MailBackend {
       sentAt: result['sent_at'] as String?,
     );
   }
+
+  /// Does nothing: the server has no way to delete a draft.
+  ///
+  /// `manage_draft` takes create, reply, update_body, add_attachment and send,
+  /// and no other mail tool deletes a message. So a reply that fails after its
+  /// draft was created leaves that draft in the owner's Drafts on this
+  /// connection, and that orphan is ACCEPTED rather than papered over: a throw
+  /// here would only be swallowed by the caller, and a fake delete would
+  /// claim a cleanup that never happened. Turning it on is a `manage_draft`
+  /// action on the server, not a change here.
+  @override
+  Future<void> deleteDraft(String draftId) async {}
 
   /// `[{name, address}]` off the wire, with anything unreadable DROPPED.
   ///

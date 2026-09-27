@@ -105,6 +105,31 @@ const int maxAttachmentsPerMessage = 5;
   return (true, null);
 }
 
+/// Whether this file is a WEB PAGE — the one attachment whose extracted bytes
+/// are markup rather than the words in them.
+///
+/// Two callers, and they must never disagree: the text handler, which converts
+/// the markup before anything stores it, and the bytes ladder, which draws a
+/// picture of the page. Both are in `services/`, so neither can reach
+/// `previewKindFor` — the same reason `_isPdf` lives beside its own caller.
+///
+/// **The name is read before the content type**, the rule `previewKindFor` and
+/// `attachmentGlyph` both keep: Graph reports `application/octet-stream` for a
+/// great many real files, and a page named `.html` is a page whatever the
+/// connector called it.
+bool isHtmlAttachment({String? contentType, String? name}) {
+  if (_htmlExtension(name)) return true;
+  final type = (contentType ?? '').split(';').first.trim().toLowerCase();
+  return type == 'text/html' || type == 'application/xhtml+xml';
+}
+
+bool _htmlExtension(String? name) {
+  final trimmed = (name ?? '').trim().toLowerCase();
+  final dot = trimmed.lastIndexOf('.');
+  if (dot <= 0) return false;
+  return const {'html', 'htm', 'xhtml'}.contains(trimmed.substring(dot + 1));
+}
+
 /// One attachment's identity in the work queue, where the only key is a single
 /// `entity_id` string.
 ///

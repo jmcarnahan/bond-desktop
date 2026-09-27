@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../backend/backend_types.dart';
 import '../backend/teams_backend.dart';
+import '../chat_mentions.dart';
 import '../graph_teams.dart';
 import 'bond_mcp_client.dart';
 
@@ -215,7 +216,33 @@ class McpTeamsBackend implements TeamsBackend {
     }
   }
 
-  /// Posts a plain-text message to a chat, and returns it as stored.
+  /// Posts a message to a chat, and returns it as stored.
+  ///
+  /// With no [mentions] the call is exactly `chat_id` and `message`, the two
+  /// keys every version of the server takes. With them, an `options` string
+  /// carries each person's id and name and the server builds the mention
+  /// entities — `content_type: text` stated, so the server is the one that
+  /// escapes the text for the html a mention forces.
+  ///
+  /// The server ALWAYS puts its at-tags at the front, so each `@Name` the
+  /// composer wrote is taken out of the text first; left in, the message
+  /// would read "Ada Park @Ada Park can you…". A message that was nothing but
+  /// the names keeps them, because the server refuses an empty one before
+  /// it adds a tag.
+  ///
+  /// A server that refuses the `options` is refused VISIBLY: the send fails
+  /// with a sentence that says what to do, and the chips and the body stay.
+  /// Retrying without the mentions would post a reply the owner believes
+  /// notified somebody it never reached.
+  ///
+  /// A server that ACCEPTS the `options` and then ignores them is the other
+  /// way a mention can vanish, and it cannot be refused here: the message is
+  /// already in the chat. [_messageShape] carries the server's
+  /// `mentioned_user_ids` through as Graph's `mentions`, and the caller reads
+  /// it against what it asked for with `missingMentionIds` — the draft send
+  /// says so as a notice and never resends. A server that reports no
+  /// `mentioned_user_ids` at all leaves the key out, and that reads as
+  /// "nothing to conclude", not as every mention dropped.
   ///
   /// The reply comes back through [_messageShape], so what the caller writes
   /// into its own outbound row is shape-identical to a message the sync would
@@ -228,15 +255,40 @@ class McpTeamsBackend implements TeamsBackend {
   @override
   Future<Map<String, dynamic>> sendChatMessage(
     String chatId,
-    String text,
-  ) async {
+    String text, {
+    List<ChatMention> mentions = const [],
+  }) async {
     await _throttleChat(chatId);
-    final result = await _call('send_teams_message', {
-      'chat_id': chatId,
-      'message': text,
-    });
+    final people = distinctMentions(mentions);
+    final stripped =
+        people.isEmpty ? text : textWithoutClaimedMentions(text, people);
+    final Map<String, dynamic> result;
+    try {
+      result = await _call('send_teams_message', {
+        'chat_id': chatId,
+        'message': stripped.isEmpty ? text : stripped,
+        if (people.isNotEmpty)
+          'options': jsonEncode({
+            'content_type': 'text',
+            'mentions': [
+              for (final person in people)
+                {'user_id': person.userId, 'name': person.displayName},
+            ],
+          }),
+      });
+    } on GraphTeamsException catch (e) {
+      // An older server's argument validation answers an unknown `options` as
+      // a protocol error rather than a result, so it arrives here.
+      if (people.isNotEmpty && _refusedOptions(e.message)) {
+        throw const GraphTeamsException(_mentionsRefused);
+      }
+      rethrow;
+    }
     final message = result['message'];
     if (message is! Map) {
+      if (people.isNotEmpty && _refusedMentions(result)) {
+        throw const GraphTeamsException(_mentionsRefused);
+      }
       // The server names a word and, when it has one, a sentence; both belong
       // on the banner, because the word alone (`invalid_arguments`) does not
       // tell the person what to change.
@@ -248,6 +300,39 @@ class McpTeamsBackend implements TeamsBackend {
     }
     return _messageShape(message);
   }
+
+  static const String _mentionsRefused =
+      "This connection can't @mention people yet — remove the people to send "
+      'as plain text.';
+
+  /// Whether a tool failure is the server refusing `options` as an argument it
+  /// does not know — a server older than mentions, whose argument check
+  /// throws. Both halves must be there: an unknown-field phrase alone could be
+  /// about anything, and the word `options` alone is in plenty of sentences.
+  static bool _refusedOptions(String message) =>
+      _unknownField.hasMatch(message) && _namesMentions.hasMatch(message);
+
+  /// Whether a result is the server refusing the mentions themselves:
+  /// `invalid_options`, or another word whose reason names them. A bare
+  /// `invalid_arguments` is NOT one — on the current server it means no chat
+  /// id or nothing to send, and its own sentence says which.
+  static bool _refusedMentions(Map<String, dynamic> result) {
+    final error = result['error'];
+    if (error == 'invalid_options') return true;
+    final reason = result['reason'];
+    return error == 'invalid_arguments' &&
+        reason is String &&
+        _namesMentions.hasMatch(reason);
+  }
+
+  static final RegExp _unknownField = RegExp(
+    r'unknown (field|argument|parameter)|unexpected keyword|extra (fields|'
+    r'inputs)|additional ?properties|not permitted',
+    caseSensitive: false,
+  );
+
+  static final RegExp _namesMentions =
+      RegExp(r'\b(options|mentions?)\b', caseSensitive: false);
 
   /// Opens the chat holding exactly [userIds] plus the signed-in user.
   ///
@@ -339,8 +424,10 @@ class McpTeamsBackend implements TeamsBackend {
   /// application, else absent entirely — a system event arrives with neither
   /// and must not be handed a `from` object with nulls inside, which would read
   /// as a person with no name. A bot's display name is null because the wire
-  /// carries no `from_application_display`; the reader tolerates that, and a
-  /// bot message is gated out of extraction either way.
+  /// carries no `from_application_display`, and the reader is where that is
+  /// answered: `TeamsSync._sender` names an application Graph — or this wire —
+  /// gave no name for `Bot`, so both backends store the same word rather than a
+  /// `teams:<id>` the reader would have been shown instead.
   ///
   /// `mentions` gets the same treatment as `from`, and it is the clearest case
   /// for why this file exists at all: the wire carries `mentioned_user_ids`, a
@@ -384,7 +471,7 @@ class McpTeamsBackend implements TeamsBackend {
       if (message['attachments'] case final List attachments)
         'attachments': [
           for (final entry in attachments)
-            if (entry is Map) Map<String, Object?>.from(entry),
+            if (entry is Map) _attachmentEntry(entry),
         ],
       if (message['mentioned_user_ids'] case final List mentionedUserIds)
         'mentions': [
@@ -397,6 +484,26 @@ class McpTeamsBackend implements TeamsBackend {
               },
         ],
     };
+  }
+
+  /// One attachment entry, as the sync reads it.
+  ///
+  /// A pass-through with one arm. The server's flat entry already IS the shape
+  /// [TeamsSync.attachmentRows] takes — that is the whole reason
+  /// [GraphTeams.attachmentEntries] converts INTO it — except for a quote-reply,
+  /// where the three fields naming the quoted message may still be a JSON
+  /// `content` string the way Graph sends it. Unpacked through
+  /// [GraphTeams.quoteReferenceFields], so both backends read a quote the same
+  /// way; a server that already sent the flat fields keeps them, because the
+  /// decode only fills what it found.
+  static Map<String, Object?> _attachmentEntry(Map entry) {
+    final flat = Map<String, Object?>.from(entry);
+    if (flat['kind'] != 'message_reference') return flat;
+    final decoded = GraphTeams.quoteReferenceFields(flat['content']);
+    for (final field in decoded.entries) {
+      flat[field.key] ??= field.value;
+    }
+    return flat;
   }
 
   /// Waits out whatever is left of the gap since the last chat-list page.

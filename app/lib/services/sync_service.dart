@@ -17,6 +17,7 @@ import 'graph_mail.dart';
 // `show`: the one thing the sync wants from the embedding client is the tag
 // the clustering one-shot below retires.
 import 'llm/embeddings_client.dart' show EmbeddingsClient;
+import 'mail_body.dart';
 import 'mail_text.dart';
 import 'pipeline_progress.dart';
 
@@ -386,6 +387,29 @@ class SyncService implements MailSync {
         sinceIso: floor,
       );
 
+      // Messages a label rule gated, back in the queue. The rules are gone
+      // (v19), so `label_rule` is a gate this build no longer writes and
+      // nothing else would ever look at those rows again. Before the backlog
+      // enqueues below, for the same reason as the re-judge above: a row this
+      // flips to `pending` is picked up in the same pass. Same one-shot idiom,
+      // every connector at once, null until it runs; bounded by this pass's
+      // floor for [MessageStore.rependGatedTriage]'s reason. NOT in
+      // `derivedOneShotPrefs`: Clear AI results re-pends these rows itself,
+      // and nothing writes the reason again, so a set key is never wrong.
+      int? rependedLabelRuleGates;
+      if (await _store.getPref('label_rule_gate_retired') == null) {
+        var repended = 0;
+        for (final source in const ['email', 'teams']) {
+          repended += await _store.rependGatedTriage(
+            source: source,
+            gateReason: 'label_rule',
+            sinceIso: floor,
+          );
+        }
+        await _store.setPref('label_rule_gate_retired', '1');
+        rependedLabelRuleGates = repended;
+      }
+
       // The one-time catch-up for mail stored before ingest wrote
       // `addressed_me`. Skipped WITHOUT setting the pref while the address is
       // unknown, so a keychain that has not answered yet costs a retry next
@@ -452,6 +476,36 @@ class SyncService implements MailSync {
         await _store.setPref('needs_you_flag_backfill', '1');
       }
 
+      // And its lowering twin: the chips that settled on triage's ask before
+      // the judge's no was allowed to outrank it (`notifyWorthy`). Once, on
+      // the same idiom, and null until it runs.
+      int? vetoedNeedsYou;
+      if (await _store.getPref('needs_you_flag_veto') == null) {
+        vetoedNeedsYou = await _progress.lowerVetoedNeedsYou();
+        await _store.setPref('needs_you_flag_veto', '1');
+      }
+
+      // The hedges an older build stored as a no. A yes below the confidence
+      // bar is written NULL now, which buys no interruption and no veto, but
+      // it used to be written 0, and 0 outranks triage's ask everywhere. The
+      // old ones cannot be told from a real no, so every in-window verdict-0
+      // inbound, mail and chat, is judged again. After the needs-you one-shots
+      // above; the extract and needs-you backlog enqueues ran earlier in this
+      // pass, which does not matter here, because the requeue revives the
+      // existing work rows rather than waiting for an enqueue. Bounded by this
+      // pass's floor and otherwise uncapped: one model call per in-window
+      // verdict-0 inbound, once, and fresh mail still claims first. Same
+      // one-shot idiom, null until it runs, and the pref is
+      // written only after the requeue returns. NOT in `derivedOneShotPrefs`:
+      // Clear AI results re-judges every message anyway, and nothing writes a
+      // hedge as 0 again, so a set key is never wrong.
+      int? requeuedNeedsYouHedges;
+      if (await _store.getPref('needs_you_hedge_rejudge') == null) {
+        requeuedNeedsYouHedges =
+            await _store.requeueZeroNeedsYouVerdicts(sinceIso: floor);
+        await _store.setPref('needs_you_hedge_rejudge', '1');
+      }
+
       // Exchange's first-contact tip, off the rows stored before the ingest
       // learned to strip it. Once, on the same one-shot idiom as the two
       // above. Null until it runs.
@@ -459,6 +513,45 @@ class SyncService implements MailSync {
       if (await _store.getPref('sender_tip_strip') == null) {
         strippedSenderTips = await _store.stripSenderIdentificationTips();
         await _store.setPref('sender_tip_strip', '1');
+      }
+
+      // The mail bodies an older converter wrote, a server's own HTML→text
+      // conversion or this branch's first converter, MARKED stale rather than
+      // nulled. Same one-shot idiom, over the lookback window this pass ran
+      // with, and null until it runs. `ensureBodies` refetches a stale row as
+      // if it had no body, so opening a thread refills it through this app's
+      // converter and a thread nobody opens costs nothing. The old text stays
+      // until a refetch answers: a message archived in Outlook since ingest
+      // has an id that now 404s, and a nulled body could never come back.
+      // Every other reader, triage, drafts, history, storylines, embeddings
+      // and search, reads the old body meanwhile, which is intended.
+      //
+      // The non-goal, stated because it is the obvious next thing to want: the
+      // verdicts, summaries, extractions and embeddings written from the old
+      // text are NOT re-judged. They finished `done` and nothing here re-pends
+      // them. Rejudging a mailbox is Clear AI results, which is a decision the
+      // owner makes in Settings and not a side effect of an upgrade.
+      //
+      // The key was bumped once, to `mail_html_rebuild_2`, because the first
+      // converter kept the source's CR/LF beside the newline every `<br>`
+      // wrote and so double-spaced plain-text mail, and decoded only seven
+      // named entities. So the marks are the legacy link patterns, a blank
+      // line and a literal named entity — see
+      // [MessageStore.markStaleMailBodies]. A local echo is never marked,
+      // because the detail fetch refuses its id and the mark could never clear.
+      int? staleMailBodies;
+      if (await _store.getPref('mail_html_rebuild_2') == null) {
+        staleMailBodies = await _store.markStaleMailBodies(sinceIso: floor);
+        await _store.setPref('mail_html_rebuild_2', '1');
+      }
+
+      // And the previews, which have no HTML part to go back to and so are
+      // rewritten in place through the same link rules the ingest now runs.
+      // Same one-shot idiom, and null until it runs.
+      int? tidiedMailPreviews;
+      if (await _store.getPref('mail_preview_tidy') == null) {
+        tidiedMailPreviews = await _store.tidyMailPreviews();
+        await _store.setPref('mail_preview_tidy', '1');
       }
 
       // The display names of everyone the user has written to, off the rows
@@ -482,6 +575,57 @@ class SyncService implements MailSync {
       if (await _store.getPref('thread_state_refold') == null) {
         refoldedThreads = await _store.refoldAllThreadStates();
         await _store.setPref('thread_state_refold', '1');
+      }
+
+      // The meeting RESPONSES already in the mailbox, gated after the fact. A
+      // gate only ever speaks about a message on its way past, so the
+      // meeting-response gate says nothing about the forty `Accepted:` threads
+      // sitting on the rail from invitations the owner sent themselves. Same
+      // one-shot idiom, and null until it runs.
+      //
+      // A genuine `meetingRequest` is never touched — see
+      // [MessageStore.regateMeetingResponses], which is where the rule and the
+      // fallback shape live. The refold after it is the same pairing the
+      // one-shot above exists for: gating an inbound can lower a thread off
+      // `needs_reply`, and a gate that told nobody is exactly the lie that
+      // repair was written for. Plain repair mode rather than every thread,
+      // because only the threads this just gated can have moved.
+      //
+      // `_crlf` because the first key's pass read Exchange's `\r\n` empty
+      // body as somebody talking and gated none of the fallback-shape rows;
+      // a fresh key is what owes that pass to a mailbox that already ran it.
+      //
+      // A re-gated response may already carry a suggested reply from before
+      // this build, and `gated_conversation_repair` is a main-era one-shot
+      // that has closed on an upgraded install, so nothing else would take it
+      // away: the thread leaves the rail but still shows the draft when
+      // opened. Only `suggested` ones are dismissed, the same status Dismiss
+      // writes, so the row stays and nothing writes it back. A draft the owner
+      // edited, saved or sent is theirs and stays.
+      int? regatedMeetingResponses;
+      if (await _store.getPref('meeting_regate_crlf') == null) {
+        final regated = await _store.regateMeetingResponseIds();
+        regatedMeetingResponses = regated.length;
+        if (regated.isNotEmpty) {
+          await _store.refoldAllThreadStates();
+          for (final id in regated) {
+            final draft = await _store.getDraftForMessage(_source, id);
+            if (draft?['status'] == 'suggested') {
+              await _store.updateDraftStatus(_source, id, status: 'dismissed');
+            }
+          }
+        }
+        await _store.setPref('meeting_regate_crlf', '1');
+      }
+
+      // The ask banners triage wrote before it learned that "Day 1" is not a
+      // date — "Confirm the source — by Day 1" is stored text and outlives
+      // the fix on every thread that is not triaged again. Same one-shot
+      // idiom, every connector at once like the refold above.
+      int? strippedPlanRelative;
+      if (await _store.getPref('plan_relative_banner_strip') == null) {
+        strippedPlanRelative = await _store.stripPlanRelativeBanners();
+        await _store.setPref('plan_relative_banner_strip', '1');
       }
 
       // The threads that were extracted, embedded and filed before a gate
@@ -520,6 +664,16 @@ class SyncService implements MailSync {
       await _store.enqueueEmbedBacklog(
         cap: backlogEnqueueCap,
         sinceIso: floor,
+        source: _source,
+      );
+
+      // What no window above can reach any more: mail triaged inside the
+      // bootstrap window whose work the rolling floor overtook before the
+      // pace got there. Owed is read off the progress row, so a pass here is
+      // one the next sync does not repeat — see
+      // [MessageStore.reviveOwedMessageStages].
+      final revivedOwedWork = await _store.reviveOwedMessageStages(
+        cap: backlogEnqueueCap,
         source: _source,
       );
 
@@ -785,6 +939,7 @@ class SyncService implements MailSync {
             'revived_terminal_work': revivedTerminalWork,
           if (rejudged > 0) 'rejudged_triage': rejudged,
           if (revivedStoryline > 0) 'revived_storyline': revivedStoryline,
+          if (revivedOwedWork > 0) 'revived_owed_work': revivedOwedWork,
           // The count the delta feed owed and did not deliver. Absent on every
           // healthy pass, which is what makes its presence worth reading.
           if (reconciledInbox + reconciledSent > 0)
@@ -795,9 +950,16 @@ class SyncService implements MailSync {
           'backfilled_addressed_me': ?backfilled,
           'revived_needs_you': ?revivedNeedsYou,
           'backfilled_needs_you': ?backfilledNeedsYou,
+          'vetoed_needs_you': ?vetoedNeedsYou,
+          'requeued_needs_you_hedges': ?requeuedNeedsYouHedges,
           'stripped_sender_tips': ?strippedSenderTips,
+          'stale_mail_bodies': ?staleMailBodies,
+          'tidied_mail_previews': ?tidiedMailPreviews,
           'named_participants': ?namedParticipants,
           'refolded_threads': ?refoldedThreads,
+          'regated_meeting_responses': ?regatedMeetingResponses,
+          'repended_label_rule_gates': ?rependedLabelRuleGates,
+          'stripped_plan_relative_banners': ?strippedPlanRelative,
           'repaired_gated_conversations': ?repairedGated,
           'requeued_clustering_reembeds': ?requeuedReembeds,
           // The four search-corpus one-shots, counts only, and only on a pass
@@ -1330,10 +1492,20 @@ class SyncService implements MailSync {
         // invisible character.
         // And Exchange's first-contact tip, which the preview opens with for
         // any sender the mailbox has not seen — see `mail_text.dart`.
+        //
+        // The preview is Graph's own text conversion of the body and arrives
+        // that way whatever the DETAIL fetch prefers, so it carries the same
+        // `label <href>` runs the ingest converter exists to undo \u2014 in a
+        // snippet a list card has two lines for. `stripLinkTargets` keeps the
+        // label and drops the address; `tidyMailText` collapses what Graph's
+        // own wrapping left behind.
         final rawPreview =
             (message['bodyPreview'] as String?)?.replaceAll('\u200b', '');
-        final preview =
-            rawPreview == null ? null : stripSenderIdentification(rawPreview);
+        final preview = rawPreview == null
+            ? null
+            : stripLinkTargets(
+                tidyMailText(stripSenderIdentification(rawPreview)),
+              );
         final key = conversationKeyFor(
           message['conversationId'] as String?,
           id,
@@ -1517,15 +1689,19 @@ class SyncService implements MailSync {
 
   /// Fills in the bodies of an opened thread, newest first.
   ///
-  /// Only messages with nothing stored are fetched, so the second open of a
-  /// thread costs one sqlite read and no network at all.
+  /// Only messages with nothing stored, or with a body marked stale, are
+  /// fetched, so the second open of a thread costs one sqlite read and no
+  /// network at all: any detail answer clears the stale mark.
   @override
   Future<void> ensureBodies(String conversationKey) async {
     final thread =
         await _store.loadThread(conversationKey, sources: const [_source]);
     final missing = [
       for (final message in thread)
-        if (message.bodyText == null || message.bodyText!.isEmpty) message,
+        if (message.bodyText == null ||
+            message.bodyText!.isEmpty ||
+            message.bodyStale)
+          message,
     ]..sort((a, b) => (b.receivedAt ?? '').compareTo(a.receivedAt ?? ''));
 
     for (final message in missing.take(_bodyFetchBatch)) {
@@ -1548,6 +1724,12 @@ class SyncService implements MailSync {
   /// and so is one the server refuses to show: it must not cost the rest of a
   /// thread its bodies, nor park a triage queue. Anything else is a real
   /// failure and belongs on the banner.
+  ///
+  /// Any answer that is not a transient failure clears the row's stale-body
+  /// mark: a 200 through [MessageStore.updateMessageDetail], which replaces
+  /// the body only when one came back, and a permanent refusal through
+  /// [MessageStore.clearBodyStale], which keeps the old text. A transient
+  /// failure rethrows and keeps the mark, so the next open tries again.
   Future<void> _fetchDetailInto(String sourceMessageId) async {
     // A local echo's id was minted by this app before the server had the
     // message, and its body was written by the hand that sent it. Asking
@@ -1564,7 +1746,12 @@ class SyncService implements MailSync {
       // permission on the SDK — so it is skipped the way a vanished message
       // is. The delta feed already omits hidden senders; this path only runs
       // after a policy flip, and it must not park a thread or a triage queue.
+      //
+      // The stale-body mark goes too, and the old text stays: this message
+      // will never have a better body than the one stored, and a mark left in
+      // place would ask for the same refusal on every thread open.
       if (e.statusCode == 403 || e.statusCode == 404 || e.statusCode == 410) {
+        await _store.clearBodyStale(_source, sourceMessageId);
         return;
       }
       rethrow;
@@ -1573,11 +1760,29 @@ class SyncService implements MailSync {
     final uniqueBody = detail['uniqueBody'];
     final rawBody =
         uniqueBody is Map<String, dynamic> ? uniqueBody['content'] as String? : null;
-    // Exchange's first-contact tip comes off HERE, where the body first
-    // exists, so nothing downstream — the transcript, the index, the prompts
-    // — ever sees a sentence the sender did not write. See `mail_text.dart`.
-    final bodyText = rawBody == null ? null : stripSenderIdentification(rawBody);
+    // The one conversion site for mail. A backend hands over what its server
+    // sent — Graph's HTML, the MCP server's text — and `mailBodyFromDetail`
+    // reads the connector's own `contentType` to decide which it is. Here
+    // rather than in either backend because there is one set of rules and both
+    // connectors' bodies are read by the same transcript, index and prompts.
+    //
+    // Then Exchange's first-contact tip, and in that order: the tip is a
+    // sentence Exchange added to the body, so it is a line to delete once the
+    // body is text and not a question about converting markup.
+    final converted = rawBody == null
+        ? null
+        : mailBodyFromDetail(
+            content: rawBody,
+            contentType: uniqueBody is Map<String, dynamic>
+                ? uniqueBody['contentType'] as String?
+                : null,
+          );
+    final bodyText =
+        converted == null ? null : stripSenderIdentification(converted);
     final headers = _headers(detail['internetMessageHeaders']);
+    // Graph's word for what kind of invitation this is, and absent on
+    // ordinary mail and on every MCP message.
+    final meeting = (detail['meetingMessageType'] as String?)?.trim();
 
     final rawAttachments = detail['attachments'];
     final rawCount = rawAttachments is List ? rawAttachments.length : 0;
@@ -1587,13 +1792,31 @@ class SyncService implements MailSync {
     // the ordinal cap counts real attachments first.
     final links = extractOwaLinks(bodyText, startOrdinal: rawCount);
 
+    // A body that converted to nothing is a real answer, not a failure: an
+    // M365 notification whose entire content is one linked image has no words
+    // in it, and neither has a body of nested empty table cells. But an empty
+    // string is exactly what `ensureBodies` reads as "no body stored" — it
+    // fetches the rows where `bodyText` is null OR empty — so storing one would
+    // make every open of that thread fetch this detail again, forever, and get
+    // the same empty answer. So the row is SETTLED instead: the stored preview
+    // is the best text such a message has, and where there is not even one, a
+    // single space stops the loop, because the question `ensureBodies` asks is
+    // whether anything is stored and not whether it is worth reading.
+    final String? storedBody;
+    if (bodyText == null) {
+      storedBody = null;
+    } else if (links.body.isEmpty && rawBody!.isNotEmpty) {
+      storedBody = await _settledEmptyBody(sourceMessageId);
+    } else {
+      storedBody = links.body;
+    }
 
     await _store.updateMessageDetail(
       _source,
       sourceMessageId,
       // Null stays null: `updateMessageDetail` COALESCEs, and an empty string
       // from a detail that carried no body would blank one already stored.
-      bodyText: bodyText == null ? null : links.body,
+      bodyText: storedBody,
       // Raised, never lowered. A link the connector never counted is still a
       // file on the message, and the paperclip is how a card says so; a
       // detail that states nothing about attachments stays null, which the
@@ -1601,10 +1824,19 @@ class SyncService implements MailSync {
       // knew".
       hasAttachments:
           links.rows.isNotEmpty ? true : detail['hasAttachments'] as bool?,
-      // Under a 'headers' key rather than at the top level: source_meta_json
-      // is the whole connector-specific blob, and headers are one thing in
-      // it.
-      sourceMetaJson: headers.isEmpty ? null : jsonEncode({'headers': headers}),
+      // Under named keys rather than at the top level: source_meta_json is the
+      // whole connector-specific blob, and headers are one thing in it. Each
+      // key is OMITTED when it has nothing to say, and the whole blob stays
+      // null when neither does — `updateMessageDetail` COALESCEs, so a thin
+      // detail must not overwrite a fat blob a previous fetch wrote. Every
+      // reader looks its own key up and tolerates its absence, which is what
+      // lets a row written before `meeting` existed keep reading correctly.
+      sourceMetaJson: headers.isEmpty && (meeting == null || meeting.isEmpty)
+          ? null
+          : jsonEncode({
+              if (headers.isNotEmpty) 'headers': headers,
+              if (meeting != null && meeting.isNotEmpty) 'meeting': meeting,
+            }),
     );
 
     await _storeAttachments(
@@ -1612,6 +1844,37 @@ class SyncService implements MailSync {
       rawAttachments,
       extraRows: links.rows,
     );
+  }
+
+  /// What to store as the body of a message whose own content converted to no
+  /// text at all, so that the fetch is not repeated on every thread open.
+  ///
+  /// The delta page's preview is the fallback because it is the only other text
+  /// the server ever sent about this message, and on an image-only notification
+  /// it is usually the alt text or the subject restated — thin, but true, and
+  /// already tidied at ingest. Tidied again here because a row pulled down by an
+  /// older build stored the preview as the server wrote it, and this is the
+  /// moment its text becomes a body that the transcript, the index and the
+  /// prompts all read.
+  ///
+  /// The space is the last resort and it is deliberately not a sentence: nothing
+  /// should render a caption this app invented over a message it did not write.
+  /// It is a mark meaning "asked, and there were no words", and it survives
+  /// `updateMessageDetail`'s COALESCE, which only treats NULL as "unsaid".
+  ///
+  /// Null when the row already holds words, which is a stale body an older
+  /// converter wrote: the refetch answered, so the mark clears, but no body
+  /// came back to replace it with, and a preview or a space is worse than the
+  /// text the message already has.
+  Future<String?> _settledEmptyBody(String sourceMessageId) async {
+    final row = await _store.getMessageRow(_source, sourceMessageId);
+    final stored = row?['body_text'] as String?;
+    if (stored != null && stored.trim().isNotEmpty) return null;
+    final preview = row?['body_preview'] as String?;
+    final tidied = preview == null || preview.isEmpty
+        ? ''
+        : stripLinkTargets(tidyMailText(preview));
+    return tidied.isEmpty ? ' ' : tidied;
   }
 
   /// Writes what came with one message and queues the eligible ones for text.

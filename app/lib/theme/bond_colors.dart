@@ -121,4 +121,27 @@ abstract final class BondColors {
   // ── §14 expansion: governed off-palette channel color (decision 9) ────
   static const Color channelVideo = Color(0xFF6D5BA6);
   static const Color channelVideoTint = Color(0xFFEFE9F6);
+
+  // ── External senders (BondTone.external) ──────────────────────────────
+  //
+  // COOL, where the whole palette is warm, and that is the entire idea: a
+  // thread from outside the owner's own domains is not louder than an internal
+  // one, it is a different temperature. Copper already means "this wants you"
+  // and clay means "this went wrong"; a stranger's mail is neither, so it gets
+  // a hue nothing else in the app uses rather than a share of one that means
+  // something.
+
+  /// The left stripe on an external row. A real colour rather than a tint
+  /// because it is the one external mark drawn with no text on it, so it has to
+  /// carry contrast on its own — `external_tint_test` holds it over 3:1 against
+  /// [surface] and against [rail], the two grounds this app draws on.
+  static const Color external = Color(0xFF46708F);
+
+  /// Fill and ink for the `External` chip.
+  static const Color externalTint = Color(0xFFE8EDF2);
+  static const Color onExternalTint = Color(0xFF3B5A73);
+
+  /// The chip's edge. Darker than the fill so the pill has a shape on white,
+  /// on [primaryTintBorder]'s precedent.
+  static const Color externalBorder = Color(0xFFA9C2D6);
 }

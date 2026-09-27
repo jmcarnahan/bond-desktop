@@ -1,3 +1,5 @@
+import 'package:bond_inbox/models/attachment_models.dart'
+    show quoteAttachmentKind;
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/llm/triage_task.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -214,12 +216,14 @@ void main() {
       String? name = 'lease-addendum.pdf',
       int size = 184320,
       Object? isInline = 0,
+      String kind = 'file',
     }) =>
         {
           'attachment_id': id,
           'name': name,
           'size': size,
           'is_inline': isInline,
+          'kind': kind,
         };
 
     test('the names and sizes are stated on their own line', () {
@@ -297,6 +301,55 @@ void main() {
       );
 
       expect(user, isNot(contains('Attachments:')));
+    });
+
+    test('a Teams quote-reply is the message answered, not a file', () {
+      // The quote row has no name and no size, and it is not inline either,
+      // so only its kind keeps it from reading as "a file".
+      final user = task.buildUserMessage(
+        TriageInput(
+          email(),
+          DateTime(2026, 8, 29),
+          attachments: [
+            attachment(
+              id: 'quote',
+              name: null,
+              size: 0,
+              kind: quoteAttachmentKind,
+            ),
+          ],
+        ),
+      );
+
+      expect(user, isNot(contains('Attachments:')));
+      expect(user, isNot(contains('a file')));
+    });
+
+    test('a quote-reply beside a real file names the file only', () {
+      final user = task.buildUserMessage(
+        TriageInput(
+          email(),
+          DateTime(2026, 8, 29),
+          attachments: [
+            attachment(
+              id: 'quote',
+              name: null,
+              size: 0,
+              kind: quoteAttachmentKind,
+            ),
+            attachment(id: 'att-2', name: 'plan.pdf', size: 0),
+          ],
+        ),
+      );
+
+      // The names sit inside their fence on the lines after the word, so the
+      // block read is from `Attachments:` to the fence's close.
+      final start = user.indexOf('Attachments: ');
+      final block =
+          user.substring(start, user.indexOf('</untrusted_data>', start));
+      expect(block, contains('plan.pdf'));
+      expect(block, isNot(contains('a file')));
+      expect(block, isNot(contains(',')));
     });
 
     test('at most five names, whatever arrived', () {

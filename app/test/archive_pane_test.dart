@@ -3,6 +3,7 @@ import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/widgets/archive_pane.dart';
 import 'package:bond_inbox/widgets/chips.dart' show BondFilterPill;
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
+import 'package:bond_inbox/widgets/conversation_row.dart';
 import 'package:bond_inbox/widgets/home_feed_row.dart';
 import 'package:bond_inbox/widgets/later_digest.dart';
 import 'package:flutter/material.dart';
@@ -17,6 +18,7 @@ Conversation _conv({
   String? bucket,
   ConversationState state = ConversationState.waiting,
   String lastMessageAt = '2026-01-14T10:00:00',
+  String? latestInboundFrom,
 }) {
   return Conversation(
     id: id,
@@ -27,6 +29,7 @@ Conversation _conv({
     state: state,
     bucket: bucket,
     lastMessageAt: lastMessageAt,
+    latestInboundFrom: latestInboundFrom,
   );
 }
 
@@ -81,6 +84,7 @@ void main() {
     String? searchNotice,
     void Function(String)? onSearch,
     VoidCallback? onExitSearch,
+    Set<String> ownerDomains = const {},
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -111,6 +115,7 @@ void main() {
           onSearch: onSearch ?? (_) {},
           onExitSearch: onExitSearch ?? () {},
           now: _now,
+          ownerDomains: ownerDomains,
         ),
       ),
     ));
@@ -160,6 +165,27 @@ void main() {
     expect(find.byType(ConversationListPane), findsOneWidget);
     expect(find.text('DONE'), findsOneWidget);
     expect(find.textContaining('Launch date'), findsOneWidget);
+  });
+
+  testWidgets('a filed external thread keeps its mark in the Done pile',
+      (tester) async {
+    // Filing a thread must not quietly change who it looks like it is from:
+    // the same stripe the inbox row wears, off the same stored answer.
+    await pump(
+      tester,
+      tab: ArchiveTab.done,
+      ownerDomains: {'northwind.example.com'},
+      conversations: [
+        _conv(
+          id: 'a',
+          subject: 'Invoice 4471',
+          state: ConversationState.done,
+          latestInboundFrom: 'sales@vendor.example.net',
+        ),
+      ],
+    );
+
+    expect(find.byKey(ConversationRow.externalStripeKey), findsOneWidget);
   });
 
   testWidgets(

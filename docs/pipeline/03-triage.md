@@ -10,6 +10,14 @@ through `refoldThreadState` before it emits, because the state machine folded
 `needs_reply` on at ingest and the gate is only speaking now — see
 [02-gates.md](02-gates.md).
 
+The CTA rollup is the first action item (or the summary, when the message
+needs something and names no item), with the deadline appended as
+"— by <deadline>" before the clamp. The deadline goes through
+`showableDeadline` (`app/lib/services/deadline_parse.dart`) first, because
+this WRITES the banner: a plan-relative word such as "Day 1" stamped here
+would outlive every display-time filter, so it is never written (see
+[08-attention.md](08-attention.md)).
+
 **The model call.**
 
 | | |
@@ -52,7 +60,14 @@ are in the bakeoff ledger (`docs/model-bakeoff.md`, "Golden ledger").
 
 **The tail and the digest, measured (2026-09-16/17).** What triage reads is
 unchanged: the newest three messages before this one, each cut to 300
-characters, in the `thread` fence. What the prompt gained is an optional
+characters, in the `thread` fence. Link targets come off first
+(`stripLinkTargets` from `html_text.dart`, applied in `message_block.dart`'s
+`_tailBody` and `buildMessageBlock`), before the
+300-character tail cap and before the message block's own body cap, so a
+hundred characters of tracking query cannot spend a quoted turn. A Teams
+quote-reply adds one line above the body, `↪ replying to <sender>: <preview>`
+(`quotedReplyLines`, the preview cut to 200 characters), so the model can see
+which turn the reply answers. What the prompt gained is an optional
 `TriageInput.threadDigest`. When a caller passes one it is rendered as its own
 `thread_digest` fence between the attachment line and the thread fence, under
 the line "A digest of the thread before those messages, oldest first, for
@@ -93,7 +108,9 @@ statement, like the directness line, so it sits outside; the FILE NAMES are as
 attacker-controlled as a body, so they ride inside an `attachment_names`
 fence on the same logical line. At most five names, clamped to 120 characters,
 and a size of 0 (unknown, which is every chat attachment) is left unsaid
-rather than printed as `(0 B)`.
+rather than printed as `(0 B)`. `_attachmentLine` skips a Teams quote-reply's
+`message_reference` row the way it skips an inline one: a quote is no file,
+and it already reaches the prompt as the `↪ replying to` line.
 
 The line is present when it can be. `_triageClaimed` calls `ensureBody` inside
 the claim, and that is `_fetchDetailInto`, so a mail attachment is on the row
@@ -103,7 +120,10 @@ detail fetch costs the line and never the triage.
 **Failure behavior.** The queue's header comment in `triage_queue.dart`
 documents the degrade-vs-park policy and the concurrency economics. An
 unreachable fast server parks the queue; the backlog resumes when the server
-comes up, with the `Triaging N remaining…` counter in the rail.
+comes up, with the `Triaging N remaining…` counter in the rail. `pump` emits
+its counts first, inside its `try`, and an empty queue returns there without
+taking the drain gate, so a pump over nothing never waits behind a long worker
+drain with its `_running` latch held (see [02-gates.md](02-gates.md)).
 
 **The headerless defer.** A degraded detail fetch that leaves no headers at
 all, on a machine-shaped sender, is the one case where classifying from the

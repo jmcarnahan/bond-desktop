@@ -1,20 +1,23 @@
+import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/llm/message_block.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The two budget-and-render helpers every prompt builder shares.
 ///
-/// `buildMessageBlock` itself is pinned through the tasks that render it
+/// What `buildMessageBlock` RENDERS is pinned through the tasks that read it
 /// (`triage_task_test.dart`, `extract_task_test.dart`); what is here is the
 /// pair that arrived with the thread digest — the fitter that decides which
 /// LINES of a digest a prompt reads, and the tail renderer three tasks now
-/// share.
+/// share — plus the one thing about the block that is a property of the block
+/// itself and of no task: the order its two strips run in against its cap.
 Message row({
   String id = 'm1',
   String? fromName = 'Priya Anand',
   String? bodyText,
   String? bodyPreview,
   bool outbound = false,
+  List<AttachmentRef> attachments = const [],
 }) =>
     Message(
       id: id,
@@ -24,9 +27,186 @@ Message row({
       bodyText: bodyText,
       bodyPreview: bodyPreview,
       receivedAt: '2026-08-29T16:05:00Z',
+      attachments: attachments,
     );
 
+/// A Teams quote-reply as the sync stores one: no name, no url, and the quoted
+/// sender and snippet on the two columns `TeamsSync.attachmentRows` reuses.
+AttachmentRef _quote({
+  String? sender = 'Dana Ruiz',
+  String? preview = 'is it slide 29 in the deck?',
+}) =>
+    AttachmentRef(
+      source: 'teams',
+      messageId: 'm1',
+      attachmentId: 'q1',
+      kind: quoteAttachmentKind,
+      contentType: 'messageReference',
+      itemFrom: sender,
+      cardText: preview,
+    );
+
+/// A URL-heavy body: [count] canonical runs, one per line, each a short label
+/// and a long tracking address. Automated mail in a nutshell, and the shape
+/// that decides whether the strip runs before the cap or after it.
+String linkRunBody(int count) => [
+      for (var i = 1; i <= count; i++)
+        'Item ${i.toString().padLeft(2, '0')} '
+            '<https://links.example.com/t/${'a' * 60}>',
+    ].join('\n');
+
 void main() {
+  group('buildMessageBlock', () {
+    test('a link run reaches the model as its label, never its target', () {
+      final block = buildMessageBlock(row(
+        bodyText: 'Findings.docx <https://files.example.com/a/Findings.docx> '
+            'is ready — see the summary '
+            '<https://wiki.example.com/x/Summary>.\n'
+            'Read https://docs.example.com/guide before Friday.',
+      ));
+
+      expect(block, contains('Findings.docx is ready'));
+      expect(block, contains('see the summary.'));
+      expect(block, isNot(contains('<https://')));
+      // A bare URL was never in a run: it is the only thing the sender put
+      // there, and taking it out would lose the reference entirely.
+      expect(block, contains('https://docs.example.com/guide'));
+    });
+
+    test('the targets come off BEFORE the cap, so labels survive it', () {
+      // Sixty runs: nothing but addresses past the cap in the raw body, and
+      // well inside it once the addresses go. A strip that ran after the clip
+      // would have spent the whole budget on tracking queries and never
+      // reached the last label.
+      final body = linkRunBody(60);
+      expect(body.length, greaterThan(messageBlockBodyCap));
+
+      final block = buildMessageBlock(row(bodyText: body));
+
+      expect(block, contains('Item 01'));
+      expect(block, contains('Item 60'));
+      expect(block, isNot(contains('links.example.com')));
+    });
+
+    test('a body that is nothing but unlabelled targets still says something',
+        () {
+      // The strip leaves a run with no label as its address in plain text, so
+      // the block is the message rather than the empty-body stand-in.
+      final block = buildMessageBlock(
+        row(bodyText: '<https://forms.example.com/approve/9f2>'),
+      );
+
+      expect(block, contains('https://forms.example.com/approve/9f2'));
+    });
+
+    test('a quote-reply tells the model whom it answers, not "(unnamed)"', () {
+      // Teams sends a quote-reply as a nameless attachment, so the block used
+      // to open `Shared a file: (unnamed)` — a sentence about a file that does
+      // not exist, in place of the one thing the quote says.
+      final block = buildMessageBlock(row(
+        bodyText: '29 and 30',
+        attachments: [_quote()],
+      ));
+
+      expect(
+        block,
+        contains('↪ replying to Dana Ruiz: is it slide 29 in the deck?'),
+      );
+      expect(block, contains('29 and 30'));
+      expect(block, isNot(contains('(unnamed)')));
+      expect(block, isNot(contains('Shared a file')));
+      // The quote reads above the answer, the way it does on screen.
+      expect(
+        block.indexOf('↪ replying to'),
+        lessThan(block.indexOf('29 and 30')),
+      );
+    });
+
+    test('a quote-reply with no words of its own is still the quote', () {
+      final block = buildMessageBlock(row(bodyText: '', attachments: [_quote()]));
+
+      expect(block, contains('↪ replying to Dana Ruiz'));
+      expect(block, isNot(contains('Shared an image')));
+      expect(block, isNot(contains('(unnamed)')));
+    });
+
+    test('half a quote is still worth a line', () {
+      final sender = buildMessageBlock(
+        row(bodyText: 'ok', attachments: [_quote(preview: null)]),
+      );
+      final preview = buildMessageBlock(
+        row(bodyText: 'ok', attachments: [_quote(sender: null)]),
+      );
+      final neither = buildMessageBlock(
+        row(bodyText: 'ok', attachments: [_quote(sender: null, preview: null)]),
+      );
+
+      expect(sender, contains('↪ replying to Dana Ruiz'));
+      expect(preview, contains('↪ replying to: is it slide 29 in the deck?'));
+      expect(neither, isNot(contains('↪')));
+      expect(neither, isNot(contains('(unnamed)')));
+    });
+
+    test('the quoted snippet is clamped, so a quoted essay costs one line', () {
+      final block = buildMessageBlock(row(
+        bodyText: 'agreed',
+        attachments: [_quote(preview: 'w' * 900)],
+      ));
+
+      expect(block, contains('↪ replying to Dana Ruiz: ${'w' * 200}'));
+      expect(block, isNot(contains('w' * 201)));
+    });
+
+    test('quote lines cannot crowd out the words the message said', () {
+      // Graph sends ONE `messageReference` per reply and there is no compose
+      // surface that quotes two, so thirty is a shape nobody has seen. It is
+      // here because the quote lines sit AHEAD of the body and the join is
+      // clipped to `messageBlockBodyCap` afterwards: uncapped, thirty quoted
+      // essays would spend the whole budget on other people's sentences and
+      // clip away the one thing the prompt cannot do without.
+      final crowd = [
+        for (var i = 0; i < 30; i++)
+          _quote(sender: 'Quoted $i', preview: 'q' * 300),
+      ];
+      // Each line renders as the `↪ replying to <sender>: ` prefix and 200
+      // clamped characters of snippet — call it 225, thirty times over, against
+      // a 4000-character body budget.
+      expect(crowd.length * 225, greaterThan(messageBlockBodyCap));
+
+      final block = buildMessageBlock(
+        row(bodyText: 'The answer is 29 and 30.', attachments: crowd),
+      );
+
+      expect(block, contains('The answer is 29 and 30.'));
+      expect('↪'.allMatches(block).length, quotedReplyMaxLines);
+      expect(block, contains('Quoted 0'));
+      expect(block, contains('Quoted 1'));
+      // Dropped silently — a `(+28 more)` note would cost body characters to
+      // say something about quotes nobody is going to read.
+      expect(block, isNot(contains('Quoted 2')));
+      expect(block, isNot(contains('more')));
+    });
+
+    test('a file beside the quote is still named', () {
+      final block = buildMessageBlock(row(
+        bodyText: '',
+        attachments: [
+          _quote(),
+          AttachmentRef(
+            source: 'teams',
+            messageId: 'm1',
+            attachmentId: 'a2',
+            ordinal: 1,
+            name: 'Report.pptx',
+          ),
+        ],
+      ));
+
+      expect(block, contains('↪ replying to Dana Ruiz'));
+      expect(block, contains('Shared a file: Report.pptx'));
+    });
+  });
+
   group('fitThreadDigest', () {
     const header = '(thread has 40 earlier messages; 12 quoted below)';
 
@@ -278,6 +458,32 @@ void main() {
         buildThreadTailText([row(bodyText: 'See [[att:abc]] for the numbers.')]),
         'Priya Anand: See for the numbers.',
       );
+    });
+
+    test('a quoted link run is its label, not its target', () {
+      expect(
+        buildThreadTailText([
+          row(
+            bodyText: 'Numbers are in the deck '
+                '<https://files.example.com/d/Q3-deck>.',
+          )
+        ]),
+        'Priya Anand: Numbers are in the deck.',
+      );
+    });
+
+    test('the targets come off before the 300-character clip', () {
+      // One anchor longer than the whole quote budget. Clipping first would
+      // leave a tail that is nothing but somebody else's tracking address;
+      // stripping first leaves the sentence, whole.
+      final text = buildThreadTailText([
+        row(
+          bodyText: 'Approve it here '
+              '<https://links.example.com/t/${'a' * 400}> before Friday.',
+        )
+      ]);
+
+      expect(text, 'Priya Anand: Approve it here before Friday.');
     });
   });
 }

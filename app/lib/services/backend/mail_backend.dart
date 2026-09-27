@@ -73,6 +73,19 @@ abstract class MailBackend {
   /// Items copy is later matched against.
   Future<SentDraft> sendDraft(String draftId);
 
+  /// Deletes a draft this app created and could not finish, so a reply that
+  /// failed halfway does not leave an empty draft behind in the owner's Drafts.
+  ///
+  /// Only ever called on a draft that was NOT sent: a sent draft is already
+  /// gone from Drafts, and its id may name the Sent Items copy by then.
+  ///
+  /// A draft that is already gone counts as deleted. Anything else throws,
+  /// and the caller treats this as best-effort: the failure it is cleaning up
+  /// after is the one the owner needs to see, not this one. A connection with
+  /// no way to delete a draft answers without doing anything and says so on
+  /// its own implementation.
+  Future<void> deleteDraft(String draftId);
+
   /// Marks messages read (or unread) on the server.
   ///
   /// A best-effort ACK of a decision the local store has already made: the
@@ -81,4 +94,76 @@ abstract class MailBackend {
   /// and the ack is gone, not failed, and is NOT in the returned list; only
   /// ids worth retrying come back.
   Future<List<String>> markRead(List<String> messageIds, {bool isRead = true});
+}
+
+/// The one draft write only some connections can make: adding people to a
+/// reply after the server has built it.
+///
+/// A SEPARATE interface rather than two more members on [MailBackend], for two
+/// reasons. The connection reason: the MCP server's `manage_draft` takes to and
+/// cc on `action: 'create'` only, so the reply path there has no call that could
+/// honour it, and a seam member every implementation must answer would make one
+/// of them answer by throwing. The language reason: Dart's `implements` ignores
+/// a default body, so a member added to [MailBackend] has to be written out
+/// again in every class that implements it, test doubles included.
+///
+/// A backend that can do it says so by implementing this; callers ask
+/// [MailBackendRecipients.canEditDraftRecipients] and never `is` directly.
+abstract interface class DraftRecipientsEditor {
+  /// Adds [to] and [cc] to a draft's existing recipient lines.
+  ///
+  /// ADDITIONS, not a replacement: the base set belongs to whatever built the
+  /// draft — for a reply, the server's own `/createReply`, which put the person
+  /// being answered on the To line — and losing them is the one outcome worse
+  /// than not adding anybody. An implementation merges rather than overwrites,
+  /// and a line nobody added to is left alone.
+  ///
+  /// An empty list for a line means "nothing to add there", never "clear it".
+  Future<void> updateDraftRecipients(
+    String draftId, {
+    List<String> to,
+    List<String> cc,
+  });
+}
+
+/// The recipients question, asked of any [MailBackend].
+extension MailBackendRecipients on MailBackend {
+  /// Whether this connection can add people to a reply the server built.
+  ///
+  /// Read by the composer, which shows its recipients row only where the answer
+  /// is yes and says so plainly where it is no. A connection that cannot do it
+  /// must never be handed people to add: they would be dropped between the
+  /// draft and the send, which is the one failure the owner could not see.
+  bool get canEditDraftRecipients => this is DraftRecipientsEditor;
+
+  /// [DraftRecipientsEditor.updateDraftRecipients], or a throw.
+  ///
+  /// [StateError] rather than a silent no-op, and the caller is expected to
+  /// have asked [canEditDraftRecipients] first: reaching here on a connection
+  /// that cannot amend recipients is a wiring bug, and the people the owner
+  /// added are still on screen to be seen when the send reports it.
+  /// `async`, so the refusal arrives as a failed future rather than as a throw
+  /// out of the call itself: a caller that holds this future — every one of them
+  /// awaits it inside the send's own try — must not be able to see the failure
+  /// before it has started.
+  Future<void> updateDraftRecipients(
+    String draftId, {
+    List<String> to = const [],
+    List<String> cc = const [],
+  }) async {
+    if (this is! DraftRecipientsEditor) {
+      throw StateError(
+        'This connection cannot add people to a reply; '
+        'canEditDraftRecipients is false.',
+      );
+    }
+    // The cast is LOAD BEARING and the analyzer cannot say so. An `is` test
+    // does not promote to a type that is not a subtype of the receiver's, and
+    // [DraftRecipientsEditor] is not a subtype of [MailBackend] — so a call
+    // written on the untouched receiver resolves to this extension member
+    // again, and this method calls itself until the stack goes. It compiles
+    // clean and overflows at runtime; `reply_recipients_test` pins the forward.
+    final editor = this as DraftRecipientsEditor;
+    return editor.updateDraftRecipients(draftId, to: to, cc: cc);
+  }
 }

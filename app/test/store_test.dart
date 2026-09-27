@@ -1,4 +1,6 @@
-import 'package:bond_inbox/data/database.dart';
+// `show`, because both libraries export a `Conversation` and this file names
+// the model one.
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:drift/drift.dart' show Variable;
@@ -404,6 +406,288 @@ void main() {
         (await store.loadConversations(sources: ['email', 'teams'])).length,
         4,
       );
+    });
+
+    /// Why the thread is asking, read off the message that made it ask — the
+    /// four columns the rail and the row explain themselves with.
+    group('the needs-you reason', () {
+      Future<Conversation> load() async =>
+          (await store.loadConversations()).firstWhere((c) => c.id == 'c-new');
+
+      test('comes off the newest kept inbound that answered yes', () async {
+        await store.upsertMessage(messageRow(
+          id: 'old',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T09:00:00Z',
+        ));
+        await store.upsertMessage(messageRow(
+          id: 'new',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T10:00:00Z',
+        ));
+        await store.writeNeedsYouVerdict('email', 'old',
+            verdict: true, reason: 'An older ask nobody answered.');
+        await store.writeNeedsYouVerdict('email', 'new',
+            verdict: true, reason: 'teams_direct');
+
+        final c = await load();
+        // One message names all three, because all three subqueries order the
+        // same way — a reason from one message stamped with another's time
+        // would point the reader at the wrong place in the transcript.
+        expect(c.needsYouReason, 'teams_direct');
+        expect(c.needsYouReasonMessageId, 'new');
+        expect(c.needsYouReasonAt, '2026-08-28T10:00:00Z');
+      });
+
+      test('ignores a verdict of no, whatever it wrote', () async {
+        await store.upsertMessage(messageRow(
+          id: 'yes',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T09:00:00Z',
+        ));
+        await store.upsertMessage(messageRow(
+          id: 'no',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T10:00:00Z',
+        ));
+        await store.writeNeedsYouVerdict('email', 'yes',
+            verdict: true, reason: 'Asks you to confirm the date.');
+        // A reason written under a NO answers the opposite question: it says
+        // why the message does not want the owner.
+        await store.writeNeedsYouVerdict('email', 'no',
+            verdict: false, reason: 'An automated digest; nothing is asked.');
+
+        final c = await load();
+        expect(c.needsYouReason, 'Asks you to confirm the date.');
+        expect(c.needsYouReasonMessageId, 'yes');
+      });
+
+      test('a message the gate threw out never explains the thread', () async {
+        // The bot post of entry 8a: it is the newest thing in the thread and
+        // the reader is not waiting on it.
+        await store.upsertMessage(messageRow(
+          id: 'human',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T09:00:00Z',
+        ));
+        await store.upsertMessage(messageRow(
+          id: 'bot',
+          conversationKey: 'c-new',
+          fromName: 'Build bot',
+          fromAddress: 'builds@ci.example.com',
+          receivedAt: '2026-08-28T10:00:00Z',
+        ));
+        await store.writeNeedsYouVerdict('email', 'human',
+            verdict: true, reason: 'Asks you to confirm the date.');
+        await store.writeNeedsYouVerdict('email', 'bot',
+            verdict: true, reason: 'The build finished.');
+        await store.writeTriage('email', 'bot',
+            status: 'skipped', gateReason: 'auto_generated');
+
+        final c = await load();
+        expect(c.needsYouReason, 'Asks you to confirm the date.');
+        expect(c.needsYouReasonMessageId, 'human');
+      });
+
+      test('a Teams message the gate skipped still counts as kept', () async {
+        await store.upsertMessage(messageRow(
+          id: 'chat',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T10:00:00Z',
+        ));
+        await store.writeNeedsYouVerdict('email', 'chat',
+            verdict: true, reason: 'teams_direct');
+        await store.writeTriage('email', 'chat',
+            status: 'skipped', gateReason: 'teams_source');
+
+        expect((await load()).needsYouReason, 'teams_direct');
+      });
+
+      test('the owner\'s own mail never explains the thread', () async {
+        await store.upsertMessage(messageRow(
+          id: 'mine',
+          conversationKey: 'c-new',
+          direction: 'outbound',
+          receivedAt: '2026-08-28T10:00:00Z',
+        ));
+        await store.writeNeedsYouVerdict('email', 'mine',
+            verdict: true, reason: 'You asked them a question.');
+
+        final c = await load();
+        expect(c.needsYouReason, isNull);
+        expect(c.needsYouReasonMessageId, isNull);
+        expect(c.needsYouReasonAt, isNull);
+      });
+
+      test('reply_expected is the newest kept inbound\'s own judgement',
+          () async {
+        await store.upsertMessage(messageRow(
+          id: 'm1',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T10:00:00Z',
+        ));
+
+        // Never judged reads as null, not as false: the unjudged rows are the
+        // worklist, and rounding them down would hide brand new mail.
+        expect((await load()).replyExpected, isNull);
+
+        await store.writeTriage('email', 'm1',
+            status: 'done',
+            result: const TriageResult(
+              urgency: 'normal',
+              category: 'other',
+              summary: 'An FYI.',
+              needsAction: false,
+              actionItems: [],
+            ));
+        expect((await load()).replyExpected, isFalse);
+
+        await store.writeTriage('email', 'm1',
+            status: 'done',
+            result: const TriageResult(
+              urgency: 'normal',
+              category: 'other',
+              summary: 'Asks for a date.',
+              needsAction: true,
+              actionItems: ['Confirm the date'],
+              replyExpected: true,
+            ));
+        expect((await load()).replyExpected, isTrue);
+      });
+
+      test('a thread with nothing stored answers all four with nothing',
+          () async {
+        final c = (await store.loadConversations())
+            .firstWhere((c) => c.id == 'c-old');
+        expect(c.needsYouReason, isNull);
+        expect(c.needsYouReasonMessageId, isNull);
+        expect(c.needsYouReasonAt, isNull);
+        expect(c.replyExpected, isNull);
+      });
+    });
+
+    /// Who the thread is from for the external mark — the newest KEPT inbound
+    /// sender, on the reason subselect's own filter, so the chip and the ask
+    /// can never describe different people.
+    group('latest_inbound_from', () {
+      Future<Conversation> load() async =>
+          (await store.loadConversations()).firstWhere((c) => c.id == 'c-new');
+
+      test('skips the owner\'s reply and the gated bot to name the person',
+          () async {
+        await store.upsertMessage(messageRow(
+          id: 'human',
+          fromAddress: 'sam@northwind.example.com',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T08:00:00Z',
+        ));
+        // Newer inbound, but the gate threw it out: tinting off it would say
+        // External about a sender the row never claims to be waiting on.
+        await store.upsertMessage(messageRow(
+          id: 'bot',
+          fromAddress: 'noreply@vendor.example.net',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T09:00:00Z',
+        ));
+        await store.writeTriage('email', 'bot',
+            status: 'skipped', gateReason: 'auto_generated');
+        // Newest of all, and the owner's own — never who the thread is from.
+        await store.upsertMessage(messageRow(
+          id: 'mine',
+          direction: 'outbound',
+          fromAddress: 'me@northwind.example.com',
+          conversationKey: 'c-new',
+          receivedAt: '2026-08-28T10:00:00Z',
+        ));
+
+        expect((await load()).latestInboundFrom, 'sam@northwind.example.com');
+      });
+
+      test('a thread with no kept inbound answers null', () async {
+        await store.upsertMessage(messageRow(
+          id: 'bot',
+          fromAddress: 'noreply@vendor.example.net',
+          conversationKey: 'c-new',
+        ));
+        await store.writeTriage('email', 'bot',
+            status: 'skipped', gateReason: 'no_reply');
+
+        expect((await load()).latestInboundFrom, isNull);
+      });
+
+      // The three newest-message joins name three DIFFERENT messages on a
+      // mixed thread, and each column must come off its own: the reason off
+      // the newest kept yes, the sender and reply_expected off the newest kept
+      // inbound, the deadline and the draft off the newest inbound whatever
+      // the gate did. Two columns off one join disagreeing would mean the join
+      // matched the wrong row, or more than one.
+      test('stays coherent with the reason columns on a mixed thread',
+          () async {
+        String ago(int hours) => MessageStore.isoStamp(
+            DateTime.now().toUtc().subtract(Duration(hours: hours)));
+        final askedAt = ago(4);
+        await store.upsertMessage(messageRow(
+          id: 'asked',
+          fromAddress: 'ana@northwind.example.com',
+          conversationKey: 'c-new',
+          receivedAt: askedAt,
+        ));
+        await store.writeNeedsYouVerdict('email', 'asked',
+            verdict: true, reason: 'Asks you to confirm the date.');
+        await store.upsertMessage(messageRow(
+          id: 'followup',
+          fromAddress: 'sam@contoso.example.com',
+          conversationKey: 'c-new',
+          receivedAt: ago(3),
+        ));
+        await store.writeTriage('email', 'followup',
+            status: 'done',
+            result: const TriageResult(
+              urgency: 'normal',
+              category: 'other',
+              summary: 'Chases the date.',
+              needsAction: true,
+              actionItems: [],
+              replyExpected: true,
+            ));
+        await store.upsertMessage(messageRow(
+          id: 'bot',
+          fromAddress: 'noreply@vendor.example.net',
+          conversationKey: 'c-new',
+          receivedAt: ago(2),
+        ));
+        await store.writeTriage('email', 'bot',
+            status: 'skipped', gateReason: 'auto_generated');
+        await db.customStatement(
+          "UPDATE messages SET deadline = 'by Friday' "
+          "WHERE source_message_id = 'bot'",
+        );
+        await store.upsertDraft(
+          source: 'email',
+          conversationKey: 'c-new',
+          replyToMessageId: 'bot',
+          body: 'Thanks.',
+        );
+        await store.upsertMessage(messageRow(
+          id: 'mine',
+          direction: 'outbound',
+          fromAddress: 'me@northwind.example.com',
+          conversationKey: 'c-new',
+          receivedAt: ago(1),
+        ));
+
+        final all = await store.loadConversations();
+        // One row per thread still: no join multiplied c-new.
+        expect(all.where((c) => c.id == 'c-new'), hasLength(1));
+        final c = all.firstWhere((c) => c.id == 'c-new');
+        expect(c.needsYouReason, 'Asks you to confirm the date.');
+        expect(c.needsYouReasonMessageId, 'asked');
+        expect(c.needsYouReasonAt, askedAt);
+        expect(c.latestInboundFrom, 'sam@contoso.example.com');
+        expect(c.replyExpected, isTrue);
+        expect(c.latestDeadline, 'by Friday');
+        expect(c.pendingDraftCount, 1);
+      });
     });
   });
 

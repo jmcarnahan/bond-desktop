@@ -7,6 +7,7 @@ import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
+import 'package:bond_inbox/services/chat_mentions.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart'
     show encodeEmbedding, EmbeddingsClient;
 import 'package:bond_inbox/services/llm/llm_client.dart';
@@ -85,6 +86,9 @@ class FakeMail implements MailBackend {
       SentDraft(draftId: draftId);
 
   @override
+  Future<void> deleteDraft(String draftId) async {}
+
+  @override
   Future<List<String>> markRead(
     List<String> messageIds, {
     bool isRead = true,
@@ -138,7 +142,11 @@ class FakeTeams implements TeamsBackend {
   }
 
   @override
-  Future<Map<String, dynamic>> sendChatMessage(String chatId, String text) =>
+  Future<Map<String, dynamic>> sendChatMessage(
+    String chatId,
+    String text, {
+    List<ChatMention> mentions = const [],
+  }) =>
       throw UnimplementedError();
 
   @override

@@ -51,7 +51,10 @@ void main() {
   /// One unread inbound message on a scored thread, triaged as asking NOTHING
   /// — no reply expected, no action, normal urgency, no deadline, no CTA on the
   /// conversation — carrying [verdict] in `needs_you_verdict`.
-  Future<void> seed(bool? verdict) async {
+  ///
+  /// [triageAsks] flips triage to the Jira-broadcast shape instead: a reply
+  /// expected and an action item, the two asks a judged no now outranks.
+  Future<void> seed(bool? verdict, {bool triageAsks = false}) async {
     await store.upsertConversation({
       'source': 'email',
       'conversation_key': 'conv-onboarding',
@@ -75,13 +78,13 @@ void main() {
       'email',
       'm-onboarding',
       status: 'triaged',
-      result: const TriageResult(
+      result: TriageResult(
         urgency: 'normal',
         category: 'work',
         summary: 'Alex Rivera wrote up where onboarding stands.',
-        needsAction: false,
-        actionItems: [],
-        replyExpected: false,
+        needsAction: triageAsks,
+        actionItems: triageAsks ? const ['Review the issue'] : const [],
+        replyExpected: triageAsks,
         deadline: '',
       ),
     );
@@ -142,6 +145,23 @@ void main() {
 
     expect(await sqlVerdict(), 0);
     expect(await dartVerdict(), isFalse);
+  });
+
+  // The judge outranks triage on both sides: a broadcast triage read as a
+  // reply expected with an action item is still not the owner's once the
+  // needs-you pass has said so.
+  test('a judged no outranks triage\'s asks on both sides', () async {
+    await seed(false, triageAsks: true);
+
+    expect(await sqlVerdict(), 0);
+    expect(await dartVerdict(), isFalse);
+  });
+
+  test('triage\'s asks still stand while nothing has judged', () async {
+    await seed(null, triageAsks: true);
+
+    expect(await sqlVerdict(), 1);
+    expect(await dartVerdict(), isTrue);
   });
 
   test('a low_value Later cannot coexist with an open ask', () async {

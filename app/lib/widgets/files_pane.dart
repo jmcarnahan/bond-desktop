@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/attachment_models.dart';
 import '../models/files_models.dart';
+import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 import 'attachment_card.dart';
 import 'attachment_format.dart';
@@ -269,8 +270,13 @@ class FilesPane extends StatelessWidget {
   /// the one place that also has to say where it came from.
   Widget _entry(FileRow row) {
     final ref = row.ref;
-    final who =
-        row.outbound ? 'you' : (row.fromName ?? row.fromAddress ?? '(no sender)');
+    final who = row.outbound
+        ? 'you'
+        : displaySenderName(
+            name: row.fromName,
+            address: row.fromAddress,
+            fallback: '(no sender)',
+          );
     final when = relativeTime(row.receivedAt, now) ?? '';
     final key = row.conversationKey;
 
@@ -332,6 +338,7 @@ class FilesPane extends StatelessWidget {
       PreviewKind.image,
       PreviewKind.pdf,
       PreviewKind.document,
+      PreviewKind.html,
     };
     if (!drawable.contains(previewKindFor(ref))) return null;
     return thumbnailFor(ref);

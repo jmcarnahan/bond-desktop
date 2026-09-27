@@ -219,6 +219,29 @@ void main() {
     expect(storylines, ['s1']);
   });
 
+  testWidgets('a hedge reads "not sure", and a never-judged row "not judged"',
+      (tester) async {
+    Map<String, Object?> message(Object? reason) => {
+          'conversation_key': 'c1',
+          'subject': 'Renewal paperwork',
+          'from_name': 'Dana Whitfield',
+          'received_at': '2026-09-03T09:00:00Z',
+          'triage_status': 'triaged',
+          'needs_you_verdict': null,
+          'needs_you_reason': reason,
+        };
+
+    await _pump(
+      tester,
+      AsyncValue.data(_history(message: message('Dana may want the DPA'))),
+    );
+    expect(find.text('Needs you: not sure — Dana may want the DPA'),
+        findsOneWidget);
+
+    await _pump(tester, AsyncValue.data(_history(message: message(null))));
+    expect(find.text('Needs you: not judged'), findsOneWidget);
+  });
+
   testWidgets('a dropped message offers Restore and nothing that would run '
       'the pipeline again', (tester) async {
     await _pump(

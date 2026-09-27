@@ -385,6 +385,19 @@ class PipelineProgress {
     }
   }
 
+  /// The one-shot that clears chips a judged no no longer earns, ticking each
+  /// row so the live screen re-reads it. Returns how many.
+  Future<int> lowerVetoedNeedsYou() async {
+    final store = _store;
+    if (store == null) return 0;
+    try {
+      return _tickRaised(await store.lowerNeedsYouFromVerdicts());
+    } catch (e) {
+      debugPrint('progress: needs-you veto failed: $e');
+      return 0;
+    }
+  }
+
   /// Raises the chips one thread's messages lost while it sat in Later, and
   /// ticks each row so the live screen re-reads it. Returns how many.
   ///

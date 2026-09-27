@@ -1,3 +1,4 @@
+import '../chat_mentions.dart';
 import 'backend_types.dart';
 
 /// The Teams chats this app reads and writes: the chat list, one chat's
@@ -52,14 +53,24 @@ abstract class TeamsBackend {
   /// `chat.readwrite`; callers gate on the grant before calling.
   Future<void> markChatRead(String chatId);
 
-  /// Posts a plain-text message to a chat, and returns it as stored.
+  /// Posts a message to a chat, and returns it as stored.
+  ///
+  /// Plain text as typed when [mentions] is empty, which is every send that
+  /// adds nobody — the request is then byte for byte the one it always was.
+  /// With mentions, each person is a real mention entity that notifies them,
+  /// never a name in a sentence that notifies nobody; a backend that cannot
+  /// carry them throws rather than sending without them.
   ///
   /// The returned message carries the id and timestamps Graph assigned, which
   /// is what lets the caller write the outbound row itself instead of waiting
   /// for the next user-triggered pull to discover its own reply. Its shape is
   /// the one [chatMessagesSince] hands back, so the row built from it is the
   /// row a sync would have built.
-  Future<Map<String, dynamic>> sendChatMessage(String chatId, String text);
+  Future<Map<String, dynamic>> sendChatMessage(
+    String chatId,
+    String text, {
+    List<ChatMention> mentions = const [],
+  });
 
   /// Opens the chat holding exactly [userIds] plus the signed-in user, and
   /// answers with its id. Graph ids, not addresses.

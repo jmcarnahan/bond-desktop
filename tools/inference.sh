@@ -10,7 +10,7 @@
 #   tools/inference.sh restart [--name NAME] [the same model options]   push a new configuration to a running box
 #                            (models not given are kept from the box; --bulk-model none drops the slot)
 #   tools/inference.sh status  [--name NAME]              every box this script manages
-#   tools/inference.sh test    [--name NAME | --url URL --model NAME [--bearer KEY]]
+#   tools/inference.sh test    [--name NAME | --url URL --model NAME [--bearer-file FILE | --bearer KEY]]
 #   tools/inference.sh tunnel  [--name NAME] [--port N]   local URLs for PROSE_URL / BENCH_URL
 #   tools/inference.sh extend  --days D [--name NAME]     move the self-termination timer
 #   tools/inference.sh down    [--name NAME] [--keep-ip]   terminate; the key pair and SG stay
@@ -101,6 +101,7 @@ SSH_KEY=$HOME/.ssh/id_ed25519
 PORT=
 URL=
 BEARER=
+BEARER_FILE=
 SSH_USER=ubuntu
 MODEL_SET=
 BULK_MODEL_SET=
@@ -856,6 +857,12 @@ test_slots() {  # the box's prose slot, then its bulk slot when it has one
 cmd_test() {
   need jq curl
   if [ -n "$URL" ]; then
+    # --bearer-file keeps the key off this command's argv, for the same reason
+    # --api-key-file does; tools/model-box.sh test hands it over this way.
+    if [ -n "$BEARER_FILE" ]; then
+      [ -f "$BEARER_FILE" ] || die "no key file at $BEARER_FILE"
+      BEARER=$(tr -d '[:space:]' < "$BEARER_FILE")
+    fi
     # With --url, --model is the name the server routes on (default: the alias).
     local m=$SERVED; [ -n "$MODEL_SET" ] && m=$MODEL
     run_test "${URL%/}" "$m" "$BEARER"
@@ -1050,7 +1057,7 @@ while [ $# -gt 0 ]; do
     --profile) PROFILE=$2; shift ;;  --account) ACCOUNT=$2; shift ;;
     --spot) SPOT=1 ;;                --ssh-key) SSH_KEY=$2; shift ;;
     --port) PORT=$2; shift ;;        --url) URL=$2; shift ;;
-    --bearer) BEARER=$2; shift ;;
+    --bearer) BEARER=$2; shift ;;  --bearer-file) BEARER_FILE=$2; shift ;;
     --persistent) PERSISTENT=1 ;;    --domain) DOMAIN=$2; shift ;;
     --api-key) API_KEY=$2; shift ;;  --api-key-file) API_KEY_FILE=$2; shift ;;
     --route53-zone) ROUTE53_ZONE=$2; shift ;; --acme-email) ACME_EMAIL=$2; shift ;;

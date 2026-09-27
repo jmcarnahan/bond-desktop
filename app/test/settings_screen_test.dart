@@ -1,10 +1,14 @@
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/label_models.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart' show ModelPlacement;
 import 'package:bond_inbox/services/server/server_state.dart';
+import 'package:bond_inbox/theme/tokens.dart';
+import 'package:bond_inbox/widgets/settings_labels_section.dart';
 import 'package:bond_inbox/widgets/settings_screen.dart';
 import 'package:bond_inbox/widgets/settings_section.dart';
+import 'package:bond_inbox/widgets/settings_segments.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -38,6 +42,14 @@ void main() {
     int needsYouRejudging = 0,
     ValueChanged<bool>? onProcessingChanged,
     Future<void> Function()? onClearAiResults,
+    List<Label>? labels,
+    bool labelsLoading = false,
+    String? labelsError,
+    Future<bool> Function(String, String)? onRenameLabel,
+    void Function(String, String?)? onLabelToneChanged,
+    void Function(String)? onDeleteLabel,
+    bool replySendMarksDone = false,
+    void Function(bool)? onReplySendMarksDoneChanged,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -62,6 +74,14 @@ void main() {
           needsYouRejudging: needsYouRejudging,
           onProcessingChanged: onProcessingChanged,
           onClearAiResults: onClearAiResults,
+          labels: labels,
+          labelsLoading: labelsLoading,
+          labelsError: labelsError,
+          onRenameLabel: onRenameLabel,
+          onLabelToneChanged: onLabelToneChanged,
+          onDeleteLabel: onDeleteLabel,
+          replySendMarksDone: replySendMarksDone,
+          onReplySendMarksDoneChanged: onReplySendMarksDoneChanged,
         ),
       ),
     ));
@@ -136,6 +156,88 @@ void main() {
     );
 
     expect(find.textContaining('judging'), findsNothing);
+  });
+
+  group('sending a reply marks it done', () {
+    testWidgets('is absent when the host cannot write it', (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+      );
+      await expand(tester, 'Needs You');
+
+      expect(
+        find.byKey(SettingsScreen.replySendMarksDoneKey),
+        findsNothing,
+      );
+      expect(find.text('Sending a reply marks it done'), findsNothing);
+    });
+
+    testWidgets('reads off by default, with its words under it',
+        (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        onReplySendMarksDoneChanged: (_) {},
+      );
+      await expand(tester, 'Needs You');
+
+      final row = find.byKey(SettingsScreen.replySendMarksDoneKey);
+      expect(tester.widget<SwitchListTile>(row).value, isFalse);
+      expect(find.text('Sending a reply marks it done'), findsOneWidget);
+      expect(
+        find.text(
+          'A thread leaves Needs You as soon as you answer it, instead of '
+          'waiting for you to mark it done.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('flips the moment it is pressed, like every other switch here',
+        (tester) async {
+      final written = <bool>[];
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        onReplySendMarksDoneChanged: written.add,
+      );
+      await expand(tester, 'Needs You');
+
+      final row = find.byKey(SettingsScreen.replySendMarksDoneKey);
+      await tester.ensureVisible(row);
+      await tester.tap(row);
+      await tester.pumpAndSettle();
+
+      // The control moved under the finger AND the host heard about it: a
+      // preference that only landed on Back could not be checked by the person
+      // who flipped it.
+      expect(written, [true]);
+      expect(tester.widget<SwitchListTile>(row).value, isTrue);
+    });
+
+    testWidgets('a stored on reads on', (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        replySendMarksDone: true,
+        onReplySendMarksDoneChanged: (_) {},
+      );
+      await expand(tester, 'Needs You');
+
+      final row = find.byKey(SettingsScreen.replySendMarksDoneKey);
+      expect(tester.widget<SwitchListTile>(row).value, isTrue);
+
+      await tester.ensureVisible(row);
+      await tester.tap(row);
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<SwitchListTile>(row).value, isFalse);
+    });
   });
 
   testWidgets('the rules editor is absent when no save is wired',
@@ -993,5 +1095,300 @@ void main() {
 
       expect(find.text('Models'), findsNothing);
     });
+  });
+
+  /// The owner's vocabulary: the one place a label can be renamed, recoloured or
+  /// thrown away. Seam-driven like every other section here, so these tests
+  /// drive the whole thing with a list and three closures.
+  group('the Labels section', () {
+    Label label(
+      String id,
+      String name, {
+      String? tone,
+      int uses = 0,
+    }) =>
+        Label(id: id, name: name, tone: tone, useCount: uses);
+
+    List<Label> vocabulary() => [
+          label('legal', 'Waiting on legal', tone: 'attention', uses: 9),
+          label('jira', 'Jira update', uses: 3),
+        ];
+
+    Future<void> openLabels(
+      WidgetTester tester, {
+      List<Label>? labels,
+      bool loading = false,
+      String? error,
+      Future<bool> Function(String, String)? onRename,
+      void Function(String, String?)? onTone,
+      void Function(String)? onDelete,
+      bool opened = true,
+    }) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        labels: labels,
+        labelsLoading: loading,
+        labelsError: error,
+        onRenameLabel: onRename,
+        onLabelToneChanged: onTone,
+        onDeleteLabel: onDelete,
+      );
+      if (opened && labels != null) {
+        final toggle = find.byKey(SettingsSection.toggleKey('Labels'));
+        await tester.ensureVisible(toggle);
+        await tester.pumpAndSettle();
+        await tester.tap(toggle);
+        await tester.pumpAndSettle();
+      }
+    }
+
+    testWidgets('a host that has not wired the vocabulary has no section',
+        (tester) async {
+      // Absent wiring, absent section — the discipline every optional section
+      // on this screen follows.
+      await openLabels(tester);
+
+      expect(find.text('Labels'), findsNothing);
+    });
+
+    testWidgets('the section title and its collapsed line', (tester) async {
+      await openLabels(tester, labels: vocabulary(), opened: false);
+
+      // Pinned here, in `docs/settings.md` and in the screen itself — the three
+      // move together.
+      expect(find.text('Labels'), findsOneWidget);
+      expect(find.text('2 labels · 12 uses'), findsOneWidget);
+      // Collapsed means the rows are not built at all.
+      expect(find.text('Jira update'), findsNothing);
+    });
+
+    test('the collapsed line counts words, then uses', () {
+      expect(LabelsSection.summaryOf(const []), 'No labels yet');
+      expect(
+        LabelsSection.summaryOf([label('a', 'Alpha')]),
+        '1 label',
+      );
+      expect(
+        LabelsSection.summaryOf([label('a', 'Alpha', uses: 1)]),
+        '1 label · 1 use',
+      );
+      expect(LabelsSection.summaryOf(vocabulary()), '2 labels · 12 uses');
+    });
+
+    testWidgets('each word is a row, with what it is and how used it is',
+        (tester) async {
+      await openLabels(tester, labels: vocabulary());
+
+      expect(find.byKey(LabelsSection.rowKeyFor('legal')), findsOneWidget);
+      expect(find.text('Waiting on legal'), findsOneWidget);
+      expect(find.text('Used 9 times'), findsOneWidget);
+      expect(find.text('Used 3 times'), findsOneWidget);
+    });
+
+    testWidgets('and a word nobody has reached for yet says so', (tester) async {
+      await openLabels(tester, labels: [label('new', 'Later')]);
+
+      expect(find.text('Not used yet'), findsOneWidget);
+    });
+
+    testWidgets('an empty vocabulary says where labels come from',
+        (tester) async {
+      await openLabels(tester, labels: const []);
+
+      expect(find.textContaining('mark it done with a label'), findsOneWidget);
+    });
+
+    testWidgets('renaming keeps the label and closes the field', (tester) async {
+      final renames = <(String, String)>[];
+      await openLabels(
+        tester,
+        labels: vocabulary(),
+        onRename: (id, name) async {
+          renames.add((id, name));
+          return true;
+        },
+      );
+
+      await tester.tap(find.byKey(LabelsSection.renameKeyFor('jira')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(LabelsSection.nameFieldKeyFor('jira')),
+        'Jira tickets',
+      );
+      await tester.tap(find.byKey(LabelsSection.saveKeyFor('jira')));
+      await tester.pumpAndSettle();
+
+      expect(renames, [('jira', 'Jira tickets')]);
+      // The host owns the list, so the row still reads the old name until the
+      // provider hands a new one down — but the field is done with.
+      expect(find.byKey(LabelsSection.nameFieldKeyFor('jira')), findsNothing);
+    });
+
+    testWidgets('a name already taken is refused under the field, not in a '
+        'dialog', (tester) async {
+      await openLabels(
+        tester,
+        labels: vocabulary(),
+        error: 'A label called “Waiting on legal” already exists.',
+        onRename: (_, _) async => false,
+      );
+
+      await tester.tap(find.byKey(LabelsSection.renameKeyFor('jira')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(LabelsSection.nameFieldKeyFor('jira')),
+        'Waiting on legal',
+      );
+      await tester.tap(find.byKey(LabelsSection.saveKeyFor('jira')));
+      await tester.pumpAndSettle();
+
+      // Open, on what was typed, with the reason under it: retyping a name to
+      // find out it is still taken is the one thing an inline refusal avoids.
+      expect(find.byKey(LabelsSection.nameFieldKeyFor('jira')), findsOneWidget);
+      expect(
+        find.text('A label called “Waiting on legal” already exists.'),
+        findsOneWidget,
+      );
+      expect(find.byType(Dialog), findsNothing);
+    });
+
+    testWidgets('Cancel drops the typed name and leaves the label alone',
+        (tester) async {
+      var renames = 0;
+      await openLabels(
+        tester,
+        labels: vocabulary(),
+        onRename: (_, _) async {
+          renames++;
+          return true;
+        },
+      );
+
+      await tester.tap(find.byKey(LabelsSection.renameKeyFor('jira')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(LabelsSection.nameFieldKeyFor('jira')),
+        'Something else',
+      );
+      await tester.tap(find.byKey(LabelsSection.cancelKeyFor('jira')));
+      await tester.pumpAndSettle();
+
+      expect(renames, 0);
+      expect(find.byKey(LabelsSection.nameFieldKeyFor('jira')), findsNothing);
+    });
+
+    testWidgets('the tint is picked while renaming, and reported at once',
+        (tester) async {
+      final tones = <(String, String?)>[];
+      await openLabels(
+        tester,
+        labels: vocabulary(),
+        onRename: (_, _) async => true,
+        onTone: (id, tone) => tones.add((id, tone)),
+      );
+
+      // The swatch beside the name is what a reader needs the rest of the time;
+      // five segments per row would be five rows of buttons.
+      expect(find.byType(SettingsSegments<BondTone>), findsNothing);
+
+      await tester.tap(find.byKey(LabelsSection.renameKeyFor('jira')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(LabelsSection.toneKeyFor('jira')), findsOneWidget);
+
+      await tester.tap(find.text('Moss'));
+      await tester.pumpAndSettle();
+
+      expect(tones, [('jira', 'success')]);
+    });
+
+    testWidgets('and choosing Stone clears the stored word', (tester) async {
+      final tones = <(String, String?)>[];
+      await openLabels(
+        tester,
+        labels: vocabulary(),
+        onRename: (_, _) async => true,
+        onTone: (id, tone) => tones.add((id, tone)),
+      );
+
+      await tester.tap(find.byKey(LabelsSection.renameKeyFor('legal')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Stone'));
+      await tester.pumpAndSettle();
+
+      // A label with no tone and a label set back to plain must not be two
+      // different rows in the table.
+      expect(tones, [('legal', null)]);
+    });
+
+    testWidgets('Remove asks a second time, on a different button',
+        (tester) async {
+      final deleted = <String>[];
+      await openLabels(
+        tester,
+        labels: vocabulary(),
+        onDelete: deleted.add,
+      );
+
+      await tester.tap(find.byKey(LabelsSection.removeKeyFor('jira')));
+      await tester.pumpAndSettle();
+
+      expect(deleted, isEmpty);
+      // The protection is that the second press lands on a DIFFERENT button
+      // that did not exist a moment ago, and the caption says what goes.
+      expect(
+        find.textContaining('takes it off every thread it is on'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(LabelsSection.confirmRemoveKeyFor('jira')));
+      await tester.pumpAndSettle();
+
+      expect(deleted, ['jira']);
+      expect(find.byType(Dialog), findsNothing);
+    });
+
+    testWidgets('and Keep disarms it', (tester) async {
+      final deleted = <String>[];
+      await openLabels(
+        tester,
+        labels: vocabulary(),
+        onDelete: deleted.add,
+      );
+
+      await tester.tap(find.byKey(LabelsSection.removeKeyFor('jira')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(LabelsSection.keepKeyFor('jira')));
+      await tester.pumpAndSettle();
+
+      expect(deleted, isEmpty);
+      expect(
+        find.byKey(LabelsSection.confirmRemoveKeyFor('jira')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('a host with no mutators wired draws the words and no controls',
+        (tester) async {
+      await openLabels(tester, labels: vocabulary());
+
+      expect(find.text('Jira update'), findsOneWidget);
+      expect(find.byKey(LabelsSection.renameKeyFor('jira')), findsNothing);
+      expect(find.byKey(LabelsSection.removeKeyFor('jira')), findsNothing);
+    });
+
+    testWidgets('a failed read is said at the top of the section',
+        (tester) async {
+      await openLabels(
+        tester,
+        labels: vocabulary(),
+        error: 'Could not read your labels.',
+      );
+
+      expect(find.text('Could not read your labels.'), findsOneWidget);
+    });
+
   });
 }

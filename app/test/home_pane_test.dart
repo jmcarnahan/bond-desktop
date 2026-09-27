@@ -1003,13 +1003,19 @@ void main() {
       );
       await swap(tester);
 
-      expect(find.text('In documents'), findsOneWidget);
-      expect(find.byType(AttachmentSearchTile), findsOneWidget);
+      expect(find.text('In documents · 1'), findsOneWidget);
       expect(
         find.text('1 result for “renewal”'),
         findsOneWidget,
         reason: 'the count labels the message list under it',
       );
+
+      // Folded while messages matched too, so six passages cannot push the
+      // rows off the first screen; the heading opens it.
+      expect(find.byType(AttachmentSearchTile), findsNothing);
+      await tester.tap(find.byKey(HomePane.documentsFoldKey));
+      await tester.pump();
+      expect(find.byType(AttachmentSearchTile), findsOneWidget);
 
       // Above the messages, not below them.
       final documents = tester.getTopLeft(find.byType(AttachmentSearchTile));
@@ -1030,6 +1036,8 @@ void main() {
         onOpenContextFile: (_, _) {},
       );
       await swap(tester);
+      await tester.tap(find.byKey(HomePane.documentsFoldKey));
+      await tester.pump();
 
       expect(find.text('In your directories'), findsOneWidget);
       expect(find.byType(ContextSearchTile), findsOneWidget);
@@ -1104,6 +1112,24 @@ void main() {
       expect(opened, [('email', 'c7')]);
     });
 
+    testWidgets('the documents fold shuts again and stays as left',
+        (tester) async {
+      await _pump(
+        tester,
+        search: HomeSearch('renewal', [_hit(7)], documents: [_doc()]),
+      );
+      await swap(tester);
+
+      await tester.tap(find.byKey(HomePane.documentsFoldKey));
+      await tester.pump();
+      expect(find.byType(AttachmentSearchTile), findsOneWidget);
+
+      await tester.tap(find.byKey(HomePane.documentsFoldKey));
+      await tester.pump();
+      expect(find.byType(AttachmentSearchTile), findsNothing);
+      expect(find.text('Subject 7'), findsOneWidget);
+    });
+
     testWidgets('no documents means no documents heading', (tester) async {
       await _pump(
         tester,
@@ -1111,7 +1137,7 @@ void main() {
       );
       await swap(tester);
 
-      expect(find.text('In documents'), findsNothing);
+      expect(find.textContaining('In documents'), findsNothing);
       expect(find.byType(AttachmentSearchTile), findsNothing);
     });
 
@@ -1124,7 +1150,9 @@ void main() {
       );
       await swap(tester);
 
+      // Open and with no fold to shut: the documents are the whole answer.
       expect(find.byType(AttachmentSearchTile), findsOneWidget);
+      expect(find.byKey(HomePane.documentsFoldKey), findsNothing);
       // The count is a count of MESSAGES, so it stays 0 — but the screen must
       // not also claim nothing matches while it is naming the file that does.
       expect(find.text('No messages match that.'), findsOneWidget);

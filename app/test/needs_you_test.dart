@@ -48,5 +48,58 @@ void main() {
       expect(needsYouFloor({...row(), 'addressed_me': true}), isFalse);
       expect(needsYouFloor({...row(), 'addressed_me': null}), isFalse);
     });
+
+    test("a stranger's first approach gets no floor", () {
+      // A RANKING, not a drop: the thread stays in the inbox and the model
+      // still reads it. All this withholds is the free pass the envelope would
+      // otherwise have bought.
+      expect(needsYouFloor(row(), coldOutreach: true), isFalse);
+    });
+
+    test('a cold approach cannot raise anything either', () {
+      expect(
+        needsYouFloor(row(addressedMe: 0), coldOutreach: true),
+        isFalse,
+      );
+    });
+
+    test('the switch defaults off, so the floor stands', () {
+      // Every caller that does not know the sender's organisation passes one
+      // argument, and an @mention still reaches the rail.
+      expect(needsYouFloor(row(), coldOutreach: false), isTrue);
+      expect(needsYouFloor(row()), isTrue);
+    });
+  });
+
+  group('isColdOutreach', () {
+    test('an outsider on a thread the owner has never written on', () {
+      expect(isColdOutreach(external: true, lastOutboundAt: null), isTrue);
+      expect(isColdOutreach(external: true, lastOutboundAt: ''), isTrue);
+      expect(isColdOutreach(external: true, lastOutboundAt: '   '), isTrue);
+    });
+
+    test('an outsider the owner has answered is not cold', () {
+      // The half that keeps this from being a rule about outsiders. Customers,
+      // counsel, candidates and suppliers are all external, and their mail is
+      // some of the most important the inbox carries.
+      expect(
+        isColdOutreach(
+          external: true,
+          lastOutboundAt: '2026-09-01T10:00:00Z',
+        ),
+        isFalse,
+      );
+    });
+
+    test('a colleague is never cold, written to or not', () {
+      expect(isColdOutreach(external: false, lastOutboundAt: null), isFalse);
+      expect(
+        isColdOutreach(
+          external: false,
+          lastOutboundAt: '2026-09-01T10:00:00Z',
+        ),
+        isFalse,
+      );
+    });
   });
 }

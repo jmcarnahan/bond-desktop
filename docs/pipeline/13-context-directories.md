@@ -251,18 +251,26 @@ costs the whole file.
 
 | Shape | What comes out |
 |---|---|
-| `.html` `.htm` | a tag stripper — see below |
+| `.html` `.htm` | a tag stripper, the document profile of `app/lib/services/html_text.dart` — see below |
 | `.ipynb` | markdown cells verbatim, code cells fenced, `stream` and `text/plain` outputs kept, images dropped; a malformed notebook falls back to its raw text |
 | `.csv` `.tsv` | the header and 40 rows, then `[… N more rows]` |
 | everything else | as-is |
 
 **The HTML extractor is a stripper and not a DOM, deliberately.** There is no
 HTML parser in this app's dependencies (`xml` is XML-only and throws on the
-first unclosed `<br>`). The order matters: comments first, then every matched
+first unclosed `<br>`). The core lives in `html_text.dart`, shared by two
+profiles: `HtmlProfile.document` for directories and attachments, and
+`HtmlProfile.mail` for message bodies
+([01-sync-ingest.md](01-sync-ingest.md)). `context_extract.dart` calls
+`htmlToText(raw, profile: HtmlProfile.document)` and never caps it, because it
+runs off the UI isolate. The order matters: comments first, then every matched
 `<script> <style> <svg> <noscript> <head>` block, then any UNCLOSED one
 running to the end of the file — a page that was truncated mid-download ends
 inside its `<script>`, and without that third sweep the tag alone is stripped
-and the JavaScript is indexed as English. Only then do block tags become
+and the JavaScript is indexed as English. Then the source's own whitespace
+folds: between tags, a run of tab, CR, LF and space becomes one space, with
+tags and `<pre>` bodies kept as written, so a newline in the markup is not a
+line break in the text. Only then do block tags become
 newlines (`h1`–`h6` prefixed with `#`×level, `td`/`th` closed with a tab),
 `alt` / `aria-label` / `title` text is lifted onto its own lines, remaining
 tags go, and entities are decoded — `&amp;` LAST, so a double-escaped
@@ -816,7 +824,7 @@ over still gets them over the ranked list.
 
 | Fence | What it holds |
 |---|---|
-| `message` | the subject with its reply markers off, then the body, clamped to 1,500 |
+| `message` | the subject with its reply markers off, then the body with its link targets stripped (`stripLinkTargets`), clamped to 1,500 |
 | `pointers` | `topic · path` from every brief in scope, ≤ 10 |
 | `skills` | `name · description` for every skill in scope, ≤ 12 — `ContextStore.skillsFor`, which does NOT require a `desc_embedding`: the embedder being down must not hide a project's own instructions |
 | `candidates` | `path · locator · first words` for ≤ 12 ranked passages, the preview whitespace-collapsed and clamped to 120 |
@@ -1224,6 +1232,8 @@ that call.
 - `app/lib/services/context/context_walk.dart` — the walk, the kinds, the
   chains.
 - `app/lib/services/context/context_extract.dart` — the extractors.
+- `app/lib/services/html_text.dart` — the HTML core both the document and the
+  mail profile share.
 - `app/lib/services/context/context_chunker.dart` — the passages, and
   `contextSection`, which puts one back together whole. `parseLineLocator` and
   `expandedSectionLines` are public for the retriever's drop rule: it decides

@@ -85,6 +85,7 @@ page has the same shape in `settings_models_page.dart`.
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
 | Activity log | `onShowActivityLogChanged` wired | `Shown in the sidebar` / `Hidden` |
 | Storylines | `onStorylineNewestFirstChanged` wired | `Newest first` / `Oldest first` |
+| Labels | `labels` wired, avatar-menu scope only | `No labels yet` / `1 label` / `3 labels · 12 uses` — the use clause only once something has been filed |
 | Context directories | when wired (both scopes) | `No directories yet` / `N directories · M files` |
 | Processing | any of `onProcessingChanged`, `onClearAiResults`, `onForgetAndResync` is wired (both scopes) | `On` / `Off` |
 | Sync & data | `onRefreshNow` wired | `Not synced yet`; `Mail synced <rel> · Teams <rel>`; a side that never ran says `not synced yet` in words (`Mail synced 4m ago · Teams not synced yet`, `Mail not synced yet · Teams synced 2h ago`) |
@@ -92,7 +93,7 @@ page has the same shape in `settings_models_page.dart`.
 
 **A section whose wiring is absent is absent** — the same discipline every
 optional row in the old dialog followed, and what lets the permissions tests
-wire `hasScope` alone. Under `SettingsScope.ai` four of them are absent for a
+wire `hasScope` alone. Under `SettingsScope.ai` five of them are absent for a
 second reason: the AI pane keeps About me, Models, Needs You, Suggested
 replies, Activity log, Storylines, Context directories and Processing, in this
 same order, and drops the rest.
@@ -107,6 +108,24 @@ The Needs You wording is a five-step ladder on the stored threshold: `≥0.8`
 `≥0.2` **Leaning generous**, otherwise **Anything plausible**. Five words for
 ten stops, because the slider is a feel and a summary reading "0.7" would report
 an implementation detail at somebody who moved a slider.
+
+The section's last control is a switch, **Sending a reply marks it done** — *A
+thread leaves Needs You as soon as you answer it, instead of waiting for you to
+mark it done.* — keyed `settings-reply-send-marks-done` and wired by
+`onReplySendMarksDoneChanged`. It is **off by default**, because a sent reply and
+a cleared thread are two different claims: an answer that asks a question back is
+still the reader's to watch. It is last in the section because everything above
+it decides what ENTERS the pile and this one says when a thread leaves. It does
+not appear in the section summary: the summary already carries three clauses, and
+the threshold is the thing a reader scans that line for.
+
+With it on, a sent reply on a thread of the Needs You pile is marked done the
+way `e` does it, so the view lands on the next row and the progress count
+moves. A thread opened from Archive or Home is marked done in place and stays
+open. Either way the toast reads `Reply sent · Marked done.` with an Undo. A
+mark-done whose write fails reads `Reply sent. Couldn't mark it done.` with no
+Undo, and the reader stays where they are. See
+[pipeline/07-replies.md](pipeline/07-replies.md).
 
 ## What commits, and when
 
@@ -307,6 +326,26 @@ unless a host overrides it. Nothing breaks in a widget test that does not —
 the future simply carries the error and `valueOrNull` is null, so the rows keep
 what the preferences said — but a test that wants the sizes and the disk
 states overrides it with `testManifest()`.
+
+**The Labels section's own wires.** Six props, all optional, all off one
+`ref.watch(labelsProvider)` — which the host **watches** rather than reads, so a
+label applied from a thread behind an open pane moves the use counts without the
+reader touching anything:
+
+- `labels: state.labels` — always a list, because `LabelsState.labels` is
+  never null, so the section is always present in the avatar scope. `null` is
+  what hides it, and only a host without the wiring (a widget test) passes
+  that. An empty list renders the section saying nothing has been filed yet.
+- `labelsLoading: !state.loaded` and `labelsError: state.error`. Until the
+  first read lands the section draws `Loading…` under its rows rather than
+  the nothing-filed line. The error is
+  the same field a refused rename lands in, which is why the section draws it
+  under the open field when there is one and at the top of the body otherwise.
+- `onRenameLabel: notifier.rename` — it already returns `Future<bool>`, and
+  false means the name is taken and `state.error` now says so.
+- `onLabelToneChanged: notifier.setTone` and `onDeleteLabel: notifier.delete`,
+  both fire-and-forget: the notifier writes `state.error` on a failure and the
+  section is already watching it.
 
 ## Models
 
@@ -948,6 +987,74 @@ and the host wires them through `ContextDirectoriesActions` in
 on every recorded activity event — so a reconcile landing behind an open
 Settings pane moves `reading…` to `12 files · read just now` with no timer of
 its own.
+
+
+## Labels
+
+The owner's own vocabulary — the words a person files their own threads under —
+and the one place a label can be renamed, recoloured or thrown away. Putting a
+word ON a thread happens on the thread; this section is the dictionary behind
+that.
+
+It is **not** `messages.label`, the model's verdict about one message. Nothing
+the pipeline writes appears here, which is why the section sits in the
+avatar-menu scope and **not** in the AI pane: a vocabulary somebody typed is not
+a thing about the model, so it would answer the wrong question there.
+
+Its own widget — `app/lib/widgets/settings_labels_section.dart` — in the
+`ContextDirectoriesSection` shape: it owns which row has its name field open and
+which row is asking a second time about Remove, and it builds its own
+`SettingsSection`. Prop-only, so a test drives the whole section with a list of
+labels and three closures.
+
+The body opens with one sentence saying the words are the reader's own and that
+a rename keeps every thread the label is already on. Then one block per label,
+in the provider's order (**most used first**, which is the order the picker
+offers them in too):
+
+- A **tone swatch** and the **name**, in the owner's own casing.
+- **`Used 9 times`**, or **`Not used yet`** for a word nobody has reached for.
+  It is a popularity signal rather than a refcount — taking a label off one
+  thread does not decrement it — which is what makes the ordering stable.
+- **Rename**, which opens a field on the current name in place. Save closes it;
+  a name already taken comes back refused, and the refusal is drawn **under the
+  field** in the provider's own words with the field still open on what was
+  typed. There is no dialog to refuse in, and retyping a name to find out it is
+  still taken is the one thing an inline refusal exists to avoid.
+- The **tint**, a `SettingsSegments<BondTone>` shown only **while that row is
+  being renamed**: five segments per row would be five rows of buttons on a
+  vocabulary of five words, and the swatch beside the name is what a reader
+  needs the rest of the time. The five choices are Stone, Sea glass, Moss,
+  Copper and Clay (`BondTone.neutral` through `error`). Choosing **Stone**
+  clears the stored word rather than storing `neutral`, so a label with no tone
+  and a label set back to plain are not two different rows in the table.
+- **Remove**, the inline two-step every destructive control on this screen
+  uses: the first tap replaces the button with a red **Remove label** beside a
+  **Keep**, so the second click lands on a different button that did not exist a
+  moment ago. The caption names what goes: `Removes the word and takes it off
+  every thread it is on. The threads themselves are untouched.` The provider
+  cascades the links; no message, thread or verdict is touched.
+
+There is no **Add label** here, deliberately. A label is minted where it is
+first needed — on a thread, from the picker — and a dictionary that could grow
+words nothing is filed under would fill up with them.
+
+The picker (`app/lib/widgets/label_picker.dart`) ranks an exact,
+case-insensitive name match first, and Enter applies the top match. When the
+typed word is not an existing name, a trailing `Create "<word>"` chip
+(`LabelPicker.createChipKey`) is offered after the matches, so a word that is
+only part of an existing label, "Vendor" beside "Vendor outreach", can still
+be minted. A name containing a double quote is refused with `A label can't
+contain a quote mark.`, because the `label:` facet in Find quotes a spaced
+name with `"` and could never quote it back. The picker says so on its hint
+line, and the store refuses the same name on create and on rename
+(`createLabel`, `renameLabel` in `message_store.dart`). Minting closes the
+picker and hands focus back before the write, so the new label files the
+thread it was minted for even if the reader has moved on; until the create
+settles the strip is busy and ignores every way out.
+
+Nothing here reaches for a provider: the section takes a list and three
+closures, and the host wires them to `labelsProvider`.
 
 
 ## About

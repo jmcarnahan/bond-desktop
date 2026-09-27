@@ -12,6 +12,7 @@ import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -352,6 +353,305 @@ void main() {
       await syncReaching(14).syncNow();
       expect(await reportedRefolds(), 1,
           reason: 'exactly one sync_mail row ever names the repair');
+    });
+
+    test('the meeting regate runs once, refolds, and reports its count',
+        () async {
+      // A meeting response triaged before the gate existed: still kept, and
+      // its thread still asking for a reply nobody owes anyone.
+      await store.upsertMessage({
+        'source_message_id': 'accepted',
+        'conversation_key': 'resp',
+        'direction': 'inbound',
+        'from_address': 'colleague@example.com',
+        'subject': 'Accepted: Weekly sync',
+        'received_at': isoAgo(const Duration(hours: 20)),
+        'triage_status': 'triaged',
+        'source_meta_json': '{"meeting":"meetingAccepted"}',
+      });
+      await store.upsertConversation({
+        'conversation_key': 'resp',
+        'state': 'needs_reply',
+      });
+
+      await syncReaching(14).syncNow();
+
+      final row = (await store.getMessageRow('email', 'accepted'))!;
+      expect(row['triage_status'], 'skipped');
+      expect(row['gate_reason'], 'meeting_response');
+      // The refold is paired with the regate: a gated row falls out of
+      // "kept", so the thread stops asking.
+      expect((await conversation('resp'))['state'], 'waiting');
+      expect(await store.getPref('meeting_regate_crlf'), '1');
+      expect((await syncMailDetail())['regated_meeting_responses'], 1);
+
+      // Once, and the pref is what says so. A later pass omits the key
+      // rather than reporting a zero.
+      graph.requests.clear();
+      await syncReaching(14).syncNow();
+      final named = await db
+          .customSelect(
+            "SELECT COUNT(*) AS n FROM activity_events WHERE kind = 'sync_mail' "
+            "AND detail_json LIKE '%regated_meeting_responses%'",
+          )
+          .getSingle();
+      expect((named.data['n'] as num).toInt(), 1,
+          reason: 'exactly one sync_mail row ever names the regate');
+    });
+
+    test('the meeting regate dismisses a suggested reply, and only that',
+        () async {
+      // Responses drafted for before this build: the thread leaves the rail,
+      // and opening it must not still show a suggestion.
+      for (final id in ['accepted', 'declined']) {
+        await store.upsertMessage({
+          'source_message_id': id,
+          'conversation_key': 'k-$id',
+          'direction': 'inbound',
+          'from_address': 'colleague@example.com',
+          'subject': 'Accepted: Weekly sync',
+          'received_at': isoAgo(const Duration(hours: 20)),
+          'triage_status': 'triaged',
+          'source_meta_json': '{"meeting":"meetingAccepted"}',
+        });
+      }
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'k-accepted',
+        replyToMessageId: 'accepted',
+        body: 'Thanks, see you there.',
+      );
+      // An edited draft is the owner's own work and stays.
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'k-declined',
+        replyToMessageId: 'declined',
+        body: 'Sorry to miss it.',
+        status: 'edited',
+      );
+
+      await syncReaching(14).syncNow();
+
+      expect((await store.getDraftForMessage('email', 'accepted'))!['status'],
+          'dismissed');
+      expect((await store.getDraftForMessage('email', 'declined'))!['status'],
+          'edited');
+      expect((await syncMailDetail())['regated_meeting_responses'], 2);
+    });
+
+    test('the hedge re-judge re-queues in-window verdict-0 inbound once',
+        () async {
+      // Old hedges were stored 0 and cannot be told from a real no, so every
+      // in-window 0 is asked again. Mail and chat alike; a yes, an unjudged
+      // row, an outbound and a row behind the floor are left alone.
+      Future<void> judged(
+        String id, {
+        String source = 'email',
+        int? verdict = 0,
+        String direction = 'inbound',
+        Duration ago = const Duration(hours: 20),
+      }) async {
+        await store.upsertMessage({
+          'source': source,
+          'source_message_id': id,
+          'conversation_key': 'k-$id',
+          'direction': direction,
+          'from_address': 'sam@example.com',
+          'subject': 'Numbers',
+          'received_at': isoAgo(ago),
+          'triage_status': 'triaged',
+        });
+        if (verdict != null) {
+          await store.writeNeedsYouVerdict(source, id,
+              verdict: verdict == 1, reason: 'Judged.');
+        }
+        // Finished once already, which is the row the enqueue will never
+        // offer again.
+        await store.enqueueWork('needs_you', source, id);
+        await db.customUpdate(
+          "UPDATE work_items SET status = 'done' WHERE entity_id = ?",
+          variables: [Variable<String>(id)],
+        );
+      }
+
+      // The older revive one-shot re-asks every done row with a NULL verdict,
+      // and it has closed on every installed machine. Closed here too, so the
+      // unjudged row below says what THIS one-shot leaves alone.
+      await store.setPref('needs_you_model_revive', '1');
+      await judged('mail-no');
+      await judged('chat-no', source: 'teams');
+      await judged('mail-yes', verdict: 1);
+      await judged('mail-unjudged', verdict: null);
+      await judged('sent-no', direction: 'outbound');
+      await judged('old-no', ago: const Duration(days: 40));
+
+      Future<Map<String, String>> statuses() async => {
+            for (final row in (await db
+                    .customSelect(
+                      'SELECT entity_id, status FROM work_items '
+                      "WHERE task_kind = 'needs_you'",
+                    )
+                    .get()))
+              row.data['entity_id'] as String: row.data['status'] as String,
+          };
+
+      await syncReaching(14).syncNow();
+
+      final after = await statuses();
+      expect(after['mail-no'], 'pending');
+      expect(after['chat-no'], 'pending');
+      for (final id in ['mail-yes', 'mail-unjudged', 'sent-no', 'old-no']) {
+        expect(after[id], 'done', reason: id);
+      }
+      expect(await store.getPref('needs_you_hedge_rejudge'), '1');
+      expect((await syncMailDetail())['requeued_needs_you_hedges'], 2);
+      expect(MessageStore.derivedOneShotPrefs,
+          isNot(contains('needs_you_hedge_rejudge')));
+
+      // Once: a row judged 0 again after the pref is set stays done.
+      await db.customUpdate(
+        "UPDATE work_items SET status = 'done' WHERE task_kind = 'needs_you'",
+      );
+      await syncReaching(14).syncNow();
+      expect((await statuses())['mail-no'], 'done');
+    });
+
+    test('the retired label-rule gate re-pends once and reports its count',
+        () async {
+      // Rows a label rule gated before the rules left (v19): `label_rule` is
+      // a gate this build no longer writes, so without the one-shot nothing
+      // would ever read them again. One per connector inside the window, and
+      // one outside it that the floor keeps out.
+      Future<void> gated(String id, String source, Duration ago) =>
+          store.upsertMessage({
+            'source': source,
+            'source_message_id': id,
+            'conversation_key': 'k-$id',
+            'direction': 'inbound',
+            'from_address': 'alerts@tracker.example.com',
+            'subject': '[CI] Build finished',
+            'received_at': isoAgo(ago),
+            'triage_status': 'skipped',
+            'gate_reason': 'label_rule',
+          });
+      await gated('mail-gated', 'email', const Duration(hours: 20));
+      await gated('chat-gated', 'teams', const Duration(hours: 20));
+      await gated('old-gated', 'email', const Duration(days: 40));
+
+      Future<Map<String, Object?>> progress(String source, String id) async =>
+          (await db
+                  .customSelect(
+                    'SELECT triage_state, dropped, outcome FROM '
+                    'message_progress WHERE source = ? '
+                    'AND source_message_id = ?',
+                    variables: [Variable<String>(source), Variable<String>(id)],
+                  )
+                  .getSingle())
+              .data;
+      // The gate wrote a dropped progress row, which is what the re-pend
+      // has to take back as well as the message's own status.
+      expect((await progress('email', 'mail-gated'))['dropped'], 1);
+
+      await syncReaching(14).syncNow();
+
+      // Queued in the SAME pass: the one-shot runs before the backlog
+      // enqueues, so the row it flipped to `pending` is already a needs-you
+      // work item rather than one a sync later.
+      final queued = await db
+          .customSelect(
+            'SELECT COUNT(*) AS n FROM work_items '
+            "WHERE task_kind = 'needs_you' AND source = 'email' "
+            "AND entity_id = 'mail-gated'",
+          )
+          .getSingle();
+      expect((queued.data['n'] as num).toInt(), 1);
+
+      for (final (source, id) in [
+        ('email', 'mail-gated'),
+        ('teams', 'chat-gated'),
+      ]) {
+        final row = (await store.getMessageRow(source, id))!;
+        expect(row['triage_status'], 'pending', reason: id);
+        expect(row['gate_reason'], null, reason: id);
+        final p = await progress(source, id);
+        expect(p['triage_state'], 'pending', reason: id);
+        expect(p['dropped'], 0, reason: id);
+        expect(p['outcome'], 'pending', reason: id);
+      }
+      final old = (await store.getMessageRow('email', 'old-gated'))!;
+      expect(old['triage_status'], 'skipped');
+      expect(old['gate_reason'], 'label_rule');
+      expect(await store.getPref('label_rule_gate_retired'), '1');
+      expect((await syncMailDetail())['repended_label_rule_gates'], 2);
+
+      // Once, and the pref is what says so. A later pass omits the key
+      // rather than reporting a zero.
+      graph.requests.clear();
+      await syncReaching(14).syncNow();
+      final named = await db
+          .customSelect(
+            "SELECT COUNT(*) AS n FROM activity_events WHERE kind = 'sync_mail' "
+            "AND detail_json LIKE '%repended_label_rule_gates%'",
+          )
+          .getSingle();
+      expect((named.data['n'] as num).toInt(), 1,
+          reason: 'exactly one sync_mail row ever names the re-pend');
+    });
+
+    test('the Day 1 banner strip runs once over stored asks', () async {
+      // A kept inbound, so the refold one-shot ahead of the strip sees a
+      // thread with something to answer and leaves its banner standing.
+      await store.upsertMessage({
+        'source_message_id': 'ticket-1',
+        'conversation_key': 'ticket',
+        'direction': 'inbound',
+        'from_address': 'tracker@example.com',
+        'subject': 'New Request under EDA-100',
+        'received_at': isoAgo(const Duration(hours: 20)),
+        'triage_status': 'triaged',
+      });
+      await store.upsertConversation({
+        'conversation_key': 'ticket',
+        'state': 'needs_reply',
+        'cta_text': 'Confirm the upstream source — by Day 1',
+      });
+
+      await syncReaching(14).syncNow();
+
+      final rows = await db
+          .customSelect(
+            "SELECT cta_text FROM conversations WHERE conversation_key = 'ticket'",
+          )
+          .get();
+      expect(rows.first.data['cta_text'], 'Confirm the upstream source');
+      expect(await store.getPref('plan_relative_banner_strip'), '1');
+      expect((await syncMailDetail())['stripped_plan_relative_banners'], 1);
+    });
+
+    test('a mailbox that ran the first regate is owed the CRLF one',
+        () async {
+      // The first key's pass read this `\r\n` body as somebody talking and
+      // kept the row; its pref being set must not close the corrected pass.
+      await store.setPref('meeting_regate', '1');
+      await store.upsertMessage({
+        'source_message_id': 'accepted',
+        'conversation_key': 'resp',
+        'direction': 'inbound',
+        'from_address': 'colleague@example.com',
+        'subject': 'Accepted: Weekly sync',
+        'received_at': isoAgo(const Duration(hours: 20)),
+        'triage_status': 'triaged',
+        'body_text': '\r\n',
+        'body_preview': '',
+      });
+
+      await syncReaching(14).syncNow();
+
+      expect(
+        (await store.getMessageRow('email', 'accepted'))!['gate_reason'],
+        'meeting_response',
+      );
+      expect(await store.getPref('meeting_regate_crlf'), '1');
     });
 
     /// How many `sync_mail` rows name the gate repair at all — the twin of

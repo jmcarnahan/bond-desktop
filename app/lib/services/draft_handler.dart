@@ -19,6 +19,7 @@ import 'llm/llm_client.dart';
 import 'llm/model_slots.dart' show LlmTargetSpec;
 import 'llm/partial_json.dart';
 import 'llm/reply_decision_task.dart';
+import 'mail_body.dart' show stripLinkTargets;
 import 'pipeline_progress.dart';
 
 /// Decides whether ONE message needs an answer, and writes one when it does.
@@ -248,6 +249,26 @@ class DraftHandler extends WorkHandler {
     // lists the retrievers float first, and whether a person pressed the
     // button at all.
     final request = DraftRequest.fromPayload(item['payload_json']);
+
+    // A machine wrote this message, so nobody is waiting for an answer to it —
+    // [replySuppressed], the one authority on that question, asked here as well
+    // as at the draft queue (`ExtractHandler._queueDraft`) because a row can
+    // reach this handler from an older build's queue, and because the headers
+    // that answer it may only have arrived since. BEFORE `_gather`, which is the
+    // embedding call and the attachment reads, and well before the 27B decision.
+    //
+    // An ASKED-FOR draft is exempt, exactly as it is exempt from the decision
+    // call below and for the same reason: pressing **Draft reply** on a
+    // notification is the owner overruling this, and a press that produced an
+    // empty box and no sentence would be a button that silently does nothing.
+    if (!request.asked && replySuppressed(Message.fromRow(row))) {
+      return _skip(
+        source,
+        id,
+        'automated_sender',
+        why: 'a machine wrote this message',
+      );
+    }
 
     final consulted = request.contextFileIds.length;
     final gathered = await _gather(
@@ -1075,10 +1096,16 @@ class DraftHandler extends WorkHandler {
     for (final row in rows) {
       // Markers out, for [buildMessageBlock]'s reason and one of its own: a
       // style example is a sample the model imitates, and `[[att:…]]` in one
-      // is a token it would learn to write.
-      final body = stripAttachmentMarkers(row['body_text'] as String?).trim();
-      final preview =
-          stripAttachmentMarkers(row['body_preview'] as String?).trim();
+      // is a token it would learn to write. Link targets go for the second
+      // reason alone — an example whose sentences trail hundred-character
+      // addresses teaches the model to write them into the reply, and what is
+      // being sampled here is how this person WORDS things.
+      final body = stripLinkTargets(
+        stripAttachmentMarkers(row['body_text'] as String?),
+      ).trim();
+      final preview = stripLinkTargets(
+        stripAttachmentMarkers(row['body_preview'] as String?),
+      ).trim();
       final text = body.isNotEmpty ? body : preview;
       if (text.isEmpty) continue;
       examples.add(

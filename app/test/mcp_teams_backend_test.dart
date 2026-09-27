@@ -1,9 +1,11 @@
 import 'dart:convert';
 
 import 'package:bond_inbox/services/backend/backend_types.dart';
+import 'package:bond_inbox/services/chat_mentions.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
 import 'package:bond_inbox/services/mcp/bond_mcp_client.dart';
 import 'package:bond_inbox/services/mcp/mcp_teams_backend.dart';
+import 'package:bond_inbox/services/sender_display.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -550,6 +552,13 @@ void main() {
       expect(message['from'], {
         'application': {'id': 'app-1', 'displayName': null},
       });
+
+      // And the row that comes out of it is named, which is the whole point of
+      // tolerating the null: the two backends must not disagree about what a
+      // nameless bot is called, and `teams:app-1` is not a name.
+      final row = TeamsSync.messageRow(message, 'chat-1', outbound: false)!;
+      expect(row['from_name'], botSenderName);
+      expect(row['from_address'], 'teams:app-1');
     });
 
     test('a system event has no sender at all', () async {
@@ -793,6 +802,252 @@ void main() {
       final args = mcp.argsOf('send_teams_message').single;
       expect(args.containsKey('text'), isFalse);
       expect(args['message'], 'On it.');
+    });
+
+    group('with mentions', () {
+      const ada = ChatMention(userId: 'aad-ada', displayName: 'Ada Park');
+
+      test('none means exactly the two keys every server takes', () async {
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            {'message': _wireMessage(id: 'sent-1')},
+          ],
+        });
+
+        await _build(mcp).sendChatMessage('chat-1', 'On it.');
+
+        expect(mcp.argsOf('send_teams_message').single.keys.toSet(),
+            {'chat_id', 'message'});
+      });
+
+      test('ride an options string, with the @Name the server would repeat '
+          'taken out', () async {
+        // The server escapes the text itself and ALWAYS prepends its at-tags,
+        // so the `@Ada Park` the composer wrote goes, or the chat would read
+        // "Ada Park @Ada Park". The `<` stays as typed: escaping is the
+        // server's, under `content_type: text`.
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            {'message': _wireMessage(id: 'sent-1')},
+          ],
+        });
+
+        await _build(mcp).sendChatMessage(
+          'chat-1',
+          '@Ada Park a < b',
+          mentions: const [ada, ada],
+        );
+
+        expect(mcp.argsOf('send_teams_message').single, {
+          'chat_id': 'chat-1',
+          'message': 'a < b',
+          'options': '{"content_type":"text","mentions":'
+              '[{"user_id":"aad-ada","name":"Ada Park"}]}',
+        });
+      });
+
+      const refusal = "This connection can't @mention people yet — remove "
+          'the people to send as plain text.';
+
+      test('a server that refuses them says so, and never resends without',
+          () async {
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            {
+              'message': null,
+              'error': 'invalid_arguments',
+              'reason': 'unknown field: options',
+            },
+          ],
+        });
+
+        await expectLater(
+          _build(mcp)
+              .sendChatMessage('chat-1', 'On it.', mentions: const [ada]),
+          throwsA(isA<GraphTeamsException>()
+              .having((e) => e.message, 'message', refusal)),
+        );
+        expect(mcp.argsOf('send_teams_message'), hasLength(1));
+      });
+
+      test('a message that was only the name keeps it', () async {
+        // The server refuses an empty message before it adds a tag.
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            {'message': _wireMessage(id: 'sent-1')},
+          ],
+        });
+
+        await _build(mcp)
+            .sendChatMessage('chat-1', '@Ada Park', mentions: const [ada]);
+
+        expect(mcp.argsOf('send_teams_message').single['message'],
+            '@Ada Park');
+      });
+
+      test('invalid_options is the mention refusal too', () async {
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            {
+              'message': null,
+              'error': 'invalid_options',
+              'reason': 'options is not valid JSON',
+            },
+          ],
+        });
+
+        await expectLater(
+          _build(mcp)
+              .sendChatMessage('chat-1', 'On it.', mentions: const [ada]),
+          throwsA(isA<GraphTeamsException>()
+              .having((e) => e.message, 'message', refusal)),
+        );
+      });
+
+      test('an invalid_arguments about something else keeps its own sentence',
+          () async {
+        // On the current server that word means no chat id or nothing to
+        // send; blaming the mentions would send the owner after the wrong fix.
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            {
+              'message': null,
+              'error': 'invalid_arguments',
+              'reason': 'nothing to send',
+            },
+          ],
+        });
+
+        await expectLater(
+          _build(mcp)
+              .sendChatMessage('chat-1', 'On it.', mentions: const [ada]),
+          throwsA(isA<GraphTeamsException>().having(
+            (e) => e.message,
+            'message',
+            allOf(contains('invalid_arguments'), contains('nothing to send')),
+          )),
+        );
+        expect(mcp.argsOf('send_teams_message'), hasLength(1));
+      });
+
+      test('a thrown tool error that is not about options passes through',
+          () async {
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            const McpToolException('Graph API error 403 (Forbidden): options'
+                ' for this chat are locked'),
+          ],
+        });
+
+        await expectLater(
+          _build(mcp)
+              .sendChatMessage('chat-1', 'On it.', mentions: const [ada]),
+          throwsA(isA<GraphTeamsException>().having(
+            (e) => e.message,
+            'message',
+            contains('Graph API error 403'),
+          )),
+        );
+      });
+
+      test('a server that posts and echoes every mention leaves nothing '
+          'missing', () async {
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            {
+              'message':
+                  _wireMessage(id: 'sent-1', mentionedUserIds: ['aad-ada']),
+            },
+          ],
+        });
+
+        final sent = await _build(mcp)
+            .sendChatMessage('chat-1', '@Ada Park on it', mentions: const [ada]);
+
+        expect(missingMentionIds(const [ada], sent), isEmpty);
+      });
+
+      test('a server that takes the options and drops a mention is caught '
+          'without a resend', () async {
+        // The client stripped `@Ada Park` before the call, so a server that
+        // silently ignores the options posts "on it" naming nobody. The
+        // message is already in the chat: this is said, never retried.
+        const ben = ChatMention(userId: 'aad-ben', displayName: 'Ben Ito');
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            {
+              'message':
+                  _wireMessage(id: 'sent-1', mentionedUserIds: ['aad-ben']),
+            },
+          ],
+        });
+
+        final sent = await _build(mcp).sendChatMessage(
+          'chat-1',
+          '@Ada Park @Ben Ito on it',
+          mentions: const [ada, ben],
+        );
+
+        expect(missingMentionIds(const [ada, ben], sent), ['aad-ada']);
+        expect(mcp.argsOf('send_teams_message'), hasLength(1));
+      });
+
+      test('a server that reports no mentions at all concludes nothing',
+          () async {
+        // An older server leaves `mentioned_user_ids` out entirely. Warning on
+        // every message there would be a warning nobody could act on.
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            {'message': _wireMessage(id: 'sent-1')},
+          ],
+        });
+
+        final sent = await _build(mcp)
+            .sendChatMessage('chat-1', 'on it', mentions: const [ada]);
+
+        expect(sent.containsKey('mentions'), isFalse);
+        expect(missingMentionIds(const [ada], sent), isEmpty);
+      });
+
+      test('a validator that throws about extra inputs is the refusal too',
+          () async {
+        // The pydantic phrasing of the same refusal, arriving as a thrown
+        // tool error rather than a result.
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            const McpToolException(
+              '1 validation error for send_teams_message\noptions\n  '
+              'Extra inputs are not permitted',
+            ),
+          ],
+        });
+
+        await expectLater(
+          _build(mcp)
+              .sendChatMessage('chat-1', 'On it.', mentions: const [ada]),
+          throwsA(isA<GraphTeamsException>()
+              .having((e) => e.message, 'message', refusal)),
+        );
+        expect(mcp.argsOf('send_teams_message'), hasLength(1));
+      });
+
+      test('and so does one whose argument check throws', () async {
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            const McpToolException(
+              'Unexpected keyword argument: options',
+            ),
+          ],
+        });
+
+        await expectLater(
+          _build(mcp)
+              .sendChatMessage('chat-1', 'On it.', mentions: const [ada]),
+          throwsA(isA<GraphTeamsException>()
+              .having((e) => e.message, 'message', refusal)),
+        );
+        expect(mcp.argsOf('send_teams_message'), hasLength(1));
+      });
     });
   });
 

@@ -487,7 +487,9 @@ void main() {
       });
       // Before triage, so the score written below is newer than every write to
       // the message row. Completeness reads a written verdict, not a work row.
-      await store.writeNeedsYouVerdict('email', 'm1', verdict: false,
+      // It follows [replyExpected]: once judged, the verdict is the ask, so
+      // "nothing was asking" means the judge said no as well.
+      await store.writeNeedsYouVerdict('email', 'm1', verdict: replyExpected,
           reason: 'seeded');
       await store.writeTriage(
         'email',

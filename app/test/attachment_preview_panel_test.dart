@@ -11,6 +11,7 @@ import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/inline_alert.dart';
 import 'package:bond_inbox/widgets/preview/attachment_preview_panel.dart';
 import 'package:bond_inbox/widgets/preview/eml_preview.dart';
+import 'package:bond_inbox/widgets/preview/html_preview.dart';
 import 'package:bond_inbox/widgets/preview/image_preview.dart';
 import 'package:bond_inbox/widgets/preview/pdf_preview.dart';
 import 'package:bond_inbox/widgets/preview/preview_engines.dart';
@@ -68,6 +69,7 @@ void main() {
     VoidCallback? onPinToStoryline,
     bool pinned = false,
     void Function(String url)? onOpenLink,
+    void Function(AttachmentRef attachment)? onOpenInBrowser,
     VoidCallback? onClose,
     bool failingWorkbook = false,
     int pumps = 3,
@@ -93,6 +95,7 @@ void main() {
             onPinToStoryline: onPinToStoryline,
             pinned: pinned,
             onOpenLink: onOpenLink,
+            onOpenInBrowser: onOpenInBrowser,
           ),
         ),
       ),
@@ -624,6 +627,243 @@ void main() {
 
       expect(find.byType(UnsupportedPreview), findsOneWidget);
       expect(bytes.bytesCalls, 0);
+    });
+  });
+
+  group('a web page', () {
+    /// A self-contained report, the shape a security tool exports and the shape
+    /// that printed itself as source in the preview before the conversion
+    /// reached it: a doctype, a head carrying a `<meta charset>` and a page of
+    /// CSS, a table of findings, and one sentence a reader came for.
+    const reportHtml = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Access review</title>
+<style>
+  body { font-family: -apple-system, sans-serif; }
+  table.findings td { border: 1px solid #333333; padding: 6px 8px; }
+</style>
+<script>document.title = 'nope';</script>
+</head>
+<body>
+<h1>Access review</h1>
+<table class="findings"><tr><th>Account</th><th>Finding</th></tr>
+<tr><td>dana@example.com</td><td>Password age</td></tr></table>
+<p>Two accounts need a password change.</p>
+</body></html>
+''';
+
+    AttachmentRef page() => ref(
+          source: 'teams',
+          name: 'security-report.html',
+          contentType: 'text/html',
+          size: 35 * 1024,
+          conversationKey: 'chat-1',
+        );
+
+    testWidgets('the rendering, the door to the browser and the words',
+        (tester) async {
+      final attachment = page();
+      bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] = reportHtml;
+      bytes.thumbnailsByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          Uint8List.fromList(onePixelPng);
+      await pump(tester, attachment, onOpenInBrowser: (_) {}, pumps: 6);
+
+      expect(find.byKey(HtmlPreview.snapshotKey), findsOneWidget);
+      expect(find.text('Open in browser'), findsOneWidget);
+      expect(find.byKey(HtmlPreview.cautionKey), findsOneWidget);
+
+      // The words under the card are the report, not the file.
+      final body = tester.widget<SelectableText>(
+        find.byKey(TextPreview.bodyKey),
+      );
+      expect(body.data, contains('Two accounts need a password change.'));
+      expect(body.data, isNot(contains('<table')));
+      expect(body.data, isNot(contains('<p>')));
+      expect(body.data, isNot(contains('border: 1px')),
+          reason: 'the style block is not prose');
+      expect(body.data, isNot(contains('document.title')),
+          reason: 'neither is the script');
+    });
+
+    testWidgets('a page a previous build stored as markup still reads as words',
+        (tester) async {
+      // The conversion belongs at ingest and is there, but nothing re-extracts
+      // what is already in the store: every page a mailbox pulled down before
+      // it landed has `<!DOCTYPE` and a stylesheet sitting in `attachment_text`
+      // until somebody clears the AI results. This is what the reader gets
+      // meanwhile.
+      final attachment = page();
+      bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] = reportHtml;
+      await pump(tester, attachment, onOpenInBrowser: (_) {}, pumps: 6);
+
+      final body = tester.widget<SelectableText>(
+        find.byKey(TextPreview.bodyKey),
+      );
+      expect(body.data, contains('Two accounts need a password change.'));
+      expect(body.data, contains('Access review'));
+      for (final source in [
+        '<!DOCTYPE',
+        '<html',
+        '<head',
+        'charset',
+        'viewport',
+        'font-family',
+        '#333333',
+        '<table',
+      ]) {
+        expect(body.data, isNot(contains(source)), reason: source);
+      }
+    });
+
+    testWidgets('words already converted are left exactly as they are',
+        (tester) async {
+      // The guard in front of the display-time conversion: a converted page can
+      // legitimately carry an angle-bracketed address, and running the stripper
+      // over it again would take the address with it.
+      final attachment = page();
+      const words = 'Access review\n\nWrite to <dana@example.com> about the '
+          'two accounts that need a password change.';
+      bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] = words;
+      await pump(tester, attachment, onOpenInBrowser: (_) {}, pumps: 6);
+
+      final body = tester.widget<SelectableText>(
+        find.byKey(TextPreview.bodyKey),
+      );
+      expect(body.data, words);
+    });
+
+    testWidgets('a page is read from the store and its picture drawn, with no '
+        'download', (tester) async {
+      final attachment = page();
+      bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] = reportHtml;
+      bytes.thumbnailsByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          Uint8List.fromList(onePixelPng);
+      await pump(tester, attachment, onOpenInBrowser: (_) {}, pumps: 6);
+
+      expect(bytes.thumbnailCalls, 1);
+      expect(bytes.bytesCalls, 0);
+    });
+
+    testWidgets('no picture is the glyph card, and still a way out',
+        (tester) async {
+      final attachment = page();
+      bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] = reportHtml;
+      await pump(tester, attachment, onOpenInBrowser: (_) {}, pumps: 6);
+
+      expect(find.byKey(HtmlPreview.snapshotKey), findsNothing);
+      expect(find.byKey(HtmlPreview.glyphKey), findsOneWidget);
+      expect(find.text('Open in browser'), findsOneWidget);
+    });
+
+    testWidgets('a host that cannot open a browser offers none', (tester) async {
+      final attachment = page();
+      bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] = reportHtml;
+      await pump(tester, attachment, pumps: 6);
+
+      expect(find.text('Open in browser'), findsNothing);
+      expect(find.byKey(HtmlPreview.cautionKey), findsNothing);
+      // The words are still there, which is the whole point of not hiding the
+      // preview behind the control.
+      final body = tester.widget<SelectableText>(
+        find.byKey(TextPreview.bodyKey),
+      );
+      expect(body.data, contains('Two accounts need a password change.'));
+    });
+
+    testWidgets('pressing the card hands this file to the host, once',
+        (tester) async {
+      final attachment = page();
+      final asked = <AttachmentRef>[];
+      bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] = reportHtml;
+      await pump(tester, attachment, onOpenInBrowser: asked.add, pumps: 6);
+
+      await tester.tap(find.byKey(HtmlPreview.cardKey));
+      await tester.pump();
+
+      expect(asked.length, 1);
+      expect(asked.single.attachmentId, attachment.attachmentId);
+    });
+
+    testWidgets('the generic Open stays off, and the card speaks instead of '
+        'the refusal caption', (tester) async {
+      final attachment = page();
+      bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] = reportHtml;
+      bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          Uint8List.fromList([1]);
+      await pump(
+        tester,
+        attachment,
+        onOpen: () {},
+        onSave: () {},
+        onOpenInBrowser: (_) {},
+        pumps: 6,
+      );
+
+      // The browser door is narrower than Open: it writes a `.html` file and
+      // launches a browser at it, where Open hands the file to whatever the
+      // operating system would run it with. So Open is still withheld —
+      // `openRefused` is untouched — and Save is still there.
+      expect(find.byKey(AttachmentPreviewPanel.openKey), findsNothing);
+      expect(find.byKey(AttachmentPreviewPanel.saveKey), findsOneWidget);
+      // One sentence about where this file can go, not two contradicting ones.
+      expect(find.byKey(AttachmentPreviewPanel.openRefusedKey), findsNothing);
+      expect(find.text('Open in browser'), findsOneWidget);
+    });
+
+    testWidgets('the refusal caption is back where there is no browser door',
+        (tester) async {
+      final attachment = page();
+      bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] = reportHtml;
+      bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          Uint8List.fromList([1]);
+      await pump(tester, attachment, onOpen: () {}, onSave: () {}, pumps: 6);
+
+      // With nothing wired, the caption is the only thing that explains the
+      // missing button.
+      expect(find.byKey(AttachmentPreviewPanel.openRefusedKey), findsOneWidget);
+      expect(find.byKey(AttachmentPreviewPanel.openKey), findsNothing);
+    });
+
+    testWidgets('the caption stays away under Text as well', (tester) async {
+      // A control that appears when the reader switches segment moves the row
+      // under their cursor.
+      final attachment = page();
+      bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] = reportHtml;
+      bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          Uint8List.fromList([1]);
+      await pump(
+        tester,
+        attachment,
+        onOpen: () {},
+        onSave: () {},
+        onOpenInBrowser: (_) {},
+        pumps: 6,
+      );
+
+      await tapSegment(tester, 'Text');
+
+      expect(find.byKey(AttachmentPreviewPanel.openRefusedKey), findsNothing);
+      expect(find.byKey(AttachmentPreviewPanel.saveKey), findsOneWidget);
+    });
+
+    testWidgets('under Text there is no card, only the words', (tester) async {
+      final attachment = page();
+      bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] = reportHtml;
+      bytes.thumbnailsByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          Uint8List.fromList(onePixelPng);
+      await pump(tester, attachment, onOpenInBrowser: (_) {}, pumps: 6);
+
+      await tapSegment(tester, 'Text');
+
+      expect(find.byKey(HtmlPreview.cardKey), findsNothing);
+      final body = tester.widget<SelectableText>(
+        find.byKey(TextPreview.bodyKey),
+      );
+      expect(body.data, contains('Two accounts need a password change.'));
     });
   });
 

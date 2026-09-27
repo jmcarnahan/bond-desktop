@@ -2026,6 +2026,41 @@ void main() {
       expect(gate.asks, 0);
     });
 
+    test(
+        'an empty pump takes no gate run, so mail arriving while another '
+        'drain holds the gate can still ask', () async {
+      final gate = _RecordingGate();
+      // The worker's drain, holding the gate for the whole test — hours, in
+      // the incident this pins: a backlog walk over an afternoon's mail.
+      final holder = Completer<void>();
+      unawaited(gate.run(() => holder.future));
+      final queue = TriageQueue(store, fakeLlm([answer()]), gate: gate);
+
+      // Nothing pending: the pump must come straight back. It used to queue
+      // its drain here anyway — ticketless, because the empty queue asks for
+      // no yield — and sit latched behind the holder, where it silenced the
+      // ask of every pump after it: new mail then waited for the holder's
+      // whole backlog. This await IS the assertion — the broken shape never
+      // returns while the holder runs.
+      await queue.pump();
+      expect(gate.asks, 0);
+
+      // The mail lands mid-drain, and the next pump can now do what the
+      // latched one never let it: ask and enqueue in the same step.
+      await seedMessage(id: 'm1');
+      final second = queue.pump();
+      while (gate.asks == 0) {
+        await Future<void>.delayed(const Duration(milliseconds: 1));
+      }
+      expect(gate.yieldRequested, isTrue);
+
+      // The holder hands over — the worker's yield — and the waiting drain
+      // triages the message that arrived under it.
+      holder.complete();
+      await second;
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+    });
+
     test('is not made on the OFF branch, however much is pending', () async {
       await seedMessage(id: 'm1');
       await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');

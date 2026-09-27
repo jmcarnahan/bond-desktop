@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:bond_inbox/services/chat_mentions.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
 import 'package:bond_inbox/services/token_store.dart';
@@ -467,6 +468,91 @@ void main() {
         build().sendChatMessage('chat-1', 'On it.'),
         throwsA(isA<GraphTeamsException>()),
       );
+    });
+
+    test('a send that mentions nobody carries no mentions and no html',
+        () async {
+      // The text shape is byte for byte what it was before mentions existed:
+      // the body and nothing else.
+      graph.posted = () => _jsonOk({'id': 'sent-1', 'messageType': 'message'});
+
+      await build().sendChatMessage('chat-1', 'a < b & c');
+
+      expect(graph.to('/messages').single.json, {
+        'body': {'contentType': 'text', 'content': 'a < b & c'},
+      });
+    });
+
+    group('with mentions', () {
+      const ada = ChatMention(userId: 'aad-ada', displayName: 'Ada Park');
+      const ben = ChatMention(userId: 'aad-ben', displayName: 'Ben Ortiz');
+
+      Future<Map<String, dynamic>> postOf(
+        String text,
+        List<ChatMention> mentions,
+      ) async {
+        graph.posted =
+            () => _jsonOk({'id': 'sent-1', 'messageType': 'message'});
+        await build().sendChatMessage('chat-1', text, mentions: mentions);
+        return graph.to('/messages').single.json;
+      }
+
+      test('an html body beside a mentions array that points back at it',
+          () async {
+        final json = await postOf('@Ada Park can you look?', const [ada]);
+
+        expect(json['body'], {
+          'contentType': 'html',
+          'content': '<at id="0">Ada Park</at> can you look?',
+        });
+        expect(json['mentions'], [
+          {
+            'id': 0,
+            'mentionText': 'Ada Park',
+            'mentioned': {
+              'user': {
+                'id': 'aad-ada',
+                'displayName': 'Ada Park',
+                'userIdentityType': 'aadUser',
+              },
+            },
+          },
+        ]);
+      });
+
+      test('a typed < and & stay text, and a new line is a <br>', () async {
+        final json =
+            await postOf('@Ada Park is a < b & "c"?\nThanks', const [ada]);
+
+        expect(
+          (json['body'] as Map)['content'],
+          '<at id="0">Ada Park</at> is a &lt; b &amp; &quot;c&quot;?<br>Thanks',
+        );
+      });
+
+      test('a person the text never names goes at the front', () async {
+        // The quick reply box never writes `@Name`, so this is its usual path.
+        final json = await postOf('Can you look?', const [ada, ben]);
+
+        expect(
+          (json['body'] as Map)['content'],
+          '<at id="0">Ada Park</at> <at id="1">Ben Ortiz</at> Can you look?',
+        );
+        expect([for (final m in json['mentions'] as List) m['id']], [0, 1]);
+      });
+
+      test('the same person twice is one mention', () async {
+        final json = await postOf(
+          '@Ada Park and @Ben Ortiz',
+          const [ada, ben, ChatMention(userId: 'aad-ada', displayName: 'Ada')],
+        );
+
+        expect(
+          (json['body'] as Map)['content'],
+          '<at id="0">Ada Park</at> and <at id="1">Ben Ortiz</at>',
+        );
+        expect(json['mentions'] as List, hasLength(2));
+      });
     });
 
     test('one other person opens a oneOnOne, with the user first', () async {

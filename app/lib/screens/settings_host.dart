@@ -11,6 +11,7 @@ import '../providers/context_provider.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
 import '../providers/home_provider.dart';
+import '../providers/labels_provider.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/recipient_search_provider.dart';
 import '../providers/setup_provider.dart';
@@ -181,6 +182,11 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     // the same provider is a second subscription for one answer.
     final statuses = ref.watch(managedModelsStatusProvider).valueOrNull;
     final supervisor = ref.read(modelServerSupervisorProvider);
+    // Watched so a rename's refusal sentence lands under the field that
+    // caused it while the pane is open; the notifier is read at call time
+    // like every other closure here.
+    final labelsState = ref.watch(labelsProvider);
+    final labelsNotifier = ref.read(labelsProvider.notifier);
     return SettingsScreen(
       scope: widget.scope,
       onBack: widget.onBack,
@@ -217,6 +223,19 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       storylineNewestFirst: prefs.storylineNewestFirst,
       onStorylineNewestFirstChanged: (on) =>
           unawaited(notifier.setStorylineNewestFirst(on)),
+      replySendMarksDone: prefs.replySendMarksDone,
+      onReplySendMarksDoneChanged: (on) =>
+          unawaited(notifier.setReplySendMarksDone(on)),
+      // The owner's label vocabulary. The list is state, the writers are the
+      // notifier's own — rename answers the bool the inline refusal reads,
+      // and the other two say their failures through [labelsError].
+      labels: labelsState.labels,
+      labelsLoading: !labelsState.loaded,
+      labelsError: labelsState.error,
+      onRenameLabel: labelsNotifier.rename,
+      onLabelToneChanged: (id, tone) =>
+          unawaited(labelsNotifier.setTone(id, tone)),
+      onDeleteLabel: (id) => unawaited(labelsNotifier.delete(id)),
       // BOTH sources are wired, and deliberately not bound to the mode the
       // screen OPENED in: the toggle switches backends in place, so which one
       // answers is the screen's live choice. Each closure reads the providers

@@ -3,11 +3,13 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart' show ConversationState;
+import 'package:bond_inbox/models/person.dart' show Person;
 import 'package:bond_inbox/providers/draft_provider.dart';
 import 'package:bond_inbox/services/backend/auth_session.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
+import 'package:bond_inbox/services/chat_mentions.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
@@ -33,6 +35,9 @@ const String _myId = 'me-1';
 class _FakeTeams implements TeamsBackend {
   final List<({String chatId, String text})> sends = [];
 
+  /// The mentions each send carried, one list per entry in [sends].
+  final List<List<ChatMention>> mentionsSent = [];
+
   /// Every message the chat holds, oldest first — the sends land here too,
   /// which is what makes the follow-up sync a real replay rather than a
   /// staged one.
@@ -44,6 +49,11 @@ class _FakeTeams implements TeamsBackend {
 
   /// Thrown from [sendChatMessage] instead of answering.
   Object? error;
+
+  /// The people the stored message says it mentions, in Graph's
+  /// `mentions[].mentioned.user.id` shape. Null leaves the key out, which is
+  /// what a server that does not report mentions answers.
+  List<String>? echoMentionIds;
 
   int nextId = 1;
 
@@ -82,9 +92,11 @@ class _FakeTeams implements TeamsBackend {
   @override
   Future<Map<String, dynamic>> sendChatMessage(
     String chatId,
-    String text,
-  ) async {
+    String text, {
+    List<ChatMention> mentions = const [],
+  }) async {
     sends.add((chatId: chatId, text: text));
+    mentionsSent.add(mentions);
     final thrown = error;
     if (thrown != null) throw thrown;
     final message = {
@@ -96,6 +108,15 @@ class _FakeTeams implements TeamsBackend {
       'from': {
         'user': {'id': _myId, 'displayName': 'Jordan Bond'},
       },
+      if (echoMentionIds case final ids?)
+        'mentions': [
+          for (final id in ids)
+            {
+              'mentioned': {
+                'user': {'id': id},
+              },
+            },
+        ],
     };
     stored.add(message);
     return message;
@@ -104,6 +125,21 @@ class _FakeTeams implements TeamsBackend {
   @override
   Future<EnsuredChat> ensureChat(List<String> userIds, {String? topic}) =>
       throw UnimplementedError();
+}
+
+/// A store whose OUTBOUND row write refuses, as a locked database would — the
+/// first local write after a chat post the server already accepted. Inbound
+/// rows still land, so the fixture can be seeded through it.
+class _OutboundRefusingStore extends MessageStore {
+  _OutboundRefusingStore(super.db);
+
+  @override
+  Future<String?> upsertMessage(Map<String, Object?> row) async {
+    if (row['direction'] == 'outbound') {
+      throw StateError('database is locked');
+    }
+    return super.upsertMessage(row);
+  }
 }
 
 /// A mail backend that would throw if a chat send ever reached it. It must not:
@@ -450,6 +486,119 @@ void main() {
 
       expect(teams.sends, isEmpty);
       expect(await teamsMessages(), hasLength(1));
+    });
+  });
+
+  group('people added to a chat reply', () {
+    const ada = Person(
+      id: 'aad-ada',
+      displayName: 'Ada Park',
+      mail: 'ada@example.com',
+    );
+
+    test('can be added at all, because the send mentions them', () async {
+      final notifier = await loaded();
+
+      expect(notifier.state.canEditRecipients, isTrue);
+    });
+
+    test('never include somebody with no Graph id to mention', () async {
+      final notifier = await loaded();
+
+      notifier.setAddedRecipients([ada, Person.typed('guest@example.test')]);
+
+      expect(notifier.state.addedRecipients, [ada]);
+    });
+
+    test('ride the send as mentions, and come off when it lands', () async {
+      await seedChat();
+      final notifier = await loaded();
+      notifier.setAddedRecipients(const [ada]);
+
+      expect(await notifier.send('Looping in @Ada Park.'), SendOutcome.sent);
+
+      expect(teams.mentionsSent.single, const [
+        ChatMention(userId: 'aad-ada', displayName: 'Ada Park'),
+      ]);
+      // Left on, they would mention the same person on the next reply.
+      expect(notifier.state.addedRecipients, isEmpty);
+      final outbound = (await teamsMessages()).last;
+      expect(outbound['direction'], 'outbound');
+      expect(outbound['addressed_me'], 0);
+    });
+
+    test('stay on a send that failed, for the retry', () async {
+      await seedChat();
+      teams.error = const GraphTeamsException('Graph said no', 502);
+      final notifier = await loaded();
+      notifier.setAddedRecipients(const [ada]);
+
+      expect(await notifier.send('On it.'), SendOutcome.failed);
+
+      expect(notifier.state.addedRecipients, [ada]);
+      expect(notifier.state.error, 'Graph said no');
+    });
+
+    test('a local write that fails after the post still reports it sent',
+        () async {
+      // The message is in the chat the moment the post returns. Reported as
+      // failed with the chips still up, the retry would post it again and
+      // mention the same people twice.
+      store = _OutboundRefusingStore(db);
+      await seedChat();
+      final notifier = await loaded();
+      notifier.setAddedRecipients(const [ada]);
+
+      final outcome = await notifier.send('Looping in @Ada Park.');
+
+      expect(outcome, SendOutcome.sent);
+      expect(notifier.state.error, isNull);
+      expect(notifier.state.notice, DraftNotifier.localCopyFailedNotice);
+      expect(notifier.state.sending, isFalse);
+      expect(notifier.state.sendEpoch, 1);
+      expect(notifier.state.addedRecipients, isEmpty);
+      // The writes after the row still ran: the thread is answered.
+      expect((await conversation())['state'], 'waiting');
+      expect((await conversation())['cta_text'], isNull);
+      expect(syncsAfterSend, 1);
+
+      // A second press lands on an empty composer and posts nothing.
+      expect(await notifier.send(''), SendOutcome.failed);
+      expect(teams.sends, hasLength(1));
+    });
+
+    test('a mention the stored message dropped is said, and never resent',
+        () async {
+      await seedChat();
+      teams.echoMentionIds = const [];
+      final notifier = await loaded();
+      notifier.setAddedRecipients(const [ada]);
+
+      final outcome = await notifier.send('Looping in @Ada Park.');
+
+      expect(outcome, SendOutcome.sent);
+      expect(notifier.state.error, isNull);
+      expect(notifier.state.notice, contains("1 mention didn't go through"));
+      expect(teams.sends, hasLength(1));
+      expect(notifier.state.addedRecipients, isEmpty);
+    });
+
+    test('every mention echoed back says nothing', () async {
+      await seedChat();
+      teams.echoMentionIds = const ['aad-ada'];
+      final notifier = await loaded();
+      notifier.setAddedRecipients(const [ada]);
+
+      expect(await notifier.send('Looping in @Ada Park.'), SendOutcome.sent);
+
+      expect(notifier.state.notice, isNull);
+    });
+
+    test('a reply that adds nobody mentions nobody', () async {
+      await seedChat();
+      await (await loaded()).send('On it.');
+
+      expect(teams.mentionsSent.single, isEmpty);
     });
   });
 

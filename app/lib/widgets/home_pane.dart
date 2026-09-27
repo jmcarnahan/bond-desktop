@@ -171,6 +171,7 @@ class HomePane extends StatefulWidget {
   /// The line that says a tile filter is on, and the way back out of it.
   static const Key filterNoticeKey = ValueKey('home-filter-notice');
   static const Key showEveryoneKey = ValueKey('home-show-everyone');
+  static const Key documentsFoldKey = ValueKey('home-documents-fold');
 
   /// Below this much table width the row folds onto ONE line.
   ///
@@ -217,6 +218,10 @@ class _HomePaneState extends State<HomePane> {
   /// Mirrors what was last reported upward, so a scroll that stays at the top
   /// — or stays away from it — costs nothing.
   bool _anchored = true;
+
+  /// Whether the owner unfolded the search's documents. Kept across queries,
+  /// like the typed text: someone who opened it once is reading documents.
+  bool _documentsOpen = false;
 
   @override
   void initState() {
@@ -563,19 +568,17 @@ class _HomePaneState extends State<HomePane> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text(
-                  'In documents',
-                  style:
-                      BondType.caption.copyWith(color: BondColors.inkMuted),
-                ),
-                const SizedBox(height: BondSpacing.s4),
-                for (final hit in search.documents)
-                  AttachmentSearchTile(
-                    key: AttachmentSearchTile.keyFor(hit.ref),
-                    hit: hit,
-                    now: widget.now,
-                    onOpenThread: widget.onOpenThread,
-                  ),
+                _documentsHeader(search),
+                if (_documentsShown(search)) ...[
+                  const SizedBox(height: BondSpacing.s4),
+                  for (final hit in search.documents)
+                    AttachmentSearchTile(
+                      key: AttachmentSearchTile.keyFor(hit.ref),
+                      hit: hit,
+                      now: widget.now,
+                      onOpenThread: widget.onOpenThread,
+                    ),
+                ],
               ],
             ),
           ),
@@ -612,6 +615,49 @@ class _HomePaneState extends State<HomePane> {
           Expanded(child: _resultList(search, compact)),
         ],
       ],
+    );
+  }
+
+  /// Whether the document passages are listed or folded under their heading.
+  ///
+  /// Folded unless opened, because six passages of three lines each push the
+  /// message rows off the first screen. Never folded when no message matched:
+  /// the documents are then the whole answer, and a shut fold over "No
+  /// messages match that." would hide the one thing the search found.
+  bool _documentsShown(HomeSearch search) =>
+      _documentsOpen || search.hits.isEmpty;
+
+  /// The documents heading, and the fold's toggle while messages matched too.
+  /// The count rides in the label for the possible-storylines fold's reason:
+  /// it is what the heading has to say for itself while it is shut.
+  Widget _documentsHeader(HomeSearch search) {
+    final label = Text(
+      'In documents · ${search.documents.length}',
+      style: BondType.caption.copyWith(color: BondColors.inkMuted),
+    );
+    if (search.hits.isEmpty) return label;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        key: HomePane.documentsFoldKey,
+        onTap: () => setState(() => _documentsOpen = !_documentsOpen),
+        borderRadius: BondRadii.smAll,
+        child: Row(
+          children: [
+            label,
+            const SizedBox(width: BondSpacing.s4),
+            AnimatedRotation(
+              turns: _documentsOpen ? 0 : -0.25,
+              duration: const Duration(milliseconds: 120),
+              child: const Icon(
+                Icons.expand_more,
+                size: 16,
+                color: BondColors.inkMuted,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 

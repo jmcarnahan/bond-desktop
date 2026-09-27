@@ -511,6 +511,121 @@ void main() {
       expect(entries.single['kind'], 'message_reference');
     });
 
+    test('a quote-reply carries who was quoted and what they said', () {
+      final entries = GraphTeams.attachmentEntries({
+        'attachments': [
+          {
+            'id': 'q-1',
+            'contentType': 'messageReference',
+            // Graph sends `content` as a JSON STRING, and `messageSender` as
+            // the same identity set `from` uses.
+            'content': jsonEncode({
+              'messageId': '1758300000001',
+              'messagePreview': 'is it slide 29 in the deck?',
+              'messageSender': {
+                'user': {'id': 'u-9', 'displayName': 'Priya Raman'},
+              },
+            }),
+          },
+        ],
+      });
+
+      final entry = entries.single;
+      expect(entry['message_id'], '1758300000001');
+      expect(entry['message_sender'], 'Priya Raman');
+      expect(entry['message_preview'], 'is it slide 29 in the deck?');
+
+      // And onto the columns the row reads it back off.
+      final row = TeamsSync.attachmentRows({'attachments': entries}).single;
+      expect(row['kind'], 'message_reference');
+      expect(row['item_from'], 'Priya Raman');
+      expect(row['card_text'], 'is it slide 29 in the deck?');
+      expect(row['content_id'], '1758300000001');
+      // Nothing to fetch and nothing to draw in a sentence: a quote is not a
+      // file, so it is never inline and never has a name or a url.
+      expect(row['is_inline'], isFalse);
+      expect(row['name'], isNull);
+      expect(row['source_url'], isNull);
+    });
+
+    test('a quote-reply whose content is broken still reads as a quote', () {
+      final entries = GraphTeams.attachmentEntries({
+        'attachments': [
+          {'id': 'q-1', 'contentType': 'messageReference', 'content': '{"mess'},
+          {
+            'id': 'q-2',
+            'contentType': 'messageReference',
+            // Half the keys, and a sender that is an identity set with no
+            // display name on it — a guest, or a bot posting as an app.
+            'content': jsonEncode({
+              'messagePreview': '29 and 30',
+              'messageSender': {
+                'user': {'id': 'u-9'},
+              },
+            }),
+          },
+        ],
+      });
+
+      expect(entries.map((e) => e['kind']), everyElement('message_reference'));
+      expect(entries.first['message_sender'], isNull);
+      expect(entries.first['message_preview'], isNull);
+      expect(entries.last['message_sender'], isNull);
+      expect(entries.last['message_preview'], '29 and 30');
+    });
+
+    test('a quote-reply reads the same through the MCP backend', () async {
+      // The server may have flattened the three fields already or may pass
+      // Graph's `content` string straight through; both have to land on the
+      // same row, or a backend switch would change what a quote is.
+      final flat = GraphTeams.attachmentEntries({
+        'attachments': [
+          {
+            'id': 'q-1',
+            'contentType': 'messageReference',
+            'content': jsonEncode({
+              'messageId': '1758300000001',
+              'messagePreview': 'is it slide 29 in the deck?',
+              'messageSender': 'Priya Raman',
+            }),
+          },
+        ],
+      });
+
+      for (final entries in [
+        flat,
+        [
+          {
+            'id': 'q-1',
+            'kind': 'message_reference',
+            'content_type': 'messageReference',
+            'content': jsonEncode({
+              'messageId': '1758300000001',
+              'messagePreview': 'is it slide 29 in the deck?',
+              'messageSender': 'Priya Raman',
+            }),
+          },
+        ],
+      ]) {
+        final shape = await _throughMcp({
+          'id': 'm1',
+          'message_type': 'message',
+          'created': _iso(const Duration(hours: 1)),
+          'last_modified': _iso(const Duration(hours: 1)),
+          'body_content_type': 'text',
+          'body_content': '29 and 30',
+          'from_user_id': 'u1',
+          'attachments': entries,
+        });
+
+        final row = TeamsSync.attachmentRows(shape).single;
+        expect(row['kind'], 'message_reference');
+        expect(row['item_from'], 'Priya Raman');
+        expect(row['card_text'], 'is it slide 29 in the deck?');
+        expect(row['content_id'], '1758300000001');
+      }
+    });
+
     test('a text body cannot carry an inline image', () {
       final entries = GraphTeams.attachmentEntries({
         'body': {

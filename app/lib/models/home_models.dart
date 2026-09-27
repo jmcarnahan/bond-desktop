@@ -160,15 +160,18 @@ class HomeFeedRow {
   /// to agree with.
   final String? threadState;
 
-  /// Whether the message carried anything attached, straight off
-  /// `messages.has_attachments`. False on any read that did not select the
-  /// column — which reads as "nothing attached" rather than as a paperclip on
-  /// a message that has none.
+  /// Whether the message carries a file somebody could open.
   ///
-  /// It is here so `has:file` can be answered without a second query per hit:
-  /// a search returns fifty rows and a per-row attachment lookup would be
-  /// fifty reads to decide which ones to throw away.
-  final bool hasAttachments;
+  /// NOT `messages.has_attachments`, which is 1 for a Teams quote-reply as
+  /// well: a quote is an attachment to Graph and no file to a reader, and the
+  /// store answers this with an EXISTS over the rows that are not quotes. False
+  /// on any read that did not select the column — which reads as "nothing
+  /// attached" rather than as a paperclip on a message that has none.
+  ///
+  /// It is here rather than behind a lookup so `has:file` can be answered
+  /// without a second query per hit: a search returns fifty rows and a per-row
+  /// attachment lookup would be fifty reads to decide which ones to throw away.
+  final bool hasFile;
   /// When the pipeline last wrote anything about this row. The stalled
   /// clock's zero, and empty only on a path that predates the column.
   final String updatedAt;
@@ -241,7 +244,7 @@ class HomeFeedRow {
     this.summary,
     this.ctaText,
     this.threadState,
-    this.hasAttachments = false,
+    this.hasFile = false,
     this.updatedAt = '',
     this.needsYouVerdict,
     this.needsYouReason,
@@ -278,7 +281,7 @@ class HomeFeedRow {
         summary: row['summary'] as String?,
         ctaText: row['cta_text'] as String?,
         threadState: row['thread_state'] as String?,
-        hasAttachments: (row['has_attachments'] as num?)?.toInt() == 1,
+        hasFile: (row['has_file'] as num?)?.toInt() == 1,
         updatedAt: row['updated_at'] as String? ?? '',
         // Three-valued on purpose: null stays null, and only a stored 1 is a
         // yes. Anything else the column could hold is a no. `Message.fromRow`
@@ -346,7 +349,7 @@ class HomeFeedRow {
         summary: summary,
         ctaText: ctaText,
         threadState: threadState,
-        hasAttachments: hasAttachments,
+        hasFile: hasFile,
         updatedAt: updatedAt,
         needsYouVerdict: needsYouVerdict,
         needsYouReason: needsYouReason,

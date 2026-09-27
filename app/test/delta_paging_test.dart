@@ -1,6 +1,8 @@
 import 'dart:convert';
 
-import 'package:bond_inbox/data/database.dart';
+// `hide Message`: drift generates a row class of that name, and the Message
+// this file reads a stored row through is the app's model.
+import 'package:bond_inbox/data/database.dart' hide Message;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
@@ -161,8 +163,10 @@ class GraphStub {
 
         if (request.url.path.contains('/me/messages/')) {
           final id = Uri.decodeComponent(request.url.pathSegments.last);
-          expect(request.headers['Prefer'], 'outlook.body-content-type="text"',
-              reason: 'Graph must convert HTML to text server-side');
+          // HTML, not text: Graph's own conversion writes `label <href>` and
+          // `[alt]`, and this app converts the HTML part itself at ingest.
+          expect(request.headers['Prefer'], 'outlook.body-content-type="html"',
+              reason: 'the ingest converts the HTML part itself');
           final responder = details[id];
           if (responder != null) return responder();
           return jsonOk({'id': id});
@@ -706,8 +710,8 @@ void main() {
       graph.requests.clear();
     });
 
-    test('fetches the plain-text unique body and lowercased headers',
-        () async {
+    test('fetches the unique body a connector calls text, and lowercased '
+        'headers', () async {
       graph.details['m1'] = () => jsonOk({
             'id': 'm1',
             'uniqueBody': {
@@ -743,6 +747,169 @@ void main() {
         graph.requests.map((u) => Uri.decodeComponent(u.pathSegments.last)).toList(),
         ['m2', 'm1'],
       );
+
+      // The detail select asks for the invitation kind. Absent on ordinary
+      // mail, which is what both rows above are, so no `meeting` key is
+      // written and the blob is headers or nothing.
+      final select =
+          graph.requests.first.queryParameters[r'$select']!.split(',');
+      expect(select, contains('meetingMessageType'));
+      expect(select, contains('uniqueBody'));
+      expect(jsonDecode(m1['source_meta_json'] as String),
+          isNot(contains('meeting')));
+      expect((await messageRow('m2'))['source_meta_json'], isNull);
+    });
+
+    test('an HTML body is converted here, not by the server', () async {
+      // The M365 notification shape, in miniature: a linked logo whose alt
+      // text is all Graph's own conversion would have written, a CTA anchor
+      // whose label is the two words on the button, and a paragraph.
+      graph.details['m1'] = () => jsonOk({
+            'id': 'm1',
+            'uniqueBody': {
+              'contentType': 'html',
+              'content': '<html><head><style>p{color:red}</style></head>'
+                  '<body><table><tr><td>'
+                  '<a href="https://notify.example.com/home">'
+                  '<img src="https://cdn.example.com/logo.png" alt="Main Logo">'
+                  '</a></td></tr></table>'
+                  '<p>Dana Whitlock commented on the renewal.</p>'
+                  '<p><a href="https://requests.example.com/r/42#c7">'
+                  'View comment</a></p></body></html>',
+            },
+            'hasAttachments': false,
+          });
+      graph.details['m2'] = () => jsonOk({
+            'id': 'm2',
+            'uniqueBody': {'contentType': 'text', 'content': 'Plain enough.'}
+          });
+
+      await sync.ensureBodies('conv-1');
+
+      final body = (await messageRow('m1'))['body_text'] as String;
+      expect(body, isNot(contains('<a ')), reason: 'no markup survives');
+      expect(body, isNot(contains('Main Logo')),
+          reason: 'a linked logo is an anchor with no label and drops whole');
+      expect(body, isNot(contains('color:red')), reason: 'the style block goes');
+      expect(body, contains('Dana Whitlock commented on the renewal.'));
+      // The canonical run, which is what the linkifier and the prompt
+      // stripper both read.
+      expect(body, contains('View comment <https://requests.example.com/r/42#c7>'));
+
+      // And the other connector's shape down the same call, untouched.
+      expect((await messageRow('m2'))['body_text'], 'Plain enough.');
+    });
+
+    test('a meeting invitation carries its kind beside the headers', () async {
+      graph.details['m1'] = () => jsonOk({
+            'id': 'm1',
+            'uniqueBody': {'contentType': 'text', 'content': 'Please join.'},
+            'internetMessageHeaders': [
+              {'name': 'Auto-Submitted', 'value': 'auto-generated'},
+            ],
+            'meetingMessageType': 'meetingRequest',
+          });
+      graph.details['m2'] = () => jsonOk({
+            'id': 'm2',
+            'uniqueBody': {'contentType': 'text', 'content': 'Not a meeting.'},
+          });
+
+      await sync.ensureBodies('conv-1');
+
+      // Read through the model, which is the only reader of the blob: the key
+      // is one thing in a connector-specific dict and nothing outside the
+      // getter knows its spelling.
+      final invite = Message.fromRow(await messageRow('m1'));
+      expect(invite.meetingMessageType, 'meetingRequest');
+      expect(invite.headers, {'auto-submitted': 'auto-generated'});
+
+      // Null is "nobody said", and it is the answer for ordinary mail as much
+      // as for a row a build before this one wrote.
+      expect(Message.fromRow(await messageRow('m2')).meetingMessageType, isNull);
+      expect(
+        Message(
+          id: 'old',
+          outbound: false,
+          sourceMetaJson: jsonEncode({
+            'headers': {'auto-submitted': 'auto-generated'},
+          }),
+        ).meetingMessageType,
+        isNull,
+        reason: 'the old blob shape still parses, and says nothing',
+      );
+    });
+
+    /// An M365 notification whose entire content is one linked banner. Every
+    /// anchor here has no label but the image, and an image that is not `cid:`
+    /// is dropped, so the honest conversion of this message is no text at all.
+    const imageOnlyHtml = '<html><body><table><tr><td>'
+        '<a href="https://notify.example.com/n/9f2c">'
+        '<img src="https://cdn.example.com/banner.png" alt="Company Banner">'
+        '</a></td></tr>'
+        '<tr><td>&nbsp;</td></tr></table></body></html>';
+
+    test('a body that converts to nothing settles on the preview', () async {
+      // The trap: an empty string is what `ensureBodies` calls missing, so
+      // storing the conversion verbatim would make every open of this thread
+      // fetch this detail again and get the same nothing back, forever.
+      graph.details['m1'] = () => jsonOk({
+            'id': 'm1',
+            'uniqueBody': {'contentType': 'html', 'content': imageOnlyHtml},
+          });
+      graph.details['m2'] = () => jsonOk({
+            'id': 'm2',
+            'uniqueBody': {'contentType': 'text', 'content': 'Ordinary mail.'},
+          });
+
+      await sync.ensureBodies('conv-1');
+
+      // The delta page's own snippet, which is the only other text the server
+      // ever said about this message.
+      expect((await messageRow('m1'))['body_text'], 'Preview text');
+
+      graph.requests.clear();
+      await sync.ensureBodies('conv-1');
+      expect(graph.requests, isEmpty,
+          reason: 'the second open must ask for nothing');
+    });
+
+    test('with no preview either, a space is what stops the asking', () async {
+      graph.queue('inbox', [
+        () => jsonOk(deltaBody(
+              [
+                graphMessage(
+                  id: 'm3',
+                  preview: '',
+                  receivedDateTime: '2026-08-29T09:00:00Z',
+                ),
+              ],
+              deltaLink: deltaCursor('inbox', 'c2'),
+            )),
+      ]);
+      await sync.syncNow();
+      graph.requests.clear();
+
+      graph.details['m3'] = () => jsonOk({
+            'id': 'm3',
+            'uniqueBody': {'contentType': 'html', 'content': imageOnlyHtml},
+          });
+      for (final id in ['m1', 'm2']) {
+        graph.details[id] = () => jsonOk({
+              'id': id,
+              'uniqueBody': {'contentType': 'text', 'content': 'Body $id.'},
+            });
+      }
+
+      await sync.ensureBodies('conv-1');
+
+      // Not a sentence: nothing should render a caption this app invented over
+      // a message it did not write. A mark meaning "asked, and there were no
+      // words", which is all `ensureBodies` needs to stop.
+      expect((await messageRow('m3'))['body_text'], ' ');
+
+      graph.requests.clear();
+      await sync.ensureBodies('conv-1');
+      expect(graph.requests, isEmpty);
     });
 
     test('a second open costs no network at all', () async {
@@ -965,6 +1132,182 @@ void main() {
       // `reply_expected` is NULL on anything the first triage judged, and
       // nothing else would ever look at the row again.
       expect((await messageRow('v1-judged'))['triage_status'], 'pending');
+    });
+  });
+
+  group('the mail text one-shots', () {
+    String ago(Duration age) =>
+        DateTime.now().toUtc().subtract(age).toIso8601String();
+
+    Future<void> stored(String id, {String? body, String? preview}) =>
+        store.upsertMessage(SyncService.mailRow(
+          id: id,
+          conversationKey: 'conv-old',
+          direction: 'inbound',
+          fromAddress: 'dana@notify.example.com',
+          to: const ['owner@example.com'],
+          receivedAt: ago(const Duration(hours: 2)),
+          isRead: true,
+          bodyText: body,
+          bodyPreview: preview,
+          triageStatus: 'done',
+        ));
+
+    Future<void> syncEmptyPage(String cursor) async {
+      graph.queue('inbox', [
+        () => jsonOk(deltaBody(const [], deltaLink: deltaCursor('inbox', cursor))),
+      ]);
+      await sync.syncNow();
+    }
+
+    /// Whether the row carries the stale-body mark, read the way the store's
+    /// own predicate reads it.
+    Future<bool> stale(String id) async {
+      final row = await messageRow(id);
+      return Message.fromRow(row).bodyStale;
+    }
+
+    test('a sync marks the bodies an older converter wrote, keeps their text, '
+        'and tidies the previews, exactly once', () async {
+      const converted = 'View comment <https://requests.example.com/r/42#c7>';
+      await stored('m-converted', body: converted, preview: converted);
+      await stored('m-clean', body: 'See you Thursday.', preview: 'See you Thursday.');
+      // Double-spaced by the first converter and carrying no link at all: the
+      // blank line is the only mark it left.
+      await stored(
+        'm-doubled',
+        body: 'Hi Dana,\n\nSee you Thursday.',
+        preview: 'Hi Dana, See you Thursday.',
+      );
+      // The first converter decoded seven entities and left the rest literal.
+      await stored('m-entity', body: 'We&rsquo;re glad you came.');
+
+      await syncEmptyPage('c1');
+
+      // Marked, and the text stays: every reader but the transcript keeps
+      // reading it until a refetch has answered.
+      expect((await messageRow('m-converted'))['body_text'], converted);
+      expect(await stale('m-converted'), isTrue);
+      expect(await stale('m-doubled'), isTrue);
+      expect(await stale('m-entity'), isTrue);
+      expect((await messageRow('m-entity'))['body_text'],
+          'We&rsquo;re glad you came.');
+      expect(await stale('m-clean'), isFalse);
+      // The preview has no HTML part behind it, so it is repaired in place.
+      expect((await messageRow('m-converted'))['body_preview'], 'View comment');
+      expect(await store.getPref('mail_html_rebuild_2'), '1');
+      expect(await store.getPref('mail_preview_tidy'), '1');
+
+      // Once means once. A row written after the prefs are set, inside the
+      // window, so the prefs are the only thing that can be leaving it alone.
+      await stored('m-after-pref', body: converted, preview: converted);
+      await stored('m-doubled-after', body: 'Hi Dana,\n\nThanks.');
+      await syncEmptyPage('c2');
+
+      expect(await stale('m-after-pref'), isFalse);
+      expect((await messageRow('m-after-pref'))['body_preview'], converted);
+      expect(await stale('m-doubled-after'), isFalse);
+    });
+
+    group('a stale body', () {
+      const old = 'Go to comment <https://files.example.com/d/9?e=1>';
+
+      setUp(() async {
+        await stored('m1', body: old);
+        await syncEmptyPage('c1');
+        expect(await stale('m1'), isTrue);
+        graph.requests.clear();
+      });
+
+      test('is what the next thread open fetches, and a 200 replaces it',
+          () async {
+        graph.details['m1'] = () => jsonOk({
+              'id': 'm1',
+              'uniqueBody': {
+                'contentType': 'html',
+                'content': '<p>Dana left a comment.</p>'
+                    '<p><a href="https://files.example.com/d/9">Go to comment</a></p>',
+              },
+            });
+        await sync.ensureBodies('conv-old');
+
+        final body = (await messageRow('m1'))['body_text'] as String;
+        expect(body, contains('Dana left a comment.'));
+        expect(body, contains('Go to comment <https://files.example.com/d/9>'));
+        expect(await stale('m1'), isFalse);
+
+        // Settled: the second open asks the network for nothing.
+        graph.requests.clear();
+        await sync.ensureBodies('conv-old');
+        expect(graph.requests, isEmpty);
+      });
+
+      test('keeps its text and loses the mark when the message is gone',
+          () async {
+        // Archived in Outlook since ingest: the id this row holds now 404s.
+        graph.details['m1'] = () => http.Response('{"error":"gone"}', 404);
+        await sync.ensureBodies('conv-old');
+
+        expect((await messageRow('m1'))['body_text'], old);
+        expect(await stale('m1'), isFalse);
+
+        // And the refusal is not asked for again on every open.
+        graph.requests.clear();
+        await sync.ensureBodies('conv-old');
+        expect(graph.requests, isEmpty);
+      });
+
+      test('keeps its text and loses the mark on a 200 with no body',
+          () async {
+        graph.details['m1'] = () => jsonOk({'id': 'm1'});
+        await sync.ensureBodies('conv-old');
+
+        expect((await messageRow('m1'))['body_text'], old);
+        expect(await stale('m1'), isFalse);
+      });
+
+      test('keeps its text when the new body converts to nothing', () async {
+        // An image-only answer: the stored words beat a preview or a space.
+        graph.details['m1'] = () => jsonOk({
+              'id': 'm1',
+              'uniqueBody': {
+                'contentType': 'html',
+                'content': '<table><tr><td></td></tr></table>',
+              },
+            });
+        await sync.ensureBodies('conv-old');
+
+        expect((await messageRow('m1'))['body_text'], old);
+        expect(await stale('m1'), isFalse);
+      });
+
+      test('keeps the mark through a transient failure', () async {
+        graph.details['m1'] = () => http.Response('boom', 500);
+        await expectLater(
+          sync.ensureBodies('conv-old'),
+          throwsA(isA<GraphMailException>()),
+        );
+
+        expect((await messageRow('m1'))['body_text'], old);
+        expect(await stale('m1'), isTrue);
+      });
+
+      test('a detail that brings headers still ends with no mark', () async {
+        // The new blob replaces the old one, so the mark cannot ride along.
+        graph.details['m1'] = () => jsonOk({
+              'id': 'm1',
+              'uniqueBody': {'content': 'Fresh text.'},
+              'internetMessageHeaders': [
+                {'name': 'List-Id', 'value': 'team.example.com'},
+              ],
+            });
+        await sync.ensureBodies('conv-old');
+
+        final row = await messageRow('m1');
+        expect(row['body_text'], 'Fresh text.');
+        expect(await stale('m1'), isFalse);
+        expect(Message.fromRow(row).headers['list-id'], 'team.example.com');
+      });
     });
   });
 }

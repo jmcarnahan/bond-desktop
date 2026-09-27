@@ -6539,6 +6539,22 @@ void main() {
       }
     }
 
+    test('a window line carries the label, not the link target', () async {
+      // A recap window is quoted text: the target is tracking query spending
+      // the line's 400 characters, and the label is what the message said.
+      // Checked by host, because the fence escapes the brackets themselves.
+      await seedTwoThreads();
+      await seedMessage(store, 'member', 'm4',
+          receivedAt: '2026-08-01T12:00:00Z',
+          body: 'Sign here <https://forms.example.com/approve/9f2> by Friday');
+      final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      expect(llm.userMessages.single, contains('Sign here by Friday'));
+      expect(llm.userMessages.single, isNot(contains('forms.example.com')));
+    });
+
     test('a digested attachment adds its facts to its message line', () async {
       await seedTwoThreads();
       await seedDigested('m2', 'a1');

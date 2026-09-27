@@ -485,6 +485,185 @@ void main() {
       expect(backend.fetchCalls, 0);
     });
 
+    test("a page's thumbnail is what the Runner drew, and is remembered",
+        () async {
+      var drawn = 0;
+      String? asked;
+      int? askedWidth;
+      int? askedHeight;
+      final withHtml = StoreAttachmentBytes(
+        store: store,
+        backend: backend,
+        cache: cache,
+        htmlThumbnailer: (html, {int width = 320, int height = 240}) async {
+          drawn++;
+          asked = html;
+          askedWidth = width;
+          askedHeight = height;
+          return Uint8List.fromList(onePixelPng);
+        },
+      );
+      final attachment = ref(
+        name: 'security-report.html',
+        contentType: 'text/html',
+        size: 35 * 1024,
+      );
+      await seed(attachment);
+      backend.bytesByKey[FakeAttachmentBackend.keyOf(attachment)] =
+          payload('<html><body><h1>Access review</h1></body></html>');
+
+      final first = await withHtml.thumbnailFor(attachment);
+
+      expect(first, Uint8List.fromList(onePixelPng));
+      expect(asked, contains('Access review'),
+          reason: 'the page itself goes over, decoded from its bytes');
+      expect(askedWidth, 320);
+      expect(askedHeight, 240);
+      final row = await store.attachmentRow('email', 'm1', 'a1');
+      expect(row!['thumb_path'], isNotNull);
+
+      // The picture is kept beside the blob, so a rebuilt row costs neither a
+      // second WebKit load nor a second download.
+      expect(await withHtml.thumbnailFor(attachment), isNotNull);
+      expect(drawn, 1);
+      expect(backend.fetchCalls, 1);
+    });
+
+    test('a page crosses to WebKit with every link element stripped',
+        () async {
+      // A preconnect may open a connection the Swift rule list never sees,
+      // and a host unique to this recipient tells the sender it was opened.
+      String? asked;
+      final withHtml = StoreAttachmentBytes(
+        store: store,
+        backend: backend,
+        cache: cache,
+        htmlThumbnailer: (html, {int width = 320, int height = 240}) async {
+          asked = html;
+          return Uint8List.fromList(onePixelPng);
+        },
+      );
+      final attachment = ref(name: 'page.html', contentType: 'text/html');
+      await seed(attachment);
+      backend.bytesByKey[FakeAttachmentBackend.keyOf(attachment)] = payload(
+        '<html><head>'
+        '<link rel="preconnect" href="https://u123.tracker.example">'
+        '<LINK REL=dns-prefetch HREF=//u123.tracker.example>'
+        '<link\nrel="stylesheet" href="https://cdn.example.com/a.css"/>'
+        '</head><body><h1>Access review</h1></body></html>',
+      );
+
+      expect(await withHtml.thumbnailFor(attachment), isNotNull);
+      expect(asked!.toLowerCase(), isNot(contains('<link')));
+      expect(asked, isNot(contains('tracker.example')));
+      expect(asked, contains('<h1>Access review</h1>'));
+    });
+
+    test('a page named by nothing but its content type is still drawn',
+        () async {
+      // Graph hands a mailed page a name often enough, but not always.
+      final withHtml = StoreAttachmentBytes(
+        store: store,
+        backend: backend,
+        cache: cache,
+        htmlThumbnailer: (html, {int width = 320, int height = 240}) async =>
+            Uint8List.fromList(onePixelPng),
+      );
+      final attachment = ref(name: null, contentType: 'text/html');
+      await seed(attachment);
+      backend.bytesByKey[FakeAttachmentBackend.keyOf(attachment)] =
+          payload('<html><body>Findings</body></html>');
+
+      expect(await withHtml.thumbnailFor(attachment), isNotNull);
+    });
+
+    test('a page the Runner would not draw leaves no thumbnail behind',
+        () async {
+      // A timeout, a page WebKit refused, or a host with no channel at all —
+      // all three arrive here as null, and none of them is worth a row.
+      final withHtml = StoreAttachmentBytes(
+        store: store,
+        backend: backend,
+        cache: cache,
+        htmlThumbnailer: (html, {int width = 320, int height = 240}) async =>
+            null,
+      );
+      final attachment = ref(name: 'page.html', contentType: 'text/html');
+      await seed(attachment);
+      backend.bytesByKey[FakeAttachmentBackend.keyOf(attachment)] =
+          payload('<html><body>Findings</body></html>');
+
+      expect(await withHtml.thumbnailFor(attachment), isNull);
+      final row = await store.attachmentRow('email', 'm1', 'a1');
+      expect(row!['thumb_path'], isNull);
+    });
+
+    test("a page over the connector's cap gets no thumbnail and no fetch",
+        () async {
+      var drawn = 0;
+      final withHtml = StoreAttachmentBytes(
+        store: store,
+        backend: backend,
+        cache: cache,
+        htmlThumbnailer: (html, {int width = 320, int height = 240}) async {
+          drawn++;
+          return Uint8List.fromList(onePixelPng);
+        },
+      );
+      final attachment = ref(
+        name: 'embedded-data.html',
+        contentType: 'text/html',
+        size: attachmentTooLargeBytes + 1,
+      );
+      await seed(attachment);
+
+      expect(await withHtml.thumbnailFor(attachment), isNull);
+      expect(drawn, 0);
+      expect(backend.fetchCalls, 0);
+    });
+
+    test('with no thumbnailer a page has no picture and nothing is fetched',
+        () async {
+      // Every test and every host with no WebSnapshot channel behind it.
+      final attachment = ref(name: 'page.html', contentType: 'text/html');
+      await seed(attachment);
+
+      expect(await bytes.thumbnailFor(attachment), isNull);
+      expect(backend.fetchCalls, 0);
+    });
+
+    test('a chat page asks the drive for its picture before downloading it',
+        () async {
+      final attachment = ref(
+        source: 'teams',
+        kind: 'file',
+        name: 'security-report.html',
+        contentType: 'text/html',
+        conversationKey: 'chat-1',
+        sourceUrl: 'https://example.invalid/security-report.html',
+      );
+      await seed(attachment);
+      backend.bytesByKey[FakeAttachmentBackend.keyOf(attachment)] =
+          payload('a rendering');
+      var drawn = 0;
+      final withHtml = StoreAttachmentBytes(
+        store: store,
+        backend: backend,
+        cache: cache,
+        htmlThumbnailer: (html, {int width = 320, int height = 240}) async {
+          drawn++;
+          return Uint8List.fromList(onePixelPng);
+        },
+      );
+
+      final thumb = await withHtml.thumbnailFor(attachment);
+
+      expect(thumb, payload('a rendering'));
+      expect(backend.thumbnailWords, ['small']);
+      expect(drawn, 0,
+          reason: 'one small fetch beats the whole file plus a WebKit load');
+    });
+
     test('a throwing connector leaves the row drawing a placeholder', () async {
       final attachment = imageRef();
       await seed(attachment);

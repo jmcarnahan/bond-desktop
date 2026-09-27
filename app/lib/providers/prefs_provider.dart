@@ -146,6 +146,16 @@ class AppPrefs {
   /// clock instead asks for it once, and gets it in all three places.
   final NeedsYouSort needsYouSort;
 
+  /// Whether sending a reply also clears the thread out of Needs You.
+  ///
+  /// OFF by default, because a sent reply and a cleared thread are two
+  /// different claims: an answer that asks a question back is still the
+  /// reader's to watch. On, it saves the second keystroke for the owner whose
+  /// reply IS the end of the matter. It reads on the one send path both the
+  /// thread composer and the in-list box go through, so the two surfaces
+  /// cannot disagree about it.
+  final bool replySendMarksDone;
+
   /// When a suggested reply is written without anyone asking for it.
   /// [DraftPolicy.needsYou] by default: the messages the pipeline judged to
   /// need the owner are drafted ahead of time and nothing else is, which is
@@ -384,6 +394,7 @@ class AppPrefs {
     this.contextSelectExpand = true,
     this.storylineNewestFirst = false,
     this.needsYouSort = NeedsYouSort.priority,
+    this.replySendMarksDone = false,
     this.draftPolicy = DraftPolicy.needsYou,
     this.modelPlacement = defaultModelPlacement,
     this.boxBigUrl = '',
@@ -703,6 +714,7 @@ class AppPrefs {
     bool? contextSelectExpand,
     bool? storylineNewestFirst,
     NeedsYouSort? needsYouSort,
+    bool? replySendMarksDone,
     DraftPolicy? draftPolicy,
     ModelPlacement? modelPlacement,
     String? boxBigUrl,
@@ -744,6 +756,7 @@ class AppPrefs {
         storylineNewestFirst:
             storylineNewestFirst ?? this.storylineNewestFirst,
         needsYouSort: needsYouSort ?? this.needsYouSort,
+        replySendMarksDone: replySendMarksDone ?? this.replySendMarksDone,
         draftPolicy: draftPolicy ?? this.draftPolicy,
         modelPlacement: modelPlacement ?? this.modelPlacement,
         boxBigUrl: boxBigUrl ?? this.boxBigUrl,
@@ -788,6 +801,7 @@ const String showActivityLogKey = 'show_activity_log';
 const String contextSelectExpandKey = 'context_select_expand';
 const String storylineNewestFirstKey = 'storyline_newest_first';
 const String needsYouSortKey = 'needs_you_sort';
+const String replySendMarksDoneKey = 'reply_send_marks_done';
 const String draftPolicyKey = 'suggested_replies';
 const String peopleSortKey = 'people_sort';
 const String roomSortKey = 'person_room_sort';
@@ -1052,6 +1066,11 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
         await store.getPref(needsYouSortKey),
         NeedsYouSort.priority,
       ),
+      // Only 'true' is on: this one CLEARS a thread out of the pile, so
+      // anything unreadable leaves it off rather than dismissing mail the
+      // reader never agreed to have dismissed.
+      replySendMarksDone:
+          await store.getPref(replySendMarksDoneKey) == 'true',
       draftPolicy: _enumOrDefault(
         DraftPolicy.values,
         await store.getPref(draftPolicyKey),
@@ -1431,6 +1450,11 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   Future<void> setNeedsYouSort(NeedsYouSort value) async {
     state = state.copyWith(needsYouSort: value);
     await _store.setPref(needsYouSortKey, value.name);
+  }
+
+  Future<void> setReplySendMarksDone(bool value) async {
+    state = state.copyWith(replySendMarksDone: value);
+    await _store.setPref(replySendMarksDoneKey, value.toString());
   }
 
   /// When suggested replies are written without anyone asking. Written as the

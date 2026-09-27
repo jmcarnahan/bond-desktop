@@ -5,6 +5,7 @@ import '../ai_worker.dart';
 import '../backend/attachment_backend.dart';
 import '../graph_mail.dart';
 import '../graph_teams.dart';
+import '../html_text.dart';
 import '../llm/embeddings_client.dart';
 import '../llm/llm_client.dart';
 import 'attachment_chunker.dart';
@@ -180,7 +181,16 @@ class AttachmentTextHandler extends WorkHandler {
       return;
     }
 
-    final text = extracted.text ?? '';
+    // Markup is not text, and this is the one place both connectors' answers
+    // pass through on their way to being stored. A page arrives as `<table>`
+    // and inline CSS from either of them — the SDK path decodes the bytes with
+    // nothing but a codec, and the server's extractor hands a page back as it
+    // found it — and every reader downstream of this line wants the words: the
+    // panel's Text segment, the digest the model writes, the passages that get
+    // embedded and the context a draft cites. Converted HERE rather than in
+    // each backend so the two cannot drift, and in the `document` profile,
+    // which lifts a chart's `alt` out as the sentence it is.
+    final text = _readable(extracted.text ?? '', ref);
     await _store.setAttachmentText(
       source,
       messageId,
@@ -237,6 +247,17 @@ class AttachmentTextHandler extends WorkHandler {
       'embedded': embedded,
       'truncated': extracted.truncated,
     });
+  }
+
+  /// [raw] as words, which for a web page means converting it.
+  ///
+  /// Every other document arrives already extracted and is stored untouched.
+  static String _readable(String raw, AttachmentRef ref) {
+    if (raw.isEmpty) return raw;
+    if (!isHtmlAttachment(contentType: ref.contentType, name: ref.name)) {
+      return raw;
+    }
+    return htmlToText(raw, profile: HtmlProfile.document);
   }
 
   /// Embeds [pending] one POST at a time, and says how many landed.

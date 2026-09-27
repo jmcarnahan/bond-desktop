@@ -21,6 +21,8 @@ CLAUDE.local.md
 golden/*
 # real inbox content and vendor briefs kept beside the repo — never committed
 docs/external/
+# designs set aside for a possible later round, kept out of the shipped docs
+docs/parked/
 
 # distribution — the built pipeline's outputs and its machine-local secrets.
 # dist/local/ holds the notarization key and the Sparkle signing key; the

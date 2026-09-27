@@ -965,6 +965,258 @@ void main() {
     expect(derived, isEmpty);
   });
 
+  test('v16 to v17 takes a vocabulary and leaves the AI verdict alone',
+      () async {
+    // The labels round. A message carrying the model's own `label` is seeded
+    // at v16 so the step is exercised against the one column whose name this
+    // round could be confused with: `messages.label` is the AI verdict, the
+    // new tables are the owner's words, and the step must not touch the first.
+    final schema = await verifier.schemaAt(16);
+    schema.rawDatabase.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, subject, label, triage_status, created_at, updated_at)
+      VALUES ('email', 'm-invite', 'c1', 'inbound', 'Accepted: standup',
+        'meeting', 'triaged', 't', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 17);
+    addTearDown(db.close);
+
+    final message = await db
+        .customSelect('SELECT * FROM messages WHERE source_message_id = ?',
+            variables: [Variable('m-invite')])
+        .getSingle();
+    expect(message.data['label'], 'meeting');
+
+    // Nothing is invented: a vocabulary exists only once a person has typed
+    // one, and an install that predates the picker has no labels at all.
+    for (final table in const ['labels', 'conversation_labels']) {
+      final rows = await db.customSelect('SELECT * FROM $table').get();
+      expect(rows, isEmpty, reason: table);
+    }
+
+    // And both tables take a write, which a STRICT one would reject if the
+    // step had declared a column as the wrong type. The defaults are the two
+    // the picker relies on: a fresh label has been used no times, and a link
+    // nobody attributed was put there by the owner.
+    await db.customStatement(
+      "INSERT INTO labels (id, name, name_key, created_at, updated_at) "
+      "VALUES ('fyi-only-ab12', 'FYI only', 'fyi only', 't', 't')",
+    );
+    await db.customStatement(
+      "INSERT INTO conversation_labels (source, conversation_key, label_id, "
+      "applied_at) VALUES ('email', 'c1', 'fyi-only-ab12', 't')",
+    );
+    final label = await db.customSelect('SELECT * FROM labels').getSingle();
+    expect(label.data['use_count'], 0);
+    expect(label.data['last_used_at'], null);
+    expect(label.data['tone'], null);
+    final link =
+        await db.customSelect('SELECT * FROM conversation_labels').getSingle();
+    expect(link.data['applied_by'], 'user');
+  });
+
+  test('v17 to v18 takes standing rules and leaves the links unattributed',
+      () async {
+    // The rules round. A label and a link the OWNER applied are seeded at v17,
+    // because the new column on `conversation_labels` is what separates the two
+    // hands: a link with a NULL `rule_id` is one a person put there, which is
+    // what makes undoing a rule able to take back only its own work. A step
+    // that stamped the existing links would hand every word the owner has ever
+    // filed by hand to the first rule that mentioned that label.
+    final schema = await verifier.schemaAt(17);
+    schema.rawDatabase.execute("""
+      INSERT INTO labels (id, name, name_key, created_at, updated_at)
+      VALUES ('not-for-me-ab12', 'Not for me', 'not for me', 't', 't');
+    """);
+    schema.rawDatabase.execute("""
+      INSERT INTO conversation_labels (source, conversation_key, label_id,
+        applied_by, applied_at)
+      VALUES ('email', 'c1', 'not-for-me-ab12', 'user', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 18);
+    addTearDown(db.close);
+
+    final link =
+        await db.customSelect('SELECT * FROM conversation_labels').getSingle();
+    expect(link.data['applied_by'], 'user');
+    expect(link.data['rule_id'], null);
+
+    // No rule is invented: a standing instruction exists only once somebody has
+    // written one, and an install that predates this round has none.
+    final rules = await db.customSelect('SELECT * FROM label_rules').get();
+    expect(rules, isEmpty);
+
+    // And the table takes a write, which a STRICT one would reject if the step
+    // had declared a column as the wrong type. The two defaults are the ones the
+    // rest of the round relies on: the exception is ON, and a fresh rule has
+    // hidden nothing.
+    await db.customStatement(
+      "INSERT INTO label_rules (id, label_id, scope_kind, scope_value, "
+      "disposition, created_at, updated_at) "
+      "VALUES ('rule-sender-ab12', 'not-for-me-ab12', 'sender', "
+      "'alerts@tracker.example.com', 'hide_needs_you', 't', 't')",
+    );
+    final rule = await db.customSelect('SELECT * FROM label_rules').getSingle();
+    expect(rule.data['unless_mentions_me'], 1);
+    expect(rule.data['hidden_count'], 0);
+
+    // One rule per scope, enforced where it has to be: two standing
+    // instructions about one address with no way to say which won is the state
+    // the unique index exists to refuse.
+    await expectLater(
+      db.customStatement(
+        "INSERT INTO label_rules (id, label_id, scope_kind, scope_value, "
+        "disposition, created_at, updated_at) "
+        "VALUES ('rule-sender-cd34', 'not-for-me-ab12', 'sender', "
+        "'alerts@tracker.example.com', 'later', 't', 't')",
+      ),
+      throwsA(anything),
+    );
+  });
+
+  test('v18 to v19 takes the rules and what they wrote, and keeps the '
+      "owner's words", () async {
+    // The rules leave. Everything a rule wrote is seeded at v18 beside what
+    // the owner wrote by hand, because the step's whole job is telling the two
+    // apart while `rule_id` still can: a `later` and a `drop` rule both filed
+    // Later, a `hide_needs_you` rule wrote a verdict, and the owner's own
+    // Later, link and snooze must come through untouched — including a Later
+    // on a thread the hide rule also labelled (the disposition clause), and
+    // one on a thread the owner filed by hand under the RULE's own word (the
+    // repair keys on `rule_id`, never on the label).
+    final schema = await verifier.schemaAt(18);
+    final raw = schema.rawDatabase;
+    raw.execute("""
+      INSERT INTO labels (id, name, name_key, created_at, updated_at) VALUES
+        ('tracker-ab12', 'Tracker', 'tracker', 't', 't'),
+        ('mine-cd34', 'Mine', 'mine', 't', 't');
+    """);
+    raw.execute("""
+      INSERT INTO label_rules (id, label_id, scope_kind, scope_value,
+        disposition, created_at, updated_at) VALUES
+        ('r-later', 'tracker-ab12', 'sender', 'a@tracker.example.com',
+          'later', 't', 't'),
+        ('r-drop', 'tracker-ab12', 'domain', 'drop.example.com',
+          'drop', 't', 't'),
+        ('r-hide', 'tracker-ab12', 'subject', '[ci]',
+          'hide_needs_you', 't', 't');
+    """);
+    raw.execute("""
+      INSERT INTO conversation_labels (source, conversation_key, label_id,
+        applied_by, applied_at, rule_id) VALUES
+        ('email', 'c-later', 'tracker-ab12', 'rule', 't', 'r-later'),
+        ('email', 'c-drop', 'tracker-ab12', 'rule', 't', 'r-drop'),
+        ('email', 'c-hide', 'tracker-ab12', 'rule', 't', 'r-hide'),
+        ('email', 'c-hand', 'mine-cd34', 'user', 't', NULL),
+        ('email', 'c-hand-tracker', 'tracker-ab12', 'user', 't', NULL);
+    """);
+    raw.execute("""
+      INSERT INTO conversation_ai (source, conversation_key, updated_at,
+        bucket, bucket_reason, snoozed_until) VALUES
+        ('email', 'c-later', 't', 'later', 'user', NULL),
+        ('email', 'c-drop', 't', 'later', 'user', NULL),
+        ('email', 'c-hand', 't', 'later', 'user', '2026-10-05T09:00:00Z'),
+        ('email', 'c-hide', 't', 'later', 'user', NULL),
+        ('email', 'c-hand-tracker', 't', 'later', 'user',
+          '2026-10-06T09:00:00Z');
+    """);
+    raw.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, created_at, updated_at, triage_status, gate_reason,
+        needs_you_verdict, needs_you_reason) VALUES
+        ('email', 'm-hidden', 'c-hide', 'inbound', 't', 't', 'done', NULL,
+          0, 'label_rule:Tracker'),
+        ('teams', 'm-model', 'c-chat', 'inbound', 't', 't', 'done', NULL,
+          1, 'teams_direct'),
+        ('email', 'm-gated', 'c-drop', 'inbound', 't', 't', 'skipped',
+          'label_rule', NULL, NULL);
+    """);
+    raw.execute("""
+      INSERT INTO app_prefs ("key", value) VALUES
+        ('rule_suggestion_not_now:sender:x@example.com', 't'),
+        ('processing_on', '1');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 19);
+    addTearDown(db.close);
+
+    // Only the owner's own links are left, the one under the rule's word too.
+    final links = await db
+        .customSelect('SELECT conversation_key FROM conversation_labels')
+        .get();
+    expect([for (final r in links) r.data['conversation_key']],
+        unorderedEquals(['c-hand', 'c-hand-tracker']));
+
+    // The threads a rule filed are back in the inbox with NO reason, so the
+    // sweep decides them afresh; the owner's own Later keeps its date.
+    Future<Map<String, Object?>> ai(String key) async => (await db
+            .customSelect(
+              'SELECT * FROM conversation_ai WHERE conversation_key = ?',
+              variables: [Variable<String>(key)],
+            )
+            .getSingle())
+        .data;
+    for (final key in ['c-later', 'c-drop']) {
+      final row = await ai(key);
+      expect(row['bucket'], null, reason: key);
+      expect(row['bucket_reason'], null, reason: key);
+      expect(row['snoozed_until'], null, reason: key);
+    }
+    for (final (key, snooze) in [
+      ('c-hand', '2026-10-05T09:00:00Z'),
+      // A hide rule never filed Later, so this Later is the owner's.
+      ('c-hide', null),
+      // Hand-filed under the rule's own label: only `rule_id` tells it apart.
+      ('c-hand-tracker', '2026-10-06T09:00:00Z'),
+    ]) {
+      final row = await ai(key);
+      expect(row['bucket'], 'later', reason: key);
+      expect(row['bucket_reason'], 'user', reason: key);
+      expect(row['snoozed_until'], snooze, reason: key);
+    }
+
+    // A rule's verdict goes back to "never judged"; the model's stays.
+    Future<Map<String, Object?>> message(String id) async => (await db
+            .customSelect(
+              'SELECT * FROM messages WHERE source_message_id = ?',
+              variables: [Variable<String>(id)],
+            )
+            .getSingle())
+        .data;
+    final hidden = await message('m-hidden');
+    expect(hidden['needs_you_verdict'], null);
+    expect(hidden['needs_you_reason'], null);
+    final model = await message('m-model');
+    expect(model['needs_you_verdict'], 1);
+    expect(model['needs_you_reason'], 'teams_direct');
+    // The gated row is the sync one-shot's to re-pend, with its progress row,
+    // so the migration leaves it exactly as it was.
+    final gated = await message('m-gated');
+    expect(gated['triage_status'], 'skipped');
+    expect(gated['gate_reason'], 'label_rule');
+
+    final prefs = await db.customSelect('SELECT "key" FROM app_prefs').get();
+    expect([for (final r in prefs) r.data['key']], ['processing_on']);
+
+    // The validator does not flag a leftover TABLE, only a leftover column,
+    // so the table's absence is asserted here by name.
+    final leftovers = await db
+        .customSelect(
+            "SELECT name FROM sqlite_master WHERE name LIKE '%label_rules%'")
+        .get();
+    expect(leftovers, isEmpty);
+    final columns = await db
+        .customSelect(
+            "SELECT name FROM pragma_table_info('conversation_labels')")
+        .get();
+    expect([for (final r in columns) r.data['name']], isNot(contains('rule_id')));
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

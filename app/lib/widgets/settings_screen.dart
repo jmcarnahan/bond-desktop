@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show FilteringTextInputFormatter;
 
+import '../models/label_models.dart' show Label;
 import '../providers/app_providers.dart' show ParkedFact;
 import '../providers/context_provider.dart' show ContextDirRow;
 import '../providers/prefs_provider.dart'
@@ -26,6 +27,7 @@ import 'needs_you_rules_editor.dart';
 import 'pane_surface.dart';
 import 'settings_connection_section.dart';
 import 'settings_context_section.dart';
+import 'settings_labels_section.dart';
 import 'settings_lookback_field.dart';
 import 'settings_models_page.dart';
 import 'settings_section.dart';
@@ -202,6 +204,13 @@ class SettingsScreen extends StatefulWidget {
   /// Fired by the rules editor's Save and by nothing else. Null hides the
   /// editor and leaves the Needs You section as the threshold alone.
   final void Function(String value)? onNeedsYouRulesSaved;
+
+  /// Whether sending a reply also clears the thread out of Needs You. It sits
+  /// in the Needs You section rather than beside the composer because it is a
+  /// rule about the PILE, and it is off by default: see
+  /// `AppPrefs.replySendMarksDone`. Null takes the switch off the section.
+  final bool replySendMarksDone;
+  final void Function(bool value)? onReplySendMarksDoneChanged;
 
   final bool storylineNewestFirst;
   final void Function(bool value)? onStorylineNewestFirstChanged;
@@ -466,6 +475,36 @@ class SettingsScreen extends StatefulWidget {
   /// Null hides that switch, on the discipline every callback here follows.
   final void Function(bool on)? onContextSelectExpandChanged;
 
+  /// The owner's own vocabulary, for the section that edits it. **Null hides
+  /// the whole section** — the same "absent wiring, absent section" discipline
+  /// every optional row here follows. An empty list is not null: it renders the
+  /// section saying nothing has been filed yet, which is what a host with the
+  /// wiring and a new install wants.
+  ///
+  /// Read from `labelsProvider` by the host, never here: this screen reaches for
+  /// no providers. Label CRUD is not a settings-only mutator — the picker on a
+  /// thread writes the same table — so these seams forward to that notifier
+  /// rather than to a method of the host's own.
+  final List<Label>? labels;
+
+  /// Whether the first read of the vocabulary is still out. The rows keep
+  /// rendering while it is.
+  final bool labelsLoading;
+
+  /// The newest label failure or refusal, verbatim from `LabelsState.error`. A
+  /// refused rename arrives here and is drawn under the field that asked.
+  final String? labelsError;
+
+  /// Renames one label, keeping every thread it is on. False is the refusal a
+  /// taken name earns, with [labelsError] saying so.
+  final Future<bool> Function(String id, String name)? onRenameLabel;
+
+  /// Sets, or with a null tone clears, one label's colour word.
+  final void Function(String id, String? tone)? onLabelToneChanged;
+
+  /// Deletes one label and every thread link it has.
+  final void Function(String id)? onDeleteLabel;
+
   /// Which half of the screen to render — see [SettingsScope].
   final SettingsScope scope;
 
@@ -504,6 +543,8 @@ class SettingsScreen extends StatefulWidget {
     this.needsYouFixedTail = '',
     this.needsYouRulesMaxLength = 4000,
     this.onNeedsYouRulesSaved,
+    this.replySendMarksDone = false,
+    this.onReplySendMarksDoneChanged,
     this.storylineNewestFirst = false,
     this.onStorylineNewestFirstChanged,
     this.probeServer,
@@ -567,6 +608,12 @@ class SettingsScreen extends StatefulWidget {
     this.onContextHonorGitignoreChanged,
     this.contextSelectExpand = true,
     this.onContextSelectExpandChanged,
+    this.labels,
+    this.labelsLoading = false,
+    this.labelsError,
+    this.onRenameLabel,
+    this.onLabelToneChanged,
+    this.onDeleteLabel,
   });
 
   /// Keyed because their labels are ordinary words a test would otherwise have
@@ -580,6 +627,11 @@ class SettingsScreen extends StatefulWidget {
       ValueKey('settings-clear-attachment-cache-confirm');
   static const Key clearCacheKeepKey =
       ValueKey('settings-clear-attachment-cache-keep');
+
+  /// The Needs You section's one switch, keyed because its words are a whole
+  /// sentence and a test reading it by text would pin the wording twice.
+  static const Key replySendMarksDoneKey =
+      ValueKey('settings-reply-send-marks-done');
 
   /// The Processing section's controls, keyed for the reason the three above
   /// are: 'Clear AI results' is also most of the caption beside it, and both
@@ -634,6 +686,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late DraftPolicy _draftPolicy = widget.draftPolicy;
   late bool _cloudDraftsStanding = widget.cloudDraftsStanding;
   late bool _storylineNewestFirst = widget.storylineNewestFirst;
+  late bool _replySendMarksDone = widget.replySendMarksDone;
 
   /// Ten stops. Enough that the slider feels like it has an opinion, few enough
   /// that the same drag lands on the same value twice.
@@ -829,6 +882,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (old.storylineNewestFirst != widget.storylineNewestFirst) {
       _storylineNewestFirst = widget.storylineNewestFirst;
     }
+    if (old.replySendMarksDone != widget.replySendMarksDone) {
+      _replySendMarksDone = widget.replySendMarksDone;
+    }
     // The host clamps: a typed 5000 comes back as 1000, and the field has to
     // say what the ledger line beside it says. Only while the field still
     // holds the number last handed over — a reader mid-way through typing a
@@ -985,6 +1041,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _section('Activity log', _activityLogSummary(), _activityLogBody()),
       if (widget.onStorylineNewestFirstChanged != null)
         _section('Storylines', _storylinesSummary(), _storylinesBody()),
+      // After Storylines and with an `!ai` guard: a storyline is the app's own
+      // grouping and a label is the owner's, so the two questions about how this
+      // mailbox is organised sit together — and neither is a fact about the
+      // model, which is why the AI stop does not carry this one.
+      if (widget.labels case final labels? when !ai)
+        LabelsSection(
+          expanded: _open.contains(LabelsSection.title),
+          onToggle: () => _toggle(LabelsSection.title),
+          labels: labels,
+          loading: widget.labelsLoading,
+          error: widget.labelsError,
+          onRename: widget.onRenameLabel,
+          onToneChanged: widget.onLabelToneChanged,
+          onDelete: widget.onDeleteLabel,
+        ),
       // After Storylines and before Sync & data, in BOTH scopes: what the
       // model is allowed to read is a question about the model, so it belongs
       // on the AI stop as much as on the avatar menu's Settings.
@@ -2131,6 +2202,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onSave: onSave,
           ),
         ],
+        // Last in the section because it is about leaving the pile rather than
+        // about what lands in it, and it is the one control here that acts on
+        // threads already judged.
+        if (widget.onReplySendMarksDoneChanged case final onChanged?)
+          SwitchListTile(
+            key: SettingsScreen.replySendMarksDoneKey,
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _replySendMarksDone,
+            title: Text(
+              'Sending a reply marks it done',
+              style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+            ),
+            subtitle: Text(
+              'A thread leaves Needs You as soon as you answer it, instead of '
+              'waiting for you to mark it done.',
+              style: BondType.caption,
+            ),
+            onChanged: (value) {
+              setState(() => _replySendMarksDone = value);
+              onChanged(value);
+            },
+          ),
       ],
     );
   }

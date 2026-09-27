@@ -122,6 +122,7 @@ void main() {
     String conversationKey = 'conv-1',
     String? summary,
     String? triageStatus,
+    Map<String, String>? headers,
   }) async {
     await store.upsertMessage({
       'source': 'email',
@@ -133,6 +134,10 @@ void main() {
       'from_address': 'sarah@x.com',
       'received_at': '2026-08-29T10:00:00Z',
       'body_text': 'Can we still ship on Thursday?',
+      // The shape the detail fetch stores them in, which is what
+      // `classificationOf` reads a machine sender off.
+      'source_meta_json':
+          headers == null ? null : jsonEncode({'headers': headers}),
     });
     if (summary != null) {
       await store.writeTriage(
@@ -1039,6 +1044,7 @@ void main() {
 
       expect(await store.getConversationAi('email', 'orphan'), isNull);
     });
+
   });
 
 
@@ -1295,6 +1301,102 @@ void main() {
 
       expect(await queuedDrafts(), isEmpty);
       expect(await draftStateOf('o1'), 'skipped');
+    });
+
+    test('a message a machine wrote is not queued, whatever triage read in it',
+        () async {
+      // The case in the report: nothing gated the mail, triage read its polite
+      // "please approve" as an ask, and the queue spent the 27B on a reply to a
+      // list address. The headers are the evidence, and they are the only thing
+      // different about this row.
+      await seedMessage(headers: {'List-Unsubscribe': '<https://x.example.com/u>'});
+      await seedConversation();
+      await triageSaid(replyExpected: true, needsAction: true);
+      final log = _Recorder();
+
+      await extract(activityLog: log);
+
+      expect(await queuedDrafts(), isEmpty);
+      // Skipped, not pending: nothing will ever write this row, and a bar
+      // waiting on it waits forever.
+      expect(await draftStateOf('m1'), 'skipped');
+      expect(log.notes['draft'], 'automated_sender');
+      // The extraction itself still landed — only the drafting was declined.
+      expect(await store.getExtraction('email', 'm1'), isNotNull);
+    });
+
+    test('a list message the owner restored is queued', () async {
+      // Gated as a newsletter, restored by the owner: Restore clears the gate
+      // reason and stamps `gate_override`, and the list headers that remain
+      // must not refuse the draft on the judgement the owner overruled.
+      await seedMessage(headers: {'List-Id': 'team.example.com'});
+      await seedConversation();
+      await store.restoreMessage('email', 'm1');
+      await triageSaid(replyExpected: true, needsAction: true);
+
+      await extract();
+
+      expect(await queuedDrafts(), ['m1']);
+    });
+
+    test('an Auto-Submitted header is the same answer', () async {
+      await seedMessage(headers: {'Auto-Submitted': 'auto-generated'});
+      await seedConversation();
+      await triageSaid(replyExpected: true);
+
+      await extract();
+
+      expect(await queuedDrafts(), isEmpty);
+    });
+
+    test('and the same message from a person is queued', () async {
+      // The control. Without it the two above would pass on a gate that queued
+      // nothing at all.
+      await seedMessage();
+      await seedConversation();
+      await triageSaid(replyExpected: true, needsAction: true);
+
+      await extract();
+
+      expect(await queuedDrafts(), ['m1']);
+    });
+
+    test('it runs ahead of the narrow policy as well as the wide one', () async {
+      // A machine sender is not a preference, so the verdict that would have
+      // prefetched a draft does not buy one either.
+      await seedMessage(headers: {'List-Id': 'news.x.example.com'});
+      await seedConversation();
+      await triageSaid();
+      await store.writeNeedsYouVerdict('email', 'm1',
+          verdict: true, reason: 'it asks the reader to approve the invoice');
+      final log = _Recorder();
+
+      await extract(policy: DraftPolicy.needsYou, activityLog: log);
+
+      expect(await queuedDrafts(), isEmpty);
+      expect(log.notes['draft'], 'automated_sender');
+    });
+
+    test('but a meeting invite is still drafted for', () async {
+      // An invite asks for the reader's TIME, which is an ask a person can
+      // answer. The line `gates.dart` draws, and this pass keeps it.
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'i1',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'subject': 'Design review',
+        'from_address': 'sarah@example.com',
+        'received_at': '2026-08-29T10:00:00Z',
+        'body_text': 'Thursday at ten?',
+        'source_meta_json': jsonEncode({'meeting': 'meetingRequest'}),
+      });
+      await seedConversation();
+      await triageSaid(id: 'i1', replyExpected: true);
+
+      await extract(id: 'i1');
+
+      expect(await queuedDrafts(), ['i1']);
     });
   });
 

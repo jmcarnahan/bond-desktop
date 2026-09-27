@@ -9,7 +9,7 @@ strings and headers.
 
 ## Tier 1 — sender-only, on delta fields
 
-Before fetching anything, five questions about the address, in this order, and
+Before fetching anything, six questions about the message, in this order, and
 the first answer wins. `gateFor` in `app/lib/services/gates.dart` dispatches to
 `_emailGate` / `_teamsGate` per source, driven from the claim loop in
 `app/lib/services/triage_queue.dart`.
@@ -18,6 +18,7 @@ the first answer wins. `gateFor` in `app/lib/services/gates.dart` dispatches to
 | --- | --- |
 | `self` | the user's own address, however the message came back to them |
 | `sender_rule` | an address the owner dropped by hand — below |
+| `meeting_response` | an Accepted / Declined / Tentative / Canceled reply to an invitation — a fact about the message, so it outranks every name guess below it, `no_reply` included. It mostly fires at tier 2, because `meetingMessageType` arrives with the detail fetch; at tier 1 only the subject-and-empty-body fallback can catch it (see Meeting responses) |
 | `no_reply` | `noreply` / `donotreply` anywhere in the local part — the compact word as a plain substring (`noreply@`, `orders-noreply@`, `noreply+billing@`, `noreply2@`, `opsnoreplyrelay@`), the punctuated spellings (`no-reply`, `do.not.reply`) as delimited TOKENS — plus the prefix family `notifications?`, `alerts?`, `mailer-daemon`, `postmaster`, `bounces?` |
 | `monitoring` | `monitoring@`, `monitoring-eu@`, `prod-monitoring@` |
 | `machine_sender` | `svc-…@`, `bot-…@`, `…-bot@`, and the exact local parts `pipelines@`, `builds@`, `ci@` |
@@ -45,13 +46,14 @@ claim by `_triageClaimed` and handed to both tiers. Undo is the one the sender
 corrections already have — `restoreSenderPref`, which puts the previous rule
 back and re-files the threads from it.
 
-**One gate deliberately does not exist here**, beside the two the header block
-below names: issue trackers and code hosts sending from their bare local parts
-(`jira@`, `github@`, …). On the golden set that exact shape is two gold drops
-AND two gold keeps — the same address sends the digest nobody reads and the
-mention addressed to the reader — so no name rule can split them. What
-separates the two populations is which tenant is talking, which is the sender
-rule above or a header, never a pattern compiled into the app.
+**One gate deliberately does not exist here**, beside the internal-domain gate
+the header block in `gates.dart` also refuses: issue trackers and code hosts
+sending from their bare local parts (`jira@`, `github@`, …). On the golden set
+that exact shape is two gold drops AND two gold keeps — the same address sends
+the digest nobody reads and the mention addressed to the reader — so no name
+rule can split them. What separates the two populations is which tenant is
+talking, which is the sender rule above or a header, never a pattern compiled
+into the app.
 
 ## Detail fetch (mail only)
 
@@ -75,6 +77,32 @@ exactly as it always was.
 With headers in hand, the list/auto-generated checks run: `List-Unsubscribe`
 / `List-Id`, `Precedence: bulk|list|junk|auto_reply`, `Auto-Submitted`, and
 `X-Auto-Response-Suppress`. Also in `gates.dart`.
+
+## Meeting responses
+
+`meeting_response` gates the "Accepted: / Declined: / Tentative: / Canceled:"
+mail a calendar sends back about the reader's own invites — mail that never
+needs a reply, and that sat in Needs You saying `Needs reply` over a summary
+reading "no further action required". The field that decides is
+`meetingMessageType`, Graph's own word, stored off the per-message detail
+`$select` since Phase 1 — so this is mostly a tier-2 gate, with one exception:
+a delta row whose preview came down empty can be caught at tier 1 by the
+subject-and-empty-body fallback. A meeting INVITE (`meetingRequest`) is never
+gated, and both fallbacks require a response-shaped subject before reading
+anything else, precisely so an invite cannot reach them — the header comment
+in `gates.dart` walks the whole line. The empty-body fallback never gates a
+message that has attachments, in the live gate and in
+`regateMeetingResponses` alike: a calendar response never carries a file, and
+"Accepted: signed offer letter" with a PDF and no text is somebody sending a
+document. Rows a build before v18 already triaged
+are re-gated once by the `meeting_regate_crlf` one-shot
+(`app/lib/services/sync_service.dart`), which then refolds the affected
+threads (the key is the second one, because the first pass read Exchange's
+`\r\n` empty body as somebody talking). It also dismisses a `suggested` draft
+on each message it re-gates, since nothing else would take it away and the
+thread would leave the rail but still show the draft when opened. A draft the
+owner edited, saved or sent is theirs and stays. `clearDerived` re-pends such
+rows like any others and the gate simply re-applies at the next claim.
 
 ## A gate drop and the thread
 
@@ -135,9 +163,9 @@ for the ingest half and the one-shot repair.
 ## Reading the file
 
 The header comment in `gates.dart` is the real documentation: it explains the
-two-tier split, a delimiter subtlety in the local-part regexes, and — most
-usefully — three gates that deliberately do **not** exist. Keep that comment
-authoritative; this page is the map to it.
+two-tier split, a delimiter subtlety in the local-part regexes, the
+meeting-response line, and — most usefully — two gates that deliberately do
+**not** exist. Keep that comment authoritative; this page is the map to it.
 
 A gated message is not hidden: it lands with a drop reason, visible under the
 Inbox's Dropped tile (`HomeFilter.dropped`) and in the Archive section's
@@ -178,6 +206,12 @@ true no matter who pumps what. The chained launch is what makes triage get
 there FIRST in the ordinary case: `AiWorker.pump` takes its `DrainGate`
 synchronously while `TriageQueue.pump` awaits an `_emit()` before it reaches
 the gate, so launching both back to back would let the worker win the FIFO.
+That `_emit()` runs inside the pump's `try`, after `_running` is latched, and
+its counts decide whether the gate is taken at all: an empty queue returns
+there, before the drain gate, with the latch released in the `finally`. A
+pump over nothing therefore never sits ticketless behind a long worker drain
+holding `_running`, and the first pump that finds new mail asks for the yield
+and enqueues in the same step.
 Since Round C the gate those two share is the FAST lane's alone
 ([10-model-routing.md](10-model-routing.md)) — which is the only lane the
 argument was ever about, because the storyline and draft lanes read rows

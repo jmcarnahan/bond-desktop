@@ -1,5 +1,6 @@
 import 'package:intl/intl.dart';
 
+import '../../models/attachment_models.dart' show quoteAttachmentKind;
 import '../../models/message_models.dart';
 import 'json_task.dart';
 import 'message_block.dart';
@@ -236,13 +237,16 @@ class TriageTask implements JsonTask<TriageResult> {
   ///
   /// Inline rows are left out. A signature logo is not something that came with
   /// a message in any sense the reader cares about, and listing three of them
-  /// would make every reply look like it carried files.
+  /// would make every reply look like it carried files. A Teams quote-reply
+  /// row ([quoteAttachmentKind]) is left out too: it is the message being
+  /// answered, not a file that came with this one.
   static String _attachmentLine(List<Map<String, Object?>> attachments) {
     final named = <String>[];
     for (final attachment in attachments) {
       if (attachment['is_inline'] == 1 || attachment['is_inline'] == true) {
         continue;
       }
+      if (attachment['kind'] == quoteAttachmentKind) continue;
       final name = (attachment['name'] as String? ?? '').trim();
       final size = (attachment['size'] as num?)?.toInt() ?? 0;
       named.add('${name.isEmpty ? 'a file' : name}${_sizeSuffix(size)}');

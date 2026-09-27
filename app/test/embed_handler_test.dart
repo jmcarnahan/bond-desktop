@@ -5,6 +5,8 @@ import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/embed_handler.dart';
+import 'package:bond_inbox/services/extract_handler.dart'
+    show messageCardBodyCap;
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:drift/drift.dart' show Variable;
@@ -346,6 +348,44 @@ void main() {
         server.inputs.single,
         contains('Can we still ship on Thursday?'),
       );
+    });
+  });
+
+  group('link runs', () {
+    test('the card the message embeds from carries labels, not targets',
+        () async {
+      await seedMessage(
+        body: 'Findings.docx <https://files.example.com/a/Findings.docx> '
+            'is ready.',
+      );
+      final server = FakeEmbedServer();
+
+      await runOne(EmbedHandler(store, server.client));
+
+      // A hundred characters of tracking query averaged into the vector is
+      // somebody else's URL shape standing in for what the message said.
+      expect(server.inputs.single, isNot(contains('<https://')));
+      expect(server.inputs.single, contains('Findings.docx is ready.'));
+    });
+
+    test('the targets come off before the card clips the body', () async {
+      // Thirty runs of a short label and a long address: past the card's body
+      // cap raw, comfortably inside it stripped. A strip that ran after the
+      // clip would embed a message whose last twenty labels were never in it.
+      final body = [
+        for (var i = 1; i <= 30; i++)
+          'Item ${i.toString().padLeft(2, '0')} '
+              '<https://links.example.com/t/${'a' * 60}>',
+      ].join('\n');
+      expect(body.length, greaterThan(messageCardBodyCap));
+      await seedMessage(body: body);
+      final server = FakeEmbedServer();
+
+      await runOne(EmbedHandler(store, server.client));
+
+      expect(server.inputs.single, contains('Item 01'));
+      expect(server.inputs.single, contains('Item 30'));
+      expect(server.inputs.single, isNot(contains('links.example.com')));
     });
   });
 

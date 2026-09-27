@@ -257,6 +257,18 @@ one slow re-embed drain and nothing else. A chat message that was nothing but a
 shared file embeds as `Shared a file: <name>` rather than as a subject and a
 sender. See [12-attachments.md](12-attachments.md).
 
+The `<target>` tails of `label <url>` link runs come off in the same place,
+for the same one-place reason: `stripLinkTargets` runs after the marker strip
+and before `buildMessageCard`'s `messageCardBodyCap`, so the words that
+survive the clip are words and not a tracking query. That too changed
+`cardHash`, for every message carrying a link run, so each such message's
+next embed writes a fresh vector once instead of hitting the hash guard.
+
+The `embed_message` queue has one more feeder besides the backlog call and the
+extract path: `reviveOwedMessageStages` re-offers, at sync, the embed rows of
+kept messages whose work the rolling window overtook, at most 150 a pass for mail
+and 100 for Teams, and only where no vector exists (see [01-sync-ingest.md](01-sync-ingest.md)).
+
 **Each corpus has its own sqlite-vec index, and the separation above holds
 through them.** `MessageVectorIndex` (`vec_messages`, over `message_vectors`)
 answers search; `ConversationVectorIndex` (`vec_conversations`, over
@@ -331,10 +343,17 @@ pass ABSENT, not the search broken.
   summary, body`. `sender` is the name and the address in one column, so a
   search for a domain finds it. The watermark IS `indexed_updated_at`: a
   backfill re-files every message whose `updated_at` is at or past the highest
-  one filed — every writer that touches text (`upsertMessage`,
-  `updateMessageDetail`, `writeTriage`) stamps `updated_at` with the current
+  one filed — the ordinary writers that touch text (`upsertMessage`,
+  `updateMessageDetail`, `writeTriage`) stamp `updated_at` with the current
   time and none accepts a stamp from outside, so the column only moves forward
-  and a row below the mark is a row already filed. The one door a past value
+  and a row below the mark is a row already filed. Two one-shot writers
+  deliberately do NOT stamp it: the `mail_html_rebuild_2` stale-body mark
+  (`markStaleMailBodies`, which changes no text the index files) and
+  `tidyMailPreviews`. No repair nulls a mail body any more, so the index and
+  every stage keep the old body until a refetch writes the converted one
+  through `updateMessageDetail`, whose own stamp refiles it exactly once. The `body` column is the stored text as it is, so it keeps
+  the raw `label <url>` runs; only the prompts and the embedding card strip
+  the targets. The one door a past value
   could come through is `upsertMessage`'s `row['updated_at']`, which must never
   be handed one. Filing is paged at 500 rows in watermark order (`updated_at`,
   then `rowid`, keyset style), one transaction per page, one `INSERT … SELECT`

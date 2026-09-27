@@ -33,6 +33,24 @@ Message _msg({
       attachments: attachments,
     );
 
+/// A Teams quote-reply, as the sync stores one: no name, no url, and the quoted
+/// sender and snippet on the two columns `TeamsSync.attachmentRows` reuses.
+AttachmentRef _quote({
+  String messageId = 'a',
+  String attachmentId = 'q1',
+  int ordinal = 0,
+}) =>
+    AttachmentRef(
+      source: 'teams',
+      messageId: messageId,
+      attachmentId: attachmentId,
+      ordinal: ordinal,
+      kind: quoteAttachmentKind,
+      contentType: 'messageReference',
+      itemFrom: 'Priya Raman',
+      cardText: 'is it slide 29 in the deck?',
+    );
+
 void main() {
   Future<void> pump(
     WidgetTester tester, {
@@ -105,6 +123,19 @@ void main() {
       expect(threadFiles([_msg(id: 'a', receivedAt: '2026-08-25T09:00:00')]),
           isEmpty);
     });
+
+    test('a quote-reply is not a file this thread carried', () {
+      final message = _msg(
+        id: 'a',
+        receivedAt: '2026-08-25T09:00:00',
+        attachments: [_quote(messageId: 'a'), ref(messageId: 'a')],
+      );
+
+      expect(
+        threadFiles([message]).map((a) => a.attachmentId).toList(),
+        ['a1'],
+      );
+    });
   });
 
   group('the Files tab', () {
@@ -149,6 +180,22 @@ void main() {
       // none — a fileless thread looks exactly as it always did.
       expect(find.byKey(RoomHeader.tabKey(ThreadTab.files)), findsNothing);
       expect(find.byKey(RoomHeader.tabKey(ThreadTab.messages)), findsNothing);
+    });
+
+    testWidgets('a thread whose only attachment is a quote wears no tab',
+        (tester) async {
+      // The bug this pins: a quote-reply used to count, so a chat where people
+      // quoted each other claimed `Files (1)` and the tab held one unnamed row.
+      await pump(tester, messages: [
+        _msg(
+          id: 'a',
+          receivedAt: '2026-08-25T09:00:00',
+          attachments: [_quote(messageId: 'a')],
+        ),
+      ]);
+
+      expect(find.byKey(RoomHeader.tabKey(ThreadTab.files)), findsNothing);
+      expect(find.textContaining('Files ('), findsNothing);
     });
 
     testWidgets('the tab lists the files and puts the transcript away',

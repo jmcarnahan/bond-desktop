@@ -1,3 +1,5 @@
+import 'deadline_parse.dart' show showableDeadline;
+
 /// Whether this message is worth interrupting for: a message-level ask AND a
 /// thread-level volume, never one of the two.
 ///
@@ -43,16 +45,32 @@
 /// is untouched by it — the attention threshold, the `later` bucket and the
 /// `done` state still gate a judged yes exactly as they gate every other ask,
 /// because the user's one loudness control does not get an exception carved
-/// into it for the newest stage. NULL and 0 add nothing, per the `== 1` rule
-/// above: never judged is not a yes, and judged no is not a veto either — the
-/// other asks stand on their own.
-bool notifyWorthy(Map<String, Object?> row, {required double threshold}) {
+/// into it for the newest stage. NULL adds nothing, per the `== 1` rule
+/// above: never judged is not a yes.
+///
+/// And 0 IS a veto, which it was not until the Jira broadcasts: triage reads
+/// `reply_expected` and an action item off any message with a task in it —
+/// a tracker's mail to four people about somebody else's ticket carried both
+/// — and the needs-you pass, which reads the thread first and answers the
+/// narrower question, had said no. `isNeedsYou` lets that no outrank the
+/// ask on the rail; this is the same rule for the chip and the toast, so the
+/// three surfaces cannot disagree about one message. Only an explicit 0:
+/// NULL is still "not judged yet", and a message settled before the judge
+/// answers is corrected by `refreshNeedsYou` when it does.
+bool notifyWorthy(Map<String, Object?> row,
+    {required double threshold, DateTime? now}) {
+  if (_int(row['needs_you_verdict']) == 0) return false;
   final ask = _int(row['needs_you_verdict']) == 1 ||
       _int(row['reply_expected']) == 1 ||
       _int(row['needs_action']) == 1 ||
       row['urgency'] == 'urgent' ||
       row['urgency'] == 'high' ||
-      (row['deadline'] as String? ?? '').isNotEmpty ||
+      // Through [showableDeadline]: an interruption is the costliest surface
+      // a deadline can buy, and plan-relative wording ("Day 1") has not
+      // earned it. [now] is injectable for the tests; every live caller
+      // means the wall clock.
+      showableDeadline(row['deadline'] as String?, now: now ?? DateTime.now())
+              != null ||
       (ownsCta(row) && (row['cta_text'] as String? ?? '').isNotEmpty);
   final score = (row['attention_score'] as num?)?.toDouble() ?? 0;
   return ask &&

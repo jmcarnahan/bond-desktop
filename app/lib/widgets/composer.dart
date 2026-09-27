@@ -3,7 +3,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../models/draft_provenance.dart' show DraftProvenance, ProvenanceFile;
+import '../models/person.dart' show Person, RecipientChannel;
+import '../providers/recipient_search_provider.dart' show RecipientResults;
+import '../services/profile_photos.dart' show ProfilePhotos;
 import '../theme/tokens.dart';
+import 'recipients_field.dart';
 
 /// What this build is actually allowed to do with a reply, which depends
 /// entirely on what Entra consented to.
@@ -154,6 +158,60 @@ class Composer extends StatefulWidget {
   /// for the same reason: it belongs to whoever passed it.
   final FocusNode? focusNode;
 
+  // ── People added to this reply ─────────────────────────────────────────
+  //
+  // BOTH sources, meaning different things. On mail a person added is a Cc on
+  // the reply; on a chat they are a real Teams mention entity, which notifies
+  // them — never a plain-text `@Name` that notifies nobody, which would read
+  // to the sender as though somebody was told. [recipientChannel] says which,
+  // and a host with no directory behind it wires none of the fields below and
+  // this composer draws nothing about recipients. See `_recipientsWired`,
+  // which is the one place that decision is read.
+
+  /// The people the owner has added to this reply so far, newest last.
+  ///
+  /// Owned by the HOST, like the body's staged suggestion: this widget is
+  /// rebuilt with a fresh key on every send epoch and every staging, and a list
+  /// held here would lose somebody the owner picked to a rebuild they did not
+  /// cause.
+  final List<Person> addedRecipients;
+
+  /// Reports every change to that list. **Null leaves the whole recipients
+  /// affordance out** — a host with no directory behind it, and every call
+  /// site that predates it.
+  final ValueChanged<List<Person>>? onRecipientsChanged;
+
+  /// The typeahead's read side, handed in exactly as `new_message_screen.dart`
+  /// hands it to a [RecipientsField]. Null leaves the affordance out for the
+  /// same reason [onRecipientsChanged] does.
+  final Future<RecipientResults> Function(String query)? recipientSearch;
+
+  /// Whether this connection can actually apply added people to a reply —
+  /// `MailBackendRecipients.canEditDraftRecipients` on mail, a Teams backend
+  /// at all on a chat.
+  ///
+  /// False draws no picker and no dead control. It draws a sentence, and only
+  /// once somebody reaches for the feature: the honest answer at the moment of
+  /// the reach, rather than a caption on every reply box explaining a thing
+  /// they were not trying to do.
+  final bool canEditRecipients;
+
+  /// Faces for the offered people. Null draws initials, which is what a host
+  /// without a photo cache gets.
+  final ProfilePhotos? recipientPhotos;
+
+  /// Which kind of thread the people are added to: mail makes them Cc and
+  /// takes a typed address; a chat mentions them, which needs a Graph id, so
+  /// a typed address is no answer there.
+  final RecipientChannel recipientChannel;
+
+  /// The sentence refusing [person] on this thread, or null to accept them.
+  ///
+  /// A chat's mention reaches only somebody IN the chat, so a host that knows
+  /// the whole roster refuses anybody outside it here, at the pick, rather
+  /// than letting a send go out naming a person Teams will not notify.
+  final String? Function(Person person)? refuseRecipient;
+
   const Composer({
     super.key,
     this.suggestedBody,
@@ -175,6 +233,13 @@ class Composer extends StatefulWidget {
     this.hint = 'Write a reply…',
     this.processingOff = false,
     this.focusNode,
+    this.addedRecipients = const [],
+    this.onRecipientsChanged,
+    this.recipientSearch,
+    this.canEditRecipients = true,
+    this.recipientPhotos,
+    this.recipientChannel = RecipientChannel.mail,
+    this.refuseRecipient,
   });
 
   /// Long enough that a normal typing rhythm does not write to sqlite between
@@ -197,6 +262,24 @@ class Composer extends StatefulWidget {
   static ValueKey<String> provenanceChipKeyFor(int fileId) =>
       ValueKey('provenance-chip-$fileId');
 
+  /// The way in to the recipients row for a mouse: the `@` is the way in for a
+  /// keyboard, and both open the same field.
+  static const Key addPeopleKey = Key('composer-add-people');
+
+  /// The picker itself, and the line above it saying who the reply is going to
+  /// now. Both are drawn only where this connection can apply the additions.
+  static const Key recipientsKey = Key('composer-recipients');
+  static const Key recipientsScopeKey = Key('composer-recipients-scope');
+
+  /// The sentence a connection that cannot amend a reply's recipients shows,
+  /// once somebody has reached for the feature.
+  static const Key recipientsRefusedKey = Key('composer-recipients-refused');
+
+  /// The sentence under the scope line when a pick was turned away by
+  /// [refuseRecipient].
+  static const Key recipientPickRefusedKey =
+      Key('composer-recipient-pick-refused');
+
   @override
   State<Composer> createState() => _ComposerState();
 }
@@ -213,6 +296,67 @@ class _ComposerState extends State<Composer> {
   /// The suggestion was closed here, this frame. The host clears its own copy
   /// a beat later; without this the caption would flash back on in between.
   bool _dismissed = false;
+
+  /// The recipients row has been asked for — by the button, or by an `@`.
+  ///
+  /// One-way: it does not close again when the last chip is removed. Somebody
+  /// who opened it is working on who this goes to, and a field that vanished
+  /// under them mid-edit would take the `@` they were answering with it.
+  bool _showRecipients = false;
+
+  /// The offset of the `@` a pick should turn into a name, or null when there
+  /// is no pending one. Cleared by the pick, and by the caret moving off it.
+  int? _mentionAt;
+
+  /// Where the text a pick replaces ends: just past the `@` on a chat, and
+  /// past the first letter typed after it on mail, which waits for that letter
+  /// before it opens anything (see [_mentionAnchor]).
+  int? _mentionEnd;
+
+  /// What the body holds between a pending `@` and the end a pick replaces:
+  /// the letter that opened the picker on mail, and nothing on a chat.
+  String get _mentionQuery {
+    final at = _mentionAt;
+    final end = _mentionEnd;
+    final text = _body.text;
+    if (at == null || end == null || end > text.length || at + 1 > end) {
+      return '';
+    }
+    return text.substring(at + 1, end);
+  }
+
+  /// Somebody reached for the feature on a connection that cannot apply it.
+  ///
+  /// Latched, because the reach is the thing worth answering: the sentence
+  /// stays until the composer is rebuilt for another thread or another send,
+  /// which is when the question is asked again from scratch.
+  bool _recipientsRefused = false;
+
+  /// Why the last pick was refused, by [Composer.refuseRecipient]; cleared by
+  /// the next change the picker reports.
+  String? _pickRefused;
+
+  /// OURS, unlike [Composer.focusNode], and disposed here: it is the `@`
+  /// keyboard path's whole implementation — a body keystroke has to be able to
+  /// put the cursor in the picker — and nothing outside this widget has any
+  /// reason to hold it.
+  final FocusNode _recipientsFocus = FocusNode();
+
+  /// Whether this host wired the recipients affordance at all.
+  ///
+  /// The one place the decision above is read: a host with no directory passes
+  /// neither callback, so no part of this — not the button, not the `@`, not
+  /// the refusal sentence — exists on its threads.
+  bool get _recipientsWired =>
+      widget.onRecipientsChanged != null && widget.recipientSearch != null;
+
+  /// Whether the picker is on screen. People already added put it there without
+  /// being asked: they are the state, and a chip nobody can see is a person
+  /// silently on the reply.
+  bool get _recipientsVisible =>
+      _recipientsWired &&
+      widget.canEditRecipients &&
+      (_showRecipients || widget.addedRecipients.isNotEmpty);
 
   @override
   void initState() {
@@ -244,16 +388,179 @@ class _ComposerState extends State<Composer> {
   void dispose() {
     _editDebounce?.cancel();
     _body.dispose();
+    _recipientsFocus.dispose();
     super.dispose();
   }
 
   void _onChanged(String value) {
     if (!_touched) setState(() => _touched = true);
+    _noteMention(value);
     final notify = widget.onEdited;
     if (notify == null) return;
     _editDebounce?.cancel();
     _editDebounce = Timer(Composer.editDebounce, () {
       if (mounted) notify(_body.text);
+    });
+  }
+
+  // ── Adding people ─────────────────────────────────────────────────────
+
+  /// The `@` that means "who", if the caret has just asked for one: the offset
+  /// of the `@` and the end of what a pick should replace.
+  ///
+  /// Read off the CARET rather than by diffing the text, so it answers the same
+  /// whether the character was typed, pasted or arrowed back to. The `@` has to
+  /// begin a word — the one before it is whitespace, or there is none — which is
+  /// what keeps a typed address out of it: the caret after the `@` in
+  /// `dana@example.com` is not a request for a people picker.
+  ///
+  /// On a chat the caret sitting right behind the `@` is the request, as it
+  /// always was: a chat is written to its members, and `@` there means a name.
+  /// On MAIL it waits one character. Mail is prose, and "meet @ 3pm" is a
+  /// sentence, not a search: taking the cursor into the picker on the bare `@`
+  /// turned " 3pm" into a directory query and left a dangling `@` in the body.
+  /// So mail asks only once the character after the `@` is not whitespace,
+  /// and that character stays in the body where it was typed, inside the
+  /// range a pick replaces.
+  ({int at, int end})? _mentionAnchor(String value) {
+    final selection = _body.selection;
+    if (!selection.isValid || !selection.isCollapsed) return null;
+    final caret = selection.baseOffset;
+    if (caret <= 0 || caret > value.length) return null;
+    bool beginsWord(int at) => at == 0 || value[at - 1].trim().isEmpty;
+    if (_isChat) {
+      if (value[caret - 1] != '@' || !beginsWord(caret - 1)) return null;
+      return (at: caret - 1, end: caret);
+    }
+    if (caret < 2) return null;
+    if (value[caret - 2] != '@' || !beginsWord(caret - 2)) return null;
+    if (value[caret - 1].trim().isEmpty) return null;
+    return (at: caret - 2, end: caret);
+  }
+
+  /// What a body keystroke does about recipients: open the picker on an `@`
+  /// that asks for one — on mail, only once a letter follows it — or, where
+  /// the connection cannot apply people, say so at that same moment and leave
+  /// the text alone.
+  ///
+  /// Saying so is the whole point of the branch. Swallowing the `@` and drawing
+  /// nothing would read as a feature that does not exist; adding people that
+  /// silently never reach the send is the one failure the owner could not see.
+  void _noteMention(String value) {
+    if (!_recipientsWired) return;
+    final anchor = _mentionAnchor(value);
+    if (anchor == null) {
+      if (_mentionAt != null) setState(() => _mentionAt = null);
+      return;
+    }
+    if (!widget.canEditRecipients) {
+      if (!_recipientsRefused) setState(() => _recipientsRefused = true);
+      return;
+    }
+    setState(() {
+      _mentionAt = anchor.at;
+      _mentionEnd = anchor.end;
+      _showRecipients = true;
+    });
+    // After the frame that builds the field: a node that is not in the tree yet
+    // has no scope to take focus from.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _mentionAt != null) _recipientsFocus.requestFocus();
+    });
+  }
+
+  void _revealRecipients() {
+    setState(() => _showRecipients = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _recipientsFocus.requestFocus();
+    });
+  }
+
+  /// The picker reported a change. Forwarded to the host UNCHANGED — the list is
+  /// theirs — after this widget has had its one look at it, for the name.
+  ///
+  /// Except a person [Composer.refuseRecipient] turns away: they are left out
+  /// of what goes to the host, the sentence says why, and the `@` stays as
+  /// typed. The host still gets a list — a fresh one — because the field keeps
+  /// its own copy of the picks and resyncs only when the value it is handed
+  /// changes.
+  void _pickedRecipients(List<Person> next) {
+    final refuse = widget.refuseRecipient;
+    if (refuse != null) {
+      final before = {for (final person in widget.addedRecipients) person.id};
+      String? refused;
+      final kept = <Person>[];
+      for (final person in next) {
+        final reason = before.contains(person.id) ? null : refuse(person);
+        if (reason == null) {
+          kept.add(person);
+        } else {
+          refused = reason;
+        }
+      }
+      if (refused != _pickRefused) setState(() => _pickRefused = refused);
+      if (refused != null) {
+        setState(() => _mentionAt = null);
+        widget.onRecipientsChanged!(List.of(kept));
+        return;
+      }
+    }
+    final person = _newlyAdded(next);
+    if (person != null) _writeMentionName(person);
+    widget.onRecipientsChanged!(next);
+  }
+
+  /// Whoever is in [next] and was not in [Composer.addedRecipients], or null for
+  /// a removal.
+  ///
+  /// By [Person.id], which is `Person`'s own identity and is never empty —
+  /// `addressKey` is empty for anyone with no address, and two of those would
+  /// read as the same person here.
+  Person? _newlyAdded(List<Person> next) {
+    if (next.length <= widget.addedRecipients.length) return null;
+    final before = {for (final person in widget.addedRecipients) person.id};
+    for (final person in next.reversed) {
+      if (!before.contains(person.id)) return person;
+    }
+    return null;
+  }
+
+  /// Turns the pending `@` into `@Name `, so the sentence somebody was writing
+  /// reads as addressed to the person they just added.
+  ///
+  /// PLAIN TEXT and nothing more: it notifies nobody by itself, which is why it
+  /// only ever accompanies a real Cc line on mail, or a real mention on a chat
+  /// — where the send turns this very `@Name` into the mention's at-tag. A pick
+  /// made from the button has no anchor and writes nothing into the body — they
+  /// were adding a recipient, not naming one mid-sentence.
+  void _writeMentionName(Person person) {
+    final anchor = _mentionAt;
+    if (anchor == null) return;
+    final text = _body.text;
+    if (anchor >= text.length || text[anchor] != '@') {
+      setState(() => _mentionAt = null);
+      return;
+    }
+    final name =
+        person.displayName.isNotEmpty ? person.displayName : person.address;
+    final written = '@$name ';
+    // The `@` alone on a chat; on mail, the `@` and the letter that asked for
+    // the picker, so "@d" becomes the name rather than the name followed by a
+    // stray "d". Clamped, because the body may have been edited since.
+    final end = (_mentionEnd ?? anchor + 1).clamp(anchor + 1, text.length);
+    final next = text.replaceRange(anchor, end, written);
+    _body.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: anchor + written.length),
+    );
+    setState(() => _mentionAt = null);
+    // The host's debounced save has to learn about a change it did not see a
+    // keystroke for; `onChanged` does not fire for a programmatic write.
+    _onChanged(next);
+    // Back into the sentence, which is where they were. The chip is already
+    // drawn and the next word is more likely than the next recipient.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.focusNode?.requestFocus();
     });
   }
 
@@ -305,6 +612,7 @@ class _ComposerState extends State<Composer> {
             _streamingPreview(widget.streamingBody!),
             const SizedBox(height: BondSpacing.s8),
           ],
+          ?_recipients(),
           _field(),
           const SizedBox(height: BondSpacing.s8),
           _buttons(),
@@ -421,6 +729,119 @@ class _ComposerState extends State<Composer> {
       ],
     );
   }
+
+  /// Everything about who else this reply goes to, or null when there is
+  /// nothing to say: a host with no directory behind it, or a connection that
+  /// cannot apply people and nobody has asked yet.
+  ///
+  /// The null is what keeps a reply box a reply box. Every thread in the app
+  /// would otherwise carry a standing line about recipients, and almost no reply
+  /// adds anybody.
+  Widget? _recipients() {
+    if (!_recipientsWired) return null;
+
+    if (!widget.canEditRecipients) {
+      if (!_recipientsRefused) return null;
+      return Padding(
+        key: Composer.recipientsRefusedKey,
+        padding: const EdgeInsets.only(bottom: BondSpacing.s8),
+        child: Text(
+          'This connection cannot add people to a reply, so this one goes to '
+          'the sender only. Open it in Outlook to add anybody.',
+          style: BondType.caption.copyWith(color: BondColors.inkMuted),
+        ),
+      );
+    }
+
+    if (!_recipientsVisible) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: TextButton.icon(
+          key: Composer.addPeopleKey,
+          onPressed: _revealRecipients,
+          icon: const Icon(Icons.person_add_alt, size: 16),
+          label: const Text('Add people'),
+          style: TextButton.styleFrom(
+            padding: const EdgeInsets.symmetric(
+              horizontal: BondSpacing.s8,
+              vertical: BondSpacing.s4,
+            ),
+            minimumSize: Size.zero,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            visualDensity: VisualDensity.compact,
+            textStyle: BondType.caption,
+          ),
+        ),
+      );
+    }
+
+    return Padding(
+      key: Composer.recipientsKey,
+      padding: const EdgeInsets.only(bottom: BondSpacing.s8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            key: Composer.recipientsScopeKey,
+            _scopeLine,
+            style: BondType.caption.copyWith(color: BondColors.inkMuted),
+          ),
+          if (_pickRefused != null) ...[
+            const SizedBox(height: BondSpacing.s4),
+            Text(
+              key: Composer.recipientPickRefusedKey,
+              _pickRefused!,
+              style: BondType.caption.copyWith(color: BondColors.inkMuted),
+            ),
+          ],
+          const SizedBox(height: BondSpacing.s4),
+          RecipientsField(
+            value: widget.addedRecipients,
+            onChanged: _pickedRecipients,
+            search: widget.recipientSearch!,
+            // A typed address is a legitimate answer on mail in a way it is
+            // not for a chat, where there is no Graph id behind one to
+            // mention anybody with.
+            channel: widget.recipientChannel,
+            allowTypedAddress: !_isChat,
+            focusNode: _recipientsFocus,
+            photos: widget.recipientPhotos,
+            // The letters typed after a mail `@`, which is what asked for this
+            // field; empty on a chat, where the bare `@` asks, and from the
+            // button. Read once, when the field is first built.
+            initialQuery: _mentionQuery,
+            hint: _isChat
+                ? 'Mention people in this reply'
+                : 'Add people to this reply',
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Who the reply is going to, said out loud.
+  ///
+  /// The server's own `/createReply` addresses the sender and nobody else, so
+  /// this is never "Reply all" — it is that reply plus whoever the owner added,
+  /// and the count is the honest way to say it while the chips sit underneath
+  /// naming them.
+  ///
+  /// A chat has no sender-only reply to promise — everybody in it reads the
+  /// message — so there the line counts who will be notified by name.
+  String get _scopeLine {
+    final count = widget.addedRecipients.length;
+    final people = count == 1 ? '1 person' : '$count people';
+    if (_isChat) {
+      return count == 0
+          ? 'Reply in this chat'
+          : 'Reply in this chat, mentioning $people';
+    }
+    if (count == 0) return 'Reply to the sender only';
+    return 'Reply to the sender, plus $people in Cc';
+  }
+
+  bool get _isChat => widget.recipientChannel == RecipientChannel.teams;
 
   Widget _field() {
     final field = TextField(

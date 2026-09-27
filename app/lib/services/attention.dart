@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import '../models/message_models.dart';
+import 'deadline_parse.dart' show showableDeadline;
 
 /// The ranking and deferral rules, as pure functions over one thread.
 ///
@@ -189,7 +190,10 @@ double attentionScore({
       conversation.state == ConversationState.needsReply &&
       latestReplyExpected == false &&
       latestNeedsAction != true &&
-      (latestDeadline == null || latestDeadline.isEmpty) &&
+      // A plan-relative phrase ("Day 1") is not a date, so it does not stop
+      // a thread reading as quiet FYI — the same [showableDeadline] rule the
+      // chips and the deadlines tab apply.
+      showableDeadline(latestDeadline, now: now) == null &&
       latestIntent != null &&
       AttentionTuning.quietIntents.contains(latestIntent);
 

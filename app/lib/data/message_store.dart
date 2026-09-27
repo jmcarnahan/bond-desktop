@@ -8,6 +8,7 @@ import '../models/drafts_models.dart';
 import '../models/files_models.dart';
 import '../models/home_models.dart';
 import '../models/home_sort.dart';
+import '../models/label_models.dart';
 import '../models/message_models.dart';
 import '../models/person.dart';
 import '../models/storyline_models.dart';
@@ -23,6 +24,11 @@ import '../services/chat_roster.dart';
 // copy of the "an outbound may go quiet, but never off `done`" asymmetry is
 // exactly how a send would start disagreeing with the sync about a thread.
 import '../services/conversation_state.dart';
+// And `deadline_parse.dart`, on the same licence: pure date arithmetic with no
+// imports at all. [stripPlanRelativeBanners] must judge a stored banner's
+// deadline by [showableDeadline] itself, because a second spelling of "Day 1
+// is not a date" is how the repair and the live banner would disagree.
+import '../services/deadline_parse.dart';
 // The third read out of `services/`, on the same licence as the two above:
 // `extract_task.dart` imports `models/` and nothing else, and [extractionFor]
 // needs `ExtractionResult.fromJson` to be the same decoder the handler wrote
@@ -39,6 +45,7 @@ import '../services/search_fusion.dart';
 // over a string. The one-off below has to strip a stored body exactly the way
 // the ingest strips a fresh one, and a second spelling of the pattern here is
 // how the two would come to disagree about what the tip looks like.
+import '../services/mail_body.dart';
 import '../services/mail_text.dart';
 import 'attachment_chunk_index.dart';
 import 'conversation_vec_index.dart';
@@ -618,6 +625,13 @@ INSERT OR IGNORE INTO message_progress (
   /// Writes what only the per-message detail fetch knows. Every column
   /// COALESCEs against itself, so a detail call that came back thin cannot
   /// blank a body, a header set, or an attachment flag already stored.
+  ///
+  /// This is the write of a detail that ANSWERED, so it always ends with no
+  /// `body_stale` key in the blob, whichever blob survives the COALESCE: a new
+  /// one never carries the key, and an old one kept by a null has it removed.
+  /// A 200 with no body keeps the old text and still clears the mark, because
+  /// asking again would get the same thin answer. An invalid old blob is left
+  /// as it was; it carries no mark to clear.
   Future<void> updateMessageDetail(
     String source,
     String sourceMessageId, {
@@ -629,7 +643,12 @@ INSERT OR IGNORE INTO message_progress (
       'UPDATE messages SET '
       'body_text = COALESCE(?, body_text), '
       'has_attachments = COALESCE(?, has_attachments), '
-      'source_meta_json = COALESCE(?, source_meta_json), '
+      // `?3`, the blob, three times: a numbered parameter can be read more
+      // than once, and the plain `?` after it takes the next number, 4.
+      'source_meta_json = CASE '
+      '  WHEN json_valid(COALESCE(?3, source_meta_json)) '
+      "  THEN json_remove(COALESCE(?3, source_meta_json), '\$.body_stale') "
+      '  ELSE COALESCE(?3, source_meta_json) END, '
       'updated_at = ? '
       'WHERE source = ? AND source_message_id = ?',
       variables: _args([
@@ -858,6 +877,23 @@ WHERE source = ? AND conversation_key = ?
   /// composer's suggestion by exactly that subselect, so a thread the drafts
   /// tab claims and a thread whose composer is full are the same set of
   /// threads by construction rather than by coincidence.
+  ///
+  /// `labels` is the owner's own words on the thread — the one place a
+  /// conversation row learns them, since this is the ONE projection every
+  /// conversation list is built from ([teamsChats] delegates here). Packed into
+  /// a single column by a GROUP_CONCAT over a correlated subselect, for the
+  /// reason spelled out at the column: a real join would multiply the rows and
+  /// every count above would come out wrong. An absent column reads as no
+  /// labels, which is right for the service reads that build a card out of a
+  /// conversation row and never draw a chip.
+  ///
+  /// The last four columns are requirement 8a — why a thread says it needs a
+  /// reply, which nothing on screen could answer before. Three of them come off
+  /// ONE message, the newest KEPT inbound one the needs-you pass judged yes with
+  /// a reason, and the fourth is triage v2's `reply_expected` on the newest kept
+  /// inbound whatever it was judged. Read-time for [unreadCount]'s reason, and
+  /// absent from every other read — which is what makes [isNeedsYou] read a
+  /// missing reason as "this read did not ask" rather than as "there is none".
   Future<List<Conversation>> loadConversations({
     List<String> sources = const ['email'],
     ConversationState? state,
@@ -891,40 +927,136 @@ WHERE source = ? AND conversation_key = ?
           "     AND w.status IN ('pending','processing')) AS ai_busy_thread, "
           // Non-inline only: a paperclip on a list card means "somebody sent
           // something with this", and counting the signature logos on ten
-          // replies would put a 12 on a thread carrying no files at all.
+          // replies would put a 12 on a thread carrying no files at all. A
+          // Teams quote-reply is stored as an attachment row of kind
+          // `message_reference`, which is a quoted message rather than a file,
+          // so it is left out for the same reason.
           '  (SELECT COUNT(*) FROM attachments a '
           '   JOIN messages m2 ON m2.source = a.source '
           '     AND m2.source_message_id = a.source_message_id '
           '   WHERE a.source = c.source '
           '     AND m2.conversation_key = c.conversation_key '
-          '     AND a.is_inline = 0) AS attachment_count, '
+          '     AND a.is_inline = 0 '
+          "     AND a.kind <> '$quoteAttachmentKind') AS attachment_count, "
           // The newest inbound message's deadline, in the sender's own words.
           // The newest one's and nobody else's: a date somebody named three
           // replies ago is history, and a Deadlines tab that surfaced it would
-          // be listing threads whose deadline has already been answered.
-          '  (SELECT m4.deadline FROM messages m4 '
-          '   WHERE m4.source = c.source AND m4.conversation_key = c.conversation_key '
-          "     AND m4.direction = 'inbound' "
-          '   ORDER BY m4.received_at DESC, m4.source_message_id DESC LIMIT 1'
-          '  ) AS latest_deadline, '
-          // How many suggestions are waiting on this thread — and the
-          // subselect is the SAME newest-inbound rule [getDraft] uses, on
+          // be listing threads whose deadline has already been answered. Off
+          // the `ni` join below, which is that message.
+          '  ni.deadline AS latest_deadline, '
+          // How many suggestions are waiting on this thread — and the message
+          // it keys off is the SAME newest-inbound rule [getDraft] uses, on
           // purpose. A pending draft is the one the thread would actually
           // show; a suggestion left against an older message is history, not
           // work, and counting it would put a badge on a thread whose composer
-          // is empty.
+          // is empty. A thread with no inbound mail joins no `ni`, and
+          // `= NULL` matches nothing, so it counts zero exactly as the old
+          // subselect's NULL did.
           '  (SELECT COUNT(*) FROM drafts d '
           '   WHERE d.source = c.source AND d.conversation_key = c.conversation_key '
           "     AND d.status IN ('suggested','edited') "
-          '     AND d.reply_to_message_id = ('
-          '       SELECT m3.source_message_id FROM messages m3 '
-          '        WHERE m3.source = c.source AND m3.conversation_key = c.conversation_key '
-          "          AND m3.direction = 'inbound' "
-          '        ORDER BY m3.received_at DESC, m3.source_message_id DESC LIMIT 1'
-          '     )) AS pending_draft_count '
+          '     AND d.reply_to_message_id = ni.source_message_id'
+          '  ) AS pending_draft_count, '
+          // The owner's own words on the thread, three fields per label packed
+          // into one column: a correlated GROUP_CONCAT rather than a join,
+          // because a join would multiply every row above by its labels and
+          // every count in this SELECT would come out wrong.
+          //
+          // The separators are the ASCII unit and record separators
+          // (`labelFieldSeparator`, `labelRecordSeparator`), not a comma: a
+          // label name is free text the owner typed, and `Waiting on legal,
+          // then finance` is a perfectly good name that a comma would split in
+          // two. Neither character can be typed into a text field on this
+          // platform, and [Label.parseConcat] bounds its split anyway.
+          //
+          // GROUP_CONCAT has no ORDER BY of its own here, so the order comes
+          // from a subselect it reads — the same most-used-first order
+          // [listLabels] and [labelsForConversation] use, so a row and the
+          // thread it opens draw their chips alike.
+          '  ${_labelsConcatSql()} AS labels, '
+          // WHY the thread wants the owner, and off WHICH message: the newest
+          // KEPT inbound one the needs-you pass judged YES with a reason — the
+          // `nr` join below. Three columns off ONE joined row, so the three
+          // cannot name different messages.
+          '  nr.needs_you_reason AS needs_you_reason, '
+          '  nr.source_message_id AS needs_you_reason_message_id, '
+          '  nr.received_at AS needs_you_reason_at, '
+          // Whether the sender of the message the thread is WAITING ON expects
+          // an answer, and WHO that sender is — both off the `nk` join, the
+          // newest kept inbound with no verdict clause, because `reply_expected`
+          // is triage v2's column and not the needs-you pass's. Tri-state all
+          // the way through: NULL means nothing has judged that message, and
+          // `isNeedsYou` reads the three values apart.
+          //
+          // `latest_inbound_from` is an envelope address and nothing else — the
+          // one fact `Conversation.isExternalTo` needs — and it comes off the
+          // same row as `reply_expected` deliberately: the row says "external"
+          // about the sender it is also saying "needs reply" about, and two
+          // reads on different rules would let the chip and the ask describe
+          // different people.
+          '  nk.reply_expected AS reply_expected, '
+          // And the needs-you pass's veto on the THREAD, off the one fragment
+          // the tile and the filter read too — `isNeedsYou` lets it outrank
+          // the ask triage folded up. See [needsYouVetoedSql].
+          '  ${needsYouVetoedSql('c')} AS needs_you_vetoed, '
+          '  nk.from_address AS latest_inbound_from '
           'FROM conversations c '
           'LEFT JOIN conversation_ai ai '
           '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
+          // The three newest-message rules this read needs, each resolved ONCE
+          // per thread and joined on the message's full key. Each seek used to
+          // be spelled once per column (seven correlated subselects, because
+          // SQLite takes one column from a scalar subselect); a join takes
+          // every column off the one row the seek found. A LEFT join on
+          // `(source, source_message_id)`, the primary key, against a subselect
+          // that returns at most one id matches at most one row, so no thread
+          // is multiplied or lost, and a thread with no such message reads NULL
+          // in every column exactly as the subselects did. Every ORDER BY
+          // breaks the tie on the id, so a second message stamped the same
+          // second resolves the same way here as in [getDraft].
+          //
+          // `ni` — the newest inbound message, whatever the gate did with it:
+          // the message a deadline and a waiting draft are about.
+          'LEFT JOIN messages ni '
+          '  ON ni.source = c.source '
+          '  AND ni.conversation_key = c.conversation_key '
+          '  AND ni.source_message_id = ('
+          '    SELECT m3.source_message_id FROM messages m3 '
+          '     WHERE m3.source = c.source '
+          '       AND m3.conversation_key = c.conversation_key '
+          "       AND m3.direction = 'inbound' "
+          '     ORDER BY m3.received_at DESC, m3.source_message_id DESC LIMIT 1) '
+          // `nr` — the newest KEPT inbound the needs-you pass judged yes with a
+          // reason. `needs_you_verdict = 1` is load-bearing, not tidiness: a
+          // reason on a `0` verdict explains why a message does NOT want the
+          // owner (the model read it and said no), and
+          // printing that under "Why does this need a reply" would answer the
+          // opposite question. `keptMessageSql` is the other half: a bot post
+          // the gate threw out is never "the latest inbound awaiting you"
+          // (requirement 8a), and the clause is what makes that true here as
+          // everywhere else.
+          'LEFT JOIN messages nr '
+          '  ON nr.source = c.source '
+          '  AND nr.conversation_key = c.conversation_key '
+          '  AND nr.source_message_id = ('
+          '    SELECT m5.source_message_id FROM messages m5 '
+          '     WHERE m5.source = c.source '
+          '       AND m5.conversation_key = c.conversation_key '
+          "       AND m5.direction = 'inbound' AND ${keptMessageSql('m5')} "
+          '       AND m5.needs_you_verdict = 1 '
+          '       AND m5.needs_you_reason IS NOT NULL '
+          '     ORDER BY m5.received_at DESC, m5.source_message_id DESC LIMIT 1) '
+          // `nk` — the newest KEPT inbound, judged or not: the message the
+          // thread is waiting on.
+          'LEFT JOIN messages nk '
+          '  ON nk.source = c.source '
+          '  AND nk.conversation_key = c.conversation_key '
+          '  AND nk.source_message_id = ('
+          '    SELECT m8.source_message_id FROM messages m8 '
+          '     WHERE m8.source = c.source '
+          '       AND m8.conversation_key = c.conversation_key '
+          "       AND m8.direction = 'inbound' AND ${keptMessageSql('m8')} "
+          '     ORDER BY m8.received_at DESC, m8.source_message_id DESC LIMIT 1) '
           'WHERE $where ORDER BY c.last_message_at DESC',
           variables: _args(args),
         )
@@ -1090,6 +1222,20 @@ WHERE source = ? AND conversation_key = ?
       variables: _args([state.wire, now, now, source, conversationKey]),
     );
   }
+
+  /// The `labels` column [loadConversations] projects, for a query whose
+  /// thread is aliased `c` — spelled once so every list draws the same chips
+  /// in the same order. See the comment at its use in [loadConversations] for
+  /// the separators and the order.
+  static String _labelsConcatSql() => '(SELECT GROUP_CONCAT('
+      "o.id || '$labelFieldSeparator' || o.name || "
+      "'$labelFieldSeparator' || COALESCE(o.tone, ''), "
+      "'$labelRecordSeparator') "
+      'FROM (SELECT l.id, l.name, l.tone FROM conversation_labels cl '
+      'JOIN labels l ON l.id = cl.label_id '
+      'WHERE cl.source = c.source '
+      'AND cl.conversation_key = c.conversation_key '
+      'ORDER BY l.use_count DESC, l.last_used_at DESC, l.name ASC) o)';
 
   /// A message the gate KEPT, for one aliased `messages` table.
   ///
@@ -2928,10 +3074,17 @@ RETURNING *
   /// Neither reset touches these as tables. [wipeAll] names the handful of
   /// `app_prefs` KEYS that describe one person rather than this machine, and
   /// deletes `sender_prefs` with the mailbox those rules were written about.
+  ///
+  /// The two label tables are here because **Clear AI results** must not take
+  /// them: a word the owner typed is not something a model produced, and
+  /// re-running the pipeline would never write it back. They are still deleted
+  /// by [wipeAll] — see [_wipeTables].
   static const List<String> keptTables = [
     'app_prefs',
     'sender_prefs',
     'setup_state',
+    'labels',
+    'conversation_labels',
   ];
 
   /// The five tables a wipe leaves alone although two of them are derived.
@@ -2977,6 +3130,7 @@ RETURNING *
   static const List<String> derivedOneShotPrefs = [
     'needs_you_model_revive',
     'needs_you_flag_backfill',
+    'needs_you_flag_veto',
     'thread_state_refold',
     'gated_conversation_repair',
     'clustering_card_v2',
@@ -2997,6 +3151,16 @@ RETURNING *
         // mailbox's data, and the mail they were written about is what is
         // going.
         if (!keepIdentity) 'sender_prefs',
+        // The labels go EITHER WAY, unlike the sender rules above, and the
+        // links are why: they name conversation keys in the mailbox this
+        // deletes, so keeping them would leave every word of the vocabulary
+        // attached to threads that no longer exist and a `use_count` counting
+        // applications to them. A sender rule still means something about a
+        // person after their mail is gone; "FYI only, on these fourteen
+        // threads" does not. Both tables, because a vocabulary with no links
+        // is not what the owner built.
+        'conversation_labels',
+        'labels',
       ];
 
   /// Every row: a reset is not paced, the sync is. The cap [clearDerived]
@@ -3773,6 +3937,181 @@ FROM messages
           _nowIso(),
           row.data['source'],
           row.data['source_message_id'],
+        ]),
+      );
+      changed++;
+    }
+    return changed;
+  }
+
+  /// Marks the in-window mail bodies an older converter wrote as owed a
+  /// refetch, and returns how many rows it marked.
+  ///
+  /// MARKED, never nulled. The mark is `body_stale` in `source_meta_json`, and
+  /// the text stays where it is until a refetch has actually answered. A body
+  /// nulled first is a body lost for good whenever that refetch cannot answer:
+  /// Graph ids are not immutable here, so a message the owner archived or
+  /// filed in Outlook after ingest keeps an id that now 404s, and a sender
+  /// policy on the MCP server answers 403. `ensureBodies` refetches a stale row
+  /// exactly as it does one with no body, so the thread the owner opens next
+  /// fills itself in through this app's converter, and a thread nobody opens
+  /// costs nothing. Every other reader, the stages, the index, the prompts,
+  /// keeps reading the old text meanwhile, which is far better than the
+  /// 255-character preview they would fall back to. So a row the pipeline
+  /// still owes work on is marked like any other: nothing loses text now.
+  ///
+  /// `updated_at` DOES NOT MOVE. The column is the keyword index's watermark,
+  /// and the mark changes no text the index would file. The refill writes the
+  /// new body through [updateMessageDetail], whose own stamp is what hands the
+  /// index the converted text exactly once.
+  ///
+  /// Four marks, each something an older conversion left and a person does
+  /// not:
+  /// - an address inside angle brackets, a `mailto:` run after a label, or an
+  ///   `[cid:…]` token, which are what a server's own HTML→text conversion
+  ///   writes for anchors and inline images;
+  /// - a blank line, because the branch's first converter kept the source's
+  ///   CR/LF beside the newline every `<br>` wrote and so double-spaced
+  ///   plain-text Exchange mail, and a blank line is the only mark it left on
+  ///   a message with no link in it;
+  /// - a literal named entity, `&` then letters then `;` somewhere after,
+  ///   because that converter decoded only seven entities and left
+  ///   `We&rsquo;re` in every templated mail. The GLOB stays linear: SQLite
+  ///   gives up the outer star as soon as the inner one finds no `;`.
+  ///
+  /// The patterns are generous on purpose. A body THIS build wrote with a real
+  /// paragraph break, or a person's `AT&T;`, costs its thread one refetch that
+  /// returns the same text; the wrong answer would be leaving an old body in
+  /// place. It runs only inside the `mail_html_rebuild_2` one-shot.
+  ///
+  /// A row already marked is not counted again, so the count is rows marked by
+  /// THIS call. A local echo (the `local:` key range) is never marked: its body
+  /// is what the owner typed, and the detail fetch refuses a `local:` id, so
+  /// the mark could never be cleared.
+  Future<int> markStaleMailBodies({required String sinceIso}) =>
+      db.customUpdate(
+        'UPDATE messages SET source_meta_json = json_set('
+        "  CASE WHEN json_valid(source_meta_json) THEN source_meta_json ELSE '{}' END, "
+        "  '\$.body_stale', 1) "
+        "WHERE source = 'email' AND body_text IS NOT NULL "
+        'AND received_at >= ? '
+        'AND NOT (source_message_id >= ? AND source_message_id < ?) '
+        'AND NOT $_bodyStaleSql '
+        "AND (body_text LIKE '%<http%' "
+        "  OR body_text LIKE '% <mailto:%' "
+        "  OR body_text LIKE '%[cid:%' "
+        '  OR instr(body_text, char(10) || char(10)) > 0 '
+        "  OR body_text GLOB '*&[A-Za-z]*;*')",
+        variables:
+            _args([sinceIso, localEchoPrefix, _localEchoPrefixEnd]),
+      );
+
+  /// Whether a `messages` row carries the stale-body mark, as SQL. A blob that
+  /// is null or invalid JSON carries no mark. A CASE and not an AND, because
+  /// SQLite does not promise to skip the `json_extract` when `json_valid` is
+  /// false, and on an invalid blob it throws "malformed JSON".
+  static const String _bodyStaleSql =
+      '(CASE WHEN json_valid(source_meta_json) '
+      "THEN json_extract(source_meta_json, '\$.body_stale') END) IS 1";
+
+  /// Drops the stale-body mark and keeps the stored text, for a message whose
+  /// detail the server refused for good (403, 404 or 410).
+  ///
+  /// The old text is the best this message will ever have, and a mark left in
+  /// place would refetch the same refusal on every thread open. `updated_at`
+  /// does not move, because no text changed.
+  Future<void> clearBodyStale(String source, String sourceMessageId) =>
+      db.customUpdate(
+        'UPDATE messages SET source_meta_json = '
+        "json_remove(source_meta_json, '\$.body_stale') "
+        'WHERE source = ? AND source_message_id = ? '
+        'AND json_valid(source_meta_json)',
+        variables: _args([source, sourceMessageId]),
+      );
+
+  /// Rewrites the stored mail previews through the converter's link rules and
+  /// returns how many rows changed.
+  ///
+  /// A preview is the connector's own snippet, not a body: the server writes
+  /// it as text whatever this app prefers, so it arrives with the `label <url>`
+  /// runs in it and there is no HTML part to go back to. Unlike a body it is
+  /// worth rewriting in place — the label IS the snippet, and dropping the
+  /// address is the whole repair.
+  ///
+  /// Both places a preview is stored, because a list card reads one and a
+  /// thread row the other, and a repair that fixed one would leave the two
+  /// disagreeing on the same message.
+  ///
+  /// The message row's `updated_at` DOES NOT MOVE, and this is the one writer of
+  /// a message text column that leaves it alone. The keyword index files
+  /// `COALESCE(NULLIF(body_text, ''), body_preview, '')`, so a preview rewrite
+  /// changes the text the index would file only on a row with NO body. No
+  /// repair empties a body any more ([markStaleMailBodies] marks and keeps the
+  /// text), so such a row is one whose detail never came, and the refill that
+  /// eventually brings its body stamps it then. On a row that DOES have a body
+  /// the preview is invisible to the index, so a stamp would re-file
+  /// byte-identical text. Neither kind of row gains anything from a stamp, so
+  /// there is no case left to write one in — and the two other readers of this
+  /// column, [reclaimStaleTriage] and [reviveTerminalTriage], both count
+  /// BACKWARDS from now, so a stamp here would only postpone a stuck row's
+  /// rescue. The refill through [updateMessageDetail] is what hands the index
+  /// the converted body, exactly once, when there is one to hand over.
+  ///
+  /// The conversation row keeps its stamp, which is what every other writer of
+  /// that table does: no index files `last_message_preview` and nothing resumes
+  /// or counts backwards from `conversations.updated_at` — the list orders by
+  /// `last_message_at` — so the stamp there is bookkeeping about the row and
+  /// costs nothing.
+  ///
+  /// Candidates are found with a LIKE and a row is written only when the
+  /// rewrite changed something — [stripSenderIdentificationTips]' shape, for
+  /// its reasons.
+  Future<int> tidyMailPreviews() async {
+    var changed = 0;
+    final messages = await db
+        .customSelect(
+          'SELECT source, source_message_id, body_preview FROM messages '
+          "WHERE source = 'email' AND body_preview LIKE '%<%'",
+        )
+        .get();
+    for (final row in messages) {
+      final preview = row.data['body_preview'] as String?;
+      if (preview == null) continue;
+      final tidied = stripLinkTargets(tidyMailText(preview));
+      if (tidied == preview) continue;
+      // No `updated_at` here, deliberately — see above.
+      await db.customUpdate(
+        'UPDATE messages SET body_preview = ? '
+        'WHERE source = ? AND source_message_id = ?',
+        variables: _args([
+          tidied,
+          row.data['source'],
+          row.data['source_message_id'],
+        ]),
+      );
+      changed++;
+    }
+
+    final conversations = await db
+        .customSelect(
+          'SELECT source, conversation_key, last_message_preview '
+          'FROM conversations '
+          "WHERE source = 'email' AND last_message_preview LIKE '%<%'",
+        )
+        .get();
+    for (final row in conversations) {
+      final preview = row.data['last_message_preview'] as String?;
+      if (preview == null) continue;
+      final tidied = stripLinkTargets(tidyMailText(preview));
+      if (tidied == preview) continue;
+      await db.customUpdate(
+        'UPDATE conversations SET last_message_preview = ?, updated_at = ? '
+        'WHERE source = ? AND conversation_key = ?',
+        variables: _args([
+          tidied,
+          _nowIso(),
+          row.data['source'],
+          row.data['conversation_key'],
         ]),
       );
       changed++;
@@ -4573,6 +4912,423 @@ SELECT conversation_key FROM (
       variables: _args([key, value]),
     );
   }
+
+  // ── labels ───────────────────────────────────────────────────────────
+  //
+  // The owner's own vocabulary and the threads it is on. Nothing in this
+  // section reads or writes `messages.label`, which is the model's verdict
+  // about one message: the two are different facts written by different hands,
+  // and the whole point of these two tables is that neither can overwrite the
+  // other.
+
+  /// A label's uniqueness key: the name trimmed and lowercased.
+  ///
+  /// One spelling of the rule, because three methods compare against it —
+  /// [createLabel] to find an existing word, [renameLabel] to refuse a
+  /// collision, and the unique index to enforce both. `Meeting response` and
+  /// `meeting response ` are one label; offering the owner two chips that mean
+  /// the same thing is the failure this prevents.
+  static String labelNameKey(String name) => name.trim().toLowerCase();
+
+  /// The id minted for a new label: a slug of the name plus four hex digits.
+  ///
+  /// The slug is for a human reading a row; the suffix is what makes the id
+  /// unique, because two DIFFERENT labels can slug to the same stem — `FYI
+  /// only` and `FYI, only!` both reduce to `fyi-only` — and the name is what
+  /// renames, so the id cannot be derived from it. A name with no slug-able
+  /// character at all (an emoji, CJK) keeps the suffix alone under a `label-`
+  /// stem rather than minting a bare id.
+  static String _mintLabelId(String name) {
+    final stem = name
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
+        .replaceAll(RegExp(r'^-+|-+$'), '');
+    final buffer = StringBuffer(stem.isEmpty ? 'label' : stem);
+    buffer.write('-');
+    for (var i = 0; i < 4; i++) {
+      buffer.write(_random.nextInt(16).toRadixString(16));
+    }
+    return buffer.toString();
+  }
+
+  /// Randomness for label ids. Secure not for secrecy but for the guarantee
+  /// that two labels created in the same millisecond differ, which a
+  /// time-seeded generator does not give.
+  static final math.Random _random = math.Random.secure();
+
+  /// Adds a word to the owner's vocabulary, or hands back the one that is
+  /// already there.
+  ///
+  /// IDEMPOTENT on [labelNameKey], deliberately: the picker's Enter key means
+  /// "file this thread under this word", and a person who types a name that
+  /// already exists — in any casing, with any stray space — means the label
+  /// they can see, not a second one beside it. Throwing there would turn the
+  /// one keystroke the round exists for into an error message.
+  ///
+  /// [tone] is a `BondTone` name or null for neutral, and an existing label's
+  /// tone is left alone: the colour belongs to the label, not to this press.
+  ///
+  /// Throws a [StateError] for a name with a quote mark in it, BEFORE any read
+  /// or write — ahead of the idempotent lookup too. The label facet in Find
+  /// quotes a spaced name with `"`, so a name carrying one could never be
+  /// written back as a filter that finds it; the picker refuses the same name
+  /// on its own hint line, and this is the rule it mirrors.
+  Future<Label> createLabel(String name, {String? tone}) async {
+    if (name.trim().contains('"')) {
+      throw StateError("A label can't contain a quote mark.");
+    }
+    final key = labelNameKey(name);
+    final existing = await db
+        .customSelect(
+          'SELECT * FROM labels WHERE name_key = ?',
+          variables: _args([key]),
+        )
+        .get();
+    if (existing.isNotEmpty) return Label.fromRow(existing.first.data);
+
+    final now = _nowIso();
+    final label = Label(
+      id: _mintLabelId(name),
+      name: name.trim(),
+      tone: tone,
+      createdAt: now,
+      updatedAt: now,
+    );
+    await db.customUpdate(
+      'INSERT INTO labels (id, name, name_key, tone, use_count, '
+      'last_used_at, created_at, updated_at) '
+      'VALUES (?, ?, ?, ?, 0, NULL, ?, ?)',
+      variables: _args([label.id, label.name, key, tone, now, now]),
+    );
+    return label;
+  }
+
+  /// Renames a label, keeping its id and therefore every thread it is on.
+  ///
+  /// Throws a [StateError] when another label already holds the new name's key.
+  /// Creating is idempotent — the picker treats a typed name that exists as
+  /// "apply that one" — but a RENAME onto an existing name is a merge of two
+  /// vocabularies, and doing that silently would move threads the owner never
+  /// mentioned. Re-spelling a label as itself (`fyi only` → `FYI Only`) is not
+  /// a collision and goes through.
+  ///
+  /// A new name with a quote mark in it is refused the same way, before the
+  /// clash read, for [createLabel]'s reason: `label:` could never quote it
+  /// back.
+  Future<void> renameLabel(String id, String newName) async {
+    if (newName.trim().contains('"')) {
+      throw StateError("A label can't contain a quote mark.");
+    }
+    final key = labelNameKey(newName);
+    final clash = await db
+        .customSelect(
+          'SELECT id FROM labels WHERE name_key = ? AND id <> ?',
+          variables: _args([key, id]),
+        )
+        .get();
+    if (clash.isNotEmpty) {
+      throw StateError('A label called "${newName.trim()}" already exists');
+    }
+    await db.customUpdate(
+      'UPDATE labels SET name = ?, name_key = ?, updated_at = ? WHERE id = ?',
+      variables: _args([newName.trim(), key, _nowIso(), id]),
+    );
+  }
+
+  /// Sets, or with a null [tone] clears, a label's colour word.
+  ///
+  /// A nullable argument rather than a second method: unlike a bucket, where
+  /// clearing and leaving alone are opposite intentions, there is nothing to
+  /// leave alone here — the caller is a picker that always knows which tone it
+  /// means, and null is the default one.
+  Future<void> setLabelTone(String id, String? tone) async {
+    await db.customUpdate(
+      'UPDATE labels SET tone = ?, updated_at = ? WHERE id = ?',
+      variables: _args([tone, _nowIso(), id]),
+    );
+  }
+
+  /// Deletes a label and every link to it, in one transaction.
+  ///
+  /// Both or neither: a label row deleted on its own would leave links naming
+  /// an id nothing can resolve, and the join in [loadConversations] would draw
+  /// a chip with no name on it. The links go first only so a reader inside the
+  /// transaction never sees the reverse.
+  Future<void> deleteLabel(String id) async {
+    await db.transaction(() async {
+      await db.customUpdate(
+        'DELETE FROM conversation_labels WHERE label_id = ?',
+        variables: _args([id]),
+      );
+      await db.customUpdate(
+        'DELETE FROM labels WHERE id = ?',
+        variables: _args([id]),
+      );
+    });
+  }
+
+  /// The whole vocabulary in the picker's order: most-used first, then
+  /// most-recently-used, then alphabetical.
+  ///
+  /// The third key is what makes the order STABLE for the labels nobody has
+  /// used yet — they all tie at zero with no stamp, and a list that reshuffled
+  /// them between frames would move a chip out from under the cursor. NULLs
+  /// sort first in sqlite's DESC, so an unused label is asked for by name.
+  Future<List<Label>> listLabels() async {
+    final rows = await db
+        .customSelect(
+          'SELECT * FROM labels '
+          'ORDER BY use_count DESC, last_used_at DESC, name ASC',
+        )
+        .get();
+    return [for (final row in rows) Label.fromRow(row.data)];
+  }
+
+  /// Files a thread under [labelIds], and records that those words were
+  /// reached for.
+  ///
+  /// One transaction: the links and the counts they feed are one action, and a
+  /// picker whose chip order came from a half-written apply would reorder
+  /// itself for no reason the owner could see.
+  ///
+  /// INSERT OR IGNORE on the primary key, so applying a label a thread already
+  /// carries is a no-op rather than a second chip — but the use count still
+  /// moves, because the owner did reach for the word. [appliedBy] is `'user'`,
+  /// the only writer this build has.
+  ///
+  /// An unknown label id writes a link nothing resolves; callers pass ids they
+  /// read out of [listLabels] or [createLabel], and the join simply omits a
+  /// link whose label is gone.
+  Future<void> applyLabels(
+    String source,
+    String conversationKey,
+    List<String> labelIds, {
+    String appliedBy = 'user',
+  }) async {
+    if (labelIds.isEmpty) return;
+    final now = _nowIso();
+    await db.transaction(() async {
+      for (final id in labelIds) {
+        await db.customUpdate(
+          'INSERT OR IGNORE INTO conversation_labels '
+          '(source, conversation_key, label_id, applied_by, applied_at) '
+          'VALUES (?, ?, ?, ?, ?)',
+          variables: _args([source, conversationKey, id, appliedBy, now]),
+        );
+        await db.customUpdate(
+          'UPDATE labels SET use_count = use_count + 1, last_used_at = ?, '
+          'updated_at = ? WHERE id = ?',
+          variables: _args([now, now, id]),
+        );
+      }
+    });
+  }
+
+  /// Takes one label off one thread, and answers whether a link came off —
+  /// false when there was none to take, so a caller offering an Undo knows
+  /// there is nothing to put back.
+  ///
+  /// The link goes and `use_count` does NOT come back down. The count is a
+  /// popularity signal — how often the owner has reached for this word, which
+  /// is what orders the picker — and not a refcount over live links. Taking a
+  /// label off one thread does not unsay the twenty times it was the right
+  /// word, and a count that fell would quietly demote a chip because of one
+  /// correction.
+  Future<bool> removeLabel(
+    String source,
+    String conversationKey,
+    String labelId,
+  ) async {
+    final affected = await db.customUpdate(
+      'DELETE FROM conversation_labels '
+      'WHERE source = ? AND conversation_key = ? AND label_id = ?',
+      variables: _args([source, conversationKey, labelId]),
+    );
+    return affected > 0;
+  }
+
+  /// The Undo behind [removeLabel]: the link back, and no `use_count`
+  /// movement, because putting back what was there is not the owner reaching
+  /// for the word again.
+  ///
+  /// False when the label itself has been deleted since: its links died with
+  /// it, and writing a fresh one would file the thread under nothing.
+  Future<bool> restoreLabel(
+    String source,
+    String conversationKey,
+    String labelId,
+  ) async {
+    return db.transaction(() async {
+      final label = await db
+          .customSelect(
+            'SELECT 1 FROM labels WHERE id = ?',
+            variables: _args([labelId]),
+          )
+          .get();
+      if (label.isEmpty) return false;
+      await db.customUpdate(
+        'INSERT OR IGNORE INTO conversation_labels '
+        '(source, conversation_key, label_id, applied_by, applied_at) '
+        "VALUES (?, ?, ?, 'user', ?)",
+        variables: _args([source, conversationKey, labelId, _nowIso()]),
+      );
+      return true;
+    });
+  }
+
+  /// One thread's labels, in the same order [loadConversations]' join emits
+  /// them — most-used first, so a row and the thread it opens draw their chips
+  /// in the same order.
+  ///
+  /// A link whose label has been deleted contributes nothing: the join is
+  /// inner, which is the same thing the deleting transaction already
+  /// guarantees and costs nothing to say twice.
+  Future<List<Label>> labelsForConversation(
+    String source,
+    String conversationKey,
+  ) async {
+    final rows = await db
+        .customSelect(
+          'SELECT l.* FROM conversation_labels cl '
+          'JOIN labels l ON l.id = cl.label_id '
+          'WHERE cl.source = ? AND cl.conversation_key = ? '
+          'ORDER BY l.use_count DESC, l.last_used_at DESC, l.name ASC',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    return [for (final row in rows) Label.fromRow(row.data)];
+  }
+
+  /// Re-gates the meeting RESPONSES already in the mailbox, and returns how many
+  /// rows moved.
+  ///
+  /// The data half of requirement 11a. A gate only ever speaks about a message
+  /// on its way past, so a new meeting-response gate says nothing about the mail
+  /// that came in before it existed — and that mail is exactly what the owner is
+  /// looking at: forty `Accepted:` threads sitting on the Needs You rail, every
+  /// one of them a response to an invitation they sent themselves.
+  ///
+  /// What counts as a response is Graph's own word for it, read out of the
+  /// `meeting` key `SyncService` stores in `source_meta_json`: accepted,
+  /// declined, cancelled, and tentatively accepted — which Graph's enum spells
+  /// `meetingTenativelyAccepted`, with the typo, so both spellings are matched
+  /// and the one that is actually stored wins. A `meetingRequest` is NEVER
+  /// touched: an invitation is a genuine ask, and gating it would hide the one
+  /// kind of meeting mail that needs an answer.
+  ///
+  /// The fallback shape is for the rows stored before the sync asked Graph for
+  /// the field at all: a subject that opens `Accepted:`, `Declined:`,
+  /// `Tentative:` or `Canceled:` AND a body with nothing in it. Both halves are
+  /// required, because the prefix alone is a subject a person can type — "Re:
+  /// Accepted: …" does not match (the LIKE is anchored), and a reply with
+  /// something written in it is somebody talking.
+  ///
+  /// Only rows triage has NOT already skipped, so a message already gated for
+  /// another reason keeps the reason it has: `outbound` and `backlog` are the
+  /// two verdicts `clearDerived` preserves, and overwriting one of them here
+  /// would quietly re-pend that message on the next reset. `gate_override =
+  /// 'user'` is the owner's own hand and is left alone for the same reason it is
+  /// everywhere else.
+  ///
+  /// `json_valid` guards the extract inside a CASE: a malformed blob would
+  /// otherwise make sqlite throw for the whole statement rather than skip one
+  /// row, and an AND does not promise to skip the extract.
+  ///
+  /// The fallback also requires no attachment, for the gate's reason: a
+  /// calendar response never carries a file.
+  ///
+  /// "Nothing in it" is read with [_blank] and not a bare `TRIM`: sqlite's
+  /// one-argument TRIM strips spaces only, and Exchange stores an empty
+  /// response body as `\r\n` — so the bare form read every real one as
+  /// somebody talking, and the rail kept them.
+  Future<int> regateMeetingResponses() async =>
+      (await regateMeetingResponseIds()).length;
+
+  /// [regateMeetingResponses], answering with the ids it gated rather than
+  /// how many. The sync needs them: a response drafted for before this build
+  /// still shows its suggestion when the thread is opened, and the ids are
+  /// what it dismisses those by.
+  Future<List<String>> regateMeetingResponseIds() async {
+    const String stored = '(CASE WHEN json_valid(source_meta_json) '
+        "THEN json_extract(source_meta_json, '\$.meeting') END)";
+    const String hasMeeting = '$stored IS NOT NULL';
+    final rows = await db.customWriteReturning(
+      'UPDATE messages '
+      "SET triage_status = 'skipped', gate_reason = 'meeting_response', "
+      '  updated_at = ? '
+      "WHERE source = 'email' AND direction = 'inbound' "
+      "  AND triage_status <> 'skipped' "
+      "  AND (gate_override IS NULL OR gate_override <> 'user') "
+      '  AND ('
+      '    ($hasMeeting AND $stored IN ('
+      "      'meetingAccepted', 'meetingDeclined', 'meetingCancelled', "
+      "      'meetingTenativelyAccepted', 'meetingTentativelyAccepted'))"
+      '    OR (NOT ($hasMeeting)'
+      "      AND (subject LIKE 'Accepted:%' OR subject LIKE 'Declined:%' "
+      "        OR subject LIKE 'Tentative:%' OR subject LIKE 'Canceled:%') "
+      "      AND (body_text IS NULL OR TRIM(body_text, $_blank) = '') "
+      "      AND (body_preview IS NULL OR TRIM(body_preview, $_blank) = '') "
+      '      AND has_attachments IS NOT 1)'
+      '  ) '
+      'RETURNING source_message_id',
+      variables: _args([_nowIso()]),
+    );
+    return [for (final row in rows) row.data['source_message_id'] as String];
+  }
+
+  /// Takes a plan-relative deadline back off every stored ask banner, and
+  /// returns how many banners changed.
+  ///
+  /// Triage appends the deadline to the ask it writes — "Confirm the upstream
+  /// source — by Day 1" — and it now does so through [showableDeadline], which
+  /// drops wording that counts from a start nobody named. The banners written
+  /// before that learned nothing from it: `cta_text` is stored text, and a
+  /// thread that is not triaged again keeps its "— by Day 1" for good. This is
+  /// that thread triaged again for the one clause, without a model call.
+  ///
+  /// The LAST ` — by ` only, because that is the one triage appends; an ask
+  /// with the phrase in its own words keeps them. And only a tail
+  /// [showableDeadline] refuses, so "— by Friday" and "— by Day 1
+  /// (2026-10-05)" stay exactly as they are.
+  Future<int> stripPlanRelativeBanners({DateTime? now}) async {
+    const marker = ' — by ';
+    final at = now ?? DateTime.now();
+    final rows = await db
+        .customSelect(
+          'SELECT source, conversation_key, cta_text FROM conversations '
+          'WHERE cta_text LIKE ?',
+          variables: _args(['%$marker%']),
+        )
+        .get();
+    var changed = 0;
+    for (final row in rows) {
+      final text = row.data['cta_text'] as String? ?? '';
+      final cut = text.lastIndexOf(marker);
+      if (cut <= 0) continue;
+      final tail = text.substring(cut + marker.length);
+      if (showableDeadline(tail, now: at) != null) continue;
+      await db.customUpdate(
+        'UPDATE conversations SET cta_text = ?, updated_at = ? '
+        'WHERE source = ? AND conversation_key = ? AND cta_text = ?',
+        variables: _args([
+          text.substring(0, cut),
+          _nowIso(),
+          row.data['source'],
+          row.data['conversation_key'],
+          text,
+        ]),
+      );
+      changed++;
+    }
+    return changed;
+  }
+
+  /// The characters sqlite's TRIM should strip to call a body empty — space,
+  /// tab, newline, carriage return — as the second argument its one-argument
+  /// form lacks. Dart's `trim()` is the live gate's reading; this is the same
+  /// reading in SQL.
+  static const String _blank = "' ' || char(9) || char(10) || char(13)";
 
   // ── storylines ───────────────────────────────────────────────────────
 
@@ -5765,6 +6521,47 @@ FROM storylines s''';
     return rows.length;
   }
 
+  /// Puts the needs-you verdict of every in-window inbound message judged NO
+  /// back on the queue, and returns how many messages that was.
+  ///
+  /// The one-shot behind `needs_you_hedge_rejudge`. A hedge, a yes below the
+  /// confidence bar, used to be written as 0, and 0 is a veto over triage's
+  /// ask on the chip, the toast, the rail and the tile. A hedge is now written
+  /// NULL, but the old ones cannot be told apart from a real no, so every 0 in
+  /// the window is asked again and the handler writes each one the way it now
+  /// answers. The chip follows through the handler's own tail when the stored
+  /// answer moves.
+  ///
+  /// Both connectors, bounded by [sinceIso] like [requeueNeedsYouRejudge], and
+  /// on [requeueWork], which revives a `done` or `error` row and leaves one
+  /// already queued where it is. Uncapped, because what it re-asks is a set
+  /// that happened once and the window bounds it.
+  Future<int> requeueZeroNeedsYouVerdicts({required String sinceIso}) async {
+    final rows = await db
+        .customSelect(
+          'SELECT source, source_message_id FROM messages '
+          "WHERE direction = 'inbound' "
+          "  AND source IN ('email', 'teams') "
+          '  AND needs_you_verdict = 0 '
+          '  AND received_at >= ? '
+          'ORDER BY received_at DESC, source_message_id DESC',
+          variables: _args([sinceIso]),
+        )
+        .get();
+    // One transaction for the whole batch, for [requeueNeedsYouRejudge]'s
+    // reason: separate writes are separate fsyncs.
+    await db.transaction(() async {
+      for (final row in rows) {
+        await requeueWork(
+          'needs_you',
+          row.data['source'] as String? ?? '',
+          row.data['source_message_id'] as String? ?? '',
+        );
+      }
+    });
+    return rows.length;
+  }
+
   /// Puts the storyline pass back on the queue for every conversation the
   /// settle race left owing one, and returns how many that was.
   ///
@@ -5819,6 +6616,84 @@ WHERE source IN (${_placeholders(sources.length)})
       );
     }
     return rows.length;
+  }
+
+  /// Queues the extract / needs-you / embed trio for triaged messages the
+  /// windowed backlog enqueue walked past, and returns how many messages got
+  /// their extraction queued.
+  ///
+  /// The shape it heals: a first sync after a reset fetches down to the
+  /// BOOTSTRAP floor, and triage — which drains the pending set, not a window
+  /// — finishes all of it; but [enqueueExtractBacklog] and its twins are
+  /// paced ([cap] rows a pass) and read each pass's OWN floor, which later
+  /// passes recompute as rolling now-minus-lookback. When that rolling floor
+  /// overtakes the part of the bootstrap window the pace had not reached, a
+  /// message behind it is triaged and owed work no window will ever offer
+  /// again: its `extract_state` sits `pending`, [sweepSettledProgress]
+  /// rightly refuses a row whose stages have not all spoken, and the home
+  /// screen counts it in flight forever over an empty queue — ninety Teams
+  /// rows sat exactly there on 2026-09-23.
+  ///
+  /// So the owed condition is read off the PROGRESS row, never a window:
+  /// triage done, extraction never stamped, not dropped. That is what makes
+  /// this a heal rather than a retry loop — the extract pass stamps the
+  /// state, so a row it fixes no longer matches — and what makes it cover
+  /// the gap however it was opened.
+  ///
+  /// All three kinds go together for [enqueueNeedsYouBacklog]'s reason: one
+  /// set of messages under every queue is what keeps "judged no" apart from
+  /// "never judged". Each kind carries its own NOT EXISTS so [cap] counts
+  /// the rows that kind actually lacks, and `OR IGNORE` against the work
+  /// table's key means work that already ran — done, failed or in flight —
+  /// is never queued twice.
+  ///
+  /// The embed arm alone also asks whether a vector already EXISTS, under
+  /// whatever tag. A stranded row missed all three enqueues together, so it
+  /// has none and gets its embedding back with the rest; but the progress
+  /// row does not track embedding, so without this clause the arm would read
+  /// "extraction owed" as "vector owed" and queue a call for messages whose
+  /// vector is fine — and a vector under a RETIRED tag is already the
+  /// retired-tag one-shot's to walk, on its own cap and its own closing
+  /// pref, which this must not race.
+  Future<int> reviveOwedMessageStages({
+    int cap = 150,
+    String source = 'email',
+  }) async {
+    final now = _nowIso();
+    var owed = 0;
+    for (final kind in const ['extract', 'needs_you', 'embed_message']) {
+      final queued = await db.customUpdate(
+        '''
+INSERT OR IGNORE INTO work_items (
+  task_kind, source, entity_id, status, attempts, error, payload_json,
+  created_at, updated_at
+)
+SELECT ?, m.source, m.source_message_id, 'pending', 0, NULL, NULL,
+  COALESCE(m.received_at, ?), ?
+FROM message_progress p
+JOIN messages m
+  ON m.source = p.source AND m.source_message_id = p.source_message_id
+WHERE p.source = ?
+  AND p.dropped = 0 AND p.outcome = 'pending'
+  AND p.triage_state = 'done' AND p.extract_state = 'pending'
+  AND m.direction = 'inbound' AND m.triage_status = 'triaged'
+  AND NOT EXISTS (SELECT 1 FROM work_items w
+    WHERE w.task_kind = ? AND w.source = m.source
+      AND w.entity_id = m.source_message_id)
+  ${kind == 'embed_message' ? '''
+  AND NOT EXISTS (SELECT 1 FROM message_vectors v
+    WHERE v.source = m.source
+      AND v.source_message_id = m.source_message_id)''' : ''}
+ORDER BY m.received_at DESC
+LIMIT ?
+''',
+        variables: _args([kind, now, now, source, kind, cap]),
+      );
+      // The extract count is the answer — it is the stage the owed condition
+      // reads — and the twins ride along without inflating it.
+      if (kind == 'extract') owed = queued;
+    }
+    return owed;
   }
 
   // ── drafts ───────────────────────────────────────────────────────────
@@ -6597,6 +7472,26 @@ COALESCE(p.storyline_id, (
   WHERE x.source = p.source AND x.conversation_key = p.conversation_key
   ORDER BY x.added_at DESC, x.storyline_id DESC LIMIT 1))''';
 
+  /// Whether the message carries a FILE, which is not the same question as
+  /// `messages.has_attachments`.
+  ///
+  /// A Teams quote-reply arrives as an attachment and sets that flag — three
+  /// handlers read it to decide whether to hydrate attachments at all, and the
+  /// `↪ replying to …` line in a prompt depends on it staying 1. But a quote is
+  /// not a file (see `quoteAttachmentKind`), and `has:file` asking the flag
+  /// matched a message carrying nothing to open. So the search facet asks the
+  /// rows instead, and reads the flag never.
+  ///
+  /// A correlated EXISTS rather than a join or a count: `attachments` is keyed
+  /// `(source, source_message_id, attachment_id)`, so this is a primary-key
+  /// prefix seek that stops at the first non-quote row, and a join would
+  /// multiply the feed row by its attachments.
+  static const String _hasFileExists = '''
+EXISTS (SELECT 1 FROM attachments a
+        WHERE a.source = m.source
+          AND a.source_message_id = m.source_message_id
+          AND a.kind <> '$quoteAttachmentKind')''';
+
   /// Everything a home-feed row needs, in one projection.
   ///
   /// Shared by the paging read, the live patch read and the two search reads
@@ -6624,7 +7519,8 @@ p.source, p.source_message_id, p.conversation_key, p.received_at,
   p.settle_state,
   p.outcome, p.dropped, p.drop_reason, p.needs_you, p.urgency, p.updated_at,
   $_effectiveStorylineId AS storyline_id,
-  m.subject, m.from_name, m.from_address, m.has_attachments, m.summary,
+  m.subject, m.from_name, m.from_address, m.summary,
+  $_hasFileExists AS has_file,
   m.needs_you_verdict, m.needs_you_reason, m.gate_reason, m.triage_status,
   c.cta_text, c.state AS thread_state,
   s.title AS storyline_title,
@@ -7282,6 +8178,41 @@ RETURNING source, source_message_id, received_at
     ];
   }
 
+  /// The lowering twin of [backfillNeedsYouFromVerdicts]: every settled chip
+  /// whose message the needs-you pass judged NO, cleared, and the rows it
+  /// cleared returned so the caller can tick each one.
+  ///
+  /// For the rows that settled before `notifyWorthy` learned that a judged no
+  /// outranks triage's `reply_expected` and ask. A deadline settle routinely
+  /// lands before the judge answers, so those rows took a chip from triage
+  /// alone, and the refresh that followed the verdict recomputed it through
+  /// the old rule and kept it. `needs_you = 1` is the whole guard past the
+  /// verdict: lowering a chip the rule no longer grants needs none of the
+  /// raise's volume checks.
+  Future<List<({String source, String sourceMessageId, String receivedAt})>>
+      lowerNeedsYouFromVerdicts() async {
+    final rows = await db.customWriteReturning(
+      '''
+UPDATE message_progress SET needs_you = 0, updated_at = ?1
+WHERE needs_you = 1
+  AND EXISTS (SELECT 1 FROM messages m
+              WHERE m.source = message_progress.source
+                AND m.source_message_id = message_progress.source_message_id
+                AND m.needs_you_verdict = 0)
+RETURNING source, source_message_id, received_at
+''',
+      variables: _args([_nowIso()]),
+    );
+    return [
+      for (final row in rows)
+        (
+          source: row.data['source'] as String? ?? '',
+          sourceMessageId: row.data['source_message_id'] as String? ?? '',
+          receivedAt: row.data['received_at'] as String? ?? '',
+        ),
+    ];
+  }
+
   /// The home screen's tiles: seven over everything received since [sinceIso],
   /// and `needs_you` over all time.
   ///
@@ -7436,11 +8367,70 @@ WHERE p.received_at >= ? AND p.source IN ($places)
   ///
   /// The one `?` is the threshold, and it is the reason every caller returns
   /// its arguments beside its SQL.
-  static const String _liveNeedsYouThread = '''
+  ///
+  /// ONE TERM APART, deliberately and as of this round: the Dart predicate also
+  /// drops a `needs_reply` thread that can explain nothing — no reason on its
+  /// newest kept inbound, no ask, and an explicit "no reply expected" — and
+  /// this fragment does not. The rail is a claim about a handful of threads a
+  /// person is about to work, and a claim it cannot justify is worse than a
+  /// missing one; the tile is a count of what the pipeline holds, and a
+  /// thread's own `state` is what it holds. Spelling the extra term here means
+  /// a correlated read of `messages` inside the feed's page query, so it waits
+  /// for whoever wants the tile narrowed rather than riding along with the
+  /// rail's honesty fix. Until then the tile can read HIGHER than the rail.
+  ///
+  /// The judge's veto IS spelled here, and ahead of the ask, because it is the
+  /// term that moves the most threads: triage folds an ask out of any Jira
+  /// broadcast, and a tile still counting those would read dozens above the
+  /// rail rather than a handful. It is [needsYouVetoedSql], the same fragment
+  /// `loadConversations` loads as `needs_you_vetoed` for the rail, so the Dart
+  /// and SQL readers cannot name different rules.
+  static final String _liveNeedsYouThread = '''
 COALESCE(ai.bucket, '') <> 'later'
 AND c.state <> 'done'
 AND COALESCE(ai.attention_score, 0) >= ?
+AND NOT ${needsYouVetoedSql('c')}
 AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
+
+  /// Whether the needs-you pass has vetoed the thread behind the
+  /// `conversations` alias [c], as a boolean SQL expression with no
+  /// placeholders. The ONE spelling of the rule: the rail reads it through
+  /// `Conversation.needsYouVetoed`, and the Needs You tile and filter read it
+  /// inside [_liveNeedsYouThread].
+  ///
+  /// Vetoed only when BOTH hold:
+  /// - the newest KEPT inbound was judged an explicit no (`0`). NULL, never
+  ///   judged or a hedged yes, is no veto, which is what `-1` stands in for;
+  /// - no kept inbound NEWER than the thread's last outbound carries a yes. A
+  ///   thread with no outbound compares against `''`, so every kept inbound
+  ///   counts.
+  ///
+  /// The second clause is why this is a fragment and not the newest verdict.
+  /// The judge rates ONE message, and its own rule lets an earlier open ask
+  /// count only when this message pushes on it. So Alex's "approve the budget
+  /// by Friday", judged yes and unanswered, followed by Sam's reply-all
+  /// "adding Jordan for visibility", judged no because the owner is a
+  /// bystander on it, must keep the thread on the rail: the ask is still open.
+  /// Once the owner replies, an older yes is answered and a newer no vetoes.
+  ///
+  /// `ix_messages_conv` makes each seek an index walk per thread.
+  static String needsYouVetoedSql(String c) => '''
+(COALESCE((SELECT nv.needs_you_verdict FROM messages nv
+            WHERE nv.source = $c.source
+              AND nv.conversation_key = $c.conversation_key
+              AND nv.direction = 'inbound' AND ${keptMessageSql('nv')}
+            ORDER BY nv.received_at DESC, nv.source_message_id DESC
+            LIMIT 1), -1) = 0
+ AND NOT EXISTS (SELECT 1 FROM messages ny
+            WHERE ny.source = $c.source
+              AND ny.conversation_key = $c.conversation_key
+              AND ny.direction = 'inbound' AND ${keptMessageSql('ny')}
+              AND ny.needs_you_verdict = 1
+              AND ny.received_at > COALESCE(
+                (SELECT MAX(ob.received_at) FROM messages ob
+                  WHERE ob.source = $c.source
+                    AND ob.conversation_key = $c.conversation_key
+                    AND ob.direction = 'outbound'), '')))''';
 
   /// The WHERE fragment one [HomeFilter] stands for, with no leading `AND`
   /// and never empty — every filter narrows something, so a caller can always
@@ -8938,9 +9928,11 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
   /// file once. The OR then makes de-duplication free: a pinned file on a
   /// member thread satisfies both halves and is still one row.
   ///
-  /// Inline images are excluded on both halves. This is the Documents list —
-  /// a signature graphic in a footer is not a document, and it is not one
-  /// because somebody pinned it either.
+  /// Inline images are excluded on both halves, and quote-replies with them
+  /// ([_notAQuote]). This is the Documents list — a signature graphic in a
+  /// footer is not a document, and it is not one because somebody pinned it
+  /// either; a Teams quote-reply is not a document in any sense, having no name,
+  /// no bytes and nothing behind it but a message already on the timeline.
   ///
   /// Ordered pinned-first, then newest message first: the files a person chose
   /// are the ones they are coming back for, and everything after that is a
@@ -8961,7 +9953,7 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
           'FROM attachments a '
           'LEFT JOIN messages m ON m.source = a.source '
           '  AND m.source_message_id = a.source_message_id '
-          'WHERE a.is_inline = 0 AND ('
+          'WHERE a.is_inline = 0 $_notAQuote AND ('
           '  EXISTS (SELECT 1 FROM storyline_members sm '
           '          WHERE sm.storyline_id = ? AND sm.source = m.source '
           '            AND sm.conversation_key = m.conversation_key) '
@@ -8987,11 +9979,16 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
   /// under Links alone. The three shelves partition the whole one.
   static const String _kindClauseImages =
       "AND (a.kind = 'image' OR (lower(a.content_type) LIKE 'image/%' "
-      "  AND a.kind NOT IN ('reference','message_reference','card'))) ";
+      "  AND a.kind NOT IN ('reference','card'))) ";
 
-  /// The three kinds that point somewhere else rather than carrying bytes.
+  /// The two kinds that point somewhere else rather than carrying bytes.
+  ///
+  /// `message_reference` was the third until quote-replies stopped being files
+  /// at all: it is excluded from this whole query by [_notAQuote] instead. The
+  /// set is `linkAttachmentKinds` in `models/attachment_models.dart` spelled in
+  /// SQL — change both together.
   static const String _kindClauseLinks =
-      "AND a.kind IN ('reference','message_reference','card') ";
+      "AND a.kind IN ('reference','card') ";
 
   /// Everything that is not a picture and not a link.
   ///
@@ -9001,8 +9998,18 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
   /// file name in SQL, which cannot use an index, and the reader still finds
   /// the file under All.
   static const String _kindClauseDocuments =
-      "AND a.kind NOT IN ('image','reference','message_reference','card') "
+      "AND a.kind NOT IN ('image','reference','card') "
       "AND (a.content_type IS NULL OR lower(a.content_type) NOT LIKE 'image/%') ";
+
+  /// A quote-reply is not a file on any shelf, including All.
+  ///
+  /// Its own clause rather than a fourth exclusion inside the three above,
+  /// because it is not a partition of the files — it is a row that is not a
+  /// file. A Teams quote-reply carries no name, no bytes and no address (see
+  /// `quoteAttachmentKind`), so a Files row for one could only read as an
+  /// unnamed link to nowhere; the transcript draws it as a quote block instead.
+  /// Keeping it out here is also what keeps the three shelves adding up to All.
+  static const String _notAQuote = "AND a.kind <> '$quoteAttachmentKind' ";
 
   /// Every file the mailbox holds, newest message first — the Files stop.
   ///
@@ -9013,8 +10020,9 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
   /// shelf keeps such a file because somebody deliberately pinned it there;
   /// nobody pinned anything here.
   ///
-  /// Inline images are excluded and nothing else is: a signature logo is not a
-  /// file anybody sent. There is deliberately NO byte-size rule — the
+  /// Inline images are excluded, and quote-replies with them ([_notAQuote]):
+  /// a signature logo is not a file anybody sent, and a quoted message is not a
+  /// file at all. There is deliberately NO byte-size rule — the
   /// `inlineImageMinBytes` threshold in the widget layer is about inline
   /// pictures, which are already gone, and the store must not import a widget
   /// constant to apply it twice.
@@ -9045,6 +10053,7 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
           '  AND m.source_message_id = a.source_message_id '
           'WHERE a.is_inline = 0 '
           '  AND a.source IN (${_placeholders(sources.length)}) '
+          '  $_notAQuote'
           '$kindClause'
           'ORDER BY m.received_at DESC, a.source_message_id DESC, '
           '  a.ordinal ASC, a.attachment_id ASC '

@@ -45,6 +45,7 @@ void main() {
     String direction = 'inbound',
     String? receivedAt = '2026-09-04T10:00:00.000Z',
     String from = 'Dana Whitfield',
+    String body = 'The paperwork is attached.',
   }) async {
     await store.upsertMessage({
       'source': source,
@@ -54,7 +55,7 @@ void main() {
       'subject': 'Renewal paperwork',
       'from_name': from,
       'received_at': receivedAt,
-      'body_text': 'The paperwork is attached.',
+      'body_text': body,
       'triage_status': 'triaged',
     });
   }
@@ -420,6 +421,32 @@ void main() {
       expect(server.inputs.single,
           isNot(startsWith(EmbeddingsClient.searchQueryPrefix)));
       expect(server.inputs.single, startsWith('Renewal paperwork'));
+    });
+
+    test('the card is stripped of link targets, as the embed queue strips them',
+        () async {
+      // This card has to match the one `embedMessageRow` would have written,
+      // or the vector taken here sits somewhere else in the space than the
+      // stored vector this path stands in for.
+      if (!available) return;
+      await seedMessage(
+        'm1',
+        body: 'Signed copy <https://files.example.com/a/Lease.pdf> attached.',
+      );
+      await seedAttachment('m1', 'a1');
+      await seedChunks('m1', 'a1', const [
+        (locator: 'part 1', text: 'The tenant pays 2,400 monthly.', axis: 0),
+      ]);
+      final server = FakeEmbedServer();
+
+      await retrieverOver(server).excerptsFor(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToId: 'm1',
+      );
+
+      expect(server.inputs.single, isNot(contains('<https://')));
+      expect(server.inputs.single, contains('Signed copy attached.'));
     });
 
     test('a vector under another model tag is re-embedded, not trusted',

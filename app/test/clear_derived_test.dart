@@ -387,6 +387,12 @@ void main() {
       variables: args([fresh()]),
     );
 
+    // The owner's own vocabulary and one thread filed under it. Kept, like a
+    // sender rule: the words are theirs, not the model's. `messages.label` is
+    // the model's verdict and lives in a derived table.
+    final label = await store.createLabel('FYI only', tone: 'success');
+    await store.applyLabels('email', 'conv-1', [label.id]);
+
     // Configuration, which neither reset may touch.
     await store.setSenderPref('eric@example.com', 'later');
     await store.setPref('backend_mode', 'sdk');
@@ -422,7 +428,7 @@ void main() {
       expect(classified.length, classified.toSet().length);
       expect(MessageStore.derivedTables, hasLength(16));
       expect(MessageStore.syncedTables, hasLength(7));
-      expect(MessageStore.keptTables, hasLength(3));
+      expect(MessageStore.keptTables, hasLength(5));
     });
 
     test('name every retired clustering one-shot', () {
@@ -440,7 +446,8 @@ void main() {
       }
     });
 
-    test('name every search-corpus one-shot, and account for all ten', () {
+    test('name every search-corpus one-shot, and account for all eleven',
+        () {
       // The same rule over the four search corpora, and it bites harder here:
       // the clear EMPTIES `message_vectors`, `attachment_chunks` and
       // `context_chunks` and nulls every `desc_embedding`, so a key left set
@@ -454,9 +461,10 @@ void main() {
       }
       // The count, so a key added to the store's list without a walk behind it
       // shows up here rather than in a mailbox. Six from before the search
-      // corpora, four with them. The behaviour of each search walk is pinned
-      // in `embed_backfill_test.dart`.
-      expect(MessageStore.derivedOneShotPrefs, hasLength(10));
+      // corpora, four with them, and the needs-you veto's lowering twin of
+      // the verdict backfill. The behaviour of each search walk is pinned in
+      // `embed_backfill_test.dart`.
+      expect(MessageStore.derivedOneShotPrefs, hasLength(11));
       expect(
         MessageStore.derivedOneShotPrefs.toSet(),
         hasLength(MessageStore.derivedOneShotPrefs.length),
@@ -528,6 +536,24 @@ void main() {
       expect(await store.getPref('backend_mode'), 'sdk');
       expect(await store.getSenderPref('eric@example.com'), 'later');
       expect(await rows('setup_state'), 1);
+    });
+
+    test('keeps the owner\'s labels and the threads they are on', () async {
+      await seedEverything();
+
+      await store.clearDerived();
+
+      // Clear AI results throws away what the model decided. A label is what
+      // the PERSON decided, and re-typing a vocabulary is not something this
+      // button is allowed to ask for.
+      final kept = await store.listLabels();
+      expect(kept.single.name, 'FYI only');
+      expect(kept.single.tone, 'success');
+      expect(
+        (await store.labelsForConversation('email', 'conv-1')).single.id,
+        kept.single.id,
+        reason: 'the filing survives as well as the word',
+      );
     });
 
     test('keeps the verdicts ingest wrote and re-pends the rest', () async {
@@ -872,6 +898,8 @@ void main() {
         'backfill_addressed_me_teams',
         'sender_tip_strip',
         'participant_names_backfill',
+        'mail_html_rebuild_2',
+        'mail_preview_tidy',
         mailLastReconcileKey,
         activityLastSyncMailKey,
       ]) {
@@ -884,11 +912,16 @@ void main() {
         expect(await store.getPref(key), isNull, reason: key);
       }
       for (final key in [
-        // All four write SYNCED columns, which this reset does not touch.
+        // All six write SYNCED columns, which this reset does not touch.
         'backfill_addressed_me_email',
         'backfill_addressed_me_teams',
         'sender_tip_strip',
         'participant_names_backfill',
+        // The mail bodies and previews a server converted: what this pair
+        // repairs is the message as it arrived, not a verdict about it, so a
+        // clear must not hand either one back.
+        'mail_html_rebuild_2',
+        'mail_preview_tidy',
         // And these describe the sync, which has not been undone.
         mailLastReconcileKey,
         activityLastSyncMailKey,
@@ -1170,6 +1203,35 @@ void main() {
       expect(await store.getSenderPref('eric@example.com'), isNull);
       expect(await store.getPref('backend_mode'), 'sdk');
       expect(await rows('messages'), 0);
+    });
+
+    test('takes the labels and their links, either way', () async {
+      await seedEverything();
+
+      await store.wipeAll(keepIdentity: true);
+
+      // Unlike a sender rule, which still means something about a person the
+      // owner will hear from again, a label link names a conversation key in
+      // the mailbox this wipe just deleted. The vocabulary goes with it: Forget
+      // everything is the one button that means everything, and the words were
+      // written about mail that is gone.
+      expect(await rows('conversation_labels'), 0);
+      expect(await rows('labels'), 0);
+      // And the sender rule beside them, to show this is a deliberate
+      // difference rather than the identity flag doing the work.
+      expect(await store.getSenderPref('eric@example.com'), 'later');
+    });
+
+    test('takes the labels with no argument either', () async {
+      // A second test rather than a second wipe in the one above:
+      // `seedEverything` registers a context directory, which a wipe keeps on
+      // purpose, so seeding twice collides on its own kept row.
+      await seedEverything();
+
+      await store.wipeAll();
+
+      expect(await rows('conversation_labels'), 0);
+      expect(await rows('labels'), 0);
     });
 
     test('leaves the registered directories alone, either way', () async {

@@ -24,6 +24,7 @@ import 'llm/embeddings_client.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'llm/storyline_tasks.dart';
+import 'mail_body.dart' show stripLinkTargets;
 import 'owner_lookup.dart';
 import 'pipeline_progress.dart';
 import 'storyline_cards.dart';
@@ -1318,9 +1319,12 @@ class StorylineService {
     final body = (preview != null && preview.isNotEmpty)
         ? preview
         : (row['body_text'] as String? ?? '');
-    // Markers out, for [buildMessageBlock]'s reason: a recap window is quoted
-    // text, and a `[[att:…]]` in it is a token nobody typed.
-    final text = stripAttachmentMarkers(body);
+    // Markers out and link targets with them, for [buildMessageBlock]'s
+    // reasons: a recap window is quoted text, so a `[[att:…]]` in it is a
+    // token nobody typed and a `<target>` in it is a tracking address where
+    // the sentence should be. Before the clamp below, because a window line
+    // gets 400 characters and one anchor can be most of that.
+    final text = stripLinkTargets(stripAttachmentMarkers(body));
     return '${subject.isEmpty ? '' : '[$subject] '}$sender: '
         '${text.length > _recapLineCap ? text.substring(0, _recapLineCap) : text}'
         '${_attachmentSuffix(digests)}';

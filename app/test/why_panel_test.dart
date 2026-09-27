@@ -136,6 +136,23 @@ void main() {
       expect(find.text('Not flagged'), findsNothing);
     });
 
+    testWidgets('null with a reason is a hedge, neither a no nor unjudged',
+        (tester) async {
+      await pump(
+        tester,
+        message: msg(needsYouReason: 'It might be asking for the numbers.'),
+      );
+
+      expect(find.text('Not sure'), findsOneWidget);
+      expect(
+        find.text('The pass leaned yes but was not sure, so triage decides. '
+            'It might be asking for the numbers.'),
+        findsOneWidget,
+      );
+      expect(find.text('Not flagged'), findsNothing);
+      expect(find.text('Not judged yet'), findsNothing);
+    });
+
     testWidgets('a gated message says which gate took it, in words',
         (tester) async {
       // The gate writes snake_case tokens; the panel reads them as words.

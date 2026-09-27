@@ -28,7 +28,7 @@ class GraphMailException implements Exception {
   String toString() => message;
 }
 
-class GraphMail implements MailBackend {
+class GraphMail implements MailBackend, DraftRecipientsEditor {
   static const String _base = 'https://graph.microsoft.com/v1.0';
 
   /// Tier one of the two-tier fetch: enough to list, sort, and thread a
@@ -40,11 +40,29 @@ class GraphMail implements MailBackend {
       'hasAttachments';
 
   /// Tier two. `uniqueBody` is the part of the message that is NOT quoted
-  /// thread — Graph computes it server-side, and with the Prefer header
-  /// below it arrives as plain text already converted from HTML. That is the
-  /// entire reason this app never parses mail HTML itself.
-  static const String _detailSelect =
-      'id,uniqueBody,internetMessageHeaders,hasAttachments';
+  /// thread, which Graph computes server-side, and with the Prefer header
+  /// below it arrives as the sender's own HTML.
+  ///
+  /// Asking for HTML is a reversal: this app used to take Graph's server-side
+  /// text conversion and never parse mail HTML itself. What that conversion
+  /// writes is `label <href>` for every anchor and `[alt]` for every image,
+  /// which in automated mail is most of the message — a hundred-character
+  /// SharePoint address on a line of its own, `[Main Logo]`, `[Comment Icon]`,
+  /// a template placeholder the sender never resolved — with the sentence
+  /// somebody wrote below the fold. So the HTML comes down and
+  /// `mailBodyFromDetail` (`mail_body.dart`) converts it at ingest, where
+  /// every rule is ours and each one is a test.
+  ///
+  /// This backend converts NOTHING. `uniqueBody` leaves here in the shape
+  /// Graph sent it, `contentType` and all, because that seam is where the
+  /// parity test compares the two mail backends and because the one converter
+  /// must not have a second copy behind a connector.
+  ///
+  /// `meetingMessageType` is Graph's word for what kind of invitation a
+  /// message is (`meetingRequest`, `meetingCancelled`, …) and is absent on
+  /// ordinary mail.
+  static const String _detailSelect = 'id,uniqueBody,internetMessageHeaders,'
+      'hasAttachments,meetingMessageType';
 
   /// The attachment list, expanded onto the same detail request rather than
   /// fetched separately: a message's attachments are part of what the detail
@@ -60,8 +78,10 @@ class GraphMail implements MailBackend {
       'attachments(\$select=id,name,contentType,size,isInline,'
       'lastModifiedDateTime,microsoft.graph.fileAttachment/contentId)';
 
-  static const Map<String, String> _plainTextBody = {
-    'Prefer': 'outlook.body-content-type="text"',
+  /// On the DETAIL fetch only. A delta page carries `bodyPreview`, which is a
+  /// snippet Graph writes as text whatever anyone prefers.
+  static const Map<String, String> _htmlBody = {
+    'Prefer': 'outlook.body-content-type="html"',
   };
 
   /// A 429 with no parseable Retry-After waits this long; anything Graph
@@ -121,7 +141,7 @@ class GraphMail implements MailBackend {
           '&\$expand=${Uri.encodeComponent(_detailExpand)}',
     );
 
-    final response = await _send(uri, headers: _plainTextBody);
+    final response = await _send(uri, headers: _htmlBody);
     if (response.statusCode != 200) {
       throw _describe(response, 'Could not read a message from Microsoft Graph');
     }
@@ -183,11 +203,13 @@ class GraphMail implements MailBackend {
 
   // ── Drafts and sending ───────────────────────────────────────────────
   //
-  // Three calls, in the order the send flow makes them: create the reply
-  // shell, fill in its body, send it. Graph builds the reply itself, which is
-  // the whole reason it is done this way — the recipients, the subject, the
-  // In-Reply-To and References headers and the quoted thread all come from the
-  // message being replied to, and none of them are this app's to reconstruct.
+  // In the order the send flow makes them: create the reply shell, add anybody
+  // the owner asked for, fill in its body, send it. Graph builds the reply
+  // itself, which is the whole reason it is done this way — the recipients, the
+  // subject, the In-Reply-To and References headers and the quoted thread all
+  // come from the message being replied to, and none of them are this app's to
+  // reconstruct. Which is also why the recipients call ADDS rather than states:
+  // it is amending a set Graph owns.
 
   /// Creates a draft reply to [messageId] in the user's Drafts folder.
   ///
@@ -289,6 +311,104 @@ class GraphMail implements MailBackend {
     }
   }
 
+  /// Adds people to a draft's To and Cc lines.
+  ///
+  /// READ, MERGE, PATCH — and the read is the whole point of it. A PATCH of
+  /// `ccRecipients` REPLACES that line, and the base set is the server's:
+  /// `/createReply` put the person being answered on the To line and this app
+  /// never learned who that was. So the draft's own lines come back first and
+  /// the additions are merged onto them; whoever the reply was already going to
+  /// cannot be lost by somebody being added to it.
+  ///
+  /// A line with nothing to add to it is NOT in the body at all. Two rules meet
+  /// there: an empty array is Graph's instruction to CLEAR a line (the reason
+  /// [createDraft] omits an empty Cc), and re-sending a line unchanged would be
+  /// this app restating a recipient set it does not own.
+  ///
+  /// Addresses are deduplicated by their lowercased form, across the base set
+  /// and the additions both: a person already on the reply stays exactly as the
+  /// server spelled them, name and all, rather than being appended a second
+  /// time as a bare address.
+  @override
+  Future<void> updateDraftRecipients(
+    String draftId, {
+    List<String> to = const [],
+    List<String> cc = const [],
+  }) async {
+    if (to.isEmpty && cc.isEmpty) return;
+    final id = Uri.encodeComponent(draftId);
+
+    final read = await _request(
+      'GET',
+      Uri.parse('$_base/me/messages/$id?\$select=$_recipientsSelect'),
+    );
+    if (read.statusCode != 200) {
+      throw _describe(
+        read,
+        'Microsoft Graph could not read who the reply was going to',
+      );
+    }
+    final draft = _decodeObject(read);
+
+    final body = <String, Object?>{
+      if (to.isNotEmpty)
+        'toRecipients': _mergedRecipients(draft['toRecipients'], to),
+      if (cc.isNotEmpty)
+        'ccRecipients': _mergedRecipients(draft['ccRecipients'], cc),
+    };
+
+    final response = await _request(
+      'PATCH',
+      Uri.parse('$_base/me/messages/$id'),
+      jsonBody: body,
+    );
+    if (response.statusCode != 200) {
+      throw _describe(
+        response,
+        'Could not add people to the reply in Microsoft Graph',
+      );
+    }
+  }
+
+  /// Just the two lines [updateDraftRecipients] merges onto.
+  static const String _recipientsSelect = 'toRecipients,ccRecipients';
+
+  /// [base] as Graph sent it, plus each of [added] that is not already there.
+  ///
+  /// Base entries are copied through with their `name`, which is the display
+  /// name Graph resolved; an addition carries an address alone, because an
+  /// address is all this app knows it can deliver to and Graph resolves the
+  /// name itself.
+  static List<Map<String, Object?>> _mergedRecipients(
+    Object? base,
+    List<String> added,
+  ) {
+    final entries = <Map<String, Object?>>[];
+    final seen = <String>{};
+    for (final entry in base is List ? base : const []) {
+      if (entry is! Map) continue;
+      final email = entry['emailAddress'];
+      if (email is! Map) continue;
+      final address = (email['address'] as String? ?? '').trim();
+      if (address.isEmpty || !seen.add(address.toLowerCase())) continue;
+      final name = email['name'];
+      entries.add({
+        'emailAddress': {
+          if (name is String && name.isNotEmpty) 'name': name,
+          'address': address,
+        },
+      });
+    }
+    for (final address in added) {
+      final trimmed = address.trim();
+      if (trimmed.isEmpty || !seen.add(trimmed.toLowerCase())) continue;
+      entries.add({
+        'emailAddress': {'address': trimmed},
+      });
+    }
+    return entries;
+  }
+
   /// Sends an existing draft and answers with what went out. Graph's own
   /// `/send` answers 202 with no body.
   ///
@@ -330,6 +450,25 @@ class GraphMail implements MailBackend {
       // when the Sent Items copy folds in with Graph's own stamp.
       sentAt: _secondsZ(DateTime.now()),
     );
+  }
+
+  /// `DELETE /me/messages/{id}`: the draft a failed reply left behind.
+  ///
+  /// 204 is the answer; 404 and 410 mean the draft is already gone, which is
+  /// the outcome this call exists for, so they are not failures either. The
+  /// caller swallows a throw — see `DraftNotifier.send` — so the throw only
+  /// has to be honest, not friendly.
+  @override
+  Future<void> deleteDraft(String draftId) async {
+    final response = await _request(
+      'DELETE',
+      Uri.parse('$_base/me/messages/${Uri.encodeComponent(draftId)}'),
+    );
+    final status = response.statusCode;
+    if (status == 204 || status == 200 || status == 404 || status == 410) {
+      return;
+    }
+    throw _describe(response, 'Microsoft Graph could not delete the draft');
   }
 
   /// Everything a local echo row needs off a draft that is about to stop
@@ -452,6 +591,7 @@ class GraphMail implements MailBackend {
         response = switch (method) {
           'POST' => await _http.post(uri, headers: sent, body: body),
           'PATCH' => await _http.patch(uri, headers: sent, body: body),
+          'DELETE' => await _http.delete(uri, headers: sent),
           _ => await _http.get(uri, headers: sent),
         };
       } on http.ClientException catch (e) {

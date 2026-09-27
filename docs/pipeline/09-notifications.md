@@ -12,7 +12,24 @@ message-level ask AND thread-level volume. `needs_you_verdict = 1` is one of
 the asks — the only one decided about the whole message rather than read off a
 triage field — and it is the ask half **only**: a judged yes is still gated by
 the attention threshold, the `later` bucket and the `done` state, like every
-other ask. NULL and 0 add nothing.
+other ask. NULL adds nothing: never judged is not a yes, and neither is a
+hedge, a yes below the needs-you pass's confidence bar, which is now stored
+NULL and so no longer vetoes (see [11-needs-you.md](11-needs-you.md)). A 0 is
+a VETO that outranks every ask: `notifyWorthy`
+(`app/lib/services/notify_worthy.dart`) returns false on a judged no before it
+reads any other field, so the chip and the toast cannot disagree about one
+message. The rail and the tile apply a thread-level form of the veto,
+`MessageStore.needsYouVetoedSql`, which also asks that no kept inbound newer
+than the last outbound was judged yes; this per-message rule is unchanged.
+Triage folds an ask out of any message with a task
+in it, and the needs-you pass, which reads the thread first, is the one that
+can say the task is somebody else's. A message settled before the judge
+answers is corrected by `refreshNeedsYou` when it does.
+
+The deadline ask goes through `showableDeadline`
+(`app/lib/services/deadline_parse.dart`): plan-relative wording such as
+"Day 1" has not earned an interruption (see
+[08-attention.md](08-attention.md)).
 
 **Waiting for the verdict — from the record, not the queue.** `_isComplete`
 reads `message_progress.extract_state` and `storyline_state` (terminal =
@@ -86,8 +103,18 @@ toast and stores the `needs_you` that goes with it; `needsYouSql`
 (`app/lib/data/progress_sql.dart`) writes the same column for the rows no
 coordinator ever saw — the settle sweep's backstop and the v8 backfill. Both
 read the verdict, and `test/needs_you_settle_test.dart` pins that they agree.
-The one documented divergence stays: only the SQL carries `is_read = 0`,
-because the decision table suppresses a read message before worthiness is
-asked. The **v8 backfill is the exception** — it interpolates the SQL with
+The live SQL arm carries the veto too (`COALESCE(m.needs_you_verdict, -1) <>
+0`, ahead of the other guards). The documented divergence stays: only the SQL
+carries `is_read = 0`, because the decision table suppresses a read message
+before worthiness is asked. The **v8 backfill is the exception** — it
+interpolates the SQL with
 `verdict: false`, frozen at the shape it ran with, because `from7To8` replays
-on v1..v7 databases where `needs_you_verdict` (v10) does not exist yet.
+on v1..v7 databases where `needs_you_verdict` (v10) does not exist yet. The
+frozen arm renders neither the verdict clause nor the veto, byte-for-byte what
+the migration ran.
+
+**A known divergence, not yet fixed.** The SQL deadline arm still grants on
+any non-empty `deadline` (`COALESCE(m.deadline, '') <> ''`), including a
+plan-relative "Day 1", while `notifyWorthy` asks `showableDeadline`. So the
+settle sweep's backstop can raise a chip on a row the Dart path would refuse.
+It is recorded as a follow-up of the 2026-09 round.

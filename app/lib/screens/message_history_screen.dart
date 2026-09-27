@@ -443,12 +443,15 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
   List<Widget> _judgements(MessageHistory history) {
     final lines = <String>[];
 
+    final why = history.needsYouReason?.trim() ?? '';
+    // A NULL verdict with a reason is a hedge: the pass leaned yes below its
+    // confidence bar and stored no verdict, so triage decides. With no reason
+    // it has never been judged at all.
     final verdict = switch (history.needsYouVerdict) {
-      null => 'not judged',
+      null => why.isEmpty ? 'not judged' : 'not sure',
       true => 'yes',
       false => 'no',
     };
-    final why = history.needsYouReason?.trim() ?? '';
     lines.add('Needs you: $verdict${why.isEmpty ? '' : ' — $why'}');
 
     final score = history.attentionScore;

@@ -1,6 +1,8 @@
 import '../../models/attachment_models.dart';
 import '../../models/message_models.dart';
 import '../attachments/attachment_markers.dart';
+import '../mail_body.dart' show stripLinkTargets;
+import '../sender_display.dart';
 
 /// Enough of a body for a model to judge intent. Past this it is quoted thread
 /// and signatures, which cost tokens and add nothing.
@@ -25,10 +27,21 @@ String buildMessageBlock(Message message) {
   // is a token this app minted, and a model shown one reasons about the token
   // rather than about the message.
   final stripped = stripAttachmentMarkers(raw);
+  // Then the `<target>` tail off every canonical link run, leaving the label.
+  // BEFORE the cap and not after: an automated mail spends a hundred
+  // characters of tracking query per anchor, and a strip that ran afterwards
+  // would have let those bytes push the sentence somebody wrote past 4000.
+  final unlinked = stripLinkTargets(stripped);
   // A chat message can be nothing BUT a shared file — somebody dropped a
   // contract into a thread and typed no words with it — and an empty body
   // tells the model the message said nothing, which is the opposite of true.
-  final body = stripped.isEmpty ? attachmentStandIn(message.attachments) : stripped;
+  final spoken =
+      unlinked.isEmpty ? attachmentStandIn(message.attachments) : unlinked;
+  // The quote goes ABOVE the words, the way it reads on screen: "29 and 30" is
+  // an answer to a question, and the model can only see which question if it is
+  // told what this reply was pointed at.
+  final quoted = quotedReplyLines(message.attachments);
+  final body = quoted.isEmpty ? spoken : '$quoted\n$spoken';
   final clipped = body.length > messageBlockBodyCap
       ? body.substring(0, messageBlockBodyCap)
       : body;
@@ -45,6 +58,55 @@ String buildMessageBlock(Message message) {
 const int _standInNames = 3;
 const int _standInCardCap = 300;
 
+/// How much of a quoted message a reply's `↪` line carries. Short on purpose:
+/// it is there to say WHICH turn is being answered, and the quoted message is
+/// almost always in the thread tail already.
+const int _quotePreviewCap = 200;
+
+/// How many quoted turns a reply gets to name. Teams sends one — a quote-reply
+/// points at a single message and there is no compose surface that quotes two —
+/// so this is a ceiling on a shape nobody has seen, not a policy.
+///
+/// It is here because these lines sit AHEAD of the body and the whole thing is
+/// clipped to [messageBlockBodyCap] afterwards: enough quote lines would spend
+/// the budget on other people's sentences and clip away the words this message
+/// actually said, which is the one thing the prompt cannot do without.
+const int quotedReplyMaxLines = 2;
+
+/// What a reply quoted, as one line the model can read whom it answers from.
+///
+/// `↪ replying to <sender>: <preview>`, and nothing when the message quoted
+/// nothing. A Teams quote-reply arrives as an attachment with no name
+/// ([quoteAttachmentKind]), so before this the prompt was told the message had
+/// shared a file called `(unnamed)` — a sentence about a file that does not
+/// exist, in place of the one fact the quote carries.
+///
+/// Either half alone is still worth a line: a sender with no snippet says who
+/// is being answered, and a snippet with no sender says which turn. Past
+/// [quotedReplyMaxLines] the rest are dropped silently: there is nothing useful
+/// to say about quotes a reader will never see, and a `(+3 more)` note would
+/// cost body characters to say it.
+String quotedReplyLines(List<AttachmentRef> attachments) {
+  final lines = <String>[];
+  for (final attachment in attachments) {
+    if (lines.length == quotedReplyMaxLines) break;
+    if (!attachment.isQuoteReply) continue;
+    final sender = attachment.quotedSender?.trim() ?? '';
+    final preview = _clampQuote(attachment.quotedPreview?.trim() ?? '');
+    if (sender.isEmpty && preview.isEmpty) continue;
+    lines.add(switch ((sender.isEmpty, preview.isEmpty)) {
+      (false, false) => '↪ replying to $sender: $preview',
+      (false, true) => '↪ replying to $sender',
+      _ => '↪ replying to: $preview',
+    });
+  }
+  return lines.join('\n');
+}
+
+String _clampQuote(String preview) => preview.length > _quotePreviewCap
+    ? preview.substring(0, _quotePreviewCap)
+    : preview;
+
 /// What a message with no words of its own says instead.
 ///
 /// Reads from [AttachmentRef] rather than raw rows because [Message.attachments]
@@ -60,9 +122,15 @@ const int _standInCardCap = 300;
 /// Inline rows are filtered out first: a signature logo is not what a message
 /// is about, and "Shared a file: image001.png" on a mail with an empty unique
 /// body would be a sentence about a footer.
+///
+/// Quote-replies come out with them, and for a sharper reason: a quote is
+/// neither a file nor a card, its `card_text` is somebody ELSE's sentence, and
+/// its missing name is what used to make a quote-reply read `Shared a file:
+/// (unnamed)`. [quotedReplyLines] says what a quote is, above the body.
 String attachmentStandIn(List<AttachmentRef> attachments) {
-  final shared = [for (final a in attachments) if (!a.isInline) a];
-  if (shared.isEmpty) return attachments.isEmpty ? '' : 'Shared an image';
+  final carried = [for (final a in attachments) if (!a.isQuoteReply) a];
+  final shared = [for (final a in carried) if (!a.isInline) a];
+  if (shared.isEmpty) return carried.isEmpty ? '' : 'Shared an image';
 
   for (final attachment in shared) {
     final card = attachment.cardText?.trim() ?? '';
@@ -87,8 +155,14 @@ String attachmentStandIn(List<AttachmentRef> attachments) {
 /// drafting task renders its thread lines through here too, which is what
 /// keeps "a chat sender is a name, not an address" a fact this file holds
 /// rather than a rule two prompts each remember separately.
+///
+/// The chat name goes through [displaySenderName], which is what stops the one
+/// row that has no name — a bot stored before ingest started calling it `Bot` —
+/// from rendering `From:` with nothing after it. Mail's line is untouched: its
+/// address is a fact the model may use, and it already sits where the model
+/// expects it.
 String senderLine(Message message) => switch (message.source) {
-      'teams' => 'From: ${message.fromName ?? ''}',
+      'teams' => 'From: ${displaySenderName(name: message.fromName)}',
       _ => 'From: ${message.fromName ?? ''} <${message.fromAddress ?? ''}>',
     };
 
@@ -271,12 +345,18 @@ String buildThreadTailText(List<Message> thread, {int max = 3, int cap = 300}) {
   ].join('\n---\n');
 }
 
-/// Markers out, for [buildMessageBlock]'s reason — a tail is quoted text too,
-/// and a `[[att:…]]` in it is a token nobody typed.
-String _tailBody(Message message) => stripAttachmentMarkers(
-      message.bodyText?.isNotEmpty == true
-          ? message.bodyText!
-          : message.bodyPreview,
+/// Markers out and link targets with them, for [buildMessageBlock]'s reasons —
+/// a tail is quoted text too, so a `[[att:…]]` in it is a token nobody typed
+/// and a `<target>` in it is tracking query where the words should be. The tail
+/// is where that bites hardest: its cap is 300 characters, so one automated
+/// anchor could spend a whole quoted turn without saying anything, which is
+/// why the strip runs before [_clampTail] rather than after.
+String _tailBody(Message message) => stripLinkTargets(
+      stripAttachmentMarkers(
+        message.bodyText?.isNotEmpty == true
+            ? message.bodyText!
+            : message.bodyPreview,
+      ),
     );
 
 String _clampTail(String value, int cap) =>

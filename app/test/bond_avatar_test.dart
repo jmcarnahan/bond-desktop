@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:bond_inbox/services/profile_photos.dart';
+import 'package:bond_inbox/services/sender_display.dart';
 import 'package:bond_inbox/widgets/bond_avatar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -153,6 +154,64 @@ void main() {
 
       expect(photos.asked, ['u1', 'u2']);
       expect(find.byType(Image), findsOneWidget);
+    });
+  });
+
+  /// A bot has no face to fetch and no name to initial. What it had instead was
+  /// the first letter of its own identity key — a "T", on every Teams bot in
+  /// the app at once.
+  group('a bot’s face', () {
+    testWidgets('is a glyph, not a letter, for the name ingest writes',
+        (tester) async {
+      await tester.pumpWidget(_host(const BondAvatar(
+        name: botSenderName,
+        address: 'teams:8e55a7b1-4c2d-4f1a-9b3e-77d0c1e2a5f4',
+      )));
+
+      expect(find.byIcon(Icons.smart_toy_outlined), findsOneWidget);
+      expect(find.text('B'), findsNothing);
+    });
+
+    testWidgets('is a glyph for a row stored before that name existed',
+        (tester) async {
+      await tester.pumpWidget(_host(const BondAvatar(
+        name: '',
+        address: 'teams:8e55a7b1-4c2d-4f1a-9b3e-77d0c1e2a5f4',
+      )));
+
+      // The "T" is the whole reported defect, and it is gone twice over: the
+      // glyph replaces it, and the pseudo-address is no longer initialled.
+      expect(find.byIcon(Icons.smart_toy_outlined), findsOneWidget);
+      expect(find.text('T'), findsNothing);
+    });
+
+    testWidgets('is still initials for a person on a chat', (tester) async {
+      await tester.pumpWidget(_host(const BondAvatar(
+        name: 'Sarah Chen',
+        address: 'teams:0c1f2e3d-5a6b',
+      )));
+
+      expect(find.text('SC'), findsOneWidget);
+      expect(find.byIcon(Icons.smart_toy_outlined), findsNothing);
+    });
+
+    testWidgets('is a photo when the directory has one anyway', (tester) async {
+      // The glyph is the disc under the picture, like initials: a bot with a
+      // profile image is drawn with it.
+      final photos = _FakePhotos(
+        images: {'app-9': MemoryImage(_png)},
+        warm: const {'app-9'},
+      );
+
+      await tester.pumpWidget(_host(BondAvatar(
+        name: botSenderName,
+        address: 'teams:app-9',
+        photoKey: 'app-9',
+        photos: photos,
+      )));
+
+      expect(find.byType(Image), findsOneWidget);
+      expect(find.byIcon(Icons.smart_toy_outlined), findsNothing);
     });
   });
 

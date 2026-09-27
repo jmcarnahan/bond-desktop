@@ -1,6 +1,9 @@
+import 'dart:convert';
+
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/draft_request.dart';
+import 'package:bond_inbox/models/person.dart' show Person;
 import 'package:bond_inbox/providers/draft_provider.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
@@ -9,6 +12,7 @@ import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/progress_bus.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/widgets/composer.dart' show SendCapability;
+import 'package:bond_inbox/widgets/linked_text.dart' show LinkRun;
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -41,6 +45,16 @@ class InMemoryTokenStore implements TokenStore {
 
   @override
   Future<void> deleteAll() async => values.clear();
+}
+
+/// A store whose echo write refuses, as a locked or busy database would: the
+/// first local write after a send the server already accepted.
+class _EchoRefusingStore extends MessageStore {
+  _EchoRefusingStore(super.db);
+
+  @override
+  Future<bool> insertLocalEcho(Map<String, Object?> row) async =>
+      throw StateError('database is locked');
 }
 
 /// Records every Graph call the send flow makes, in order.
@@ -79,6 +93,39 @@ class RecordingMail extends GraphMail {
     final error = failure;
     if (error != null) throw error;
     return reply;
+  }
+
+  /// The Cc lines the send asked for, one entry per call. Overridden rather
+  /// than inherited: [GraphMail] implements it against the real endpoint, and a
+  /// subclass that left it alone would dial Microsoft from this file.
+  final List<List<String>> ccLines = [];
+
+  @override
+  Future<void> updateDraftRecipients(
+    String draftId, {
+    List<String> to = const [],
+    List<String> cc = const [],
+  }) async {
+    calls.add('recipients:$draftId');
+    ccLines.add([...cc]);
+    final error = failure ?? recipientsFailure;
+    if (error != null) throw error;
+  }
+
+  /// Thrown by the recipients PATCH alone, when set: the step the send's own
+  /// comment calls the one most likely to be refused.
+  Object? recipientsFailure;
+
+  /// Thrown by the draft delete, when set.
+  Object? deleteFailure;
+
+  /// Overridden for the same reason as [updateDraftRecipients]: the inherited
+  /// one would dial Microsoft.
+  @override
+  Future<void> deleteDraft(String draftId) async {
+    calls.add('delete:$draftId');
+    final error = deleteFailure;
+    if (error != null) throw error;
   }
 
   @override
@@ -270,6 +317,66 @@ void main() {
         'send:graph-draft-1',
       ]);
       expect(mail.bodies, ['Friday works. — Jo']);
+    });
+
+    test('adds people between the draft and its body', () async {
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+      notifier.setAddedRecipients([
+        const Person(
+          id: 'user-dana',
+          displayName: 'Dana Okoye',
+          mail: 'dana@example.com',
+        ),
+      ]);
+
+      final outcome = await notifier.send('Friday works. — Jo');
+
+      expect(notifier.state.error, isNull);
+      expect(outcome, SendOutcome.sent);
+      // Before the body on purpose: a refused recipients call has to read as a
+      // send that did not happen, not as a reply already gone without them.
+      expect(mail.calls, [
+        'createReply:inbound-1',
+        'recipients:graph-draft-1',
+        'updateBody:graph-draft-1',
+        'send:graph-draft-1',
+      ]);
+      // Cc, not To: the server's own reply owns the To line.
+      expect(mail.ccLines, [
+        ['dana@example.com']
+      ]);
+      // On the mail that went out, so no longer pending on anything.
+      expect(notifier.state.addedRecipients, isEmpty);
+    });
+
+    test('and leaves the call out when nobody was added', () async {
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.send('Friday works.');
+
+      expect(mail.calls, isNot(contains('recipients:graph-draft-1')));
+    });
+
+    test('a person with no address stops the send before anything is created',
+        () async {
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+      notifier.setAddedRecipients([
+        const Person(id: 'user-noel', displayName: 'Noel Pike'),
+      ]);
+
+      final outcome = await notifier.send('Friday works.');
+
+      expect(outcome, SendOutcome.failed);
+      expect(mail.calls, isEmpty);
+      expect(notifier.state.error, contains('Noel Pike'));
+      // Still on screen, so they can be removed and the reply sent.
+      expect(notifier.state.addedRecipients, hasLength(1));
     });
 
     test('sends what it was handed, not what was stored', () async {
@@ -541,6 +648,149 @@ void main() {
       expect(notifier.state.body, 'Friday works.');
     });
 
+    test('a refused Cc deletes the draft it had already created', () async {
+      await seedDraft();
+      mail.recipientsFailure =
+          const GraphMailException('Graph refused the Cc line.', 400);
+      final notifier = notifierFor();
+      await notifier.load();
+      notifier.setAddedRecipients([
+        const Person(
+          id: 'user-dana',
+          displayName: 'Dana Okoye',
+          mail: 'dana@example.com',
+        ),
+      ]);
+
+      final outcome = await notifier.send('Friday works.');
+
+      expect(outcome, SendOutcome.failed);
+      // No body and no send after the refusal, and the empty reply the server
+      // built is taken back out of Drafts rather than left there per retry.
+      expect(mail.calls, [
+        'createReply:inbound-1',
+        'recipients:graph-draft-1',
+        'delete:graph-draft-1',
+      ]);
+      expect(notifier.state.error, 'Graph refused the Cc line.');
+      expect(notifier.state.sending, isFalse);
+      // Nothing went out, so the people stay for the retry.
+      expect(notifier.state.addedRecipients, hasLength(1));
+    });
+
+    test('a delete that fails too never hides why the send stopped', () async {
+      await seedDraft();
+      mail.recipientsFailure =
+          const GraphMailException('Graph refused the Cc line.', 400);
+      mail.deleteFailure =
+          const GraphMailException('Could not delete the draft.', 500);
+      final notifier = notifierFor();
+      await notifier.load();
+      notifier.setAddedRecipients([
+        const Person(
+          id: 'user-dana',
+          displayName: 'Dana Okoye',
+          mail: 'dana@example.com',
+        ),
+      ]);
+
+      final outcome = await notifier.send('Friday works.');
+
+      expect(outcome, SendOutcome.failed);
+      expect(mail.calls.last, 'delete:graph-draft-1');
+      expect(notifier.state.error, 'Graph refused the Cc line.');
+      expect(notifier.state.sending, isFalse);
+    });
+
+    test('a draft that was never created is never deleted', () async {
+      await seedDraft();
+      mail.failure = const GraphMailException('Mailbox is over quota.');
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.send('Friday works.');
+
+      expect(mail.calls, ['createReply:inbound-1']);
+    });
+
+    test('a local write that fails after the send still reports it sent',
+        () async {
+      // The reply is in somebody's inbox the moment `sendDraft` returns. A
+      // "Could not send" here, with the text and the Cc still up, is an
+      // invitation to send the same reply twice.
+      final echoRefusing = _EchoRefusingStore(db);
+      store = echoRefusing;
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+      notifier.setAddedRecipients([
+        const Person(
+          id: 'user-dana',
+          displayName: 'Dana Okoye',
+          mail: 'dana@example.com',
+        ),
+      ]);
+      final epochBefore = notifier.state.sendEpoch;
+
+      final outcome = await notifier.send('Friday works.');
+
+      expect(outcome, SendOutcome.sent);
+      expect(notifier.state.error, isNull);
+      expect(notifier.state.notice, DraftNotifier.localCopyFailedNotice);
+      expect(notifier.state.sending, isFalse);
+      // Retired exactly as a clean send retires it: the epoch rebuilds the box
+      // empty, and the chips are on the mail that went out.
+      expect(notifier.state.sendEpoch, epochBefore + 1);
+      expect(notifier.state.addedRecipients, isEmpty);
+      // The writes after the echo still ran, so the card does not offer the
+      // reply again.
+      expect((await store.getDraft('email', 'conv-1'))!['status'], 'sent');
+      expect(notifier.state.body, isNull);
+      expect(syncsAfterSend, 1);
+      // And the draft that went out is not "cleaned up" after.
+      expect(mail.calls, isNot(contains('delete:graph-draft-1')));
+
+      // A second press lands on an empty composer and sends nothing.
+      expect(await notifier.send(''), SendOutcome.failed);
+      expect(mail.calls.where((c) => c.startsWith('send:')), hasLength(1));
+    });
+
+    test('a second press while the target is being looked up sends once',
+        () async {
+      // No stored draft, so the send awaits the store for the newest inbound
+      // message before anything else. A press landing in that gap used to
+      // find `sending` still false.
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'newest-inbound',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'received_at': '2026-08-30T10:00:00Z',
+      });
+      final notifier = notifierFor();
+      await notifier.load();
+
+      final first = notifier.send('Typed from scratch.');
+      final second = notifier.send('Typed from scratch.');
+
+      expect(await second, SendOutcome.failed);
+      expect(await first, SendOutcome.sent);
+      expect(mail.calls.where((c) => c.startsWith('createReply:')),
+          hasLength(1));
+    });
+
+    test('a refusal before anything is created leaves nothing in flight',
+        () async {
+      final notifier = notifierFor();
+      await notifier.load();
+
+      expect(await notifier.send('Friday works.'), SendOutcome.failed);
+
+      expect(notifier.state.sending, isFalse);
+      expect(notifier.state.error,
+          'There is nothing to reply to in this thread yet.');
+    });
+
     test('empty text never reaches Graph', () async {
       await seedDraft();
       final notifier = notifierFor();
@@ -736,6 +986,45 @@ void main() {
       expect(copied, ['Friday works.']);
       expect(mail.calls, isEmpty);
       expect(launched, isEmpty);
+      // Nobody added, so nothing to say about them.
+      expect(notifier.state.notice, isNull);
+      expect(notifier.state.error, isNull);
+    });
+
+    test('a copy with people added says so as a notice, not an error',
+        () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (_) async => null);
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+
+      tokens.values['granted_scopes'] = _coreGrant;
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+      notifier.setAddedRecipients([
+        const Person(
+          id: 'user-dana',
+          displayName: 'Dana Okoye',
+          mail: 'dana@example.com',
+        ),
+      ]);
+
+      expect(await notifier.send('Friday works.'), SendOutcome.copied);
+      // The copy worked, so nothing is red: the limit of it is its own channel.
+      expect(notifier.state.error, isNull);
+      expect(
+        notifier.state.notice,
+        'Copied. The people you added are not carried on a copy — '
+        'add them wherever you paste this.',
+      );
+
+      // And the next act clears it, the way it clears an error.
+      await notifier.dismissOptions();
+      expect(notifier.state.notice, isNull);
     });
   });
 
@@ -1068,6 +1357,131 @@ void main() {
         withRow(status: 'sent', optionsDismissed: 1).suggestable,
         isFalse,
       );
+    });
+
+    test('nor a message a machine wrote, whatever the row says', () {
+      // Asked FIRST, and it is not about the row at all: it is about who sent
+      // the thing being answered. A newsletter with no draft against it has
+      // nothing to lose by every rule above, and a reply to it is still work
+      // spent to produce something the owner could only delete.
+      expect(const DraftState(replySuppressed: true).suggestable, isFalse);
+      expect(
+        DraftState(draft: const {
+          'status': 'dismissed',
+          'body': '',
+          'options_dismissed': 0,
+        }, replySuppressed: true).suggestable,
+        isFalse,
+      );
+    });
+
+    test('and the default is a reply being offered', () {
+      // Every existing caller builds this state without the field.
+      expect(const DraftState().replySuppressed, isFalse);
+      expect(const DraftState().openIn, isNull);
+      expect(const DraftState().suggestable, isTrue);
+    });
+
+    test('copyWith carries the judgement, and can take the link back', () {
+      final run = LinkRun('View comment', Uri.parse('https://t.example.com/1'));
+      final judged =
+          const DraftState().copyWith(replySuppressed: true, openIn: run);
+
+      expect(judged.suggestable, isFalse);
+      expect(judged.openIn?.label, 'View comment');
+      // The `_unset` sentinel: an omitted `openIn` keeps what was there and an
+      // explicit null clears it, which is what a re-load of a thread whose
+      // newest message changed has to be able to say.
+      expect(judged.copyWith(pending: null).openIn, isNotNull);
+      expect(judged.copyWith(openIn: null).openIn, isNull);
+    });
+  });
+
+  /// The judgement `load()` makes about the newest inbound message, which is
+  /// what closes both **Suggest a reply** doorways on the inbox without either
+  /// of them knowing about it.
+  group('a thread whose newest message is automated', () {
+    /// One inbound message with the headers the detail fetch stores, and no
+    /// draft row: a suggestion is exactly what is being refused here.
+    Future<void> seedInbound({
+      Map<String, String>? headers,
+      String body = 'Amina left a comment.\n\n'
+          'View comment <https://tracker.example.com/t/41#c9>',
+    }) =>
+        store.upsertMessage({
+          'source': 'email',
+          'source_message_id': 'inbound-1',
+          'conversation_key': 'conv-1',
+          'direction': 'inbound',
+          'from_name': 'Tracker',
+          'from_address': 'notifications@tracker.example.com',
+          'received_at': '2026-08-29T10:00:00Z',
+          'body_text': body,
+          'source_meta_json':
+              headers == null ? null : jsonEncode({'headers': headers}),
+        });
+
+    test('the row says a machine wrote it, so no reply is offered', () async {
+      await seedInbound(headers: {'List-Id': 'news.tracker.example.com'});
+      final notifier = notifierFor();
+
+      await notifier.load();
+
+      expect(notifier.state.replySuppressed, isTrue);
+      expect(notifier.state.suggestable, isFalse);
+    });
+
+    test('and the way out is the first anchored link in its body', () async {
+      // The button's words come from the sender's own anchor text; this is
+      // where they are read.
+      await seedInbound(headers: {'Auto-Submitted': 'auto-generated'});
+      final notifier = notifierFor();
+
+      await notifier.load();
+
+      expect(notifier.state.openIn?.label, 'View comment');
+      expect(notifier.state.openIn?.target.toString(),
+          'https://tracker.example.com/t/41#c9');
+    });
+
+    test('a machine-written message with nothing to click offers nothing',
+        () async {
+      // Suppression and the way out are two separate facts: the reply is still
+      // refused, and the row simply has no second thing to offer.
+      await seedInbound(
+        headers: {'List-Id': 'news.tracker.example.com'},
+        body: 'Your weekly summary is ready.',
+      );
+      final notifier = notifierFor();
+
+      await notifier.load();
+
+      expect(notifier.state.replySuppressed, isTrue);
+      expect(notifier.state.openIn, isNull);
+    });
+
+    test('an ordinary message is judged no differently than before', () async {
+      // The control, and the shape every other test in this file loads: a
+      // person wrote it, so nothing here changes.
+      await seedDraft();
+      final notifier = notifierFor();
+
+      await notifier.load();
+
+      expect(notifier.state.replySuppressed, isFalse);
+      expect(notifier.state.openIn, isNull);
+    });
+
+    test('a thread with no inbound message at all is not suppressed',
+        () async {
+      // Nothing to read is not evidence of a machine, and a suppression on an
+      // unreadable thread would take the button away for the wrong reason.
+      final notifier = notifierFor(key: 'conv-empty');
+
+      await notifier.load();
+
+      expect(notifier.state.replySuppressed, isFalse);
+      expect(notifier.state.suggestable, isTrue);
     });
   });
 

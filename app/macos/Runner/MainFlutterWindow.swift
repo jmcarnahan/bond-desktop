@@ -33,6 +33,13 @@ class MainFlutterWindow: NSWindow {
     // been launched twice and its interval has passed.
     UpdaterChannel.register(with: flutterViewController.engine.binaryMessenger)
 
+    // Fourth, and the only one of the four nothing asks for before a person
+    // clicks: the first HTML attachment somebody opens is what draws a page.
+    // Registered here anyway rather than lazily, because a channel registered
+    // from somewhere other than this function is a channel whose lifetime is a
+    // question — and registering it costs one object until it is called.
+    WebSnapshotChannel.register(with: flutterViewController.engine.binaryMessenger)
+
     super.awakeFromNib()
   }
 }

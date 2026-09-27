@@ -11,6 +11,7 @@ import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart'
     show NeedsYouTask, needsYouDefaultRules, needsYouOutputContract;
 import 'package:bond_inbox/services/needs_you_handler.dart';
+import 'package:bond_inbox/services/notify_worthy.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/progress_bus.dart';
 import 'package:drift/drift.dart' show Variable;
@@ -100,6 +101,7 @@ void main() {
     String body = 'Legal wants a look at the DPA.',
     String receivedAt = '2026-08-29T10:00:00Z',
     int hasAttachments = 0,
+    String fromAddress = 'teams:u-1',
   }) async {
     await store.upsertMessage({
       'has_attachments': hasAttachments,
@@ -108,7 +110,7 @@ void main() {
       'conversation_key': 'chat-1',
       'direction': direction,
       'from_name': 'Dana',
-      'from_address': 'teams:u-1',
+      'from_address': fromAddress,
       'to_json': '["lo@x.com"]',
       'received_at': receivedAt,
       'body_text': body,
@@ -342,6 +344,189 @@ void main() {
     });
   });
 
+  group("a stranger's first approach", () {
+    // The owner works at `northwind.example.com` throughout — one fictional
+    // domain, which is all the app can derive from a signed-in account today.
+    // Every other domain below is somebody else's.
+    Future<Set<String>> owned() async => {'northwind.example.com'};
+
+    /// Mail from [fromAddress], with the thread row this rule reads the owner's
+    /// own history off. `lastOutboundAt` null is a thread the owner has never
+    /// written on; [thread] false writes no conversation row at all.
+    Future<void> seedMail({
+      String fromAddress = 'sales@vendor.example.net',
+      String? lastOutboundAt,
+      bool thread = true,
+    }) async {
+      await seed(
+        source: 'email',
+        id: 'm1',
+        fromAddress: fromAddress,
+        body: 'Confirm your interest and we will send the proposal over.',
+      );
+      if (thread) {
+        await store.upsertConversation({
+          'source': 'email',
+          'conversation_key': 'chat-1',
+          'subject': 'An introduction',
+          'last_inbound_at': '2026-08-29T10:00:00Z',
+          'last_outbound_at': lastOutboundAt,
+        });
+      }
+    }
+
+    /// The model agreeing with the sales copy: a yes it is not sure about. This
+    /// is the answer the whole rule turns on — `high` and `low` already mean the
+    /// same thing on every sender.
+    const hedged = {
+      'evidence': 'It asks the reader to confirm their interest.',
+      'needs_you': true,
+      'confidence': 'medium',
+    };
+
+    test('a hedged yes from an outsider nobody has written to is a hedge',
+        () async {
+      await seedMail();
+      final llm = scriptedLlm(hedged);
+
+      await runOne(
+        NeedsYouHandler(store, llm, ownerDomains: owned),
+        source: 'email',
+        id: 'm1',
+      );
+
+      // A RANKING, not a drop: the model was still asked, and the reason is
+      // still the model's own sentence. The verdict is NULL, not 0: a medium
+      // yes on a stranger's mail buys no interruption, and it is no veto
+      // either, so the message sits in the inbox like any other.
+      expect(llm.calls.length, 1);
+      expect(await verdictOf('email', 'm1'), {
+        'verdict': null,
+        'reason': 'It asks the reader to confirm their interest.',
+      });
+
+      // So triage's own ask still reaches the chip and the toast: a new
+      // customer's "please send the signed contract by Friday" is not taken
+      // off every Needs You surface by the cold bar.
+      await db.customUpdate(
+        "UPDATE messages SET reply_expected = 1 WHERE source_message_id = 'm1'",
+      );
+      await db.customUpdate(
+        "UPDATE conversations SET state = 'needs_reply' "
+        "WHERE conversation_key = 'chat-1'",
+      );
+      final row = await store.notifyRowFor('email', 'm1');
+      expect(notifyWorthy(row!, threshold: 0), isTrue);
+    });
+
+    test('the same hedged yes from a colleague still raises', () async {
+      // The half that keeps this from being a bar on everybody: internal mail
+      // is judged on exactly the scale it was before.
+      await seedMail(fromAddress: 'sam@northwind.example.com');
+      final llm = scriptedLlm(hedged);
+
+      await runOne(
+        NeedsYouHandler(store, llm, ownerDomains: owned),
+        source: 'email',
+        id: 'm1',
+      );
+
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+    });
+
+    test('an outsider the owner HAS written to is judged like anyone else',
+        () async {
+      // Customers, counsel, candidates and suppliers are all external, and one
+      // reply from the owner is the evidence that this correspondent is theirs.
+      await seedMail(lastOutboundAt: '2026-08-20T09:00:00Z');
+      final llm = scriptedLlm(hedged);
+
+      await runOne(
+        NeedsYouHandler(store, llm, ownerDomains: owned),
+        source: 'email',
+        id: 'm1',
+      );
+
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+    });
+
+    test('a confident yes from a stranger still lands on the rail', () async {
+      // The bar moved; the door did not close. A real ask from a real
+      // counterparty comes back `high`.
+      await seedMail();
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(
+        NeedsYouHandler(store, llm, ownerDomains: owned),
+        source: 'email',
+        id: 'm1',
+      );
+
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+    });
+
+    test('with no owner domains wired nothing reads as cold', () async {
+      // The default, and what every other test in this file gets: an app that
+      // cannot say whose inbox this is judges on the old scale.
+      await seedMail();
+      final llm = scriptedLlm(hedged);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+    });
+
+    test('a domain read that throws is forgotten, not believed', () async {
+      // A keychain hiccup must not quietly move the bar for the session, and it
+      // must not cost the item either.
+      await seedMail();
+      final llm = scriptedLlm(hedged);
+
+      await runOne(
+        NeedsYouHandler(
+          store,
+          llm,
+          ownerDomains: () async => throw StateError('no account'),
+        ),
+        source: 'email',
+        id: 'm1',
+      );
+
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+    });
+
+    test('mail with no thread row yet is not a stranger', () async {
+      // The sweep writes the conversation row, and a message judged before it
+      // lands has no history to read. Unknown answers false, like every other
+      // unknown on this path.
+      await seedMail(thread: false);
+      final llm = scriptedLlm(hedged);
+
+      await runOne(
+        NeedsYouHandler(store, llm, ownerDomains: owned),
+        source: 'email',
+        id: 'm1',
+      );
+
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+    });
+
+    test('a chat that named the owner is untouched by any of this', () async {
+      // The floor is Teams-only and a Teams sender is `teams:<id>`, which names
+      // no domain at all — so no chat can ever read as a stranger's approach,
+      // however the owner's domains are set. This is the regression the rule
+      // most needs pinned: an @mention still costs no model call.
+      await seed();
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm, ownerDomains: owned));
+
+      expect(llm.calls.length, 0);
+      expect(await verdictOf('teams', 't1'),
+          {'verdict': 1, 'reason': 'teams_direct'});
+    });
+  });
+
   group('guards', () {
     test('a message gated after the enqueue is left unjudged', () async {
       // The race this pins: the judgement is queued at sync time while the
@@ -428,9 +613,10 @@ void main() {
       });
     });
 
-    test('a hesitant yes is a no', () async {
+    test('a hesitant yes is a hedge: no raise and no veto', () async {
       // The raise policy. The verdict buys an interruption, and "possibly" is
-      // not grounds for one.
+      // not grounds for one. Nor is it a no, so it is stored NULL with its
+      // evidence and triage decides.
       await seedAmbiguousMail();
       final llm = scriptedLlm(const {
         'evidence': 'It might be asking the owner to look at the numbers.',
@@ -440,8 +626,19 @@ void main() {
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
-      expect((await verdictOf('email', 'm1'))['verdict'], 0);
+      expect(await verdictOf('email', 'm1'), {
+        'verdict': null,
+        'reason': 'It might be asking the owner to look at the numbers.',
+      });
+      await db.customUpdate(
+        "UPDATE messages SET reply_expected = 1 WHERE source_message_id = 'm1'",
+      );
+      final row = await store.notifyRowFor('email', 'm1');
+      expect(notifyWorthy(row!, threshold: 0), isTrue,
+          reason: "triage's ask decides a hedged message");
     });
+
+
 
     test('a model that fails leaves the verdict unjudged and throws', () async {
       // The row stays on the worklist and the worker's retry machinery owns
@@ -751,6 +948,35 @@ void main() {
       expect(await verdictOf('teams', 't1'),
           {'verdict': 1, 'reason': 'teams_direct'});
       expect(await flagOf('teams', 't1'), 0);
+    });
+
+    test('a hedge over an old no is a change the chip follows', () async {
+      // Old hedges were stored 0, and 0 vetoed triage's ask. Re-judged, the
+      // NULL that replaces it is a different stored answer, so the chip is
+      // recomputed and triage's ask raises it.
+      await seedSettled(source: 'email', id: 'm1', addressedMe: 1);
+      await store.writeNeedsYouVerdict('email', 'm1',
+          verdict: false, reason: 'It might be asking.');
+      await db.customUpdate(
+        "UPDATE messages SET reply_expected = 1 WHERE source_message_id = 'm1'",
+      );
+
+      await runOne(
+        NeedsYouHandler(
+          store,
+          scriptedLlm(const {
+            'evidence': 'It might be asking the owner to look at the numbers.',
+            'needs_you': true,
+            'confidence': 'low',
+          }),
+          progress: progress,
+        ),
+        source: 'email',
+        id: 'm1',
+      );
+
+      expect((await verdictOf('email', 'm1'))['verdict'], isNull);
+      expect(await flagOf('email', 'm1'), 1);
     });
 
     test('and a handler with no recorder judges exactly as before', () async {

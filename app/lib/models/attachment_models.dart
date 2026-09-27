@@ -6,14 +6,25 @@ import 'package:flutter/foundation.dart' show immutable;
 ///
 /// One set for every surface that has to tell a link from a file — the
 /// transcript's unfurls, the thread's Files tab, the Files stop's Links shelf —
-/// so a fourth link kind cannot be an unfurl in one place and a card in
-/// another. `MessageStore.recentAttachments` spells the same three out in SQL;
+/// so a third link kind cannot be an unfurl in one place and a card in
+/// another. `MessageStore.recentAttachments` spells the same two out in SQL;
 /// change both together.
 const Set<String> linkAttachmentKinds = {
   'reference',
-  'message_reference',
   'card',
 };
+
+/// A quote-reply: what Graph calls a `messageReference` attachment, and the one
+/// `kind` that is NOT something the message carried.
+///
+/// Deliberately outside [linkAttachmentKinds], where it used to sit. A quote is
+/// a piece of the conversation the sender pointed back at, so the transcript
+/// draws it as a quote block above the reply (`widgets/quote_block.dart`) and
+/// every file surface leaves it out: it is no file, it has no name of its own —
+/// which is what drew a `🔗 (unnamed)` chip and opened an empty preview — and
+/// there is nothing to fetch, because the quoted message is already in the
+/// thread.
+const String quoteAttachmentKind = 'message_reference';
 
 /// One thing that came with a message, and what the app has managed to learn
 /// about it.
@@ -154,6 +165,21 @@ class AttachmentRef {
   /// is fetched by", and naming it twice in the store would be two things to
   /// keep in step.
   String? get contentUrl => sourceUrl;
+
+  /// Whether this row is a quote-reply rather than something the message
+  /// carried. See [quoteAttachmentKind].
+  bool get isQuoteReply => kind == quoteAttachmentKind;
+
+  /// Who wrote the quoted message, and a snippet of what they said.
+  ///
+  /// THE one place the column reuse on the Teams quote path is readable: the
+  /// sync writes the quoted sender into `item_from` and the quoted preview into
+  /// `card_text`, both columns mail's `item` attachments own, and these two
+  /// getters are why no widget has to know that. Null on every other kind, so a
+  /// caller cannot read a forwarded mail's sender as a quoted one.
+  String? get quotedSender => isQuoteReply ? itemFrom : null;
+
+  String? get quotedPreview => isQuoteReply ? cardText : null;
 
   /// An `attachments` row, as the store returns it.
   ///

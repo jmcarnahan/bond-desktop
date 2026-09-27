@@ -1269,9 +1269,10 @@ The kitchen inventory is counted on the first of the month.
       int axis = 1,
       bool vectors = true,
       bool messageVector = true,
+      String body = 'What does the renewal come to?',
       List<String> chain = const [],
     }) async {
-      await seedMessage('m1', vector: messageVector);
+      await seedMessage('m1', body: body, vector: messageVector);
       final dir =
           await context.registerDirectory(path: '/a', displayName: 'acme');
       await context.setDirectoryWalked(dir,
@@ -1530,6 +1531,24 @@ Standard freight is 41 credits per pallet.
       // Deterministic: two drafts of one message must read the same
       // sections.
       expect(fake.temperatures.single, 0);
+    });
+
+    test('the message reaches the selector without its link targets', () async {
+      // The selector chooses which of the owner's files to read from what the
+      // message ASKS, and its 1500-character budget is one an automated anchor
+      // can spend on nothing. The address is checked by host: the fence
+      // escapes its brackets on the way in.
+      if (!available) return;
+      await seedDirectory(
+        body: 'What does the renewal come to? See the sheet '
+            '<https://files.example.com/s/rates>.',
+      );
+      final fake = selectLlm([answer()]);
+
+      await packWith(fake);
+
+      expect(fake.userMessages.single, contains('See the sheet.'));
+      expect(fake.userMessages.single, isNot(contains('files.example.com')));
     });
 
     test('a very long section is clamped to its own ceiling', () async {

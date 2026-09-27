@@ -35,6 +35,11 @@ String needsYouSql({required String threshold, bool verdict = true}) {
   // migration ran before this parameter existed.
   final verdictClause =
       verdict ? '       m.needs_you_verdict = 1\n    OR ' : '       ';
+  // The judge's explicit no, which outranks every ask in the CASE — the
+  // `notifyWorthy` rule, spelled for the rows the coordinator never saw. The
+  // frozen arm renders nothing here, for the reason the clause above gives.
+  final vetoClause =
+      verdict ? '\n  AND COALESCE(m.needs_you_verdict, -1) <> 0' : '';
   return '''
 CASE WHEN (
 ${verdictClause}m.reply_expected = 1
@@ -45,7 +50,7 @@ ${verdictClause}m.reply_expected = 1
          SELECT c.cta_text FROM conversations c
           WHERE c.source = m.source AND c.conversation_key = m.conversation_key
        ), '') <> '')
-  )
+  )$vetoClause
   AND m.is_read = 0
   AND COALESCE((
         SELECT c.state FROM conversations c

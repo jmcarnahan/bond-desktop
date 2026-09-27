@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
@@ -846,6 +848,122 @@ void main() {
         await store.reviveOwedStorylineStages(sources: const ['email']),
         0,
       );
+    });
+  });
+
+  // The moving-floor gap's cleanup crew. Triage drains the pending set
+  // whatever its age, but the extract/needs-you/embed enqueues are paced and
+  // windowed on a floor later passes recompute — so a message triaged behind
+  // the moved floor is owed work no window will ever offer again, and its row
+  // reads "in flight" forever over an empty queue. This pass reads owed off
+  // the row itself, which is what lets In flight actually reach zero.
+  group('reviving an owed message stage', () {
+    /// The stranded shape exactly: triaged, extraction never queued or
+    /// stamped, nothing dropped.
+    Future<void> seedStranded(
+      String id, {
+      String receivedAt = '2026-09-01T10:00:00Z',
+    }) async {
+      await ingest(id, triageStatus: 'triaged', receivedAt: receivedAt);
+      await progress.noteTriage('email', id, state: 'done');
+    }
+
+    Future<List<String>> workOf(String kind) async => [
+          for (final row in await db
+              .customSelect(
+                'SELECT entity_id FROM work_items WHERE task_kind = ?'
+                " AND status = 'pending' ORDER BY entity_id",
+                variables: [Variable(kind)],
+              )
+              .get())
+            row.data['entity_id'] as String,
+        ];
+
+    test('a stranded row gets all three queues back', () async {
+      await seedStranded('m1');
+
+      expect(await store.reviveOwedMessageStages(source: 'email'), 1);
+      expect(await workOf('extract'), ['m1']);
+      expect(await workOf('needs_you'), ['m1']);
+      expect(await workOf('embed_message'), ['m1']);
+    });
+
+    test('and one pass is all it takes — the second call finds nothing',
+        () async {
+      await seedStranded('m1');
+      await store.reviveOwedMessageStages(source: 'email');
+
+      // The work rows it just wrote are what the NOT EXISTS refuses to
+      // queue over.
+      expect(await store.reviveOwedMessageStages(source: 'email'), 0);
+
+      // And once the extract pass lands, the row no longer matches at all.
+      await store.writeWork('extract', 'email', 'm1', status: 'done');
+      await progress.noteExtract('email', 'm1', state: 'done');
+      expect(await store.reviveOwedMessageStages(source: 'email'), 0);
+    });
+
+    test('a gate cascade is not a stranded row and stays dropped', () async {
+      // Gated mail never owed an extraction — the cascade closed the stage as
+      // skipped — and queueing the model for it is what the gate prevents.
+      await ingest('m1', triageStatus: 'skipped', gateReason: 'newsletter');
+      expect((await progressOf('m1'))['dropped'], 1);
+
+      expect(await store.reviveOwedMessageStages(source: 'email'), 0);
+      expect(await workOf('extract'), isEmpty);
+    });
+
+    test('a message triage has not finished with is not owed', () async {
+      // The ordinary path: the windowed enqueue picks this up once triage
+      // lands, and the extract handler refuses to run ahead of the verdict.
+      await ingest('m1');
+
+      expect(await store.reviveOwedMessageStages(source: 'email'), 0);
+    });
+
+    test('a message the window already queued is left alone', () async {
+      await seedStranded('m1');
+      await store.enqueueWork('extract', 'email', 'm1');
+      await store.enqueueWork('needs_you', 'email', 'm1');
+      await store.enqueueWork('embed_message', 'email', 'm1');
+
+      expect(await store.reviveOwedMessageStages(source: 'email'), 0);
+    });
+
+    test('a message that already carries a vector is not re-embedded',
+        () async {
+      // Owed an extraction, not a vector: the row under a retired tag is the
+      // retired-tag one-shot's to walk, and one under the current tag is not
+      // work at all. Only the embed arm reads the vector table — the message
+      // still gets its extraction and its verdict back.
+      await seedStranded('m1');
+      await store.upsertMessageVector(
+        source: 'email',
+        sourceMessageId: 'm1',
+        embedding: Uint8List.fromList(const [0, 0, 0, 1]),
+        dims: 1,
+        embeddedHash: 'h-m1',
+        embedModel: 'an-older-model',
+      );
+
+      expect(await store.reviveOwedMessageStages(source: 'email'), 1);
+      expect(await workOf('extract'), ['m1']);
+      expect(await workOf('needs_you'), ['m1']);
+      expect(await workOf('embed_message'), isEmpty);
+    });
+
+    test('the cap is a pace, and the next pass takes the next slice',
+        () async {
+      await seedStranded('m1', receivedAt: '2026-09-01T10:00:00Z');
+      await seedStranded('m2', receivedAt: '2026-09-01T11:00:00Z');
+      await seedStranded('m3', receivedAt: '2026-09-01T12:00:00Z');
+
+      // Newest first — the same promise the windowed enqueue makes.
+      expect(await store.reviveOwedMessageStages(cap: 2, source: 'email'), 2);
+      expect(await workOf('extract'), ['m2', 'm3']);
+
+      expect(await store.reviveOwedMessageStages(cap: 2, source: 'email'), 1);
+      expect(await workOf('extract'), ['m1', 'm2', 'm3']);
     });
   });
 

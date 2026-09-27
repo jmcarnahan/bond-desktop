@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 
 import '../models/attachment_models.dart';
 import '../models/message_models.dart';
+import '../services/deadline_parse.dart' show showableDeadline;
 import '../services/profile_photos.dart';
+import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 import 'attachment_card.dart';
 import 'attachment_chip.dart';
@@ -12,7 +14,9 @@ import 'chips.dart';
 import 'image_grid.dart';
 import 'inline_image_thumb.dart';
 import 'link_unfurl.dart';
+import 'linked_text.dart';
 import 'preview/preview_kind.dart';
+import 'quote_block.dart';
 import 'time_format.dart';
 
 // The avatar and its two pure helpers moved to `bond_avatar.dart` when the
@@ -59,6 +63,10 @@ final RegExp _bodyToken = RegExp(
 /// Runs of blank lines, which is what taking a token out of its own paragraph
 /// leaves behind.
 final RegExp _blankRun = RegExp(r'\n{3,}');
+
+/// A single whitespace character — where the clamp looks for the edge of the
+/// last word it kept.
+final RegExp _whitespace = RegExp(r'\s');
 
 /// The kinds that are somewhere ELSE rather than something the message carried.
 ///
@@ -132,12 +140,17 @@ final class BodyAttachmentSegment extends BodySegment {
 /// row draws it — but the file is still named in the chip row underneath,
 /// which is what carries its size and its tap target. Counting it twice would
 /// make a folded row claim two files where there is one.
+/// [quotes] is the one bucket that is NOT a file this message carried: a Teams
+/// quote-reply arrives as an attachment and is drawn above the words as the
+/// piece of conversation it is (`quote_block.dart`), so it is in none of the
+/// other four lists and counts toward nothing.
 typedef BodyLayout = ({
   List<BodySegment> segments,
   String plainText,
   List<AttachmentRef> chips,
   List<AttachmentRef> trailingImages,
   List<AttachmentRef> thumbnailable,
+  List<AttachmentRef> quotes,
 });
 
 /// The body a row reads.
@@ -166,6 +179,10 @@ String rawBodyOf(Message message) {
 /// - `[cid:x]` matching an INLINE attachment of at least [inlineImageMinBytes]
 ///   draws it there. A smaller one is stripped exactly as it always was, and is
 ///   dropped from the chips too: a signature logo is not a file somebody sent.
+/// - A marker naming a QUOTE-REPLY loses its marker and places nothing. Teams
+///   writes that marker at the head of the body, which is how the quote used to
+///   draw itself as a `🔗 (unnamed)` chip above the reply; the quote goes to
+///   [BodyLayout.quotes] instead and the row draws a quote block there.
 /// - Everything unplaced falls to the bottom in `ordinal` order — pictures as
 ///   pictures, the rest as chips.
 ///
@@ -219,6 +236,9 @@ BodyLayout layOutBody(String body, List<AttachmentRef> attachments) {
       }
     }
     if (target == null) continue;
+    // A quote-reply is not drawn where its marker sat. It is the thing being
+    // replied TO, so it belongs above the whole reply rather than inside it.
+    if (target.isQuoteReply) continue;
     // A body that names the same file twice draws it once, where it was first
     // mentioned; the second mention just loses its marker.
     if (!placed.add(target.attachmentId)) continue;
@@ -248,10 +268,16 @@ BodyLayout layOutBody(String body, List<AttachmentRef> attachments) {
       // byte for byte the way it always has.
       : <BodySegment>[if (plainText.isNotEmpty) BodyTextSegment(plainText)];
 
+  final quotes = [
+    for (final attachment in attachments)
+      if (attachment.isQuoteReply) attachment,
+  ]..sort((a, b) => a.ordinal.compareTo(b.ordinal));
+
   final leftovers = [
     for (final attachment in attachments)
       if (!placed.contains(attachment.attachmentId) &&
           !dropped.contains(attachment.attachmentId) &&
+          !attachment.isQuoteReply &&
           !_isSubThresholdInlineImage(attachment))
         attachment,
   ]..sort((a, b) => a.ordinal.compareTo(b.ordinal));
@@ -266,11 +292,12 @@ BodyLayout layOutBody(String body, List<AttachmentRef> attachments) {
     }
     chips.add(attachment);
     // A document that something in this build might be able to draw: a PDF
-    // (its own first page) or a chat's shared file (OneDrive's rendering).
-    // Whether one actually arrives is the host's answer, not this function's —
-    // it says only which files are worth asking about.
+    // (its own first page), a chat's shared file (OneDrive's rendering) or a web
+    // page (the Runner's WebKit). Whether one actually arrives is the host's
+    // answer, not this function's — it says only which files are worth asking
+    // about.
     if (!attachment.isInline &&
-        const {PreviewKind.pdf, PreviewKind.document}
+        const {PreviewKind.pdf, PreviewKind.document, PreviewKind.html}
             .contains(previewKindFor(attachment))) {
       thumbnailable.add(attachment);
     }
@@ -282,6 +309,7 @@ BodyLayout layOutBody(String body, List<AttachmentRef> attachments) {
     chips: chips,
     trailingImages: trailingImages,
     thumbnailable: thumbnailable,
+    quotes: quotes,
   );
 }
 
@@ -319,8 +347,11 @@ bool _isSubThresholdInlineImage(AttachmentRef attachment) =>
 /// There are no bubbles and no right-hand column: a transcript reads top to
 /// bottom in one gutter, and direction is carried by the avatar alone.
 /// Consecutive messages from the same sender collapse under the first one's
-/// header. Bodies are plain-text [SelectableText] — mail content is NEVER
-/// markdown-rendered.
+/// header. Bodies are plain-text [LinkedText] — mail content is NEVER
+/// markdown-rendered. Links are the ONE exception and a narrow one: a bare
+/// address and the canonical `label <url>` run a converter wrote are painted as
+/// links (see `linked_text.dart`), and every other character stays exactly as it
+/// was stored. No `*`, no `_`, no `#`, no `[](…)`.
 ///
 /// A row can also be FOLDED, which is a different thing from the `Show more`
 /// clamp on a long body: folded, the message keeps its header and gives up its
@@ -368,6 +399,34 @@ class MessageRow extends StatefulWidget {
   /// Whether it starts folded. Read once, at construction — see [_collapsed].
   final bool initiallyCollapsed;
 
+  /// A COUNTER of times the host has asked for this row to be opened, which is
+  /// how a jump lands on a folded message and finds it readable.
+  ///
+  /// Not a bool and not a re-read of [initiallyCollapsed]: the fold is seeded
+  /// once and never recomputed, deliberately (see [_collapsed]), so the only
+  /// honest way to open a row from outside is an EVENT rather than a state the
+  /// row keeps re-deciding. Each increment is one such event — "the reader just
+  /// jumped here" — so a reader who folds the row again and jumps back to it
+  /// gets it opened again. Never decreases, so the host keeps one number per
+  /// message rather than clearing a flag on the frame after it set one.
+  final int unfoldRequest;
+
+  /// Whether this message names the owner — an `@mention`, a 1:1, or an ask the
+  /// extractor wrote for them (`services/mention_index.dart`). Draws the `@ you`
+  /// marker, and is why the host starts such a row unfolded in a thread whose
+  /// history is otherwise folded away. False is what every other host passes.
+  final bool namesOwner;
+
+  /// Told whenever the reader folds or unfolds this row, with what it became.
+  ///
+  /// The fold survives every rebuild on its own (see [_collapsed]); what it
+  /// cannot survive is the row being DISPOSED, which is what happens to a
+  /// transcript replaced by something else and built again when it comes back.
+  /// A host that can lose the row remembers the answer and hands it back as
+  /// [initiallyCollapsed]; one that never loses it passes null and the fold
+  /// stays the row's own business.
+  final void Function(bool collapsed)? onFoldChanged;
+
   /// What opening one of this message's files does. Null leaves every chip and
   /// picture a statement — a row whose host has nowhere to show a file must not
   /// offer to show it.
@@ -401,6 +460,16 @@ class MessageRow extends StatefulWidget {
   /// Null draws no button, and so does an address `webUriOf` refuses.
   final void Function(String url)? onOpenLink;
 
+  /// What tapping the quote above a reply does, asked PER QUOTE.
+  ///
+  /// A quote-reply names the message it quotes (`content_id`), and only the host
+  /// knows whether that message is one of the rows it loaded. So the row asks
+  /// about each quote and draws whatever comes back: a tap where the answer is
+  /// somewhere on this screen, a statement where it is not. Null altogether
+  /// leaves every quote a statement, which is what a host with no transcript to
+  /// scroll passes.
+  final VoidCallback? Function(AttachmentRef quote)? quoteTapFor;
+
   const MessageRow({
     super.key,
     required this.message,
@@ -410,17 +479,25 @@ class MessageRow extends StatefulWidget {
     this.suggestion,
     this.collapsible = false,
     this.initiallyCollapsed = false,
+    this.unfoldRequest = 0,
+    this.namesOwner = false,
+    this.onFoldChanged,
     this.onOpenAttachment,
     this.selectedAttachment,
     this.thumbnailFor,
     this.photos,
     this.onUseInReply,
     this.onOpenLink,
+    this.quoteTapFor,
   });
 
   /// The one line a folded row keeps about its files.
   static const Key collapsedAttachmentHintKey =
       ValueKey('message-row-attachment-hint');
+
+  /// The `@ you` marker — what a reader scanning a long thread is looking for,
+  /// and what a test asks for instead of hunting a colour.
+  static const Key ownerMarkerKey = ValueKey('message-row-owner-marker');
 
   /// The run of file cards under a message — what a test asks for to say "the
   /// files this message carried are drawn here".
@@ -452,6 +529,21 @@ class _MessageRowState extends State<MessageRow> {
     _collapsed = widget.initiallyCollapsed && widget.collapsible;
   }
 
+  /// The ONE arm that reopens a folded row from outside, and it reads an event
+  /// rather than a state: a fresh [MessageRow.unfoldRequest] means the reader
+  /// has just been sent here, and a message the reader was sent to has to be
+  /// readable when they arrive. [MessageRow.initiallyCollapsed] is still never
+  /// re-read — that is the rule this arm sits beside rather than the rule it
+  /// breaks.
+  @override
+  void didUpdateWidget(MessageRow old) {
+    super.didUpdateWidget(old);
+    if (widget.unfoldRequest != old.unfoldRequest && _collapsed) {
+      setState(() => _collapsed = false);
+      widget.onFoldChanged?.call(false);
+    }
+  }
+
   String get _raw => rawBodyOf(widget.message);
 
   /// The body with its attachments placed in it. Computed ONCE per build and
@@ -475,18 +567,42 @@ class _MessageRowState extends State<MessageRow> {
     var clamped =
         lines.length > _maxLines ? lines.take(_maxLines).join('\n') : body;
     if (clamped.length > _maxChars) {
-      clamped = clamped.substring(0, _maxChars);
+      clamped = _cutAt(clamped, _maxChars);
     }
     return clamped.trimRight();
   }
 
+  /// [text] cut to [cap] characters, never through a link.
+  ///
+  /// The cap used to land wherever it landed, which cut a long address in half
+  /// — and half an address still parses, so the clamped body painted a link to
+  /// somewhere else entirely. Where the last token is the start of a link (a
+  /// bare address, or the `label <` head of a canonical run whose address the
+  /// cut took) the whole token comes off, and `Show more` is where the rest of
+  /// it is. A cut through ordinary words is left where it fell.
+  ///
+  /// A window with no whitespace in it at all — a machine-generated blob, one
+  /// enormous address — is the one case the token can't come off: there would be
+  /// nothing left to paint, and such a body has no words to show either way. The
+  /// cut stands there, and `Show more` still has the whole of it.
+  static String _cutAt(String text, int cap) {
+    final head = text.substring(0, cap);
+    final boundary = head.lastIndexOf(_whitespace);
+    if (boundary <= 0) return head;
+    final tail = head.substring(boundary + 1);
+    if (tail.contains('<') || tail.toLowerCase().contains('http')) {
+      return head.substring(0, boundary + 1);
+    }
+    return head;
+  }
+
   String get _senderName {
     final message = widget.message;
-    final name = message.fromName;
-    if (name != null && name.isNotEmpty) return name;
-    final address = message.fromAddress;
-    if (address != null && address.isNotEmpty) return address;
-    return message.outbound ? 'You' : '(no sender)';
+    return displaySenderName(
+      name: message.fromName,
+      address: message.fromAddress,
+      fallback: message.outbound ? 'You' : unknownSenderName,
+    );
   }
 
   @override
@@ -533,6 +649,13 @@ class _MessageRowState extends State<MessageRow> {
               if (widget.showHeader) ...[
                 _header(meta, folds: folds),
                 const SizedBox(height: 2),
+              ]
+              // A continuation row has no header to hang the marker on, and a
+              // mention in the middle of somebody's run is still the reason the
+              // reader came here, so it wears one of its own.
+              else if (widget.namesOwner) ...[
+                _ownerMarker(),
+                const SizedBox(height: 2),
               ],
               if (collapsed) ...[
                 // One line of what was said, and then only what still wants
@@ -558,6 +681,14 @@ class _MessageRowState extends State<MessageRow> {
                         BondType.caption.copyWith(color: BondColors.inkMuted),
                   ),
               ] else ...[
+                // What this reply is answering, first: a quote reads before the
+                // words that answer it or it is not a quote.
+                for (final quote in layout.quotes)
+                  QuoteBlock(
+                    key: QuoteBlock.keyFor(quote),
+                    attachment: quote,
+                    onTap: widget.quoteTapFor?.call(quote),
+                  ),
                 ..._bodySegments(layout, overflows),
                 if (overflows) ...[
                   const SizedBox(height: BondSpacing.s4),
@@ -673,10 +804,24 @@ class _MessageRowState extends State<MessageRow> {
     return widgets;
   }
 
-  Widget _text(String text) => SelectableText(
+  /// A stretch of body words. Its links came off anchors a real sender wrote,
+  /// whose text runs to a whole question ("Why am I receiving this notification
+  /// from Office?"), so the label caps here are the generous pair — the tight
+  /// defaults are for the one-line asks a model writes.
+  Widget _text(String text) => LinkedText(
         text,
         style: BondType.body.copyWith(color: BondColors.ink, height: 1.4),
+        onOpenLink: _openLink,
+        maxLabelChars: bodyMaxLabelChars,
+        maxLabelWords: bodyMaxLabelWords,
       );
+
+  /// The link seam, in the shape [LinkedText] takes. Null where the host gave
+  /// the row nowhere to send a tap, which paints the labels as words.
+  void Function(Uri target)? get _openLink {
+    final open = widget.onOpenLink;
+    return open == null ? null : (target) => open(target.toString());
+  }
 
   /// A picture, left-aligned in the body column and bounded on both axes — the
   /// transcript is a `ListView`, where an unbounded child is an assertion
@@ -826,6 +971,12 @@ class _MessageRowState extends State<MessageRow> {
           const SizedBox(width: BondSpacing.s8),
           Text(meta, style: BondType.caption),
         ],
+        // After the name and the stamp, before the chevron: it says something
+        // about this message, not about whether the row is open.
+        if (widget.namesOwner) ...[
+          const SizedBox(width: BondSpacing.s8),
+          _ownerMarker(),
+        ],
         if (folds) ...[
           const SizedBox(width: BondSpacing.s4),
           Icon(
@@ -841,12 +992,26 @@ class _MessageRowState extends State<MessageRow> {
     return Material(
       type: MaterialType.transparency,
       child: InkWell(
-        onTap: () => setState(() => _collapsed = !_collapsed),
+        onTap: () {
+          setState(() => _collapsed = !_collapsed);
+          widget.onFoldChanged?.call(_collapsed);
+        },
         borderRadius: BondRadii.smAll,
         child: line,
       ),
     );
   }
+
+  /// The `@ you` marker: this is one of the messages the navigator counts.
+  ///
+  /// The attention tone, the same copper the ask line and the banner wear,
+  /// because it is the same claim in fewer words — something here is the
+  /// reader's. Lowercase `you`, matching the header's own sentence case.
+  Widget _ownerMarker() => BondChip.semantic(
+        '@ you',
+        BondTone.attention,
+        key: MessageRow.ownerMarkerKey,
+      );
 
   /// The open ask, in the same copper ink an inbox row tints its CTA with.
   /// Triage names an action item where it can; where it only judged that a
@@ -858,7 +1023,10 @@ class _MessageRowState extends State<MessageRow> {
     final ask = message.actionItems.isNotEmpty
         ? message.actionItems.first
         : 'Reply expected';
-    final deadline = message.deadline;
+    // Through [showableDeadline], so plan-relative wording the extractor
+    // repeated ("Day 1", "sprint 2") never wears a chip that reads like a
+    // date the app worked out.
+    final deadline = showableDeadline(message.deadline, now: DateTime.now());
 
     final onTap = widget.onAskTap;
     final line = Wrap(
@@ -866,12 +1034,18 @@ class _MessageRowState extends State<MessageRow> {
       spacing: BondSpacing.s8,
       runSpacing: BondSpacing.s4,
       children: [
-        Text(
+        // An action item is written by a model reading the body, so it carries
+        // whatever link the body carried — "Verify access at <url>". Not
+        // selectable, because this line never was, and a tap on a link beats
+        // the InkWell below to the gesture arena by sitting deeper in it.
+        LinkedText(
           ask,
           style: BondType.caption.copyWith(
             color: BondColors.onAttentionTint,
             fontWeight: FontWeight.w600,
           ),
+          onOpenLink: _openLink,
+          selectable: false,
         ),
         if (deadline != null && deadline.isNotEmpty)
           BondChip.semantic(deadline, BondTone.attention),

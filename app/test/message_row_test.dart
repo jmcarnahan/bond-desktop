@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/profile_photos.dart';
+import 'package:bond_inbox/services/sender_display.dart';
 import 'package:bond_inbox/widgets/attachment_card.dart';
 import 'package:bond_inbox/widgets/attachment_chip.dart';
 import 'package:bond_inbox/widgets/bond_avatar.dart';
@@ -12,6 +13,7 @@ import 'package:bond_inbox/widgets/image_grid.dart';
 import 'package:bond_inbox/widgets/inline_image_thumb.dart';
 import 'package:bond_inbox/widgets/link_unfurl.dart';
 import 'package:bond_inbox/widgets/message_row.dart';
+import 'package:bond_inbox/widgets/quote_block.dart';
 import 'package:bond_inbox/widgets/time_format.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -91,6 +93,25 @@ class _FakePhotos implements ProfilePhotos {
     return images[key];
   }
 }
+
+/// A Teams quote-reply as the sync stores one: no name, no url, and the quoted
+/// sender and snippet on the two columns `TeamsSync.attachmentRows` reuses.
+AttachmentRef _quote({
+  String attachmentId = 'q1',
+  int ordinal = 0,
+  String? sender = 'Dana Ruiz',
+  String? preview = 'is it slide 29 in the deck?',
+}) =>
+    AttachmentRef(
+      source: 'teams',
+      messageId: 'm1',
+      attachmentId: attachmentId,
+      ordinal: ordinal,
+      kind: quoteAttachmentKind,
+      contentType: 'messageReference',
+      itemFrom: sender,
+      cardText: preview,
+    );
 
 Widget _host(Widget child) => MaterialApp(
       home: Scaffold(
@@ -248,6 +269,38 @@ void main() {
       );
       expect(find.text('EN'), findsNothing);
       expect(photos.asked, ['eric@example.com']);
+    });
+
+    testWidgets('a chat bot stored with no name shows neither its id nor a T',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      // What a row written before ingest named its bots carries: no name, and
+      // the `teams:` identity key for an address. The header used to print the
+      // key and the avatar the key's first letter.
+      const guid = 'teams:8e55a7b1-4c2d-4f1a-9b3e-77d0c1e2a5f4';
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(fromName: null, fromAddress: guid),
+      )));
+
+      expect(find.text(unknownSenderName), findsOneWidget);
+      expect(find.textContaining('teams:'), findsNothing);
+      expect(find.text('T'), findsNothing);
+      expect(find.byIcon(Icons.smart_toy_outlined), findsOneWidget);
+    });
+
+    testWidgets('a chat bot ingest named Bot says so', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(fromName: botSenderName, fromAddress: 'teams:app-9'),
+      )));
+
+      expect(find.text(botSenderName), findsOneWidget);
+      expect(find.textContaining('teams:'), findsNothing);
+      expect(find.byIcon(Icons.smart_toy_outlined), findsOneWidget);
     });
 
     testWidgets('a continuation row drops the avatar and the name',
@@ -1011,6 +1064,280 @@ void main() {
     });
   });
 
+  /// A Teams quote-reply. Graph sends it as an attachment with no name and no
+  /// url, and writes an `<attachment id=…>` tag at the HEAD of the body, which
+  /// the sync turns into a marker — which is why the broken chip appeared ABOVE
+  /// the words rather than under them.
+  group('a quote-reply', () {
+    test('its marker places nothing and leaves no chip behind', () {
+      final quote = _quote();
+      final layout = layOutBody('[[att:q1]]29 and 30', [quote]);
+
+      expect(layout.plainText, '29 and 30');
+      expect(layout.segments.single, isA<BodyTextSegment>());
+      expect(layout.chips, isEmpty);
+      expect(layout.trailingImages, isEmpty);
+      expect(layout.quotes.map((a) => a.attachmentId), ['q1']);
+      // A quote is not a file, so a folded row must not claim one.
+      expect(displayableCountOf(layout), 0);
+    });
+
+    test('and a quote with no marker at all is still a quote', () {
+      final layout = layOutBody('29 and 30', [_quote()]);
+
+      expect(layout.quotes.map((a) => a.attachmentId), ['q1']);
+      expect(layout.chips, isEmpty);
+    });
+
+    testWidgets('reads as who was quoted and what they said, above the reply',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final quote = _quote();
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(
+          fromName: 'Priya Raman',
+          bodyText: '[[att:q1]]29 and 30',
+          attachments: [quote],
+        ),
+      )));
+
+      expect(find.byKey(QuoteBlock.keyFor(quote)), findsOneWidget);
+      expect(find.text('Dana Ruiz'), findsOneWidget);
+      expect(find.text('is it slide 29 in the deck?'), findsOneWidget);
+      // The quote reads before the words that answer it.
+      expect(
+        tester.getTopLeft(find.text('is it slide 29 in the deck?')).dy,
+        lessThan(tester.getTopLeft(find.text('29 and 30')).dy),
+      );
+    });
+
+    testWidgets('and never as the broken link chip it used to be',
+        (tester) async {
+      // The whole of entry 7a: a `🔗 (unnamed)` chip whose tap opened an empty
+      // preview panel. No attachment surface here, and nothing reaches the
+      // preview. The quote DOES take a tap now, but a different one — a jump to
+      // the message it quotes, wired through `quoteTapFor`, which this row was
+      // handed none of.
+      final opened = <String>[];
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(bodyText: '[[att:q1]]29 and 30', attachments: [_quote()]),
+        onOpenAttachment: (a) => opened.add(a.attachmentId),
+      )));
+
+      expect(find.byType(AttachmentChip), findsNothing);
+      expect(find.byType(LinkUnfurl), findsNothing);
+      expect(find.byType(AttachmentCard), findsNothing);
+      expect(find.textContaining('🔗'), findsNothing);
+      expect(find.textContaining('(unnamed)'), findsNothing);
+      expect(opened, isEmpty);
+    });
+
+    testWidgets('a file on the same message is still a file', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final quote = _quote();
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(
+          bodyText: '[[att:q1]]here is the deck',
+          attachments: [
+            quote,
+            ref(source: 'teams', attachmentId: 'a2', ordinal: 1,
+                name: 'Report.pptx', contentType: null),
+          ],
+        ),
+      )));
+
+      expect(find.byKey(QuoteBlock.keyFor(quote)), findsOneWidget);
+      expect(find.byType(AttachmentCard), findsOneWidget);
+      expect(find.text('Report.pptx'), findsOneWidget);
+    });
+
+    testWidgets('a reference Graph told us nothing about draws nothing',
+        (tester) async {
+      // Malformed `content`, or a tenant that sent none: there is no sender and
+      // no snippet, and an empty rule says less than the words under it.
+      final bare = AttachmentRef(
+        source: 'teams',
+        messageId: 'm1',
+        attachmentId: 'q1',
+        kind: quoteAttachmentKind,
+      );
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(bodyText: '[[att:q1]]29 and 30', attachments: [bare]),
+      )));
+
+      expect(find.text('29 and 30'), findsOneWidget);
+      expect(find.byType(AttachmentChip), findsNothing);
+      expect(find.textContaining('(unnamed)'), findsNothing);
+      expect(
+        tester.getSize(find.byType(QuoteBlock)),
+        Size.zero,
+      );
+    });
+
+    testWidgets('the host can make it the way to the message it quotes',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final asked = <String>[];
+      final jumped = <String>[];
+      final quote = _quote();
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(bodyText: '[[att:q1]]29 and 30', attachments: [quote]),
+        quoteTapFor: (q) {
+          asked.add(q.attachmentId);
+          return () => jumped.add(q.attachmentId);
+        },
+      )));
+
+      // The row asks the host about the reference rather than deciding for
+      // itself: only the host knows which rows it loaded.
+      expect(asked, ['q1']);
+      await tester.tap(find.text('is it slide 29 in the deck?'));
+      await tester.pump();
+      expect(jumped, ['q1']);
+    });
+
+    testWidgets('and stays a statement where the host has nowhere to send it',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      // A quote of a message older than the window that was read: a control
+      // that looks tappable and goes nowhere is the dead end entry 7a was.
+      final quote = _quote();
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(bodyText: '[[att:q1]]29 and 30', attachments: [quote]),
+        quoteTapFor: (_) => null,
+      )));
+
+      expect(find.text('is it slide 29 in the deck?'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(QuoteBlock.keyFor(quote)),
+          matching: find.byType(InkWell),
+        ),
+        findsNothing,
+      );
+    });
+  });
+
+  /// Entry 7b's marker: in a thread of fifty messages, which two are yours.
+  group('a message that names the owner', () {
+    testWidgets('wears a marker in its header', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(),
+        namesOwner: true,
+      )));
+
+      expect(find.byKey(MessageRow.ownerMarkerKey), findsOneWidget);
+      expect(find.text('@ you'), findsOneWidget);
+    });
+
+    testWidgets('and one that does not wears none', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(message: _msg())));
+
+      expect(find.byKey(MessageRow.ownerMarkerKey), findsNothing);
+      expect(find.text('@ you'), findsNothing);
+    });
+
+    testWidgets('a continuation row carries it too', (tester) async {
+      // A run of messages from one sender draws one header for the lot, so the
+      // marker cannot live only in the header or the second of a pair loses it.
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(),
+        showHeader: false,
+        namesOwner: true,
+      )));
+
+      expect(find.byKey(MessageRow.ownerMarkerKey), findsOneWidget);
+    });
+  });
+
+  group('unfoldRequest', () {
+    testWidgets('a bump opens a folded row and tells the host it did',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final folds = <bool>[];
+      Widget row(int request) => _host(MessageRow(
+            message: _msg(bodyText: 'The long answer is in the deck.'),
+            collapsible: true,
+            initiallyCollapsed: true,
+            unfoldRequest: request,
+            onFoldChanged: folds.add,
+          ));
+
+      await tester.pumpWidget(row(0));
+      expect(find.byIcon(Icons.expand_more), findsOneWidget);
+
+      await tester.pumpWidget(row(1));
+      await tester.pump();
+      expect(find.byIcon(Icons.expand_less), findsOneWidget);
+      // Reported, so a host holding its own fold set remembers the unfold when
+      // this row is built again.
+      expect(folds, [false]);
+    });
+
+    testWidgets('the same count again changes nothing', (tester) async {
+      // A rebuild for any other reason must not reopen a row the reader folded
+      // by hand after the jump landed.
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final folds = <bool>[];
+      Widget row() => _host(MessageRow(
+            message: _msg(bodyText: 'The long answer is in the deck.'),
+            collapsible: true,
+            initiallyCollapsed: true,
+            unfoldRequest: 3,
+            onFoldChanged: folds.add,
+          ));
+
+      await tester.pumpWidget(row());
+      await tester.pumpWidget(row());
+      await tester.pump();
+
+      expect(find.byIcon(Icons.expand_more), findsOneWidget);
+      expect(folds, isEmpty);
+    });
+
+    testWidgets('a bump at an already-open row is not reported',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final folds = <bool>[];
+      Widget row(int request) => _host(MessageRow(
+            message: _msg(bodyText: 'The long answer is in the deck.'),
+            collapsible: true,
+            unfoldRequest: request,
+            onFoldChanged: folds.add,
+          ));
+
+      await tester.pumpWidget(row(0));
+      await tester.pumpWidget(row(1));
+      await tester.pump();
+
+      expect(find.byIcon(Icons.expand_less), findsOneWidget);
+      expect(folds, isEmpty);
+    });
+  });
+
   group('pictures on a message', () {
     testWidgets('one picture is a picture', (tester) async {
       await tester.binding.setSurfaceSize(const Size(1200, 800));
@@ -1086,6 +1413,165 @@ void main() {
       await tester.pump();
 
       expect(find.byKey(AttachmentCard.useInReplyKeyFor(file)), findsNothing);
+    });
+  });
+
+  group('links in a row', () {
+    /// A canonical link run: the label a sender saw, and an address long enough
+    /// that the clamp would have cut it.
+    const url = 'https://metrics.example.com/rooms/01f0b5d9c4e2';
+    const run = 'Dashboard <$url>';
+
+    /// Filler words exactly [chars] long, so a fixture can put a run where the
+    /// 600-character clamp will land on it.
+    String pad(int chars) => ('word ' * (chars ~/ 5 + 1)).substring(0, chars);
+
+    Future<List<String>> pump(WidgetTester tester, Message message,
+        {VoidCallback? onAskTap, bool openAsk = false}) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final opened = <String>[];
+      await tester.pumpWidget(_host(MessageRow(
+        message: message,
+        openAsk: openAsk,
+        onAskTap: onAskTap,
+        onOpenLink: opened.add,
+      )));
+      return opened;
+    }
+
+    testWidgets('a body paints the label and opens the whole address',
+        (tester) async {
+      final opened = await pump(
+        tester,
+        _msg(bodyText: 'Please check: $run before Friday.'),
+      );
+
+      expect(
+          find.text('Please check: Dashboard before Friday.'), findsOneWidget);
+      expect(find.textContaining('http'), findsNothing);
+
+      await tester.tapOnText(find.textRange.ofSubstring('Dashboard'));
+      await tester.pump();
+
+      expect(opened, [url]);
+    });
+
+    testWidgets('a clamped body still opens the whole address', (tester) async {
+      final opened = await pump(
+        tester,
+        _msg(bodyText: '$run ${pad(900)}'),
+      );
+
+      expect(find.text('Show more'), findsOneWidget);
+
+      await tester.tapOnText(find.textRange.ofSubstring('Dashboard'));
+      await tester.pump();
+
+      expect(opened, [url]);
+    });
+
+    testWidgets('and the clamp never paints half an address', (tester) async {
+      // The cut lands INSIDE the run: the whole token comes off rather than
+      // leaving a label whose address is half an address.
+      final opened = await pump(
+        tester,
+        _msg(bodyText: '${pad(580)}next. $run and the rest of it.'),
+      );
+
+      expect(find.textContaining('http'), findsNothing);
+      expect(find.textContaining('<'), findsNothing);
+      expect(find.text('Show more'), findsOneWidget);
+
+      await tester.tapOnText(find.textRange.ofSubstring('Dashboard'));
+      await tester.pump();
+      expect(opened, isEmpty);
+
+      await tester.tap(find.text('Show more'));
+      await tester.pump();
+      await tester.tapOnText(find.textRange.ofSubstring('Dashboard'));
+      await tester.pump();
+
+      expect(opened, [url]);
+    });
+
+    testWidgets("an ask line's link goes to the address, not the reply",
+        (tester) async {
+      var asks = 0;
+      final opened = await pump(
+        tester,
+        _msg(needsAction: true, actionItems: const ['Confirm access. $run']),
+        openAsk: true,
+        onAskTap: () => asks++,
+      );
+
+      expect(find.text('Confirm access. Dashboard'), findsOneWidget);
+
+      await tester.tapOnText(find.textRange.ofSubstring('Dashboard'));
+      await tester.pump();
+
+      expect(opened, [url]);
+      expect(asks, 0);
+
+      // The rest of the line is still the way into the reply.
+      await tester.tapOnText(find.textRange.ofSubstring('Confirm access'));
+      await tester.pump();
+
+      expect(asks, 1);
+      expect(opened, [url]);
+    });
+
+    testWidgets('a body paints the long anchor text real mail carries',
+        (tester) async {
+      // A gateway rewrote both addresses into something nobody reads, and the
+      // anchor text is a whole question. A body paints those; the ask line's
+      // tighter caps would have handed them back to the address.
+      const slot = 'https://links.example.net/?url=calendar.example.com'
+          '%2Fslots%2F7a2c&d=05';
+      const why = 'https://links.example.net/?url=support.example.com'
+          '%2Fwhy-this-mail&d=05';
+      final opened = await pump(
+        tester,
+        _msg(
+          bodyText: 'Does not suit? I want to choose another time <$slot>\n'
+              'Why am I receiving this notification from Office? <$why>',
+        ),
+      );
+
+      expect(find.textContaining('http'), findsNothing);
+
+      await tester.tapOnText(
+          find.textRange.ofSubstring('I want to choose another time'));
+      await tester.pump();
+      await tester.tapOnText(find.textRange
+          .ofSubstring('Why am I receiving this notification from Office?'));
+      await tester.pump();
+
+      expect(opened, [slot, why]);
+    });
+
+    testWidgets('a body with no whitespace in it still clamps to words',
+        (tester) async {
+      // Nothing to cut back to: dropping the token would leave an empty body,
+      // so the cut stands where the cap put it.
+      final blob = 'a1b2c3d4' * 120;
+      await pump(tester, _msg(bodyText: blob));
+
+      expect(find.textContaining(blob.substring(0, 64)), findsOneWidget);
+      expect(find.text('Show more'), findsOneWidget);
+    });
+
+    testWidgets('a row with nowhere to send a tap paints words', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(bodyText: 'Please check: $run before Friday.'),
+      )));
+
+      expect(
+          find.text('Please check: Dashboard before Friday.'), findsOneWidget);
     });
   });
 

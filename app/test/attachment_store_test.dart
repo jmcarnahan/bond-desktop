@@ -316,6 +316,49 @@ void main() {
       expect(documents.single['attachment_id'], 'att-real');
     });
 
+    test('a Teams quote-reply is not a document either', () async {
+      // It has no name, no bytes and nothing behind it but a message already
+      // on the timeline, so the strip would have shown a nameless row that
+      // opened an empty preview.
+      await seedMessage('t1', source: 'teams', key: 'chat-1');
+      await store.addStorylineMember(
+        'story-7',
+        'teams',
+        'chat-1',
+        addedBy: 'auto',
+      );
+      await store.upsertAttachments('teams', 't1', [
+        {
+          ...row('att-quote', kind: 'message_reference'),
+          'name': null,
+          'content_type': 'messageReference',
+          'card_text': 'is it slide 29 in the deck?',
+          'item_from': 'Priya Raman',
+        },
+        row('att-deck', ordinal: 1, name: 'Report.pptx'),
+      ]);
+
+      final documents = await store.attachmentsForStoryline('story-7');
+
+      expect(documents.single['attachment_id'], 'att-deck');
+    });
+
+    test('a quote-reply somebody pinned is still not a document', () async {
+      // The pin half of the query is a second OR branch with its own filters,
+      // and a quote is not a file on either side of it.
+      await seedMessage('t1', source: 'teams', key: 'chat-other');
+      await store.upsertAttachments('teams', 't1', [
+        {
+          ...row('att-quote', kind: 'message_reference'),
+          'name': null,
+          'content_type': 'messageReference',
+        },
+      ]);
+      await store.setAttachmentPinned('teams', 't1', 'att-quote', 'story-7');
+
+      expect(await store.attachmentsForStoryline('story-7'), isEmpty);
+    });
+
     test('a thread outside the storyline contributes nothing', () async {
       await seedMessage('m1', key: 'conv-1');
       await seedMessage('m2', key: 'conv-2');
@@ -562,6 +605,45 @@ void main() {
       await seedMessage('m1');
 
       expect((await store.loadConversations()).single.attachmentCount, 0);
+    });
+
+    // A Teams quote-reply is stored as an attachment row, and it is the
+    // message being answered rather than a file anybody sent.
+    Future<void> seedTeamsThread() => store.upsertConversation({
+          'source': 'teams',
+          'conversation_key': 'chat-1',
+          'subject': 'Deck review',
+          'state': 'waiting',
+          'last_message_at': '2026-09-04T11:00:00.000Z',
+        });
+
+    Map<String, Object?> quoteRow() => {
+          ...row('att-quote', kind: quoteAttachmentKind),
+          'name': null,
+          'content_type': 'messageReference',
+        };
+
+    test('a quote-reply alone carries no paperclip', () async {
+      await seedTeamsThread();
+      await seedMessage('t1', source: 'teams', key: 'chat-1');
+      await store.upsertAttachments('teams', 't1', [quoteRow()]);
+
+      final teams = await store.loadConversations(sources: ['teams']);
+
+      expect(teams.single.attachmentCount, 0);
+    });
+
+    test('a quote-reply beside a real file counts the file only', () async {
+      await seedTeamsThread();
+      await seedMessage('t1', source: 'teams', key: 'chat-1');
+      await store.upsertAttachments('teams', 't1', [
+        quoteRow(),
+        row('att-deck', ordinal: 1, name: 'Report.pptx'),
+      ]);
+
+      final teams = await store.loadConversations(sources: ['teams']);
+
+      expect(teams.single.attachmentCount, 1);
     });
 
     test('clearing the blobs forgets the paths and keeps the metadata',

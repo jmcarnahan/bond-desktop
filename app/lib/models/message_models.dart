@@ -2,7 +2,9 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart' show immutable;
 
+import '../services/external_sender.dart';
 import 'attachment_models.dart';
+import 'label_models.dart';
 
 /// Wire/row models for the inbox. Hand-written and deliberately defensive:
 /// every field reads through a nullable cast with a default, so neither a
@@ -202,6 +204,74 @@ class Conversation {
   /// has passed.
   final String? snoozedUntil;
 
+  /// The owner's own words on this thread, most-used first — the chips a row
+  /// draws. Read at read time by the GROUP_CONCAT subquery in
+  /// `loadConversations`, and EMPTY on every read that does not run it, which
+  /// reads as "not filed" rather than as a wrong chip.
+  ///
+  /// Nothing to do with [Message.label], the model's verdict about one message.
+  /// A thread carries as many of these as the owner has put on it.
+  final List<Label> labels;
+
+  /// WHY this thread wants the owner, in the words the needs-you pass wrote:
+  /// `'teams_direct'` from the deterministic floor, or the model's own evidence
+  /// sentence. Null when nothing on the thread has been judged to need them.
+  ///
+  /// Read at read time by the subquery in `loadConversations`, off the newest
+  /// KEPT inbound message whose verdict was YES — the only kind of row that can
+  /// answer this question. A reason attached to a `false` verdict explains why a
+  /// message does NOT want the owner, and showing it here would answer the
+  /// opposite of what was asked. Null on every read that does not run the
+  /// subquery, which reads as "nothing to show" rather than as a wrong sentence.
+  ///
+  /// [needsYouReasonWords] is the one place these turn into words on screen.
+  final String? needsYouReason;
+
+  /// Which message [needsYouReason] came off, and when it landed. Carried so a
+  /// later phase can jump the transcript to it — the line that shows the reason
+  /// is inert text today — and null together with the reason.
+  final String? needsYouReasonMessageId;
+  final String? needsYouReasonAt;
+
+  /// Whether the sender of the newest kept inbound message is waiting on an
+  /// answer, as triage v2 judged it. TRI-STATE, and the null arm is the point:
+  /// null means no v2 pass has ever judged that message, which is NOT "no reply
+  /// expected" (`schema.drift` says so at the column, and [isNeedsYou] is
+  /// written on that distinction).
+  ///
+  /// Read at read time by the subquery in `loadConversations`; null on every
+  /// read that does not run it, which reads as "nobody has judged", never as a
+  /// judgement.
+  final bool? replyExpected;
+
+  /// Whether the needs-you pass has vetoed this THREAD: its newest kept
+  /// inbound was judged no, AND no kept inbound newer than the thread's last
+  /// outbound carries a yes (with no outbound at all, no kept inbound does).
+  ///
+  /// Computed in SQL by `MessageStore`'s one veto fragment, the same one the
+  /// Needs You tile and filter read, and never recomputed here from partial
+  /// data. A no on the newest message alone is not enough: the judge rates
+  /// THAT message, so a reply-all "adding Jordan for visibility" judged no
+  /// must not hide an older ask the owner has not answered.
+  ///
+  /// It outranks triage's ask and `reply_expected` in [isNeedsYou]: the judge
+  /// reads the thread before the message and answers the narrower question —
+  /// is this the owner's — where triage answers "does anyone owe a reply".
+  /// False on every read that did not run the fragment, which leaves the
+  /// thread where the other terms put it.
+  final bool needsYouVetoed;
+
+  /// The envelope address of the newest KEPT inbound message — who the thread
+  /// is waiting on. Null on every read that does not run the subquery in
+  /// `loadConversations`, and on a thread with no inbound mail at all.
+  ///
+  /// Carried for [isExternalTo] and for select-similar's sender and domain
+  /// scopes (`services/select_similar.dart`), and for nothing else, which is
+  /// why it is an address and not a [Participant]: the name beside it is
+  /// already on [participants], and a second copy of it could disagree with
+  /// the first.
+  final String? latestInboundFrom;
+
   const Conversation({
     required this.id,
     this.source = 'email',
@@ -225,7 +295,39 @@ class Conversation {
     this.latestDeadline,
     this.pendingDraftCount = 0,
     this.snoozedUntil,
+    this.labels = const [],
+    this.needsYouReason,
+    this.needsYouReasonMessageId,
+    this.needsYouReasonAt,
+    this.replyExpected,
+    this.needsYouVetoed = false,
+    this.latestInboundFrom,
   });
+
+  /// Whether this thread came from outside the owner's own organisation.
+  ///
+  /// **The LATEST INBOUND SENDER's domain, and nobody else's.** A thread is
+  /// external when the person the inbox is waiting on writes from a domain that
+  /// is not one of [ownerDomains] — so a vendor copied in on an internal thread
+  /// does not tint it, and an internal reply to a vendor's mail un-tints the
+  /// thread the moment a colleague answers. The alternative rule — any external
+  /// participant, ever — would paint half a busy inbox and stop meaning
+  /// anything.
+  ///
+  /// **Computed at display time and never stored.** Whose domains are "ours"
+  /// is a fact about the signed-in account, not about the mail: a stored flag
+  /// would be wrong for the next account to open the same database, and right
+  /// only until the owner's own address changed. The cost is a string compare
+  /// per drawn row, which is the same cost as the row's own `from:` filter.
+  ///
+  /// [ownerDomains] comes from `ownerDomainsOf(account.mail ??
+  /// account.userPrincipalName)` — the one source `needs_you_handler` ranks
+  /// from, so the tint and the ranking cannot disagree about who is a stranger.
+  /// EMPTY — a signed-out app, and every widget test that passes nothing —
+  /// answers false for every thread: an app that cannot say who the owner is
+  /// does not get to call anybody external.
+  bool isExternalTo(Set<String> ownerDomains) =>
+      isExternalAddress(latestInboundFrom, ownerDomains);
 
   /// First participant — the row's primary sender. Null when a conversation
   /// somehow carries no participants.
@@ -241,10 +343,19 @@ class Conversation {
   /// Whether the model is still working on this thread.
   bool get isAiBusy => aiPendingCount > 0;
 
-  /// Deliberately narrow: state and unread count are the only two fields a
-  /// local action flips. Marking a thread done flips the state; opening one
-  /// flips the count to zero.
-  Conversation copyWith({ConversationState? state, int? unreadCount}) {
+  /// Deliberately narrow: state, unread count and labels are the only three
+  /// fields a local action flips. Marking a thread done flips the state;
+  /// opening one flips the count to zero; filing one under a word of the
+  /// owner's puts a chip on it.
+  ///
+  /// Labels are here rather than in a method of their own because an empty list
+  /// is a real value: taking the last label off a thread and leaving its labels
+  /// alone are `[]` and null, which is exactly what an optional list says.
+  Conversation copyWith({
+    ConversationState? state,
+    int? unreadCount,
+    List<Label>? labels,
+  }) {
     return Conversation(
       id: id,
       source: source,
@@ -268,6 +379,13 @@ class Conversation {
       latestDeadline: latestDeadline,
       pendingDraftCount: pendingDraftCount,
       snoozedUntil: snoozedUntil,
+      labels: labels ?? this.labels,
+      needsYouReason: needsYouReason,
+      needsYouReasonMessageId: needsYouReasonMessageId,
+      needsYouReasonAt: needsYouReasonAt,
+      replyExpected: replyExpected,
+      needsYouVetoed: needsYouVetoed,
+      latestInboundFrom: latestInboundFrom,
     );
   }
 
@@ -299,6 +417,13 @@ class Conversation {
       latestDeadline: latestDeadline,
       pendingDraftCount: pendingDraftCount,
       snoozedUntil: snoozedUntil,
+      labels: labels,
+      needsYouReason: needsYouReason,
+      needsYouReasonMessageId: needsYouReasonMessageId,
+      needsYouReasonAt: needsYouReasonAt,
+      replyExpected: replyExpected,
+      needsYouVetoed: needsYouVetoed,
+      latestInboundFrom: latestInboundFrom,
     );
   }
 
@@ -370,6 +495,24 @@ class Conversation {
       // From the same LEFT JOIN the bucket comes from, and null on every read
       // that does not run it — which reads as "no date set".
       snoozedUntil: row['snoozed_until'] as String?,
+      // The owner's own words, concatenated by the last subquery and absent
+      // from every read that does not run it — which reads as "not filed".
+      labels: Label.parseConcat(row['labels']),
+      // The three reason columns travel together: one subquery picks the
+      // message, and a read that does not run it carries none of them.
+      needsYouReason: row['needs_you_reason'] as String?,
+      needsYouReasonMessageId: row['needs_you_reason_message_id'] as String?,
+      needsYouReasonAt: row['needs_you_reason_at'] as String?,
+      // Null survives as null, exactly as it does on [Message.replyExpected]:
+      // a message triage v2 has never judged is not a message it judged "no".
+      replyExpected: _boolFromInt(row['reply_expected']),
+      // The thread veto, computed by the store's one fragment; absent reads
+      // as no veto.
+      needsYouVetoed: _boolFromInt(row['needs_you_vetoed']) ?? false,
+      // The last subquery, and null on every read that does not run it — which
+      // reads as "cannot tell who this is from", and [isExternalTo] answers
+      // false to that rather than calling an unknown sender a stranger.
+      latestInboundFrom: row['latest_inbound_from'] as String?,
     );
   }
 }
@@ -402,10 +545,28 @@ class Message {
   /// Why the triage gate skipped this message (bulk sender, no body, …).
   final String? gateReason;
 
+  /// The row's `has_attachments` flag, as the delta page or the detail fetch
+  /// last set it. False when the column is absent or null. The meeting gate's
+  /// empty-body fallback asks it: a calendar response carries no file, so an
+  /// `Accepted:` mail with a PDF on it is somebody sending a document.
+  final bool hasAttachments;
+
+  /// `'user'` when the owner pressed Restore on this message, which clears
+  /// [gateReason] and exempts the row from every gate. Null otherwise, and on
+  /// every read that did not select the column. Reply suppression asks it, so
+  /// a restored message is not refused a draft on the same classification the
+  /// owner just overruled.
+  final String? gateOverride;
+
   /// The connector-specific blob stored alongside the message — for email,
-  /// `{"headers": {...}}` from the per-message detail fetch. Held as raw JSON
-  /// rather than decoded eagerly: the inbox renders thousands of messages and
-  /// reads this on none of them.
+  /// `{"headers": {...}, "meeting": "…"}` from the per-message detail fetch,
+  /// each key present only when that fetch had something to put in it. Held as
+  /// raw JSON rather than decoded eagerly: the inbox renders thousands of
+  /// messages and reads this on none of them.
+  ///
+  /// Read through [headers] and [meetingMessageType], never by hand: both
+  /// answer for a blob that never carried their key, which is every row a
+  /// build before theirs wrote.
   final String? sourceMetaJson;
 
   // ── Triage output ────────────────────────────────────────────────────
@@ -476,6 +637,8 @@ class Message {
     this.isRead = true,
     this.bodyPreview,
     this.gateReason,
+    this.hasAttachments = false,
+    this.gateOverride,
     this.sourceMetaJson,
     this.urgency,
     this.category,
@@ -523,6 +686,8 @@ class Message {
         isRead: isRead,
         bodyPreview: bodyPreview,
         gateReason: gateReason,
+        hasAttachments: hasAttachments,
+        gateOverride: gateOverride,
         sourceMetaJson: sourceMetaJson,
         urgency: urgency,
         category: category,
@@ -563,6 +728,48 @@ class Message {
       };
     } on FormatException {
       return const {};
+    }
+  }
+
+  /// Whether the stored body was written by an older converter and is owed a
+  /// refetch — the `body_stale` key the `mail_html_rebuild_2` one-shot sets.
+  ///
+  /// The old text stays readable meanwhile: every stage that is not the
+  /// transcript reads it as it stands, and `ensureBodies` refetches a stale
+  /// row as if it had no body. Any detail answer clears the key, a 200 or a
+  /// permanent refusal alike, so a message the server no longer has keeps its
+  /// old text and stops being asked for. False for a blob that is null,
+  /// invalid or silent about the key.
+  bool get bodyStale {
+    final raw = sourceMetaJson;
+    if (raw == null || raw.isEmpty) return false;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return false;
+      final stale = decoded['body_stale'];
+      return stale == 1 || stale == true;
+    } on FormatException {
+      return false;
+    }
+  }
+
+  /// What kind of invitation this message is, in Graph's own words —
+  /// `meetingRequest`, `meetingCancelled`, `meetingAccepted` and the rest.
+  ///
+  /// Null on ordinary mail, on every Teams and MCP message, and on any row
+  /// whose detail was fetched before the sync asked for the field: a reader
+  /// must treat null as "nobody said", never as "not a meeting".
+  String? get meetingMessageType {
+    final raw = sourceMetaJson;
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+      final meeting = decoded['meeting'];
+      if (meeting is! String || meeting.isEmpty) return null;
+      return meeting;
+    } on FormatException {
+      return null;
     }
   }
 
@@ -620,6 +827,8 @@ class Message {
       isRead: _boolFromInt(row['is_read']) ?? true,
       bodyPreview: row['body_preview'] as String?,
       gateReason: row['gate_reason'] as String?,
+      hasAttachments: _boolFromInt(row['has_attachments']) ?? false,
+      gateOverride: row['gate_override'] as String?,
       sourceMetaJson: row['source_meta_json'] as String?,
       urgency: row['urgency'] as String?,
       category: row['category'] as String?,

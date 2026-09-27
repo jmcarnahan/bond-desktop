@@ -27,6 +27,11 @@ enum BondTone {
 
   /// Governed off-palette purple — the Video channel only.
   video,
+
+  /// Cool slate — a thread whose latest inbound sender is outside the owner's
+  /// own domains. Not a verdict and not a warning: the other five tones say how
+  /// a thread is DOING, and this one says where it came from.
+  external,
 }
 
 /// Background / foreground / border triple for a [BondTone].
@@ -72,5 +77,10 @@ const Map<BondTone, BondToneColors> bondToneColors = {
     background: BondColors.channelVideoTint,
     foreground: BondColors.channelVideo,
     border: BondColors.channelVideoTint,
+  ),
+  BondTone.external: BondToneColors(
+    background: BondColors.externalTint,
+    foreground: BondColors.onExternalTint,
+    border: BondColors.externalBorder,
   ),
 };

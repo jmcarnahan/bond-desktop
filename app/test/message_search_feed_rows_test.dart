@@ -8,6 +8,7 @@ import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/embed_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/message_search.dart';
+import 'package:bond_inbox/services/search_grammar.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -182,6 +183,125 @@ void main() {
         (await wordIds(null))..sort(),
         ['chat-1', 'mail-1'],
       );
+    });
+  });
+
+  group('what has:file can see', () {
+    late BondDatabase db;
+    late MessageStore store;
+
+    setUp(() {
+      db = testDb();
+      store = MessageStore(db);
+    });
+
+    tearDown(() async => db.close());
+
+    /// A Teams message with `has_attachments` set, which is what the sync
+    /// writes for a quote-reply as much as for a file: Graph sends the quote
+    /// AS an attachment, and three handlers read that flag to decide whether
+    /// to hydrate attachments at all, so it stays 1 either way.
+    Future<void> seedChat(
+      String id, {
+      required List<Map<String, Object?>> attachments,
+    }) async {
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': id,
+        'conversation_key': 'chat-$id',
+        'direction': 'inbound',
+        'subject': 'Invoice 4471 is overdue',
+        'received_at': '2026-08-29T10:00:00Z',
+        'has_attachments': 1,
+      });
+      await store.upsertAttachments('teams', id, attachments);
+    }
+
+    Map<String, Object?> quoteRow() => {
+          'attachment_id': 'q1',
+          'ordinal': 0,
+          'kind': 'message_reference',
+          'name': null,
+          'content_type': 'messageReference',
+          'is_inline': false,
+          'item_from': 'Priya Raman',
+          'card_text': 'is it slide 29 in the deck?',
+        };
+
+    Map<String, Object?> fileRow() => {
+          'attachment_id': 'a1',
+          'ordinal': 1,
+          'kind': 'file',
+          'name': 'Invoice-4471.pdf',
+          'content_type': 'application/pdf',
+          'size': 2048,
+          'is_inline': false,
+        };
+
+    Future<List<String>> matching(String typed) async {
+      final result = await MessageSearch(store, downServer())
+          .search(parseSearchQuery(typed).text);
+      final hits = filterHits(
+        parseSearchQuery(typed),
+        (result as MessageSearchHits).hits,
+      );
+      return [for (final hit in hits) hit.row.sourceMessageId];
+    }
+
+    test('a quote-only message has no file, whatever its flag says', () async {
+      await seedChat('quoted', attachments: [quoteRow()]);
+
+      final result =
+          await MessageSearch(store, downServer()).search('invoice');
+      final row = (result as MessageSearchHits).hits.single.row;
+
+      // The row itself, so the projection is what is being read and not the
+      // predicate's own arithmetic.
+      expect(row.hasFile, isFalse);
+      expect(await matching('invoice has:file'), isEmpty);
+      // And the message is still findable — it is a real message that said a
+      // real thing, and only the facet turns it away.
+      expect(await matching('invoice'), ['quoted']);
+    });
+
+    test('a file beside the quote is still a file', () async {
+      await seedChat('both', attachments: [quoteRow(), fileRow()]);
+
+      expect(await matching('invoice has:file'), ['both']);
+    });
+
+    test('a message carrying nothing at all has no file either', () async {
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'bare',
+        'conversation_key': 'conv-bare',
+        'direction': 'inbound',
+        'subject': 'Invoice 4471 is overdue',
+        'received_at': '2026-08-29T10:00:00Z',
+      });
+
+      expect(await matching('invoice has:file'), isEmpty);
+    });
+
+    test('an inline logo counts, because has:file is not the Files shelf',
+        () async {
+      // The accepted edge, stated so a later reader does not take it for a
+      // bug: `recentAttachments` drops inline images and this does not. A
+      // reader typing `has:file` is narrowing a search, not browsing a shelf,
+      // and a second EXISTS clause per feed row to spare them one signature
+      // graphic is not worth the read.
+      await seedChat('logo', attachments: [
+        {
+          ...fileRow(),
+          'attachment_id': 'sig',
+          'kind': 'image',
+          'name': 'logo.png',
+          'content_type': 'image/png',
+          'is_inline': true,
+        }
+      ]);
+
+      expect(await matching('invoice has:file'), ['logo']);
     });
   });
 
