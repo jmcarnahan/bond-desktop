@@ -5,19 +5,26 @@ import 'dart:async' show Completer;
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/label_models.dart';
+import 'package:bond_inbox/models/message_models.dart' show ConversationState;
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/services/backend/backend_types.dart' show SentDraft;
+import 'package:bond_inbox/services/backend/mail_backend.dart';
+import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
+import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
 import 'package:bond_inbox/widgets/cheat_sheet_panel.dart';
+import 'package:bond_inbox/widgets/chips.dart' show BondFilterPill;
 import 'package:bond_inbox/widgets/composer.dart';
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/widgets/conversation_row.dart';
 import 'package:bond_inbox/widgets/find_field.dart';
+import 'package:bond_inbox/widgets/quick_replies.dart' show QuickReplyBox;
 import 'package:bond_inbox/widgets/label_picker.dart';
 import 'package:bond_inbox/widgets/side_panel.dart';
 import 'package:bond_inbox/widgets/thread_action_bar.dart';
@@ -26,6 +33,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 import 'fixtures/test_db.dart';
 
@@ -74,6 +83,42 @@ class _RefusingStore extends MessageStore {
   /// held open long enough for the reader to have moved on.
   Completer<void>? holdApply;
 
+  /// Set, a label create waits on it: the picker's write held open while the
+  /// reader presses Enter again, or Escape.
+  Completer<void>? holdCreate;
+
+  /// Set, a thread state write waits on it: a mark-done held between the
+  /// press and its landing, for a click to arrive in the gap.
+  Completer<void>? holdStateWrite;
+
+  /// Set, a label create fails the way a disk does — not the store's own
+  /// refusal, so the host falls back to its generic sentence.
+  bool refuseCreate = false;
+
+  /// Every thread state write, by key, in order: how a test tells one
+  /// mark-done from the same one run twice.
+  final List<String> stateWrites = [];
+
+  @override
+  Future<Label> createLabel(String name, {String? tone}) async {
+    final hold = holdCreate;
+    if (hold != null) await hold.future;
+    if (refuseCreate) throw Exception('the disk said no');
+    return super.createLabel(name, tone: tone);
+  }
+
+  @override
+  Future<void> setConversationState(
+    String source,
+    String conversationKey,
+    ConversationState state,
+  ) async {
+    stateWrites.add(conversationKey);
+    final hold = holdStateWrite;
+    if (hold != null) await hold.future;
+    return super.setConversationState(source, conversationKey, state);
+  }
+
   @override
   Future<List<Label>> labelsForConversation(
     String source,
@@ -121,6 +166,62 @@ class _RefusingStore extends MessageStore {
     return super.restoreLabel(source, conversationKey, labelId);
   }
 }
+
+class _Tokens implements TokenStore {
+  final Map<String, String> values = {};
+
+  @override
+  Future<String?> read(String key) async => values[key];
+
+  @override
+  Future<void> write(String key, String? value) async {
+    if (value == null) {
+      values.remove(key);
+    } else {
+      values[key] = value;
+    }
+  }
+
+  @override
+  Future<void> deleteAll() async => values.clear();
+}
+
+/// A mail backend whose sends go nowhere and succeed, recording the bodies —
+/// so a reply from the composer is a real `SendOutcome.sent` through the
+/// whole draft path. Anything else a pane reaches for throws.
+class _SendingMail implements MailBackend {
+  final List<String> bodies = [];
+
+  @override
+  Future<Map<String, dynamic>> createReplyDraft(String messageId) async =>
+      const {'id': 'graph-draft-1'};
+
+  @override
+  Future<void> updateDraftBody(String draftId, String text) async {
+    bodies.add(text);
+  }
+
+  @override
+  Future<SentDraft> sendDraft(String draftId) async =>
+      SentDraft(draftId: draftId);
+
+  @override
+  Future<List<String>> markRead(
+    List<String> messageIds, {
+    bool isRead = true,
+  }) async =>
+      const [];
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
+}
+
+/// Everything a send needs, so the composer is armed rather than offering a
+/// copy.
+const String _sendGrant =
+    'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read '
+    'https://graph.microsoft.com/Mail.ReadWrite '
+    'https://graph.microsoft.com/Mail.Send';
 
 class _FakeTeamsSync implements TeamsSync {
   @override
@@ -194,9 +295,29 @@ void main() {
     await tester.pump(HomeFeedNotifier.metricsDebounce);
   }
 
-  Future<void> pumpInbox(WidgetTester tester, {MessageStore? storeAs}) async {
+  /// [mail], when given, arms the composer: a signed-in grant that can send,
+  /// on the SDK backend, and [mail] as the backend the send reaches.
+  Future<void> pumpInbox(
+    WidgetTester tester, {
+    MessageStore? storeAs,
+    _SendingMail? mail,
+    RailSection section = RailSection.needsYou,
+  }) async {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
+    GraphAuth? auth;
+    if (mail != null) {
+      final tokens = _Tokens();
+      tokens.values['refresh_token'] = 'rt-1';
+      tokens.values['granted_scopes'] = _sendGrant;
+      auth = GraphAuth(
+        httpClient: MockClient((_) async => http.Response('{}', 200)),
+        store: tokens,
+      );
+      // The app's default backend is MCP, whose session would answer the
+      // scope question by asking a server that is not there.
+      await store.setPref(backendModeKey, backendModeSdk);
+    }
 
     // Everything eligible reaches Needs You: the scoring pass lands a few pumps
     // in, and the default slider would cut rows this file walks with.
@@ -204,13 +325,15 @@ void main() {
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
-      initialSectionProvider.overrideWithValue(RailSection.needsYou),
+      initialSectionProvider.overrideWithValue(section),
       initialAppPrefsProvider.overrideWithValue(prefs),
       syncServiceProvider.overrideWithValue(_FakeSync()),
       teamsSyncProvider.overrideWithValue(_FakeTeamsSync()),
       notificationCoordinatorProvider
           .overrideWithValue(NotificationCoordinator(store)),
       if (storeAs != null) messageStoreProvider.overrideWithValue(storeAs),
+      if (auth != null) graphAuthProvider.overrideWithValue(auth),
+      if (mail != null) mailBackendProvider.overrideWithValue(mail),
     ]);
     addTearDown(container.dispose);
 
@@ -632,7 +755,7 @@ void main() {
     await settleQueues(tester);
 
     expect(await store.labelsForConversation('email', 'c2'), isEmpty);
-    expect(rowTitles(tester), hasLength(3));
+    expect(rowTitles(tester), ['Homepage copy', 'Invoice 4471', 'Vendor quote']);
     await settleQueues(tester);
   });
 
@@ -1190,7 +1313,7 @@ void main() {
     // The undo is the row back AND the count back — the same bar carries both.
     await press(tester, LogicalKeyboardKey.keyZ);
     await settleQueues(tester);
-    expect(rowTitles(tester), hasLength(3));
+    expect(rowTitles(tester), ['Homepage copy', 'Invoice 4471', 'Vendor quote']);
     expect(find.byKey(ConversationListPane.progressKey), findsNothing);
   });
 
@@ -1335,5 +1458,660 @@ void main() {
     expect(unhandled, isEmpty);
     await tester.pump(ThreadDetailPanel.flashDuration);
     await settleQueues(tester);
+  });
+
+  group('a sent reply takes its thread off the pile', () {
+    /// Types into the open thread's composer and presses its Send, then lets
+    /// the send's round trips land.
+    Future<void> sendReply(WidgetTester tester, String body) async {
+      final field = find.descendant(
+        of: find.byType(Composer),
+        matching: find.byType(TextField),
+      );
+      await tester.enterText(field, body);
+      await tester.pump();
+      await tester.tap(find.descendant(
+        of: find.byType(Composer),
+        matching: find.text('Send'),
+      ));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      await settleQueues(tester);
+    }
+
+    /// The thread the open panel is showing, wherever it is drawn.
+    String? openThread(WidgetTester tester) {
+      final panels = tester.widgetList<ThreadDetailPanel>(
+        find.byType(ThreadDetailPanel),
+      );
+      return panels.isEmpty ? null : panels.last.conversation.subject;
+    }
+
+    /// Two rows down — Invoice 4471 open beside — with a composer that can
+    /// send.
+    Future<_SendingMail> openInvoice(WidgetTester tester) async {
+      final mail = _SendingMail();
+      await seedPile();
+      await pumpInbox(tester, mail: mail);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      // The capability read the composer waits on before it arms.
+      await tester.pump();
+      await tester.pump();
+      expect(litRow(tester), 'Invoice 4471');
+      return mail;
+    }
+
+    /// `r` on the open row, words into the in-list box, and its Send — the
+    /// reply the keyboard flow makes. The box hands the cursor back to the
+    /// list when it goes, which is what leaves `j` and `k` live afterwards;
+    /// the docked composer keeps the cursor, where a letter is a letter.
+    Future<void> quickReply(WidgetTester tester, String body) async {
+      await press(tester, LogicalKeyboardKey.keyR);
+      await tester.enterText(find.byKey(QuickReplyBox.fieldKey), body);
+      await tester.pump();
+      await tester.tap(find.byKey(QuickReplyBox.sendKey));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      await settleQueues(tester);
+    }
+
+    testWidgets('j after a reply opens the row that stood under it',
+        (tester) async {
+      final mail = await openInvoice(tester);
+
+      await quickReply(tester, 'Signed and sent back.');
+
+      expect(mail.bodies, ['Signed and sent back.']);
+      expect(find.text('Reply sent.'), findsOneWidget);
+      // Waiting now, so off Needs You — and still open beside, because the
+      // preference that would clear it is off.
+      expect(rowTitles(tester), ['Homepage copy', 'Vendor quote']);
+      expect(openThread(tester), 'Invoice 4471');
+      unhandled.clear();
+
+      await press(tester, LogicalKeyboardKey.keyJ);
+
+      expect(unhandled, isEmpty);
+      expect(litRow(tester), 'Vendor quote');
+      expect(openThread(tester), 'Vendor quote');
+      await settleQueues(tester);
+    });
+
+    testWidgets('k after a reply opens the row that stood above it',
+        (tester) async {
+      await openInvoice(tester);
+
+      await quickReply(tester, 'Signed and sent back.');
+      expect(rowTitles(tester), ['Homepage copy', 'Vendor quote']);
+      expect(openThread(tester), 'Invoice 4471');
+
+      await press(tester, LogicalKeyboardKey.keyK);
+
+      expect(litRow(tester), 'Homepage copy');
+      expect(openThread(tester), 'Homepage copy');
+      await settleQueues(tester);
+    });
+
+    testWidgets('with reply-marks-done on, the reader lands on the next row '
+        'and the progress line counts it', (tester) async {
+      await store.setPref(replySendMarksDoneKey, 'true');
+      await openInvoice(tester);
+
+      await sendReply(tester, 'Signed and sent back.');
+
+      expect(find.text('Reply sent · Marked done.'), findsOneWidget);
+      expect(rowTitles(tester), ['Homepage copy', 'Vendor quote']);
+      // Nothing pressed: the send's own mark-done took `e`'s landing.
+      expect(litRow(tester), 'Vendor quote');
+      expect(openThread(tester), 'Vendor quote');
+      expect(find.text('1 of 3 cleared'), findsOneWidget);
+      final stored = await store.loadConversations();
+      expect(
+        [for (final c in stored) if (c.state == ConversationState.done) c.id],
+        ['c2'],
+      );
+      await settleQueues(tester);
+    });
+
+    testWidgets('a thread opened from Archive was never in the pile, so j '
+        'goes nowhere from it', (tester) async {
+      await seedPile();
+      final received = ago(4);
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'c9-m1',
+        'conversation_key': 'c9',
+        'direction': 'inbound',
+        'subject': 'Old contract',
+        'from_name': 'Dana Whitfield',
+        'from_address': 'dana@example.com',
+        'received_at': received,
+        'body_text': 'the hero paragraph',
+      });
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'c9',
+        'subject': 'Old contract',
+        'participants_json':
+            '[{"name":"Dana Whitfield","email":"dana@example.com"}]',
+        'state': 'done',
+        'last_message_at': received,
+        'last_inbound_at': received,
+      });
+      await pumpInbox(tester, section: RailSection.archive);
+      await tester.tap(find.widgetWithText(BondFilterPill, 'Done'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.text('Old contract').first);
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      expect(openThread(tester), 'Old contract');
+
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await press(tester, LogicalKeyboardKey.keyK);
+
+      // Stepping "next" from here would teleport the reader to the top of a
+      // pile they are not on.
+      expect(openThread(tester), 'Old contract');
+      await settleQueues(tester);
+    });
+  });
+
+  group('a minted label files the thread it was minted for', () {
+    testWidgets('Shift+E, a new word, Enter twice while the create is out: '
+        'one label, one done, one z back', (tester) async {
+      final held = _RefusingStore(db);
+      await seedPile();
+      await pumpInbox(tester, storeAs: held);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      expect(litRow(tester), 'Homepage copy');
+      await press(tester, LogicalKeyboardKey.keyE, shift: true);
+      held.holdCreate = Completer<void>();
+
+      await tester.enterText(
+          find.byKey(LabelPicker.fieldKey), 'Vendor outreach');
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      // The second Enter, on a box the first one cleared, while the write is
+      // still out: with the strip live it would have been "mark done with no
+      // label", a second act on the same thread.
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(LabelPicker.fieldKey), findsNothing);
+      expect(find.text('Marked done.'), findsNothing);
+
+      held.holdCreate!.complete();
+      await settleQueues(tester);
+      await tester.pump();
+      await tester.pump();
+
+      expect(rowTitles(tester), ['Invoice 4471', 'Vendor quote']);
+      expect(litRow(tester), 'Invoice 4471');
+      expect(find.text('Marked done · Vendor outreach.'), findsOneWidget);
+      expect(find.text('Marked done.'), findsNothing);
+      expect([for (final l in await store.listLabels()) l.name],
+          ['Vendor outreach']);
+      expect(
+        [for (final l in await store.labelsForConversation('email', 'c1'))
+          l.name],
+        ['Vendor outreach'],
+      );
+
+      await press(tester, LogicalKeyboardKey.keyZ);
+      await settleQueues(tester);
+
+      // What undoMarkDone restores: the thread back in its place and the
+      // link this dismissal made taken off; the word stays in the vocabulary.
+      expect(
+        rowTitles(tester),
+        ['Homepage copy', 'Invoice 4471', 'Vendor quote'],
+      );
+      expect(await store.labelsForConversation('email', 'c1'), isEmpty);
+      await settleQueues(tester);
+    });
+
+    testWidgets('l, a new word, Enter, then Escape before the write lands: '
+        'filed and not marked done', (tester) async {
+      final held = _RefusingStore(db);
+      await seedPile();
+      await pumpInbox(tester, storeAs: held);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      expect(litRow(tester), 'Invoice 4471');
+      await press(tester, LogicalKeyboardKey.keyL);
+      held.holdCreate = Completer<void>();
+
+      await tester.enterText(find.byKey(LabelPicker.fieldKey), 'Receipts');
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await press(tester, LogicalKeyboardKey.escape);
+
+      held.holdCreate!.complete();
+      await settleQueues(tester);
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        rowTitles(tester),
+        ['Homepage copy', 'Invoice 4471', 'Vendor quote'],
+      );
+      expect(find.text('Labeled Receipts.'), findsOneWidget);
+      expect(
+        [for (final l in await store.labelsForConversation('email', 'c2'))
+          l.name],
+        ['Receipts'],
+      );
+      final stored = await store.loadConversations();
+      expect(
+        [for (final c in stored) if (c.state == ConversationState.done) c.id],
+        isEmpty,
+      );
+      await settleQueues(tester);
+    });
+
+    testWidgets('Shift+E, a new word, Enter, then Escape mid-write: still '
+        'marked done under the word', (tester) async {
+      final held = _RefusingStore(db);
+      await seedPile();
+      await pumpInbox(tester, storeAs: held);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await press(tester, LogicalKeyboardKey.keyE, shift: true);
+      held.holdCreate = Completer<void>();
+
+      await tester.enterText(find.byKey(LabelPicker.fieldKey), 'Receipts');
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      // Escape used to close the request mid-write, and the apply then read
+      // the closed request as "keep with a label".
+      await press(tester, LogicalKeyboardKey.escape);
+
+      held.holdCreate!.complete();
+      await settleQueues(tester);
+      await tester.pump();
+      await tester.pump();
+
+      expect(rowTitles(tester), ['Invoice 4471', 'Vendor quote']);
+      expect(find.text('Marked done · Receipts.'), findsOneWidget);
+      expect(
+        [for (final l in await store.labelsForConversation('email', 'c1'))
+          l.name],
+        ['Receipts'],
+      );
+      await settleQueues(tester);
+    });
+  });
+
+  group('destructive keys, one act at a time', () {
+    testWidgets('e held down clears one thread, not a run of them',
+        (tester) async {
+      await seedPile();
+      await pumpInbox(tester);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      expect(litRow(tester), 'Homepage copy');
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.keyE);
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.keyE);
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.keyE);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyE);
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      await settleQueues(tester);
+
+      expect(rowTitles(tester), ['Invoice 4471', 'Vendor quote']);
+      expect(litRow(tester), 'Invoice 4471');
+      await settleQueues(tester);
+    });
+
+    testWidgets('a row clicked while e is still writing is where the reader '
+        'stays', (tester) async {
+      final held = _RefusingStore(db);
+      await seedPile();
+      await pumpInbox(tester, storeAs: held);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      expect(litRow(tester), 'Homepage copy');
+      held.holdStateWrite = Completer<void>();
+
+      await press(tester, LogicalKeyboardKey.keyE);
+      await tester.tap(find.descendant(
+        of: find.byType(ConversationListPane),
+        matching: find.text('Vendor quote'),
+      ));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      expect(litRow(tester), 'Vendor quote');
+
+      held.holdStateWrite!.complete();
+      await settleQueues(tester);
+      await tester.pump();
+
+      // Not the computed landing (Invoice 4471): the click came after the
+      // press, and it is the reader's.
+      expect(litRow(tester), 'Vendor quote');
+      expect(rowTitles(tester), ['Invoice 4471', 'Vendor quote']);
+      await settleQueues(tester);
+    });
+  });
+
+  group('review fixes', () {
+    /// Types into the open thread's docked composer and presses its Send.
+    Future<void> composerSend(WidgetTester tester, String body) async {
+      await tester.enterText(
+        find.descendant(
+          of: find.byType(Composer),
+          matching: find.byType(TextField),
+        ),
+        body,
+      );
+      await tester.pump();
+      await tester.tap(find.descendant(
+        of: find.byType(Composer),
+        matching: find.text('Send'),
+      ));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      await settleQueues(tester);
+    }
+
+    /// `r`, words into the in-list box, and its Send.
+    Future<void> quickReply(WidgetTester tester, String body) async {
+      await press(tester, LogicalKeyboardKey.keyR);
+      await tester.enterText(find.byKey(QuickReplyBox.fieldKey), body);
+      await tester.pump();
+      await tester.tap(find.byKey(QuickReplyBox.sendKey));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      await settleQueues(tester);
+    }
+
+    String? openThread(WidgetTester tester) {
+      final panels = tester.widgetList<ThreadDetailPanel>(
+        find.byType(ThreadDetailPanel),
+      );
+      return panels.isEmpty ? null : panels.last.conversation.subject;
+    }
+
+    Future<List<String>> doneKeys() async => [
+          for (final c in await store.loadConversations())
+            if (c.state == ConversationState.done) c.id,
+        ];
+
+    testWidgets('a create that fails says so and hands the keys back',
+        (tester) async {
+      final held = _RefusingStore(db)..refuseCreate = true;
+      await seedPile();
+      await pumpInbox(tester, storeAs: held);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await press(tester, LogicalKeyboardKey.keyL);
+
+      await tester.enterText(find.byKey(LabelPicker.fieldKey), 'Receipts');
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await settleQueues(tester);
+      await tester.pump();
+
+      expect(find.text("Couldn't save that label just now."), findsOneWidget);
+      expect(find.byKey(LabelPicker.fieldKey), findsNothing);
+      unhandled.clear();
+
+      // The strip the cursor was in is gone; the list has it now.
+      await press(tester, LogicalKeyboardKey.keyJ);
+
+      expect(unhandled, isEmpty);
+      expect(litRow(tester), 'Invoice 4471');
+      await settleQueues(tester);
+    });
+
+    testWidgets('a second e while the first is still writing is dropped',
+        (tester) async {
+      final held = _RefusingStore(db);
+      await seedPile();
+      await pumpInbox(tester, storeAs: held);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      expect(litRow(tester), 'Homepage copy');
+      held.holdStateWrite = Completer<void>();
+
+      await press(tester, LogicalKeyboardKey.keyE);
+      // A fresh press, not a repeat: `includeRepeats` has nothing to say
+      // about it, so only the one-act latch stands between it and a second
+      // mark-done of the same thread.
+      await press(tester, LogicalKeyboardKey.keyE);
+
+      held.holdStateWrite!.complete();
+      await settleQueues(tester);
+      await tester.pump();
+
+      expect(held.stateWrites, ['c1']);
+      expect(await doneKeys(), ['c1']);
+      expect(rowTitles(tester), ['Invoice 4471', 'Vendor quote']);
+      expect(litRow(tester), 'Invoice 4471');
+      await settleQueues(tester);
+    });
+
+    testWidgets('a picker apply that lands behind a running act waits its '
+        'turn rather than vanishing', (tester) async {
+      final held = _RefusingStore(db);
+      await seedPile();
+      await pumpInbox(tester, storeAs: held);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      expect(litRow(tester), 'Homepage copy');
+      await press(tester, LogicalKeyboardKey.keyE, shift: true);
+
+      // Shift+E on Homepage copy, a new word, Enter — with the create held.
+      held.holdCreate = Completer<void>();
+      await tester.enterText(find.byKey(LabelPicker.fieldKey), 'Receipts');
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      await tester.pump();
+
+      // Meanwhile the reader opens Invoice 4471 and presses e on it, and that
+      // act's write is held too, so it owns the latch when the create lands.
+      await tester.tap(find.descendant(
+        of: find.byType(ConversationListPane),
+        matching: find.text('Invoice 4471'),
+      ));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      expect(litRow(tester), 'Invoice 4471');
+      held.holdStateWrite = Completer<void>();
+      await press(tester, LogicalKeyboardKey.keyE);
+
+      held.holdCreate!.complete();
+      await tester.pump();
+      await tester.pump();
+      held.holdStateWrite!.complete();
+      await settleQueues(tester);
+      await tester.pump();
+      await tester.pump();
+
+      // Both acts happened: the e on Invoice 4471, and Homepage copy done
+      // UNDER the word minted for it.
+      expect(held.stateWrites, ['c2', 'c1']);
+      expect(await doneKeys(), unorderedEquals(['c1', 'c2']));
+      expect(
+        [for (final l in await store.labelsForConversation('email', 'c1'))
+          l.name],
+        ['Receipts'],
+      );
+      expect(rowTitles(tester), ['Vendor quote']);
+      expect(find.text('Marked done · Receipts.'), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a reply that clears the last row of the pile is counted',
+        (tester) async {
+      await store.setPref(needsYouSortKey, 'newest');
+      await store.setPref(replySendMarksDoneKey, 'true');
+      await seedThread('c1', 'Homepage copy', 'Confirm the launch date',
+          hoursAgo: 1);
+      await pumpInbox(tester, mail: _SendingMail());
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await tester.pump();
+      await tester.pump();
+      expect(litRow(tester), 'Homepage copy');
+
+      await quickReply(tester, 'Confirmed for the 14th.');
+
+      expect(find.text('Reply sent · Marked done.'), findsOneWidget);
+      expect(rowTitles(tester), isEmpty);
+      final pane = tester.widget<ConversationListPane>(
+        find.byType(ConversationListPane),
+      );
+      expect(pane.progress, (cleared: 1, total: 1));
+      await settleQueues(tester);
+    });
+
+    testWidgets('e on the last row after a reply took it off still counts',
+        (tester) async {
+      // The departed path proper: the reply (preference off) takes the only
+      // row off the pile and the reader is still on it, so `e` finds it in
+      // the snapshot with no neighbour either side to land on.
+      await store.setPref(needsYouSortKey, 'newest');
+      await seedThread('c1', 'Homepage copy', 'Confirm the launch date',
+          hoursAgo: 1);
+      await pumpInbox(tester, mail: _SendingMail());
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await tester.pump();
+      await tester.pump();
+      await quickReply(tester, 'Confirmed for the 14th.');
+      expect(rowTitles(tester), isEmpty);
+      expect(openThread(tester), 'Homepage copy');
+
+      await press(tester, LogicalKeyboardKey.keyE);
+      await settleQueues(tester);
+
+      expect(find.text('Marked done.'), findsOneWidget);
+      final pane = tester.widget<ConversationListPane>(
+        find.byType(ConversationListPane),
+      );
+      expect(pane.progress, (cleared: 1, total: 1));
+      await settleQueues(tester);
+    });
+
+    testWidgets('a panel over a replied thread does not make it forget where '
+        'it stood', (tester) async {
+      await seedPile();
+      await pumpInbox(tester, mail: _SendingMail());
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await tester.pump();
+      await tester.pump();
+      expect(litRow(tester), 'Invoice 4471');
+      await quickReply(tester, 'Signed and sent back.');
+      expect(rowTitles(tester), ['Homepage copy', 'Vendor quote']);
+
+      // The sheet goes ON the thread, which hides it from the keys without
+      // closing it — the cheap twin of a file opened from its attachment.
+      await pressQuestionMark(tester);
+      expect(find.byType(CheatSheetBody), findsOneWidget);
+      await settleQueues(tester);
+      await press(tester, LogicalKeyboardKey.escape);
+      expect(openThread(tester), 'Invoice 4471');
+
+      await press(tester, LogicalKeyboardKey.keyJ);
+
+      expect(litRow(tester), 'Vendor quote');
+      expect(openThread(tester), 'Vendor quote');
+      await settleQueues(tester);
+    });
+
+    testWidgets('a reply on a thread from Archive is marked done where it '
+        'stands, and stays open', (tester) async {
+      await store.setPref(replySendMarksDoneKey, 'true');
+      await seedPile();
+      final received = ago(4);
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'c9-m1',
+        'conversation_key': 'c9',
+        'direction': 'inbound',
+        'subject': 'Old contract',
+        'from_name': 'Dana Whitfield',
+        'from_address': 'dana@example.com',
+        'received_at': received,
+        'body_text': 'the hero paragraph',
+      });
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'c9',
+        'subject': 'Old contract',
+        'participants_json':
+            '[{"name":"Dana Whitfield","email":"dana@example.com"}]',
+        'state': 'done',
+        'last_message_at': received,
+        'last_inbound_at': received,
+      });
+      final mail = _SendingMail();
+      await pumpInbox(tester, mail: mail, section: RailSection.archive);
+      await tester.tap(find.widgetWithText(BondFilterPill, 'Done'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.text('Old contract').first);
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      expect(openThread(tester), 'Old contract');
+
+      await composerSend(tester, 'Countersigned, thanks.');
+
+      expect(mail.bodies, ['Countersigned, thanks.']);
+      expect(find.text('Reply sent · Marked done.'), findsOneWidget);
+      // No pile under it: no landing on a Needs You row, and no close.
+      expect(openThread(tester), 'Old contract');
+      expect(await doneKeys(), ['c9']);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a create that lands after l on another thread leaves that '
+        'picker open', (tester) async {
+      final held = _RefusingStore(db);
+      await seedPile();
+      await pumpInbox(tester, storeAs: held);
+      await press(tester, LogicalKeyboardKey.keyJ);
+      await press(tester, LogicalKeyboardKey.keyL);
+      held.holdCreate = Completer<void>();
+      await tester.enterText(find.byKey(LabelPicker.fieldKey), 'Receipts');
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      await tester.pump();
+
+      // The reader moves on to Invoice 4471 and asks for its picker.
+      await tester.tap(find.descendant(
+        of: find.byType(ConversationListPane),
+        matching: find.text('Invoice 4471'),
+      ));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      await press(tester, LogicalKeyboardKey.keyL);
+      expect(find.byKey(LabelPicker.fieldKey), findsOneWidget);
+
+      held.holdCreate!.complete();
+      await settleQueues(tester);
+      await tester.pump();
+
+      // Homepage copy got its word; Invoice 4471's picker is still up.
+      expect(
+        [for (final l in await store.labelsForConversation('email', 'c1'))
+          l.name],
+        ['Receipts'],
+      );
+      expect(find.byKey(LabelPicker.fieldKey), findsOneWidget);
+      await settleQueues(tester);
+    });
   });
 }

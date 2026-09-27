@@ -121,14 +121,25 @@ const Map<ShortcutActivator, Intent> triageKeys = {
   SingleActivator(LogicalKeyboardKey.arrowDown): NextThreadIntent(),
   SingleActivator(LogicalKeyboardKey.keyK): PreviousThreadIntent(),
   SingleActivator(LogicalKeyboardKey.arrowUp): PreviousThreadIntent(),
-  SingleActivator(LogicalKeyboardKey.keyE): DismissThreadIntent(),
-  SingleActivator(LogicalKeyboardKey.keyE, shift: true):
+  // The letters that DO something to a thread fire once per press: a key held
+  // a beat too long would otherwise repeat `e` down the pile, clearing rows
+  // the reader never looked at, or flip `x` on and off again. Movement, undo
+  // and the sheet keep the default — holding `j` to scroll is what a held key
+  // is for.
+  SingleActivator(LogicalKeyboardKey.keyE, includeRepeats: false):
+      DismissThreadIntent(),
+  SingleActivator(LogicalKeyboardKey.keyE, shift: true, includeRepeats: false):
       DismissWithLabelIntent(),
-  SingleActivator(LogicalKeyboardKey.keyL): LabelThreadIntent(),
-  SingleActivator(LogicalKeyboardKey.keyS): LaterThreadIntent(),
-  SingleActivator(LogicalKeyboardKey.keyR): QuickReplyIntent(),
-  SingleActivator(LogicalKeyboardKey.keyM): DropSenderIntent(),
-  SingleActivator(LogicalKeyboardKey.keyX): ToggleCheckedIntent(),
+  SingleActivator(LogicalKeyboardKey.keyL, includeRepeats: false):
+      LabelThreadIntent(),
+  SingleActivator(LogicalKeyboardKey.keyS, includeRepeats: false):
+      LaterThreadIntent(),
+  SingleActivator(LogicalKeyboardKey.keyR, includeRepeats: false):
+      QuickReplyIntent(),
+  SingleActivator(LogicalKeyboardKey.keyM, includeRepeats: false):
+      DropSenderIntent(),
+  SingleActivator(LogicalKeyboardKey.keyX, includeRepeats: false):
+      ToggleCheckedIntent(),
   // Brackets, because they already read as forward/back WITHIN a thing
   // where j/k are the things themselves — and they collide with nothing.
   SingleActivator(LogicalKeyboardKey.bracketRight): NextMentionIntent(),
@@ -360,6 +371,20 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   int _clearedThisSession = 0;
   int? _pileAtSessionStart;
 
+  /// The pile as [_triageRows] last read it WHILE the thread the keys act on
+  /// ([_triageTarget]) was in it — or while nothing was open — as (source,
+  /// key) pairs in drawn order.
+  ///
+  /// A thread can leave the pile while it is still open beside it: a sent
+  /// reply sets it waiting and clears its ask, so it is gone from Needs You
+  /// with the reader still reading it. From then on the live list no longer
+  /// says where it stood, and `j`, `k` and a reply's mark-done would have
+  /// nowhere to step from. This remembers: a read that no longer finds the
+  /// target leaves it alone, and [_stepFromDeparted] walks it to the nearest
+  /// neighbour still drawn. Cleared by [_resetPileProgress], because a
+  /// remembered place in a pile that is no longer on screen is no place.
+  List<({String source, String key})> _lastPileIds = const [];
+
   /// Ends the sit-down: the next non-empty render of whatever pile is on
   /// screen snapshots its own total. Called wherever the pile the reader is
   /// looking at CHANGES — the rail moving, a tab pick, the label lens — since
@@ -368,6 +393,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   void _resetPileProgress() {
     _clearedThisSession = 0;
     _pileAtSessionStart = null;
+    // Where a departed thread stood is a fact about the pile it left.
+    _lastPileIds = const [];
     // A selection is about the pile it was made in, and so is its picker.
     _checked.clear();
     _checkAnchor = null;
@@ -380,6 +407,24 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// already raised — which is what keeps `_dropSender`'s menu path, whose
   /// toasts fire outside the window, out of the count.
   bool _countingCleared = false;
+
+  /// True while [_triageAndAdvance] is running an act. One act at a time: a
+  /// second act starting while the first write is still out would compute
+  /// its landing from a list the first is about to move, and act on a thread
+  /// the reader has not seen yet.
+  ///
+  /// What happens to the second one depends on where it came from. A key or a
+  /// button is DROPPED: its surface is still on screen, so the reader sees
+  /// nothing happened, sees where the first act landed, and presses again. A
+  /// picker's apply, its no-label way out and a reply's mark-done are QUEUED
+  /// (`queue: true`): the strip or the box that asked has already gone, so a
+  /// drop would read as success over a thing that never happened. They wait
+  /// on [_triageIdle] and then run as if pressed at that moment.
+  bool _triaging = false;
+
+  /// Completed when the act holding [_triaging] finishes — what a queued act
+  /// waits on. A fresh one per act, so a waiter never wakes on a stale one.
+  Completer<void>? _triageIdle;
 
   /// The Find field's text, and the two objects behind it.
   ///
@@ -2398,17 +2443,87 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// Off the Needs You stop it is the same pile without the tab's lens, which is
   /// what the rail draws.
+  ///
+  /// Every read also records [_lastPileIds] — when nothing at all is open, or
+  /// when the open thread is in the list it just read. A read that no longer
+  /// finds the open thread leaves the snapshot as it was, which is how a thread
+  /// that left the pile while open still has a place to step from. "Nothing at
+  /// all" is the side stack empty and nothing in the main pane, not merely no
+  /// [_triageTarget]: a file or a Why panel pushed over a thread beside hides
+  /// the thread from [_threadBeside] without closing it, and refreshing then
+  /// would forget where that thread stood before Back brings it back. A bare field
+  /// write, no setState: [_pileAtSessionStart]'s idiom, and nothing draws it.
   List<Conversation> _triageRows(AppPrefs prefs) {
     final ranked = sortNeedsYou(
       prefs.needsYouSort,
       needsYouRows(_rows, threshold: prefs.attentionThreshold),
     );
-    return _section == RailSection.needsYou
+    final rows = _section == RailSection.needsYou
         ? needsYouLabelRows(
             _activeNeedsYouLabelId,
             needsYouTabRows(_needsYouTab, ranked),
           )
         : ranked;
+    final target = _triageTarget;
+    final nothingOpen = _side == null && _selectedId == null;
+    if ((target == null && nothingOpen) ||
+        (target != null &&
+            rows.any(
+              (c) => c.id == target.key && c.source == target.source,
+            ))) {
+      _lastPileIds = [for (final c in rows) (source: c.source, key: c.id)];
+    }
+    return rows;
+  }
+
+  /// The nearest row to [target]'s old place that is still drawn, walking
+  /// [_lastPileIds] from where [target] stood — down the pile when [forward],
+  /// up it otherwise. Null when [target] was never in the snapshot (a thread
+  /// opened from Archive, Home or a room) or when nothing on that side of it
+  /// is left in [rows].
+  ({String source, String key})? _stepFromDeparted(
+    ({String source, String key}) target,
+    List<Conversation> rows, {
+    required bool forward,
+  }) {
+    final at = _lastPileIds.indexOf(target);
+    if (at < 0) return null;
+    final drawn = {for (final c in rows) (source: c.source, key: c.id)};
+    final step = forward ? 1 : -1;
+    for (var i = at + step; i >= 0 && i < _lastPileIds.length; i += step) {
+      if (drawn.contains(_lastPileIds[i])) return _lastPileIds[i];
+    }
+    return null;
+  }
+
+  /// Where the reader lands when [target] leaves [rows], and whether [target]
+  /// counts as a row of this pile ([_countingCleared]).
+  ///
+  /// In the pile: [nextRowAfter] — the row under it, else the new last one.
+  /// Already gone from it but remembered by [_lastPileIds] (a sent reply took
+  /// it off while it was open): the same rule walked over the snapshot — the
+  /// nearest drawn row below where it stood, else the nearest above — and it
+  /// still counts, because it was a row of this pile a moment ago — even with
+  /// no drawn row left on either side to land on, which is the last row of a
+  /// pile cleared by a reply. Neither: no landing, and not counted.
+  ({({String source, String key})? landing, bool inPile}) _landingFor(
+    ({String source, String key}) target,
+    List<Conversation> rows,
+  ) {
+    if (rows.any((c) => c.id == target.key && c.source == target.source)) {
+      final nextId = nextRowAfter([for (final c in rows) c.id], target.key);
+      for (final row in rows) {
+        if (row.id != nextId) continue;
+        return (landing: (source: row.source, key: row.id), inPile: true);
+      }
+      return (landing: null, inPile: true);
+    }
+    final departed = _stepFromDeparted(target, rows, forward: true) ??
+        _stepFromDeparted(target, rows, forward: false);
+    return (
+      landing: departed,
+      inPile: departed != null || _lastPileIds.contains(target),
+    );
   }
 
   /// The thread the keys act on: whatever is open beside, else the main pane's
@@ -2438,12 +2553,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   void _moveSelection({required bool forward}) {
     final rows = _triageRows(ref.read(appPrefsProvider));
     final target = _triageTarget;
-    // A thread open from another stop — Archive, Home, a room — is not in
-    // this pile, and stepping "next" from it would teleport the reader to the
-    // top Needs You row. No target at all still starts at the top: that is a
-    // reader on the pile who has not picked a row yet.
+    // A thread that is open but not drawn steps from where it STOOD, if it
+    // stood here at all — a sent reply takes a thread off the pile while the
+    // reader is still on it, and the next row is still the next row. One
+    // opened from another stop — Archive, Home, a room — was never in this
+    // pile, and stepping "next" from it would teleport the reader to the top
+    // Needs You row, so it goes nowhere. No target at all still starts at the
+    // top: that is a reader on the pile who has not picked a row yet.
     if (target != null &&
         !rows.any((c) => c.id == target.key && c.source == target.source)) {
+      final step = _stepFromDeparted(target, rows, forward: forward);
+      if (step != null) _selectTriageRow(step.source, step.key);
       return;
     }
     final next = neighbourRow(
@@ -2473,57 +2593,81 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// [_triageTarget], but a button drawn on a panel belongs to the conversation
   /// that panel is showing — and a thread in the main pane with another one open
   /// beside it would otherwise act on the one beside.
+  ///
+  /// The landing is [_landingFor]'s: a thread that already left the pile while
+  /// open (a sent reply) lands from where it stood, and one cleared from
+  /// another stop has no landing at all — advancing would put the reader on
+  /// the top Needs You row, a teleport nobody asked for.
+  ///
+  /// One act at a time ([_triaging]): a key or button press while one is
+  /// running is dropped, and a caller whose own surface has already gone
+  /// passes [queue] to wait its turn instead — see [_triaging]. A queued act
+  /// reads its target, the pile and its landing AFTER the wait, from the list
+  /// as the act before it left it.
+  ///
+  /// And the landing yields to the reader: if the thread in front of them
+  /// changed while the act's write was out — they clicked another row — that
+  /// choice stands, and neither the landing nor the close runs over it.
   Future<void> _triageAndAdvance(
     Future<void> Function(({String source, String key}) target) act, {
     ({String source, String key})? on,
+    bool queue = false,
   }) async {
-    final target = on ?? _triageTarget;
-    if (target == null) return;
-    final rows = _triageRows(ref.read(appPrefsProvider));
-    // A thread cleared from another stop has no place in this pile to land
-    // from: advancing would put the reader on the top Needs You row, a
-    // teleport nobody asked for. No landing takes the close/clear branch.
-    final inPile =
-        rows.any((c) => c.id == target.key && c.source == target.source);
-    final nextId =
-        inPile ? nextRowAfter([for (final c in rows) c.id], target.key) : null;
-    ({String source, String key})? landing;
-    if (nextId != null) {
-      for (final row in rows) {
-        if (row.id != nextId) continue;
-        landing = (source: row.source, key: row.id);
-        break;
+    if (_triaging) {
+      if (!queue) return;
+      // A loop, not one await: every waiter wakes on the same completion and
+      // only the first to run takes the latch; the rest wait on the next act.
+      while (_triaging) {
+        await _triageIdle!.future;
       }
+      if (!mounted) return;
     }
-
-    // The window [_toast] counts in — see [_countingCleared]. Spanning the
-    // act's own awaits is the point (its toast fires inside them); the cost
-    // is that an unrelated bar landing in those few frames would be counted,
-    // which the clamp bounds and a progress line can afford.
-    _countingCleared = inPile;
+    _triaging = true;
+    final idle = _triageIdle = Completer<void>();
     try {
-      await act(target);
+      final target = on ?? _triageTarget;
+      if (target == null) return;
+      final before = _triageTarget;
+      final rows = _triageRows(ref.read(appPrefsProvider));
+      final (:landing, :inPile) = _landingFor(target, rows);
+
+      // The window [_toast] counts in — see [_countingCleared]. Spanning the
+      // act's own awaits is the point (its toast fires inside them); the cost
+      // is that an unrelated bar landing in those few frames would be counted,
+      // which the clamp bounds and a progress line can afford.
+      _countingCleared = inPile;
+      try {
+        await act(target);
+      } finally {
+        _countingCleared = false;
+      }
+      if (!mounted) return;
+      // The reader moved while the write was out: where they went wins.
+      if (_triageTarget != before) {
+        _takeTriageFocus();
+        return;
+      }
+      if (landing != null) {
+        _selectTriageRow(landing.source, landing.key);
+        return;
+      }
+      final beside = _threadBeside;
+      if (beside != null &&
+          beside.source == target.source &&
+          beside.conversationKey == target.key) {
+        _closeSide();
+      } else if (_selectedId == target.key) {
+        setState(() {
+          _clearOverlays();
+          _selectedId = null;
+          _selectedSource = null;
+        });
+      }
+      _takeTriageFocus();
     } finally {
-      _countingCleared = false;
+      _triaging = false;
+      idle.complete();
     }
-    if (!mounted) return;
-    if (landing != null) {
-      _selectTriageRow(landing.source, landing.key);
-      return;
-    }
-    final beside = _threadBeside;
-    if (beside != null &&
-        beside.source == target.source &&
-        beside.conversationKey == target.key) {
-      _closeSide();
-    } else if (_selectedId == target.key) {
-      setState(() {
-        _clearOverlays();
-        _selectedId = null;
-        _selectedSource = null;
-      });
-    }
-    _takeTriageFocus();
   }
 
   /// Dismiss: `done`, said in a bar with the way back on it.
@@ -2636,18 +2780,31 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// A label picked from the open picker, applied to the thread the request
   /// names.
   ///
-  /// Two different actions behind one chip, told apart by the request's own
-  /// flag: `Shift+E`'s picker dismisses WITH the label — one [markDone], whose
+  /// Two different actions behind one chip, told apart by [dismissAfter]:
+  /// `Shift+E`'s picker dismisses WITH the label — one [markDone], whose
   /// [MarkDoneUndo] takes back the state change and the links it created in one
   /// step, riding [_triageAndAdvance] so the label path gets the same landing
   /// and the same `z` as `e` — while `l`'s picker files the thread where it
   /// stands (keep with a label), and its undo is taking the chip back off.
+  ///
+  /// [dismissAfter] is passed, never read off the request here: every caller
+  /// reads the request's flag SYNCHRONOUSLY at the tap or the Enter, and
+  /// [_createAndApplyLabel] reaches this only after a create's await, by which
+  /// time the request is long closed — reading it then turned "mark done with
+  /// a label" into "keep with a label" whenever anything touched the request
+  /// mid-write.
+  ///
+  /// It closes the picker only when the open request is still about [target]:
+  /// a create that lands after the reader pressed `l` on another thread must
+  /// not shut the picker they just opened there. The dismiss is queued behind
+  /// any act still running ([_triaging]), since the chip or the Enter that
+  /// asked for it has already gone from the screen.
   Future<void> _applyPickedLabel(
     ({String source, String key}) target,
-    Label label,
-  ) async {
-    final dismissAfter = _labelPickerRequest?.dismissAfter ?? false;
-    _clearLabelPickerRequest();
+    Label label, {
+    required bool dismissAfter,
+  }) async {
+    _clearLabelPickerRequestFor(target);
     if (dismissAfter) {
       await _triageAndAdvance(
         (t) async {
@@ -2662,6 +2819,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           );
         },
         on: target,
+        queue: true,
       );
       return;
     }
@@ -2782,13 +2940,28 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// word goes straight onto the thread — creating without applying would make
   /// the reader say the same thing twice.
   ///
-  /// A create the store refused answers null, the provider keeps the sentence
-  /// for the picker's own error line, and nothing is dismissed on the strength
-  /// of a label that was never made.
+  /// A create the store refused answers null and nothing is dismissed on the
+  /// strength of a label that was never made. The picker is closed by then, so
+  /// the toast says why — the provider's sentence where it kept one — and the
+  /// cursor goes back to the list, since the strip it was in has unmounted and
+  /// the keys would otherwise be dead until the reader clicked something.
+  ///
+  /// The request's mode is read and the request CLOSED before the create's
+  /// await, not after it: the picker the reader typed into must not stay open
+  /// and live across the write, where a second Enter would apply its top chip
+  /// and an Escape or `l` would rewrite the mode this Enter was pressed in.
+  /// The future is handed back to the picker, which holds itself busy until it
+  /// settles, and the list takes the cursor a frame later — the strip it was in
+  /// has gone, and the keys stay live while the write is out.
   Future<void> _createAndApplyLabel(
     ({String source, String key}) target,
     String name,
   ) async {
+    final dismissAfter = _labelPickerRequest?.dismissAfter ?? false;
+    _clearLabelPickerRequest();
+    // The strip the cursor was in goes on the next frame; the list takes the
+    // cursor then, not when the write lands, so the keys are live meanwhile.
+    _takeTriageFocusSoon();
     final label = await ref.read(labelsProvider.notifier).create(name);
     if (!mounted) return;
     if (label == null) {
@@ -2796,22 +2969,38 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // such things. A field that just sits there reads as a dead Enter key.
       _toast(ref.read(labelsProvider).error ??
           "Couldn't save that label just now.");
+      _takeTriageFocusSoon();
       return;
     }
-    await _applyPickedLabel(target, label);
+    await _applyPickedLabel(target, label, dismissAfter: dismissAfter);
   }
 
   /// The dismiss-mode picker's way out with nothing on it: entry 1c says
   /// dismissing without a tag is allowed, so this is `e` with the picker's
-  /// politeness — same dismiss, same undo, same landing.
+  /// politeness — same dismiss, same undo, same landing. Queued behind a
+  /// running act rather than dropped, for [_applyPickedLabel]'s reason: the
+  /// button that asked has already gone.
   Future<void> _dismissWithoutLabel(({String source, String key}) target) {
     _clearLabelPickerRequest();
-    return _triageAndAdvance(_dismissThread, on: target);
+    return _triageAndAdvance(_dismissThread, on: target, queue: true);
   }
 
   void _clearLabelPickerRequest() {
     if (_labelPickerRequest == null) return;
     setState(() => _labelPickerRequest = null);
+  }
+
+  /// [_clearLabelPickerRequest], only when the open request names [target] —
+  /// a late apply closing a picker the reader has since opened on another
+  /// thread would close something they did not finish with.
+  void _clearLabelPickerRequestFor(({String source, String key}) target) {
+    final request = _labelPickerRequest;
+    if (request == null ||
+        request.source != target.source ||
+        request.key != target.key) {
+      return;
+    }
+    _clearLabelPickerRequest();
   }
 
   /// `r`: the in-list quick reply on the thread the keys act on. Takes the
@@ -2886,9 +3075,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       ];
 
   /// Whether the keys should act on the selection instead of on one row:
-  /// something is ticked AND drawn, on the one stop that draws boxes.
+  /// something is ticked AND drawn, on the one stop that draws boxes, AND that
+  /// overview is what the main pane is showing ([_highlightedSection]). A
+  /// thread opened in the main pane from the rail column, Settings, the
+  /// composer or the activity log hides the ticked rows, and `e` there means
+  /// the thing in front of the reader, never rows they cannot see. A thread
+  /// open BESIDE the overview hides nothing, so the selection stays live
+  /// there. The ticks themselves are kept either way: the reader can open a
+  /// thread, look, and come back to the selection they made.
   bool get _selectionActive =>
-      _section == RailSection.needsYou &&
+      _highlightedSection == RailSection.needsYou &&
       _liveChecked(_triageRows(ref.read(appPrefsProvider))).isNotEmpty;
 
   /// A box pressed, or a card Shift-clicked. A range ticks everything between
@@ -3176,8 +3372,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// the rows not already carrying the word — so Undo takes off only what this
   /// press put on — and KEEPS the selection: the reader is still holding those
   /// rows, and may well dismiss them next.
-  Future<void> _applyBulkLabel(Label label) async {
-    final dismissAfter = _bulkPickerRequest?.dismissAfter ?? false;
+  ///
+  /// [dismissAfter] is passed, read by the caller at the tap or the Enter —
+  /// [_applyPickedLabel]'s rule, for the bar's picker.
+  Future<void> _applyBulkLabel(
+    Label label, {
+    required bool dismissAfter,
+  }) async {
     _clearBulkPicker();
     if (dismissAfter) {
       await _bulkDismiss(label: label);
@@ -3226,16 +3427,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   /// Enter on a new name in the bar's picker: create it, then
-  /// [_applyBulkLabel] — [_createAndApplyLabel]'s shape.
+  /// [_applyBulkLabel] — [_createAndApplyLabel]'s shape, the mode read and the
+  /// picker closed before the create's await for the same reason, and the
+  /// cursor handed back to the list when the create is refused.
   Future<void> _createAndApplyBulkLabel(String name) async {
+    final dismissAfter = _bulkPickerRequest?.dismissAfter ?? false;
+    _clearBulkPicker();
+    _takeTriageFocusSoon();
     final label = await ref.read(labelsProvider.notifier).create(name);
     if (!mounted) return;
     if (label == null) {
       _toast(ref.read(labelsProvider).error ??
           "Couldn't save that label just now.");
+      _takeTriageFocusSoon();
       return;
     }
-    await _applyBulkLabel(label);
+    await _applyBulkLabel(label, dismissAfter: dismissAfter);
   }
 
   /// The chips on the bar's second line, seeded from the anchor (else the
@@ -3310,8 +3517,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             prompt: request.dismissAfter
                 ? 'Mark ${_threads(n)} done with a label…'
                 : 'Label ${_threads(n)}',
-            onApply: (label) => unawaited(_applyBulkLabel(label)),
-            onCreate: (name) => unawaited(_createAndApplyBulkLabel(name)),
+            onApply: (label) => unawaited(_applyBulkLabel(
+              label,
+              dismissAfter: _bulkPickerRequest?.dismissAfter ?? false,
+            )),
+            onCreate: (name) => _createAndApplyBulkLabel(name),
             onDismissWithoutLabel: request.dismissAfter
                 ? () {
                     _clearBulkPicker();
@@ -5007,11 +5217,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onApplyLabel: (label) => unawaited(_applyPickedLabel(
         (source: selected.source, key: selected.id),
         label,
+        dismissAfter: _labelPickerRequest?.dismissAfter ?? false,
       )),
-      onCreateLabel: (name) => unawaited(_createAndApplyLabel(
+      onCreateLabel: (name) => _createAndApplyLabel(
         (source: selected.source, key: selected.id),
         name,
-      )),
+      ),
       onDismissWithoutLabel: () => unawaited(
         _dismissWithoutLabel((source: selected.source, key: selected.id)),
       ),
@@ -6482,6 +6693,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// [replyTo] is a caller that already knows which message is being answered
   /// — a suggestion card, which hangs under one message and means that one.
+  ///
+  /// With `replySendMarksDone` on, a sent reply on a thread of the Needs You
+  /// pile is marked done through [_triageAndAdvance], so the reader lands on
+  /// the next row and the progress line counts it; a thread from anywhere else
+  /// is marked done in place and left open.
   Future<void> _send(DraftTarget target, String body, {String? replyTo}) async {
     // An explicit message outranks the pane's own caption: a card sends the
     // reply to the message it was drawn under, whatever the box above it was
@@ -6517,19 +6733,38 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // in-list box clear the same way. Only a real send: a copy or an
         // Outlook save is a reply that has not gone anywhere yet, and `done`
         // on its strength would clear a thread that is still the reader's.
-        if (ref.read(appPrefsProvider).replySendMarksDone) {
-          final conversations = ref.read(conversationsProvider.notifier);
-          final undo = await conversations.markDone(
-            target.source,
-            target.conversationKey,
-          );
-          if (!mounted) return;
-          _toast(
-            'Reply sent · Marked done.',
-            onUndo: undo == null
-                ? null
-                : () => unawaited(conversations.undoMarkDone(undo)),
-          );
+        final prefs = ref.read(appPrefsProvider);
+        if (prefs.replySendMarksDone) {
+          final thread = (source: target.source, key: target.conversationKey);
+          Future<void> markDone(({String source, String key}) t) async {
+            final conversations = ref.read(conversationsProvider.notifier);
+            final undo = await conversations.markDone(t.source, t.key);
+            if (!mounted) return;
+            _toast(
+              'Reply sent · Marked done.',
+              onUndo: undo == null
+                  ? null
+                  : () => unawaited(conversations.undoMarkDone(undo)),
+            );
+          }
+
+          // A thread of the pile — still drawn, or remembered where it stood
+          // after the send took it off — is cleared the way `e` clears it:
+          // [_triageAndAdvance], for the landing and the progress count. One
+          // from anywhere else (Archive, Home) is marked done where it stands
+          // and stays open, since there is no pile under it to land on and
+          // closing it on the reader would be the only thing the send did.
+          // Queued, never dropped, behind an act still running: the box that
+          // sent has already gone, and the reply is not done until it is.
+          final ofPile = _triageRows(prefs).any(
+                (c) => c.id == thread.key && c.source == thread.source,
+              ) ||
+              _lastPileIds.contains(thread);
+          if (ofPile) {
+            await _triageAndAdvance(markDone, on: thread, queue: true);
+          } else {
+            await markDone(thread);
+          }
         } else {
           _toast('Reply sent.');
         }
@@ -6967,11 +7202,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             onApplyLabel: (c, label) => unawaited(_applyPickedLabel(
               (source: c.source, key: c.id),
               label,
+              dismissAfter: _labelPickerRequest?.dismissAfter ?? false,
             )),
-            onCreateLabel: (c, name) => unawaited(_createAndApplyLabel(
+            onCreateLabel: (c, name) => _createAndApplyLabel(
               (source: c.source, key: c.id),
               name,
-            )),
+            ),
             onDismissWithoutLabel: (c) => unawaited(
               _dismissWithoutLabel((source: c.source, key: c.id)),
             ),

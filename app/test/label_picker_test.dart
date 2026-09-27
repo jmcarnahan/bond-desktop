@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:bond_inbox/models/label_models.dart';
 import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/chips.dart';
@@ -30,6 +32,7 @@ void main() {
     bool withoutLabel = true,
     String prompt = 'Mark done with a label…',
     Set<String> appliedIds = const {},
+    FutureOr<void> Function(String name)? onCreate,
   }) async {
     await tester.binding.setSurfaceSize(const Size(600, 500));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -39,7 +42,7 @@ void main() {
           labels: labels,
           prompt: prompt,
           onApply: applied.add,
-          onCreate: created.add,
+          onCreate: onCreate ?? created.add,
           onDismissWithoutLabel: withoutLabel ? () => dismissedWithout++ : null,
           onClose: () => closed++,
           appliedIds: appliedIds,
@@ -252,5 +255,132 @@ void main() {
 
       expect(applied, [fyi]);
     });
+  });
+
+  group('one create at a time', () {
+    testWidgets('while the host is still writing, every way out is refused, '
+        'and the strip comes back once it lands', (tester) async {
+      final hold = Completer<void>();
+      await pump(tester, labels: [fyi], onCreate: (name) {
+        created.add(name);
+        return hold.future;
+      });
+
+      await type(tester, 'Receipts');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      // A second Enter on the box the first one cleared would apply the top
+      // chip; Escape, the ✕, a chip and the no-label button would each end
+      // the strip on a mode the host has already acted on.
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pump();
+      await tester.tap(find.byKey(LabelPicker.keyFor(fyi)));
+      await tester.pump();
+      await tester.tap(find.byKey(LabelPicker.noLabelKey));
+      await tester.pump();
+
+      expect(created, ['Receipts']);
+      expect(applied, isEmpty);
+      expect(closed, 0);
+      expect(dismissedWithout, 0);
+
+      hold.complete();
+      await tester.pump();
+      await type(tester, 'fyi');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+
+      expect(applied.map((l) => l.id), ['fyi']);
+    });
+  });
+
+  group('the Create chip', () {
+    testWidgets('sits beside a partial match, and a tap mints the typed word',
+        (tester) async {
+      await pump(tester, labels: [vendor]);
+
+      await type(tester, 'Vendor');
+
+      // Enter still means the top match; the chip is the other answer.
+      expect(hint(tester), "Enter — apply 'Vendor outreach'");
+      expect(find.byKey(LabelPicker.createChipKey), findsOneWidget);
+      expect(find.text('Create "Vendor"'), findsOneWidget);
+
+      await tester.tap(find.byKey(LabelPicker.createChipKey));
+      await tester.pump();
+
+      expect(created, ['Vendor']);
+      expect(applied, isEmpty);
+    });
+
+    testWidgets('is drawn with no match at all, as Enter\'s mouse twin',
+        (tester) async {
+      await pump(tester, labels: [fyi]);
+
+      await type(tester, 'Receipts');
+
+      expect(find.text('Create "Receipts"'), findsOneWidget);
+      // Its right end: the box's selection handle sits over the middle of a
+      // chip drawn straight under a short word.
+      final chip = tester.getRect(find.byKey(LabelPicker.createChipKey));
+      await tester.tapAt(chip.centerRight - const Offset(6, 0));
+      await tester.pump();
+      expect(created, ['Receipts']);
+    });
+
+    testWidgets('is not offered for a word that already exists',
+        (tester) async {
+      await pump(tester, labels: [fyi]);
+
+      await type(tester, 'fyi only');
+
+      expect(find.byKey(LabelPicker.createChipKey), findsNothing);
+    });
+  });
+
+  testWidgets('the word typed exactly outranks a more used one containing it',
+      (tester) async {
+    final team = _label('fyi-team', 'fyi-team');
+    final exact = _label('fyi-exact', 'fyi');
+    // The host's order says fyi-team is used more.
+    await pump(tester, labels: [team, exact]);
+
+    await type(tester, 'FYI');
+
+    final chips = tester
+        .widgetList<BondChip>(find.descendant(
+          of: find.byKey(LabelPicker.chipRowKey),
+          matching: find.byType(BondChip),
+        ))
+        .map((chip) => chip.label)
+        .toList();
+    expect(chips, ['fyi', 'fyi-team']);
+    expect(hint(tester), "Enter — apply 'fyi'");
+
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+
+    expect(applied.map((l) => l.id), ['fyi-exact']);
+  });
+
+  testWidgets('a quote mark is refused on the hint line, and Enter does '
+      'nothing', (tester) async {
+    await pump(tester, labels: [fyi]);
+
+    await type(tester, 'Big "deal"');
+
+    expect(hint(tester), "A label can't contain a quote mark.");
+    expect(find.byKey(LabelPicker.createChipKey), findsNothing);
+
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+
+    expect(created, isEmpty);
+    expect(applied, isEmpty);
+    expect(dismissedWithout, 0);
   });
 }

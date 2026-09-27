@@ -2,6 +2,7 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/home_models.dart';
 import 'package:bond_inbox/models/home_sort.dart';
+import 'package:bond_inbox/widgets/app_rail.dart' show isNeedsYou, needsYouRows;
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -248,6 +249,62 @@ void main() {
 
       expect(metrics.needsYou, 1);
       expect(rows.map((r) => r.sourceMessageId), ['mine']);
+    });
+
+    test('the verdict read is the newest KEPT inbound, on the rail, the tile '
+        'and the filter alike', () async {
+      // A: judged no once, then a newer message the gate kept and nobody has
+      // judged yet — the no is about an older message, so the thread stays.
+      await seed('a-old',
+          conversationKey: 'a',
+          receivedAt: '2026-09-01T09:00:00Z',
+          threadState: 'needs_reply');
+      await seed('a-new',
+          conversationKey: 'a',
+          receivedAt: '2026-09-01T10:00:00Z',
+          threadState: 'needs_reply');
+      // B: judged no, then a newer message the gate threw out. The newest
+      // message the app KEPT is still the judged no, so the thread goes.
+      await seed('b-old',
+          conversationKey: 'b',
+          receivedAt: '2026-09-01T09:00:00Z',
+          threadState: 'needs_reply');
+      await seed('b-new',
+          conversationKey: 'b',
+          receivedAt: '2026-09-01T10:00:00Z',
+          triageStatus: 'skipped',
+          gateReason: 'newsletter',
+          threadState: 'needs_reply');
+      await db.customUpdate(
+        'UPDATE messages SET needs_you_verdict = 0 '
+        "WHERE source_message_id IN ('a-old', 'b-old')",
+      );
+
+      // The rail's read: `loadConversations`' `nk` row and `isNeedsYou`.
+      final threads = {
+        for (final c in await store.loadConversations()) c.id: c,
+      };
+      expect(threads['a']!.latestNeedsYouVerdict, isNull);
+      expect(threads['b']!.latestNeedsYouVerdict, isFalse);
+      expect(isNeedsYou(threads['a']!), isTrue);
+      expect(isNeedsYou(threads['b']!), isFalse);
+      expect(
+        [for (final c in needsYouRows(threads.values.toList())) c.id],
+        ['a'],
+      );
+
+      // The tile and the filter: `_liveNeedsYouThread`, the same row.
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+      final rows = await store.pageHomeFeed(
+        filter: HomeFilter.needsYou,
+        sinceIso: '2026-09-01T00:00:00Z',
+      );
+      expect(metrics.needsYou, 1);
+      expect(rows.map((r) => r.sourceMessageId), ['a-new']);
     });
 
     test('the veto one-shot clears chips a judged no no longer earns',

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show HardwareKeyboard;
 
@@ -127,8 +129,10 @@ class ConversationListPane extends StatelessWidget {
   final void Function(Conversation conversation, Label label)? onApplyLabel;
 
   /// A name nothing matched was typed for that row; the host creates it and
-  /// applies what comes back.
-  final void Function(Conversation conversation, String name)? onCreateLabel;
+  /// applies what comes back. A future handed back holds the picker busy until
+  /// it settles — see [LabelPicker.onCreate].
+  final FutureOr<void> Function(Conversation conversation, String name)?
+      onCreateLabel;
 
   /// Dismiss that row with nothing on it.
   final void Function(Conversation conversation)? onDismissWithoutLabel;

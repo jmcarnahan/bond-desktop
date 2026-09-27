@@ -152,6 +152,18 @@ void main() {
     expect(notifier.state.labels, hasLength(1));
   });
 
+  test('a quote-marked name is refused with the store\'s own sentence',
+      () async {
+    final notifier = LabelsNotifier(store);
+    await notifier.load();
+
+    expect(await notifier.create('Big "deal"'), isNull);
+    // The host's toast reads this, so the reader learns why rather than a
+    // generic "couldn't save".
+    expect(notifier.state.error, "A label can't contain a quote mark.");
+    expect(await store.listLabels(), isEmpty);
+  });
+
   test('a blank name is not a label', () async {
     final notifier = LabelsNotifier(store);
 

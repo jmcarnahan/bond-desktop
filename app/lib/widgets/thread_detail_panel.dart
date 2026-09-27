@@ -306,8 +306,9 @@ class ThreadDetailPanel extends StatefulWidget {
   final void Function(Label label)? onApplyLabel;
 
   /// A name nothing matched was typed. The host creates it (idempotent on the
-  /// trimmed name) and applies what comes back.
-  final void Function(String name)? onCreateLabel;
+  /// trimmed name) and applies what comes back; a future handed back holds the
+  /// picker busy until it settles — see [LabelPicker.onCreate].
+  final FutureOr<void> Function(String name)? onCreateLabel;
 
   /// Dismiss with nothing on it. Offered only while [labelPicker] is
   /// [LabelPickerMode.dismiss] — there is nothing to dismiss on the label-only

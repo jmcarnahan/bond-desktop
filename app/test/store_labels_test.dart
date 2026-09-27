@@ -137,6 +137,20 @@ void main() {
       expect(await store.listLabels(), hasLength(1));
       expect((await store.listLabels()).single.id, label.id);
     });
+
+    test('refuses a quote mark, and writes nothing', () async {
+      // `label:` quotes a spaced name with `"`, so a name carrying one could
+      // never be written back as a filter that finds it.
+      await expectLater(
+        store.createLabel('Big "deal"'),
+        throwsA(isA<StateError>().having(
+          (e) => e.message,
+          'message',
+          "A label can't contain a quote mark.",
+        )),
+      );
+      expect(await store.listLabels(), isEmpty);
+    });
   });
 
   group('renameLabel', () {
@@ -184,6 +198,21 @@ void main() {
 
       expect((await rowOf(label.id))['name'], 'Waiting on legal');
       expect((await rowOf(label.id))['name_key'], 'waiting on legal');
+    });
+
+    test('refuses a quote mark, and leaves the name', () async {
+      final label = await store.createLabel('Later');
+
+      await expectLater(
+        store.renameLabel(label.id, 'Big "deal"'),
+        throwsA(isA<StateError>().having(
+          (e) => e.message,
+          'message',
+          "A label can't contain a quote mark.",
+        )),
+      );
+      expect((await rowOf(label.id))['name'], 'Later');
+      expect((await rowOf(label.id))['name_key'], 'later');
     });
   });
 

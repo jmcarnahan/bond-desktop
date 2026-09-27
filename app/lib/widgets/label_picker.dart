@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -45,7 +47,22 @@ extension LabelPickerModePrompt on LabelPickerMode {
 /// matches, it creates that label and applies it; with an empty box on the
 /// dismiss path, it dismisses with no label at all. The affordance IS the
 /// documentation: nobody reads a legend, and everybody reads the line that says
-/// `Enter — create 'Vendor outreach'`.
+/// `Enter — create 'Vendor outreach'`. A typed name that is only PART of an
+/// existing word still gets a way to mint itself: a trailing `Create "…"` chip
+/// after the matches, the mouse's answer to "I meant a new word, not that
+/// one". A name with a quote mark in it is refused rather than created — the
+/// store would refuse it anyway, and the hint line says so before Enter does.
+///
+/// **One create at a time.** A create hands the host a future; until it
+/// settles the strip is busy and every way out of it — Enter, a chip, Escape,
+/// the ✕, the no-label button — does nothing. The host has already read the
+/// mode it was asked in and closed its request by then, so a second Enter
+/// landing on the top chip or an Escape turning "mark done with a label" into
+/// "keep with a label" mid-write is exactly what the guard is there to stop.
+/// Every host in the app closes its request synchronously, before the create's
+/// await, so the strip is gone a frame later; [_LabelPickerState._busy] is the
+/// backstop for the same frame and for a host that keeps the strip mounted —
+/// it is not a reason to drop the host-side close.
 ///
 /// A widget with no providers and no store in it: the labels arrive ordered (the
 /// host reads `use_count DESC, last_used_at DESC`), and applying, creating and
@@ -54,9 +71,11 @@ extension LabelPickerModePrompt on LabelPickerMode {
 /// outside and an apply collapse it.
 class LabelPicker extends StatefulWidget {
   /// The owner's vocabulary, ALREADY in the order the chips should read: most
-  /// used first, most recently used breaking the tie. This widget never sorts —
-  /// the order is a fact about the store, and a second opinion here would drift
-  /// from the one the rest of the app shows.
+  /// used first, most recently used breaking the tie. This widget never sorts,
+  /// except that the word typed EXACTLY is first — the order is a fact about
+  /// the store, and a second opinion here would drift from the one the rest of
+  /// the app shows, but a reader who typed `fyi` in full means `fyi`, not the
+  /// more used `fyi-team` that merely contains it.
   final List<Label> labels;
 
   /// Applies an existing label — a chip tap, or Enter on the top match.
@@ -65,7 +84,11 @@ class LabelPicker extends StatefulWidget {
   /// Creates the typed name and applies it, trimmed. One callback rather than
   /// two because the reader pressed Enter once: the host calls `createLabel`
   /// (idempotent on the trimmed, lowercased name) and applies what comes back.
-  final void Function(String name) onCreate;
+  ///
+  /// A host that hands back a [Future] holds the strip busy until it settles
+  /// (see the class doc's one-create rule); a plain `void` callback leaves the
+  /// strip live, which is what a host with nothing to wait on wants.
+  final FutureOr<void> Function(String name) onCreate;
 
   /// Dismisses with no label. Null takes the affordance away AND takes the
   /// meaning off an empty-box Enter — which is what the label-only mount wants,
@@ -119,6 +142,10 @@ class LabelPicker extends StatefulWidget {
   /// reader was aiming at.
   static Key keyFor(Label label) => ValueKey('label-picker-chip-${label.id}');
 
+  /// The trailing `Create "…"` chip: drawn after the matches whenever the typed
+  /// name is not already a word and could be one.
+  static const Key createChipKey = ValueKey('label-picker-create');
+
   /// How many chips the row shows. A cap rather than a scroll: the keyboard
   /// flow is the point, and a reader with more words than this narrows them by
   /// typing instead of by hunting.
@@ -135,6 +162,13 @@ class _LabelPickerState extends State<LabelPicker> {
   final TextEditingController _controller = TextEditingController();
   final FocusNode _focus = FocusNode();
 
+  /// True while a create the host handed back as a future is still in flight.
+  /// Every way out of the strip reads it and does nothing meanwhile — see the
+  /// class doc's one-create rule. Local rather than the host's, because the
+  /// host has already closed its request by the time the write is running and
+  /// so has nothing left to hold.
+  bool _busy = false;
+
   @override
   void dispose() {
     _controller.dispose();
@@ -145,15 +179,27 @@ class _LabelPickerState extends State<LabelPicker> {
   String get _needle => _controller.text.trim();
 
   /// Case-insensitive substring on the name, in the order the host handed them
-  /// over, capped.
+  /// over, capped — except that a name equal to the needle (case-insensitive)
+  /// moves to the front BEFORE the cap, so the word typed in full is the one
+  /// Enter applies and is never the chip the cap cut off.
   List<Label> get _filtered {
     final needle = _needle.toLowerCase();
-    final matches = needle.isEmpty
-        ? widget.labels
-        : [
-            for (final label in widget.labels)
-              if (label.name.toLowerCase().contains(needle)) label,
-          ];
+    final List<Label> matches;
+    if (needle.isEmpty) {
+      matches = widget.labels;
+    } else {
+      final exact = <Label>[];
+      final rest = <Label>[];
+      for (final label in widget.labels) {
+        final name = label.name.toLowerCase();
+        if (name == needle) {
+          exact.add(label);
+        } else if (name.contains(needle)) {
+          rest.add(label);
+        }
+      }
+      matches = [...exact, ...rest];
+    }
     return matches.length <= LabelPicker.visibleChips
         ? matches
         : matches.sublist(0, LabelPicker.visibleChips);
@@ -170,33 +216,78 @@ class _LabelPickerState extends State<LabelPicker> {
     return n;
   }
 
+  /// Whether the typed name could be minted: something typed, no quote mark
+  /// in it (the store refuses one), and not already a word — a create of an
+  /// existing name would only re-apply it.
+  bool get _creatable {
+    final needle = _needle;
+    if (needle.isEmpty || needle.contains('"')) return false;
+    final lower = needle.toLowerCase();
+    return !widget.labels.any((l) => l.name.toLowerCase() == lower);
+  }
+
   /// What Enter means right now — the one rule, read by both the hint line and
-  /// the submit handler so the two can never disagree.
+  /// the submit handler so the two can never disagree. A quote-marked name
+  /// nothing matches is refused here, so the hint says why before the store
+  /// would.
   _EnterMeaning get _enter {
     final filtered = _filtered;
     if (filtered.isNotEmpty) return _EnterMeaning.apply(filtered.first);
+    if (_needle.contains('"')) return const _EnterMeaning.refused();
     if (_needle.isNotEmpty) return _EnterMeaning.create(_needle);
     if (widget.onDismissWithoutLabel != null) return const _EnterMeaning.none();
     return const _EnterMeaning.inert();
   }
 
+  /// Enter. Inert while a create is in flight — see [_busy].
   void _submit() {
+    if (_busy) return;
     switch (_enter) {
       case _Apply(label: final label):
         _apply(label);
       case _Create(name: final name):
-        _controller.clear();
-        widget.onCreate(name);
+        _create(name);
       case _NoLabel():
         widget.onDismissWithoutLabel?.call();
+      case _Refused():
       case _Inert():
         break;
     }
   }
 
   void _apply(Label label) {
+    if (_busy) return;
     _controller.clear();
     widget.onApply(label);
+  }
+
+  /// The one create path, for Enter's Create meaning and the trailing chip
+  /// alike: clears the box, hands the name over, and holds the strip busy
+  /// until a future the host returned settles.
+  void _create(String name) {
+    if (_busy) return;
+    _controller.clear();
+    final pending = widget.onCreate(name);
+    if (pending is Future) {
+      setState(() => _busy = true);
+      // `.ignore()` on the derived future: it re-throws a host error nobody
+      // else listens to, and the host owns saying what went wrong.
+      pending.whenComplete(() {
+        if (mounted) setState(() => _busy = false);
+      }).ignore();
+    }
+  }
+
+  /// Escape and the ✕, refused mid-create for [_busy]'s reason.
+  void _close() {
+    if (_busy) return;
+    widget.onClose();
+  }
+
+  /// The no-label button, refused mid-create for [_busy]'s reason.
+  void _dismissWithoutLabel() {
+    if (_busy) return;
+    widget.onDismissWithoutLabel?.call();
   }
 
   @override
@@ -204,13 +295,15 @@ class _LabelPickerState extends State<LabelPicker> {
     final filtered = _filtered;
     final hidden = _matchCount - filtered.length;
     final dismiss = widget.onDismissWithoutLabel;
+    final needle = _needle;
+    final creatable = _creatable;
 
     // Escape is bound HERE rather than on the screen, on `FindField`'s
     // precedent: it only fires while the strip holds focus, which is where the
     // hand that just typed already is.
     return CallbackShortcuts(
       bindings: {
-        const SingleActivator(LogicalKeyboardKey.escape): widget.onClose,
+        const SingleActivator(LogicalKeyboardKey.escape): _close,
       },
       child: Container(
         padding: const EdgeInsets.all(BondSpacing.s12),
@@ -227,7 +320,7 @@ class _LabelPickerState extends State<LabelPicker> {
               children: [
                 Expanded(child: Text(widget.prompt, style: BondType.label)),
                 IconButton(
-                  onPressed: widget.onClose,
+                  onPressed: _close,
                   icon: const Icon(Icons.close, size: 16),
                   tooltip: 'Close',
                   visualDensity: VisualDensity.compact,
@@ -253,7 +346,7 @@ class _LabelPickerState extends State<LabelPicker> {
                 hintText: 'Type to filter, or a new name',
               ),
             ),
-            if (filtered.isNotEmpty) ...[
+            if (filtered.isNotEmpty || creatable) ...[
               const SizedBox(height: BondSpacing.s8),
               Wrap(
                 key: LabelPicker.chipRowKey,
@@ -289,6 +382,22 @@ class _LabelPickerState extends State<LabelPicker> {
                       '+$hidden more — keep typing',
                       style: BondType.caption,
                     ),
+                  // The mouse twin of Enter's Create meaning — and, beside
+                  // matches, the only way to mint a word that is part of one
+                  // already there, since Enter applies the top match then.
+                  if (creatable)
+                    Material(
+                      key: LabelPicker.createChipKey,
+                      type: MaterialType.transparency,
+                      child: InkWell(
+                        onTap: () => _create(needle),
+                        borderRadius: BondRadii.fullAll,
+                        child: BondChip.semantic(
+                          'Create "$needle"',
+                          labelToneOf(null),
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ],
@@ -304,7 +413,7 @@ class _LabelPickerState extends State<LabelPicker> {
                 alignment: Alignment.centerLeft,
                 child: TextButton(
                   key: LabelPicker.noLabelKey,
-                  onPressed: dismiss,
+                  onPressed: _dismissWithoutLabel,
                   style: TextButton.styleFrom(
                     padding: const EdgeInsets.symmetric(
                       horizontal: BondSpacing.s8,
@@ -340,6 +449,7 @@ class _LabelPickerState extends State<LabelPicker> {
         _Apply(label: final label) => "Enter — apply '${label.name}'",
         _Create(name: final name) => "Enter — create '$name'",
         _NoLabel() => 'Enter — mark done with no label',
+        _Refused() => "A label can't contain a quote mark.",
         _Inert() => 'Type a name and press Enter to create it',
       };
 }
@@ -355,6 +465,10 @@ sealed class _EnterMeaning {
 
   /// Dismiss with nothing on it.
   const factory _EnterMeaning.none() = _NoLabel;
+
+  /// A name with a quote mark in it and nothing matching: not a word the store
+  /// will keep, so Enter does nothing and the hint says why.
+  const factory _EnterMeaning.refused() = _Refused;
 
   /// Nothing typed and nowhere to go: an empty vocabulary on the label-only
   /// path.
@@ -373,6 +487,10 @@ class _Create extends _EnterMeaning {
 
 class _NoLabel extends _EnterMeaning {
   const _NoLabel();
+}
+
+class _Refused extends _EnterMeaning {
+  const _Refused();
 }
 
 class _Inert extends _EnterMeaning {

@@ -11,11 +11,13 @@ import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/select_similar.dart' show SimilarScope;
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
-import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
+import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
 import 'package:bond_inbox/widgets/bulk_action_bar.dart';
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/widgets/find_field.dart';
+import 'package:bond_inbox/widgets/icon_rail.dart' show IconRail;
 import 'package:bond_inbox/widgets/label_picker.dart';
+import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -295,7 +297,13 @@ void main() {
     await tester.tap(find.text('Undo'));
     await settleQueues(tester);
 
-    expect(rowTitles(tester), hasLength(5));
+    expect(rowTitles(tester), [
+      'Homepage copy',
+      'Invoice 4471',
+      'Vendor quote',
+      'Offsite agenda',
+      'Parking passes',
+    ]);
     expect(find.byKey(ConversationListPane.progressKey), findsNothing);
     expect(find.text('3 selected'), findsOneWidget);
     // Each row back where it stood, not a re-derived guess.
@@ -357,7 +365,13 @@ void main() {
     await tester.tap(find.text('Undo'));
     await settleQueues(tester);
 
-    expect(rowTitles(tester), hasLength(5));
+    expect(rowTitles(tester), [
+      'Homepage copy',
+      'Invoice 4471',
+      'Vendor quote',
+      'Offsite agenda',
+      'Parking passes',
+    ]);
     expect(find.text('2 selected'), findsOneWidget);
     expect(find.byKey(ConversationListPane.progressKey), findsNothing);
     await settleQueues(tester);
@@ -420,7 +434,13 @@ void main() {
 
     await press(tester, LogicalKeyboardKey.keyZ);
     await settleQueues(tester);
-    expect(rowTitles(tester), hasLength(5));
+    expect(rowTitles(tester), [
+      'Homepage copy',
+      'Invoice 4471',
+      'Vendor quote',
+      'Offsite agenda',
+      'Parking passes',
+    ]);
     expect(find.text('3 selected'), findsOneWidget);
     await settleQueues(tester);
   });
@@ -601,7 +621,12 @@ void main() {
 
     expect(await store.getSenderPref('dana@example.com'), isNull);
     expect(await store.getSenderPref('lee@example.net'), 'keep');
-    expect(rowTitles(tester), hasLength(4));
+    expect(rowTitles(tester), [
+      'Homepage copy',
+      'Invoice 4471',
+      'Vendor quote',
+      'Offsite agenda',
+    ]);
     await settleQueues(tester);
   });
 
@@ -649,5 +674,100 @@ void main() {
     expect(find.text('1 selected'), findsOneWidget);
     expect(tickedTitles(tester), ['Homepage copy']);
     await settleQueues(tester);
+  });
+
+  group('the bulk keys act only on the pile in view', () {
+    /// Which threads the store holds as done, by key.
+    Future<List<String>> doneKeys() async => [
+          for (final c in await store.loadConversations())
+            if (c.state == ConversationState.done) c.id,
+        ];
+
+    testWidgets('a thread opened in the main pane is what e acts on, and the '
+        'ticks wait for the overview', (tester) async {
+      await seedPile();
+      await pumpInbox(tester);
+      await settleQueues(tester);
+      await tickFromTop(tester, 2);
+      expect(tickedTitles(tester), ['Homepage copy', 'Invoice 4471']);
+
+      // The rail column's row opens the thread in MAIN, hiding the overview
+      // and its ticked rows.
+      await tester.tap(find.descendant(
+        of: find.byType(AppRail),
+        matching: find.textContaining('Answer Vendor quote'),
+      ));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      expect(
+        tester
+            .widget<ThreadDetailPanel>(find.byType(ThreadDetailPanel))
+            .conversation
+            .subject,
+        'Vendor quote',
+      );
+
+      await press(tester, LogicalKeyboardKey.keyE);
+      await settleQueues(tester);
+
+      // The thread in front of the reader, not the two they cannot see.
+      expect(find.text('Marked done.'), findsOneWidget);
+      expect(find.text('Marked done: 2 threads.'), findsNothing);
+      expect(await doneKeys(), ['c3']);
+
+      // Back on the overview, the selection they made is still made.
+      await tester.tap(find.byTooltip('Back'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      expect(rowTitles(tester), [
+        'Homepage copy',
+        'Invoice 4471',
+        'Offsite agenda',
+        'Parking passes',
+      ]);
+      expect(find.text('2 selected'), findsOneWidget);
+      expect(tickedTitles(tester), ['Homepage copy', 'Invoice 4471']);
+      await settleQueues(tester);
+    });
+
+    testWidgets('e with Settings showing marks no ticked row done',
+        (tester) async {
+      await seedPile();
+      await pumpInbox(tester);
+      await settleQueues(tester);
+      await tickFromTop(tester, 2);
+      expect(find.text('2 selected'), findsOneWidget);
+
+      await tester.tap(find.byKey(IconRail.accountMenuKey));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.byKey(IconRail.settingsItemKey));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(ConversationListPane), findsNothing);
+
+      await press(tester, LogicalKeyboardKey.keyE);
+      await settleQueues(tester);
+
+      expect(find.text('Marked done: 2 threads.'), findsNothing);
+      expect(await doneKeys(), isEmpty);
+
+      await tester.tap(find.byTooltip('Back'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      expect(rowTitles(tester), [
+        'Homepage copy',
+        'Invoice 4471',
+        'Vendor quote',
+        'Offsite agenda',
+        'Parking passes',
+      ]);
+      expect(find.text('2 selected'), findsOneWidget);
+      expect(tickedTitles(tester), ['Homepage copy', 'Invoice 4471']);
+      await settleQueues(tester);
+    });
   });
 }

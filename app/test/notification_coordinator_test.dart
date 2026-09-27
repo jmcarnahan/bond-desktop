@@ -451,17 +451,26 @@ void main() {
       // one's triage spent its attempts and ended in `error`, so the ask
       // sitting on the thread is somebody else's — and counting it would
       // announce THIS message while quoting THAT one.
+      //
+      // Unjudged, and walked to the deadline, on the CTA test's shape above: a
+      // judged no would veto before the CTA rule is ever read, and this test
+      // would pass with that rule deleted.
       await seedCandidate(
         triageStatus: 'error',
         triageVerdict: false,
         ctaText: 'Send the appraisal',
-        needsYouVerdict: false,
+        needsYouVerdict: null,
+        storylineState: 'pending',
       );
       await sweep();
+      now = armedAt.add(const Duration(minutes: 7));
+      await sweep();
 
+      // Settled on the deadline, so `deadline` is the reason either way; the
+      // state is what says the CTA did not count.
       final row = await notifyRow('m-1');
       expect(row['state'], 'suppressed');
-      expect(row['reason'], 'not_worthy');
+      expect(row['reason'], 'deadline');
       expect(emitted, isEmpty);
     });
 
@@ -469,17 +478,25 @@ void main() {
       // NULL means no v2 pass has judged this message, which is NOT a decided
       // "no reply expected" — but it is not a "yes" either. The score is well
       // over the threshold here, so the NULL is the only thing that can be
-      // keeping this quiet.
+      // keeping this quiet. The needs-you verdict is left unjudged too, and
+      // the candidate walked to its deadline: a judged no would veto first
+      // and hide whether the NULL rule holds at all.
       await seedCandidate(
         triageVerdict: false,
         attentionScore: 0.9,
-        needsYouVerdict: false,
+        needsYouVerdict: null,
+        storylineState: 'pending',
       );
       final stored = await store.getMessageRow('email', 'm-1');
       expect(stored!['reply_expected'], isNull);
 
       await sweep();
-      expect(await notifyRow('m-1'), containsPair('reason', 'not_worthy'));
+      now = armedAt.add(const Duration(minutes: 7));
+      await sweep();
+      // A deadline settle, whose reason is `deadline` whatever it decides:
+      // the state is the verdict.
+      expect(await notifyRow('m-1'), containsPair('state', 'suppressed'));
+      expect(await notifyRow('m-1'), containsPair('reason', 'deadline'));
       expect(emitted, isEmpty);
     });
 

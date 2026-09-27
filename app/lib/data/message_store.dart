@@ -4965,7 +4965,16 @@ SELECT conversation_key FROM (
   ///
   /// [tone] is a `BondTone` name or null for neutral, and an existing label's
   /// tone is left alone: the colour belongs to the label, not to this press.
+  ///
+  /// Throws a [StateError] for a name with a quote mark in it, BEFORE any read
+  /// or write — ahead of the idempotent lookup too. The label facet in Find
+  /// quotes a spaced name with `"`, so a name carrying one could never be
+  /// written back as a filter that finds it; the picker refuses the same name
+  /// on its own hint line, and this is the rule it mirrors.
   Future<Label> createLabel(String name, {String? tone}) async {
+    if (name.trim().contains('"')) {
+      throw StateError("A label can't contain a quote mark.");
+    }
     final key = labelNameKey(name);
     final existing = await db
         .customSelect(
@@ -5000,7 +5009,14 @@ SELECT conversation_key FROM (
   /// vocabularies, and doing that silently would move threads the owner never
   /// mentioned. Re-spelling a label as itself (`fyi only` → `FYI Only`) is not
   /// a collision and goes through.
+  ///
+  /// A new name with a quote mark in it is refused the same way, before the
+  /// clash read, for [createLabel]'s reason: `label:` could never quote it
+  /// back.
   Future<void> renameLabel(String id, String newName) async {
+    if (newName.trim().contains('"')) {
+      throw StateError("A label can't contain a quote mark.");
+    }
     final key = labelNameKey(newName);
     final clash = await db
         .customSelect(

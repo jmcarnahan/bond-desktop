@@ -112,13 +112,18 @@ class LabelsNotifier extends StateNotifier<LabelsState> {
   ///
   /// Idempotent in the store, which is what the picker's Enter key needs: a
   /// name that already exists — in any casing — comes back as the label that
-  /// exists rather than as an error.
+  /// exists rather than as an error. A name the store REFUSES (a quote mark)
+  /// keeps the store's own sentence in [LabelsState.error], so the host's toast
+  /// says why rather than a generic "couldn't save".
   Future<Label?> create(String name, {String? tone}) async {
     if (name.trim().isEmpty) return null;
     try {
       final label = await _store.createLabel(name, tone: tone);
       await load();
       return label;
+    } on StateError catch (e) {
+      if (mounted) state = state.copyWith(error: e.message);
+      return null;
     } catch (e) {
       debugPrint('creating a label failed: $e');
       if (!mounted) return null;
