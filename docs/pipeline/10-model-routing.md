@@ -48,13 +48,15 @@ cannot route a draft off the machine on their own. `specById` answers the
 fixed ids back (the composer's "Improved with <name>" reads it off a draft
 row).
 
-**Today, the generative model still classifies.** The decision client exists
-and is wired to a provider, but nothing calls it yet: `triage`, `needs_you` and
-`extraction` still run as generative calls, the reply decision too. Moving
-classification onto the decision pass is this round's Phase 5, and one text
-call per message is Phase 6. Until then a full-tier managed install runs
-triage, needs-you and extraction on the 27B, which is slower than the old 4B
-split; the branch is not meant to ship between those phases.
+**Classification is the decision model's (Phase 5).** The triage queue runs
+one decision pass per kept inbound message before its text call, and the
+learned gate, urgency, category, the two booleans, the needs-you verdict
+outside its band and extraction's intent/importance come from it (see
+[03-triage.md](03-triage.md) and [11-needs-you.md](11-needs-you.md)). The
+generative calls `triage` (for its text), `extraction` and the needs-you band
+still run until one text call per message lands in Phase 6; until then a
+full-tier managed install runs those on the 27B, and the branch is not meant
+to ship between those phases.
 
 Why one generative model: the decision model answers every classification
 field in one forward pass of tens of milliseconds, so what is left for a chat
@@ -597,7 +599,7 @@ membership in an order that is an argument, see
 waits for), but they now contend at one server, which queues them. On a
 managed full-tier Mac that server is the 27B with one slot, so today every
 lane's calls take turns there; that is the cost the decision pass (Phase 5)
-and the one-call-per-message task (Phase 6) remove.
+began to remove and the one-call-per-message task (Phase 6) finishes.
 
 **The newest message goes first.** A triage pump that finds work asks the fast
 gate for a yield. The fast worker reads the flag only where it is about to

@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 19;
+  int get schemaVersion => 20;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -716,6 +716,21 @@ WHERE needs_you_reason LIKE 'label_rule:%' ''');
                 await customStatement('DROP TABLE IF EXISTS label_rules');
                 if (await _columnExists('conversation_labels', 'rule_id')) {
                   await m.dropColumn(schema.conversationLabels, 'rule_id');
+                }
+              },
+              // v20 — the decision model. One DERIVED table,
+              // `message_decisions`: the nine answers the fine-tuned
+              // classifier gave each kept inbound message, written by the
+              // triage pass before its text call.
+              //
+              // Nothing to backfill: a message decided before this version was
+              // decided by the language model, and an absent row is what the
+              // needs-you handler reads as "ask the language model".
+              //
+              // Guarded like every step here (db_adoption_test replays them).
+              from19To20: (m, schema) async {
+                if (!await _tableExists('message_decisions')) {
+                  await m.createTable(schema.messageDecisions);
                 }
               },
             ),

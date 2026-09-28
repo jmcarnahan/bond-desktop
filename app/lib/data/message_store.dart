@@ -29,6 +29,13 @@ import '../services/conversation_state.dart';
 // deadline by [showableDeadline] itself, because a second spelling of "Day 1
 // is not a date" is how the repair and the live banner would disagree.
 import '../services/deadline_parse.dart';
+// The decision model's two value types, read and written by [writeDecision]
+// and [decisionFor]. `DecisionAnswers.fromJson` must be the decoder of the
+// blob `toJson` wrote, and a second copy of it here is how a stored decision
+// and its reader would come to disagree about a probability.
+import '../services/decision/decision_client.dart' show DecisionResult;
+import '../services/decision/decision_heads.dart' show DecisionAnswers;
+import '../services/decision/stored_decision.dart';
 // The third read out of `services/`, on the same licence as the two above:
 // `extract_task.dart` imports `models/` and nothing else, and [extractionFor]
 // needs `ExtractionResult.fromJson` to be the same decoder the handler wrote
@@ -2379,6 +2386,104 @@ RETURNING conversation_key
     );
   }
 
+  /// Stores the decision model's answers for one message, replacing any
+  /// earlier decision for it.
+  ///
+  /// A table of its own rather than columns on `messages`: every option's
+  /// probability rides along in `answers_json`, so a policy threshold can move
+  /// without re-running the model, and Clear AI results empties it with the
+  /// rest of [derivedTables]. The four probabilities the pipeline reads by
+  /// hand are lifted into columns so a reader takes a number, not a parse.
+  ///
+  /// [ownerKnown] says whether the state carried an owner line. It rides in
+  /// `answers_json` under `owner_known` — not one of the nine field names,
+  /// and not a Map, so `DecisionAnswers.fromJson` passes over it — because
+  /// the needs-you head was trained with that line and an ownerless row's
+  /// needs-you probability is not to be trusted.
+  Future<void> writeDecision(
+    String source,
+    String sourceMessageId,
+    DecisionResult result, {
+    required String qhash,
+    required bool ownerKnown,
+  }) async {
+    final a = result.answers;
+    double? pOf(String field, String option) =>
+        a.fields.containsKey(field) ? a.p(field, option) : null;
+    await db.customUpdate(
+      'INSERT INTO message_decisions (source, source_message_id, model, '
+      'qhash, answers_json, gate_p, needs_you_p, needs_action_p, '
+      'reply_expected_p, latency_ms, truncated, decided_at) '
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+      'ON CONFLICT(source, source_message_id) DO UPDATE SET '
+      'model = excluded.model, qhash = excluded.qhash, '
+      'answers_json = excluded.answers_json, gate_p = excluded.gate_p, '
+      'needs_you_p = excluded.needs_you_p, '
+      'needs_action_p = excluded.needs_action_p, '
+      'reply_expected_p = excluded.reply_expected_p, '
+      'latency_ms = excluded.latency_ms, truncated = excluded.truncated, '
+      'decided_at = excluded.decided_at',
+      variables: _args([
+        source,
+        sourceMessageId,
+        result.model,
+        qhash,
+        jsonEncode({...a.toJson(), decisionOwnerKnownKey: ownerKnown}),
+        pOf('gate', 'drop'),
+        pOf('needs_you', 'yes'),
+        pOf('needs_action', 'yes'),
+        pOf('reply_expected', 'yes'),
+        result.latencyMs.toDouble(),
+        result.truncated ? 1 : 0,
+        _nowIso(),
+      ]),
+    );
+  }
+
+  /// The stored decision for one message, or null when the decision model
+  /// never read it — a message triaged before this build, or one a rules gate
+  /// dropped first.
+  Future<StoredDecision?> decisionFor(
+    String source,
+    String sourceMessageId,
+  ) async {
+    final rows = await db.customSelect(
+      'SELECT * FROM message_decisions '
+      'WHERE source = ? AND source_message_id = ?',
+      variables: _args([source, sourceMessageId]),
+    ).get();
+    if (rows.isEmpty) return null;
+    final row = rows.first.data;
+    var answers = const DecisionAnswers({});
+    var ownerKnown = false;
+    try {
+      final decoded = jsonDecode(row['answers_json'] as String? ?? '{}');
+      if (decoded is Map) {
+        final json = decoded.cast<String, Object?>();
+        answers = DecisionAnswers.fromJson({
+          for (final e in json.entries)
+            if (e.key != decisionOwnerKnownKey) e.key: e.value,
+        });
+        ownerKnown = json[decisionOwnerKnownKey] == true;
+      }
+    } on FormatException {
+      // Unreadable: no answers and no owner, which every reader treats as
+      // "the decision model did not speak".
+    }
+    double? d(String key) => (row[key] as num?)?.toDouble();
+    return StoredDecision(
+      answers: answers,
+      model: row['model'] as String? ?? '',
+      gateP: d('gate_p'),
+      needsYouP: d('needs_you_p'),
+      needsActionP: d('needs_action_p'),
+      replyExpectedP: d('reply_expected_p'),
+      latencyMs: d('latency_ms'),
+      truncated: (row['truncated'] as num?)?.toInt() == 1,
+      ownerKnown: ownerKnown,
+    );
+  }
+
   /// Records what the needs-you pass decided about one message.
   ///
   /// Targeted like [writeTriage], and for the same reason: this stage owns
@@ -3051,6 +3156,7 @@ RETURNING *
     'attachment_chunks',
     'context_text',
     'context_chunks',
+    'message_decisions',
   ];
 
   /// Every table a CONNECTOR or the user's own directory scan wrote.
@@ -3180,7 +3286,7 @@ RETURNING *
   ///
   /// Four things happen, and the order is the method:
   ///
-  /// 1. One transaction: the sixteen [derivedTables] are emptied, the verdict
+  /// 1. One transaction: the seventeen [derivedTables] are emptied, the verdict
   ///    columns on `messages` and `conversations` are reset, the derived
   ///    columns on `context_dirs` and `context_files` are nulled, and the
   ///    one-shot markers that describe rows this just deleted are dropped.
@@ -3231,17 +3337,25 @@ RETURNING *
     // nothing recomputes it on a claim, so clearing it would be this reset
     // silently un-ignoring mail the owner threw out by hand. It is the same
     // durable user intent `gate_override` is, written in the other direction.
-    const keptGate = "(gate_reason IN ('outbound', 'backlog', 'user') "
+    //
+    // A LEARNED drop is derived even when its word is an ingest word: the
+    // decision model maps its own `outbound` and (on a chat) `auto_generated`
+    // onto the rules' words, so the word alone cannot say who wrote it. A
+    // message the decision model read has a `message_decisions` row, and an
+    // ingest verdict never does (ingest gates before triage), so the row is
+    // the tell. It is read BEFORE that table is emptied below, which is why
+    // the messages reset now runs first.
+    const keptGate = "(gate_reason = 'user' "
+        "OR ((gate_reason IN ('outbound', 'backlog') "
         "OR (source = 'teams' "
-        "AND gate_reason IN ('auto_generated', 'teams_source')))";
+        "AND gate_reason IN ('auto_generated', 'teams_source'))) "
+        'AND NOT EXISTS (SELECT 1 FROM message_decisions d '
+        'WHERE d.source = messages.source '
+        'AND d.source_message_id = messages.source_message_id)))';
     // What `upsertMessage` means by gated, read off the row AFTER the reset
     // above: a kept verdict is the only way a row is still `skipped`.
     const gated = "(triage_status = 'skipped' AND gate_reason IS NOT NULL)";
     await db.transaction(() async {
-      for (final table in derivedTables) {
-        await db.customUpdate('DELETE FROM $table');
-      }
-
       // One UPDATE over every row: the CASE is what keeps the ingest verdicts
       // and re-pends the rest, and a second statement for the second half
       // would be a second scan of the same table.
@@ -3264,6 +3378,12 @@ RETURNING *
         '  updated_at = ?',
         variables: _args([now]),
       );
+
+      // AFTER the reset above, which reads `message_decisions` to tell a
+      // learned drop from an ingest one.
+      for (final table in derivedTables) {
+        await db.customUpdate('DELETE FROM $table');
+      }
 
       // `message_progress` is derived in the strongest sense — one row per
       // message, rebuildable from `messages` with no model call — and it is

@@ -12,6 +12,7 @@ import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -207,6 +208,272 @@ void main() {
 
   Future<Map<String, Object?>> conversationRow([String key = 'conv-1']) async =>
       (await store.getConversationRow('email', key))!;
+
+  group('decision pass', () {
+    Future<Map> triageDetail(String status) async {
+      final row = (await store.recentActivity(limit: 20)).firstWhere(
+        (r) => r['kind'] == 'triage' && r['status'] == status,
+      );
+      return jsonDecode(row['detail_json'] as String) as Map;
+    }
+
+    test('runs before the text call, and its classification is what lands',
+        () async {
+      await seedMessage(id: 'm1', bodyText: 'Please sign the lease today.');
+      await seedConversation();
+      final order = <String>[];
+      final decision = FakeDecisionClient.fixed(
+        fakeAnswers(
+          urgency: 'low',
+          category: 'notification',
+          needsAction: 0.8,
+          replyExpected: 0.7,
+          needsYou: 0.66,
+        ),
+        onDecide: () => order.add('decide'),
+      );
+      final llm = ScriptedLlm(
+        answers: {
+          'triage': answer(
+            urgency: 'high',
+            category: 'work',
+            needsAction: false,
+            replyExpected: false,
+            summary: 'Sarah wants the lease signed.',
+            actionItems: const ['Sign the lease'],
+          ),
+        },
+        onCall: (_) => order.add('text'),
+      );
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+
+      await TriageQueue(
+        store,
+        llm,
+        activityLog: log,
+        decisionClient: decision,
+        owner: () async => (name: 'Ada Park', address: 'ada@example.com'),
+      ).pump();
+
+      expect(order, ['decide', 'text']);
+      expect(decision.calls.single.owner, contains('ada@example.com'));
+      final row = await messageRow('m1');
+      expect(row['triage_status'], 'triaged');
+      // The decision model's four fields...
+      expect(row['urgency'], 'low');
+      expect(row['category'], 'notification');
+      expect(row['needs_action'], 1);
+      expect(row['reply_expected'], 1);
+      // ...under the text call's words.
+      expect(row['summary'], 'Sarah wants the lease signed.');
+      expect(jsonDecode(row['action_items_json'] as String), ['Sign the lease']);
+      // The fold reads the merged result too.
+      final conversation = await conversationRow();
+      expect(conversation['cta_urgency'], 'low');
+      expect(conversation['category'], 'notification');
+
+      final stored = (await store.decisionFor('email', 'm1'))!;
+      expect(stored.model, 'bond-decide-fake');
+      expect(stored.needsYouP, closeTo(0.66, 1e-9));
+      expect(stored.needsActionP, closeTo(0.8, 1e-9));
+      expect(stored.answers['urgency'].choice, 'low');
+      expect(stored.ownerKnown, isTrue);
+
+      final detail = await triageDetail('ok');
+      expect(
+        detail['decision'],
+        'gate=keep urgency=low category=notification na=0.80 re=0.70 '
+        'ny=0.66 (42 ms)',
+      );
+      expect(detail['urgency'], 'low');
+      expect(detail['needs_action'], true);
+    });
+
+    test('a decision made before the owner is known says so', () async {
+      await seedMessage(id: 'm1');
+      final decision = FakeDecisionClient.fixed(fakeAnswers());
+      await TriageQueue(
+        store,
+        fakeLlm([answer()]),
+        decisionClient: decision,
+        // An account that has not answered: no owner line in the state.
+        owner: () async => null,
+      ).pump();
+
+      expect(decision.calls.single.owner, isNull);
+      expect((await store.decisionFor('email', 'm1'))!.ownerKnown, isFalse);
+    });
+
+    test("below the booleans' bar the answers are no", () async {
+      await seedMessage(id: 'm1');
+      final llm = fakeLlm([answer(needsAction: true, replyExpected: true)]);
+
+      await TriageQueue(
+        store,
+        llm,
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(needsAction: 0.49, replyExpected: 0.3),
+        ),
+      ).pump();
+
+      final row = await messageRow('m1');
+      expect(row['needs_action'], 0);
+      expect(row['reply_expected'], 0);
+    });
+
+    test('the learned gate drops without a text call, under its reason',
+        () async {
+      await seedMessage(id: 'm1', from: 'helpdesk@example.com');
+      await seedConversation();
+      final llm = fakeLlm([answer()]);
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      final gated = <String>[];
+
+      await TriageQueue(
+        store,
+        llm,
+        activityLog: log,
+        onGated: (source, id) async => gated.add(id),
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(gateDrop: 0.93, dropReason: 'ticket_system'),
+        ),
+      ).pump();
+
+      expect(llm.calls, isEmpty);
+      final row = await messageRow('m1');
+      expect(row['triage_status'], 'skipped');
+      expect(row['gate_reason'], 'ticket_system');
+      expect(gated, ['m1']);
+      // The decision is kept for the Why panel.
+      expect((await store.decisionFor('email', 'm1'))!.gateP,
+          closeTo(0.93, 1e-9));
+      final detail = await triageDetail('skipped');
+      expect(detail['reason'], 'ticket_system');
+      expect(detail['gate'], 'ticket_system');
+      expect(detail['learned'], true);
+      expect(detail['gate_p'], '0.93');
+      expect(detail['decision_ms'], 42);
+    });
+
+    test("the model's catch-all reads model_other", () async {
+      await seedMessage(id: 'm1');
+      await TriageQueue(
+        store,
+        fakeLlm([answer()]),
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(gateDrop: 0.8, dropReason: 'other'),
+        ),
+      ).pump();
+
+      expect((await messageRow('m1'))['gate_reason'], 'model_other');
+    });
+
+    test('a drop below the bar keeps the message', () async {
+      await seedMessage(id: 'm1');
+      final llm = fakeLlm([answer()]);
+      await TriageQueue(
+        store,
+        llm,
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(gateDrop: 0.69, dropReason: 'newsletter'),
+        ),
+      ).pump();
+
+      expect(llm.calls, hasLength(1));
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+    });
+
+    test('cold outreach never gates, however sure the model is', () async {
+      await seedMessage(id: 'm1', from: 'rep@vendor.example.com');
+      final llm = fakeLlm([answer()]);
+      await TriageQueue(
+        store,
+        llm,
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(gateDrop: 0.97, dropReason: 'cold_outreach'),
+        ),
+      ).pump();
+
+      expect(llm.calls, hasLength(1));
+      final row = await messageRow('m1');
+      expect(row['triage_status'], 'triaged');
+      expect(row['gate_reason'], isNull);
+    });
+
+    test('a restored message is never gated by the model either', () async {
+      await seedMessage(id: 'm1');
+      await store.restoreMessage('email', 'm1');
+      final llm = fakeLlm([answer()]);
+      await TriageQueue(
+        store,
+        llm,
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(gateDrop: 0.99, dropReason: 'newsletter'),
+        ),
+      ).pump();
+
+      expect(llm.calls, hasLength(1));
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+    });
+
+    test('a rules gate still fires first, and the model is never asked',
+        () async {
+      await seedMessage(id: 'm1', from: 'no-reply@example.com');
+      final decision = FakeDecisionClient.fixed(fakeAnswers());
+      await TriageQueue(store, fakeLlm([answer()]), decisionClient: decision)
+          .pump();
+
+      expect(decision.calls, isEmpty);
+      expect((await messageRow('m1'))['gate_reason'], 'no_reply');
+      expect(await store.decisionFor('email', 'm1'), isNull);
+    });
+
+    test('a dead decision server parks under its own reason', () async {
+      await seedMessage(id: 'm1');
+      final llm = fakeLlm([answer()]);
+      final queue = TriageQueue(
+        store,
+        llm,
+        concurrency: 1,
+        decisionClient: FakeDecisionClient(
+          (_) => throw const DecisionUnavailableException('not running'),
+        ),
+      );
+      TriageProgress? last;
+      final subscription = queue.progress.listen((p) => last = p);
+
+      await queue.pump();
+      await Future<void>.delayed(Duration.zero);
+      await subscription.cancel();
+
+      expect(llm.calls, isEmpty);
+      expect(last!.parkedReason, 'decision_unavailable');
+      final row = await messageRow('m1');
+      expect(row['triage_status'], 'pending');
+      expect(row['triage_attempts'], 0);
+    });
+
+    test('an unusable decision is a failure that spends an attempt', () async {
+      await seedMessage(id: 'm1');
+      final llm = fakeLlm([answer()]);
+      await TriageQueue(
+        store,
+        llm,
+        concurrency: 1,
+        decisionClient: FakeDecisionClient(
+          (_) => throw const LlmFormatException('a normalised vector'),
+        ),
+      ).pump();
+
+      expect(llm.calls, isEmpty);
+      final row = await messageRow('m1');
+      expect(row['triage_attempts'], greaterThanOrEqualTo(1));
+      expect(row['triage_error'], contains('a normalised vector'));
+      expect(await store.decisionFor('email', 'm1'), isNull);
+    });
+  });
 
   group('drain', () {
     test('a second pump does not start a racing drain', () async {

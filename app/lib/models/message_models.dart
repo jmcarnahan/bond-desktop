@@ -901,6 +901,25 @@ class TriageResult {
         deadline: '',
       );
 
+  /// This result with the classification fields replaced — how the triage
+  /// queue lays the decision model's answers over the text call's.
+  TriageResult copyWith({
+    String? urgency,
+    String? category,
+    bool? needsAction,
+    bool? replyExpected,
+  }) =>
+      TriageResult(
+        urgency: urgency ?? this.urgency,
+        category: category ?? this.category,
+        label: label,
+        summary: summary,
+        needsAction: needsAction ?? this.needsAction,
+        actionItems: actionItems,
+        replyExpected: replyExpected ?? this.replyExpected,
+        deadline: deadline,
+      );
+
   factory TriageResult.fromJson(Map<String, dynamic> json) {
     final rawActionItems = json['action_items'] as List<dynamic>?;
     return TriageResult(

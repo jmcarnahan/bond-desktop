@@ -22,6 +22,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
 
 /// The Inbox as the SCREEN assembles it: the pane the app opens on, and the two
@@ -150,6 +151,7 @@ void main() {
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
+      keepingDecisionClient(),
       initialAppPrefsProvider.overrideWithValue(prefs),
       syncServiceProvider.overrideWithValue(_FakeSync()),
       // Unstarted, so it owns no sweep timer — this file's container is

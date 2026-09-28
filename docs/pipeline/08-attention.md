@@ -7,6 +7,16 @@ Needs You rail: thread state, recency of movement, what the model found in it
 Settings slider sets the score threshold for appearing. Threads awaiting the
 user's reply rank first; threads waiting on somebody else follow, dimmed.
 
+**Where the verdicts come from.** Since schema v20 the classification the
+score reads is the DECISION MODEL's: `urgency` (and the thread's
+`cta_urgency`), `needs_action` and `reply_expected` are written by the triage
+pass from the decision heads (the booleans at p(yes) ≥ 0.50), extraction's
+`intent` and `importance` — which `bucketFor` and the quiet-FYI temper read —
+are the heads' choices, and most `needs_you_verdict`s are its probability
+against the bars in [11-needs-you.md](11-needs-you.md). The columns did not
+move, so every reader below moved with them (see
+[03-triage.md](03-triage.md)).
+
 **No model call.** Pure arithmetic over stored rows — which is why it can be
 awaited synchronously right before the list renders (called from
 `conversations_provider.dart`).

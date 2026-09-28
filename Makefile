@@ -182,7 +182,7 @@ RESET  := \033[0m
         ab ab-membership drain bench-pipeline bench-compare \
         golden-check golden-baseline golden-score golden golden-prose \
         golden-storyline golden-sweep golden-vector golden-declared \
-        golden-gate \
+        golden-gate golden-decision decision-agreement _decide-health \
         golden-judge-pack golden-judge-tally \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
         dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
@@ -229,6 +229,8 @@ help:
 	@printf "  make golden-vector GOLDEN_RUN=<run.json> → the clustering vector alone: the clusters it would form and the pool pairs by cosine, subject and people; needs only the embed server (SWEEP_CARD=…, SWEEP_EMBED_PREFIX=…, EMBED_URL=…)\n"
 	@printf "  make golden-declared GOLDEN_RUN=<run.json> → every registry storyline declared by hand and then recruited into, on the embed server and the bulk slot; the ceiling the sweep is read against\n"
 	@printf "  make golden-gate   → the golden set through the app's gates, offline (GOLDEN_RUN=<run.json> adds the model's notification proxy)\n"
+	@printf "  make golden-decision → the golden set through the decision model on :$(DECIDE_PORT) (after make decide); two run files, the app's gate and the row of record's\n"
+	@printf "  make decision-agreement DECISION_DB=<copy of the app db> → the decision model against the stored 4B labels, counts only (DECISION_LIMIT=…)\n"
 	@printf "  make golden-baseline → what the shipping app scores on the golden set (needs golden/)\n"
 	@printf "  make golden-score R=<run.json> → score a golden run file (BREAKDOWN= per-bucket tables, JSON= the tallies)\n"
 	@printf "  make golden-judge-pack R=<run.json> → packets for the Claude Code rubric judge (NAME=, GOLDEN_BATCH=)\n"
@@ -888,6 +890,16 @@ GOLDEN_CHARTER_CAP ?= 400
 # Which context rung EXTRACTION sees, on its own axis: none | tail3 | digest.
 # The app gives extraction no thread today; the replay prices giving it one.
 GOLDEN_EXTRACT_CTX ?= none
+# The decision server `make golden-decision` and `make decision-agreement`
+# call: `make decide`'s own port unless DECIDE_URL (the FULL /v1/embeddings
+# URL, as the app's define takes it) points somewhere else. Recursive, so a
+# DECIDE_PORT given on the command line moves it too.
+DECISION_URL = $(if $(strip $(DECIDE_URL)),$(DECIDE_URL),http://127.0.0.1:$(DECIDE_PORT)/v1/embeddings)
+# A COPY of the app database for `make decision-agreement`. A copy because the
+# report must never share a file with a running app; it is opened read-only.
+DECISION_DB ?=
+# How many of that copy's newest triaged inbound messages the report reads.
+DECISION_LIMIT ?= 500
 # Which clustering card `make golden-sweep` embeds: topics (what the app ships
 # since 2026-09-18, the card with its people segment left empty) or
 # participants (what it shipped before). The variable that bench was built to
@@ -1411,6 +1423,46 @@ golden-declared: golden-check
 golden-gate: golden-check
 	@$(if $(GOLDEN_RUN),test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; },:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'gates' $(BENCH_DEFINES)
+
+# The decision server's own health check, first in both decision targets: a
+# run against a server that is not up fails on its first call with a sentence
+# about sockets, and this one says what to run.
+_decide-health:
+	@url='$(patsubst %/v1/embeddings,%/health,$(DECISION_URL))'; \
+	 curl -sf -m 5 "$$url" >/dev/null || { printf "$(RED)✗$(RESET) no decision server answering at $$url — run make decide (or point DECIDE_URL at one)\n"; exit 1; }
+
+# What the decision tests are told: the server, the model name and the heads
+# file the app applies in Dart (the heads ride beside the GGUF, not on the
+# server — the plan's D12).
+DECISION_DEFINES = \
+  --dart-define=DECIDE_URL='$(DECISION_URL)' \
+  --dart-define=DECIDE_MODEL='$(if $(strip $(DECIDE_MODEL)),$(DECIDE_MODEL),bond-decide)' \
+  --dart-define=DECIDE_HEADS='$(DECIDE_DIR)/$(DECIDE_HEADS)'
+
+# The golden set through the decision model: each item's state rendered from
+# the packer's parts exactly as jev-prototype's golden_states did, one live
+# call per item on the decide server (make decide, :$(DECIDE_PORT)), and TWO
+# run files from the one pass — golden-run-decision-policy-… (the gate as the
+# app applies it: p(drop) >= 0.70, cold outreach kept, reasons in the app's
+# words) and golden-run-decision-argmax-… (the gate as the plan's §1 row of
+# record was scored). Every other field is the same in both; score each with
+# `make golden-score R=…` (the test prints both commands). Set
+# GOLDEN_OWNER_NAME and GOLDEN_OWNER_ADDRESS: needs_you reads the owner line.
+golden-decision: golden-check _decide-health
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'golden decision pass' $(BENCH_DEFINES) $(DECISION_DEFINES)
+
+# The decision model against the labels the 4B already stored, on a COPY of
+# the app database: per-field agreement counts, the gate drops the learned gate
+# would add, and how many messages fall in the needs-you band the generative
+# model would still answer. Counts and enum words only — the copy is real mail.
+decision-agreement: _decide-health
+	@test -n "$(DECISION_DB)" || { printf "$(RED)✗$(RESET) usage: make decision-agreement DECISION_DB=<path to a COPY of the app database> [DECISION_LIMIT=500]\n"; exit 1; }
+	@test -f "$(DECISION_DB)" || { printf "$(RED)✗$(RESET) no database at $(DECISION_DB)\n"; exit 1; }
+	@cd $(APP_DIR) && $(FLUTTER) test test/decision_agreement_live_test.dart --run-skipped --plain-name 'db agreement' $(DECISION_DEFINES) \
+	  --dart-define=DECISION_DB='$(abspath $(DECISION_DB))' \
+	  --dart-define=DECISION_LIMIT='$(DECISION_LIMIT)' \
+	  --dart-define=GOLDEN_OWNER_NAME='$(GOLDEN_OWNER_NAME)' \
+	  --dart-define=GOLDEN_OWNER_ADDRESS='$(GOLDEN_OWNER_ADDRESS)'
 
 # The rubric fields — label, summary, action items, the two evidence sentences
 # and a drafted reply — need a READER, and the middle step here is deliberately

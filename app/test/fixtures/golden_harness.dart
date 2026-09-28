@@ -1,5 +1,11 @@
+import 'dart:io';
+
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/clustering_card.dart';
+import 'package:bond_inbox/services/decision/decision_heads.dart';
+import 'package:bond_inbox/services/decision/decision_input.dart';
+import 'package:bond_inbox/services/decision/decision_policy.dart';
+import 'package:bond_inbox/services/decision/decision_state.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
@@ -146,6 +152,132 @@ class GoldenDefines {
 
   static String? get ownerAddress =>
       ownerAddressRaw.trim().isEmpty ? null : ownerAddressRaw.trim();
+
+  /// The decision model's owner line value, `name <address>` — the form the
+  /// heads were trained on — or null unless BOTH defines are set. Not
+  /// `decisionOwnerString`'s fallback to whichever half is known: the golden
+  /// row of record was taken with the full form, and a half-owner run would
+  /// be a different measurement quietly scored against it.
+  static String? get decisionOwner => ownerName == null || ownerAddress == null
+      ? null
+      : '$ownerName <$ownerAddress>';
+}
+
+// ── the decision model on the golden set ─────────────────────────────
+
+/// The state the decision model reads for one golden item, from the item's
+/// raw `stage_input` — jev-prototype's `distill/state.py` `golden_states`,
+/// the WITH-tail half: `now`, `directness_line`, `message_block` and
+/// `ctx_tail3.thread_tail` exactly as the packer wrote them, through the same
+/// composer the app's raw-field renderer calls. No cap and no strip here,
+/// because `render_state` applied none — the packer already had.
+///
+/// From the raw map rather than a [GoldenItem]: the item keeps `now` as a
+/// parsed date and the tail as rebuilt messages, and a round trip through
+/// either is a second renderer that could drift from the bytes the heads were
+/// scored on.
+String goldenDecisionState(
+  Map<String, dynamic> stageInput, {
+  String? owner,
+}) {
+  String text(Object? v) => v is String ? v : '';
+  final ctx = stageInput['ctx_tail3'];
+  final tail = ctx is Map ? ctx['thread_tail'] : null;
+  return renderDecisionStateFromParts(
+    owner: owner,
+    now: text(stageInput['now']),
+    directnessLine: text(stageInput['directness_line']),
+    messageBlock: text(stageInput['message_block']),
+    tail: [
+      if (tail is List)
+        for (final t in tail)
+          if (t is Map)
+            // `t.get('who') or ''`, `t.get('text') or ''`.
+            DecisionTailItem(who: text(t['who']), text: text(t['text'])),
+    ],
+  );
+}
+
+/// The heads file a decision leg applies: `DECIDE_HEADS` (the Makefile
+/// passes `$(DECIDE_DIR)/$(DECIDE_HEADS)`), else where `make decide-install`
+/// puts it.
+String decideHeadsPath() {
+  const defined = String.fromEnvironment('DECIDE_HEADS');
+  if (defined.isNotEmpty) return defined;
+  final home = Platform.environment['HOME'] ?? '';
+  return '$home/Library/Application Support/com.bondinbox.app/models/'
+      'local_bond-decide/decide-heads.json';
+}
+
+/// Which gate rule a decision run file records.
+enum DecisionGateRule {
+  /// The app's `learnedGateReason`: drop when `p(drop) >= 0.70` and the drop
+  /// reason is not `cold_outreach` (a human writing to the owner stays kept),
+  /// with the reason mapped to the app's gate word (R5-1).
+  policy,
+
+  /// The row of record's: the gate head's argmax and the drop-reason head's
+  /// raw argmax — jev-prototype's `golden_run.run_entry`, which is what the
+  /// plan's §1 numbers were scored from.
+  argmax,
+}
+
+/// The needs-you confidence word from the head's top probability — the row
+/// of record's `confidence_word(max(p, 1 - p))`.
+String decisionConfidenceWord(double pYes) {
+  final top = pYes >= 1 - pYes ? pYes : 1 - pYes;
+  return top >= 0.85
+      ? 'high'
+      : top >= 0.65
+          ? 'medium'
+          : 'low';
+}
+
+/// One item's decision answers, as the run file records them.
+///
+/// needs_you is `p(yes) >= 0.5` in BOTH rules: that is the row of record's
+/// verdict. The app's own reading is banded (yes at 0.65, no below 0.35,
+/// the generative model in between — D6), which a run file of one model's
+/// answers cannot express; the band's size is what the agreement leg counts.
+GoldenClassifierOut classifierOut(
+  DecisionAnswers a, {
+  required DecisionGateRule rule,
+  bool truncated = false,
+}) {
+  final pDrop = a.p('gate', 'drop');
+  final dropReason = a['drop_reason'].choice;
+  final String verdict;
+  final String? reason;
+  switch (rule) {
+    case DecisionGateRule.policy:
+      // The app's own rule, called rather than restated.
+      reason = learnedGateReason(a);
+      verdict = reason == null ? 'keep' : 'drop';
+    case DecisionGateRule.argmax:
+      verdict = a['gate'].choice;
+      reason = verdict == 'drop' ? dropReason : null;
+  }
+  final pNeedsYou = a.p('needs_you', 'yes');
+  return GoldenClassifierOut(
+    gateVerdict: verdict,
+    gateReason: reason,
+    category: a['category'].choice,
+    urgency: a['urgency'].choice,
+    needsAction: a.p('needs_action', 'yes') >= DecisionPolicy.booleanYes,
+    replyExpected: a.p('reply_expected', 'yes') >= DecisionPolicy.replyYes,
+    needsYouVerdict: pNeedsYou >= 0.5,
+    needsYouConfidence: decisionConfidenceWord(pNeedsYou),
+    intent: a['intent'].choice,
+    importance: a['importance'].choice,
+    probabilities: {
+      'gate_drop': pDrop,
+      'drop_reason': dropReason,
+      'needs_you_yes': pNeedsYou,
+      'needs_action_yes': a.p('needs_action', 'yes'),
+      'reply_expected_yes': a.p('reply_expected', 'yes'),
+      'truncated': truncated,
+    },
+  );
 }
 
 /// Reads the `GOLDEN_EXTRACT_CTX` define. Case-insensitive, and loud rather

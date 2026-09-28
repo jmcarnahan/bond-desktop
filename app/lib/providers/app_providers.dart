@@ -1069,6 +1069,13 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     onGated: (source, id) => ref
         .read(gateRepairServiceProvider)
         .afterGate(source, id, reason: 'extracted_then_gated'),
+    // The decision model classifies every kept message before the text call.
+    // Late-bound like the text client (its target resolves per call), so a
+    // prefs write rebuilds no queue; always passed — only tests leave it out.
+    decisionClient: ref.watch(decisionClientProvider),
+    // The decision state's owner line. Asked without waiting (see the
+    // queue's `_askOwner`), so a keychain read never holds a claim.
+    owner: _ownerLookup(ref),
   );
   ref.onDispose(queue.dispose);
   return queue;
@@ -1119,10 +1126,20 @@ final embeddingsClientProvider = Provider<EmbeddingsClient>(
 /// [modelServerSupervisorProvider]'s rule. A manifest with no decide entry
 /// (a test fixture) resolves to a path that is never there, which reads as
 /// not installed.
+///
+/// The manifest is READ inside the path closure rather than watched: the
+/// triage queue holds the decision client, so a container that never loaded
+/// a manifest (a widget test that builds the queue and never triages) must
+/// still be able to build it. An unreadable manifest reads as not installed.
 final decisionHeadsProvider = Provider<DecisionHeadsFile>((ref) {
   final paths = ref.watch(appPathsProvider);
-  final manifest = ref.watch(modelManifestProvider);
   return DecisionHeadsFile(() {
+    final ModelManifest manifest;
+    try {
+      manifest = ref.read(modelManifestProvider);
+    } catch (_) {
+      return '';
+    }
     final heads = manifest.byRoleOrNull(ModelRole.decide)?.headsRelativePath;
     if (heads == null) return '';
     return p.join(
@@ -1132,8 +1149,8 @@ final decisionHeadsProvider = Provider<DecisionHeadsFile>((ref) {
   });
 });
 
-/// The decision model's client. Nothing calls it yet: the classification
-/// cutover (the round's Phase 5) is what puts it on the triage path.
+/// The decision model's client, on the triage path: [triageQueueProvider]
+/// runs one decision per kept inbound message before the text call.
 ///
 /// Late-bound on [stageLlmClientProvider]'s rule: the target is resolved
 /// through the NOTIFIER at the top of every call — the managed router's

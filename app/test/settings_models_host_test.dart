@@ -25,6 +25,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/fake_process_runner.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/test_manifest.dart';
@@ -199,6 +200,7 @@ void main() {
     await tester.pumpWidget(ProviderScope(
       overrides: [
         dbProvider.overrideWithValue(db),
+        keepingDecisionClient(),
         initialSectionProvider.overrideWithValue(RailSection.needsYou),
         initialAppPrefsProvider.overrideWithValue(prefs),
         syncServiceProvider.overrideWithValue(_FakeSync()),
@@ -248,6 +250,7 @@ void main() {
     await tester.pumpWidget(ProviderScope(
       overrides: [
         dbProvider.overrideWithValue(db),
+        keepingDecisionClient(),
         initialAppPrefsProvider.overrideWithValue(prefs),
         syncServiceProvider.overrideWithValue(_FakeSync()),
         modelManifestProvider.overrideWithValue(testManifest()),

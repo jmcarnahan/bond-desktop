@@ -1859,6 +1859,21 @@ Both quants pass every item. The Mac's decision call therefore costs about
 40 ms. The 4B triage call it replaces reads 2.4 s p50 at K=1 and 7.6 s at K=4 in
 the Golden ledger's Qwen3-4B rows above.
 
+**Through the app's own Dart path** (`make golden-decision`, 2026-09-28, Homebrew
+b10621 F16 on :8083, owner line set). The state is rendered by
+`renderDecisionStateFromParts`, the heads run in Dart, and long states take the
+client's tokenize path (16 of the 100 golden states were over 2048 tokens):
+
+| gate rule | keep-only | gate.verdict (all 100) | gate.reason | p50 / p95 ms per item |
+| --- | --- | --- | --- | --- |
+| argmax (the row of record's rule) | 94 / 96 / 89 / 86 / 84 / 88 / 83 / 74 — identical to the PyTorch row | 94 | 16/20 (80%) | 43 / 289 |
+| the app's policy (drop at p ≥ 0.70, never cold outreach) | same eight fields | 92 | 13/17 (76%) | same pass |
+
+The acceptance for the cutover was the ModernBERT row within ±2 points on every
+field; it is identical, so the Dart renderer, heads and truncation path add no
+error. The policy gate drops four fewer messages than argmax (18 against 22),
+which is the cautious direction for a drop.
+
 ### Recommendations (golden set, 2026-09)
 
 Superseded on 2026-09-20 by the section of the same name dated 2026-09-20

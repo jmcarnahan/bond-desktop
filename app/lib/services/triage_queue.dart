@@ -5,12 +5,17 @@ import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'deadline_parse.dart' show showableDeadline;
+import 'decision/decision_client.dart';
+import 'decision/decision_heads.dart';
+import 'decision/decision_input.dart';
+import 'decision/decision_policy.dart';
 import 'drain_gate.dart';
 import 'gates.dart';
 import 'backend/backend_types.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'llm/triage_task.dart';
+import 'owner_lookup.dart';
 import 'pipeline_progress.dart';
 
 /// How much triage is left, as of the last message the worker finished.
@@ -232,6 +237,24 @@ class TriageQueue {
   /// rebuild.
   final bool Function()? _enabled;
 
+  /// The decision model, which classifies every kept message before the text
+  /// call: the learned gate, urgency, category, needs_action and
+  /// reply_expected. The app ALWAYS passes one ([triageQueueProvider]); null
+  /// is a TEST SEAM that keeps the language model's own classification, so
+  /// the tests written before the decision model still describe a queue.
+  final DecisionClient? _decisionClient;
+
+  /// Who the owner is, for the decision state's owner line — a keychain read
+  /// in the app. NEVER awaited by a claim: [_askOwner] starts it at a pump
+  /// and a claim uses [_ownerKnown], whatever has arrived. The self gate's
+  /// `userAddress` has the same shape for the same reason: a read that has
+  /// not answered must not hold the drain. In practice it has answered long
+  /// before the first claim, since triage runs after a sync that needed the
+  /// same account.
+  final OwnerLookup? _owner;
+  OwnerIdentity? _ownerKnown;
+  bool _ownerAsking = false;
+
   TriageQueue(
     this._store,
     this._client, {
@@ -244,6 +267,8 @@ class TriageQueue {
     this._enabled,
     this._onDrained,
     this._onGated,
+    this._decisionClient,
+    this._owner,
   })  : _gate = gate ?? DrainGate(),
         _log = activityLog ?? ActivityLog.disabled(),
         _pipeline = progress;
@@ -414,6 +439,9 @@ class TriageQueue {
       // enqueues in the same step, exactly as [DrainGate.yieldRequested]
       // promises.
       if ((counts['pending'] ?? 0) == 0) return;
+      // Who the owner is, for the decision state — started here, never
+      // awaited (see [_owner]).
+      _askOwner();
       // Asked in the same synchronous step as the `_gate.run` below, which is
       // what makes the flag transient — this run holds the ticket that clears
       // it. See [DrainGate.yieldRequested].
@@ -694,7 +722,67 @@ class TriageQueue {
     }
 
     try {
-      final result = await runTask(
+      // The decision pass: one forward pass of the decision model answers
+      // every classification question from the message's rendered state,
+      // before any language-model call. INSIDE this try on purpose: a
+      // decision server that is down throws [DecisionUnavailableException],
+      // an [LlmUnavailableException], so the message parks under
+      // `decision_unavailable` exactly as it parks for the text model, and an
+      // unusable answer is a failure that spends an attempt.
+      final decisionClient = _decisionClient;
+      DecisionResult? decided;
+      if (decisionClient != null) {
+        final owner = decisionOwnerString(_ownerKnown);
+        decided = await decisionClient.decide(DecisionInput.fromRows(
+          message: message,
+          thread: thread,
+          attachments: message.attachments,
+          owner: owner,
+        ));
+        await _store.writeDecision(
+          source,
+          id,
+          decided,
+          qhash: DecisionHeads.expectedQhash,
+          ownerKnown: owner != null,
+        );
+
+        // The learned gate, after the rules gates and under the same escape
+        // hatch: a message the owner restored is never gated again. Shaped
+        // like the header gate above, plus an activity row, because unlike a
+        // rules gate this one DID consult a model.
+        final learned =
+            overridden ? null : learnedGateReason(decided.answers);
+        if (learned != null) {
+          await _writeTriage(
+            source,
+            id,
+            status: 'skipped',
+            gateReason: learned,
+          );
+          await _store.refoldThreadState(source, id, restored: false);
+          await _notifyGated(source, id);
+          await _log.record(
+            'triage',
+            status: 'skipped',
+            source: source,
+            entityId: id,
+            durationMs: sw.elapsedMilliseconds,
+            detail: {
+              // `reason` is what the activity panel prints on a skipped row.
+              'reason': learned,
+              'gate': learned,
+              'learned': true,
+              'gate_p': _p2(decided.answers.p('gate', 'drop')),
+              'decision_ms': decided.latencyMs,
+            },
+          );
+          await _emit();
+          return true;
+        }
+      }
+
+      final text = await runTask(
         _client,
         const TriageTask(),
         TriageInput(
@@ -704,10 +792,15 @@ class TriageQueue {
           attachments: attachments,
         ),
       );
+      // The text call's summary, action items, deadline and label, under the
+      // decision model's classification. Written ONCE, so no reader ever sees
+      // the language model's urgency flash past on its way out.
+      final result = decided == null ? text : _merged(text, decided.answers);
       await _writeTriage(source, id, status: 'triaged', result: result);
       await _foldUp(source, current, message, result);
-      // What the model decided, on the row. The `llm_*` tally the call itself
-      // reported folds in from the log's pending slot.
+      // What the models decided, on the row. The `llm_*` tally the text call
+      // reported folds in from the log's pending slot; the decision's numbers
+      // ride in their own key, because the log keeps one label per span.
       await _log.record(
         'triage',
         source: source,
@@ -720,6 +813,7 @@ class TriageQueue {
           'action_items': result.actionItems.length,
           'reply_expected': result.replyExpected,
           if (result.deadline.isNotEmpty) 'deadline': result.deadline,
+          if (decided != null) 'decision': decisionLine(decided),
         },
       );
       await _emit();
@@ -767,6 +861,50 @@ class TriageQueue {
         sw.elapsedMilliseconds,
       );
     }
+  }
+
+  /// Starts the owner lookup when the owner is not yet known and no lookup is
+  /// in flight. Unawaited on purpose (see [_owner]); a throw or a null answer
+  /// leaves the owner unknown, and the next pump asks again.
+  void _askOwner() {
+    final lookup = _owner;
+    if (lookup == null || _ownerKnown != null || _ownerAsking) return;
+    _ownerAsking = true;
+    Future<OwnerIdentity?>.sync(lookup).then(
+      (owner) => _ownerKnown = owner,
+      onError: (Object _) => null,
+    ).whenComplete(() => _ownerAsking = false);
+  }
+
+  /// The text call's result with the decision model's classification laid
+  /// over it: urgency and category are the heads' choices, and the two
+  /// booleans are their yes-probabilities against the policy bars
+  /// (`booleanYes` for needs_action, `replyYes` for reply_expected).
+  static TriageResult _merged(TriageResult text, DecisionAnswers a) =>
+      text.copyWith(
+        urgency: a['urgency'].choice,
+        category: a['category'].choice,
+        needsAction:
+            a.p('needs_action', 'yes') >= DecisionPolicy.booleanYes,
+        replyExpected:
+            a.p('reply_expected', 'yes') >= DecisionPolicy.replyYes,
+      );
+
+  static String _p2(double p) => p.toStringAsFixed(2);
+
+  /// The one line a triage activity row carries about the decision pass of a
+  /// KEPT message: `gate=keep urgency=high category=work na=0.81 re=0.12
+  /// ny=0.77 (58 ms)`. `gate=keep` is the verdict, not the head's argmax: a
+  /// drop below the bar, a cold approach and a restored message all land here.
+  static String decisionLine(DecisionResult d) {
+    final a = d.answers;
+    return 'gate=keep '
+        'urgency=${a['urgency'].choice} '
+        'category=${a['category'].choice} '
+        'na=${_p2(a.p('needs_action', 'yes'))} '
+        're=${_p2(a.p('reply_expected', 'yes'))} '
+        'ny=${_p2(a.p('needs_you', 'yes'))} '
+        '(${d.latencyMs} ms)';
   }
 
   /// Whether a failed fetch on this message is worth one more attempt instead

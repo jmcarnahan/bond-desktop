@@ -5603,6 +5603,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           conversation: conversation,
           extraction: facts.extraction,
           ai: facts.ai,
+          decision: facts.decision,
           threshold: threshold,
           now: DateTime.now(),
           // The longer answer, in the same slot: the history replaces this

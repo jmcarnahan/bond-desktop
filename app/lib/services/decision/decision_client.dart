@@ -166,16 +166,23 @@ class DecisionClient {
   /// states allow: the short states in array requests of up to [batchChunk],
   /// and each long one on its own token path. One [LlmCallRecord] for the
   /// whole batch.
-  Future<List<DecisionResult>> decideBatch(List<DecisionInput> inputs) async {
-    if (inputs.isEmpty) return const [];
+  Future<List<DecisionResult>> decideBatch(List<DecisionInput> inputs) =>
+      decideStates([
+        for (final input in inputs)
+          renderDecisionState(input, toLocal: _toLocal),
+      ]);
+
+  /// [decideBatch] over states already rendered — the golden harness's
+  /// entry, which renders each item from the packer's parts through
+  /// `renderDecisionStateFromParts` (the composer `renderDecisionState`
+  /// itself calls), because the golden set carries those parts and not the
+  /// raw fields. The app always goes through [decide] or [decideBatch].
+  Future<List<DecisionResult>> decideStates(List<String> states) async {
+    if (states.isEmpty) return const [];
     final sw = Stopwatch()..start();
     final destination = target;
     return _instrumented(destination, sw, (facts) async {
       final heads = _heads();
-      final states = [
-        for (final input in inputs)
-          renderDecisionState(input, toLocal: _toLocal),
-      ];
       final vectors = List<List<double>?>.filled(states.length, null);
       final truncated = List<bool>.filled(states.length, false);
 

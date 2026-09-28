@@ -5,6 +5,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
+import 'package:bond_inbox/services/backend/backend_types.dart' show AccountInfo;
 import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
@@ -13,6 +14,8 @@ import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_auth_session.dart';
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -523,6 +526,9 @@ void main() {
       final worker = container.read(aiWorkerProvider);
       final storyline = container.read(storylineWorkerProvider);
       final drafts = container.read(draftWorkerProvider);
+      // The triage queue now holds the decision client too, so a decision
+      // client rebuilt on a prefs write would rebuild the queue with it.
+      final decision = container.read(decisionClientProvider);
 
       await prefs.useGenerative(
         placement: ModelPlacement.box,
@@ -541,6 +547,8 @@ void main() {
       // it a `ref.watch`, every one of these becomes a new object and a drain
       // in flight is disposed to change where the NEXT request goes.
       expect(identical(container.read(triageQueueProvider), triage), isTrue);
+      expect(identical(container.read(decisionClientProvider), decision),
+          isTrue);
       expect(identical(container.read(aiWorkerProvider), worker), isTrue);
       expect(identical(container.read(storylineWorkerProvider), storyline),
           isTrue);
@@ -716,6 +724,57 @@ void main() {
         ...container.read(draftWorkerProvider).kinds,
       ];
       expect(all.toSet(), hasLength(all.length));
+    });
+
+    test('the app-built triage queue runs the decision pass with the owner',
+        () async {
+      // The wiring nothing else can see: the queue the app builds holds the
+      // decision client and the signed-in account's owner line. A gating fake
+      // proves the pass ran; its recorded input proves the owner reached it.
+      final decision = FakeDecisionClient.fixed(
+        fakeAnswers(gateDrop: 0.95, dropReason: 'ticket_system'),
+      );
+      final container = ProviderContainer(
+        overrides: [
+          dbProvider.overrideWithValue(db),
+          decisionClientProvider.overrideWithValue(decision),
+          stageLlmClientProvider
+              .overrideWith((ref, _) => ScriptedLlm.never(label: 'triage')),
+          authSessionProvider.overrideWithValue(FakeAuthSession(
+            signedIn: true,
+            account: const AccountInfo(
+              displayName: 'Ada Park',
+              mail: 'ada@example.com',
+            ),
+          )),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
+
+      // A chat, so the queue asks Graph for no mail detail.
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 't1',
+        'conversation_key': 'chat-1',
+        'direction': 'inbound',
+        'from_name': 'Helpdesk',
+        'from_address': 'teams:u-helpdesk',
+        'received_at': DateTime.now()
+            .toUtc()
+            .subtract(const Duration(hours: 1))
+            .toIso8601String(),
+        'body_text': 'Ticket 4471 was updated.',
+        'triage_status': 'pending',
+      });
+
+      await container.read(triageQueueProvider).pump();
+
+      final row = (await store.getMessageRow('teams', 't1'))!;
+      expect(row['triage_status'], 'skipped');
+      expect(row['gate_reason'], 'ticket_system');
+      expect(decision.calls.single.owner, 'Ada Park <ada@example.com>');
+      expect((await store.decisionFor('teams', 't1'))!.ownerKnown, isTrue);
     });
 
     test('every lane and the triage queue carry the processing switch',

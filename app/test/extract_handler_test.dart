@@ -18,6 +18,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -897,6 +898,33 @@ void main() {
 
       expect(await bucketOf(), 'later');
       expect(await reasonOf(), 'low_value');
+    });
+
+    test("the decision model's intent and importance are what get filed",
+        () async {
+      // The language model reads a request; the decision model read an FYI
+      // of low importance. Its answer replaces the text model's before the
+      // write, so the stored blob and the filing agree.
+      await seedCurrentConversation();
+      await seedMessage();
+      await store.writeDecision(
+        'email',
+        'm1',
+        fakeDecision(fakeAnswers(intent: 'fyi', importance: 'low')),
+        qhash: 'test',
+        ownerKnown: true,
+      );
+
+      await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
+
+      expect(await bucketOf(), 'later');
+      expect(await reasonOf(), 'low_value');
+      final stored = jsonDecode((await store.getExtraction('email', 'm1'))!)
+          as Map<String, dynamic>;
+      expect(stored['intent'], 'fyi');
+      expect(stored['importance'], 'low');
+      // Everything else is still the text model's.
+      expect(stored['project'], 'Website redesign');
     });
 
     test('a request is not', () async {

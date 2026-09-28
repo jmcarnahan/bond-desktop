@@ -176,7 +176,7 @@ class ExtractHandler extends WorkHandler {
       ));
     }
 
-    final result = await runTask(
+    final extracted = await runTask(
       _client,
       const ExtractTask(),
       ExtractionInput(message, DateTime.now()),
@@ -185,6 +185,25 @@ class ExtractHandler extends WorkHandler {
       // reason a human could see.
       temperature: 0,
     );
+    // Intent and importance are the decision model's when it read this
+    // message (the triage pass stored its answers): its heads beat the
+    // language model on both. Replaced BEFORE the write, so the stored
+    // extraction, the activity row and the bucket filing all read one answer.
+    final decision = await _store.decisionFor(source, id);
+    final decided = decision?.answers.fields;
+    final result = decided == null ||
+            !decided.containsKey('intent') ||
+            !decided.containsKey('importance')
+        ? extracted
+        : ExtractionResult(
+            evidence: extracted.evidence,
+            topics: extracted.topics,
+            people: extracted.people,
+            organizations: extracted.organizations,
+            project: extracted.project,
+            intent: decided['intent']!.choice,
+            importance: decided['importance']!.choice,
+          );
     await _store.writeExtraction(source, id, jsonEncode(result.toJson()));
     // After the write and before the two optional passes below: the facts are
     // stored, so the stage is done however the bucket filing and the embedding

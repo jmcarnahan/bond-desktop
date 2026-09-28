@@ -108,7 +108,7 @@ It also embeds the message's own document vector on the fast path
 | Task | `ExtractTask` — `app/lib/services/llm/extract_task.dart` |
 | Prompt | top of that file, fenced by `prompt_guard.dart` |
 | Schema | `extraction` |
-| Output | evidence sentence (written first), topics, people, organizations, a stable project label, an intent enum, an importance enum |
+| Output | evidence sentence (written first), topics, people, organizations, a stable project label, an intent enum, an importance enum (intent and importance are replaced by the decision model's, below) |
 | Slot | **fast / bulk** by default (`stageLlmClientProvider('extraction')`; re-pointable per stage in Settings → Models, see [10-model-routing.md](10-model-routing.md)) |
 | Params | **temperature 0** (set in `extract_handler.dart`), maxTokens 512 |
 | Concurrency | 3 (the handler's `concurrency` override) |
@@ -117,6 +117,15 @@ The `inbound_message` fence is `buildMessageBlock`
 (`app/lib/services/llm/message_block.dart`), so the body is link-stripped
 (`stripLinkTargets`, keeping each label) before its cap, the same block triage
 reads.
+
+**Intent and importance come from the decision model (schema v20).** When
+the triage pass stored a decision for the message (`message_decisions`), the
+handler replaces the language model's `intent` and `importance` with the
+decision heads' choices BEFORE the extraction is written — so the stored
+blob, the activity row and `_fileBucket`'s `bucketFor` all read one answer.
+A message with no stored decision (triaged before the decision model) keeps
+the language model's. Everything else in the extraction is still the
+language model's.
 
 **What the prompt instructs.** Pull the stable facts out of one message, with
 the evidence sentence first to force grounding. The prompt's bullets restate

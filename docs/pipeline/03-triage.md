@@ -3,9 +3,9 @@
 **What happens.** The first model read of a message. `TriageQueue`
 (`app/lib/services/triage_queue.dart`) claims ungated messages newest-first,
 loads the prior messages on the conversation (cut off at this message's
-`received_at` so the model never sees the future), runs `TriageTask`, and
-folds the result into `triage_status`, the conversation's CTA rollup, and an
-activity row. A claim that ends in a gate skip instead refolds the thread down
+`received_at` so the model never sees the future), runs the DECISION PASS,
+then `TriageTask`, and folds the merged result into `triage_status`, the
+conversation's CTA rollup, and an activity row. A claim that ends in a gate skip instead refolds the thread down
 through `refoldThreadState` before it emits, because the state machine folded
 `needs_reply` on at ingest and the gate is only speaking now — see
 [02-gates.md](02-gates.md).
@@ -18,6 +18,42 @@ this WRITES the banner: a plan-relative word such as "Day 1" stamped here
 would outlive every display-time filter, so it is never written (see
 [08-attention.md](08-attention.md)).
 
+**The decision pass (schema v20).** Before any language-model call, one
+forward pass of the fine-tuned decision model
+(`app/lib/services/decision/`) answers all nine classification heads from the
+message's rendered state: `DecisionInput.fromRows(message, thread,
+attachments, owner)` → `DecisionClient.decide`. The answers are stored in
+`message_decisions` (one row per message, every option's probability in
+`answers_json`, the four p's the pipeline reads lifted into `gate_p`,
+`needs_you_p`, `needs_action_p`, `reply_expected_p`; derived, so Clear AI
+results empties it). Then:
+
+- the learned gate may drop the message (see
+  [02-gates.md](02-gates.md#the-learned-gate)) — no text call;
+- otherwise `TriageTask` runs for its TEXT, and the row is written ONCE with
+  the fields split by source (`answers_json` also records `owner_known`,
+  whether the state carried an owner line — the account is asked without
+  waiting at each pump, so the first claims after launch may lack it):
+
+| Field | From |
+|---|---|
+| `urgency`, `category` | the decision heads' choices |
+| `needs_action`, `reply_expected` | the decision heads' p(yes) ≥ `DecisionPolicy.booleanYes` / `replyYes` (both 0.50) |
+| `summary`, action items, `deadline`, `label` | the language model |
+
+The CTA rollup (`_foldUp`) reads the same merged result. The activity row
+keeps its keys (with the merged values) and adds `decision`: `gate=keep
+urgency=<u> category=<c> na=<p> re=<p> ny=<p> (<ms> ms)` — the numbers ride
+in the detail because the log keeps one model label per span. A decision
+server that is down (or a heads file that is not installed) throws
+`DecisionUnavailableException`, which PARKS the drain under
+`decision_unavailable` without spending an attempt; an unusable vector is a
+format failure that spends one like any model failure. The queue's
+`decisionClient` is null only in unit tests (a test seam); the app always
+wires one (`triageQueueProvider`). The language model's own urgency, category
+and booleans are ignored this round; Phase 6 of the decision-model round
+replaces `TriageTask` with a text-only call.
+
 **The model call.**
 
 | | |
@@ -25,7 +61,7 @@ would outlive every display-time filter, so it is never written (see
 | Task | `TriageTask` — `app/lib/services/llm/triage_task.dart` |
 | Prompt | `_triageRules` at the top of that file, composed with the shared untrusted-data fence (`prompt_guard.dart`) |
 | Schema | `triage` — flat; **key order is load-bearing** (the doc comment above the schema explains why) |
-| Output | urgency, category, 2–4 word label, one- or two-sentence summary, `needs_action`, action items, `addressed_me`, `reply_expected`, `deadline` |
+| Output | urgency, category, 2–4 word label, one- or two-sentence summary, `needs_action`, action items, `addressed_me`, `reply_expected`, `deadline` (urgency, category and the two booleans are overwritten by the decision pass) |
 | Slot | **fast / bulk** by default (`stageLlmClientProvider('triage')`, wired in `app_providers.dart`; re-pointable per stage in Settings → Models, see [10-model-routing.md](10-model-routing.md)) |
 | Params | temperature 0.2, maxTokens 512 (the `json_task.dart` defaults) |
 | Concurrency | 3 in-flight requests |

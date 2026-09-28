@@ -117,6 +117,53 @@ class GoldenDecisionOut {
   const GoldenDecisionOut({required this.needsReply, this.reason = ''});
 }
 
+/// The decision model's answer for one item: every classification field the
+/// scorer reads, from ONE forward pass, and no text at all.
+///
+/// Its own class rather than a [GoldenTriageOut] and a [GoldenExtractOut]
+/// with empty strings in their text fields, because the scorer reads an empty
+/// `deadline`, `project` or `topics` as an ANSWER ("no deadline", "no
+/// project") and would score the decision model on fields it never produced.
+/// Written, these sections carry only the keys the model answered, so every
+/// text field reads to `score_run.py` as "not attempted".
+class GoldenClassifierOut {
+  /// `keep` or `drop`, by whichever gate rule the run was asked for.
+  final String gateVerdict;
+
+  /// The gate reason slug on a drop; null on a keep.
+  final String? gateReason;
+
+  final String category;
+  final String urgency;
+  final bool needsAction;
+  final bool replyExpected;
+  final bool needsYouVerdict;
+
+  /// `low`, `medium` or `high`, from the needs-you head's top probability.
+  final String needsYouConfidence;
+
+  final String intent;
+  final String importance;
+
+  /// For the reader, never scored: the probabilities the verdicts above were
+  /// read from, and whether the state had to be cut to the model's window.
+  final Map<String, Object?> probabilities;
+
+  const GoldenClassifierOut({
+    required this.gateVerdict,
+    this.gateReason,
+    required this.category,
+    required this.urgency,
+    required this.needsAction,
+    required this.replyExpected,
+    required this.needsYouVerdict,
+    required this.needsYouConfidence,
+    required this.intent,
+    required this.importance,
+    this.probabilities = const {},
+  });
+}
+
 /// A drafted reply, for the rubric judge.
 class GoldenDraftOut {
   final String body;
@@ -191,6 +238,11 @@ class GoldenRunEntry {
   GoldenDecisionOut? decision;
   GoldenDraftOut? draft;
 
+  /// The decision model's classification-only answer. A run that sets it
+  /// sets none of [gate], [triage], [extract] or [needsYou]; if one of those
+  /// is set as well, the typed section wins its key.
+  GoldenClassifierOut? classifier;
+
   final Map<String, GoldenCall> calls = {};
 
   /// Whether any stage was so much as tried on this item.
@@ -207,7 +259,8 @@ class GoldenRunEntry {
       needsYou != null ||
       storylineId != null ||
       decision != null ||
-      draft != null;
+      draft != null ||
+      classifier != null;
 
   GoldenRunEntry({
     required this.id,
@@ -239,6 +292,11 @@ class GoldenRunEntry {
             'verdict': gate!.verdict,
             'reason': gate!.reason,
             'model_category': gate!.modelCategory,
+          }
+        else if (classifier != null)
+          'gate': {
+            'verdict': classifier!.gateVerdict,
+            'reason': classifier!.gateReason,
           },
         if (triage != null)
           'triage': {
@@ -252,7 +310,14 @@ class GoldenRunEntry {
             'action_items': triage!.actionItems,
           }
         else if (decision != null)
-          'triage': {'reply_expected': decision!.needsReply},
+          'triage': {'reply_expected': decision!.needsReply}
+        else if (classifier != null)
+          'triage': {
+            'category': classifier!.category,
+            'urgency': classifier!.urgency,
+            'needs_action': classifier!.needsAction,
+            'reply_expected': classifier!.replyExpected,
+          },
         if (extract != null)
           'extract': {
             'intent': extract!.intent,
@@ -262,6 +327,11 @@ class GoldenRunEntry {
             'people': extract!.people,
             'organizations': extract!.organizations,
             'evidence': extract!.evidence,
+          }
+        else if (classifier != null)
+          'extract': {
+            'intent': classifier!.intent,
+            'importance': classifier!.importance,
           },
         if (needsYou != null)
           'needs_you': {
@@ -271,7 +341,13 @@ class GoldenRunEntry {
             if (needsYou!.confidence != null) 'confidence': needsYou!.confidence,
             'evidence': needsYou!.evidence,
             'floor': needsYou!.floor,
+          }
+        else if (classifier != null)
+          'needs_you': {
+            'verdict': classifier!.needsYouVerdict,
+            'confidence': classifier!.needsYouConfidence,
           },
+        if (classifier != null) 'decision_model': classifier!.probabilities,
         if (storylineId != null) 'storyline': {'id': storylineId},
         if (decision != null)
           'decision': {

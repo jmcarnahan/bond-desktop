@@ -41,6 +41,13 @@ const Map<String, String> homeDropLabels = {
   'backlog': 'Backlog',
   'gated': 'Filtered',
   'user': 'Ignored',
+  // The decision model's own drop reasons (its learned gate); the rest of
+  // its words are the rules gates' above.
+  'ticket_system': 'Ticket system',
+  'identity_service': 'Sign-in notice',
+  'share_notification': 'Shared file notice',
+  'digest': 'Digest',
+  'model_other': 'Automated',
 };
 
 /// [homeDropLabels] with its fallbacks. A drop with no reason on it is still a

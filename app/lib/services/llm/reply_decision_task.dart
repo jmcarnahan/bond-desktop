@@ -21,12 +21,18 @@ import 'prompt_guard.dart';
 ///
 /// Not every gate reason belongs here. `self`, `sender_rule`, `monitoring` and
 /// `machine_sender` all gate mail for reasons that say nothing about whether a
-/// reply is owed, and `teams_source` is not a judgement at all.
+/// reply is owed, and `teams_source` is not a judgement at all. The decision
+/// model's learned gate adds four machine senders nobody replies to; its
+/// catch-all `model_other` stays out for the reason `monitoring` does.
 const Set<String> automatedGateReasons = {
   'no_reply',
   'newsletter',
   'auto_generated',
   'meeting_response',
+  'ticket_system',
+  'identity_service',
+  'share_notification',
+  'digest',
 };
 
 /// Whether no reply may be offered for [message] — ever, by anybody.

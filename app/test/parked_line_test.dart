@@ -19,6 +19,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/memory_token_store.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
@@ -328,6 +329,7 @@ void main() {
       workers = _FeedWorkers(store);
       container = ProviderContainer(overrides: [
         dbProvider.overrideWithValue(db),
+        keepingDecisionClient(),
         triageQueueProvider.overrideWithValue(triage),
         aiWorkersProvider.overrideWithValue(workers),
       ]);
@@ -510,6 +512,7 @@ void main() {
       await tester.pumpWidget(ProviderScope(
         overrides: [
           dbProvider.overrideWithValue(db),
+          keepingDecisionClient(),
           initialSectionProvider.overrideWithValue(RailSection.home),
           initialAppPrefsProvider.overrideWithValue(prefs),
           graphAuthProvider.overrideWithValue(auth),

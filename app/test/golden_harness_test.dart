@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
@@ -687,6 +688,149 @@ void main() {
         () => retryingUnavailable<String>(() async => 'ok', attempts: 0),
         throwsArgumentError,
       );
+    });
+  });
+
+  // ── the decision model on the golden set ─────────────────────────────
+  group('the decision leg', () {
+    DecisionAnswers answers(Map<String, Map<String, double>> probs) {
+      final fields = <String, ChoiceAnswer>{};
+      for (final field in decisionFields) {
+        final options = decisionOptions[field]!;
+        final p = {
+          for (final o in options) o: probs[field]?[o] ?? 0.0,
+        };
+        if (!probs.containsKey(field)) p[options.first] = 1.0;
+        final top = p.entries.reduce((a, b) => b.value > a.value ? b : a);
+        fields[field] = ChoiceAnswer(
+          choice: top.key,
+          confidence: top.value,
+          probabilities: p,
+        );
+      }
+      return DecisionAnswers(fields);
+    }
+
+    test('the state is render_state over the packer parts, tail and all', () {
+      final state = goldenDecisionState(
+        {
+          'now': '2026-09-09 (Wednesday)',
+          'directness_line': 'Addressed to: only you.',
+          'message_block': 'From: A <a@example.com>\n\nBody:\nhi',
+          'ctx_tail3': {
+            'thread_tail': [
+              {'who': 'You', 'received_at': 'x', 'text': 'earlier'},
+              {'who': null, 'text': 'second'},
+            ],
+          },
+        },
+        owner: 'Sam <sam@example.com>',
+      );
+      expect(
+        state,
+        'The reader, the owner of this inbox, is Sam <sam@example.com>. Any '
+        'mention of that name or address refers to the reader.\n\n'
+        'Today is 2026-09-09 (Wednesday).\n\n'
+        'Addressed to: only you.\n\n'
+        'Recent thread before this message, oldest first, for context only:\n'
+        'You: earlier\n---\n: second\n\n'
+        'The message to judge:\nFrom: A <a@example.com>\n\nBody:\nhi',
+      );
+    });
+
+    test('no tail, no owner: no tail section and no owner line', () {
+      expect(
+        goldenDecisionState({
+          'now': 'n',
+          'directness_line': 'd',
+          'message_block': 'm',
+          'ctx_tail3': {'thread_tail': <Object?>[]},
+        }),
+        'Today is n.\n\nd\n\nThe message to judge:\nm',
+      );
+    });
+
+    test('the policy gate keeps cold outreach and maps other', () {
+      final cold = answers({
+        'gate': {'keep': 0.1, 'drop': 0.9},
+        'drop_reason': {'cold_outreach': 0.8, 'other': 0.2},
+      });
+      expect(
+        classifierOut(cold, rule: DecisionGateRule.policy).gateVerdict,
+        'keep',
+      );
+      final argmax = classifierOut(cold, rule: DecisionGateRule.argmax);
+      expect(argmax.gateVerdict, 'drop');
+      expect(argmax.gateReason, 'cold_outreach');
+
+      final other = answers({
+        'gate': {'keep': 0.25, 'drop': 0.75},
+        'drop_reason': {'other': 0.9},
+      });
+      final out = classifierOut(other, rule: DecisionGateRule.policy);
+      expect(out.gateVerdict, 'drop');
+      expect(out.gateReason, 'model_other');
+      expect(
+        classifierOut(other, rule: DecisionGateRule.argmax).gateReason,
+        'other',
+      );
+    });
+
+    test('a drop below 0.70 is kept by policy and dropped by argmax', () {
+      final a = answers({
+        'gate': {'keep': 0.4, 'drop': 0.6},
+        'drop_reason': {'newsletter': 1},
+      });
+      expect(classifierOut(a, rule: DecisionGateRule.policy).gateVerdict,
+          'keep');
+      expect(classifierOut(a, rule: DecisionGateRule.policy).gateReason,
+          isNull);
+      expect(classifierOut(a, rule: DecisionGateRule.argmax).gateVerdict,
+          'drop');
+    });
+
+    test('booleans at 0.5, needs-you confidence off the top probability', () {
+      final a = answers({
+        'needs_action': {'yes': 0.5, 'no': 0.5},
+        'reply_expected': {'yes': 0.49, 'no': 0.51},
+        'needs_you': {'yes': 0.3, 'no': 0.7},
+        'category': {'work': 1},
+        'urgency': {'high': 1},
+        'intent': {'question': 1},
+        'importance': {'normal': 1},
+      });
+      final out = classifierOut(a, rule: DecisionGateRule.policy);
+      expect(out.needsAction, isTrue);
+      expect(out.replyExpected, isFalse);
+      expect(out.needsYouVerdict, isFalse);
+      expect(out.needsYouConfidence, 'medium');
+      expect(decisionConfidenceWord(0.9), 'high');
+      expect(decisionConfidenceWord(0.1), 'high');
+      expect(decisionConfidenceWord(0.6), 'low');
+      expect(out.category, 'work');
+      expect(out.urgency, 'high');
+      expect(out.intent, 'question');
+      expect(out.importance, 'normal');
+    });
+
+    test('the run row carries the scored keys and no text field', () {
+      final entry = GoldenRunEntry(id: 'x', stratum: 's', difficulty: 'd')
+        ..classifier = classifierOut(
+          answers({
+            'gate': {'keep': 0.2, 'drop': 0.8},
+            'drop_reason': {'newsletter': 1},
+          }),
+          rule: DecisionGateRule.policy,
+        );
+      final json = entry.toScoreRunJson();
+      expect(json['gate'], {'verdict': 'drop', 'reason': 'newsletter'});
+      expect((json['triage'] as Map).keys.toSet(),
+          {'category', 'urgency', 'needs_action', 'reply_expected'});
+      expect((json['extract'] as Map).keys.toSet(), {'intent', 'importance'});
+      expect((json['needs_you'] as Map).keys.toSet(),
+          {'verdict', 'confidence'});
+      expect(json.containsKey('decision_model'), isTrue);
+      expect(entry.attempted, isTrue);
     });
   });
 

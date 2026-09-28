@@ -1,9 +1,12 @@
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart'
     show ExtractionResult;
+import 'package:bond_inbox/services/decision/stored_decision.dart';
 import 'package:bond_inbox/widgets/why_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'fixtures/fake_decision_client.dart';
 
 /// The explanation beside a message.
 ///
@@ -60,6 +63,7 @@ void main() {
     Map<String, Object?>? ai,
     double threshold = 1.0,
     VoidCallback? onWhatHappened,
+    StoredDecision? decision,
   }) async {
     await tester.binding.setSurfaceSize(const Size(600, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -73,6 +77,7 @@ void main() {
           threshold: threshold,
           now: now,
           onWhatHappened: onWhatHappened,
+          decision: decision,
         ),
       ),
     ));
@@ -159,6 +164,89 @@ void main() {
       await pump(tester, message: msg(gateReason: 'teams_source'));
 
       expect(find.text('Skipped by the gate: teams source.'), findsOneWidget);
+    });
+
+    testWidgets("the decision model's own gate reads in the label's words",
+        (tester) async {
+      await pump(tester, message: msg(gateReason: 'model_other'));
+
+      expect(find.text('Skipped by the gate: automated.'), findsOneWidget);
+    });
+
+    testWidgets("the decision model's numbers are one line", (tester) async {
+      await pump(
+        tester,
+        decision: StoredDecision(
+          answers: fakeAnswers(),
+          model: 'bond-decide-fake',
+          gateP: 0.06,
+          needsYouP: 0.713,
+          needsActionP: 0.66,
+          replyExpectedP: 0.1,
+          latencyMs: 58,
+        ),
+      );
+
+      expect(
+        find.text('Decision model: gate keep 0.94, needs you 0.71, '
+            'action 0.66, reply 0.10 · 58 ms'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a learned drop says drop, with its probability',
+        (tester) async {
+      await pump(
+        tester,
+        message: msg(gateReason: 'digest', triageStatus: 'skipped'),
+        decision: StoredDecision(
+          answers: fakeAnswers(gateDrop: 0.91),
+          model: 'bond-decide-fake',
+          gateP: 0.91,
+          needsYouP: 0.02,
+          needsActionP: 0.05,
+          replyExpectedP: 0.03,
+          latencyMs: 40,
+        ),
+      );
+
+      expect(find.text('Skipped by the gate: digest.'), findsOneWidget);
+      expect(
+        find.text('Decision model: gate drop 0.91, needs you 0.02, '
+            'action 0.05, reply 0.03 · 40 ms'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a kept message the head leaned against says so',
+        (tester) async {
+      await pump(
+        tester,
+        decision: StoredDecision(
+          answers: fakeAnswers(gateDrop: 0.6),
+          model: 'bond-decide-fake',
+          gateP: 0.6,
+          needsYouP: 0.4,
+          needsActionP: 0.5,
+          replyExpectedP: 0.5,
+          latencyMs: 40,
+        ),
+      );
+
+      expect(
+        find.text('Decision model: gate keep (drop 0.60), needs you 0.40, '
+            'action 0.50, reply 0.50 · 40 ms'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('no decision, no line', (tester) async {
+      await pump(tester);
+
+      expect(
+        texts(tester).where((t) => t.startsWith('Decision model')),
+        isEmpty,
+      );
     });
   });
 

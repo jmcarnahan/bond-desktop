@@ -128,6 +128,7 @@ class DecisionAnswers {
           key: value.toJson(),
       };
 
+  /// Entries that are not a Map (a stored `owner_known` flag) are skipped.
   factory DecisionAnswers.fromJson(Map<String, Object?> json) =>
       DecisionAnswers({
         for (final MapEntry(:key, :value) in json.entries)

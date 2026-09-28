@@ -1,16 +1,19 @@
 @Skip('live — needs the golden set, and a server for all of it but the gate '
     'replay. Run: make golden (bulk), make golden-prose (prose), '
-    'make golden-storyline (storyline confirm) or make golden-gate (the '
-    "app's own gates, offline)")
+    'make golden-storyline (storyline confirm), make golden-gate (the '
+    "app's own gates, offline) or make golden-decision (the decision model)")
 library;
 
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/clustering_card.dart';
+import 'package:bond_inbox/services/decision/decision_client.dart';
+import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -19,6 +22,7 @@ import 'package:bond_inbox/services/llm/json_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/message_block.dart'
     show threadDigestCap;
+import 'package:bond_inbox/services/llm/model_slots.dart' show LlmTarget;
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
@@ -1947,6 +1951,184 @@ void main() {
     // A hundred pure function calls. The two minutes are for loading the set.
     timeout: const Timeout(Duration(minutes: 2)),
   );
+
+  /// The decision model over the golden set: each item's state rendered from
+  /// the packer's parts (`goldenDecisionState`, jev-prototype's
+  /// `golden_states`), one live `DecisionClient` call per item, and TWO run
+  /// files from the one pass — the gate by the app's policy (`p(drop) >=
+  /// 0.70`, cold outreach never dropped, reasons mapped to the app's words)
+  /// and by the row of record's argmax. Every other field is identical in
+  /// both. The name carries none of the five filter words (G21).
+  test(
+    'golden decision pass: the golden set through the decision model',
+    () async {
+      final set = await _loadOrFail();
+      final stageInputs = await _decoded(
+        GoldenDefines.setPath,
+        () async => _stageInputsById(
+          jsonDecode(await File(GoldenDefines.setPath).readAsString()),
+        ),
+      );
+      final owner = GoldenDefines.decisionOwner;
+      if (owner == null) {
+        // ignore: avoid_print
+        print('WARNING: GOLDEN_OWNER_NAME and GOLDEN_OWNER_ADDRESS are not '
+            'both set — the states carry no owner line, and needs_you depends '
+            'on it (the row of record was taken with one)');
+      }
+
+      final headsPath = decideHeadsPath();
+      if (!File(headsPath).existsSync()) {
+        fail('no decision heads at $headsPath — run make decide-install, or '
+            'pass --dart-define=DECIDE_HEADS=<path>');
+      }
+      final heads = await DecisionHeads.load(File(headsPath));
+      final client = DecisionClient(
+        resolveTarget: () => const LlmTarget(
+          baseUrl: DecisionClient.defaultBaseUrl,
+          model: DecisionClient.defaultModel,
+        ),
+        heads: () => heads,
+      );
+
+      final states = [
+        for (final item in set.items)
+          goldenDecisionState(
+            stageInputs[item.id] ??
+                (throw StateError('golden item ${item.id} has no stage_input')),
+            owner: owner,
+          ),
+      ];
+
+      // One untimed call first: the server's first request pays for its
+      // graph, and that is not a per-message cost.
+      try {
+        await client.decideStates([states.first]);
+      } on LlmUnavailableException {
+        fail('the decision server at ${DecisionClient.defaultBaseUrl} is not '
+            'answering — run make decide');
+      }
+
+      final startedAt = DateTime.now();
+      final policy = <GoldenRunEntry>[];
+      final argmax = <GoldenRunEntry>[];
+      final ms = <int>[];
+      var truncated = 0;
+      for (var i = 0; i < set.items.length; i++) {
+        final item = set.items[i];
+        final sw = Stopwatch()..start();
+        final result = (await client.decideStates([states[i]])).single;
+        ms.add(sw.elapsedMilliseconds);
+        if (result.truncated) truncated++;
+        for (final (rule, into) in [
+          (DecisionGateRule.policy, policy),
+          (DecisionGateRule.argmax, argmax),
+        ]) {
+          into.add(
+            GoldenRunEntry(
+              id: item.id,
+              stratum: item.stratum,
+              difficulty: item.difficulty,
+            )..classifier = classifierOut(
+                result.answers,
+                rule: rule,
+                truncated: result.truncated,
+              ),
+          );
+        }
+      }
+      final wall = DateTime.now().difference(startedAt);
+
+      int drops(List<GoldenRunEntry> run) =>
+          run.where((e) => e.classifier!.gateVerdict == 'drop').length;
+      var differ = 0;
+      for (var i = 0; i < policy.length; i++) {
+        if (policy[i].classifier!.gateVerdict !=
+            argmax[i].classifier!.gateVerdict) {
+          differ++;
+        }
+      }
+      final sorted = [...ms]..sort();
+      final p50 = percentile(sorted, 0.5);
+      final p95 = percentile(sorted, 0.95);
+
+      // Counts and milliseconds only: the states are real mail.
+      // ignore: avoid_print
+      print(
+        '\ndecision: ${set.items.length} items, owner '
+        '${owner == null ? 'NOT set' : 'set'}, model ${heads.model}\n'
+        'per item: p50 $p50 ms, p95 $p95 ms, wall ${wall.inMilliseconds} ms, '
+        '$truncated truncated to ${heads.maxTokens} tokens\n'
+        'gate drops: policy ${drops(policy)}, argmax ${drops(argmax)}, '
+        'differ on $differ items\n'
+        'needs_you in the app band [0.35, 0.65): '
+        '${policy.where((e) {
+          final p = e.classifier!.probabilities['needs_you_yes']! as double;
+          return p >= 0.35 && p < 0.65;
+        }).length} items (the run files score p(yes) >= 0.5)\n',
+      );
+
+      final argmaxPaths = await _decisionBench.writeRun(
+        entries: argmax,
+        label: 'decision-argmax',
+        startedAt: startedAt,
+      );
+      final policyPaths = await _decisionBench.writeRun(
+        entries: policy,
+        label: 'decision-policy',
+        startedAt: startedAt,
+        extra: (runPath) => {
+          'run_file': runPath,
+          'argmax_run_file': argmaxPaths.runPath,
+          'items': set.items.length,
+          'p50_ms': p50,
+          'p95_ms': p95,
+          'wall_ms': wall.inMilliseconds,
+          'truncated': truncated,
+          'model': heads.model,
+          'url': DecisionClient.defaultBaseUrl,
+          'owner_set': owner != null,
+          'gate_drops_policy': drops(policy),
+          'gate_drops_argmax': drops(argmax),
+        },
+      );
+      // ignore: avoid_print
+      print('argmax gate (the row of record\'s rule):');
+      _decisionBench.printPaths(runPath: argmaxPaths.runPath);
+      // ignore: avoid_print
+      print('policy gate (the app\'s rule):');
+      _decisionBench.printPaths(
+        runPath: policyPaths.runPath,
+        resultPath: policyPaths.resultPath,
+      );
+
+      // Shape, never accuracy.
+      expect(policy, hasLength(set.items.length));
+      for (final entry in policy) {
+        final out = entry.classifier!;
+        expect(out.gateVerdict, anyOf('keep', 'drop'));
+        expect(out.category, isNotEmpty);
+        expect(out.urgency, isNotEmpty);
+        expect(out.intent, isNotEmpty);
+        expect(out.importance, isNotEmpty);
+      }
+    },
+    // A hundred forward passes of tens of milliseconds each.
+    timeout: const Timeout(Duration(minutes: 10)),
+  );
+}
+
+/// `stage_input` per item id, off the raw set — what [goldenDecisionState]
+/// renders from, byte for byte.
+Map<String, Map<String, dynamic>> _stageInputsById(Object? decoded) {
+  final items = decoded is Map ? decoded['items'] : null;
+  return {
+    if (items is List)
+      for (final item in items)
+        if (item is Map && item['id'] is String && item['stage_input'] is Map)
+          item['id'] as String:
+              (item['stage_input'] as Map).cast<String, dynamic>(),
+  };
 }
 
 /// The stratum drawn to be gated wrongly — machine-shaped mail a person
@@ -2021,6 +2203,7 @@ const LiveBench _storylineBench = LiveBench('golden-storyline');
 const LiveBench _gatesBench = LiveBench('golden-gate');
 const LiveBench _sweepBench = LiveBench('golden-sweep');
 const LiveBench _vectorBench = LiveBench('golden-vector');
+const LiveBench _decisionBench = LiveBench('golden-decision');
 
 /// [load], with a decode failure rethrown as a sentence naming the FILE.
 ///

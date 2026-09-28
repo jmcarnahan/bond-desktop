@@ -481,7 +481,7 @@ void main() {
           reason: reason,
         );
       }
-      expect(automatedGateReasons, hasLength(4));
+      expect(automatedGateReasons, hasLength(8));
     });
 
     test('the gate reasons that say nothing about a reply do not suppress', () {
@@ -494,6 +494,8 @@ void main() {
         'monitoring',
         'machine_sender',
         'teams_source',
+        // The decision model's catch-all says no more than `monitoring` does.
+        'model_other',
       ]) {
         expect(
           replySuppressed(message(gateReason: reason)),

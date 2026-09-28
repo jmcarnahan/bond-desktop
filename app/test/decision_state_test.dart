@@ -88,6 +88,63 @@ void main() {
     }
   });
 
+  group('renderDecisionStateFromParts composes as render_state does', () {
+    const block = 'From: Ada Park <ada@example.org>\nSubject: Hi\n'
+        'Received: 2026-09-15T16:00:00Z\n\nBody:\nhello';
+
+    test('no owner, no tail: date, directness, message', () {
+      expect(
+        renderDecisionStateFromParts(
+          now: '2026-09-15 (Tuesday)',
+          directnessLine: 'Addressed to: only you.',
+          messageBlock: block,
+        ),
+        'Today is 2026-09-15 (Tuesday).\n\n'
+        'Addressed to: only you.\n\n'
+        'The message to judge:\n$block',
+      );
+    });
+
+    test('an empty owner renders no owner line', () {
+      expect(
+        renderDecisionStateFromParts(
+          owner: '',
+          now: 'x',
+          directnessLine: 'd',
+          messageBlock: 'm',
+        ),
+        'Today is x.\n\nd\n\nThe message to judge:\nm',
+      );
+    });
+
+    test('owner and tail, and the tail text is never capped', () {
+      final long = 'a' * 500;
+      expect(
+        renderDecisionStateFromParts(
+          owner: 'Sam Rivera <sam@example.org>',
+          now: '2026-09-15 (Tuesday)',
+          directnessLine: 'Addressed to: you and 2 others.',
+          messageBlock: block,
+          tail: [
+            const DecisionTailItem(who: 'You', text: 'first'),
+            const DecisionTailItem(who: 'Ada Park', text: 'second'),
+            const DecisionTailItem(who: '', text: 'third'),
+            DecisionTailItem(who: 'Lee', text: long),
+          ],
+        ),
+        'The reader, the owner of this inbox, is Sam Rivera '
+        '<sam@example.org>. Any mention of that name or address refers to '
+        'the reader.\n\n'
+        'Today is 2026-09-15 (Tuesday).\n\n'
+        'Addressed to: you and 2 others.\n\n'
+        'Recent thread before this message, oldest first, for context only:\n'
+        'You: first\n---\nAda Park: second\n---\n: third\n---\nLee: $long'
+        '\n\n'
+        'The message to judge:\n$block',
+      );
+    });
+  });
+
   group('the edges the fixture does not reach', () {
     test('a stamp that does not parse keeps its first ten characters', () {
       expect(decisionNowAnchor('yesterday afternoon'), 'yesterday ');

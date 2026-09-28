@@ -21,6 +21,7 @@ import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -252,6 +253,9 @@ void main() {
         overrides: [
           dbProvider.overrideWithValue(db),
           stageLlmClientProvider.overrideWith((ref, _) => llm),
+          // The decision pass runs before the held text call; a fake that
+          // keeps the message lets it through to the model.
+          keepingDecisionClient(),
         ],
       );
       addTearDown(made.dispose);

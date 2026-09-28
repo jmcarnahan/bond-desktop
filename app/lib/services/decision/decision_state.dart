@@ -23,25 +23,55 @@ String renderDecisionState(
   DecisionInput input, {
   DateTime Function(DateTime utc)? toLocal,
 }) {
-  final owner = input.owner;
   final tail = input.tail.length > DecisionInput.tailMax
       ? input.tail.sublist(input.tail.length - DecisionInput.tailMax)
       : input.tail;
+  return renderDecisionStateFromParts(
+    owner: input.owner,
+    now: decisionNowAnchor(input.receivedAt, toLocal: toLocal),
+    directnessLine: _directnessLine(input),
+    tail: [
+      for (final t in tail)
+        // Capped here as the service capped it, and NOT marker-stripped
+        // here: `DecisionInput.fromRows` strips, the service did not. The
+        // composer below never caps, as `render_state` never did.
+        DecisionTailItem(
+          who: t.who,
+          text: cutCodePoints(t.text, DecisionInput.tailTextCap),
+        ),
+    ],
+    messageBlock: _messageBlock(input),
+  );
+}
+
+/// `distill/state.py` `render_state`, exactly: the owner line (when
+/// [owner] is non-empty), `Today is $now.`, the directness line, the thread
+/// tail (when there is one) as `who: text` joined by `\n---\n`, and the
+/// message block, joined by blank lines.
+///
+/// It takes the parts as they stand — no tail cap, no count limit, no
+/// marker strip — because Python's `render_state` applied none; the raw-field
+/// [renderDecisionState] applies its caps before calling this, and the golden
+/// harness passes the packer's pre-rendered parts straight through (as
+/// jev-prototype's `golden_states` did), so both reach the model through one
+/// composition that cannot drift.
+String renderDecisionStateFromParts({
+  String? owner,
+  required String now,
+  required String directnessLine,
+  required String messageBlock,
+  List<DecisionTailItem> tail = const [],
+}) {
   return [
     if (owner != null && owner.isNotEmpty)
       'The reader, the owner of this inbox, is $owner. Any mention of that '
           'name or address refers to the reader.',
-    'Today is ${decisionNowAnchor(input.receivedAt, toLocal: toLocal)}.',
-    _directnessLine(input),
+    'Today is $now.',
+    directnessLine,
     if (tail.isNotEmpty)
       'Recent thread before this message, oldest first, for context only:\n'
-          '${[
-        for (final t in tail)
-          // Capped here as the service capped it, and NOT marker-stripped
-          // here: `DecisionInput.fromRows` strips, the service did not.
-          '${t.who}: ${cutCodePoints(t.text, DecisionInput.tailTextCap)}',
-      ].join('\n---\n')}',
-    'The message to judge:\n${_messageBlock(input)}',
+          '${[for (final t in tail) '${t.who}: ${t.text}'].join('\n---\n')}',
+    'The message to judge:\n$messageBlock',
   ].join('\n\n');
 }
 
