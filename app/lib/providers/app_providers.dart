@@ -414,17 +414,23 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
     //
     // It is also where the prefs LEARN the machine tier (`setMachineTier`):
     // the managed generative target's model id depends on it, and this build
-    // precedes every request the managed router can answer. And a
-    // hand-installed entry whose files are missing (the decision model before
-    // `make decide-install`) is left out, because the server refuses to start
-    // with a preset file missing and that must not cost the other models.
+    // precedes every request the managed router can answer. And an entry
+    // whose files are missing (the decision model before `make
+    // decide-install`, a chosen generative model not yet downloaded) is left
+    // out, because the server refuses to start with a preset file missing and
+    // that must not cost the other models: that role parks on its own.
     buildPreset: () async {
       final tier = await ref.read(machineTierProvider.future);
       ref.read(appPrefsProvider.notifier).setMachineTier(tier);
       final folder = ref.read(appPrefsProvider).effectiveModelsFolder(paths);
-      return (await ref.read(managedManifestProvider.future))
-          .withInstalledLocal(folder)
-          .toPreset(folder);
+      final served = (await ref.read(managedManifestProvider.future))
+          .withPresentFiles(folder);
+      // What the router will serve, so a managed target naming a model left
+      // out (not downloaded, not installed) parks rather than 400s.
+      ref.read(appPrefsProvider.notifier).setServedManagedIds({
+        for (final model in served.models) model.id,
+      });
+      return served.toPreset(folder);
     },
     routerPort: () => ref.read(appPrefsProvider).routerPort,
     // A port the app had to move to is REMEMBERED, and remembered before the
@@ -545,6 +551,10 @@ final managedModelsStatusProvider =
       routerId: file.id,
       inUse: served.contains(file.id),
       local: local,
+      headsOnDisk: switch (file.headsRelativePath) {
+        null => true,
+        final heads => File(p.join(folder, heads)).existsSync(),
+      },
     ));
   }
 

@@ -85,16 +85,15 @@ void main() {
             memoryBytes > 0 && memoryBytes < measuredFloorBytes,
       );
 
-  const fullSentence = 'This Mac runs all three models: the embedding model, '
-      'the inbox model and the writing model.';
+  const fullSentence = 'This Mac can run every model: the decision model, '
+      'the embedding model and the 27B generative model.';
   const floorSentence = 'The inbox models were measured on 16 GB and up; '
       'below that, expect slower triage.';
   String inboxSentence(String memory) =>
-      'This Mac has $memory of memory. It runs the inbox models, the '
-      'embedding model and the 4B. The writing model (Qwen3.8 27B) is built '
-      'for 40.0 GB or more and is not downloaded here; writing stages run on '
-      'the inbox model unless you point Bond at your own servers under '
-      'Settings, Models.';
+      'This Mac has $memory of memory. It runs the decision model, the '
+      'embedding model and the 4B as its generative model. Qwen3.8 27B is '
+      'built for 40.0 GB or more and is not downloaded here; point Bond at a '
+      'server of your own under Settings, Models to write with it.';
 
   testWidgets('a machine that has not answered yet says it is checking',
       (tester) async {
@@ -177,7 +176,7 @@ void main() {
     expect(find.byKey(setupContinueKey), findsNothing);
   });
 
-  testWidgets('a 64 GB Mac is told it runs all three models', (tester) async {
+  testWidgets('a 64 GB Mac is told it can run every model', (tester) async {
     await openFor(tester, 68719476736);
 
     expect(find.text(fullSentence), findsOneWidget);

@@ -37,6 +37,13 @@ class ManagedModelStatus {
 
   final String routerId;
 
+  /// Whether this entry's heads file is in the models folder, for an entry
+  /// that has one (the decision model); true for every other entry. Apart
+  /// from [onDisk] because the heads run in Dart on this Mac even when the
+  /// decision model embeds on the owner's server (D12), so a remote decision
+  /// model is only usable once this is true.
+  final bool headsOnDisk;
+
   /// Whether the placement's preset includes this file.
   ///
   /// False for a role whose placement is the owner's own server. That is
@@ -52,5 +59,6 @@ class ManagedModelStatus {
     required this.routerId,
     required this.inUse,
     this.local = false,
+    this.headsOnDisk = true,
   });
 }

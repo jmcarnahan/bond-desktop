@@ -731,9 +731,19 @@ class LlmClient {
     final streamed = onText != null && _wireOf(target) == LlmWire.openAi;
     // One closure so the instrumented try below stays a single try over either
     // path, exactly as it was over the only path there used to be.
-    Future<_Reply> send() => streamed
-        ? _postStreamed(body, request: request, target: target, onText: onText)
-        : _postInner(body, request: request, target: target);
+    //
+    // A target that says it cannot answer is refused HERE, before any
+    // request, and inside the instrumented try below so the call is recorded
+    // as `unavailable`: the drains park on it, where the router's 400 for a
+    // model it is not serving would be fatal.
+    Future<_Reply> send() async {
+      if (target.unavailable case final why?) {
+        throw LlmUnavailableException(why);
+      }
+      return streamed
+          ? _postStreamed(body, request: request, target: target, onText: onText)
+          : _postInner(body, request: request, target: target);
+    }
 
     final observer = _onCall;
     if (observer == null) {

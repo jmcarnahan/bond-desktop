@@ -382,6 +382,11 @@ class DecisionClient {
     _CallFacts facts, {
     bool tooLargeIsSignal = false,
   }) async {
+    // A managed decision model the router is not serving (not installed):
+    // refused before any request, so the pass parks on its own reason.
+    if (destination.unavailable case final why?) {
+      throw DecisionUnavailableException(why);
+    }
     final bearer = destination.bearer;
     final http.Response response;
     try {

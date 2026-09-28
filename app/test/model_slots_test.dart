@@ -434,7 +434,7 @@ void main() {
 
     test('a typed box address is trimmed and loses every trailing slash', () {
       // One function rather than the same two lines in the wizard, the
-      // Settings page and `useBox`: three copies of the strip is three
+      // Settings page and the role writers: three copies of the strip is three
       // places for `https://box.example.com//prose/…` to come from.
       expect(normalizeBoxBaseUrl('  https://box.example.com/  '),
           'https://box.example.com');

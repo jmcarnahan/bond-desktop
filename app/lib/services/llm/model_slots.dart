@@ -58,11 +58,20 @@ class LlmTarget {
   /// never in `app_prefs`.
   final String? bearer;
 
+  /// Why this target cannot answer right now, as a sentence a person can act
+  /// on, or null when it can. Set on a MANAGED target whose model the router
+  /// is not serving (a chosen generative model not yet downloaded, a
+  /// decision model not yet installed): the client then throws its
+  /// unavailable exception WITHOUT a request, so the work PARKS rather than
+  /// taking the router's 400 for an unknown model, which is fatal.
+  final String? unavailable;
+
   const LlmTarget({
     required this.baseUrl,
     required this.model,
     this.wire,
     this.bearer,
+    this.unavailable,
   });
 
   @override
@@ -71,10 +80,11 @@ class LlmTarget {
       other.baseUrl == baseUrl &&
       other.model == model &&
       other.wire == wire &&
-      other.bearer == bearer;
+      other.bearer == bearer &&
+      other.unavailable == unavailable;
 
   @override
-  int get hashCode => Object.hash(baseUrl, model, wire, bearer);
+  int get hashCode => Object.hash(baseUrl, model, wire, bearer, unavailable);
 
   /// Deliberately unchanged, and deliberately incomplete: this string reaches
   /// logs and failure messages, and neither the wire nor — above all — the
@@ -219,7 +229,7 @@ const String boxUrlDefault = String.fromEnvironment('BOND_BOX_URL');
 /// and with every trailing slash gone.
 ///
 /// One function rather than the same two lines in the wizard, the Settings
-/// page and `useBox`: a pasted address arrives with whitespace and often
+/// page and the role writers: a pasted address arrives with whitespace and often
 /// with a slash, and three copies of the strip is three places for
 /// `https://box.example.com//prose/v1/chat/completions` to come from. Returns
 /// the empty string for an empty input, which is what both callers read as
@@ -455,11 +465,12 @@ class LlmTargetSpec {
   /// constructed on the OpenAI one, and
   /// so the two spellings describe the same request. Only the second wire is
   /// worth saying out loud.
-  LlmTarget toTarget({String? bearer}) => LlmTarget(
+  LlmTarget toTarget({String? bearer, String? unavailable}) => LlmTarget(
         baseUrl: url,
         model: model,
         wire: wire == LlmWire.openAi ? null : wire,
         bearer: bearer,
+        unavailable: unavailable,
       );
 
   LlmTargetSpec copyWith({

@@ -114,8 +114,8 @@ void main() {
     );
   });
 
-  test('the supervisor\'s preset teaches the prefs the tier, and leaves out a '
-      'decision model that is not installed', () async {
+  test('the supervisor\'s preset teaches the prefs the tier, and leaves out '
+      'every model whose files are not on disk', () async {
     final container = containerFor(
       const AppPrefs(),
       memoryBytes: 16 * 1024 * 1024 * 1024,
@@ -129,10 +129,36 @@ void main() {
     // router for the model this preset actually serves.
     expect(container.read(appPrefsProvider).machineTier, MachineTier.inbox);
     expect(container.read(appPrefsProvider).generativeSpec.model, routerBulkId);
-    // Not installed: left out, so its absence cannot stop the other models.
-    expect(preset.modelIds, [routerEmbedId, routerBulkId]);
+    // Nothing is on disk yet: the 4B and the decision model are left out,
+    // so their absence cannot stop the others. The embedding model is kept
+    // whatever the disk says, so the preflight still reports it.
+    expect(preset.modelIds, [routerEmbedId]);
+    // And the prefs learned what is served, so a managed target naming the
+    // missing 4B parks instead of asking the router for it.
+    expect(container.read(appPrefsProvider).servedManagedIds, {routerEmbedId});
+    expect(
+      container.read(appPrefsProvider.notifier).targetForStage('triage')
+          .unavailable,
+      isNotNull,
+    );
 
     final folder = p.join(support.path, 'models');
+    final bulk = manifest.byRole(ModelRole.bulk);
+    final bulkFile = File(p.join(folder, bulk.relativePath));
+    await bulkFile.parent.create(recursive: true);
+    await bulkFile.writeAsString('x');
+
+    preset = await supervisor.buildPreset();
+    // Downloaded: served. The decision model is still not installed.
+    expect(preset.modelIds, [routerEmbedId, routerBulkId]);
+    expect(container.read(appPrefsProvider).servedManagedIds,
+        {routerEmbedId, routerBulkId});
+    expect(
+      container.read(appPrefsProvider.notifier).targetForStage('triage')
+          .unavailable,
+      isNull,
+    );
+
     final decide = manifest.byRole(ModelRole.decide);
     for (final relative in [decide.relativePath, decide.headsRelativePath!]) {
       final file = File(p.join(folder, relative));
@@ -142,6 +168,8 @@ void main() {
 
     preset = await supervisor.buildPreset();
     expect(preset.modelIds, [routerEmbedId, routerDecideId, routerBulkId]);
+    expect(container.read(appPrefsProvider).servedManagedIds,
+        {routerEmbedId, routerDecideId, routerBulkId});
     // The heads never enter the INI.
     expect(preset.toIni(), isNot(contains('decide-heads.json')));
   });

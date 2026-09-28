@@ -412,4 +412,64 @@ void main() {
       ),
     );
   });
+
+  group('a target that says it cannot answer', () {
+    test('throws LlmUnavailableException with its sentence and sends '
+        'nothing', () async {
+      final records = <LlmCallRecord>[];
+      final client = LlmClient(
+        httpClient: MockClient((request) async {
+          fail('no request may leave for an unavailable target');
+        }),
+        onCall: records.add,
+        resolveTarget: () => const LlmTarget(
+          baseUrl: 'http://127.0.0.1:8080/v1/chat/completions',
+          model: routerBulkId,
+          unavailable: 'The Qwen3 4B is not downloaded on this Mac. Set up '
+              'again to download it.',
+        ),
+      );
+
+      await expectLater(
+        client.complete(system: 's', user: 'u'),
+        throwsA(isA<LlmUnavailableException>().having(
+          (e) => e.message,
+          'message',
+          contains('not downloaded'),
+        )),
+      );
+      await expectLater(
+        client.completeJson(system: 's', user: 'u', schema: const {}),
+        throwsA(isA<LlmUnavailableException>()),
+      );
+      // Recorded the way every other unavailable call is.
+      expect(records.map((r) => r.outcome), ['unavailable', 'unavailable']);
+    });
+
+    test('a target without the sentence is asked as usual', () async {
+      var asked = 0;
+      final client = LlmClient(
+        httpClient: MockClient((request) async {
+          asked++;
+          return http.Response(
+            jsonEncode({
+              'choices': [
+                {
+                  'message': {'content': 'hi'},
+                  'finish_reason': 'stop',
+                },
+              ],
+            }),
+            200,
+          );
+        }),
+        resolveTarget: () => const LlmTarget(
+          baseUrl: 'http://127.0.0.1:8080/v1/chat/completions',
+          model: routerBulkId,
+        ),
+      );
+      await client.complete(system: 's', user: 'u');
+      expect(asked, 1);
+    });
+  });
 }

@@ -171,53 +171,51 @@ class _SetupFlowState extends ConsumerState<SetupFlow> {
         );
       case SetupStep.where:
         // The third step whose way forward is not the shared `next`. Under
-        // User defined it is the form's own Continue, which probes, discovers
-        // and writes before the controller moves the step; under Managed it
-        // is the step's button. The key lives in the form's controllers and
-        // in no state.
+        // Your server it is the generative form's own Continue, which probes,
+        // discovers and writes before the controller moves the step; under
+        // This Mac it is the step's button. The decision form's Connect
+        // writes its role and stays. The keys live in the forms' controllers
+        // and in no state.
         final prefs = ref.watch(appPrefsProvider);
         return SetupWhereBody(
           placement: state.placement,
-          // INTERIM (Phase 4 redesigns this step): the form still has two
-          // addresses, and both open on the generative remote's, because the
-          // small half is ignored by `useBox` now.
-          bigUrl: prefs.effectiveGenerativeUrl,
-          smallUrl: prefs.effectiveGenerativeUrl,
-          bigModel: prefs.effectiveGenerativeModel,
-          smallModel: prefs.effectiveGenerativeModel,
-          bigKeyStored: prefs.boxBigKeyStored,
-          smallKeyStored: prefs.boxBigKeyStored,
+          decisionPlacement: state.decisionPlacement,
+          generativeManagedId:
+              managedGenerativeIdFor(_controller.tier, state.generativeManaged),
+          inboxTier: _controller.lowMemory,
+          generativeUrl: prefs.effectiveGenerativeUrl,
+          generativeModel: prefs.effectiveGenerativeModel,
+          generativeKeyStored: prefs.boxBigKeyStored,
+          decisionUrl: prefs.effectiveDecisionUrl,
+          decisionModel: prefs.effectiveDecisionModel,
+          decisionKeyStored: prefs.decisionKeyStored,
+          decisionConnected: prefs.decisionPlacement == ModelPlacement.box,
           probe: _controller.probe,
           storedBearer: _controller.storedBearer,
           onChoose: (choice) => choice == ModelPlacement.box
               ? _controller.chooseBox()
               : _controller.chooseLocal(),
+          onChooseDecision: _controller.chooseDecision,
+          onChooseManaged: _controller.chooseGenerativeManaged,
           onContinueManaged: () =>
               unawaited(_controller.continueFromWhere()),
           // RETURNED, not unawaited: the form catches a refused write and
           // draws it under its fields.
-          onConnect: ({
-            required bigUrl,
-            required smallUrl,
-            required bigModel,
-            required smallModel,
-            bigKey,
-            smallKey,
-          }) =>
+          onConnect: ({required url, required model, key, required clearKey}) =>
               _controller.continueFromWhere(
-            servers: (
-              bigUrl: bigUrl,
-              smallUrl: smallUrl,
-              bigModel: bigModel,
-              smallModel: smallModel,
-              bigKey: bigKey,
-              smallKey: smallKey,
-            ),
+            generative: (url: url, model: model, key: key, clearKey: clearKey),
+          ),
+          onConnectDecision: (
+                  {required url, required model, key, required clearKey}) =>
+              _controller.connectDecision(
+            (url: url, model: model, key: key, clearKey: clearKey),
           ),
         );
       case SetupStep.models:
         return SetupModelsBody(
           manifest: manifest,
+          decisionModel: _controller.localDecisionModel,
+          decisionInstalled: _controller.decisionInstalled,
           onOpenLicense: (file) => unawaited(_openLicense(file)),
           onContinue: next,
         );

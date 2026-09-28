@@ -7,8 +7,10 @@ import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/model_slots.dart' show LlmTarget;
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/testing.dart';
 
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
@@ -1785,6 +1787,37 @@ void main() {
 
       expect(seen.last, isNull);
       expect(seen.first, isNull, reason: 'nothing is parked before the first');
+    });
+
+    test('a managed model the router is not serving PARKS the message, and '
+        'no request leaves', () async {
+      // The chosen 4B on a full Mac before it is downloaded: the router was
+      // started without it, and its 400 for an unknown model would be fatal.
+      // The target says so instead, and the REAL client refuses it.
+      await seedMessage(id: 'm1');
+      final llm = LlmClient(
+        httpClient: MockClient((request) async {
+          fail('no request may leave for an unavailable target');
+        }),
+        resolveTarget: () => const LlmTarget(
+          baseUrl: 'http://127.0.0.1:8080/v1/chat/completions',
+          model: 'bond-bulk',
+          unavailable: 'The Qwen3 4B is not downloaded on this Mac. Set up '
+              'again to download it.',
+        ),
+      );
+      final queue = TriageQueue(store, llm, concurrency: 1);
+      TriageProgress? last;
+      final subscription = queue.progress.listen((p) => last = p);
+
+      await queue.pump();
+      await Future<void>.delayed(Duration.zero);
+      await subscription.cancel();
+
+      expect(last!.parkedReason, 'model_unavailable');
+      final row = await messageRow('m1');
+      expect(row['triage_status'], 'pending');
+      expect(row['triage_attempts'], 0);
     });
 
     test('a refused key parks with its own reason', () async {

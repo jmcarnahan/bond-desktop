@@ -3,13 +3,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../providers/app_providers.dart' show ParkedFact;
-import '../providers/prefs_provider.dart' show AppPrefs;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart'
     show
-        LlmTargetSpec,
         ModelPlacement,
-        StageRole,
+        boxDecideId,
+        boxProseId,
         handServersBuild,
         hostPort,
         isLoopbackHost,
@@ -20,429 +19,208 @@ import '../services/models/managed_model_status.dart' show ManagedModelStatus;
 import '../services/server/server_state.dart';
 import '../theme/tokens.dart';
 import 'attachment_format.dart' show formatBytes;
-import 'model_servers_form.dart' show ModelServersForm;
-import 'probe_status.dart' show ProbeStatus, guardedProbe;
+import 'model_servers_form.dart' show ModelServersForm, ServerFormRole;
 import 'settings_segments.dart';
 
-/// One role's row on the Models page.
+/// One role write from the Models page: where the role runs and, on Your
+/// server, the address, the discovered model and the key as typed.
+/// [managedModel] is the generative role's managed choice (`bond-prose` or
+/// `bond-bulk`) and is ignored for the decision role. [clearKey] forgets the
+/// stored key because the address moved to another host.
+typedef RoleWrite = Future<void> Function({
+  required ModelPlacement placement,
+  String? managedModel,
+  String? url,
+  String? model,
+  String? key,
+  bool clearKey,
+});
+
+/// The Models section as a tester reads it: three roles, top to bottom.
 ///
-/// Three of these are the whole read-only half of the page: what the role is
-/// called, one phrase naming the model and the machine that answers for it,
-/// what it costs on disk and whether it is loaded, and where **Check** should
-/// look. Built from the preferences by [fromPrefs] and dressed with the live
-/// facts by [withStatus], both of which the host calls, so this widget stays
-/// prop-only like every other body in Settings and both resolutions are pure
-/// functions a test can call.
-@immutable
-class RoleLine {
-  /// `decision`, `generative` or `embed` — the slug the row's Check key is
-  /// built on, and
-  /// the reason this is a field rather than a position in a list: a test taps
-  /// one named row, never the second one.
-  final String id;
-
-  /// The role's own word, as the page says it.
-  final String title;
-
-  /// One phrase: the model and the machine it runs on, or the Custom sentence
-  /// when the role's steps do not all agree. See [SettingsModelsPage
-  /// .roleDetail], which is where both spellings are built.
-  final String detail;
-
-  /// What **Check** asks. Null takes the button off that row, the discipline
-  /// every optional control in Settings follows.
-  final String? checkUrl;
-
-  /// Which target's stored token rides that one request, or null for a target
-  /// with none. An ID, never the token: the lookup happens at the press.
-  final String? bearerId;
-
-  /// What this checkpoint costs on disk, already formatted, for a model this
-  /// Mac runs. Null on a row about somebody else's server, which has no local
-  /// file to report.
-  final String? size;
-
-  /// `not downloaded`, `on disk` or `on disk · loaded`, from the ledger and
-  /// the router. Null for the same reason [size] is.
-  final String? state;
-
-  const RoleLine({
-    required this.id,
-    required this.title,
-    required this.detail,
-    this.checkUrl,
-    this.bearerId,
-    this.size,
-    this.state,
-  });
-
-  RoleLine copyWith({
-    String? detail,
-    String? size,
-    String? state,
-  }) =>
-      RoleLine(
-        id: id,
-        title: title,
-        detail: detail ?? this.detail,
-        checkUrl: checkUrl,
-        bearerId: bearerId,
-        size: size ?? this.size,
-        state: state ?? this.state,
-      );
-
-  /// The row's second line, as one string: the phrase, then whatever local
-  /// facts there are, in the order a person asks for them.
-  String get line => [
-        detail,
-        if (size != null && size!.isNotEmpty) size!,
-        if (state != null && state!.isNotEmpty) state!,
-      ].join(' · ');
-
-  /// The three rows, resolved from the preferences the way the page reports
-  /// them. The host calls this and hands the result down; a test calls it on
-  /// an [AppPrefs] it built.
-  ///
-  /// One row per ROLE since the decision-model round, each describing the
-  /// one target its role resolves to: `decision` (the decision model),
-  /// `generative` (every text stage; the drafts may go to the cloud-drafts
-  /// target, which the Cloud drafts section describes rather than this row),
-  /// and `embed`, which is not routed at all, so its row is the one fixed
-  /// answer and its Check asks the embedding server the app would actually
-  /// send to.
-  ///
-  /// INTERIM: Phase 4 redesigns the page around the two role placements.
-  static List<RoleLine> fromPrefs(AppPrefs prefs) {
-    RoleLine routed(String id, String title, StageRole role, LlmTargetSpec spec) =>
-        RoleLine(
-          id: id,
-          title: title,
-          detail: SettingsModelsPage.roleDetail(role: role, spec: spec),
-          checkUrl: spec.url,
-          // An ID, never the token: the lookup happens at the press, through
-          // the same `storedBearer` closure every other Check here uses.
-          bearerId: spec.hasBearer ? spec.id : null,
-        );
-
-    return [
-      routed('decision', 'Decision model', StageRole.decision,
-          prefs.decisionSpec),
-      routed('generative', 'Generative model', StageRole.generative,
-          prefs.generativeSpec),
-      RoleLine(
-        id: 'embed',
-        title: 'Embeddings',
-        detail: SettingsModelsPage.roleDetail(
-          role: StageRole.embed,
-          spec: null,
-        ),
-        checkUrl: prefs.embedRequestTarget.baseUrl,
-      ),
-    ];
-  }
-
-  /// The same three rows with this Mac's own facts joined on: what the model
-  /// is called in the manifest, what it cost to fetch, whether the bytes are
-  /// there and whether the router has them loaded.
-  ///
-  /// A pure function beside the widget, so the join is pinned by a test that
-  /// never pumps a screen. [statuses] is null while the provider is still
-  /// reading, or when it failed, and a row then keeps exactly what
-  /// [fromPrefs] said: a page that blanked its own answers while a future
-  /// settled would flicker on every rebuild.
-  ///
-  /// A role on somebody's server has no local facts to add: its status says
-  /// so ([ManagedModelStatus.inUse] false), and under the user-defined
-  /// generative [placement] the generative row is left alone as well rather
-  /// than trusted to the statuses, because a list resolved a frame before the
-  /// mode moved would otherwise put a size and a disk state on a row about a
-  /// machine this app cannot see.
-  static List<RoleLine> withStatus(
-    List<RoleLine> lines, {
-    required List<ManagedModelStatus>? statuses,
-    required ServerState serverState,
-    required ModelPlacement placement,
-  }) {
-    if (statuses == null) return lines;
-    final byRole = {for (final row in statuses) row.roleId: row};
-    return [
-      for (final line in lines)
-        if (placement == ModelPlacement.box && line.id == 'generative')
-          line
-        else
-          switch (byRole[line.id]) {
-            null => line,
-            final status when !status.inUse && line.id != 'embed' => line,
-            final status => line.copyWith(
-                detail: '${status.displayName} on this Mac',
-                size: formatBytes(status.bytes),
-                state: _diskState(status, serverState),
-              ),
-          },
-    ];
-  }
-
-  /// Whether the bytes are there, and whether the router is holding them.
-  ///
-  /// `loaded` is keyed by ROUTER id rather than by role, which is why the
-  /// status carries one: on a small Mac the big row's file IS the bulk file,
-  /// and a row that looked itself up by `bond-prose` would read as never
-  /// loaded there.
-  ///
-  /// A file the placement does not use is NOT loaded by definition. `Ready`
-  /// means every model in the preset is resident, and under User defined the
-  /// preset is the embedding model alone, so a `Ready` read as "everything is
-  /// loaded" would call the idle 27B resident the moment that small server
-  /// came up, which is the steady state and the opposite of the fact.
-  static String _diskState(ManagedModelStatus status, ServerState state) {
-    if (!status.onDisk) return status.local ? 'not installed' : 'not downloaded';
-    if (!status.inUse) return 'on disk · not loaded';
-    final loaded = switch (state) {
-      ServerReady() => true,
-      ServerLoading(loaded: final map) => map[status.routerId] == true,
-      _ => false,
-    };
-    return loaded ? 'on disk · loaded' : 'on disk · not loaded';
-  }
-
-  /// The files this Mac holds that the placement does not use, one line each,
-  /// for the block under User defined.
-  ///
-  /// The two chat models keep their weights when the work moves to somebody
-  /// else's servers, and the page says so rather than dropping the rows: a
-  /// person who has just switched wants to watch the memory come back and to
-  /// see that the download is still there to come back to. Empty while the
-  /// statuses are still being read, which is the same silence [withStatus]
-  /// keeps.
-  ///
-  /// ON DISK only: the heading says this Mac holds the file, and an install
-  /// that chose User defined in the wizard never downloaded the chat models.
-  /// One line per FILE, not per role: on a small Mac the big row and the
-  /// small row are the same bulk file, and it should read once.
-  static List<String> idleOnThisMac(
-    List<ManagedModelStatus>? statuses,
-    ServerState serverState,
-  ) {
-    if (statuses == null) return [];
-    final seen = <String>{};
-    return [
-      for (final status in statuses)
-        if (!status.inUse && status.onDisk && seen.add(status.routerId))
-          '${status.displayName} · ${formatBytes(status.bytes)} · '
-              '${_diskState(status, serverState)}',
-    ];
-  }
-}
-
-/// The Models section as a tester reads it: one question, two answers, and
-/// nothing else on the page.
-///
-/// The question is **where the models run**. *Managed* means this app runs the
-/// models on this Mac and there is nothing to configure, so the page is a
-/// status block: one server line, a bar while the weights load, and the three
-/// role rows saying what each model is, what it cost and whether it is loaded.
-/// *User defined* means the person names a big model address and a small model
-/// address and pastes an access key, and **Connect** asks each server what it
-/// serves. Everything that used to be folded away under Advanced — the stage
-/// table, the slot editors, the targets list, the Local server card — is gone
-/// rather than hidden.
+/// **Decision model** (sorts and flags every message) and **Generative
+/// model** (writes summaries, drafts and storylines) each answer one
+/// question, where it runs: **This Mac** or **Your server**. This Mac is a
+/// status block (and, for the generative model, the choice of the 27B or the
+/// 4B); Your server is the one-address [ModelServersForm]. **Embeddings**
+/// always run on this Mac and are a status line only.
 ///
 /// PROP-ONLY, like every other body here: nothing reaches for a provider, the
-/// host resolves every fact and takes every write back as a closure, and the
-/// whole page is drivable from a test with a handful of values. The state it
-/// owns is which mode is being edited before anything is written, and the
-/// probe results of this session, which belong to no preference.
-///
-/// The ACCESS KEY is never held here. It lives in [ModelServersForm]'s own
-/// controllers, arrives as the argument of one call, and reaches the keychain
-/// through the host.
+/// host resolves every fact and takes every write back as a closure. The
+/// state it owns is which segment is being edited before anything is written.
+/// The ACCESS KEY is never held here: it lives in the form's own controller.
 class SettingsModelsPage extends StatefulWidget {
-  /// Where this install's model work runs today. The segments open on it.
-  final ModelPlacement modelPlacement;
+  final ModelPlacement decisionPlacement;
+  final ModelPlacement generativePlacement;
 
-  /// Whether the session's processing switch is on. Off, the status line says
-  /// so instead of repeating a park sentence, because a park says work is
-  /// retrying and nothing retries while the switch is off: the last parked
-  /// fact stays in its provider after the drains stop, and the rail guards
-  /// the same way.
+  /// The managed generative model's router id on this Mac (`bond-prose` or
+  /// `bond-bulk`), already resolved against the tier.
+  final String generativeManagedId;
+
+  /// This Mac is on the inbox tier, where the 27B is not offered.
+  final bool inboxTier;
+
+  /// Whether the session's processing switch is on. Off, the server line
+  /// says so and no park sentence is shown, because nothing retries.
   final bool processingOn;
 
-  /// Where the app's own llama-server stands, for the Managed status line and
-  /// the loaded half of each row.
-  ///
-  /// What this Mac's own MODELS are does not arrive here: the host joins them
-  /// onto [roleLines] through [RoleLine.withStatus] before it hands them
-  /// down, so the page draws rows rather than resolving them.
+  /// Where the app's own llama-server stands.
   final ServerState serverState;
 
-  /// The four user-defined values to prefill the form with, already resolved
-  /// by the host: the stored ones where there are stored ones, the build's
-  /// otherwise. Never a key.
-  final String boxBigUrl;
-  final String boxSmallUrl;
-  final String boxBigModel;
-  final String boxSmallModel;
+  /// The decision remote's effective address and model, and whether its key
+  /// is stored. Never a key.
+  final String decisionUrl;
+  final String decisionModel;
+  final bool decisionKeyStored;
 
-  /// Whether a key is in the keychain, for either server and for each.
-  /// Presence flags, never the token.
-  final bool boxKeyStored;
-  final bool boxBigKeyStored;
-  final bool boxSmallKeyStored;
+  /// The same three for the generative remote.
+  final String generativeUrl;
+  final String generativeModel;
+  final bool generativeKeyStored;
 
-  /// Asks a server what it serves. Null takes every **Check** on this page
-  /// off, the form's Connect and the three rows' alike.
+  /// This Mac's role models (`decision`, `generative`, `embed`), or null
+  /// while they are still being read.
+  final List<ManagedModelStatus>? statuses;
+
+  /// Asks a server what it serves. Null takes both forms' Connect off.
   final Future<ModelProbeResult> Function(String url, {String? bearer})? probe;
 
-  /// Looks up one target's stored token for a probe's `Authorization` header.
-  /// A LOOKUP, never the value.
+  /// Looks up one target's stored token for a probe. A LOOKUP, never the
+  /// value.
   final String? Function(String targetId)? storedBearer;
 
-  /// **Connect**: the two addresses, the two discovered names and a key per
-  /// server where one was typed. **Null takes the form off the page**, this
-  /// screen's usual discipline.
-  final Future<void> Function({
-    required String bigUrl,
-    required String smallUrl,
-    required String bigModel,
-    required String smallModel,
-    String? bigKey,
-    String? smallKey,
-  })? onUseBox;
+  /// The decision role's write. **Null takes the whole page's decision
+  /// controls off**, the house "absent wiring, absent control" rule.
+  final RoleWrite? onUseDecision;
 
-  /// **Managed**: puts the install back on this Mac's own models. Null leaves
-  /// that segment inert.
-  final Future<void> Function()? onUseManaged;
+  /// The generative role's write, for either placement.
+  final RoleWrite? onUseGenerative;
 
-  /// Forgets both stored keys. Null takes **Remove key** off the form.
-  final Future<void> Function()? onRemoveKey;
+  /// **Check** under This Mac's decision model: re-reads the heads file and
+  /// the install state and asks the router to pick up a model installed
+  /// while the app runs. Null takes the button off.
+  final Future<void> Function()? onCheckDecision;
 
-  /// Raised by the form when the big address is somebody else's service. Null
-  /// makes the form refuse such an address instead.
-  final Future<void> Function(
-    LlmTargetSpec big,
-    Future<void> Function() resume,
-  )? onThirdParty;
+  /// Forgets one role's stored key, by target id. Null takes **Remove key**
+  /// off both forms.
+  final Future<void> Function(String targetId)? onRemoveKey;
 
   /// Reruns the wizard, which is how the models folder changes and a download
   /// is retried. Null takes the link off.
   final VoidCallback? onSetUpAgain;
 
-  /// Opens the server's log in the operating system's own viewer. Null takes
-  /// **Show log** off the failure line.
+  /// Opens the server's log. Null takes **Show log** off the failure line.
   final VoidCallback? onShowLog;
 
-  /// The three rows, in the order they are drawn. Empty draws none, which is
-  /// what a host that resolved no targets has.
-  final List<RoleLine> roleLines;
-
-  /// The models this Mac holds that the placement is not serving, from
-  /// [RoleLine.idleOnThisMac]. Drawn under User defined only, where they are
-  /// the answer to "what happened to my 27B": the weights are on the disk and
-  /// nothing is holding them in memory. Empty draws no block.
-  final List<String> idleModelLines;
-
-  /// Why the pipeline is parked and how much is waiting, for the status line.
-  /// Null is the ordinary state and reads as nothing parked.
+  /// Why the pipeline is parked and how much is waiting.
   final ParkedFact? parked;
 
   const SettingsModelsPage({
     super.key,
-    required this.modelPlacement,
+    this.decisionPlacement = ModelPlacement.local,
+    this.generativePlacement = ModelPlacement.local,
+    this.generativeManagedId = routerProseId,
+    this.inboxTier = false,
     this.processingOn = true,
     this.serverState = const ServerStopped(),
-    this.boxBigUrl = '',
-    this.boxSmallUrl = '',
-    this.boxBigModel = '',
-    this.boxSmallModel = '',
-    this.boxKeyStored = false,
-    this.boxBigKeyStored = false,
-    this.boxSmallKeyStored = false,
+    this.decisionUrl = '',
+    this.decisionModel = '',
+    this.decisionKeyStored = false,
+    this.generativeUrl = '',
+    this.generativeModel = '',
+    this.generativeKeyStored = false,
+    this.statuses,
     this.probe,
     this.storedBearer,
-    this.onUseBox,
-    this.onUseManaged,
+    this.onUseDecision,
+    this.onUseGenerative,
+    this.onCheckDecision,
     this.onRemoveKey,
-    this.onThirdParty,
     this.onSetUpAgain,
     this.onShowLog,
-    this.roleLines = const [],
-    this.idleModelLines = const [],
     this.parked,
   });
 
-  /// The one question, and the heading over the segments.
-  static const String whereHeading = 'Where the models run';
-
-  /// The controls, keyed for the reason every control in Settings is: the
-  /// words on them are ordinary words that also appear in the sentences
-  /// beside them.
-  static const Key modeKey = ValueKey('settings-mode');
+  static const Key decisionModeKey = ValueKey('settings-decision-mode');
+  static const Key generativeModeKey = ValueKey('settings-generative-mode');
+  static const Key generativeManagedKey =
+      ValueKey('settings-generative-managed');
+  static const Key decisionStatusKey = ValueKey('settings-decision-status');
+  static const Key generativeStatusKey = ValueKey('settings-generative-status');
+  static const Key embedStatusKey = ValueKey('settings-embed-status');
+  static const Key checkDecisionKey = ValueKey('settings-role-check-decision');
   static const Key statusKey = ValueKey('settings-models-status');
   static const Key progressKey = ValueKey('settings-models-progress');
   static const Key showLogKey = ValueKey('settings-show-log');
   static const Key setUpAgainKey = ValueKey('settings-set-up-again');
-  static const Key idleModelsKey = ValueKey('settings-idle-models');
+  static const Key idleGenerativeKey = ValueKey('settings-idle-models');
 
-  /// One role row's **Check**. Three buttons carry the same word, so a test
-  /// that tapped by label would tap whichever came first.
-  static Key roleCheckKey(String roleId) =>
-      ValueKey('settings-role-check-$roleId');
+  static const String decisionTitle = 'Decision model';
+  static const String generativeTitle = 'Generative model';
+  static const String embedTitle = 'Embeddings';
+  static const String serverTitle = 'Model server on this Mac';
 
-  /// The two modes, in the owner's own words.
-  static const String managedLabel = 'Managed';
-  static const String userDefinedLabel = 'User defined';
+  /// The two placements, in the owner's own words.
+  static const String thisMacLabel = 'This Mac';
+  static const String yourServerLabel = 'Your server';
 
-  /// What choosing one does, which is the whole of the page in one sentence.
-  static const String modeCaption =
-      'Managed runs the models on this Mac. User defined sends the work to '
-      'servers you name.';
+  static const String decisionCaption =
+      'Sorts and flags every message. It reads every message, so it runs on '
+      'this Mac or on a server of your own.';
+  static const String generativeCaption =
+      'Writes summaries, drafts and storylines.';
+  static const String embedCaption =
+      'Finds related messages. Always runs on this Mac.';
 
-  /// The status line while the processing switch is off, ahead of any park.
+  /// The managed generative choice.
+  static const String model27bLabel = 'Qwen3.8 27B';
+  static const String model4bLabel = 'Qwen3 4B';
+  static const String managedCaption =
+      'The 27B writes better. The 4B is smaller and faster.';
+  static const String inboxTierCaption =
+      'This Mac has too little memory for the 27B.';
+
+  /// The server line while the processing switch is off.
   static const String processingOffText =
       'Processing is off. Turn it on under Processing, or in the sidebar, and '
       'the work starts.';
 
-  /// The status line while the form is open on an install that has not
-  /// connected yet. Nothing moves until Connect, and this is what says so.
+  /// A role's status while its form is open over an install that has not
+  /// connected yet.
   static const String untilConnectText =
       'Running on this Mac until you connect.';
 
-  /// The parks this page can answer for, in its own words. The same facts the
-  /// inbox rail reads, from the drains' own progress streams; nothing polls a
-  /// server to produce them.
+  /// The parks this page can answer for, each under its own role.
   static const String serverParkedText =
       'Your server is not answering. Work is waiting and will retry each '
       'minute.';
-
-  /// The same line when the server ANSWERED and refused the key. A different
-  /// sentence because it is a different job: waiting fixes the first and
-  /// nothing but a new key fixes this one, and the field that takes one is
-  /// standing open directly above it.
   static const String serverUnauthorizedText =
       'Your server refused the access key. Change it here.';
-
-  /// And the third. The embedding model is on this Mac under EITHER mode, so
-  /// this sentence names this Mac in both — the same reason
-  /// `railProgressLine` keeps one wording for it across both.
   static const String embedUnavailableText =
       'The embedding model on this Mac is not answering. Work is waiting and '
       'will retry each minute.';
-
-  /// And the decision model's. It can run on this Mac or on your server, so
-  /// the sentence names the model and not a machine, and it is answered under
-  /// both modes for the same reason.
   static const String decisionUnavailableText =
       'The decision model is not answering. Work is waiting and will retry '
       'each minute.';
 
-  /// The user-defined status line before a key has been pasted, and after one
-  /// has. A server on this machine needs no key, so the first is asked for
-  /// only when at least one address is somewhere else.
+  /// Your server's status before a key has been pasted, and after one has.
   static const String keyNeededText =
       'Access key needed. Paste it and press Connect.';
-  static const String connectedText = 'Connected to your servers.';
+  static String connectedText(String model, String url) =>
+      'Connected · $model at ${hostPort(url)}';
 
-  /// The Managed status line, one sentence per state of the app's own server.
+  /// This Mac's install states.
+  static const String decisionNotInstalledText =
+      'Not installed · run make decide-install';
+  static const String installedLoadedText = 'Installed · loaded';
+  static const String installedNotLoadedText = 'Installed · not loaded';
+  static const String notDownloadedText =
+      'Not downloaded · Set up again to download it';
+  static const String onDiskLoadedText = 'On disk · loaded';
+  static const String onDiskNotLoadedText = 'On disk · not loaded';
+  static const String checkingText = 'Checking…';
+
+  /// The server line, one sentence per state of the app's own server.
   static const String startingText = 'Starting…';
   static String loadingText(int loaded, int total) =>
       'Loading models · $loaded of $total';
@@ -452,100 +230,44 @@ class SettingsModelsPage extends StatefulWidget {
   static String portInUseText(int port, String? holder) => holder == null
       ? 'Port $port is in use'
       : 'Port $port is in use by $holder';
-
-  /// A build that leaves the servers to the developer, which is a define
-  /// rather than a preference since Round H.
   static const String handServersText =
       'Servers are started by hand for this build.';
 
+  static const String checkLabel = 'Check';
   static const String showLogLabel = 'Show log';
   static const String setUpAgainLabel = 'Set up again';
 
-  /// The heading over the models this Mac holds and the placement does not
-  /// serve.
-  static const String idleModelsTitle = 'Also on this Mac, not in use';
-
-  /// The models this build runs on this Mac, in the words a person
-  /// recognises, BY ROUTER ID (the `model` a managed request carries): a
-  /// small Mac's generative model is the 4B, and its row has to say so rather
-  /// than name the 27B it is not using.
-  ///
-  /// A const map rather than a read of the manifest. [RoleLine.withStatus]
-  /// replaces these with the manifest's own `displayName` the moment the
-  /// host has read it; this is what a row says in the frame before that, and
-  /// on a row the statuses do not cover.
+  /// The models this build runs on this Mac, by router id, for the frame
+  /// before the statuses are read.
   static const Map<String, String> localModelNames = {
-    routerProseId: 'Qwen3.8 27B',
-    routerBulkId: 'Qwen3 4B',
+    routerProseId: model27bLabel,
+    routerBulkId: model4bLabel,
     routerDecideId: 'Bond decision model',
   };
-
-  /// The embedding model, which is on this Mac under either mode and is never
-  /// routed, so it is one name rather than a lookup.
   static const String embedModelName = 'Qwen3 Embedding 0.6B';
 
-  /// One role's phrase: the model and the machine, or the Custom sentence.
-  ///
-  /// Here rather than in the host because it is user-facing prose, and prose
-  /// that lives in a 5,800-line screen is prose nothing can pin. [overrides]
-  /// is how many of the role's other steps resolve somewhere else than its
-  /// representative one; any at all and the role has no single answer to give.
-  ///
-  /// Embeddings never route, so the role answers the same phrase under either
-  /// mode: that model is on this Mac whatever the rest of the pipeline is
-  /// doing.
-  static String roleDetail({
-    required StageRole role,
-    required LlmTargetSpec? spec,
-    int overrides = 0,
-  }) {
-    if (overrides > 0) return customDetail(overrides);
-    if (role == StageRole.embed) return '$embedModelName on this Mac';
-    if (spec == null) return 'Not pointed at a server';
-    if (spec.isBuiltIn) {
-      return '${localModelNames[spec.model] ?? spec.model} on this Mac';
-    }
-    // A user-defined server and somebody's own target read the same way, and
-    // they are the same fact: the page cannot claim which machine either one
-    // is, so it says the model and where it dials.
-    return '${spec.model} at ${hostPort(spec.url)}';
-  }
-
-  /// A role whose steps disagree. It names the count, and nothing more: the
-  /// screen that could have shown which ones is gone.
-  static String customDetail(int steps) => steps == 1
-      ? 'Custom · 1 step points elsewhere'
-      : 'Custom · $steps steps point elsewhere';
-
-  /// The collapsed Models summary: which mode, and the one fact about it.
-  ///
-  /// Static so the screen can build it without this widget existing — a
-  /// collapsed section renders its summary and nothing else. [serverLine] is
-  /// the same sentence the page would show under Managed, resolved by the
-  /// screen from the same state.
+  /// The collapsed Models summary: where each role runs, then the server.
   static String summary({
-    required ModelPlacement placement,
+    required ModelPlacement decisionPlacement,
+    required ModelPlacement generativePlacement,
+    required String generativeUrl,
     required String serverLine,
-    required String bigUrl,
-    required String smallUrl,
   }) {
-    if (placement == ModelPlacement.local) {
-      return 'Managed · $serverLine';
-    }
-    final big = hostPort(bigUrl);
-    final small = hostPort(smallUrl);
-    final hosts = <String>[
-      if (big.isNotEmpty) big,
-      if (small.isNotEmpty && small != big) small,
-    ];
-    return hosts.isEmpty
-        ? 'User defined · no address yet'
-        : 'User defined · ${hosts.join(' · ')}';
+    final host = hostPort(generativeUrl);
+    return [
+      decisionPlacement == ModelPlacement.local
+          ? 'Decision on this Mac'
+          : 'Decision on your server',
+      generativePlacement == ModelPlacement.local
+          ? 'Generative on this Mac'
+          : (host.isEmpty
+              ? 'Generative on your server'
+              : 'Generative at $host'),
+      serverLine,
+    ].join(' · ');
   }
 
-  /// The Managed server line, from the state alone. Static for [summary]'s
-  /// reason: the collapsed section says the same thing the open one does, and
-  /// two copies of these sentences would drift.
+  /// The server line, from the state alone.
   static String serverLine(ServerState state) {
     if (handServersBuild || state is ServerDisabled) return handServersText;
     return switch (state) {
@@ -559,8 +281,18 @@ class SettingsModelsPage extends StatefulWidget {
       ServerFailed(reason: final reason) => failedText(reason),
       ServerPortInUse(port: final port, holder: final holder) =>
         portInUseText(port, holder),
-      // Answered above, and unreachable: a sealed switch needs the arm.
       ServerDisabled() => handServersText,
+    };
+  }
+
+  /// Whether the router holds [status]'s model. A file the placements do not
+  /// use is not loaded by definition.
+  static bool loaded(ManagedModelStatus status, ServerState state) {
+    if (!status.onDisk || !status.inUse) return false;
+    return switch (state) {
+      ServerReady() => true,
+      ServerLoading(loaded: final map) => map[status.routerId] == true,
+      _ => false,
     };
   }
 
@@ -569,120 +301,78 @@ class SettingsModelsPage extends StatefulWidget {
 }
 
 class _SettingsModelsPageState extends State<SettingsModelsPage> {
-  /// Whether the form is open on an install that is still Managed. Choosing
-  /// **User defined** opens it and writes nothing; **Connect** is what moves
-  /// the install, and the placement prop coming back as `box` is what closes
-  /// this again.
-  bool _editing = false;
+  /// Whether a role's form is open on an install that still runs it here.
+  /// Choosing Your server opens it and writes nothing; Connect moves the
+  /// role, and the placement prop coming back as `box` closes this again.
+  bool _decisionEditing = false;
+  bool _generativeEditing = false;
 
-  /// And the same per role row, keyed by [RoleLine.id].
-  final Map<String, bool> _roleProbing = {};
-  final Map<String, ModelProbeResult> _roleProbe = {};
+  /// A Check is out.
+  bool _checking = false;
 
   @override
   void didUpdateWidget(SettingsModelsPage old) {
     super.didUpdateWidget(old);
-    // The Connect landed: the placement is what the form was asking for, and
-    // the form is now showing because of the placement rather than because of
-    // a press.
-    if (widget.modelPlacement == ModelPlacement.box && _editing) {
-      _editing = false;
+    if (widget.decisionPlacement == ModelPlacement.box) {
+      _decisionEditing = false;
     }
-    // A row that now asks a different server drops the answer it had, and the
-    // busy line with it: a green Checked line from a user-defined server would
-    // otherwise survive a switch to Managed and read as a report about the
-    // wrong machine. A check still in flight is dropped where it lands, by
-    // the URL it was pressed on.
-    final before = {for (final line in old.roleLines) line.id: line.checkUrl};
-    for (final line in widget.roleLines) {
-      if (before.containsKey(line.id) && before[line.id] != line.checkUrl) {
-        _roleProbe.remove(line.id);
-        _roleProbing.remove(line.id);
-      }
+    if (widget.generativePlacement == ModelPlacement.box) {
+      _generativeEditing = false;
     }
   }
 
-  bool get _onBox => widget.modelPlacement == ModelPlacement.box;
+  bool get _decisionOnServer =>
+      widget.decisionPlacement == ModelPlacement.box || _decisionEditing;
+  bool get _generativeOnServer =>
+      widget.generativePlacement == ModelPlacement.box || _generativeEditing;
 
-  /// Whether the form is on screen: always under User defined, and under
-  /// Managed only while somebody is filling it in.
-  bool get _showForm => (_onBox || _editing) && widget.onUseBox != null;
+  ManagedModelStatus? _row(String roleId) {
+    for (final row in widget.statuses ?? const <ManagedModelStatus>[]) {
+      if (row.roleId == roleId) return row;
+    }
+    return null;
+  }
+
+  /// A park sentence for [reasons], when processing is on and work waits.
+  String? _parked(Set<String> reasons) {
+    final parked = widget.parked;
+    if (!widget.processingOn || parked == null || parked.waiting <= 0) {
+      return null;
+    }
+    if (!reasons.contains(parked.reason)) return null;
+    return switch (parked.reason) {
+      'model_unavailable' => SettingsModelsPage.serverParkedText,
+      'unauthorized' => SettingsModelsPage.serverUnauthorizedText,
+      'embed_unavailable' => SettingsModelsPage.embedUnavailableText,
+      'decision_unavailable' => SettingsModelsPage.decisionUnavailableText,
+      _ => null,
+    };
+  }
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(
-          SettingsModelsPage.whereHeading,
-          style: BondType.small.copyWith(fontWeight: FontWeight.w600),
-        ),
-        const SizedBox(height: BondSpacing.s8),
-        SettingsSegments<ModelPlacement>(
-          key: SettingsModelsPage.modeKey,
-          segments: const [
-            (
-              value: ModelPlacement.local,
-              label: SettingsModelsPage.managedLabel,
-            ),
-            (
-              value: ModelPlacement.box,
-              label: SettingsModelsPage.userDefinedLabel,
-            ),
-          ],
-          // The segment moves under the finger. Under Managed that is this
-          // page's own state until Connect lands, which is what the status
-          // line directly below says out loud.
-          selected: _onBox || _editing
-              ? ModelPlacement.box
-              : ModelPlacement.local,
-          onChanged: _chooseMode,
-          caption: SettingsModelsPage.modeCaption,
-        ),
-        const SizedBox(height: BondSpacing.s16),
-        if (_showForm) ...[
-          ModelServersForm(
-            bigUrl: widget.boxBigUrl,
-            smallUrl: widget.boxSmallUrl,
-            bigModel: widget.boxBigModel,
-            smallModel: widget.boxSmallModel,
-            keyStored: widget.boxKeyStored,
-            bigKeyStored: widget.boxBigKeyStored,
-            smallKeyStored: widget.boxSmallKeyStored,
-            probe: widget.probe,
-            storedBearer: widget.storedBearer,
-            onConnect: widget.onUseBox!,
-            onRemoveKey: widget.onRemoveKey,
-            onThirdParty: widget.onThirdParty,
-          ),
-          const SizedBox(height: BondSpacing.s16),
-        ],
+        _heading(SettingsModelsPage.serverTitle),
         Text(
           key: SettingsModelsPage.statusKey,
-          _statusLine(),
+          widget.processingOn
+              ? SettingsModelsPage.serverLine(widget.serverState)
+              : SettingsModelsPage.processingOffText,
           style: BondType.small,
         ),
-        if (!_onBox) ..._managedProgress(),
-        if (widget.roleLines.isNotEmpty) ...[
+        ..._serverProgress(),
+        if (widget.onUseDecision != null) ...[
           const SizedBox(height: BondSpacing.s24),
-          for (final line in widget.roleLines) _roleRow(line),
+          ..._decisionBlock(widget.onUseDecision!),
         ],
-        if (_onBox && widget.idleModelLines.isNotEmpty) ...[
+        if (widget.onUseGenerative != null) ...[
           const SizedBox(height: BondSpacing.s24),
-          Column(
-            key: SettingsModelsPage.idleModelsKey,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                SettingsModelsPage.idleModelsTitle,
-                style: BondType.small.copyWith(fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(height: BondSpacing.s4),
-              for (final line in widget.idleModelLines)
-                Text(line, style: BondType.caption),
-            ],
-          ),
+          ..._generativeBlock(widget.onUseGenerative!),
         ],
+        const SizedBox(height: BondSpacing.s24),
+        ..._embedBlock(),
         if (widget.onSetUpAgain case final again?) ...[
           const SizedBox(height: BondSpacing.s16),
           Align(
@@ -698,33 +388,317 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
     );
   }
 
-  /// Which mode the person just pressed.
-  ///
-  /// Managed ACTS, because there is nothing else to fill in: from a
-  /// user-defined install it moves the work back here at once. User defined
-  /// opens the form and writes nothing — the addresses and the key are the
-  /// rest of that answer, and Connect is where it is given.
-  void _chooseMode(ModelPlacement mode) {
-    if (mode == ModelPlacement.box) {
-      if (!_onBox) setState(() => _editing = true);
-      return;
-    }
-    if (_onBox) {
-      final managed = widget.onUseManaged;
-      if (managed != null) unawaited(managed());
-      return;
-    }
-    if (_editing) setState(() => _editing = false);
+  Widget _heading(String text) => Padding(
+        padding: const EdgeInsets.only(bottom: BondSpacing.s8),
+        child: Text(
+          text,
+          style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+        ),
+      );
+
+  Widget _placementSegments({
+    required Key key,
+    required bool onServer,
+    required String caption,
+    required ValueChanged<ModelPlacement> onChanged,
+  }) =>
+      SettingsSegments<ModelPlacement>(
+        key: key,
+        segments: const [
+          (value: ModelPlacement.local, label: SettingsModelsPage.thisMacLabel),
+          (value: ModelPlacement.box, label: SettingsModelsPage.yourServerLabel),
+        ],
+        selected: onServer ? ModelPlacement.box : ModelPlacement.local,
+        onChanged: onChanged,
+        caption: caption,
+      );
+
+  /// One line of this Mac's facts about a model: its name and its size.
+  Widget? _detail(ManagedModelStatus? row) {
+    if (row == null) return null;
+    return Text(
+      '${row.displayName} · ${formatBytes(row.bytes)}',
+      style: BondType.caption,
+    );
   }
 
-  /// The bar under the Managed status line, and the way to the log.
-  ///
-  /// A bar only while something is happening: an indeterminate one for a
-  /// process that has not answered yet, and a real fraction once the router
-  /// is reporting model by model. **Show log** only under a failure, because
-  /// that is the only state where the last twelve lines the server printed
-  /// are what tells two identical sentences apart.
-  List<Widget> _managedProgress() {
+  // ── Decision ───────────────────────────────────────────────────────────
+
+  List<Widget> _decisionBlock(RoleWrite write) {
+    final onServer = _decisionOnServer;
+    final row = _row('decision');
+    final check = widget.onCheckDecision;
+    return [
+      _heading(SettingsModelsPage.decisionTitle),
+      _placementSegments(
+        key: SettingsModelsPage.decisionModeKey,
+        onServer: onServer,
+        caption: SettingsModelsPage.decisionCaption,
+        onChanged: (mode) {
+          if (mode == ModelPlacement.box) {
+            if (widget.decisionPlacement != ModelPlacement.box) {
+              setState(() => _decisionEditing = true);
+            }
+            return;
+          }
+          if (widget.decisionPlacement == ModelPlacement.box) {
+            unawaited(write(placement: ModelPlacement.local));
+            return;
+          }
+          if (_decisionEditing) setState(() => _decisionEditing = false);
+        },
+      ),
+      const SizedBox(height: BondSpacing.s12),
+      if (onServer) ...[
+        ModelServersForm(
+          key: const ValueKey('settings-decision-form'),
+          role: ServerFormRole.decision,
+          url: widget.decisionUrl,
+          model: widget.decisionModel,
+          keyStored: widget.decisionKeyStored,
+          probe: widget.probe,
+          storedBearer: widget.storedBearer,
+          onConnect: ({required url, required model, key, required clearKey}) =>
+              write(
+            placement: ModelPlacement.box,
+            url: url,
+            model: model,
+            key: key,
+            clearKey: clearKey,
+          ),
+          onRemoveKey: widget.onRemoveKey == null
+              ? null
+              : () => widget.onRemoveKey!(boxDecideId),
+          thirdPartyRefusal: ModelServersForm.decisionThirdPartyRefusalText,
+        ),
+        const SizedBox(height: BondSpacing.s12),
+      ] else
+        ?_detail(row),
+      Row(
+        children: [
+          Expanded(
+            child: Text(
+              key: SettingsModelsPage.decisionStatusKey,
+              _decisionStatus(row),
+              style: BondType.small,
+            ),
+          ),
+          if (!onServer && check != null) ...[
+            const SizedBox(width: BondSpacing.s12),
+            OutlinedButton(
+              key: SettingsModelsPage.checkDecisionKey,
+              onPressed: _checking ? null : () => unawaited(_check(check)),
+              child: const Text(SettingsModelsPage.checkLabel),
+            ),
+          ],
+        ],
+      ),
+    ];
+  }
+
+  String _decisionStatus(ManagedModelStatus? row) {
+    if (_parked(const {'decision_unavailable'}) case final parked?) {
+      return parked;
+    }
+    if (_decisionEditing) return SettingsModelsPage.untilConnectText;
+    if (widget.decisionPlacement == ModelPlacement.box) {
+      // The heads run here whichever server embeds (D12): without the heads
+      // file a connected server still cannot decide anything.
+      if (row != null && !row.headsOnDisk) {
+        return SettingsModelsPage.decisionNotInstalledText;
+      }
+      return _remoteStatus(
+        widget.decisionUrl,
+        widget.decisionModel,
+        widget.decisionKeyStored,
+      );
+    }
+    if (_checking) return SettingsModelsPage.checkingText;
+    if (row == null) {
+      return '${SettingsModelsPage.localModelNames[routerDecideId]} on this Mac';
+    }
+    if (!row.onDisk) return SettingsModelsPage.decisionNotInstalledText;
+    return SettingsModelsPage.loaded(row, widget.serverState)
+        ? SettingsModelsPage.installedLoadedText
+        : SettingsModelsPage.installedNotLoadedText;
+  }
+
+  /// Your server's line: a key is needed unless the server is on this
+  /// machine, which needs none.
+  String _remoteStatus(String url, String model, bool keyStored) {
+    if (!keyStored && !isLoopbackHost(url)) {
+      return SettingsModelsPage.keyNeededText;
+    }
+    return SettingsModelsPage.connectedText(model, url);
+  }
+
+  Future<void> _check(Future<void> Function() check) async {
+    setState(() => _checking = true);
+    try {
+      await check();
+    } on Object {
+      // The status line re-reads the disk either way; a Check that could not
+      // finish has nothing more useful to say than the line below it.
+    }
+    if (!mounted) return;
+    setState(() => _checking = false);
+  }
+
+  // ── Generative ─────────────────────────────────────────────────────────
+
+  List<Widget> _generativeBlock(RoleWrite write) {
+    final onServer = _generativeOnServer;
+    final row = _row('generative');
+    // The row answers for the CHOSEN model only; in the frame after a switch
+    // it may still describe the other one.
+    final chosen = row != null && row.routerId == widget.generativeManagedId
+        ? row
+        : null;
+    return [
+      _heading(SettingsModelsPage.generativeTitle),
+      _placementSegments(
+        key: SettingsModelsPage.generativeModeKey,
+        onServer: onServer,
+        caption: SettingsModelsPage.generativeCaption,
+        onChanged: (mode) {
+          if (mode == ModelPlacement.box) {
+            if (widget.generativePlacement != ModelPlacement.box) {
+              setState(() => _generativeEditing = true);
+            }
+            return;
+          }
+          if (widget.generativePlacement == ModelPlacement.box) {
+            unawaited(write(placement: ModelPlacement.local));
+            return;
+          }
+          if (_generativeEditing) setState(() => _generativeEditing = false);
+        },
+      ),
+      const SizedBox(height: BondSpacing.s12),
+      if (onServer) ...[
+        ModelServersForm(
+          key: const ValueKey('settings-generative-form'),
+          role: ServerFormRole.generative,
+          url: widget.generativeUrl,
+          model: widget.generativeModel,
+          keyStored: widget.generativeKeyStored,
+          probe: widget.probe,
+          storedBearer: widget.storedBearer,
+          onConnect: ({required url, required model, key, required clearKey}) =>
+              write(
+            placement: ModelPlacement.box,
+            url: url,
+            model: model,
+            key: key,
+            clearKey: clearKey,
+          ),
+          onRemoveKey: widget.onRemoveKey == null
+              ? null
+              : () => widget.onRemoveKey!(boxProseId),
+          thirdPartyRefusal: ModelServersForm.generativeThirdPartyRefusalText,
+        ),
+        const SizedBox(height: BondSpacing.s12),
+      ] else ...[
+        SettingsSegments<String>(
+          key: SettingsModelsPage.generativeManagedKey,
+          segments: const [
+            (value: routerProseId, label: SettingsModelsPage.model27bLabel),
+            (value: routerBulkId, label: SettingsModelsPage.model4bLabel),
+          ],
+          selected: widget.generativeManagedId,
+          disabled: widget.inboxTier ? const {routerProseId} : const {},
+          onChanged: (id) {
+            if (id == widget.generativeManagedId) return;
+            unawaited(write(placement: ModelPlacement.local, managedModel: id));
+          },
+          caption: widget.inboxTier
+              ? SettingsModelsPage.inboxTierCaption
+              : SettingsModelsPage.managedCaption,
+        ),
+        const SizedBox(height: BondSpacing.s8),
+        ?_detail(chosen),
+      ],
+      Text(
+        key: SettingsModelsPage.generativeStatusKey,
+        _generativeStatus(chosen),
+        style: BondType.small,
+      ),
+      // The weights a switch to Your server left behind: on the disk, and
+      // nothing holding them in memory.
+      if (widget.generativePlacement == ModelPlacement.box &&
+          row != null &&
+          row.onDisk) ...[
+        const SizedBox(height: BondSpacing.s4),
+        Text(
+          key: SettingsModelsPage.idleGenerativeKey,
+          '${row.displayName} · ${formatBytes(row.bytes)} · on disk · not '
+          'loaded',
+          style: BondType.caption,
+        ),
+      ],
+    ];
+  }
+
+  String _generativeStatus(ManagedModelStatus? row) {
+    final box = widget.generativePlacement == ModelPlacement.box;
+    // Under This Mac the server line above is already saying what the
+    // router is doing, so only Your server speaks for these two parks.
+    if (box) {
+      if (_parked(const {'model_unavailable', 'unauthorized'})
+          case final parked?) {
+        return parked;
+      }
+      return _remoteStatus(
+        widget.generativeUrl,
+        widget.generativeModel,
+        widget.generativeKeyStored,
+      );
+    }
+    if (_generativeEditing) return SettingsModelsPage.untilConnectText;
+    if (row == null) {
+      final name =
+          SettingsModelsPage.localModelNames[widget.generativeManagedId] ??
+              widget.generativeManagedId;
+      return '$name on this Mac';
+    }
+    if (!row.onDisk) return SettingsModelsPage.notDownloadedText;
+    return SettingsModelsPage.loaded(row, widget.serverState)
+        ? SettingsModelsPage.onDiskLoadedText
+        : SettingsModelsPage.onDiskNotLoadedText;
+  }
+
+  // ── Embeddings ─────────────────────────────────────────────────────────
+
+  List<Widget> _embedBlock() {
+    final row = _row('embed');
+    final parked = _parked(const {'embed_unavailable'});
+    final String status;
+    if (parked != null) {
+      status = parked;
+    } else if (row == null) {
+      status = '${SettingsModelsPage.embedModelName} on this Mac';
+    } else if (!row.onDisk) {
+      status = SettingsModelsPage.notDownloadedText;
+    } else {
+      status = SettingsModelsPage.loaded(row, widget.serverState)
+          ? SettingsModelsPage.onDiskLoadedText
+          : SettingsModelsPage.onDiskNotLoadedText;
+    }
+    return [
+      _heading(SettingsModelsPage.embedTitle),
+      Text(SettingsModelsPage.embedCaption, style: BondType.caption),
+      const SizedBox(height: BondSpacing.s4),
+      ?_detail(row),
+      Text(
+        key: SettingsModelsPage.embedStatusKey,
+        status,
+        style: BondType.small,
+      ),
+    ];
+  }
+
+  /// The bar under the server line, and the way to the log.
+  List<Widget> _serverProgress() {
     final state = widget.serverState;
     final onShowLog = widget.onShowLog;
     return [
@@ -754,125 +728,5 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
           ),
         ),
     ];
-  }
-
-  /// One role: what answers for it, what it costs here, and a Check that asks.
-  Widget _roleRow(RoleLine line) {
-    final probing = _roleProbing[line.id] ?? false;
-    final result = _roleProbe[line.id];
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: BondSpacing.s4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      line.title,
-                      style:
-                          BondType.small.copyWith(fontWeight: FontWeight.w600),
-                    ),
-                    Text(line.line, style: BondType.caption),
-                  ],
-                ),
-              ),
-              if (widget.probe != null && line.checkUrl != null) ...[
-                const SizedBox(width: BondSpacing.s12),
-                OutlinedButton(
-                  key: SettingsModelsPage.roleCheckKey(line.id),
-                  onPressed: probing ? null : () => unawaited(_checkRole(line)),
-                  child: const Text('Check'),
-                ),
-              ],
-            ],
-          ),
-          ProbeStatus(probing: probing, result: result),
-        ],
-      ),
-    );
-  }
-
-  /// One line, always, and it is the first thing a stalled tester reads.
-  ///
-  /// The order is the order the jobs come in. The switch being off first,
-  /// because a park sentence promises a retry nothing is going to make while
-  /// it is; then the form standing open over an install that has not moved
-  /// yet; then a park; and only then the ordinary report.
-  ///
-  /// Under Managed the page answers for the embedding and decision parks
-  /// alone. The other two are about a server, and under Managed the server
-  /// line directly here is already saying what that server is doing.
-  ///
-  /// A refused ADDRESS is not on this line. The form owns that rule and says
-  /// so under the field it is about.
-  String _statusLine() {
-    if (!widget.processingOn) return SettingsModelsPage.processingOffText;
-    if (_showForm && !_onBox) return SettingsModelsPage.untilConnectText;
-    final parked = widget.parked;
-    if (parked != null && parked.waiting > 0) {
-      final sentence = switch (parked.reason) {
-        'model_unavailable' when _onBox => SettingsModelsPage.serverParkedText,
-        'unauthorized' when _onBox => SettingsModelsPage.serverUnauthorizedText,
-        'embed_unavailable' => SettingsModelsPage.embedUnavailableText,
-        'decision_unavailable' => SettingsModelsPage.decisionUnavailableText,
-        // Every other park word is about something this page cannot answer
-        // for — a sign-out — and it must not claim it.
-        _ => null,
-      };
-      if (sentence != null) return sentence;
-    }
-    if (!_onBox) return SettingsModelsPage.serverLine(widget.serverState);
-    // PER SERVER, not either: two different hosts with a key stored for the
-    // small one only leaves the big one with no credential, and a line
-    // reading Connected there would be describing an install that cannot
-    // draft. A server on this machine needs no key at all, and telling
-    // somebody to paste one would be an instruction with nothing to follow.
-    final bigNeeds =
-        !isLoopbackHost(widget.boxBigUrl) && !widget.boxBigKeyStored;
-    final smallNeeds =
-        !isLoopbackHost(widget.boxSmallUrl) && !widget.boxSmallKeyStored;
-    return bigNeeds || smallNeeds
-        ? SettingsModelsPage.keyNeededText
-        : SettingsModelsPage.connectedText;
-  }
-
-  /// One role row's **Check**: the target the role resolves to, with its own
-  /// stored token looked up at the press and dropped after it.
-  ///
-  /// The answer is dropped unless the row still asks the URL it was pressed
-  /// on. A Check on a user-defined server, a switch to Managed, and then that
-  /// server's answer landing would otherwise draw a green line under a row
-  /// that now points at this Mac — the same rule `didUpdateWidget` enforces
-  /// for an answer already on screen, for the one that is still out.
-  Future<void> _checkRole(RoleLine line) async {
-    final probe = widget.probe;
-    final url = line.checkUrl;
-    if (probe == null || url == null) return;
-    setState(() {
-      _roleProbing[line.id] = true;
-      _roleProbe.remove(line.id);
-    });
-    final id = line.bearerId;
-    final result = await guardedProbe(
-      probe,
-      url,
-      id == null ? null : widget.storedBearer?.call(id),
-    );
-    if (!mounted) return;
-    final asksStill = widget.roleLines
-        .any((row) => row.id == line.id && row.checkUrl == url);
-    if (!asksStill) {
-      setState(() => _roleProbing.remove(line.id));
-      return;
-    }
-    setState(() {
-      _roleProbing[line.id] = false;
-      _roleProbe[line.id] = result;
-    });
   }
 }

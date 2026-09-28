@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
@@ -18,6 +20,19 @@ import 'fixtures/test_db.dart';
 /// requests; that the cloud-drafts consent is enforced where the target is
 /// resolved; and that the routing keys are machine configuration a wipe
 /// leaves alone.
+/// A keychain whose writes wait on a gate the test opens, so a test can look
+/// at what the prefs resolve WHILE a role write is inside the keychain.
+class _GatedTokenStore extends MemoryTokenStore {
+  Completer<void>? gate;
+
+  @override
+  Future<void> write(String key, String? value) async {
+    final wait = gate;
+    if (wait != null) await wait.future;
+    await super.write(key, value);
+  }
+}
+
 void main() {
   late BondDatabase db;
   late MessageStore store;
@@ -472,7 +487,7 @@ void main() {
       expect(prefs.targetForStage('triage').bearer, key);
     });
 
-    test('clearBoxKey forgets the generative key and nothing else', () async {
+    test('clearRoleKey forgets one role\'s key and nothing else', () async {
       final tokens = MemoryTokenStore();
       final prefs = await notifier(tokens);
       await prefs.useGenerative(
@@ -487,13 +502,198 @@ void main() {
         key: decideKey,
       );
 
-      await prefs.clearBoxKey();
+      await prefs.clearRoleKey(boxProseId);
 
       expect(tokens.values.keys,
           ['$llmTargetBearerKeyPrefix$boxDecideId']);
       expect(prefs.state.boxBigKeyStored, isFalse);
       expect(prefs.targetForStage('triage').bearer, isNull);
       expect(prefs.targetForStage('decision').bearer, decideKey);
+
+      await prefs.clearRoleKey(boxDecideId);
+      expect(tokens.values, isEmpty);
+      expect(prefs.state.decisionKeyStored, isFalse);
+      expect(prefs.targetForStage('decision').bearer, isNull);
+    });
+
+    test('a new host with a blank key and clearKey forgets the generative '
+        'key rather than keeping it', () async {
+      final tokens = MemoryTokenStore();
+      final prefs = await notifier(tokens);
+      await prefs.useGenerative(
+        placement: ModelPlacement.box,
+        url: generativeUrl,
+        key: key,
+        hardwareTier: MachineTier.full,
+      );
+
+      await prefs.useGenerative(
+        placement: ModelPlacement.box,
+        url: 'https://other.example.com/v1/chat/completions',
+        key: '',
+        clearKey: true,
+        hardwareTier: MachineTier.full,
+      );
+
+      expect(tokens.values, isEmpty);
+      expect(prefs.state.boxBigKeyStored, isFalse);
+      expect(prefs.state.generativeSpec.hasBearer, isFalse);
+      expect(prefs.targetForStage('triage').bearer, isNull);
+    });
+
+    test('clearKey with a typed key stores the typed key', () async {
+      final tokens = MemoryTokenStore();
+      final prefs = await notifier(tokens);
+      await prefs.useDecision(
+        placement: ModelPlacement.box,
+        url: decisionUrl,
+        key: decideKey,
+      );
+
+      const next = 'sk-fixture-not-a-real-next-token';
+      await prefs.useDecision(
+        placement: ModelPlacement.box,
+        url: 'https://other.example.com/decide/v1/embeddings',
+        key: next,
+        clearKey: true,
+      );
+
+      expect(tokens.values['$llmTargetBearerKeyPrefix$boxDecideId'], next);
+      expect(prefs.targetForStage('decision').bearer, next);
+    });
+
+    test('a role write never pairs the new host with the old key, or the '
+        'old host with the new key', () async {
+      final tokens = _GatedTokenStore();
+      final prefs = await notifier(tokens);
+      await prefs.useGenerative(
+        placement: ModelPlacement.box,
+        url: generativeUrl,
+        key: key,
+        hardwareTier: MachineTier.full,
+      );
+      const other = 'https://other.example.com/v1/chat/completions';
+      const next = 'sk-fixture-not-a-real-next-token';
+
+      Future<void> watch(Future<void> write, String? newBearer) async {
+        // While the keychain is blocked, the resolved target is still the
+        // old pair: old host, old key.
+        for (var i = 0; i < 5; i++) {
+          await Future<void>.delayed(Duration.zero);
+          final target = prefs.targetForStage('triage');
+          expect(target.baseUrl, generativeUrl);
+          expect(target.bearer, key);
+        }
+        tokens.gate!.complete();
+        await write;
+        final after = prefs.targetForStage('triage');
+        expect(after.baseUrl, other);
+        expect(after.bearer, newBearer);
+      }
+
+      // A new host with a new key.
+      tokens.gate = Completer<void>();
+      await watch(
+        prefs.useGenerative(
+          placement: ModelPlacement.box,
+          url: other,
+          key: next,
+          hardwareTier: MachineTier.full,
+        ),
+        next,
+      );
+
+      // Back, then a new host with the field blank: the key is cleared in
+      // the same step the host moves.
+      tokens.gate = null;
+      await prefs.useGenerative(
+        placement: ModelPlacement.box,
+        url: generativeUrl,
+        key: key,
+        hardwareTier: MachineTier.full,
+      );
+      tokens.gate = Completer<void>();
+      await watch(
+        prefs.useGenerative(
+          placement: ModelPlacement.box,
+          url: other,
+          clearKey: true,
+          hardwareTier: MachineTier.full,
+        ),
+        null,
+      );
+    });
+
+    test('the decision role clears its key before its host moves, too',
+        () async {
+      final tokens = _GatedTokenStore();
+      final prefs = await notifier(tokens);
+      await prefs.useDecision(
+        placement: ModelPlacement.box,
+        url: decisionUrl,
+        key: decideKey,
+      );
+      const other = 'https://other.example.com/decide/v1/embeddings';
+
+      tokens.gate = Completer<void>();
+      final write = prefs.useDecision(
+        placement: ModelPlacement.box,
+        url: other,
+        clearKey: true,
+      );
+      await Future<void>.delayed(Duration.zero);
+      final during = prefs.targetForStage('decision');
+      expect(during.baseUrl, decisionUrl);
+      expect(during.bearer, decideKey);
+      tokens.gate!.complete();
+      await write;
+      final after = prefs.targetForStage('decision');
+      expect(after.baseUrl, other);
+      expect(after.bearer, isNull);
+    });
+
+    test('cloud drafts forgets its key on clearKey, and keeps it without',
+        () async {
+      final tokens = MemoryTokenStore();
+      final prefs = await notifier(tokens);
+      await prefs.setCloudDraftsConsent(true);
+      await prefs.useCloudDrafts(url: vendor, model: 'gpt', key: cloudKey);
+      expect(prefs.targetForStage('draft_reply').bearer, cloudKey);
+
+      // Same target, blank field, no clear: the key stays.
+      await prefs.useCloudDrafts(url: vendor, model: 'gpt');
+      expect(tokens.values['$llmTargetBearerKeyPrefix$cloudDraftsId'],
+          cloudKey);
+
+      await prefs.useCloudDrafts(
+        url: 'https://api.anthropic.com/v1/chat/completions',
+        model: 'claude-x',
+        clearKey: true,
+      );
+      expect(tokens.values, isEmpty);
+      expect(prefs.state.cloudDraftsKeyStored, isFalse);
+      expect(prefs.targetForStage('draft_reply').bearer, isNull);
+      expect(prefs.targetForStage('draft_reply').model, 'claude-x');
+    });
+
+    test('the decision role forgets its key on clearKey too', () async {
+      final tokens = MemoryTokenStore();
+      final prefs = await notifier(tokens);
+      await prefs.useDecision(
+        placement: ModelPlacement.box,
+        url: decisionUrl,
+        key: decideKey,
+      );
+
+      await prefs.useDecision(
+        placement: ModelPlacement.box,
+        url: 'https://other.example.com/decide/v1/embeddings',
+        clearKey: true,
+      );
+
+      expect(tokens.values, isEmpty);
+      expect(prefs.state.decisionKeyStored, isFalse);
+      expect(prefs.targetForStage('decision').bearer, isNull);
     });
 
     test('a keychain that refuses costs the header, not the write', () async {
@@ -526,83 +726,47 @@ void main() {
     });
   });
 
-  group('the interim shims (Phase 4 deletes them)', () {
-    test('useBox with the owner\'s own big address is the generative remote, '
-        'and the small half is ignored', () async {
-      final tokens = MemoryTokenStore();
-      final prefs = await notifier(tokens);
-
-      await prefs.useBox(
-        bigUrl: generativeUrl,
-        smallUrl: '$box/bulk/v1/chat/completions',
-        bigModel: 'qwen3.8',
-        smallModel: 'qwen3-4b',
-        bigKey: key,
-        smallKey: 'sk-fixture-not-a-real-small-token',
-        hardwareTier: MachineTier.full,
-      );
-
-      expect(prefs.state.generativeSpec.id, boxProseId);
-      expect(prefs.state.generativeSpec.url, generativeUrl);
-      expect(tokens.values.keys, ['$llmTargetBearerKeyPrefix$boxProseId']);
-      expect(await store.getPref(boxSmallUrlKey), isNull);
-      expect(prefs.state.cloudDraftsSpec, isNull);
-    });
-
-    test('a third-party big address becomes cloud drafts, and an own small '
-        'one the generative remote', () async {
-      final tokens = MemoryTokenStore();
-      final prefs = await notifier(tokens);
-      // The consent pane records the acknowledgement before the press.
-      await prefs.setCloudDraftsConsent(true);
-
-      await prefs.useBox(
-        bigUrl: vendor,
-        smallUrl: generativeUrl,
-        bigModel: 'gpt',
-        smallModel: 'qwen3.8',
-        bigKey: cloudKey,
-        smallKey: key,
-        hardwareTier: MachineTier.full,
-      );
-
-      expect(prefs.state.cloudDraftsSpec!.url, vendor);
-      expect(prefs.state.generativeSpec.id, boxProseId);
-      expect(prefs.state.generativeSpec.url, generativeUrl);
-      expect(tokens.values, {
-        '$llmTargetBearerKeyPrefix$cloudDraftsId': cloudKey,
-        '$llmTargetBearerKeyPrefix$boxProseId': key,
-      });
-      expect(prefs.targetForStage('draft_reply').bearer, cloudKey);
-      expect(prefs.targetForStage('triage').bearer, key);
-    });
-
-    test('a third-party big address with no own small one leaves the '
-        'generative placement alone', () async {
+  group('a managed model the router is not serving', () {
+    test('marks the managed target unavailable, and only that one', () async {
       final prefs = await notifier();
-      await prefs.setCloudDraftsConsent(true);
-
-      await prefs.useBox(
-        bigUrl: bedrock,
-        smallUrl: vendor,
-        bigModel: 'us.example.big-model',
-        smallModel: 'gpt',
+      await prefs.useGenerative(
+        placement: ModelPlacement.local,
+        managedModel: routerBulkId,
         hardwareTier: MachineTier.full,
       );
+      // Unknown until the supervisor has built a preset: served.
+      expect(prefs.targetForStage('triage').unavailable, isNull);
 
-      expect(prefs.state.cloudDraftsSpec!.wire, LlmWire.bedrockConverse);
-      expect(prefs.state.modelPlacement, ModelPlacement.local);
-      expect(prefs.state.generativeSpec.id, localGenerativeId);
+      prefs.setServedManagedIds({routerEmbedId, routerDecideId});
+
+      final triage = prefs.targetForStage('triage');
+      expect(triage.model, routerBulkId);
+      expect(
+        triage.unavailable,
+        'The Qwen3 4B is not downloaded on this Mac. Set up again to '
+        'download it.',
+      );
+      expect(prefs.targetForStage('draft_reply').unavailable, isNotNull);
+      // The decision model IS served.
+      expect(prefs.targetForStage('decision').unavailable, isNull);
+
+      prefs.setServedManagedIds({routerEmbedId, routerBulkId});
+      expect(prefs.targetForStage('triage').unavailable, isNull);
+      expect(
+        prefs.targetForStage('decision').unavailable,
+        'The decision model is not installed. Run: make decide-install',
+      );
     });
 
-    test('usePlacement is the generative writer', () async {
+    test('a target on the owner\'s server is never marked', () async {
       final prefs = await notifier();
-      await prefs.usePlacement(
-        ModelPlacement.local,
-        hardwareTier: MachineTier.inbox,
+      await prefs.useGenerative(
+        placement: ModelPlacement.box,
+        url: generativeUrl,
+        hardwareTier: MachineTier.full,
       );
-      expect(prefs.state.generativeSpec.model, routerBulkId);
-      expect(prefs.state.draftPolicy, DraftPolicy.onDemand);
+      prefs.setServedManagedIds({routerEmbedId});
+      expect(prefs.targetForStage('triage').unavailable, isNull);
     });
   });
 

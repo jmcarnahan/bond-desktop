@@ -1,6 +1,7 @@
 # An inference endpoint on AWS
 
-For running the app's prose model on a rented GPU instead of this Mac: one
+For running the app's Generative model (and, optionally, its Decision model)
+on a rented GPU instead of this Mac: one
 script stands the box up, watches it boot, tests it, opens a tunnel for the
 bench harness, extends its life and tears it down. It also tests any
 OpenAI-compatible endpoint you point it at. The measurements that motivated
@@ -10,6 +11,7 @@ row 7); this page is how to use it.
 ```sh
 tools/inference.sh up --type g6e.xlarge --days 1     # launch, watch the boot, test
 tools/inference.sh up --bulk-model Qwen/Qwen3-4B-Instruct-2507-FP8   # …with the 4B beside the 27B
+tools/inference.sh up --decide-gguf PATH              # …with the decision model beside it
 tools/inference.sh restart --bulk-model …             # push a new configuration to a running box
 tools/inference.sh status                             # every box, hours up, $ so far, shutdown time
 tools/inference.sh tunnel                             # the local URLs for PROSE_URL / BENCH_URL
@@ -108,6 +110,53 @@ is back in about eight minutes and the 4B in two. On the box,
 `/opt/bond/serve.sh prose` or `… bulk` restarts one slot by hand, with any
 extra vLLM flags appended.
 
+## The decide slot
+
+The app's **Decision model** (the fine-tuned ModernBERT classifier that sorts
+and flags every message) can run on the box too. `--decide-gguf PATH` adds a
+third container, `llama-decide`, on the box's :8002: the llama.cpp CUDA
+server (`ghcr.io/ggml-org/llama.cpp:server-cuda-b10896`, the build that
+passed the round's parity check; `--decide-image` pins another) serving the
+GGUF as mean-pooled embeddings with exactly the local arguments:
+
+```
+-m /models/<file> --embeddings --pooling mean -c 2048 -ub 2048 -b 2048 -np 1 -ngl 99
+--host 0.0.0.0 --port 8080 --alias bond-decide-mbl-v2swap [--api-key-file /opt/bond/api.key]
+```
+
+- **The file.** PATH is the GGUF `make decide-install` put on this Mac:
+  `~/Library/Application Support/com.bondinbox.app/models/local_bond-decide/bond-decide-mbl-v2swap-f16.gguf`
+  (quote it, since the folder has a space, and write `"$HOME/Library/…"`
+  rather than `~`, which does not expand inside quotes). `up` and `restart` copy it to
+  `/opt/bond/decide/` on the box over scp, into `incoming/` first, and move it
+  to its final name only after the box's sha256 of it equals this Mac's; a
+  mismatch deletes the copy and stops the command. A file already on the box
+  with the same digest is not sent again, and a directory standing at the
+  final name (left by an older boot) is removed before the move. The boot
+  script waits up to thirty minutes for the final name and starts the slot
+  only if the file is there; `/opt/bond/serve.sh decide` itself refuses to
+  start when the GGUF is not a regular file, so Docker never creates a
+  directory in its place.
+- **The heads stay on the Mac.** Only the GGUF travels. The nine heads,
+  temperatures and softmax run in the app, off `decide-heads.json` in the
+  local models folder, so a Mac pointed at a box's decision server still needs
+  `make decide-install`. `--decide-gguf` refuses a `.json`.
+- **The name.** Served as `bond-decide-mbl-v2swap` (`--decide-served`), the
+  name the app asks a box for.
+- **Order and memory.** The decide slot starts after the vLLM slots, because
+  vLLM measures free GPU memory when it starts. It needs about 1.5 GB: room
+  enough beside the 27B alone (92% of the card) and tight beside the 27B and
+  the 4B together (80% + 16%).
+- **The bulk slot is unchanged.** The app no longer uses a bulk model, but the
+  benches may, so `--bulk-model` still means what it did. (The round's plan had
+  the decide slot take over bulk; a third slot was chosen so a bench flag
+  never changes meaning.)
+- **`restart`** keeps the decide slot from the box when `--decide-gguf` is not
+  given (the `decide-model` and `decide-file` tags say what it runs; nothing is
+  uploaded), and `--decide-gguf none` drops it. On the box,
+  `/opt/bond/serve.sh decide` restarts it by hand, with any extra llama-server
+  flags appended.
+
 ## What the test checks
 
 `tools/inference.sh test` runs, in order, the four things `make bench-verify`
@@ -122,12 +171,24 @@ demands of any target and two throughput reads:
 | one stream | tokens per second for a 256-token answer |
 | four streams | aggregate tokens per second with four such requests in flight |
 
+A box with a decide slot gets two more checks on it, the facts the app's
+decision client relies on:
+
+| check | what passes |
+|---|---|
+| embeddings, raw | `POST /v1/embeddings {"model", "input": "hello", "embd_normalize": -1}` answers a 1024-long `data[0].embedding` whose L2 norm is NOT within 0.001 of 1.0 (the app refuses a unit vector: the server ignored the field) |
+| tokenize | `POST /tokenize {"model", "content": "hello", "add_special": false}` answers `tokens` (the app's path for a message longer than 2048 tokens) |
+
 Any endpoint can be tested the same way:
 
 ```sh
 tools/inference.sh test --url http://localhost:8080 --model qwen3.8          # the local 27B
 tools/inference.sh test --url https://host:port --model NAME --bearer KEY     # a keyed server
+tools/inference.sh test --url http://localhost:8083 --decide --model bond-decide   # `make decide`
 ```
+
+`--decide` runs the two embedding checks instead of the chat ones; the URL
+is the server's base (`…/decide` on a box), not its `/v1/embeddings`.
 
 The script's numbers are a smoke read. The bakeoff's `make bench-prose` and
 `make golden-prose` are the measurement, and `test` prints them ready to run.
@@ -147,7 +208,11 @@ make golden-prose       PROSE_URL=… PROSE_MODEL=qwen3.8 PROSE_LABEL=…
 
 and, for the bulk slot (the next port up), the same three as `BENCH_URL` /
 `BENCH_MODEL=qwen3-4b` / `BENCH_LABEL` on `make bench`, `make drain` and
-`make golden`. The tunnel dies when this Mac sleeps or the
+`make golden`. The decide slot is two ports up (18102 on the first tunnel):
+`http://localhost:18102/v1/embeddings`, model `bond-decide-mbl-v2swap`. The
+tunnel always forwards all three ports; a forward to a slot the box does not
+run answers nothing. A tunnel opened by an older copy of the script forwards
+only two, and the script closes and reopens it. The tunnel dies when this Mac sleeps or the
 terminal closes; `tunnel` reopens it. The harness prices a localhost URL at
 $0.00, so a ledger row from a box is priced by hand at the instance's hourly
 rate: `1000 / (msgs_per_min × 60) × $/h`.
@@ -177,8 +242,10 @@ What that builds:
 
 - **The front door.** Caddy runs on the box in host networking mode and holds
   443 and 80. Requests under `/prose/` go to the 27B on the box's loopback
-  :8000 and requests under `/bulk/` to the 4B on :8001, with the prefix
-  stripped, so vLLM sees the plain `/v1/…` paths it expects. Both proxies set
+  :8000, requests under `/bulk/` to the 4B on :8001 and requests under
+  `/decide/` to the decision model on :8002, with the prefix stripped, so
+  vLLM and llama-server see the plain `/v1/…` (and `/tokenize`) paths they
+  expect. `/decide/` is routed whether or not the slot runs. Every proxy sets
   `flush_interval -1`, which turns response buffering off. Drafts stream as
   server-sent events, and a buffering proxy would hold every token back until
   the answer was finished. Any other path answers `bond inference` with a 200.
@@ -195,7 +262,9 @@ What that builds:
   argument, and lands in `/opt/bond/api.env` at mode 600. vLLM reads it as
   `VLLM_API_KEY` through `--env-file`, so it appears in no process listing on
   the box. It is still readable in `docker inspect` under `.Config.Env`, on a
-  box only the operator can reach. Both slots check it.
+  box only the operator can reach. The decide slot reads the same key from
+  `/opt/bond/api.key` (mode 600), mounted read-only into its container and
+  passed as `--api-key-file`. Every slot checks it.
 - **The address and the record.** An Elastic IP is allocated, tagged for the
   box's name and associated with it, so the hostname stays true across a stop
   and a start. With `--route53-zone` the script writes the A record itself at
@@ -208,7 +277,7 @@ What that builds:
 shutdown timer, tag the instance, attach a second security group
 `bond-inference-web` carrying 443 and 80, close any open tunnel, allocate and
 associate the Elastic IP, write and wait for the A record, push the key,
-restart both slots so they read it, check the Caddyfile with `caddy validate`
+restart the slots so they read it, check the Caddyfile with `caddy validate`
 and only then start Caddy, confirm the container is still running a moment
 later, wait for `https://box.example.com/` to answer 200 so the certificate is
 really in place, and run the same checks through the new hostname with the
@@ -222,20 +291,25 @@ address held but attached to nothing is billed by the hour. `--keep-ip` holds
 it for the next box. `status` prints `persistent` in the shutdown column and
 the hostname beside the models.
 
-The two URLs the app wants:
+The URLs the app wants:
 
 ```
-https://box.example.com/prose/v1/chat/completions   model qwen3.8
-https://box.example.com/bulk/v1/chat/completions    model qwen3-4b
+https://box.example.com/prose/v1/chat/completions   model qwen3.8                  Generative model
+https://box.example.com/decide/v1/embeddings        model bond-decide-mbl-v2swap   Decision model
 ```
 
-`BOND_BOX_URL=https://box.example.com` in `.env` fills in both addresses under
-**User defined**. The key is typed into the app and kept in the keychain. From a
-terminal:
+Each is a role's **Your server** address in Settings → Models. A build with
+`BOND_BOX_URL=https://box.example.com` in `.env` derives both itself
+(`/prose/v1/chat/completions` and `/decide/v1/embeddings`), so they need no
+typing. The Decision model's heads file stays on the Mac: run
+`make decide-install` there even when the decision server is the box. The
+`/bulk/` slot is for the benches only. The key is typed into the app and kept
+in the keychain. From a terminal:
 
 ```sh
 tools/inference.sh test --url https://box.example.com/prose --bearer KEY --model qwen3.8
 tools/inference.sh test --url https://box.example.com/bulk --bearer KEY --model qwen3-4b
+tools/inference.sh test --url https://box.example.com/decide --decide --bearer KEY
 curl -s -o /dev/null -w '%{http_code}\n' https://box.example.com/prose/v1/models
 ```
 
@@ -244,10 +318,10 @@ is enforced rather than merely accepted.
 
 ## Security
 
-- vLLM listens on the box's loopback only, on 8000 and 8001. On a tunnelled
-  box nothing but SSH answers on the public address. On a persistent box Caddy
-  is the only other listener, on 443 and 80, and all it does is forward to
-  those two loopback ports.
+- vLLM listens on the box's loopback only, on 8000 and 8001, and llama-server
+  (the decide slot) on 8002. On a tunnelled box nothing but SSH answers on the
+  public address. On a persistent box Caddy is the only other listener, on 443
+  and 80, and all it does is forward to those loopback ports.
 - SSH is allowed from the caller's current public IP alone, in a security
   group named `bond-inference-ssh`. The IP is re-allowed on every command
   that connects, because home IPs move. The first spike box went unreachable
@@ -255,16 +329,17 @@ is enforced rather than merely accepted.
   the second group `bond-inference-web` carries 443 and 80 and nothing else.
 - On a tunnelled box there is no access key, and the tunnel is the credential.
   Anyone who can SSH to the box can reach the model and nobody else can.
-- On a persistent box the access key is the credential. Both slots answer 401
+- On a persistent box the access key is the credential. Every slot answers 401
   without it. Rotate it by running `persist` again with a new key file, which
-  rewrites `/opt/bond/api.env` and restarts both slots. The key belongs in no
+  rewrites `/opt/bond/api.env` and `/opt/bond/api.key` and restarts the slots. The key belongs in no
   committed file. It lives in a 600 file on this Mac, in the app's keychain
   entry, and in `.env` for the bench recipes, and all three are outside git.
 - Prompts carrying mail content cross the internet to a persistent box, under
   TLS, to an EC2 instance the owner of the install rents and runs. It is not a
   third-party model vendor, which is why the app does not treat the box as one
   and asks for no cloud consent before sending to it.
-- The box holds nothing but public model weights and the key file. Nothing
+- The box holds nothing but model weights (the decide slot's GGUF is the
+  owner's fine-tuned model, not a public one) and the key file. Nothing
   from the mailbox is stored on it. Prompts pass through vLLM's memory, vLLM
   logs no prompt text at its default level, and the Caddyfile turns on no
   access log.
@@ -310,6 +385,14 @@ is enforced rather than merely accepted.
   left against the 1.19 GiB needed); lower `--max-len`, raise `--mem`, or
   shrink the other slot. `docker logs vllm-prose` / `vllm-bulk` on the box
   has the numbers.
+- **The decide slot exits or never answers.** On the box, `docker logs
+  llama-decide`. `cat /opt/bond/stage` reading `waiting-gguf` means the GGUF
+  never reached its final name within the boot's thirty-minute wait (the
+  upload failed or its digest did not match), and no decide container was
+  started; `up` itself stops with the reason, and `restart --decide-gguf
+  PATH` uploads the file and starts the slot. An out-of-memory error beside
+  the 27B and the 4B means the three do not fit; drop the bulk slot
+  (`--bulk-model none`) or lower `--bulk-mem`.
 - **The box vanished**: its timer ran out. `status` shows the shutdown time;
   `extend --days N` moves it.
 - **`… still does not resolve to …` after ten minutes**: the A record is

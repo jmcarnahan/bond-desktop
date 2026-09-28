@@ -1021,20 +1021,27 @@ void main() {
     });
   });
 
-  /// The Models section's own collapsed line. It says WHICH MODE the install
-  /// is in and the one fact about it: the app's own server's state under
-  /// Managed, the hosts under User defined.
+  /// The Models section's own collapsed line. It says where each ROLE runs
+  /// and then the app's own server's state.
   group('the Models summary', () {
     Future<void> openModels(
       WidgetTester tester, {
-      required ModelPlacement placement,
+      ModelPlacement decision = ModelPlacement.local,
+      ModelPlacement generative = ModelPlacement.local,
       ServerState serverState = const ServerStopped(),
-      String boxBigUrl = '',
-      String boxSmallUrl = '',
+      String generativeUrl = '',
       bool wireModels = true,
     }) async {
       await tester.binding.setSurfaceSize(const Size(900, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));
+      Future<void> write({
+        required ModelPlacement placement,
+        String? managedModel,
+        String? url,
+        String? model,
+        String? key,
+        bool clearKey = false,
+      }) async {}
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: SettingsScreen(
@@ -1043,55 +1050,51 @@ void main() {
             onThresholdChanged: (_) {},
             onAboutMeChanged: (_) {},
             onBack: () {},
-            modelPlacement: placement,
+            decisionPlacement: decision,
+            generativePlacement: generative,
             serverState: serverState,
-            boxBigUrl: boxBigUrl,
-            boxSmallUrl: boxSmallUrl,
-            onUseBox: !wireModels
-                ? null
-                : ({
-                    required bigUrl,
-                    required smallUrl,
-                    required bigModel,
-                    required smallModel,
-                    bigKey,
-                    smallKey,
-                  }) async {},
+            generativeUrl: generativeUrl,
+            onUseDecision: wireModels ? write : null,
+            onUseGenerative: wireModels ? write : null,
           ),
         ),
       ));
       await tester.pumpAndSettle();
     }
 
-    testWidgets('Managed carries the server’s own state', (tester) async {
+    testWidgets('both roles on this Mac carry the server’s own state',
+        (tester) async {
       await openModels(
         tester,
-        placement: ModelPlacement.local,
         serverState: const ServerReady(port: 8080, pid: 42),
       );
 
       expect(find.text('Models'), findsOneWidget);
-      expect(find.text('Managed · Running'), findsOneWidget);
+      expect(
+        find.text('Decision on this Mac · Generative on this Mac · Running'),
+        findsOneWidget,
+      );
     });
 
-    testWidgets('User defined names the host the work goes to', (tester) async {
+    testWidgets('a role on your server names the host the work goes to',
+        (tester) async {
       await openModels(
         tester,
-        placement: ModelPlacement.box,
-        boxBigUrl: 'https://box.example.com/prose/v1/chat/completions',
-        boxSmallUrl: 'https://box.example.com/bulk/v1/chat/completions',
+        generative: ModelPlacement.box,
+        generativeUrl: 'https://box.example.com/prose/v1/chat/completions',
       );
 
-      expect(find.text('User defined · box.example.com'), findsOneWidget);
+      expect(
+        find.text(
+          'Decision on this Mac · Generative at box.example.com · Not running',
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('a host that cannot connect anywhere has no section at all',
         (tester) async {
-      await openModels(
-        tester,
-        placement: ModelPlacement.local,
-        wireModels: false,
-      );
+      await openModels(tester, wireModels: false);
 
       expect(find.text('Models'), findsNothing);
     });

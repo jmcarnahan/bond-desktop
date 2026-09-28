@@ -18,11 +18,12 @@ import '../providers/prefs_provider.dart'
 import '../screens/consent_screen.dart' show CloudDraftsConsentPane;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart';
+import '../services/models/managed_model_status.dart' show ManagedModelStatus;
 import '../services/server/server_state.dart';
 import '../theme/tokens.dart';
 import 'attachment_format.dart' show formatBytes;
 import 'inline_alert.dart';
-import 'model_servers_form.dart' show ModelServersForm;
+import 'model_servers_form.dart' show ModelServersForm, ServerFormRole;
 import 'needs_you_rules_editor.dart';
 import 'pane_surface.dart';
 import 'settings_connection_section.dart';
@@ -229,46 +230,62 @@ class SettingsScreen extends StatefulWidget {
   /// header. A LOOKUP, never the value: no secret is held in widget state.
   final String? Function(String targetId)? storedBearer;
 
-  /// Where this install's model work runs: the segment the Models page opens
-  /// on, and what its collapsed summary says.
-  final ModelPlacement modelPlacement;
+  /// Where each role runs: the segments the Models page opens on, and what
+  /// its collapsed summary says.
+  final ModelPlacement decisionPlacement;
+  final ModelPlacement generativePlacement;
 
-  /// The four user-defined values to prefill the Models form with, already
-  /// resolved by the host: the stored ones where there are stored ones, the
-  /// build's otherwise. Never a key.
-  final String boxBigUrl;
-  final String boxSmallUrl;
-  final String boxBigModel;
-  final String boxSmallModel;
+  /// The managed generative model's router id on this Mac, and whether this
+  /// Mac is on the inbox tier, where the 27B is not offered.
+  final String generativeManagedId;
+  final bool inboxTier;
 
-  /// Whether a key is in the keychain, for either server and for each.
-  /// Presence flags, never the token: the first is what offers **Remove
-  /// key**, and the two below are what hint that typing replaces something.
-  final bool boxKeyStored;
-  final bool boxBigKeyStored;
-  final bool boxSmallKeyStored;
+  /// The two remotes' effective addresses and discovered models, already
+  /// resolved by the host, and whether each has a stored key. Never a key.
+  final String decisionUrl;
+  final String decisionModel;
+  final bool decisionKeyStored;
+  final String generativeUrl;
+  final String generativeModel;
+  final bool generativeKeyStored;
 
-  /// **Connect** on that form: the two addresses, the two names discovered
-  /// from the servers themselves, and a key per server where one was typed.
-  /// **Null hides the whole Models section**, the same discipline every other
-  /// optional section follows: a host that cannot store a change must not
-  /// offer the controls that make one. The keys are SECRETS and pass straight
-  /// through.
+  /// This Mac's role models, or null while they are being read.
+  final List<ManagedModelStatus>? modelStatuses;
+
+  /// The decision role's write. **Null hides the whole Models section**, the
+  /// same discipline every other optional section follows: a host that
+  /// cannot store a change must not offer the controls that make one. The
+  /// key is a SECRET and passes straight through.
+  final RoleWrite? onUseDecision;
+
+  /// The generative role's write, for either placement.
+  final RoleWrite? onUseGenerative;
+
+  /// The Decision model's **Check** under This Mac.
+  final Future<void> Function()? onCheckDecision;
+
+  /// Forgets one role's stored key, by target id. Null takes **Remove key**
+  /// off every form.
+  final Future<void> Function(String targetId)? onRemoveKey;
+
+  /// The cloud-drafts target as it stands: its address and model, empty for
+  /// none, and whether its key is stored. Never a key.
+  final String cloudDraftsUrl;
+  final String cloudDraftsModel;
+  final bool cloudDraftsKeyStored;
+
+  /// Whether the owner has already agreed that drafts may go to a
+  /// third-party service. True skips the consent pane on Connect.
+  final bool cloudDraftsConsent;
+
+  /// **Connect** under Cloud drafts. **Null hides the Cloud drafts
+  /// section.** May throw [ArgumentError]; the form renders it.
   final Future<void> Function({
-    required String bigUrl,
-    required String smallUrl,
-    required String bigModel,
-    required String smallModel,
-    String? bigKey,
-    String? smallKey,
-  })? onUseBox;
-
-  /// **Managed**: puts the install back on this Mac's own models. Null leaves
-  /// that segment inert.
-  final Future<void> Function()? onUseManaged;
-
-  /// Forgets both stored keys. Null takes **Remove key** off the form.
-  final Future<void> Function()? onRemoveKey;
+    required String url,
+    required String model,
+    String? key,
+    required bool clearKey,
+  })? onUseCloudDrafts;
 
   /// Reruns the wizard, which is how the models folder changes and a download
   /// is retried. Null takes the link off the foot of the section.
@@ -281,13 +298,6 @@ class SettingsScreen extends StatefulWidget {
   /// Where the app's own llama-server stands, for the Managed status line,
   /// the loading bar and the collapsed summary.
   final ServerState serverState;
-
-  /// The three read-only role rows, resolved by the host. Empty draws none.
-  final List<RoleLine> roleLines;
-
-  /// The models this Mac holds that the placement is not serving, resolved by
-  /// the host. Drawn under User defined only, and empty draws none.
-  final List<String> idleModelLines;
 
   /// Why the pipeline is parked and how much is waiting, for the Models
   /// page's status line. Null is the ordinary state.
@@ -549,22 +559,29 @@ class SettingsScreen extends StatefulWidget {
     this.onStorylineNewestFirstChanged,
     this.probeServer,
     this.storedBearer,
-    this.modelPlacement = ModelPlacement.local,
-    this.boxBigUrl = '',
-    this.boxSmallUrl = '',
-    this.boxBigModel = '',
-    this.boxSmallModel = '',
-    this.boxKeyStored = false,
-    this.boxBigKeyStored = false,
-    this.boxSmallKeyStored = false,
-    this.onUseBox,
-    this.onUseManaged,
+    this.decisionPlacement = ModelPlacement.local,
+    this.generativePlacement = ModelPlacement.local,
+    this.generativeManagedId = routerProseId,
+    this.inboxTier = false,
+    this.decisionUrl = '',
+    this.decisionModel = '',
+    this.decisionKeyStored = false,
+    this.generativeUrl = '',
+    this.generativeModel = '',
+    this.generativeKeyStored = false,
+    this.modelStatuses,
+    this.onUseDecision,
+    this.onUseGenerative,
+    this.onCheckDecision,
     this.onRemoveKey,
+    this.cloudDraftsUrl = '',
+    this.cloudDraftsModel = '',
+    this.cloudDraftsKeyStored = false,
+    this.cloudDraftsConsent = false,
+    this.onUseCloudDrafts,
     this.onSetUpAgain,
     this.onShowLog,
     this.serverState = const ServerStopped(),
-    this.roleLines = const [],
-    this.idleModelLines = const [],
     this.parked,
     this.onCloudDraftsConsent,
     this.cloudDraftsStanding = false,
@@ -664,6 +681,9 @@ class SettingsScreen extends StatefulWidget {
       ValueKey('settings-stop-cloud-drafts-confirm');
   static const Key stopCloudDraftsKeepKey =
       ValueKey('settings-stop-cloud-drafts-keep');
+
+  /// The Cloud drafts section's line naming the target in force.
+  static const Key cloudDraftsTargetKey = ValueKey('cloud-drafts-target');
 
   /// Keyed for the same reason the buttons above are: 'Check for updates' is
   /// an ordinary phrase, and the caption beside it contains half of it.
@@ -1012,17 +1032,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
           onSignIn: widget.onSignIn,
           onSignOutOfServer: widget.onSignOutOfServer,
         ),
-      if (widget.onUseBox != null)
+      if (widget.onUseDecision != null)
         _section(
           'Models',
           SettingsModelsPage.summary(
-            placement: widget.modelPlacement,
+            decisionPlacement: widget.decisionPlacement,
+            generativePlacement: widget.generativePlacement,
+            generativeUrl: widget.generativeUrl,
             serverLine: SettingsModelsPage.serverLine(widget.serverState),
-            bigUrl: widget.boxBigUrl,
-            smallUrl: widget.boxSmallUrl,
           ),
           _modelsPage(),
         ),
+      // Beside Models because it is the other half of the same question,
+      // where a model call goes: the one place a cloud service may write, and
+      // only the drafts.
+      if (widget.onUseCloudDrafts != null)
+        _section('Cloud drafts', _cloudDraftsSummary(), _cloudDraftsBody()),
       _section('Needs You', _needsYouSummary(), _needsYouBody()),
       // After Needs You because it is the next question that pile raises —
       // these are the messages a reply gets written for — and in BOTH scopes
@@ -1203,47 +1228,99 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // ── Models ────────────────────────────────────────────────────────────────
 
-  /// The Models section: one question, two answers, and nothing else.
+  /// The Models section: three roles, each saying where it runs.
   ///
-  /// The body is the whole of [SettingsModelsPage]. The eight blocks this
-  /// section used to open on, and the Advanced fold they were folded into,
-  /// are gone rather than hidden: the routing DATA they edited is still
-  /// there, and no screen shows it.
+  /// The body is the whole of [SettingsModelsPage]. The routing DATA the old
+  /// Advanced fold edited is a rule now, and no screen shows it.
   Widget _modelsPage() => SettingsModelsPage(
-    modelPlacement: widget.modelPlacement,
+    decisionPlacement: widget.decisionPlacement,
+    generativePlacement: widget.generativePlacement,
+    generativeManagedId: widget.generativeManagedId,
+    inboxTier: widget.inboxTier,
     processingOn: widget.processingOn,
     serverState: widget.serverState,
-    boxBigUrl: widget.boxBigUrl,
-    boxSmallUrl: widget.boxSmallUrl,
-    boxBigModel: widget.boxBigModel,
-    boxSmallModel: widget.boxSmallModel,
-    boxKeyStored: widget.boxKeyStored,
-    boxBigKeyStored: widget.boxBigKeyStored,
-    boxSmallKeyStored: widget.boxSmallKeyStored,
+    decisionUrl: widget.decisionUrl,
+    decisionModel: widget.decisionModel,
+    decisionKeyStored: widget.decisionKeyStored,
+    generativeUrl: widget.generativeUrl,
+    generativeModel: widget.generativeModel,
+    generativeKeyStored: widget.generativeKeyStored,
+    statuses: widget.modelStatuses,
     probe: widget.probeServer,
     storedBearer: widget.storedBearer,
-    onUseBox: widget.onUseBox,
-    onUseManaged: widget.onUseManaged,
+    onUseDecision: widget.onUseDecision,
+    onUseGenerative: widget.onUseGenerative,
+    onCheckDecision: widget.onCheckDecision,
     onRemoveKey: widget.onRemoveKey,
-    // The consent pane belongs to THIS screen, not to the page: it replaces
-    // the sections, it has a back arrow, and the sections' own open state
-    // lives here. The page raises the question and the screen asks it.
-    //
-    // Null when there is nobody to record the answer, so the form refuses a
-    // vendor's address under the field instead. A pane whose Continue wrote
-    // no consent would hand the connect straight back to `useCloudDrafts`,
-    // which refuses a third-party address while the flag is false: a question
-    // that can only be answered wrong is worse than no question.
-    onThirdParty: widget.onCloudDraftsConsent == null
-        ? null
-        : (spec, resume) async =>
-            setState(() => _subpane = _ConsentPane(spec, resume)),
     onSetUpAgain: widget.onSetUpAgain,
     onShowLog: widget.onShowLog,
-    roleLines: widget.roleLines,
-    idleModelLines: widget.idleModelLines,
     parked: widget.parked,
   );
+
+  // ── Cloud drafts ──────────────────────────────────────────────────────────
+
+  String _cloudDraftsSummary() {
+    final url = widget.cloudDraftsUrl;
+    if (url.isEmpty || widget.cloudDraftsModel.isEmpty) return 'Off';
+    return '${widget.cloudDraftsModel} at ${hostPort(url)}';
+  }
+
+  /// The optional cloud-drafts target: the one place a cloud service may
+  /// serve, and only the two draft stages. A third-party address opens the
+  /// consent pane first, unless the owner has already agreed.
+  Widget _cloudDraftsBody() {
+    final connect = widget.onUseCloudDrafts!;
+    final set = widget.cloudDraftsUrl.isNotEmpty &&
+        widget.cloudDraftsModel.isNotEmpty;
+    final remove = widget.onRemoveKey;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          'Suggested replies and Improve a draft can go to a cloud service. '
+          'Everything else stays on the Decision and Generative models.',
+          style: BondType.caption,
+        ),
+        const SizedBox(height: BondSpacing.s8),
+        Text(
+          key: SettingsScreen.cloudDraftsTargetKey,
+          set
+              ? 'Drafts go to ${widget.cloudDraftsModel} at '
+                  '${hostPort(widget.cloudDraftsUrl)}.'
+              : 'No cloud drafts. Drafts are written by the generative model.',
+          style: BondType.small,
+        ),
+        const SizedBox(height: BondSpacing.s12),
+        ModelServersForm(
+          role: ServerFormRole.cloudDrafts,
+          url: widget.cloudDraftsUrl,
+          model: widget.cloudDraftsModel,
+          keyStored: widget.cloudDraftsKeyStored,
+          probe: widget.probeServer,
+          storedBearer: widget.storedBearer,
+          onConnect: connect,
+          onRemoveKey: remove == null ? null : () => remove(cloudDraftsId),
+          // The consent pane belongs to THIS screen: it replaces the
+          // sections and has a back arrow. Null when there is nobody to
+          // record the answer, so the form refuses a vendor's address
+          // instead: a pane whose Continue wrote no consent would hand the
+          // connect straight back to `useCloudDrafts`'s refusal.
+          onThirdParty: widget.onCloudDraftsConsent == null
+              ? null
+              : (spec, resume) async {
+                  if (widget.cloudDraftsConsent) return resume();
+                  setState(() => _subpane = _ConsentPane(spec, resume));
+                },
+        ),
+        const SizedBox(height: BondSpacing.s8),
+        Text(
+          'Stop sending drafts anywhere is under Processing.',
+          style: BondType.caption,
+        ),
+      ],
+    );
+  }
 
   void _closeSubpane() => setState(() {
         _subpane = null;
@@ -1253,7 +1330,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// Continue: the consent is recorded FIRST and the connect made after it.
   ///
   /// That order is the whole protection. `AppPrefsNotifier.useCloudDrafts`
-  /// (reached through the interim `useBox` shim) refuses a third-party
+  /// refuses a third-party
   /// address while the flag is false, so a connect made before the flag
   /// would throw rather than write.
   ///

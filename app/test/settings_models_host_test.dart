@@ -97,6 +97,25 @@ class _ScriptedProbe extends ModelServerProbe {
   void close() {}
 }
 
+/// A supervisor that only counts `ensurePreset`, for the Check wire.
+class _CountingSupervisor extends ModelServerSupervisor {
+  _CountingSupervisor(Directory support)
+      : super(
+          runner: FakeProcessRunner(),
+          supportDir: support,
+          binaryPath: () => '/usr/bin/true',
+          buildPreset: () => testManifest().toPreset(support.path),
+          routerPort: () => 8080,
+          onPortMoved: (_) async {},
+          managed: () => true,
+        );
+
+  int presets = 0;
+
+  @override
+  Future<void> ensurePreset() async => presets++;
+}
+
 /// An open panel nobody in this file presses.
 class _NoDialogs implements FileDialogs {
   @override
@@ -220,6 +239,7 @@ void main() {
     WidgetTester tester, {
     required ModelServerProbe probe,
     bool withServer = false,
+    ModelServerSupervisor? server,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 1600));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -235,8 +255,8 @@ void main() {
         // placement. Left alone everywhere else: the other cases are about
         // preferences and clients, and a supervisor over a fake runner would
         // only add filesystem work to them.
-        if (withServer)
-          modelServerSupervisorProvider.overrideWithValue(supervisor),
+        if (withServer || server != null)
+          modelServerSupervisorProvider.overrideWithValue(server ?? supervisor),
         // Connect and Managed both read the machine tier AT THE PRESS, and
         // left alone the channel answers `HardwareInfo.unknown` two seconds
         // later: a press would land after the case had finished looking.
@@ -313,12 +333,28 @@ void main() {
     await tester.pump();
   }
 
-  testWidgets('Connect through the page moves the live client', (tester) async {
-    const bigUrl = 'https://box.example.com/prose/v1/chat/completions';
-    const smallUrl = 'https://box.example.com/bulk/v1/chat/completions';
+  Future<void> settle(WidgetTester tester) async {
+    for (var i = 0; i < 4; i++) {
+      await tester.pump(const Duration(milliseconds: 200));
+    }
+  }
+
+  /// Taps one segment of one role's placement control, by its label.
+  Future<void> tapSegment(WidgetTester tester, Key control, String label) async {
+    final target =
+        find.descendant(of: find.byKey(control), matching: find.text(label));
+    await tester.ensureVisible(target);
+    await tester.pump();
+    await tester.tap(target);
+    await tester.pump();
+    await tester.pump();
+  }
+
+  testWidgets('Connect on the generative form moves the live client',
+      (tester) async {
+    const url = 'https://box.example.com/prose/v1/chat/completions';
     final probe = _ScriptedProbe(const {
-      bigUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3-27b-fp8']),
-      smallUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3-4b']),
+      url: ModelProbeResult(reachable: true, modelIds: ['qwen3-27b-fp8']),
     });
     await pumpHost(tester, probe: probe);
     // Taken BEFORE the write: the assertion below is that this exact instance
@@ -327,55 +363,73 @@ void main() {
     final before = container.read(stageLlmClientProvider('triage'));
 
     await openHostSection(tester, 'Models');
-    await tester.tap(find.text(SettingsModelsPage.userDefinedLabel));
-    await tester.pump();
-    await tester.pump();
+    await tapSegment(tester, SettingsModelsPage.generativeModeKey,
+        SettingsModelsPage.yourServerLabel);
 
-    await tester.enterText(find.byKey(ModelServersForm.bigUrlKey), bigUrl);
-    await tester.enterText(find.byKey(ModelServersForm.smallUrlKey), smallUrl);
+    await tester.enterText(
+      find.byKey(ModelServersForm.urlKey(ServerFormRole.generative)),
+      url,
+    );
     await tester.pump();
     // No key typed: the keychain plugin throws under `flutter test`, and what
-    // a typed key does to the two requests and the one call is pinned in
-    // `model_servers_form_test.dart` with no keychain behind it.
-    await tapKey(tester, ModelServersForm.connectKey);
-    for (var i = 0; i < 4; i++) {
-      await tester.pump(const Duration(milliseconds: 200));
-    }
+    // a typed key does is pinned in `model_servers_form_test.dart`.
+    await tapKey(tester, ModelServersForm.connectKey(ServerFormRole.generative));
+    await settle(tester);
 
-    // Both servers were asked, through the host's own probe.
-    expect(probe.asked, [(bigUrl, null), (smallUrl, null)]);
+    expect(probe.asked, [(url, null)]);
 
     final prefs = container.read(appPrefsProvider);
     expect(prefs.modelPlacement, ModelPlacement.box);
-    // The name came from the server itself, and every text stage resolves
-    // to the one generative remote (the small half is ignored since the
-    // decision-model round).
     expect(prefs.specForStage('triage')?.id, boxProseId);
     expect(prefs.specForStage('triage')?.model, 'qwen3-27b-fp8');
     expect(prefs.specForStage('draft_reply')?.id, boxProseId);
-    expect(prefs.specForStage('draft_reply')?.model, 'qwen3-27b-fp8');
+    // The decision role did not move.
+    expect(prefs.decisionPlacement, ModelPlacement.local);
 
     final after = container.read(stageLlmClientProvider('triage'));
     expect(identical(before, after), isTrue);
-    expect(after.baseUrl, bigUrl);
+    expect(after.baseUrl, url);
     expect(after.model, 'qwen3-27b-fp8');
+  });
+
+  testWidgets('Connect on the decision form writes the decision role only',
+      (tester) async {
+    const url = 'https://box.example.com/decide/v1/embeddings';
+    final probe = _ScriptedProbe(const {
+      url: ModelProbeResult(reachable: true, modelIds: ['bond-decide-x']),
+    });
+    await pumpHost(tester, probe: probe);
+
+    await openHostSection(tester, 'Models');
+    await tapSegment(tester, SettingsModelsPage.decisionModeKey,
+        SettingsModelsPage.yourServerLabel);
+    await tester.enterText(
+      find.byKey(ModelServersForm.urlKey(ServerFormRole.decision)),
+      url,
+    );
+    await tester.pump();
+    await tapKey(tester, ModelServersForm.connectKey(ServerFormRole.decision));
+    await settle(tester);
+
+    final prefs = container.read(appPrefsProvider);
+    expect(prefs.decisionPlacement, ModelPlacement.box);
+    expect(prefs.decisionSpec.id, boxDecideId);
+    expect(prefs.decisionSpec.url, url);
+    expect(prefs.decisionSpec.model, 'bond-decide-x');
+    expect(prefs.modelPlacement, ModelPlacement.local);
   });
 
   /// The server this Mac runs follows the placement, not only the launch.
   ///
-  /// The two halves of decision 29: choosing User defined leaves the embedding
-  /// model alone here, and choosing Managed puts this Mac's whole set back.
   /// Real filesystem work either way, so the start goes inside `runAsync` and
   /// each restart is waited for with the run-and-pump pair — `runAsync` lets
   /// the real event loop deliver the result and the pump flushes the
   /// continuation waiting for it in the fake-async queue.
-  testWidgets('a placement switch restarts the local server onto the '
-      "placement's set", (tester) async {
-    const bigUrl = 'https://box.example.com/prose/v1/chat/completions';
-    const smallUrl = 'https://box.example.com/bulk/v1/chat/completions';
+  testWidgets('a generative placement switch restarts the local server onto '
+      "the placements' set", (tester) async {
+    const url = 'https://box.example.com/prose/v1/chat/completions';
     final probe = _ScriptedProbe(const {
-      bigUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3-27b-fp8']),
-      smallUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3-4b']),
+      url: ModelProbeResult(reachable: true, modelIds: ['qwen3-27b-fp8']),
     });
     await pumpHost(tester, probe: probe, withServer: true);
     await tester.runAsync(() => supervisor.ensureRunning());
@@ -383,16 +437,15 @@ void main() {
     expect(runner.starts, hasLength(1));
 
     await openHostSection(tester, 'Models');
-    await tester.tap(find.text(SettingsModelsPage.userDefinedLabel));
+    await tapSegment(tester, SettingsModelsPage.generativeModeKey,
+        SettingsModelsPage.yourServerLabel);
+    await tester.enterText(
+      find.byKey(ModelServersForm.urlKey(ServerFormRole.generative)),
+      url,
+    );
     await tester.pump();
-    await tester.pump();
-    await tester.enterText(find.byKey(ModelServersForm.bigUrlKey), bigUrl);
-    await tester.enterText(find.byKey(ModelServersForm.smallUrlKey), smallUrl);
-    await tester.pump();
-    await tapKey(tester, ModelServersForm.connectKey);
-    for (var i = 0; i < 4; i++) {
-      await tester.pump(const Duration(milliseconds: 200));
-    }
+    await tapKey(tester, ModelServersForm.connectKey(ServerFormRole.generative));
+    await settle(tester);
     for (var i = 0; i < 100 && runner.starts.length < 2; i++) {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -409,10 +462,9 @@ void main() {
     expect(written, isNot(contains('[$routerProseId]')));
     expect(written, isNot(contains('[$routerBulkId]')));
 
-    await tester.tap(find.text(SettingsModelsPage.managedLabel));
-    for (var i = 0; i < 4; i++) {
-      await tester.pump(const Duration(milliseconds: 200));
-    }
+    await tapSegment(tester, SettingsModelsPage.generativeModeKey,
+        SettingsModelsPage.thisMacLabel);
+    await settle(tester);
     for (var i = 0; i < 100 && runner.starts.length < 3; i++) {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -433,38 +485,63 @@ void main() {
     // One generative model: the 4B is not served beside the 27B.
     expect(written, isNot(contains('[$routerBulkId]')));
 
-    // The last restart armed a start timeout and a health poll in the test's
-    // own fake-async queue, and the binding refuses to end a test with a timer
-    // pending. Both are cancelled at the top of `dispose`, before any await,
-    // so letting it go and pumping once is enough; `tearDown` still awaits it.
     unawaited(supervisor.dispose());
     await tester.pump();
   });
 
-  testWidgets('Managed re-applies the rule', (tester) async {
+  testWidgets('This Mac re-applies the rule', (tester) async {
     final probe = _ScriptedProbe(const {});
     await pumpHost(tester, probe: probe);
-    await container.read(appPrefsProvider.notifier).useBox(
-          bigUrl: 'https://box.example.com/prose/v1/chat/completions',
-          smallUrl: 'https://box.example.com/bulk/v1/chat/completions',
-          bigModel: 'qwen3-27b-fp8',
-          smallModel: 'qwen3-4b',
+    await container.read(appPrefsProvider.notifier).useGenerative(
+          placement: ModelPlacement.box,
+          url: 'https://box.example.com/prose/v1/chat/completions',
+          model: 'qwen3-27b-fp8',
           hardwareTier: MachineTier.full,
         );
     await tester.pump();
     await tester.pump();
 
     await openHostSection(tester, 'Models');
-    await tester.tap(find.text(SettingsModelsPage.managedLabel));
-    for (var i = 0; i < 4; i++) {
-      await tester.pump(const Duration(milliseconds: 200));
-    }
+    await tapSegment(tester, SettingsModelsPage.generativeModeKey,
+        SettingsModelsPage.thisMacLabel);
+    await settle(tester);
 
     final prefs = container.read(appPrefsProvider);
     expect(prefs.modelPlacement, ModelPlacement.local);
-    // Back on this Mac, by the rule rather than by a stored row.
     expect(prefs.specForStage('triage')?.id, localGenerativeId);
     expect(prefs.specForStage('draft_reply')?.id, localGenerativeId);
+  });
+
+  testWidgets('choosing the 4B writes the managed model and asks for the '
+      'preset', (tester) async {
+    final server = _CountingSupervisor(support);
+    await pumpHost(tester, probe: _ScriptedProbe(const {}), server: server);
+    await openHostSection(tester, 'Models');
+    await tapSegment(tester, SettingsModelsPage.generativeManagedKey,
+        SettingsModelsPage.model4bLabel);
+    await settle(tester);
+
+    final prefs = container.read(appPrefsProvider);
+    expect(prefs.generativeManagedModel, routerBulkId);
+    expect(prefs.generativeSpec.model, routerBulkId);
+    expect(server.presets, greaterThanOrEqualTo(1));
+  });
+
+  testWidgets('Check on the decision model asks the supervisor for the '
+      'preset', (tester) async {
+    final server = _CountingSupervisor(support);
+    await pumpHost(tester, probe: _ScriptedProbe(const {}), server: server);
+    await openHostSection(tester, 'Models');
+    final before = server.presets;
+
+    await tapKey(tester, SettingsModelsPage.checkDecisionKey);
+    await settle(tester);
+
+    // The make-decide-install-while-running path: the router is asked to
+    // pick up the placements' preset, which restarts it only when the hash
+    // moved.
+    expect(server.presets, before + 1);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('About shows what the two providers resolved', (tester) async {
@@ -533,16 +610,14 @@ void main() {
 
     expect(tester.takeException(), isNull);
   });
-  testWidgets('a user-defined install reads its rows through the placement',
+  testWidgets('a generative remote reads its status through the placement',
       (tester) async {
     await pumpInbox(tester);
-    // An install on a named server, made the way the page makes one.
     final notifier = container.read(appPrefsProvider.notifier);
-    await notifier.useBox(
-      bigUrl: 'https://box.example.com/prose/v1/chat/completions',
-      smallUrl: 'https://box.example.com/bulk/v1/chat/completions',
-      bigModel: 'qwen3-27b-fp8',
-      smallModel: 'qwen3-4b',
+    await notifier.useGenerative(
+      placement: ModelPlacement.box,
+      url: 'https://box.example.com/prose/v1/chat/completions',
+      model: 'qwen3-27b-fp8',
       hardwareTier: MachineTier.full,
     );
     await tester.pump();
@@ -550,15 +625,14 @@ void main() {
 
     await openSection(tester, 'Models');
 
-    // The generative row names the server it dials; the decision row stays
-    // on this Mac.
-    expect(find.text('qwen3-27b-fp8 at box.example.com'), findsOneWidget);
-    expect(find.textContaining('Bond decision model on this Mac'),
-        findsOneWidget);
-    // No key was typed, and the line says the one thing left to do.
+    // No key was typed, and the generative line says the one thing left to
+    // do; the decision model stays on this Mac.
     expect(
-      tester.widget<Text>(find.byKey(SettingsModelsPage.statusKey)).data,
+      tester
+          .widget<Text>(find.byKey(SettingsModelsPage.generativeStatusKey))
+          .data,
       SettingsModelsPage.keyNeededText,
     );
+    expect(find.byKey(SettingsModelsPage.checkDecisionKey), findsOneWidget);
   });
 }

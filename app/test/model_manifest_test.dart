@@ -565,7 +565,7 @@ spec-type = draft-mtp
       });
     });
 
-    group('withInstalledLocal', () {
+    group('withPresentFiles', () {
       late Directory folder;
       setUp(() => folder = Directory.systemTemp.createTempSync('manifest'));
       tearDown(() => folder.deleteSync(recursive: true));
@@ -573,22 +573,75 @@ spec-type = draft-mtp
       void touch(String relative) =>
           File('${folder.path}/$relative')..createSync(recursive: true);
 
+      List<String> kept(ModelManifest manifest) => [
+            for (final m in manifest.withPresentFiles(folder.path).models) m.id,
+          ];
+
       test('drops the decision model until both of its files are there', () {
         final manifest = realManifest().forTier(MachineTier.full);
         final decide = manifest.byId(routerDecideId);
-        List<String> kept() => [
-              for (final m in manifest.withInstalledLocal(folder.path).models)
-                m.id,
-            ];
 
-        expect(kept(), isNot(contains(routerDecideId)));
+        expect(kept(manifest), isNot(contains(routerDecideId)));
         touch(decide.relativePath);
-        expect(kept(), isNot(contains(routerDecideId)));
+        expect(kept(manifest), isNot(contains(routerDecideId)));
         touch(decide.headsRelativePath!);
-        expect(kept(), contains(routerDecideId));
-        // A downloaded entry is never dropped for a missing file: the
-        // server's own preflight says which download did not finish.
-        expect(kept(), contains(routerProseId));
+        expect(kept(manifest), contains(routerDecideId));
+      });
+
+      test('a chosen generative model that was never downloaded leaves the '
+          'preset, and embed and decide stay', () {
+        // A full Mac that downloaded embed + 27B, then chose the 4B.
+        final served = realManifest().forRoles(
+          hardwareTier: MachineTier.full,
+          decisionManaged: true,
+          generativeManagedId: routerBulkId,
+        );
+        for (final m in served.models) {
+          if (m.id == routerBulkId) continue;
+          touch(m.relativePath);
+          if (m.headsRelativePath case final heads?) touch(heads);
+        }
+
+        expect(kept(served), [
+          for (final m in served.models)
+            if (m.id != routerBulkId) m.id,
+        ]);
+        expect(kept(served), containsAll([routerEmbedId, routerDecideId]));
+        // And the preset built from it names no missing file, so the
+        // server's preflight lets the other models start.
+        final preset = served.withPresentFiles(folder.path).toPreset(folder.path);
+        expect(preset.missingFiles(), isEmpty);
+
+        touch(served.byId(routerBulkId).relativePath);
+        expect(kept(served), contains(routerBulkId));
+      });
+
+      test('the 27B needs its MTP head too', () {
+        final served = realManifest().forRoles(
+          hardwareTier: MachineTier.full,
+          decisionManaged: false,
+          generativeManagedId: routerProseId,
+        );
+        final prose = served.byId(routerProseId);
+        touch(prose.relativePath);
+        expect(kept(served), isNot(contains(routerProseId)));
+        touch(prose.sidecarRelativePath!);
+        expect(kept(served), contains(routerProseId));
+      });
+
+      test('the embedding model is kept even when missing, so the preflight '
+          'still says so', () {
+        final served = realManifest().forRoles(
+          hardwareTier: MachineTier.full,
+          decisionManaged: false,
+          generativeManagedId: null,
+        );
+        expect(kept(served), [routerEmbedId]);
+        expect(
+          served.withPresentFiles(folder.path).toPreset(folder.path)
+              .missingFiles(),
+          isNotEmpty,
+        );
       });
     });
 

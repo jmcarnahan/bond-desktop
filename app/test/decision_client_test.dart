@@ -702,4 +702,33 @@ void main() {
       expect(records.single.outcome, 'unavailable');
     });
   });
+
+  test('a target that says it cannot answer throws '
+      'DecisionUnavailableException and sends nothing', () async {
+    final c = DecisionClient(
+      resolveTarget: () => const LlmTarget(
+        baseUrl: 'http://127.0.0.1:8080/v1/embeddings',
+        model: 'bond-decide',
+        unavailable:
+            'The decision model is not installed. Run: make decide-install',
+      ),
+      heads: syntheticHeads,
+      client: MockClient((request) async {
+        fail('no request may leave for an unavailable target');
+      }),
+    );
+
+    await expectLater(
+      c.decide(_input('a')),
+      throwsA(isA<DecisionUnavailableException>().having(
+        (e) => e.message,
+        'message',
+        contains('make decide-install'),
+      )),
+    );
+    await expectLater(
+      c.decide(_longInput()),
+      throwsA(isA<DecisionUnavailableException>()),
+    );
+  });
 }

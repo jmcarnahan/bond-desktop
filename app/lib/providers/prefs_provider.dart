@@ -235,6 +235,14 @@ class AppPrefs {
   /// Not persisted, on [boxBigKeyStored]'s rule.
   final bool cloudDraftsKeyStored;
 
+  /// The router ids the managed server's preset actually serves, as the
+  /// supervisor last built it, or null before it has built one (read as
+  /// "everything is served"). NOT persisted. A managed model the owner chose
+  /// that is not on disk is left out of that preset, and a managed target
+  /// naming it is marked unavailable ([unavailableFor]) so its role parks
+  /// instead of taking the router's fatal 400 for an unknown model.
+  final Set<String>? servedManagedIds;
+
   /// What this Mac can hold, read off its memory. NOT a preference and NOT
   /// persisted: the notifier is told by `setMachineTier`, from the managed
   /// server's preset build and from the placement writers, so resolution
@@ -395,6 +403,7 @@ class AppPrefs {
     this.cloudDraftsUrl = '',
     this.cloudDraftsModel = '',
     this.cloudDraftsKeyStored = false,
+    this.servedManagedIds,
     this.machineTier = MachineTier.full,
     this.processingOn = true,
     this.peopleSort = PeopleSort.recent,
@@ -615,6 +624,28 @@ class AppPrefs {
     return generativeSpec;
   }
 
+  /// The sentence a MANAGED target carries when the router is not serving
+  /// its model, or null when it is (or when this is not a managed target, or
+  /// the served set is not known yet). See [servedManagedIds].
+  String? unavailableFor(LlmTargetSpec spec) {
+    final served = servedManagedIds;
+    if (served == null || !managedServer) return null;
+    if (spec.id != localGenerativeId && spec.id != localDecisionId) {
+      return null;
+    }
+    if (served.contains(spec.model)) return null;
+    return switch (spec.model) {
+      routerDecideId =>
+        'The decision model is not installed. Run: make decide-install',
+      routerProseId => 'The Qwen3.8 27B is not downloaded on this Mac. Set '
+          'up again to download it.',
+      routerBulkId => 'The Qwen3 4B is not downloaded on this Mac. Set up '
+          'again to download it.',
+      final other => 'The model $other is not on this Mac. Set up again to '
+          'download it.',
+    };
+  }
+
   /// One of the current fixed specs by id, or null when none carries it —
   /// what the composer's `Improved with <name>` reads back off a draft row.
   LlmTargetSpec? specById(String id) {
@@ -658,6 +689,7 @@ class AppPrefs {
     String? cloudDraftsUrl,
     String? cloudDraftsModel,
     bool? cloudDraftsKeyStored,
+    Set<String>? servedManagedIds,
     MachineTier? machineTier,
     bool? processingOn,
     PeopleSort? peopleSort,
@@ -700,6 +732,7 @@ class AppPrefs {
         cloudDraftsUrl: cloudDraftsUrl ?? this.cloudDraftsUrl,
         cloudDraftsModel: cloudDraftsModel ?? this.cloudDraftsModel,
         cloudDraftsKeyStored: cloudDraftsKeyStored ?? this.cloudDraftsKeyStored,
+        servedManagedIds: servedManagedIds ?? this.servedManagedIds,
         machineTier: machineTier ?? this.machineTier,
         processingOn: processingOn ?? this.processingOn,
         peopleSort: peopleSort ?? this.peopleSort,
@@ -1069,7 +1102,10 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   LlmTarget targetForStage(String stageId) {
     final spec = state.specForStage(stageId);
     if (spec == null) return state.embedRequestTarget;
-    return spec.toTarget(bearer: spec.hasBearer ? _bearers[spec.id] : null);
+    return spec.toTarget(
+      bearer: spec.hasBearer ? _bearers[spec.id] : null,
+      unavailable: state.unavailableFor(spec),
+    );
   }
 
   /// One target's stored token, or null when there is none.
@@ -1716,6 +1752,20 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _store.setPref(modelPlacementKey, value.name);
   }
 
+  /// Tells the prefs which router ids the managed server's preset serves.
+  /// NOT persisted. Called by the supervisor's preset build every time it
+  /// builds one. A no-op when unchanged.
+  void setServedManagedIds(Set<String> ids) {
+    if (!mounted) return;
+    final current = state.servedManagedIds;
+    if (current != null &&
+        current.length == ids.length &&
+        current.containsAll(ids)) {
+      return;
+    }
+    state = state.copyWith(servedManagedIds: Set.unmodifiable(ids));
+  }
+
   /// Tells the prefs what this Mac can hold. NOT persisted: the tier is read
   /// off the hardware on every launch (see [AppPrefs.machineTier]). Called
   /// by the managed server's preset build, which precedes every managed
@@ -1746,7 +1796,9 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// build already derives, which is [AppPrefs.boxBigUrl]'s whole meaning. A
   /// null [url] or [model] keeps what is stored; a blank [key] keeps the
   /// stored token, so a Connect with the field empty cannot replace a good
-  /// key with nothing.
+  /// key with nothing — UNLESS [clearKey] says the address moved to another
+  /// host, when the old host's token is forgotten ([clearRoleKey]) rather
+  /// than sent to a machine it was never meant for.
   ///
   /// Then the placement, the tier, and the draft policy: on this Mac the
   /// 4B's drafts are the tier's policy (on demand on the inbox tier), the 27B
@@ -1757,6 +1809,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     String? url,
     String? model,
     String? key,
+    bool clearKey = false,
     required MachineTier hardwareTier,
   }) async {
     String? storedUrl;
@@ -1785,22 +1838,34 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       );
     }
 
-    if (storedUrl != null) {
-      state = state.copyWith(boxBigUrl: storedUrl);
-      await _store.setPref(boxBigUrlKey, storedUrl);
-    }
+    String? storedModel;
     if (placement == ModelPlacement.box && model != null) {
       final trimmed = model.trim();
-      final storedModel = trimmed == boxProseModel ? '' : trimmed;
-      state = state.copyWith(boxBigModel: storedModel);
-      await _store.setPref(boxBigModelKey, storedModel);
+      storedModel = trimmed == boxProseModel ? '' : trimmed;
     }
     if (placement == ModelPlacement.box) {
-      await _storeKey(boxProseId, key);
+      // The keychain FIRST, then the key, the address and the model in ONE
+      // state step: a request resolved in between must never pair the old
+      // host's token with the new host (or the new token with the old).
+      final move = await _keychainFirst(
+        boxProseId,
+        key,
+        clearKey: clearKey,
+        flagged: state.boxBigKeyStored,
+      );
+      _applyKeyCache(boxProseId, move);
+      state = state.copyWith(
+        boxBigUrl: storedUrl,
+        boxBigModel: storedModel,
+        boxBigKeyStored: move.flag,
+      );
+      if (storedUrl != null) await _store.setPref(boxBigUrlKey, storedUrl);
+      if (storedModel != null) {
+        await _store.setPref(boxBigModelKey, storedModel);
+      }
       // A key typed for the generative remote REPLACES whatever the role
       // split still owed under `box-prose`, so nothing is left to move.
-      final typed = key?.trim() ?? '';
-      if (typed.isNotEmpty) await _settleModelRoles(typed);
+      if (move.token case final typed?) await _settleModelRoles(typed);
     }
     if (managedModel != null) {
       state = state.copyWith(generativeManagedModel: managedModel);
@@ -1833,6 +1898,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     String? url,
     String? model,
     String? key,
+    bool clearKey = false,
   }) async {
     String? storedUrl;
     if (placement == ModelPlacement.box && url != null) {
@@ -1849,18 +1915,29 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
               ? ''
               : clean;
     }
-    if (storedUrl != null) {
-      state = state.copyWith(decisionUrl: storedUrl);
-      await _store.setPref(decisionUrlKey, storedUrl);
-    }
+    String? storedModel;
     if (placement == ModelPlacement.box && model != null) {
       final trimmed = model.trim();
-      final storedModel = trimmed == boxDecideModel ? '' : trimmed;
-      state = state.copyWith(decisionModel: storedModel);
-      await _store.setPref(decisionModelKey, storedModel);
+      storedModel = trimmed == boxDecideModel ? '' : trimmed;
     }
     if (placement == ModelPlacement.box) {
-      await _storeKey(boxDecideId, key);
+      // Keychain first, then one state step: [useGenerative]'s rule.
+      final move = await _keychainFirst(
+        boxDecideId,
+        key,
+        clearKey: clearKey,
+        flagged: state.decisionKeyStored,
+      );
+      _applyKeyCache(boxDecideId, move);
+      state = state.copyWith(
+        decisionUrl: storedUrl,
+        decisionModel: storedModel,
+        decisionKeyStored: move.flag,
+      );
+      if (storedUrl != null) await _store.setPref(decisionUrlKey, storedUrl);
+      if (storedModel != null) {
+        await _store.setPref(decisionModelKey, storedModel);
+      }
     }
     state = state.copyWith(decisionPlacement: placement);
     await _store.setPref(decisionPlacementKey, placement.name);
@@ -1878,6 +1955,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     required String url,
     required String model,
     String? key,
+    bool clearKey = false,
   }) async {
     final clean = normalizeBoxBaseUrl(url);
     if (!isBoxOrigin(clean)) {
@@ -1894,10 +1972,21 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     if (trimmed.isEmpty) {
       throw ArgumentError.value(model, 'model', 'must name a model');
     }
-    state = state.copyWith(cloudDraftsUrl: clean, cloudDraftsModel: trimmed);
+    // Keychain first, then one state step: [useGenerative]'s rule.
+    final move = await _keychainFirst(
+      cloudDraftsId,
+      key,
+      clearKey: clearKey,
+      flagged: state.cloudDraftsKeyStored,
+    );
+    _applyKeyCache(cloudDraftsId, move);
+    state = state.copyWith(
+      cloudDraftsUrl: clean,
+      cloudDraftsModel: trimmed,
+      cloudDraftsKeyStored: move.flag,
+    );
     await _store.setPref(cloudDraftsUrlKey, clean);
     await _store.setPref(cloudDraftsModelKey, trimmed);
-    await _storeKey(cloudDraftsId, key);
   }
 
   /// Forgets the cloud-drafts target: its address, its model and its token.
@@ -1940,34 +2029,71 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     } catch (_) {}
   }
 
-  /// One role's access key into the keychain and the cache, and its presence
-  /// flag into the state. A SECRET: what [state] gains is a boolean. A no-op
-  /// on an omitted or blank token.
-  Future<void> _storeKey(String id, String? key) async {
+  /// The keychain half of a role write, done BEFORE anything a request can
+  /// read moves: a typed [key] is written, or, with [clearKey] and a blank
+  /// field, the stored one is deleted (only when there is one, on
+  /// [clearRoleKey]'s no-op rule). What it returns is applied to the cache
+  /// ([_applyKeyCache]) and the flag in the SAME synchronous step as the
+  /// address, so no request resolves a new host with an old token.
+  ///
+  /// [flag] is the presence flag to write: true for a stored token, false
+  /// for a cleared one, null for "unchanged".
+  Future<({String? token, bool clear, bool? flag})> _keychainFirst(
+    String id,
+    String? key, {
+    required bool clearKey,
+    required bool flagged,
+  }) async {
     final token = key?.trim() ?? '';
-    if (token.isEmpty) return;
-    _bearers[id] = token;
-    await _writeToken('$llmTargetBearerKeyPrefix$id', token);
-    state = switch (id) {
-      boxProseId => state.copyWith(boxBigKeyStored: true),
-      boxDecideId => state.copyWith(decisionKeyStored: true),
-      _ => state.copyWith(cloudDraftsKeyStored: true),
-    };
+    if (token.isNotEmpty) {
+      await _writeToken('$llmTargetBearerKeyPrefix$id', token);
+      return (token: token, clear: false, flag: true);
+    }
+    if (clearKey && (flagged || _bearers.containsKey(id))) {
+      await _writeToken('$llmTargetBearerKeyPrefix$id', null);
+      return (token: null, clear: true, flag: false);
+    }
+    return (token: null, clear: false, flag: null);
   }
 
-  /// Forgets the generative remote's key.
+  /// The cache half of [_keychainFirst]'s answer. Synchronous, and called
+  /// right before the one `state` write it belongs with.
+  void _applyKeyCache(
+    String id,
+    ({String? token, bool clear, bool? flag}) move,
+  ) {
+    if (move.token case final token?) {
+      _bearers[id] = token;
+    } else if (move.clear) {
+      _bearers.remove(id);
+    }
+  }
+
+  /// Forgets one role's access key: [boxProseId] (the generative remote),
+  /// [boxDecideId] (the decision remote) or [cloudDraftsId]. The keychain
+  /// entry, the cache and the presence flag all go.
   ///
   /// A no-op when there is nothing to forget, which is every install that
   /// never typed one. Not an optimisation: a keychain write is a platform
   /// channel round trip, and making the first run take one to delete nothing
   /// is how a wizard step stops advancing within the pumps its test gives
-  /// it. Decided from the cache, not the keychain, and NOT behind `ready`.
-  Future<void> clearBoxKey() async {
-    final stored = state.boxBigKeyStored || _bearers.containsKey(boxProseId);
-    if (!stored) return;
-    _bearers.remove(boxProseId);
-    await _writeToken('$llmTargetBearerKeyPrefix$boxProseId', null);
-    state = state.copyWith(boxBigKeyStored: false);
+  /// it. Decided from the cache and the flag, not the keychain, and NOT
+  /// behind `ready`.
+  Future<void> clearRoleKey(String id) async {
+    final flagged = switch (id) {
+      boxProseId => state.boxBigKeyStored,
+      boxDecideId => state.decisionKeyStored,
+      cloudDraftsId => state.cloudDraftsKeyStored,
+      _ => throw ArgumentError.value(id, 'id', 'not a role key'),
+    };
+    if (!flagged && !_bearers.containsKey(id)) return;
+    _bearers.remove(id);
+    await _writeToken('$llmTargetBearerKeyPrefix$id', null);
+    state = switch (id) {
+      boxProseId => state.copyWith(boxBigKeyStored: false),
+      boxDecideId => state.copyWith(decisionKeyStored: false),
+      _ => state.copyWith(cloudDraftsKeyStored: false),
+    };
   }
 
   /// Remembers whether model work runs. State first and the write after it,
@@ -1975,57 +2101,6 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   Future<void> setProcessingOn(bool value) async {
     state = state.copyWith(processingOn: value);
     await _store.setPref(processingOnKey, value.toString());
-  }
-
-  /// INTERIM (Phase 4 deletes it): the Round H door between placements, as a
-  /// shim onto [useGenerative] for the pages that still call it.
-  Future<void> usePlacement(
-    ModelPlacement placement, {
-    required MachineTier hardwareTier,
-  }) =>
-      useGenerative(placement: placement, hardwareTier: hardwareTier);
-
-  /// INTERIM (Phase 4 deletes it): the Round H pair form's door, as a shim.
-  ///
-  /// The big address is the generative remote and the small half is
-  /// IGNORED — except when the big address is a third party. That was Round
-  /// H's cloud-drafts mechanism, so it becomes the cloud-drafts target
-  /// (the consent pane recorded consent before this press), and the small
-  /// address, when it is the owner's own, becomes the generative remote;
-  /// otherwise the generative placement is left where it is.
-  Future<void> useBox({
-    required String bigUrl,
-    required String smallUrl,
-    required String bigModel,
-    required String smallModel,
-    String? bigKey,
-    String? smallKey,
-    required MachineTier hardwareTier,
-  }) async {
-    final big = normalizeBoxBaseUrl(bigUrl);
-    if (isBoxOrigin(big) && !AppPrefs._ownServer(big)) {
-      await useCloudDrafts(url: big, model: bigModel, key: bigKey);
-      final small = normalizeBoxBaseUrl(smallUrl);
-      if (isBoxOrigin(small) && AppPrefs._ownServer(small)) {
-        await useGenerative(
-          placement: ModelPlacement.box,
-          url: small,
-          model: smallModel,
-          key: smallKey,
-          hardwareTier: hardwareTier,
-        );
-      } else {
-        setMachineTier(hardwareTier);
-      }
-      return;
-    }
-    await useGenerative(
-      placement: ModelPlacement.box,
-      url: bigUrl,
-      model: bigModel,
-      key: bigKey,
-      hardwareTier: hardwareTier,
-    );
   }
 
   /// Records that the owner has read what a third-party draft target

@@ -130,12 +130,14 @@ void main() {
         await containerFor(manifest).read(managedModelsStatusProvider.future);
     expect(rows.first.roleId, 'decision');
     expect(rows.first.onDisk, isFalse, reason: 'the heads are missing');
+    expect(rows.first.headsOnDisk, isFalse);
 
     final heads = File(p.join(models.path, decide.headsRelativePath!));
     await heads.writeAsString('{}');
     rows =
         await containerFor(manifest).read(managedModelsStatusProvider.future);
     expect(rows.first.onDisk, isTrue);
+    expect(rows.first.headsOnDisk, isTrue);
   });
 
   test('a ledger row over a file somebody deleted is not on disk', () async {
@@ -249,5 +251,43 @@ void main() {
 
     final after = await container.read(managedModelsStatusProvider.future);
     expect(after.last.onDisk, isTrue);
+  });
+
+  test('the served preset leaves out a chosen model that is not on disk, and '
+      'embed and decide stay', () async {
+    // A full Mac that downloaded embed + 27B and installed the decision
+    // model, then chose the 4B: the preset the supervisor builds (the roles'
+    // manifest through `withPresentFiles`) must not name the missing 4B, or
+    // the router's preflight would stop embed and decide with it.
+    final manifest = testManifest(withDecide: true);
+    final decide = manifest.byRole(ModelRole.decide);
+    await write(manifest.byRole(ModelRole.embed));
+    await write(manifest.byRole(ModelRole.prose));
+    await write(decide);
+    await File(p.join(models.path, decide.headsRelativePath!))
+        .writeAsString('{}');
+
+    final container = containerFor(
+      manifest,
+      prefs: const AppPrefs(
+        modelPlacement: ModelPlacement.local,
+        generativeManagedModel: routerBulkId,
+      ),
+    );
+    final served = await container.read(managedManifestProvider.future);
+    expect([for (final m in served.models) m.id], contains(routerBulkId));
+
+    final present = served.withPresentFiles(models.path);
+    expect([for (final m in present.models) m.id],
+        unorderedEquals([routerEmbedId, routerDecideId]));
+    expect(present.toPreset(models.path).missingFiles(), isEmpty);
+
+    // And the row the Models page reads still says the 4B is not here.
+    final rows = await container.read(managedModelsStatusProvider.future);
+    final generative = rows.firstWhere((r) => r.roleId == 'generative');
+    expect(generative.routerId, routerBulkId);
+    expect(generative.onDisk, isFalse);
+    // A file with no heads record never reads as missing its heads.
+    expect(generative.headsOnDisk, isTrue);
   });
 }

@@ -1096,32 +1096,46 @@ class ModelManifest {
         tiers: tiers,
       );
 
-  /// This manifest without the `source: local` entries whose files are not
-  /// in [modelsFolder] (the GGUF, and the heads file when there is one).
+  /// This manifest without the entries whose files are not all in
+  /// [modelsFolder] (the GGUF, the MTP sidecar and the heads file, whichever
+  /// the entry has), EXCEPT the embedding model.
   ///
-  /// What the managed server's preset is built from. A local entry is
-  /// installed by hand, and the server refuses to start with a file the
-  /// preset names missing, so an uninstalled decision model must leave the
-  /// preset rather than take the embedding and generative models down with
-  /// it: the decision pass parks with its own reason instead. The next
-  /// `ensurePreset` after `make decide-install` sees a new hash and restarts.
-  ModelManifest withInstalledLocal(String modelsFolder) => ModelManifest(
+  /// What the managed server's preset is built from. The server refuses to
+  /// start with a file the preset names missing, and one missing model must
+  /// not take the others down with it: a decision model not yet installed by
+  /// hand, or a generative model the owner chose that was never downloaded
+  /// (the 4B on a full Mac, since only the chosen one is fetched), leaves the
+  /// preset and that role parks on its own reason while the rest run. The
+  /// next `ensurePreset` after the file lands sees a new hash and restarts.
+  ///
+  /// The embedding model is KEPT whatever the disk says: every stage needs
+  /// it, and a router started without it would look healthy while nothing
+  /// could work. Left in, its absence fails the start with the preflight's
+  /// own `Model files are missing` sentence, which is the true report.
+  ModelManifest withPresentFiles(String modelsFolder) => ModelManifest(
         version: version,
         models: List.unmodifiable([
           for (final model in models)
-            if (!model.isLocal || localInstalled(model, modelsFolder)) model,
+            if (model.role == ModelRole.embed ||
+                filesPresent(model, modelsFolder))
+              model,
         ]),
         tiers: tiers,
       );
 
-  /// Whether a `source: local` entry's files are all in [modelsFolder].
-  static bool localInstalled(ModelFile model, String modelsFolder) {
-    if (!File(p.join(modelsFolder, model.relativePath)).existsSync()) {
-      return false;
-    }
-    final heads = model.headsRelativePath;
-    return heads == null || File(p.join(modelsFolder, heads)).existsSync();
+  /// Whether every file [model] needs is in [modelsFolder]: the weights, the
+  /// MTP sidecar when it has one, and the heads file when it has one.
+  static bool filesPresent(ModelFile model, String modelsFolder) {
+    bool at(String? relative) =>
+        relative == null || File(p.join(modelsFolder, relative)).existsSync();
+    return at(model.relativePath) &&
+        at(model.sidecarRelativePath) &&
+        at(model.headsRelativePath);
   }
+
+  /// Whether a `source: local` entry's files are all in [modelsFolder].
+  static bool localInstalled(ModelFile model, String modelsFolder) =>
+      filesPresent(model, modelsFolder);
 
   /// The preset the supervisor writes, pointed at [modelsFolder].
   RouterPreset toPreset(String modelsFolder) => RouterPreset(

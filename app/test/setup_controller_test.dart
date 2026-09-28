@@ -75,26 +75,31 @@ void main() {
   late List<bool> seeded;
   late List<String> foldersSet;
 
-  /// What `useBox` was called with, KEYS INCLUDED — this is a fake, the
-  /// "keys" are the fictional strings the test typed, and nothing real is
-  /// here.
+  /// What `useGenerative(placement: box)` was called with, KEYS INCLUDED —
+  /// this is a fake, the "keys" are the fictional strings the test typed,
+  /// and nothing real is here.
   late List<
       ({
-        String bigUrl,
-        String smallUrl,
-        String bigModel,
-        String smallModel,
-        String? bigKey,
-        String? smallKey,
+        String? url,
+        String? model,
+        String? key,
+        bool clearKey,
         MachineTier hardwareTier,
       })> boxUses;
 
-  /// What `usePlacement` was called with.
+  /// What `useGenerative(placement: local)` was called with.
   late List<({ModelPlacement placement, MachineTier hardwareTier})>
       placementUses;
 
-  /// Set, and the `useBox` fake refuses with an `ArgumentError` instead of
-  /// recording: the write the form would draw a sentence for.
+  /// The managed model each local generative write carried.
+  late List<String?> managedUses;
+
+  /// What `useDecision` was called with.
+  late List<({ModelPlacement placement, String? url, String? model})>
+      decisionUses;
+
+  /// Set, and the generative box fake refuses with an `ArgumentError` instead
+  /// of recording: the write the form would draw a sentence for.
   late bool boxRefuses;
 
   String folder() => p.join(root.path, 'models');
@@ -158,30 +163,39 @@ void main() {
         foldersSet.add(path);
         prefs = prefs.copyWith(modelsFolder: path);
       },
-      useBox: ({
-        required bigUrl,
-        required smallUrl,
-        required bigModel,
-        required smallModel,
-        bigKey,
-        smallKey,
+      useGenerative: ({
+        required placement,
+        managedModel,
+        url,
+        model,
+        key,
+        clearKey = false,
         required hardwareTier,
       }) async {
-        if (boxRefuses) throw ArgumentError('refused');
-        boxUses.add((
-          bigUrl: bigUrl,
-          smallUrl: smallUrl,
-          bigModel: bigModel,
-          smallModel: smallModel,
-          bigKey: bigKey,
-          smallKey: smallKey,
-          hardwareTier: hardwareTier,
-        ));
-        prefs = prefs.copyWith(modelPlacement: ModelPlacement.box);
-      },
-      usePlacement: (placement, {required hardwareTier}) async {
-        placementUses.add((placement: placement, hardwareTier: hardwareTier));
+        if (placement == ModelPlacement.box) {
+          if (boxRefuses) throw ArgumentError('refused');
+          boxUses.add((
+            url: url,
+            model: model,
+            key: key,
+            clearKey: clearKey,
+            hardwareTier: hardwareTier,
+          ));
+        } else {
+          placementUses.add((placement: placement, hardwareTier: hardwareTier));
+          managedUses.add(managedModel);
+        }
         prefs = prefs.copyWith(modelPlacement: placement);
+      },
+      useDecision: ({
+        required placement,
+        url,
+        model,
+        key,
+        clearKey = false,
+      }) async {
+        decisionUses.add((placement: placement, url: url, model: model));
+        prefs = prefs.copyWith(decisionPlacement: placement);
       },
       auth: () => auth,
       notifier: notifier,
@@ -244,6 +258,8 @@ void main() {
     foldersSet = [];
     boxUses = [];
     placementUses = [];
+    managedUses = [];
+    decisionUses = [];
     boxRefuses = false;
     manifest = publish();
     prefs = AppPrefs(modelsFolder: folder());
@@ -864,8 +880,8 @@ void main() {
       expect(controller.lowMemory, isTrue);
     });
 
-    test('Continue on User defined hands the pair and the keys to useBox '
-        'with this Mac\'s tier and moves on', () async {
+    test('Continue on Your server hands the server and the key to '
+        'useGenerative with this Mac\'s tier and moves on', () async {
       final controller = build();
       await controller.init();
       controller.chooseBox();
@@ -877,27 +893,25 @@ void main() {
       expect(controller.state.step, SetupStep.welcome);
 
       await controller.continueFromWhere(
-        servers: (
-          bigUrl: 'https://box.example.com/prose/v1/chat/completions',
-          smallUrl: 'https://box.example.com/bulk/v1/chat/completions',
-          bigModel: 'qwen3.8',
-          smallModel: 'qwen3-4b',
-          bigKey: 'sk-fixture-not-a-real-box-key',
-          smallKey: 'sk-fixture-not-a-real-box-key',
+        generative: (
+          url: 'https://box.example.com/prose/v1/chat/completions',
+          model: 'qwen3.8',
+          key: 'sk-fixture-not-a-real-box-key',
+          clearKey: false,
         ),
       );
 
       expect(boxUses, [
         (
-          bigUrl: 'https://box.example.com/prose/v1/chat/completions',
-          smallUrl: 'https://box.example.com/bulk/v1/chat/completions',
-          bigModel: 'qwen3.8',
-          smallModel: 'qwen3-4b',
-          bigKey: 'sk-fixture-not-a-real-box-key',
-          smallKey: 'sk-fixture-not-a-real-box-key',
+          url: 'https://box.example.com/prose/v1/chat/completions',
+          model: 'qwen3.8',
+          key: 'sk-fixture-not-a-real-box-key',
+          clearKey: false,
           hardwareTier: MachineTier.full,
         )
       ]);
+      // The decision model stays on this Mac, and that is written too.
+      expect(decisionUses.single.placement, ModelPlacement.local);
       expect(controller.state.step, SetupStep.models);
       expect(await store.get(SetupStore.setupKey), 'models');
     });
@@ -915,22 +929,139 @@ void main() {
       // a first run it is the same no-op `finish()` was going to make anyway.
       expect(placementUses,
           [(placement: ModelPlacement.local, hardwareTier: MachineTier.full)]);
+      expect(decisionUses.single.placement, ModelPlacement.local);
       expect(controller.state.step, SetupStep.models);
     });
 
-    test('a user-defined install re-run choosing Managed ends up local',
+    test('the defaults are the stored answers: decision here, generative as '
+        'the build decided', () async {
+      final controller = build();
+      await controller.init();
+      expect(controller.state.decisionPlacement, ModelPlacement.local);
+      expect(controller.placement, ModelPlacement.local);
+
+      prefs = prefs.copyWith(
+        modelPlacement: ModelPlacement.box,
+        decisionPlacement: ModelPlacement.box,
+      );
+      final again = build();
+      await again.init();
+      expect(again.placement, ModelPlacement.box);
+      expect(again.state.decisionPlacement, ModelPlacement.box);
+    });
+
+    test('the managed choice rides the local write, and the 27B is refused '
+        'on the inbox tier', () async {
+      final controller = build();
+      await controller.init();
+      controller.chooseLocal();
+      controller.chooseGenerativeManaged(routerBulkId);
+      expect([for (final m in controller.resolvedManifest.models) m.id],
+          [routerEmbedId, routerBulkId]);
+
+      await controller.continueFromWhere();
+      expect(managedUses, [routerBulkId]);
+
+      system.hardwareInfo = const HardwareInfo(
+        chip: 'Apple M2',
+        memoryBytes: 17179869184,
+        appleSilicon: true,
+        rosetta: false,
+        osVersion: '15.6',
+      );
+      final small = build();
+      await small.init();
+      await small.probeHardware();
+      small.chooseGenerativeManaged(routerProseId);
+      expect(small.state.generativeManaged, '');
+    });
+
+    test('a newly chosen managed model is downloaded', () async {
+      // A full Mac whose 27B is already here chooses the 4B: the download
+      // set now names the 4B, so the download step fetches it.
+      final controller = build();
+      await controller.init();
+      controller.chooseGenerativeManaged(routerBulkId);
+      expect(
+        controller.resolvedManifest.models.map((m) => m.id),
+        contains(routerBulkId),
+      );
+      expect(
+        controller.resolvedManifest.models.map((m) => m.id),
+        isNot(contains(routerProseId)),
+      );
+    });
+
+    test('the decision form connects its role at once and stays', () async {
+      final controller = build();
+      await controller.init();
+      controller.chooseDecision(ModelPlacement.box);
+
+      await controller.connectDecision((
+        url: 'https://box.example.com/decide/v1/embeddings',
+        model: 'bond-decide-x',
+        key: null,
+        clearKey: false,
+      ));
+
+      expect(decisionUses, [
+        (
+          placement: ModelPlacement.box,
+          url: 'https://box.example.com/decide/v1/embeddings',
+          model: 'bond-decide-x',
+        )
+      ]);
+      expect(controller.state.step, SetupStep.welcome);
+
+      controller.chooseLocal();
+      await controller.continueFromWhere();
+      // Your server stays: no local decision write on the way forward.
+      expect(decisionUses, hasLength(1));
+      expect(controller.state.step, SetupStep.models);
+    });
+
+    test('Your server for the decision model, not yet connected, refuses the '
+        'way forward and writes nothing', () async {
+      final controller = build();
+      await controller.init();
+      controller.chooseDecision(ModelPlacement.box);
+      controller.chooseLocal();
+
+      await expectLater(
+        controller.continueFromWhere(),
+        throwsA(isA<ArgumentError>().having(
+          (e) => e.message,
+          'message',
+          SetupController.decisionFirstText,
+        )),
+      );
+      expect(placementUses, isEmpty);
+      expect(decisionUses, isEmpty);
+      expect(controller.state.step, SetupStep.welcome);
+    });
+
+    test('the decision model on this Mac is listed apart from the downloads',
         () async {
-      // The re-entry case. Without the write, "Set up again" on a box install
-      // would leave `model_placement = box` standing, and every stage
-      // resolving to the box by the rule, while `finish()` applied this
-      // machine's tier defaults on top.
+      final controller = build();
+      await controller.init();
+      expect(
+        controller.resolvedManifest.models.map((m) => m.role),
+        isNot(contains(ModelRole.decide)),
+      );
+      // The fixture manifest may or may not carry a decide entry; either way
+      // it is never downloaded, and on Your server it is not listed at all.
+      controller.chooseDecision(ModelPlacement.box);
+      expect(controller.localDecisionModel, isNull);
+      expect(controller.decisionInstalled, isFalse);
+    });
+
+    test('a user-defined install re-run choosing This Mac ends up local',
+        () async {
       prefs = prefs.copyWith(modelPlacement: ModelPlacement.box);
       await store.set(SetupStore.setupKey, SetupStep.notifications.name);
       final controller = build();
       await controller.init();
 
-      // The stored answer is seeded, so the step opens on the box rather than
-      // on nothing.
       expect(controller.placement, ModelPlacement.box);
       expect(controller.tier, MachineTier.full);
 
@@ -940,12 +1071,10 @@ void main() {
       expect(placementUses,
           [(placement: ModelPlacement.local, hardwareTier: MachineTier.full)]);
       expect(controller.placement, ModelPlacement.local);
-      expect(controller.tier, MachineTier.full);
       expect(controller.state.step, SetupStep.models);
     });
 
-    test('the tier usePlacement is given is the HARDWARE tier', () async {
-      // The defaults being restored are the ones this machine can run.
+    test('the tier the local write is given is the HARDWARE tier', () async {
       system.hardwareInfo = const HardwareInfo(
         chip: 'Apple M2',
         memoryBytes: 17179869184,
@@ -964,34 +1093,28 @@ void main() {
           [(placement: ModelPlacement.local, hardwareTier: MachineTier.inbox)]);
     });
 
-    test('null keys pass through as null, which useBox reads as keep',
-        () async {
+    test('a null key passes through as null, which the writer reads as keep, '
+        'and clearKey rides along', () async {
       final controller = build();
       await controller.init();
       controller.chooseBox();
 
       await controller.continueFromWhere(
-        servers: (
-          bigUrl: 'https://box.example.com/prose/v1/chat/completions',
-          smallUrl: 'https://box.example.com/bulk/v1/chat/completions',
-          bigModel: 'qwen3.8',
-          smallModel: 'qwen3-4b',
-          bigKey: null,
-          smallKey: null,
+        generative: (
+          url: 'https://other.example.com/v1/chat/completions',
+          model: 'qwen3.8',
+          key: null,
+          clearKey: true,
         ),
       );
 
-      expect(boxUses, hasLength(1));
-      // Null, not the empty string: a re-entry with the field blank keeps the
-      // key already in the keychain.
-      expect(boxUses.single.bigKey, isNull);
-      expect(boxUses.single.smallKey, isNull);
+      expect(boxUses.single.key, isNull);
+      expect(boxUses.single.clearKey, isTrue);
       expect(controller.state.step, SetupStep.models);
     });
 
-    test('a useBox that throws leaves the step where it is', () async {
-      // Nothing is caught here: the throw goes back to the form, which is the
-      // thing that can draw the sentence under its own fields.
+    test('a generative write that throws leaves the step where it is',
+        () async {
       boxRefuses = true;
       final controller = build();
       await controller.init();
@@ -999,13 +1122,11 @@ void main() {
 
       await expectLater(
         controller.continueFromWhere(
-          servers: (
-            bigUrl: 'https://box.example.com/prose/v1/chat/completions',
-            smallUrl: 'https://box.example.com/bulk/v1/chat/completions',
-            bigModel: 'qwen3.8',
-            smallModel: 'qwen3-4b',
-            bigKey: null,
-            smallKey: null,
+          generative: (
+            url: 'https://box.example.com/prose/v1/chat/completions',
+            model: 'qwen3.8',
+            key: null,
+            clearKey: false,
           ),
         ),
         throwsA(isA<ArgumentError>()),

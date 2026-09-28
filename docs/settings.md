@@ -79,7 +79,8 @@ page has the same shape in `settings_models_page.dart`.
 |---|---|---|
 | About me | always | the saved text, whitespace collapsed to one line, cut at 80 characters with `…`; `Not written yet` when empty |
 | Microsoft connection | any of `onBackendModeChanged`, `connectionStatus`, `hasScope`, `onSignIn` is wired | `MCP` or `This device`, then (MCP only) `Deployed` / `Local` / `Custom`, then `Checking…` / `Not signed in` / `Signed in as <label>` / `Signed in`, joined by ` · ` |
-| Models | `onUseBox` wired | `Managed · <the app's own server's state sentence>`, or `User defined · <big host>[ · <small host>]` with the two collapsed to one when they are the same host, or `User defined · no address yet` when neither address resolves |
+| Models | `onUseDecision` wired | where each role runs, then the app's own server's state sentence, joined by ` · `: `Decision on this Mac` / `Decision on your server`, then `Generative on this Mac` / `Generative at <host>` / `Generative on your server` (no address yet), then e.g. `Running` |
+| Cloud drafts | `onUseCloudDrafts` wired (both scopes) | `Off`, or `<model> at <host>` for the target in force |
 | Needs You | always | the threshold wording, plus ` · custom rules` or ` · default rules` when `onNeedsYouRulesSaved` is wired, plus ` · judging N message(s)` while `needsYouRejudging` (the whole needs-you queue, from `needsYouPendingProvider`) is above zero — "judging", not "re-judging", because the count cannot tell a Save's rows from a sync's |
 | Suggested replies | `onDraftPolicyChanged` wired (both scopes) | `For messages that need you` / `For every reply-worthy message` / `Only when asked` |
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
@@ -143,12 +144,13 @@ saved text back in the field and stays; Save writes and stays, and the saved
 text becomes the new baseline, so a second edit is dirty against the first save.
 Both buttons are disabled while the field is clean.
 
-**The Models form commits on Connect only.** Two addresses, two discovered
-model names and a key per server travel together in one write, because an
-address sent with the previous server's model name against it is an HTTP 400
-on an MLX runtime, which is fatal and never retried. That is also why the name
-is discovered rather than typed: Connect asks each server what it serves and
-writes what it answered.
+**Each server form commits on Connect only.** One address, its discovered
+model name and its key travel together in one write, because an address sent
+with the previous server's model name against it is an HTTP 400 on an MLX
+runtime, which is fatal and never retried. That is also why the name is
+discovered rather than typed: Connect asks the server what it serves and
+writes what it answered. The Decision model, the Generative model and Cloud
+drafts each have their own form and their own Connect.
 
 **Nothing is saved on dispose.** The dialog this replaced saved about-me on the
 way out, which needed a `scheduleMicrotask` to survive being unmounted by its
@@ -274,42 +276,40 @@ on the AI rung Back goes home.
 so the page's prefill and its report come from one resolver rather than from
 two guesses:
 
-- `modelPlacement: prefs.modelPlacement`, and the four values the form opens
-  on: `boxBigUrl: prefs.effectiveBoxBigUrl` and its three siblings
-  (`effectiveBoxSmallUrl`, `effectiveBoxBigModel`, `effectiveBoxSmallModel`),
-  each already resolved to the stored value where there is one and the build's
-  otherwise. Never a key.
-- `boxKeyStored`, `boxBigKeyStored` and `boxSmallKeyStored` are presence flags
-  and never the token: the first offers **Remove key**, the two below hint that
-  typing replaces something.
-- `onUseBox` reads this Mac's hardware tier AT THE PRESS and calls
-  `notifier.useBox(bigUrl:, smallUrl:, bigModel:, smallModel:, bigKey:,
-  smallKey:, hardwareTier:)`; `onUseManaged` does the same and calls
-  `notifier.usePlacement(ModelPlacement.local, hardwareTier:)`. The tier is
-  read at the press rather than closed over, so a press cannot write last
-  frame's answer. `onRemoveKey` is `notifier.clearBoxKey`.
+- `decisionPlacement: prefs.decisionPlacement` and `generativePlacement:
+  prefs.modelPlacement` (the generative placement reuses Round H's key), with
+  `generativeManagedId` resolved by `managedGenerativeIdFor(tier,
+  prefs.generativeManagedModel)` and `inboxTier` from `machineTierProvider`
+  (watched; read as full for the two seconds a test's hardware channel takes).
+- The six values the two forms open on: `decisionUrl:
+  prefs.effectiveDecisionUrl`, `decisionModel: prefs.effectiveDecisionModel`,
+  `generativeUrl: prefs.effectiveGenerativeUrl`, `generativeModel:
+  prefs.effectiveGenerativeModel`, each already resolved to the stored value
+  where there is one and the build's otherwise, and the two presence flags
+  `decisionKeyStored` and `generativeKeyStored` (`prefs.boxBigKeyStored`).
+  Never a key.
+- `onUseDecision` calls `notifier.useDecision(placement:, url:, model:, key:,
+  clearKey:)`; `onUseGenerative` reads this Mac's hardware tier AT THE PRESS
+  and calls `notifier.useGenerative(placement:, managedModel:, url:, model:,
+  key:, clearKey:, hardwareTier:)`. Both then fire
+  `supervisor.ensurePreset()`, which restarts the router only when the preset
+  hash moved. `onRemoveKey` is `notifier.clearRoleKey`, by target id
+  (`box-decide`, `box-prose` or `cloud-drafts`).
+- `onCheckDecision` is the host's `_checkDecision`: it invalidates
+  `decisionHeadsProvider` (the heads file is cached), fires
+  `supervisor.ensurePreset()` so a `make decide-install` that landed while the
+  app runs is picked up (the preset left the decision model out while its
+  files were missing, so the hash moves), and invalidates and re-reads
+  `managedModelsStatusProvider`.
 - `serverState` is `ref.watch(serverStateProvider)` with the supervisor's own
   field as the fallback for the frame before the stream's first value lands,
-  and `managedModelsStatusProvider` is watched ONCE into a local beside it.
-  Both watched, so a load that finishes behind an open pane moves the bar and
-  the three rows without the reader touching anything. The statuses do not
-  reach the page as a prop: the host joins them onto `roleLines` below, so the
-  page draws rows rather than resolving them.
-- `roleLines` is `RoleLine.withStatus(RoleLine.fromPrefs(prefs), statuses:,
-  serverState:, placement:)`, two pure functions beside the widget that the
-  host calls and `settings_models_page_test.dart` pins under both modes. A
-  role's steps are every stage the placement's rule sends to the same default
-  target as its lead stage, `draft_reply` for the big model and `triage` for
-  the small. Membership is read off `prefs.defaultTargetIdForStage` rather than
-  off `roleOfStage`, because the two disagree on purpose: storyline membership
-  is the big model's work on a user-defined server and the small model's on
-  this Mac, so grouping by the enum would read every Managed install as Custom.
-  `draft_improve` is one of the big model's steps since Round H, when it
-  stopped being optional, so a target on it reads as Custom like a target on
-  any other. The row describes the target most of the role's steps resolve to,
-  compared by the spec `specForStage` answers rather than by the stored id, so
-  a third-party pick with consent withheld reads as the fallback it actually
-  reaches.
+  and `modelStatuses` is `managedModelsStatusProvider` watched ONCE. Both
+  watched, so a load that finishes behind an open pane moves the bar and the
+  three roles' lines without the reader touching anything.
+- The Cloud drafts section's wires: `cloudDraftsUrl`, `cloudDraftsModel`,
+  `cloudDraftsKeyStored` and `cloudDraftsConsent` off the preferences, and
+  `onUseCloudDrafts` is `notifier.useCloudDrafts(url:, model:, key:,
+  clearKey:)`.
 - `processingOn: ref.watch(processingProvider)`, the same value the Processing
   section's switch shows, so the status line can say the switch is off instead
   of repeating a park.
@@ -319,13 +319,13 @@ two guesses:
 - `onSetUpAgain` is `restartSetup(ref)` and `onShowLog` hands
   `supervisor.logFile` to `launchUrl`. `onCloudDraftsConsent` is
   `notifier.setCloudDraftsConsent(true)`, called by the consent pane before
-  the connect it is standing in front of.
+  the Cloud drafts connect it is standing in front of.
 
 `managedModelsStatusProvider` reads `modelManifestProvider`, which THROWS
 unless a host overrides it. Nothing breaks in a widget test that does not —
-the future simply carries the error and `valueOrNull` is null, so the rows keep
-what the preferences said — but a test that wants the sizes and the disk
-states overrides it with `testManifest()`.
+the future simply carries the error and `valueOrNull` is null, so each role's
+line names the model this Mac would run and nothing more — but a test that
+wants the sizes and the disk states overrides it with `testManifest()`.
 
 **The Labels section's own wires.** Six props, all optional, all off one
 `ref.watch(labelsProvider)` — which the host **watches** rather than reads, so a
@@ -349,239 +349,175 @@ reader touching anything:
 
 ## Models
 
-**One question, two answers, and nothing else on the page.** The section asks
-where the models run. *Managed* means this app runs the models on this Mac and
-there is nothing to configure, so the page is a status block. *User defined*
-means the person names two servers and pastes one access key, and **Connect**
-asks each server what it serves. The page is
-`app/lib/widgets/settings_models_page.dart`; the form both it and the first-run
-wizard render is `app/lib/widgets/model_servers_form.dart`.
+**Three roles, top to bottom.** The **Decision model** sorts and flags every
+message; the **Generative model** writes summaries, drafts and storylines;
+**Embeddings** find related messages. The first two each answer one question,
+where they run: **This Mac** or **Your server**. Embeddings always run on
+this Mac and are a status line only. The page is
+`app/lib/widgets/settings_models_page.dart`; the one-address form it, the
+Cloud drafts section and the first-run wizard all render is
+`app/lib/widgets/model_servers_form.dart`.
 
-Round H deleted the **Advanced** fold, and the Local server card with it: the
-stage table, the two slot editors, the targets list and editor, the presets,
-**Drafts in flight**, the embeddings card, the port, the folder and the three
-lifecycle buttons are gone from every screen. The routing DATA is untouched —
-`stage_targets`, `llm_targets`, `applyPreset`, `setStageTarget`,
-`upsertTarget`, the four slot preferences and `prose_parallel` are all still
-there, still tested, still what the benches drive. Nothing shows them.
+Round H deleted the **Advanced** fold and the Local server card, and the
+decision-model round made the routing a RULE (`AppPrefs.specForStage` resolves
+every stage by role), so there is nothing else to show: no stage table, no
+slot editors, no targets list.
 
-**Where the models run.** The heading, then `SettingsSegments<ModelPlacement>`
-keyed `settings-mode` with two labels: **Managed** and **User defined**, under
-the caption `Managed runs the models on this Mac. User defined sends the work
-to servers you name.`
+**The server line comes first.** Under the heading **Model server on this
+Mac**, a line keyed `settings-models-status`: `Processing is off. Turn it on
+under Processing, or in the sidebar, and the work starts.` while the session's
+switch is off (a park sentence promises a retry nothing makes while it is),
+and otherwise the app's own server's state: `Not running`, `Starting…`,
+`Loading models · N of M`, `Running`, `Not running: <reason>`, `Port <p> is in
+use[ by <holder>]`, or `Servers are started by hand for this build.` on a
+build that passed `BOND_DEV_HAND_SERVERS`. The embedding model is always here,
+so this line always matters. Under it, a `LinearProgressIndicator` keyed
+`settings-models-progress` while the server starts (indeterminate) or loads
+(the fraction `ServerLoading.loaded` reports), and **Show log**, keyed
+`settings-show-log`, only under a failure.
 
-**The segments ACT.** Choosing **Managed** on a user-defined install calls
-`usePlacement(ModelPlacement.local, hardwareTier:)` at once: there is nothing
-else to fill in, so there is nothing to press afterwards. Choosing **User
-defined** opens the form and writes NOTHING — the two addresses and the key
-are the rest of that answer, and **Connect** is where it is given. The segment
-still moves under the finger, and the status line directly under it says
-`Running on this Mac until you connect.` until it has been.
+**The two placement controls** are `SettingsSegments<ModelPlacement>` keyed
+`settings-decision-mode` and `settings-generative-mode`, each with **This
+Mac** and **Your server**, under the captions `Sorts and flags every message.
+It reads every message, so it runs on this Mac or on a server of your own.`
+and `Writes summaries, drafts and storylines.`
 
-**The form.** Two addresses, one key, one press:
+**The segments ACT one way and wait the other.** Choosing **This Mac** on a
+role that runs on your server writes it at once (`useDecision(placement:
+local)` or `useGenerative(placement: local)`): there is nothing else to fill
+in. Choosing **Your server** opens that role's form and writes NOTHING; the
+address and the key are the rest of that answer, and **Connect** is where it
+is given. Until then the role's own status says `Running on this Mac until you
+connect.`
+
+**Decision model on This Mac** is a name-and-size line (`Bond decision model ·
+<size>`) and a status keyed `settings-decision-status`: `Installed · loaded`,
+`Installed · not loaded`, or `Not installed · run make decide-install`. The
+weights are installed by hand this round and never downloaded. Under Your server the same status still reads `Not installed · run make
+decide-install` while the heads file is missing from this Mac: the heads run
+here whichever server embeds. A **Check**
+button keyed `settings-role-check-decision` sits beside it: it re-reads the
+heads file and the install state and asks the router for the placements'
+preset, which is how a `make decide-install` made while the app runs is picked
+up. The line reads `Checking…` while it is out.
+
+**Generative model on This Mac** adds a second control,
+`SettingsSegments<String>` keyed `settings-generative-managed`, choosing
+**Qwen3.8 27B** (`bond-prose`) or **Qwen3 4B** (`bond-bulk`) under the caption
+`The 27B writes better. The 4B is smaller and faster.` On the inbox tier the
+27B segment is disabled and the caption is `This Mac has too little memory
+for the 27B.` A pick writes `useGenerative(placement: local, managedModel:)`
+and the router follows. The status, keyed `settings-generative-status`, is
+`On disk · loaded`, `On disk · not loaded`, or `Not downloaded · Set up again
+to download it` when the chosen file is not here (a newly chosen 4B on a full
+Mac, for one): **Set up again** at the foot of the section is how it arrives. Until it arrives that model is LEFT OUT of the router
+(`ModelManifest.withPresentFiles`, which also drops a decision model not yet
+installed), so the embedding and decision models keep running and only the
+generative role waits, parked on its own reason. The supervisor tells the
+preferences what it serves (`setServedManagedIds`), and a managed target
+naming a model left out carries the sentence `The Qwen3 4B is not downloaded
+on this Mac. Set up again to download it.` (or the 27B's, or `The decision
+model is not installed. Run: make decide-install`), which the client throws
+as unavailable before any request, so the role PARKS rather than taking the
+router's fatal 400.
+
+**Embeddings** are a caption (`Finds related messages. Always runs on this
+Mac.`), the name-and-size line and a status keyed `settings-embed-status`.
+
+**Your server, for either role, is the one-address form:**
 
 | Control | Key | Label |
 |---|---|---|
-| Big model address | `servers-big-url` | **Big model address** |
-| Small model address | `servers-small-url` | **Small model address** |
-| Access key | `servers-key` | **Access key**, obscured |
-| Access key for the small model | `servers-small-key` | only when the two addresses name different hosts |
-| Model picker | `servers-big-model` / `servers-small-model` | only when that server lists several |
-| Model name | `servers-big-model-text` / `servers-small-model-text` | only under a Converse address |
-| Connect | `servers-connect` | **Connect** here, **Continue** in the wizard |
-| Remove key | `servers-remove-key` | only with a key stored |
+| Address | `servers-<role>-url` | **Decision model address** / **Generative model address** |
+| Access key | `servers-<role>-key` | **Access key**, obscured |
+| Model picker | `servers-<role>-model` | generative only, only when that server lists several |
+| Model name | `servers-<role>-model-text` | only under a Converse address (cloud drafts only in practice) |
+| Refusal | `servers-<role>-refusal` | under the address |
+| Error | `servers-<role>-error` | under the form |
+| Connect | `servers-<role>-connect` | **Connect** here, **Continue** or **Connect** in the wizard |
+| Remove key | `servers-<role>-remove-key` | only with a key stored |
 
-**The model name is DISCOVERED, never typed.** Connect probes each address's
-`/v1/models` with the key. One id: used, with nobody picking anything. Several:
-a `DropdownButton` appears under that address with the first id filled in, the
-caption says `This server lists several models. Choose one and press Connect
-again.`, and nothing is written until the second press. None, or a server that
-did not answer: that address's own `ProbeStatus` says so and nothing is
-written. The same address typed in both fields is the designed case for a
-one-router server: it lists every id under both, and the two pickers are how
-the two roles get their two names.
+`<role>` is `decision` or `generative`; the Cloud drafts form uses the prefix
+`cloud-drafts` (`cloud-drafts-url`, `cloud-drafts-key`, `cloud-drafts-model`,
+`cloud-drafts-connect`, `cloud-drafts-error`). The status under Your server is
+`Access key needed. Paste it and press Connect.` while no key is stored for an
+address that is not on this machine (a loopback address needs none), and
+`Connected · <model> at <host>` otherwise.
 
-**Two refusals, each under the field it is about**, both before any request
-leaves:
+**The model name is DISCOVERED, never typed.** Connect probes the address's
+`/v1/models` with the key. One id: used. Several: a `DropdownButton` appears
+with the first id filled in, the caption says `This server lists several
+models. Choose one and press Connect again.`, and nothing is written until the
+second press. A decision server may list any name and the FIRST is taken: it
+serves one embedding model. None, or a server that did not answer: the
+`ProbeStatus` line says so and nothing is written.
+
+**Refusals, under the address, before any request leaves:**
 
 - `The address needs to start with http:// or https:// and name a server.`
-  for anything `isBoxOrigin` refuses. The same rule `setBoxServers` throws on,
-  said before the press reaches it.
-- `The address needs to be the chat completions endpoint, ending in
-  /v1/chat/completions.` for an origin where an endpoint belongs. `isBoxOrigin`
-  reads the scheme and the host and nothing else, so this is the rule that
-  catches a bare `https://box.example.com`.
+  for anything `isBoxOrigin` refuses.
+- Generative and cloud drafts: `The address needs to be the chat completions
+  endpoint, ending in /v1/chat/completions.` when the path has no `/v1/`
+  (a Converse address excepted).
+- Decision: `The address needs to be the embeddings endpoint, ending in
+  /v1/embeddings.` unless the path ends in `/embeddings`.
+- A third-party host (`isThirdPartyHost`: Bedrock, anthropic.com, openai.com,
+  deepseek.com) or the Converse wire on a ROLE is refused outright, because
+  both roles read every message: `The decision model reads every message, so
+  it runs on this Mac or on a server of your own.` under the decision field,
+  and `A cloud service can write drafts only. Set it up under Cloud drafts.`
+  under the generative one. Nothing is sent to it, the stored key included.
+  `useDecision` and `useGenerative` throw `ArgumentError` on the same address
+  as their last line.
 
-Typing in either field clears both, drops every answer from the last press and
+Typing anywhere in the form drops every answer from the last press and
 invalidates it: a press outlived by an edit writes nothing, on `_connectSeq`.
 
-**A Bedrock address is typed into rather than asked.** `wireForHost` reads the
-wire off the host, and a Converse service has no `/v1/models` to ask, so that
-address gets a plain **Model** field instead of a probe and a picker, and
-Connect refuses it with `Type the model name. This service does not list its
-models.` while it is empty.
+**A connect that does not land says so**, under the form, keyed
+`servers-<role>-error`: the `ArgumentError`'s own message for a refusal, and
+`The server could not be saved. Try again.` for anything else (a locked
+keychain answers the write with a `PlatformException`).
 
-**A third-party big address asks first.** `isThirdPartyHost` names Bedrock,
-anthropic.com, openai.com and deepseek.com. When the big address is one of
-them the form raises `onThirdParty(spec, resume)` rather than connecting: the
-Models page passes it up to `SettingsScreen`, which opens the **Cloud drafts**
-consent pane in place of the sections. **Continue** records the consent and
-THEN calls `resume()`, which is the same connect with the same values — that
-order is the protection, because `setBoxServers` refuses a third-party big
-address while the flag is false. **Not now** and **Back** close the pane and
-write nothing.
+**The key.** The field opens EMPTY, always. When one is in the keychain it
+carries the hint `Stored. Type to replace` and Connect goes through with the
+field blank, the probe borrowing the stored token by id (`storedBearer`), never
+by value. **A key belongs to the host it was typed for.** When the typed
+address names a DIFFERENT origin from the stored one (scheme, host or port;
+`https://h` and `https://h:443` are one origin), the hint becomes `The
+stored key is for another server. Type this server's key.`, the probe goes
+without the stored token, and a Connect with the field still blank passes
+`clearKey: true`, which makes `useDecision` / `useGenerative` forget the
+role's keychain entry, cache and flag (`clearRoleKey`) rather than keep a
+token for another machine. Otherwise a blank field keeps the stored key, and
+**Remove key** is the only other thing that forgets one. The key lives in the
+form's `TextEditingController` and, for a Cloud drafts connect waiting on the
+consent pane, in the `resume` closure that pane holds; it is emptied the
+moment a connect lands and is never in a widget field after a save, a probe
+result, a log line or a test name.
 
-**A third-party small address is refused outright.** The consent is about
-drafts on the big model; the small model reads every message body for
-triage and the rest, and no cloud service serves that role from any screen
-(Round E decision 9). A vendor or Bedrock host in the small field is refused
-under it with `The small model runs on a server of your own. Cloud services
-can serve the big model only.` before any server is asked, whatever the
-consent flag says, and `setBoxServers` refuses the same address as its last
-line.
+**Parks are said under the role they are about**, when processing is on and
+something is waiting: `decision_unavailable` under the Decision model (`The
+decision model is not answering. Work is waiting and will retry each
+minute.`), `embed_unavailable` under Embeddings (`The embedding model on this
+Mac is not answering. Work is waiting and will retry each minute.`), and
+`model_unavailable` (`Your server is not answering. Work is waiting and will
+retry each minute.`) and `unauthorized` (`Your server refused the access key.
+Change it here.`) under the Generative model while it runs on your server.
+With the generative model on this Mac the server line above already says what
+the router is doing, and the rail says `Model server unreachable`. A park word
+this page cannot answer for, such as a sign-out, is left alone.
 
-`onThirdParty` is null in two cases, and then the form refuses the address
-under the field instead of asking: `Cloud services are connected under
-Settings after setup.` The wizard is one. The other is a screen wired with
-`onUseBox` but no `onCloudDraftsConsent` — a pane whose Continue recorded no
-consent would hand the connect straight back to a refusal, and a question that
-can only be answered wrong is worse than no question.
+**The server follows the placements.** Every placement write is followed by
+`ModelServerSupervisor.ensurePreset`, from the host and from the wizard's
+Finish; the preset is embeddings plus the decision model when it runs here
+(and is installed) plus the chosen generative model when it runs here. It
+restarts only when the preset hash changed.
 
-**A connect that does not land says so.** The form renders the reason under
-the form, keyed `servers-error`: the `ArgumentError`'s own message for a
-refusal, and `The servers could not be saved. Try again.` for anything else —
-`useBox` ends in a keychain write, which answers with a `PlatformException` on
-a locked keychain or a denied prompt, and unhandled that left the key field
-full and the screen silent. When the connect was resumed from the consent pane
-the form is unmounted and has nowhere to draw, so the throw is RETHROWN to the
-screen, which keeps the pane open and puts the sentence on it instead of
-returning the person to an unchanged section.
-
-**The key.** One field by default; a second appears the moment the two
-addresses name different hosts, because two hosts are two operators and a
-token for one must never ride a request to the other. With one host the one
-key is passed as both. The field opens EMPTY, always. When one is already in
-the keychain it carries the hint `Stored. Type to replace` and Connect goes
-through with the field blank. That is the rule, not a convenience: a token
-that has reached the keychain is never read back onto a screen, so
-"unchanged" has to be a state the empty field can be in. **A blank field keeps
-the stored key, and Remove key is the only thing that forgets one.**
-
-The key lives in the form's two `TextEditingController`s and in ONE other
-place: the `resume` closure the form hands to the consent pane, which captures
-the typed values so Continue can finish the same connect. `SettingsScreen`
-holds that closure on `_ConsentPane` for as long as the pane is open, and
-every way out — Continue, Not now, Back — drops it. Nowhere else: it reaches
-the probes' `Authorization` headers and the one call, the controllers are
-emptied the moment a connect lands, and it is never in a widget field after a
-save, a probe result, a log line or a test name.
-
-**The status line**, keyed `settings-models-status`, is always exactly one
-line, and it is the first thing a stalled tester reads. It answers in this
-order, and the order is the order the jobs come in:
-
-1. `Processing is off. Turn it on under Processing, or in the sidebar, and the
-   work starts.` while the session's switch is off. First, because a park
-   sentence says work is retrying and nothing retries while the switch is off:
-   the last parked fact stays in its provider after the drains stop, and the
-   rail's own line guards the same way.
-2. `Running on this Mac until you connect.` while the form is open over an
-   install that has not moved yet.
-3. A park this page can answer for, when something is waiting. Under **User
-   defined** all four: `model_unavailable` reads `Your server is not
-   answering. Work is waiting and will retry each minute.`, `unauthorized`
-   reads `Your server refused the access key. Change it here.`,
-   `embed_unavailable` reads `The embedding model on this Mac is not
-   answering. Work is waiting and will retry each minute.`, and
-   `decision_unavailable` reads `The decision model is not answering. Work is
-   waiting and will retry each minute.` (it names the model rather than a
-   machine, because the decision model can run on either). Under **Managed**
-   only the embedding and decision ones: the other two are about a server
-   whose own line is the next thing on this page, and the rail already says
-   `Model server unreachable`. A park word this page cannot answer for, such as a sign-out,
-   is left alone: the inbox already routes it.
-4. Under **Managed**, the server's own state: `Not running`, `Starting…`,
-   `Loading models · N of M`, `Running`, `Not running: <reason>`, `Port <p> is
-   in use[ by <holder>]`, or `Servers are started by hand for this build.` on a
-   build that passed `BOND_DEV_HAND_SERVERS`. Under **User defined**, `Access
-   key needed. Paste it and press Connect.` when EITHER address is somewhere
-   other than this machine and has no key of its own — per server, because two
-   hosts are two operators and a key stored for one says nothing about the
-   other — and `Connected to your servers.` otherwise. A loopback address
-   needs no key at all.
-
-**A loading bar and a way to the log.** Under Managed, a
-`LinearProgressIndicator` keyed `settings-models-progress` sits under the
-status line: indeterminate while the process has not answered, and a real
-fraction from `ServerLoading.loaded` once the router is reporting model by
-model. No bar in any other state. **Show log**, keyed `settings-show-log`,
-appears only under a failure and hands the log file to the operating system's
-own viewer — this app has no log pane and does not want one.
-
-**Three role rows.** **Big model**, **Small model** and **Embeddings**, each a
-title over one line. The line is the role's phrase, then its size and its
-state where there are any, joined by ` · `.
-
-Under Managed each row is joined with this Mac's own facts by
-`RoleLine.withStatus`, from `managedModelsStatusProvider` and the supervisor:
-`Qwen3.8 27B on this Mac · 20.9 GB · on disk · loaded`. The name is the
-MANIFEST's `displayName`, the size is what the checkpoint cost to fetch
-(weights plus any sidecar), and the state is `not downloaded` when the bytes
-are not there, `on disk · loaded` when the router says it is resident, and `on
-disk · not loaded` otherwise. Loaded is read by ROUTER id rather than by role, which is why
-`ManagedModelStatus` carries one: on a small Mac the big row's file IS the bulk
-file, and a row that looked itself up by `bond-prose` would read as never
-loaded there.
-
-Under User defined the two chat rows read `qwen3.8 at box.example.com` — the
-discovered model name and the address's host — and have no size or state,
-because those models are on somebody else's machine. The embedding row is
-built the Managed way under either mode, because that model is here whatever
-the rest of the pipeline is doing.
-
-**The server follows the placement.** Choosing User defined restarts the app's
-own server onto the embedding model alone, so the two chat models leave this
-Mac's memory; choosing Managed restarts it onto this Mac's whole set and the
-bar and the rows show the load. One call does it,
-`ModelServerSupervisor.ensurePreset`, made by the host after either placement
-write and by the wizard's Finish. It restarts only when the preset hash
-changed, so a Finish that moved nothing leaves a model that took a minute to
-map exactly where it is.
-
-**Also on this Mac, not in use.** Under User defined, a block keyed
-`settings-idle-models` sits after the three rows and before Set up again, with
-one line per model this Mac holds that the placement does not serve:
-`Qwen3.8 27B · 20.9 GB · on disk · not loaded`. The name, the size and the
-state are the row's own three facts, from the statuses
-`managedModelsStatusProvider` marks `inUse: false`. Only files ON DISK are
-listed, one line per FILE (a small Mac's big and small rows share the bulk
-file), and an idle file is `not loaded` by definition: `Ready` means every
-model in the small server's own preset is resident, and these are not in it.
-The lines say `not loaded` rather than disappearing because a person who has
-just switched wants to see the memory come back and the download stay.
-Managed never draws the block, and neither does a user-defined install with
-nothing idle.
-
-A role whose steps do not all resolve to one target reads `Custom · N steps
-point elsewhere`, singular at one. N is counted against the target most of the
-role's steps share, so one odd step reads as one wherever it sits, the lead
-stage included, and the row's Check asks the shared target rather than the odd
-one. There is no longer anywhere to go and look at which ones: the sentence
-says how many and stops.
-
-The two local chat names in `RoleLine.fromPrefs` are a const map in
-`settings_models_page.dart`, keyed by built-in target, with the embedding name
-one constant beside it. They are what a row says before the manifest has been
-read and on a row the statuses do not cover; `withStatus` replaces them with
-the manifest's own name the moment the host has it.
-
-Each row carries a **Check**, keyed `settings-role-check-big`, `-small` and
-`-embed`, which probes that role's own resolved URL with that target's stored
-token and renders a `ProbeStatus` beneath the row. A row that moves to another
-server drops the answer it had, so a green line from one machine is never read
-as a report about another. A host that wires no probe gets no Check anywhere
-on the page, and no Connect either, the same discipline every optional control
-here follows.
+**The weights a switch left behind.** With the generative model on your
+server and its managed file still on disk, a caption keyed
+`settings-idle-models` under its status says `<name> · <size> · on disk · not
+loaded`, so a person who has just switched sees the memory come back and the
+download stay.
 
 **Set up again**, keyed `settings-set-up-again`, sits at the foot of the
 section. It is how the models folder changes and a download is retried, now
@@ -614,17 +550,47 @@ through to the end leaves nothing behind.
 button press would leak a connection pool per press, and this is a button a
 user can hammer.
 
+## Cloud drafts
+
+**The one place a cloud service may write, and only the drafts.** A section
+of its own beside Models, rendered when `onUseCloudDrafts` is wired. A caption
+(`Suggested replies and Improve a draft can go to a cloud service. Everything
+else stays on the Decision and Generative models.`), a line keyed
+`cloud-drafts-target` naming the target in force (`Drafts go to <model> at
+<host>.`, or `No cloud drafts. Drafts are written by the generative model.`),
+then the one-address form with the `cloud-drafts` keys. Connect writes
+`useCloudDrafts(url:, model:, key:, clearKey:)`, which routes `draft_reply`
+and `draft_improve` there and nothing else.
+
+**A third-party address asks first.** When the address is a vendor's or a
+Converse host, the form raises `onThirdParty(spec, resume)`; the screen opens
+the **Cloud drafts** consent pane in place of the sections. **Continue**
+records the consent and THEN calls `resume()`, the same connect with the same
+values: that order is the protection, because `useCloudDrafts` refuses a
+third-party address while the flag is false. **Not now** and **Back** close
+the pane and write nothing. A connect that refuses keeps the pane open with the
+reason on it. An owner who has already consented connects without being asked
+again; the owner's own server never asks. With no `onCloudDraftsConsent`
+wired the form refuses a vendor with `Cloud services are connected under
+Settings after setup.` instead: a question that can only be answered wrong is
+worse than no question. A Converse service lists no models, so it gets a
+typed **Model** field.
+
+**Stop sending drafts anywhere** stays under Processing, and
+the section says so.
+
 **What pins all of this.** `model_servers_form_test.dart` for the form,
 `settings_models_page_test.dart` for the page, `probe_status_test.dart` for the
 three outcomes of a look at a server, `settings_models_host_test.dart` for the
-wires, and `settings_cloud_drafts_test.dart` for the consent pane through
-Connect.
+wires (Connect per role, the managed pick, Check calling `ensurePreset`), and
+`settings_cloud_drafts_test.dart` for the Cloud drafts section and the consent
+pane through Connect.
 
 ## Suggested replies
 
 When a reply is written **without anyone asking**. Three segments and a
 sentence, between Needs You and Notifications, in **both scopes** — how much of
-the big model's time a backlog spends on replies nobody will read is a fact
+the generative model's time a backlog spends on replies nobody will read is a fact
 about the model, so the AI stop is where someone would look for it.
 
 | Segment | Stored `suggested_replies` | What extraction queues |
@@ -654,8 +620,8 @@ message the needs-you pass judged the owner is needed on, with `urgency`
 `urgent` or `high`, the same prompt goes again to whichever target the
 **Improve a draft** stage points at, and that answer replaces the draft. It
 needs such a target to be turned on at all — without one the switch is inert
-and the caption reads *"Pick a target for Improve a draft under Models
-first."*; with one it names it: *"After the local draft is written, the same
+and the caption reads *"Improve a draft has no server to run on. Check the
+Models section."*; with one it names it: *"After the local draft is written, the same
 prompt goes to `<name>` and its answer replaces the draft. Counts toward the
 daily cap under Processing."*
 
@@ -696,31 +662,24 @@ with it.
 
 | Action | Keys | What goes | What stays |
 |---|---|---|---|
-| **Stop sending drafts anywhere** | `settings-stop-cloud-drafts{,-confirm,-keep}` | the `draft_reply` and `draft_improve` stage entries and `cloud_drafts_consent`, so both drafting stages resolve to `AppPrefs.draftFallbackSpec` again, and the consent is withdrawn | every row, every target, every keychain bearer and every other stage entry |
+| **Stop sending drafts anywhere** | `settings-stop-cloud-drafts{,-confirm,-keep}` | the cloud-drafts target (its address, its model and its `cloud-drafts` key) and then `cloud_drafts_consent`, so both drafting stages resolve to the generative model again | every row, and the Decision and Generative models' own settings and keys |
 | **Clear AI results** | `settings-clear-ai-results{,-confirm,-keep}` | every triage verdict, summary, storyline, draft, digest and embedding — the sixteen `MessageStore.derivedTables`, the verdict columns on `messages` and `conversations`, and the stage markers on `attachments` and the library; the activity log is one of the sixteen, so today's **Cloud drafts** count starts again at zero, which the caption above the buttons says | mail, Teams messages, attachments, registered directories, the sign-in and every preference |
 | **Forget everything and re-sync** | `settings-forget-resync{,-confirm,-keep}` | everything above **and** the mailbox itself — `MessageStore.wipeAll(keepIdentity: true)`, cursors and bootstrap floors included | the sign-in, the about-me text, the Needs You rules, the sender rules, the registered directories and every setting |
 
 **Stop sending drafts anywhere** is the one-button revoke, in the same
-two-step and above the two resets. It makes three preference writes in one
-order that matters: `clearStageTarget('draft_reply')`, then
-`clearStageTarget('draft_improve')`, then `setCloudDraftsConsent(false)`. The
-stages go first and the flag last, which is the grant's order reversed, and
-for the grant's reason: `AppPrefs.specForStage` sends a third-party draft
-target back to the local one while the flag is false, so clearing the stages
-first means they are already local by the moment consent goes. Consent first
-would leave two stage entries pointing off this machine with nothing but the
-resolver between them and a draft.
+two-step and above the two resets. It makes its writes in one order that
+matters: `clearCloudDrafts()` (address, model and key), then
+`setCloudDraftsConsent(false)`. The target goes first and the flag last, which
+is the grant's order reversed, and for the grant's reason: `AppPrefs
+.specForStage` sends the drafts to the generative model once there is no
+cloud-drafts target, so they are already home by the moment consent goes.
 
-Both drafting stages fall back to `AppPrefs.draftFallbackSpec`: the
-user-defined big model on that placement and the local prose target here, and
-never a third-party address, since that is the operator the withdrawal just
-refused. It is
+Both drafting stages fall back to the generative model, never a third-party
+address, since that is the operator the withdrawal just refused. It is
 **not** refused while processing is on, unlike the two resets it sits above:
 it writes preferences and touches no rows, so there is no drain it could race,
 and somebody who has just realised their drafts are leaving the machine should
-not have to find a switch first. Nothing else goes with it: the third-party
-target stays in the list, its keychain bearer stays in the keychain, and any
-other stage pointed at it keeps pointing at it. Granting
+not have to find a switch first. Granting
 again is the consent pane, one screen, so the second button says
 `Confirm: this cannot be undone` for the reason both resets do rather than
 because this one cannot be redone. The standing switch under Suggested replies
@@ -922,7 +881,7 @@ for any one folder:
   `AppPrefs.contextSelectExpand`, key `context_select_expand` in `app_prefs`.
   **On by default**, unlike almost every switch on this screen: it is what
   makes a suggestion read the section that carries the number rather than the
-  passages nearest the question, and it is one extra fast-slot call per
+  passages nearest the question, and it is one extra generative-model call per
   suggestion that reads a directory at all. Off, a reply sees only the nearest
   passages. Prop-driven with no local state — the host watches the preference,
   so what the switch shows is what is stored. See
@@ -959,7 +918,7 @@ Then one block per registered directory:
   handler's sixty-second freshness rung would otherwise answer `fresh` at a
   row that has not changed on screen.
 - **Summaries** — the `digests` column. On by default: each changed text file
-  earns one fast-slot digest, which is what makes a question about *findings*
+  earns one generative-model digest, which is what makes a question about *findings*
   reach an analysis whose code shares none of its vocabulary.
 - **Read ignored files** — `honor_gitignore`, **inverted**. The stored column
   asks "is `.gitignore` honoured"; the switch asks the question a person
@@ -1149,9 +1108,9 @@ One `PaneSurface`, whose title is the step's and whose trailing slot reads
 | # | Title | Primary button | What it does |
 |---|---|---|---|
 | 1 | Welcome to Bond | `Get started` | What Bond is; the container-migration line when there was one |
-| 2 | Your Mac | `Continue` | Chip, memory, macOS, and which models this Mac takes. Intel or Rosetta renders **no** button at all. At 40 GiB and up, one line saying it runs all three; below it, an alert naming the memory, saying the writing model is not downloaded here and that the writing stages run on the inbox model unless Bond is pointed at the user's own servers under Settings, Models. Under 16 GiB the same alert gains one sentence about slower triage. All of it is a warning that still continues |
-| 3 | Where the models run | the form's `Continue` | The one question this round is about, answered by the same form Settings renders. `SetupWhereBody` is two cards and nothing else: **Managed · recommended** keyed `setup-where-managed` and **User defined** keyed `setup-where-custom`. User defined renders `ModelServersForm` with `connectLabel: 'Continue'` and `onThirdParty: null`, so its press IS the way forward and there is no second Continue under it. On a build carrying `BOND_BOX_URL` the User defined card opens ALREADY CHOSEN with both addresses filled in, because `defaultModelPlacement` is the box whenever an address was compiled in. **Managed** is never preselected: the form keeps the way forward behind its own press, where a preselected Managed would put a live Continue under a question nobody had been asked. The press probes BOTH addresses with the typed key, or with the stored one looked up by id when the field is blank, takes the model names the servers list, refuses an address under its own field in the form's own words, and refuses a vendor's address with `Cloud services are connected under Settings after setup.` — there is no consent pane behind a wizard, and cloud services are a Settings decision. It then calls `continueFromWhere(servers:)`, which is the four-value `useBox`: the two addresses, the two discovered names, a key per id or null to keep the stored one, the box placement, and no stored target or stage entry anywhere, and then the models step. A re-entry with a key already in the keychain continues with the field blank and keeps it. Managed's own Continue calls `continueFromWhere()` with no payload, which is `usePlacement(local, hardwareTier:)` with this Mac's HARDWARE tier, never the effective one, which reads `remote` while the placement is still the box. It KEEPS the addresses and the key: changing where the work runs is not forgetting how to reach the servers |
-| 4 | Models | `Continue` | The RESOLVED manifest's rows — name, role sentence, size, licence button, and any `notice` verbatim — and the total. Three rows and 23.8 GB on a full Mac — four files, because the writing model's row says `+ MTP head, 1.6 GB` under its size — two rows and 4.6 GB on an inbox one, and the first sentence says which |
+| 2 | Your Mac | `Continue` | Chip, memory, macOS, and which models this Mac takes. Intel or Rosetta renders **no** button at all. At 40 GiB and up, one line: `This Mac can run every model: the decision model, the embedding model and the 27B generative model.`; below it, an alert naming the memory, saying this Mac runs the decision model, the embedding model and the 4B as its generative model, that the 27B is not downloaded here, and that a server of the user's own under Settings, Models is how to write with it. Under 16 GiB the same alert gains one sentence about slower triage. All of it is a warning that still continues |
+| 3 | Where the models run | the generative form's `Continue`, or the step's `Continue` under This Mac | The same two questions the Models page asks, answered by the same form. `SetupWhereBody` is two roles of two cards each: **Decision model** with **This Mac · recommended** (`setup-where-decision-managed`) and **Your server** (`setup-where-decision-custom`), then **Generative model** with **This Mac · recommended** (`setup-where-managed`) and **Your server** (`setup-where-custom`), and a note that the embedding model always runs on this Mac. The DEFAULTS are the stored answers: the decision model on this Mac, the generative model on Your server when the build carries `BOND_BOX_URL` (its form prefilled with `…/prose/v1/chat/completions`) and on this Mac otherwise. Generative This Mac shows `SettingsSegments<String>` keyed `setup-where-generative-model` with **Qwen3.8 27B** | **Qwen3 4B** (the 27B disabled on the inbox tier with `This Mac has too little memory for the 27B.`); the pick is `SetupState.generativeManaged` and decides what the download step fetches. Decision Your server renders the decision form with **Connect**: it writes `useDecision(box, …)` at once (`SetupController.connectDecision`) and stays, then says `Connected · <model> at <host>` (`setup-where-decision-connected`); until then the way forward is disabled and says `Connect the decision server first, or choose This Mac for it.` Generative Your server renders the generative form with `connectLabel: 'Continue'` and `onThirdParty: null`, so its press IS the way forward: it probes with the typed key (or the stored one by id, same host only), takes the listed name, refuses a vendor with `Cloud services are connected under Settings after setup.` (the decision form refuses one with its own role sentence), and calls `continueFromWhere(generative:)`, which checks the decision role, writes `useGenerative(box, url, model, key, clearKey, hardwareTier)`, writes `useDecision(local)` when the decision model stays here, and moves to Models. Under This Mac the step's own Continue calls `continueFromWhere()`, which writes `useGenerative(local, managedModel:, hardwareTier:)` with this Mac's HARDWARE tier. Both KEEP the stored addresses and keys: changing where the work runs is not forgetting how to reach the servers |
+| 4 | Models | `Continue` | The RESOLVED manifest's downloadable rows — name, role sentence (`Finds related messages`; both chat models `Writes summaries, drafts and storylines`), size, licence button, and any `notice` verbatim — and the total. With the decision model on this Mac it heads the list (`setup-models-decision`, `Sorts and flags every message`) with `Installed` or `Not installed · run make decide-install` in place of a size: it is installed by hand, never downloaded, and counts toward neither the sentence nor the total. Two rows on a full Mac that chose the 27B (the 27B's row says `+ MTP head, 1.6 GB` under its size), two rows on an inbox one (embed + 4B), one row when the generative model runs on your server, and the first sentence says which |
 | 5 | Storage | `Continue` | The effective folder, **Change folder…**, and `checkDisk`. Dead until the preflight answers and passes; free space that could not be asked counts as passing, a folder that cannot be WRITTEN does not — `Bond can't write to this folder. Choose another one.` |
 | 6 | Download | `Continue` | One bar per MODEL this Mac's tier wants, smallest first — the writing model's MTP head rides on its model's bar rather than taking one of its own, so the bar counts both files and finishes once. Enabled only when EVERY file is done — see below |
 | 7 | Sign in | `Continue` | `SignInBody(showTitle: false)` when signed out (signing in advances, and there is no Continue); `You're signed in.` and a Continue when already signed in |

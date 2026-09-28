@@ -215,13 +215,16 @@ void main() {
 
     await tapContinue(tester);
 
-    // 3 — Where the models run. Both cards, nothing chosen, no way forward
-    // until one of them is pressed.
+    // 3 — Where the models run. Two roles, each with two cards; a build
+    // with no compiled address opens on This Mac for both, so the way
+    // forward is live.
     expect(find.text('Where the models run'), findsOneWidget);
     expect(find.text('Step 3 of 9'), findsOneWidget);
     expect(find.byKey(SetupWhereBody.managedCardKey), findsOneWidget);
     expect(find.byKey(SetupWhereBody.customCardKey), findsOneWidget);
-    expect(continueEnabled(tester), isFalse);
+    expect(find.byKey(SetupWhereBody.decisionManagedCardKey), findsOneWidget);
+    expect(find.byKey(SetupWhereBody.decisionCustomCardKey), findsOneWidget);
+    expect(continueEnabled(tester), isTrue);
     expect(await store.get(SetupStore.setupKey), 'where');
 
     await tester.tap(find.byKey(SetupWhereBody.managedCardKey));
@@ -320,7 +323,10 @@ void main() {
 
     expect(find.text('Models'), findsOneWidget);
     expect(find.textContaining('Bond downloads two models'), findsOneWidget);
-    expect(find.text('Writes drafts and replies'), findsNothing);
+    // The 4B is this Mac's generative model; the 27B is not offered.
+    expect(find.text('Test Prose'), findsNothing);
+    expect(find.text('Writes summaries, drafts and storylines'),
+        findsOneWidget);
   });
 
   testWidgets('signed out, the sign-in step is the only way past itself',
@@ -406,35 +412,35 @@ void main() {
 
   group('Where the models run', () {
     /// The wizard with a REAL prefs notifier over an in-memory keychain, so
-    /// the box choice can be followed all the way to the placement, the
-    /// address and the key it writes. `appPrefsProvider` builds a
-    /// `SecureTokenStore`, which throws under `flutter test`.
+    /// a choice can be followed all the way to the placement, the address
+    /// and the key it writes. `appPrefsProvider` builds a `SecureTokenStore`,
+    /// which throws under `flutter test`.
     ///
     /// [initial] is how a case says which install this is. `boxUrlDefault` is
     /// empty under `flutter test`, so `defaultModelPlacement` reads local
     /// across the suite and a case that wants the compiled-address build says
-    /// so with `AppPrefs(modelPlacement: box, boxBigUrl: …, boxSmallUrl: …)`.
+    /// so with `AppPrefs(modelPlacement: box, boxBigUrl: …)`.
     late MemoryTokenStore tokens;
     late AppPrefsNotifier prefs;
 
-    /// The user-defined pair, and the fictional string this group types into
-    /// the key field.
-    const bigUrl = 'https://box.example.com/prose/v1/chat/completions';
-    const smallUrl = 'https://box.example.com/bulk/v1/chat/completions';
+    const generativeUrl = 'https://box.example.com/prose/v1/chat/completions';
+    const decisionUrl = 'https://box.example.com/decide/v1/embeddings';
     const key = 'sk-fixture-not-a-real-box-key';
+
+    const gen = ServerFormRole.generative;
+    const dec = ServerFormRole.decision;
 
     /// What Connect asked, with the bearer it was handed. A fake's record of
     /// a fixture string, never a real key.
     late List<(String, String?)> asked;
 
-    /// Two servers answering, one id each, which is what a fresh User defined
-    /// install sees: the big address lists the writing model and the small
-    /// one the inbox model.
-    Future<ModelProbeResult> twoServers(String url, {String? bearer}) async {
+    /// Servers answering one id each: the writing model, or the decision
+    /// model on an embeddings address.
+    Future<ModelProbeResult> servers(String url, {String? bearer}) async {
       asked.add((url, bearer));
-      return url.contains('/prose/')
-          ? const ModelProbeResult(reachable: true, modelIds: ['qwen3.8'])
-          : const ModelProbeResult(reachable: true, modelIds: ['qwen3-4b']);
+      return url.endsWith('/embeddings')
+          ? const ModelProbeResult(reachable: true, modelIds: ['bond-decide-x'])
+          : const ModelProbeResult(reachable: true, modelIds: ['qwen3.8']);
     }
 
     void makeWithPrefs({
@@ -468,26 +474,8 @@ void main() {
                 setModelsFolder: prefs.setModelsFolder,
                 probe: probe,
                 storedBearer: prefs.bearerFor,
-                useBox: ({
-                  required bigUrl,
-                  required smallUrl,
-                  required bigModel,
-                  required smallModel,
-                  bigKey,
-                  smallKey,
-                  required hardwareTier,
-                }) =>
-                    prefs.useBox(
-                      bigUrl: bigUrl,
-                      smallUrl: smallUrl,
-                      bigModel: bigModel,
-                      smallModel: smallModel,
-                      bigKey: bigKey,
-                      smallKey: smallKey,
-                      hardwareTier: hardwareTier,
-                    ),
-                usePlacement: (placement, {required hardwareTier}) => prefs
-                    .usePlacement(placement, hardwareTier: hardwareTier),
+                useGenerative: prefs.useGenerative,
+                useDecision: prefs.useDecision,
                 auth: () => auth,
                 notifier: notifier,
                 seedAuthorization: (_) {},
@@ -504,183 +492,221 @@ void main() {
       expect(find.text('Where the models run'), findsOneWidget);
     }
 
-    /// The form's own press, which is the way forward under User defined.
-    Future<void> tapConnect(WidgetTester tester) async {
-      await tester.ensureVisible(find.byKey(ModelServersForm.connectKey));
-      await tester.tap(find.byKey(ModelServersForm.connectKey));
+    Future<void> tapKey(WidgetTester tester, Key key) async {
+      await tester.ensureVisible(find.byKey(key));
+      await tester.tap(find.byKey(key));
       await settle(tester);
     }
 
-    /// The install this wizard is re-entered on: both addresses, both
-    /// discovered names and the key in the keychain under both ids.
-    Future<void> seedUserDefined() => prefs.useBox(
-          bigUrl: bigUrl,
-          smallUrl: smallUrl,
-          bigModel: 'qwen3.8',
-          smallModel: 'qwen3-4b',
-          bigKey: key,
-          smallKey: key,
+    /// The install this wizard is re-entered on: the generative remote with
+    /// its discovered name and its key in the keychain.
+    Future<void> seedUserDefined() => prefs.useGenerative(
+          placement: ModelPlacement.box,
+          url: generativeUrl,
+          model: 'qwen3.8',
+          key: key,
           hardwareTier: MachineTier.full,
         );
 
-    testWidgets('both cards say what they mean, and neither is chosen',
+    testWidgets('both roles say what they mean, and each opens on This Mac',
         (tester) async {
-      makeWithPrefs(probe: twoServers);
+      makeWithPrefs(probe: servers);
       await reachWhere(tester);
 
-      expect(find.text(SetupWhereBody.managedTitle), findsOneWidget);
+      expect(find.text(SetupWhereBody.decisionTitle), findsOneWidget);
+      expect(find.text(SetupWhereBody.generativeTitle), findsOneWidget);
       expect(find.text(SetupWhereBody.managedBlurb), findsOneWidget);
-      expect(find.text(SetupWhereBody.customTitle), findsOneWidget);
       expect(find.text(SetupWhereBody.customBlurb), findsOneWidget);
-      // The form belongs to User defined and is not up until it is picked.
-      expect(find.byKey(ModelServersForm.bigUrlKey), findsNothing);
-      expect(continueEnabled(tester), isFalse);
+      expect(find.text(SetupWhereBody.decisionManagedBlurb), findsOneWidget);
+      expect(find.text(SetupWhereBody.decisionCustomBlurb), findsOneWidget);
+      // No form until Your server is picked.
+      expect(find.byKey(ModelServersForm.urlKey(gen)), findsNothing);
+      expect(find.byKey(ModelServersForm.urlKey(dec)), findsNothing);
+      // The managed choice is up, on the 27B for a full Mac.
+      expect(find.byKey(SetupWhereBody.generativeModelKey), findsOneWidget);
+      expect(continueEnabled(tester), isTrue);
     });
 
-    testWidgets('the User defined card reveals the form, whose Continue is '
-        'the way forward', (tester) async {
-      makeWithPrefs(probe: twoServers);
+    testWidgets('Your server for the generative model reveals the form, whose '
+        'Continue is the way forward', (tester) async {
+      makeWithPrefs(probe: servers);
       await reachWhere(tester);
 
-      await tester.tap(find.byKey(SetupWhereBody.customCardKey));
-      await settle(tester);
+      await tapKey(tester, SetupWhereBody.customCardKey);
 
-      expect(find.byKey(ModelServersForm.bigUrlKey), findsOneWidget);
-      expect(find.byKey(ModelServersForm.smallUrlKey), findsOneWidget);
-      expect(find.byKey(ModelServersForm.keyKey), findsOneWidget);
-      // ONE press, and it is the form's: a second button reading Continue
-      // that wrote nothing is the confusion this round removed.
-      expect(find.byKey(ModelServersForm.connectKey), findsOneWidget);
+      expect(find.byKey(ModelServersForm.urlKey(gen)), findsOneWidget);
+      expect(find.byKey(ModelServersForm.keyKey(gen)), findsOneWidget);
+      // ONE press, and it is the form's.
       expect(
         find.descendant(
-          of: find.byKey(ModelServersForm.connectKey),
+          of: find.byKey(ModelServersForm.connectKey(gen)),
           matching: find.text('Continue'),
         ),
         findsOneWidget,
       );
       expect(find.byKey(SetupFlow.continueKey), findsNothing);
-      // The key field hides what is typed into it, and says nothing about a
-      // stored key on a fresh install.
       expect(
-        tester.widget<TextField>(find.byKey(ModelServersForm.keyKey))
+        tester.widget<TextField>(find.byKey(ModelServersForm.keyKey(gen)))
             .obscureText,
         isTrue,
       );
       expect(find.text(ModelServersForm.storedHint), findsNothing);
     });
 
-    testWidgets('a compiled address preselects User defined with both fields '
+    testWidgets('a compiled address preselects Your server with the address '
         'filled', (tester) async {
-      // What a build carrying `BOND_BOX_URL` really has on a first run: the
-      // placement default is the box and both addresses are the compiled
-      // ones.
       makeWithPrefs(
-        probe: twoServers,
+        probe: servers,
         initial: const AppPrefs(
           modelPlacement: ModelPlacement.box,
-          boxBigUrl: bigUrl,
+          boxBigUrl: generativeUrl,
         ),
       );
       await reachWhere(tester);
 
-      // Chosen, so the form is up without a tap and both addresses are in it
-      // (INTERIM: both open on the generative remote's, because the small
-      // half is ignored since the decision-model round).
       expect(
-        tester.widget<TextField>(find.byKey(ModelServersForm.bigUrlKey))
+        tester.widget<TextField>(find.byKey(ModelServersForm.urlKey(gen)))
             .controller!
             .text,
-        bigUrl,
+        generativeUrl,
       );
       expect(
-        tester.widget<TextField>(find.byKey(ModelServersForm.smallUrlKey))
-            .controller!
-            .text,
-        bigUrl,
-      );
-      // The one thing a compiled address does not answer.
-      expect(
-        tester.widget<TextField>(find.byKey(ModelServersForm.keyKey))
+        tester.widget<TextField>(find.byKey(ModelServersForm.keyKey(gen)))
             .controller!
             .text,
         isEmpty,
       );
+      // The decision model still defaults to this Mac.
+      expect(find.byKey(ModelServersForm.urlKey(dec)), findsNothing);
       expect(find.byKey(SetupFlow.continueKey), findsNothing);
     });
 
-    testWidgets('Continue on Managed writes local and the next step lists '
-        'this Mac\'s two', (tester) async {
-      makeWithPrefs(probe: twoServers);
+    testWidgets('Continue on This Mac writes both roles local and the next '
+        'step lists this Mac\'s models', (tester) async {
+      makeWithPrefs(probe: servers);
       await reachWhere(tester);
 
-      await tester.tap(find.byKey(SetupWhereBody.managedCardKey));
-      await settle(tester);
-      expect(continueEnabled(tester), isTrue);
       await tapContinue(tester);
 
-      // No key and nothing stored: what it leaves is a fresh install with
-      // this machine's tier defaults applied.
       expect(prefs.state.modelPlacement, ModelPlacement.local);
+      expect(prefs.state.decisionPlacement, ModelPlacement.local);
       expect(tokens.values, isEmpty);
 
-      // The embedding model and the one generative model this Mac runs (the
-      // 27B on the full tier); the 4B is not downloaded beside it.
       expect(find.text('Models'), findsOneWidget);
       expect(find.text('Test Embed'), findsOneWidget);
       expect(find.text('Test Bulk'), findsNothing);
       expect(find.text('Test Prose'), findsOneWidget);
     });
 
-    testWidgets('Continue on User defined asks both servers, takes the names '
-        'they list, writes the pair and the key under both ids, and lists '
-        'ONE model', (tester) async {
-      makeWithPrefs(probe: twoServers);
+    testWidgets('choosing the 4B downloads the 4B instead of the 27B',
+        (tester) async {
+      makeWithPrefs(probe: servers);
       await reachWhere(tester);
-      await tester.tap(find.byKey(SetupWhereBody.customCardKey));
+
+      await tester.tap(find.descendant(
+        of: find.byKey(SetupWhereBody.generativeModelKey),
+        matching: find.text(SetupWhereBody.model4bLabel),
+      ));
       await settle(tester);
-      await tester.enterText(find.byKey(ModelServersForm.bigUrlKey), bigUrl);
+      await tapContinue(tester);
+
+      expect(prefs.state.generativeManagedModel, routerBulkId);
+      expect(find.text('Test Bulk'), findsOneWidget);
+      expect(find.text('Test Prose'), findsNothing);
+    });
+
+    testWidgets('Continue on Your server asks the server, takes the name it '
+        'lists, writes the address and the key, and lists ONE model',
+        (tester) async {
+      makeWithPrefs(probe: servers);
+      await reachWhere(tester);
+      await tapKey(tester, SetupWhereBody.customCardKey);
       await tester.enterText(
-          find.byKey(ModelServersForm.smallUrlKey), smallUrl);
-      await tester.enterText(find.byKey(ModelServersForm.keyKey), key);
+          find.byKey(ModelServersForm.urlKey(gen)), generativeUrl);
+      await tester.enterText(find.byKey(ModelServersForm.keyKey(gen)), key);
       await settle(tester);
 
-      await tapConnect(tester);
+      await tapKey(tester, ModelServersForm.connectKey(gen));
 
-      // Both servers, the big one first, each with the typed key.
-      expect(asked, [(bigUrl, key), (smallUrl, key)]);
-      // The placement, the generative remote, the name its server listed,
-      // and the key in the keychain rather than a preference. The small half
-      // is ignored since the decision-model round (INTERIM form).
+      expect(asked, [(generativeUrl, key)]);
       expect(prefs.state.modelPlacement, ModelPlacement.box);
-      expect(prefs.state.boxBigUrl, bigUrl);
+      expect(prefs.state.boxBigUrl, generativeUrl);
       expect(prefs.state.effectiveGenerativeModel, 'qwen3.8');
       expect(tokens.values.keys, ['$llmTargetBearerKeyPrefix$boxProseId']);
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'], key);
       expect(prefs.state.draftPolicy, DraftPolicy.needsYou);
+      expect(prefs.state.decisionPlacement, ModelPlacement.local);
 
-      // And the models step is about what THIS Mac downloads, which under
-      // User defined is the embedding model alone.
-      expect(find.text('Models'), findsOneWidget);
       expect(find.text('Step 4 of 9'), findsOneWidget);
       expect(find.text('Test Embed'), findsOneWidget);
       expect(find.text('Test Bulk'), findsNothing);
       expect(find.text('Test Prose'), findsNothing);
     });
 
-    testWidgets('an address with no scheme is refused under its field and '
-        'nothing is written', (tester) async {
-      makeWithPrefs(probe: twoServers);
+    testWidgets('the decision form connects its role and the step stays',
+        (tester) async {
+      makeWithPrefs(probe: servers);
       await reachWhere(tester);
-      await tester.tap(find.byKey(SetupWhereBody.customCardKey));
+
+      await tapKey(tester, SetupWhereBody.decisionCustomCardKey);
+      // Not connected yet: the step's Continue waits for it.
+      expect(continueEnabled(tester), isFalse);
+      expect(find.text(SetupController.decisionFirstText), findsOneWidget);
+
+      await tester.enterText(
+          find.byKey(ModelServersForm.urlKey(dec)), decisionUrl);
+      await tester.enterText(find.byKey(ModelServersForm.keyKey(dec)), key);
       await settle(tester);
+      expect(
+        find.descendant(
+          of: find.byKey(ModelServersForm.connectKey(dec)),
+          matching: find.text('Connect'),
+        ),
+        findsOneWidget,
+      );
+      await tapKey(tester, ModelServersForm.connectKey(dec));
+
+      expect(asked, [(decisionUrl, key)]);
+      expect(prefs.state.decisionPlacement, ModelPlacement.box);
+      expect(prefs.state.decisionSpec.url, decisionUrl);
+      expect(prefs.state.decisionSpec.model, 'bond-decide-x');
+      expect(tokens.values['$llmTargetBearerKeyPrefix$boxDecideId'], key);
+      expect(find.text('Where the models run'), findsOneWidget);
+      expect(find.byKey(SetupWhereBody.decisionConnectedKey), findsOneWidget);
+
+      await tapContinue(tester);
+      expect(find.text('Step 4 of 9'), findsOneWidget);
+      expect(prefs.state.decisionPlacement, ModelPlacement.box);
+    });
+
+    testWidgets('a decision address that is not an embeddings endpoint is '
+        'refused under its field', (tester) async {
+      makeWithPrefs(probe: servers);
+      await reachWhere(tester);
+      await tapKey(tester, SetupWhereBody.decisionCustomCardKey);
       await tester.enterText(
-          find.byKey(ModelServersForm.bigUrlKey), 'box.example.com');
-      await tester.enterText(
-          find.byKey(ModelServersForm.smallUrlKey), smallUrl);
-      await tester.enterText(find.byKey(ModelServersForm.keyKey), key);
+          find.byKey(ModelServersForm.urlKey(dec)), generativeUrl);
       await settle(tester);
 
-      await tapConnect(tester);
+      await tapKey(tester, ModelServersForm.connectKey(dec));
+
+      expect(find.text(ModelServersForm.decisionEndpointRefusalText),
+          findsOneWidget);
+      expect(asked, isEmpty);
+      expect(prefs.state.decisionPlacement, ModelPlacement.local);
+    });
+
+    testWidgets('an address with no scheme is refused under its field and '
+        'nothing is written', (tester) async {
+      makeWithPrefs(probe: servers);
+      await reachWhere(tester);
+      await tapKey(tester, SetupWhereBody.customCardKey);
+      await tester.enterText(
+          find.byKey(ModelServersForm.urlKey(gen)), 'box.example.com');
+      await tester.enterText(find.byKey(ModelServersForm.keyKey(gen)), key);
+      await settle(tester);
+
+      await tapKey(tester, ModelServersForm.connectKey(gen));
 
       expect(find.text(ModelServersForm.addressRefusalText), findsOneWidget);
       expect(find.text('Where the models run'), findsOneWidget,
@@ -691,8 +717,8 @@ void main() {
       expect(asked, isEmpty,
           reason: 'refused before any server was asked anything');
 
-      // Typing clears it.
-      await tester.enterText(find.byKey(ModelServersForm.bigUrlKey), bigUrl);
+      await tester.enterText(
+          find.byKey(ModelServersForm.urlKey(gen)), generativeUrl);
       await settle(tester);
       expect(find.text(ModelServersForm.addressRefusalText), findsNothing);
     });
@@ -701,20 +727,15 @@ void main() {
         (tester) async {
       makeWithPrefs(probe: (url, {bearer}) async {
         asked.add((url, bearer));
-        return url.contains('/prose/')
-            ? const ModelProbeResult(reachable: true, modelIds: ['qwen3.8'])
-            : const ModelProbeResult(reachable: false, error: 'Not reachable');
+        return const ModelProbeResult(reachable: false, error: 'Not reachable');
       });
       await reachWhere(tester);
-      await tester.tap(find.byKey(SetupWhereBody.customCardKey));
-      await settle(tester);
-      await tester.enterText(find.byKey(ModelServersForm.bigUrlKey), bigUrl);
+      await tapKey(tester, SetupWhereBody.customCardKey);
       await tester.enterText(
-          find.byKey(ModelServersForm.smallUrlKey), smallUrl);
-      await tester.enterText(find.byKey(ModelServersForm.keyKey), key);
+          find.byKey(ModelServersForm.urlKey(gen)), generativeUrl);
       await settle(tester);
 
-      await tapConnect(tester);
+      await tapKey(tester, ModelServersForm.connectKey(gen));
 
       expect(find.text('Not reachable'), findsOneWidget);
       expect(find.text('Where the models run'), findsOneWidget);
@@ -722,86 +743,83 @@ void main() {
       expect(tokens.values, isEmpty);
     });
 
-    testWidgets('a third-party big address is refused with the sentence',
+    testWidgets('a third-party address is refused with the sentence',
         (tester) async {
-      makeWithPrefs(probe: (url, {bearer}) async {
-        asked.add((url, bearer));
-        return const ModelProbeResult(
-            reachable: true, modelIds: ['gpt-fixture']);
-      });
+      makeWithPrefs(probe: servers);
       await reachWhere(tester);
-      await tester.tap(find.byKey(SetupWhereBody.customCardKey));
-      await settle(tester);
-      // A vendor's service, which is a Settings decision and not a wizard
-      // one: there is no consent pane behind a first run.
-      await tester.enterText(find.byKey(ModelServersForm.bigUrlKey),
+      await tapKey(tester, SetupWhereBody.customCardKey);
+      await tester.enterText(find.byKey(ModelServersForm.urlKey(gen)),
           'https://api.openai.com/v1/chat/completions');
-      await tester.enterText(
-          find.byKey(ModelServersForm.smallUrlKey), smallUrl);
-      await tester.enterText(find.byKey(ModelServersForm.keyKey), key);
+      await tester.enterText(find.byKey(ModelServersForm.keyKey(gen)), key);
       await settle(tester);
 
-      await tapConnect(tester);
+      await tapKey(tester, ModelServersForm.connectKey(gen));
 
       expect(find.text(ModelServersForm.thirdPartyRefusalText), findsOneWidget);
       expect(find.text('Where the models run'), findsOneWidget);
       expect(prefs.state.modelPlacement, ModelPlacement.local);
-      expect(prefs.state.boxBigUrl, isEmpty);
       expect(tokens.values, isEmpty);
+      expect(asked, isEmpty);
       expect(prefs.state.cloudDraftsConsent, isFalse);
     });
 
-    testWidgets('a user-defined install that chooses Managed keeps the '
-        'addresses and the key', (tester) async {
-      makeWithPrefs(probe: twoServers);
+    testWidgets('a user-defined install that chooses This Mac keeps the '
+        'address and the key', (tester) async {
+      makeWithPrefs(probe: servers);
       await seedUserDefined();
       expect(prefs.state.modelPlacement, ModelPlacement.box);
 
       await reachWhere(tester);
-      // The stored answer is seeded, so the form opens filled, and the key
-      // field says why it is empty.
       expect(find.text(ModelServersForm.storedHint), findsOneWidget);
 
-      await tester.tap(find.byKey(SetupWhereBody.managedCardKey));
-      await settle(tester);
+      await tapKey(tester, SetupWhereBody.managedCardKey);
       await tapContinue(tester);
 
-      // The work moves here, and the way back is not thrown away: changing
-      // where the models run is not forgetting how to reach the servers.
       expect(prefs.state.modelPlacement, ModelPlacement.local);
-      expect(prefs.state.boxBigUrl, bigUrl);
+      expect(prefs.state.boxBigUrl, generativeUrl);
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'], key);
-
-      // And the models step is about this Mac again.
       expect(find.text('Test Prose'), findsOneWidget);
     });
 
     testWidgets('a user-defined install re-entered continues with the key '
         'field blank and keeps its key', (tester) async {
-      makeWithPrefs(probe: twoServers);
+      makeWithPrefs(probe: servers);
       await seedUserDefined();
 
       await reachWhere(tester);
-      await tapConnect(tester);
+      await tapKey(tester, ModelServersForm.connectKey(gen));
 
-      // The stored key rode both requests, looked up by id at the press.
-      expect(asked.map((a) => a.$2), [key, key]);
+      // The stored key rode the request, looked up by id at the press.
+      expect(asked, [(generativeUrl, key)]);
       expect(prefs.state.modelPlacement, ModelPlacement.box);
-      expect(prefs.state.boxBigUrl, bigUrl);
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'], key);
       expect(find.text('Step 4 of 9'), findsOneWidget);
-      expect(find.text('Test Embed'), findsOneWidget);
-      expect(find.text('Test Prose'), findsNothing);
+    });
+
+    testWidgets('a new host with the key field blank forgets the old key',
+        (tester) async {
+      makeWithPrefs(probe: servers);
+      await seedUserDefined();
+
+      await reachWhere(tester);
+      const other = 'https://other.example.com/v1/chat/completions';
+      await tester.enterText(find.byKey(ModelServersForm.urlKey(gen)), other);
+      await settle(tester);
+      await tapKey(tester, ModelServersForm.connectKey(gen));
+
+      // The old host's key never rode to the new one, and it is gone.
+      expect(asked, [(other, null)]);
+      expect(prefs.state.boxBigUrl, other);
+      expect(tokens.values, isEmpty);
+      expect(prefs.state.boxBigKeyStored, isFalse);
     });
 
     testWidgets('a quit on this step resumes here, having adopted nothing',
         (tester) async {
-      makeWithPrefs(probe: twoServers);
+      makeWithPrefs(probe: servers);
       await reachWhere(tester);
-      await tester.tap(find.byKey(SetupWhereBody.customCardKey));
-      await settle(tester);
+      await tapKey(tester, SetupWhereBody.customCardKey);
 
-      // The step is recorded on ARRIVAL, and the choice is not.
       expect(await store.get(SetupStore.setupKey), 'where');
       expect(prefs.state.modelPlacement, ModelPlacement.local);
       expect(prefs.state.boxBigUrl, isEmpty);
