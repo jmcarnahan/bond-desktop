@@ -142,19 +142,24 @@ void main() {
       // A binary that resolves, so a start that did not happen is the
       // placement's doing rather than a missing executable's.
       binaryPath: () => '/usr/bin/true',
-      // The rule `effectiveTierProvider` applies, read SYNCHRONOUSLY off the
-      // preferences: the placement is what moves the tier, and awaiting that
-      // provider's future here would deadlock — it completes in the widget
-      // test's fake-async zone, which cannot advance while `runAsync` is
-      // holding the body.
-      buildPreset: () => testManifest()
-          .forTier(
-            container.read(appPrefsProvider).modelPlacement ==
-                    ModelPlacement.box
-                ? MachineTier.remote
-                : MachineTier.full,
-          )
-          .toPreset(modelsFolder),
+      // The rule `managedManifestProvider` applies, read SYNCHRONOUSLY off
+      // the preferences: the placement is what moves the set, and awaiting
+      // that provider's future here would deadlock — it completes in the
+      // widget test's fake-async zone, which cannot advance while `runAsync`
+      // is holding the body.
+      buildPreset: () {
+        final prefs = container.read(appPrefsProvider);
+        return testManifest()
+            .forRoles(
+              hardwareTier: MachineTier.full,
+              decisionManaged: prefs.decisionSpec.id == localDecisionId,
+              generativeManagedId:
+                  prefs.generativeSpec.id == localGenerativeId
+                      ? routerProseId
+                      : null,
+            )
+            .toPreset(modelsFolder);
+      },
       routerPort: () => 8080,
       onPortMoved: (_) async {},
       managed: () => true,
@@ -342,17 +347,18 @@ void main() {
 
     final prefs = container.read(appPrefsProvider);
     expect(prefs.modelPlacement, ModelPlacement.box);
-    // The names came from the servers themselves, and the two stages resolve
-    // to the two derived specs.
-    expect(prefs.specForStage('triage')?.id, boxBulkId);
-    expect(prefs.specForStage('triage')?.model, 'qwen3-4b');
+    // The name came from the server itself, and every text stage resolves
+    // to the one generative remote (the small half is ignored since the
+    // decision-model round).
+    expect(prefs.specForStage('triage')?.id, boxProseId);
+    expect(prefs.specForStage('triage')?.model, 'qwen3-27b-fp8');
     expect(prefs.specForStage('draft_reply')?.id, boxProseId);
     expect(prefs.specForStage('draft_reply')?.model, 'qwen3-27b-fp8');
 
     final after = container.read(stageLlmClientProvider('triage'));
     expect(identical(before, after), isTrue);
-    expect(after.baseUrl, smallUrl);
-    expect(after.model, 'qwen3-4b');
+    expect(after.baseUrl, bigUrl);
+    expect(after.model, 'qwen3-27b-fp8');
   });
 
   /// The server this Mac runs follows the placement, not only the launch.
@@ -424,7 +430,8 @@ void main() {
     );
     expect(written, contains('[$routerEmbedId]'));
     expect(written, contains('[$routerProseId]'));
-    expect(written, contains('[$routerBulkId]'));
+    // One generative model: the 4B is not served beside the 27B.
+    expect(written, isNot(contains('[$routerBulkId]')));
 
     // The last restart armed a start timeout and a health poll in the test's
     // own fake-async queue, and the binding refuses to end a test with a timer
@@ -455,9 +462,9 @@ void main() {
 
     final prefs = container.read(appPrefsProvider);
     expect(prefs.modelPlacement, ModelPlacement.local);
-    // Back on this Mac's own two, by the rule rather than by a stored row.
-    expect(prefs.specForStage('triage')?.id, builtInFastId);
-    expect(prefs.specForStage('draft_reply')?.id, builtInProseId);
+    // Back on this Mac, by the rule rather than by a stored row.
+    expect(prefs.specForStage('triage')?.id, localGenerativeId);
+    expect(prefs.specForStage('draft_reply')?.id, localGenerativeId);
   });
 
   testWidgets('About shows what the two providers resolved', (tester) async {
@@ -529,8 +536,7 @@ void main() {
   testWidgets('a user-defined install reads its rows through the placement',
       (tester) async {
     await pumpInbox(tester);
-    // An install on two named servers, made the way the page makes one, then
-    // one hand pick moving membership onto the small model.
+    // An install on a named server, made the way the page makes one.
     final notifier = container.read(appPrefsProvider.notifier);
     await notifier.useBox(
       bigUrl: 'https://box.example.com/prose/v1/chat/completions',
@@ -539,16 +545,16 @@ void main() {
       smallModel: 'qwen3-4b',
       hardwareTier: MachineTier.full,
     );
-    await notifier.setStageTarget('storyline_membership', boxBulkId);
     await tester.pump();
     await tester.pump();
 
     await openSection(tester, 'Models');
 
-    // The big row describes the six steps that agree and counts the one that
-    // does not; the small row names the server it dials.
-    expect(find.text('Custom · 1 step points elsewhere'), findsOneWidget);
-    expect(find.text('qwen3-4b at box.example.com'), findsOneWidget);
+    // The generative row names the server it dials; the decision row stays
+    // on this Mac.
+    expect(find.text('qwen3-27b-fp8 at box.example.com'), findsOneWidget);
+    expect(find.textContaining('Bond decision model on this Mac'),
+        findsOneWidget);
     // No key was typed, and the line says the one thing left to do.
     expect(
       tester.widget<Text>(find.byKey(SettingsModelsPage.statusKey)).data,

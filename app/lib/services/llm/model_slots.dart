@@ -3,13 +3,16 @@ import 'package:flutter/foundation.dart' show immutable;
 import '../../models/draft_policy.dart';
 import 'embeddings_client.dart';
 
-/// Which of the three local servers a piece of work goes to.
+/// Which of the three models a piece of work goes to.
 ///
-/// [embed] is here so the settings screen can DISPLAY it beside the other two.
-/// It is deliberately not switchable: stored vectors carry a hardcoded model
-/// tag ([EmbeddingsClient.modelTag]), so a swapped embedding model would
-/// silently compare vectors from two different spaces.
-enum ModelSlot { fast, prose, embed }
+/// Since the decision-model round there are three ROLES and one model each:
+/// [generative] writes every piece of text (the old fast and prose slots
+/// merged into it), [decide] is the fine-tuned classifier that sorts and flags
+/// every message, and [embed] writes the vectors. [embed] is deliberately not
+/// switchable: stored vectors carry a hardcoded model tag
+/// ([EmbeddingsClient.modelTag]), so a swapped embedding model would silently
+/// compare vectors from two different spaces.
+enum ModelSlot { generative, decide, embed }
 
 /// Which request shape a client puts on the wire.
 ///
@@ -92,32 +95,22 @@ const String proseUrlDefault = String.fromEnvironment(
 const String proseModelDefault =
     String.fromEnvironment('LLAMA_MODEL', defaultValue: 'qwen3.8');
 
-/// The bulk slot's compiled defaults — its own server (`make fast`), its own
-/// name, because an MLX-style runtime routes on the model field.
-const String fastUrlDefault = String.fromEnvironment(
-  'FAST_LLAMA_URL',
-  defaultValue: 'http://localhost:8082/v1/chat/completions',
-);
-const String fastModelDefault =
-    String.fromEnvironment('FAST_LLAMA_MODEL', defaultValue: 'qwen3.8');
-
 const LlmTarget proseSlotDefault =
     LlmTarget(baseUrl: proseUrlDefault, model: proseModelDefault);
-const LlmTarget fastSlotDefault =
-    LlmTarget(baseUrl: fastUrlDefault, model: fastModelDefault);
 
-/// Display only — nothing resolves through it. The "model" is the corpus tag
-/// the vectors were written under, not a name any request carries.
-const LlmTarget embedSlotDefault = LlmTarget(
-  baseUrl: EmbeddingsClient.defaultBaseUrl,
-  model: EmbeddingsClient.modelTag,
+/// The decision server's compiled defaults (`--dart-define=DECIDE_URL=…`,
+/// `DECIDE_MODEL=…`): the FULL `/v1/embeddings` URL `make decide` serves on
+/// :8083, and the name a router would route on. Here rather than in
+/// `DecisionClient` for [proseUrlDefault]'s reason: the prefs compose the
+/// hand-servers decision target out of them, and this file may not import the
+/// client back. `DecisionClient.defaultBaseUrl` and `defaultModel` are const
+/// aliases of these.
+const String decideUrlDefault = String.fromEnvironment(
+  'DECIDE_URL',
+  defaultValue: 'http://127.0.0.1:8083/v1/embeddings',
 );
-
-const Map<ModelSlot, LlmTarget> slotDefaults = {
-  ModelSlot.fast: fastSlotDefault,
-  ModelSlot.prose: proseSlotDefault,
-  ModelSlot.embed: embedSlotDefault,
-};
+const String decideModelDefault =
+    String.fromEnvironment('DECIDE_MODEL', defaultValue: 'bond-decide');
 
 /// The ids the router preset gives the three models — the `model` field a
 /// request sends when the app runs its own server.
@@ -132,31 +125,47 @@ const String routerProseId = 'bond-prose';
 const String routerBulkId = 'bond-bulk';
 const String routerEmbedId = 'bond-embed';
 
-/// The id of the built-in target that serves every fast-slot stage by default.
-///
-/// The two built-ins are DERIVED from the four slot prefs rather than stored
-/// in the target list: `local-fast` IS `AppPrefs.fastTarget` and `local-prose`
-/// IS `AppPrefs.proseTarget`, so the two slot editors, the managed router's
-/// baseline and every test that predates targets keep meaning exactly what
-/// they meant. They cannot be added, edited through the target list, or
-/// removed.
-const String builtInFastId = 'local-fast';
-const String builtInProseId = 'local-prose';
-const String builtInFastName = 'Local fast';
-const String builtInProseName = 'Local prose';
+/// The decision model's router id: the fine-tuned encoder served as a
+/// mean-pooled embedding model beside the other three.
+const String routerDecideId = 'bond-decide';
 
-/// Where this install's model work runs.
+/// The ids of the two targets that run on THIS MAC — the managed router, or
+/// the hand-started servers of a `BOND_DEV_HAND_SERVERS` build.
+///
+/// DERIVED, like every target now: `AppPrefs.generativeSpec` and
+/// `AppPrefs.decisionSpec` compose them from the placement and the managed
+/// model choice, and nothing stores them.
+const String localGenerativeId = 'local-generative';
+const String localDecisionId = 'local-decision';
+
+/// The user-facing names of the five fixed targets. A middle dot rather than
+/// a dash, because user-facing strings take no em-dashes.
+const String localGenerativeName = 'This Mac · generative';
+const String localDecisionName = 'This Mac · decision';
+const String boxProseName = 'Your server · generative';
+const String boxDecideName = 'Your server · decision';
+const String cloudDraftsName = 'Cloud drafts';
+
+/// The optional cloud-drafts target: the ONE place a third-party service may
+/// serve, and only `draft_reply` and `draft_improve`, behind the consent.
+/// Its id is the keychain entry's too.
+const String cloudDraftsId = 'cloud-drafts';
+
+/// Where one role's model runs.
 ///
 /// A machine preference, not a tier read off memory: the same Mac can be
-/// pointed at the shared GPU box today and at its own servers tomorrow, and
-/// neither answer is derivable from the hardware. [box] means the inbox and
-/// writing stages dial two fixed targets over TLS and only the embedding
-/// model runs here; [local] is the shipped default and every stage runs on
-/// this Mac.
+/// pointed at the owner's own server today and at its own models tomorrow,
+/// and neither answer is derivable from the hardware. [box] means "Your
+/// server" (the word is historical, see app/CLAUDE.md); [local] means this
+/// Mac, on the managed router. Two roles carry one each since the
+/// decision-model round: `AppPrefs.modelPlacement` is the GENERATIVE
+/// placement and `AppPrefs.decisionPlacement` the decision one.
 enum ModelPlacement { box, local }
 
-/// Where a fresh install runs its model work: the shared GPU box when this
-/// build was compiled with an address for one, and this Mac otherwise.
+/// Where a fresh install runs its GENERATIVE model: the owner's box when this
+/// build was compiled with an address for one, and this Mac otherwise. The
+/// decision model defaults to this Mac whatever the build (it reads every
+/// message, and a local forward pass beats any network hop).
 ///
 /// The box is the default because it is the measured best answer for every
 /// stage but embeddings, and because a placement nobody has to find is a
@@ -173,36 +182,29 @@ const ModelPlacement defaultModelPlacement =
 
 /// Which of the three models a stage's work belongs to.
 ///
-/// The simple Models page asks one question and answers it in three lines,
-/// and this is the vocabulary those lines are drawn in. Coarser than
-/// [ModelSlot] on purpose: a slot says which local server a stage would dial,
-/// a role says which MODEL does the work wherever it runs, which is what
-/// lets `storyline_membership` sit on the big model on the box and on the
-/// small one here without a fourth name for it.
+/// The vocabulary the Models page draws its rows in, and since the
+/// decision-model round the same partition as [ModelSlot]: one model per role.
 ///
-/// Not `ModelRole`, which `model_manifest.dart` already spells
-/// `{embed, bulk, prose}` for the three files a machine downloads. The two
-/// mean nearly the same thing and cannot be merged: the manifest imports this
-/// file, so this file cannot import the manifest's enum back. A stage has a
-/// STAGE role, a downloaded file has a model role, and a screen that wants
-/// both says which it means.
-enum StageRole { big, small, embed }
+/// Not `ModelRole`, which `model_manifest.dart` spells for the FILES a machine
+/// holds (two of which, the 27B and the 4B, can each fill the generative
+/// role). A stage has a STAGE role, a downloaded file has a model role, and a
+/// screen that wants both says which it means.
+enum StageRole { decision, generative, embed }
 
-/// The two targets [ModelPlacement.box] writes, by fixed id.
+/// The two "Your server" targets, by fixed id: the generative remote and the
+/// decision remote.
 ///
-/// Fixed rather than generated so that the two derived specs, the two
-/// keychain entries and `usePlacement`'s sweep of the stage entries all name
-/// the same pair. The names carry a middle dot rather than a dash because
-/// user-facing strings take no em-dashes.
+/// Fixed rather than generated so that the derived specs and the keychain
+/// entries name the same ids. `box-prose` keeps its Round H spelling on
+/// purpose: it is the keychain entry an existing install's key already lives
+/// under, and reusing it is what spares the upgrade a re-key.
 const String boxProseId = 'box-prose';
-const String boxBulkId = 'box-bulk';
-const String boxProseName = 'Your server · big model';
-const String boxBulkName = 'Your server · small model';
+const String boxDecideId = 'box-decide';
 
-/// What each box slot calls its model on the wire: the 27B on the writing
-/// slot, the 4B on the inbox slot, as the box's two vLLM servers serve them.
+/// What each remote is asked for when no name was discovered: the 27B the
+/// compiled box serves under `/prose`, and the decision model under `/decide`.
 const String boxProseModel = 'qwen3.8';
-const String boxBulkModel = 'qwen3-4b';
+const String boxDecideModel = 'bond-decide-mbl-v2swap';
 
 /// The box address the wizard prefills, compiled in from `.env`'s
 /// `BOND_BOX_URL` through the Makefile's `APP_SECRET_DEFINE`.
@@ -235,7 +237,7 @@ String normalizeBoxBaseUrl(String raw) {
 ///
 /// Whether [base], already through [normalizeBoxBaseUrl], is an origin the
 /// box can be dialled at: an http or https scheme and a host. The ONE rule
-/// `AppPrefsNotifier.setBoxServers` refuses on and the forms check before pressing
+/// `AppPrefsNotifier.useGenerative` refuses on and the forms check before pressing
 /// it, so a refusal is a sentence on the page rather than an error thrown past
 /// a fire-and-forget Save.
 bool isBoxOrigin(String base) {
@@ -373,13 +375,13 @@ const bool handServersBuild = handServersDefine.length > 0 &&
 /// now: where the models run. Every shipped build answers true here.
 const bool managedServerDefault = !handServersBuild;
 
-/// One target the user can point a stage at.
+/// One target a stage can resolve to.
 ///
-/// The DATA behind routing: a list of these lives in the `llm_targets` pref
-/// and `stage_targets` maps a stage id onto one of their ids. [hasBearer] is a
-/// presence flag and nothing more — the secret itself is in the keychain under
-/// `llm_target_bearer:<id>`, and this object is JSON that lands in a database
-/// table.
+/// The VALUE routing answers with: `AppPrefs.specForStage` derives one of the
+/// five fixed specs per call and nothing stores them. [toJson] and [tryParse]
+/// survive for the frozen one-shot migrations that read the legacy
+/// `llm_targets` rows. [hasBearer] is a presence flag and nothing more — the
+/// secret itself is in the keychain under `llm_target_bearer:<id>`.
 @immutable
 class LlmTargetSpec {
   /// Stable for the life of the target: the stage map points at it, the
@@ -401,9 +403,9 @@ class LlmTargetSpec {
 
   /// How many requests of one kind may be in flight at this target. The prose
   /// server's width, per target rather than per app — a GPU-served box has
-  /// slots a laptop does not. Clamped 1..8 by [tryParse] and by
-  /// `AppPrefsNotifier.upsertTarget`; the const constructor cannot clamp, so a
-  /// hand-built spec is trusted the way every other const value here is.
+  /// slots a laptop does not. Clamped 1..8 by [tryParse]; the const
+  /// constructor cannot clamp, so a derived spec is trusted the way every
+  /// other const value here is.
   final int parallel;
 
   /// Whether a draft at this target may stream. False for a wire with nothing
@@ -421,25 +423,22 @@ class LlmTargetSpec {
     this.streams = true,
   });
 
-  bool get isBuiltIn => id == builtInFastId || id == builtInProseId;
+  /// Whether this target runs on THIS MAC: the managed router or the
+  /// hand-started servers.
+  bool get isBuiltIn => id == localGenerativeId || id == localDecisionId;
 
-  /// Whether this is one of the two targets the GPU box placement derives
-  /// from the stored address.
-  ///
-  /// Beside [isBuiltIn] rather than folded into it, because the two words
-  /// mean different things: a built-in is edited in the two slot editors and
-  /// says so on its row, and a box target is edited by changing the one
-  /// address. Widening [isBuiltIn] would put "Edited above, under Fast and
-  /// Prose" under a row no editor above it reaches.
-  bool get isBox => id == boxProseId || id == boxBulkId;
+  /// Whether this is one of the two "Your server" targets derived from a
+  /// stored or compiled address.
+  bool get isBox => id == boxProseId || id == boxDecideId;
 
-  /// Whether this target is DERIVED rather than stored, by either route.
-  ///
-  /// The question every caller that guards a write actually has: a derived
-  /// spec has no row in `llm_targets` to update, so this flag is what
-  /// `upsertTarget` and `removeTarget` guard on, and both refuse it; the
-  /// Drafts-in-flight control writes the slot pref instead of the spec.
-  bool get isFixed => isBuiltIn || isBox;
+  /// Whether this is the optional cloud-drafts target.
+  bool get isCloudDrafts => id == cloudDraftsId;
+
+  /// Whether this is one of the five FIXED targets. Every target is derived
+  /// since the decision-model round, so this is true of everything the prefs
+  /// resolve; a spec parsed out of a legacy `llm_targets` row is the only
+  /// thing it can be false for.
+  bool get isFixed => isBuiltIn || isBox || isCloudDrafts;
 
   /// Whether somebody else's company operates the machine this dials. The
   /// consent rule's whole question — see [thirdPartyHosts].
@@ -451,9 +450,9 @@ class LlmTargetSpec {
   ///
   /// The OpenAI wire is left NULL rather than stamped, which is what makes a
   /// stage with no stored entry resolve to exactly the [LlmTarget] it resolved
-  /// to before routing was data — `targetForStage('triage') == fastTarget`,
-  /// pinned by `llm_targets_test.dart`. Null means "follow the client's own
-  /// wire", every client the app builds is constructed on the OpenAI one, and
+  /// to before routing was data, pinned by `llm_targets_test.dart`. Null
+  /// means "follow the client's own wire", every client the app builds is
+  /// constructed on the OpenAI one, and
   /// so the two spellings describe the same request. Only the second wire is
   /// worth saying out loud.
   LlmTarget toTarget({String? bearer}) => LlmTarget(
@@ -557,160 +556,63 @@ class LlmTargetSpec {
   String toString() => '$name: $model @ $url';
 }
 
-/// Which built-in target a slot's stages resolve to when nothing is stored.
-///
-/// [ModelSlot.embed] throws rather than answering: embeddings are not routed
-/// at all — their vectors carry a corpus tag, and a swapped model would
-/// compare two different spaces — so asking is a bug in the caller, not a
-/// question with a sensible default.
-String defaultTargetIdFor(ModelSlot slot) => switch (slot) {
-      ModelSlot.fast => builtInFastId,
-      ModelSlot.prose => builtInProseId,
-      ModelSlot.embed =>
-        throw ArgumentError('embeddings are not routed to a target'),
-    };
-
-/// A stage's DEFAULT slot, from [pipelineStages]. [ModelSlot.fast] for an id
-/// no row names, which is the cheap slot and the one a stray id costs least on.
+/// A stage's slot, from [pipelineStages]. [ModelSlot.generative] for an id no
+/// row names: every stage that makes a text call is generative, so that is the
+/// answer a stray chat stage would have had anyway.
 ModelSlot stageSlot(String stageId) {
   for (final stage in pipelineStages) {
     if (stage.id == stageId) return stage.slot;
   }
-  return ModelSlot.fast;
+  return ModelSlot.generative;
 }
-
-/// The stages the **Use for prose stages** preset writes — every prose-slot
-/// row in the stage table.
-///
-/// `storyline_group` is in it on purpose: it is a prose-slot stage, dark today
-/// behind `StorylineTuning.groupingMode`, and a user who points prose at a box
-/// should have it follow rather than be left behind the day the mode flips.
-/// `draft_improve` joined it in Round H: it used to be the one stage a person
-/// turned on by picking a target for it, and with the stage picker gone that
-/// would have made it a feature nothing could reach. It is a prose stage like
-/// the five above it now, and the consent gate still keeps both drafting
-/// stages off a third-party target nobody agreed to.
-const List<String> proseStageIds = [
-  'storyline_group',
-  'storyline_name',
-  'storyline_refresh',
-  'storyline_recap',
-  'reply_decision',
-  'draft_reply',
-  'draft_improve',
-];
 
 /// The two stages that write a reply in the owner's name, and the ONE place
 /// that pair is named.
 ///
-/// Not a preset — `draft_improve` is in none — but the same closed set of two
-/// is what four places ask about: the consent gate in `specForStage`, the
-/// stages `applyPreset` skips when consent is missing, the picker's gated note
-/// and the picker's consent prompt. Written out at each of them, a third
-/// drafting stage would have to be remembered four times.
+/// The optional cloud-drafts target routes these two and nothing else, and
+/// the consent gate in `AppPrefs.specForStage` is keyed on the same list.
 const List<String> draftStageIds = ['draft_reply', 'draft_improve'];
 
-/// The stages **Use for storyline confirm** writes. One stage, and the one
-/// Round D measured a 27B worth pointing at.
-const List<String> confirmStageIds = ['storyline_membership'];
-
-/// The stages **Use for all bulk stages** writes — every fast-slot row.
-const List<String> bulkStageIds = [
-  'triage',
-  'needs_you',
-  'extraction',
-  'attachment_digest',
-  'context_file_digest',
-  'context_brief',
-  'context_select',
-  'storyline_membership',
-];
-
-/// The stages the BIG model does on the box: every prose-slot stage the
-/// presets name, plus the storyline confirm.
-///
-/// The confirm is a fast-slot stage everywhere else and the one exception the
-/// placement rule carries, because Round D and Round G both measured the 27B
-/// worth its cost there and the box has the 27B sitting idle between drafts.
-/// Built from [proseStageIds] so it cannot drift from the stage table, and
-/// pinned against `pipelineStages` in `model_slots_test` the way the presets
-/// are.
-const List<String> bigModelStageIds = [...proseStageIds, 'storyline_membership'];
-
-/// The stages the SMALL model does: the bulk set with the confirm taken out.
-///
-/// Written out rather than computed, because a const list may spread and may
-/// not loop. `model_slots_test` pins it as exactly [bulkStageIds] minus
-/// `storyline_membership`, which is what keeps the two halves of the rule
-/// covering every stage exactly once.
-const List<String> smallModelStageIds = [
-  'triage',
-  'needs_you',
-  'extraction',
-  'attachment_digest',
-  'context_file_digest',
-  'context_brief',
-  'context_select',
-];
-
 /// Which model does [stageId]'s work, or null for an id no stage table row
-/// names.
-///
-/// The three-role view of the stage table, for the page that shows one line
-/// per role. `draft_improve` is [StageRole.big] like the stage it improves on:
-/// the role is about which model writes, and a second pass over a reply is
-/// written by the same model that wrote the first.
+/// names. One role per slot since the decision-model round.
 StageRole? roleOfStage(String stageId) {
   for (final stage in pipelineStages) {
     if (stage.id != stageId) continue;
-    if (stage.slot == ModelSlot.embed) return StageRole.embed;
-    if (stage.slot == ModelSlot.prose || bigModelStageIds.contains(stageId)) {
-      return StageRole.big;
-    }
-    return StageRole.small;
+    return switch (stage.slot) {
+      ModelSlot.generative => StageRole.generative,
+      ModelSlot.decide => StageRole.decision,
+      ModelSlot.embed => StageRole.embed,
+    };
   }
   return null;
 }
 
-/// Which target [stageId] resolves to when nothing is stored for it — THE
-/// PLACEMENT RULE.
+/// Which managed generative model this Mac serves: [stored] when it names one
+/// the [tier] can hold, else the tier's own default.
 ///
-/// The one function that says where a stage goes by default, and the reason
-/// the GPU box can be the default with nothing written to the database: on
-/// [ModelPlacement.box] with an address to dial, the big stages answer
-/// [boxProseId] and the small ones [boxBulkId], and everywhere else the answer
-/// is the slot's built-in exactly as it was before placements existed.
-///
-/// Null where there is no default to give: `embeddings` is the one stage that
-/// is not routed at all. [hasBox] is passed rather than read, because the
-/// address lives in the prefs and this file may not import upward.
-String? placementDefaultTargetId({
-  required ModelPlacement placement,
-  required bool hasBox,
-  required String stageId,
-}) {
-  final slot = stageSlot(stageId);
-  if (slot == ModelSlot.embed) return null;
-  if (placement == ModelPlacement.box && hasBox) {
-    if (bigModelStageIds.contains(stageId)) return boxProseId;
-    if (smallModelStageIds.contains(stageId)) return boxBulkId;
-    // An id no role list names is an id no stage table row names either, and
-    // [stageSlot] has already answered fast for it. It falls through to the
-    // built-in rather than to a box target, which is the cheap wrong answer
-    // rather than the expensive one.
+/// [stored] is `AppPrefs.generativeManagedModel`: `''` (follow the hardware),
+/// [routerProseId] (the 27B) or [routerBulkId] (the 4B). The 27B on the
+/// [MachineTier.inbox] tier is REFUSED here rather than on a screen, because
+/// that machine never downloads it and a preset naming it would not start;
+/// it falls back to the 4B. Anything unrecognised reads as `''`.
+String managedGenerativeIdFor(MachineTier tier, String stored) {
+  if (stored == routerBulkId) return routerBulkId;
+  if (stored == routerProseId) {
+    return tier == MachineTier.full ? routerProseId : routerBulkId;
   }
-  return defaultTargetIdFor(slot);
+  return switch (tier) {
+    MachineTier.full => routerProseId,
+    MachineTier.inbox => routerBulkId,
+  };
 }
 
 /// One pipeline stage, as the settings screen names it.
 ///
-/// AUTHORED, not derived, and since Round E the [slot] is the stage's DEFAULT
-/// rather than its wiring: every stage resolves a target per call through
-/// `stageLlmClientProvider`, and what it resolves to is the `stage_targets`
-/// entry when there is one and the slot's built-in target — `Local fast` or
-/// `Local prose` — when there is not. This table is what the settings screen
-/// lists and what the defaults are read off, and `model_slots_test.dart` is
-/// what keeps it honest against the handler list.
+/// AUTHORED, not derived. The [slot] is the stage's ROLE: every stage
+/// resolves a target per call through `stageLlmClientProvider`, and what it
+/// resolves to is `AppPrefs.specForStage`, a rule over the role's placement.
+/// `model_slots_test.dart` is what keeps this table honest against the
+/// handler list.
 @immutable
 class PipelineStageInfo {
   /// The `schemaName` the task sends, where the stage makes a model call —
@@ -720,7 +622,7 @@ class PipelineStageInfo {
   final String label;
   final String description;
 
-  /// The target this stage resolves to when `stage_targets` names none.
+  /// Which model does this stage's work.
   final ModelSlot slot;
 
   /// Whether the stage has NO target until the user picks one.
@@ -746,102 +648,112 @@ class PipelineStageInfo {
 /// Every stage that dials a model, in pipeline order — the order of
 /// `docs/pipeline/README.md`'s stage table.
 ///
-/// The `slot` column is each stage's DEFAULT target. Changing a default is a
-/// row here and an edit to `docs/pipeline/10-model-routing.md`; changing where
-/// a stage goes on one machine is Settings → Models, and costs no code at all.
+/// The `slot` column is each stage's ROLE. Changing one is a row here and an
+/// edit to `docs/pipeline/10-model-routing.md`; changing where a role runs on
+/// one machine is Settings → Models, and costs no code at all.
+///
+/// `decision` is FIRST: the decision pass runs on every kept message before
+/// any text call. It has no schema of its own (it is an embedding call whose
+/// heads run in Dart).
 const List<PipelineStageInfo> pipelineStages = [
+  PipelineStageInfo(
+    id: 'decision',
+    label: 'Decision model',
+    description: 'Sorts and flags every message',
+    slot: ModelSlot.decide,
+  ),
   PipelineStageInfo(
     id: 'triage',
     label: 'Triage',
     description: 'Urgency, category, summary, action items',
-    slot: ModelSlot.fast,
+    slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
     id: 'needs_you',
     label: 'Needs-you verdict',
     description: 'Whether a message wants the owner',
-    slot: ModelSlot.fast,
+    slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
     id: 'extraction',
     label: 'Extraction',
     description: 'Evidence, topics, people, intent, importance',
-    slot: ModelSlot.fast,
+    slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
     id: 'attachment_digest',
     label: 'Attachment digest',
     description: 'What an attached document is, and what it asks for',
-    slot: ModelSlot.fast,
+    slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
     id: 'context_file_digest',
     label: 'Directory file digest',
     description: 'What one file in a registered directory is for, and what '
         'it found',
-    slot: ModelSlot.fast,
+    slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
     id: 'context_brief',
     label: 'Directory brief',
     description: 'The standing notes and file map of a directory, compiled '
         'for replies',
-    slot: ModelSlot.fast,
+    slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
     id: 'context_select',
     label: 'Directory section pick',
     description: 'Which two sections of a directory a reply should read in '
         'full',
-    slot: ModelSlot.fast,
+    slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
     id: 'storyline_membership',
     label: 'Storyline membership',
     description: 'Whether a thread belongs to a storyline',
-    slot: ModelSlot.fast,
+    slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
     id: 'storyline_group',
     label: 'Storyline grouping',
     description: 'Which threads in a neighbourhood are one project or event',
-    slot: ModelSlot.prose,
+    slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
     id: 'storyline_name',
     label: 'Storyline naming',
     description: 'The title and summary a group is given',
-    slot: ModelSlot.prose,
+    slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
     id: 'storyline_refresh',
     label: 'Storyline refresh',
     description: 'Re-reading a group as it grows',
-    slot: ModelSlot.prose,
+    slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
     id: 'storyline_recap',
     label: 'Storyline recap',
     description: 'Where the story stands right now',
-    slot: ModelSlot.prose,
+    slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
     id: 'reply_decision',
     label: 'Reply decision',
     description: 'Whether a message needs an answer at all',
-    slot: ModelSlot.prose,
+    slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
     id: 'draft_reply',
     label: 'Draft generation',
     description: 'The suggested reply itself',
-    slot: ModelSlot.prose,
+    slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
     id: 'draft_improve',
     label: 'Improve a draft',
-    description: 'A second pass over a suggested reply, on the big model',
-    slot: ModelSlot.prose,
+    description: 'A second pass over a suggested reply',
+    slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
     id: 'embeddings',
@@ -851,35 +763,23 @@ const List<PipelineStageInfo> pipelineStages = [
   ),
 ];
 
-/// What this Mac runs.
+/// What this Mac can hold, read off its memory alone.
 ///
-/// Two of the three are read off memory alone, because two things differ between the machines the ledger has
-/// numbers for: whether the writing model (the 27B, 19 GB on disk and 22 GB
-/// resident with its MTP head) is downloaded and started at all, and how the
-/// inbox model's context is split. Everything else — the embedding model, the
-/// 4B, the search corpora, sync — runs the same way on 16 GB as on 64 GB.
-/// A third memory tier for 8 GB machines is a measured row in
-/// `docs/model-bakeoff.md` and not shipped: one more checkpoint to pin and no
-/// machine to test it on. [remote] is a third VALUE but not a third rung: it
-/// is what [ModelPlacement.box] resolves to.
+/// Two things differ between the machines the ledger has numbers for: whether
+/// the writing model (the 27B, 19 GB on disk and 22 GB resident with its MTP
+/// head) is downloaded and started at all, and how the 4B's context is split.
+/// Everything else runs the same way on 16 GB as on 64 GB. Since the
+/// decision-model round the tier constrains the MANAGED generative choice
+/// (`managedGenerativeIdFor`): the 27B only on [full]. Where the roles run is
+/// the placements' answer, not this one.
 enum MachineTier {
-  /// The embedding model, the inbox model and the writing model, all local.
-  /// The 64 GB rows of the ledger are this tier.
+  /// The embedding, decision and 4B models, and the 27B. The 64 GB rows of
+  /// the ledger are this tier.
   full,
 
-  /// The embedding model and the inbox model only. The writing stages run on
-  /// the inbox model unless the install is pointed at the user's own servers,
-  /// and drafts are on demand rather than prefetched.
+  /// The embedding, decision and 4B models only. The managed generative model
+  /// is the 4B, and drafts are on demand rather than prefetched.
   inbox,
-
-  /// The embedding model alone: every other stage is on the shared GPU box.
-  ///
-  /// NOT a memory rung. [machineTierFor] never returns it at any byte count;
-  /// it is what `effectiveTierProvider` answers under
-  /// [ModelPlacement.box], and it is here rather than in a second enum
-  /// because `ModelManifest.forTier` is keyed on this one and a parallel
-  /// resolution API would touch the same consumers twice.
-  remote,
 }
 
 /// The memory at or above which the writing model is downloaded and started.
@@ -900,44 +800,17 @@ const int measuredFloorBytes = 16 * 1024 * 1024 * 1024;
 /// without the system channel answer) is [MachineTier.full]: nothing is
 /// refused for a fact the app could not read, the same rule
 /// `HardwareInfo.unknown` states.
-///
-/// Never [MachineTier.remote] at any byte count: that tier is a placement,
-/// not a reading of this machine.
 MachineTier machineTierFor(int memoryBytes) {
   if (memoryBytes <= 0) return MachineTier.full;
   return memoryBytes >= fullTierMinBytes ? MachineTier.full : MachineTier.inbox;
 }
 
-/// The stage → target entries a tier writes, keyed by stage id.
-///
-/// [MachineTier.full] writes nothing: the compiled defaults ARE that tier, so
-/// a fresh 64 GB install keeps an empty `stage_targets` and stays
-/// byte-identical to the two-slot app. [MachineTier.inbox] points every
-/// prose-slot stage at the built-in fast target, so nothing parks on a machine
-/// with no prose server; built from [proseStageIds] so it cannot drift from the
-/// stage table, `draft_improve` included since Round H made it a prose stage
-/// like the others. The confirm and the bulk stages already default to the
-/// fast target.
-///
-/// [MachineTier.remote] writes nothing, and MUST stay empty: `applyTierDefaults`
-/// builds its `governed` set from the union of every tier's keys, so a stage
-/// named here would widen what `applyTierDefaults(full)` clears on a machine
-/// that never saw the box.
-Map<String, String> tierStageDefaults(MachineTier tier) => switch (tier) {
-      MachineTier.full => const {},
-      MachineTier.inbox => {for (final id in proseStageIds) id: builtInFastId},
-      MachineTier.remote => const {},
-    };
-
-/// The draft policy a tier writes.
+/// The draft policy a managed generative model writes.
 ///
 /// The inbox tier drafts on demand: its writer is the 4B, whose drafts the
 /// golden set has not judged, and nobody should pay for them unasked. The full
 /// tier keeps the shipped default.
-/// [MachineTier.remote] drafts on the box's 27B, which is the writing model
-/// the ledger measured, so it keeps the shipped default.
 DraftPolicy tierDraftPolicy(MachineTier tier) => switch (tier) {
       MachineTier.full => DraftPolicy.needsYou,
       MachineTier.inbox => DraftPolicy.onDemand,
-      MachineTier.remote => DraftPolicy.needsYou,
     };

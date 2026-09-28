@@ -322,15 +322,18 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       // hands it to the probe and drops it. Nothing holds it.
       storedBearer: (id) => ref.read(appPrefsProvider.notifier).bearerFor(id),
       modelPlacement: prefs.modelPlacement,
-      // The four values the form opens on, already resolved: the stored ones
+      // The values the form opens on, already resolved: the stored ones
       // where there are stored ones, the build's otherwise. Never a key.
-      boxBigUrl: prefs.effectiveBoxBigUrl,
-      boxSmallUrl: prefs.effectiveBoxSmallUrl,
-      boxBigModel: prefs.effectiveBoxBigModel,
-      boxSmallModel: prefs.effectiveBoxSmallModel,
-      boxKeyStored: prefs.boxKeyStored,
+      // INTERIM (Phase 4 redesigns this page): the form still has two
+      // addresses and both open on the generative remote's, because
+      // `useBox` ignores the small half now.
+      boxBigUrl: prefs.effectiveGenerativeUrl,
+      boxSmallUrl: prefs.effectiveGenerativeUrl,
+      boxBigModel: prefs.effectiveGenerativeModel,
+      boxSmallModel: prefs.effectiveGenerativeModel,
+      boxKeyStored: prefs.boxBigKeyStored,
       boxBigKeyStored: prefs.boxBigKeyStored,
-      boxSmallKeyStored: prefs.boxSmallKeyStored,
+      boxSmallKeyStored: prefs.boxBigKeyStored,
       // The app's own server. Watched, so a load that finishes behind an open
       // Settings pane moves the bar and the three rows without the reader
       // touching anything.
@@ -402,16 +405,12 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       onShowLog: () => unawaited(launchUrl(Uri.file(supervisor.logFile.path))),
       onCloudDraftsConsent: () => notifier.setCloudDraftsConsent(true),
       // The grant's order reversed, and that order is the protection.
-      // `AppPrefs.specForStage` sends a third-party draft target back to the
-      // local one while the flag is false, so clearing the two stages first
-      // and the flag last means the stages are already local by the moment
-      // consent goes. Consent first would leave two stage entries pointing
-      // off this machine with nothing but the resolver between them and a
-      // draft. Awaited in turn rather than fired together: three writes to
-      // one prefs row.
+      // `AppPrefs.specForStage` sends the drafts back to the generative
+      // model once the cloud-drafts target is gone, so clearing it first and
+      // the flag last means the drafts are already home by the moment
+      // consent goes. Awaited in turn rather than fired together.
       onStopCloudDrafts: () async {
-        await notifier.clearStageTarget('draft_reply');
-        await notifier.clearStageTarget('draft_improve');
+        await notifier.clearCloudDrafts();
         await notifier.setCloudDraftsConsent(false);
       },
       cloudDraftsStanding: prefs.cloudDraftsStanding,

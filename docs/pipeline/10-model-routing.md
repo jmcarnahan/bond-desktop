@@ -1,5 +1,18 @@
 # 10 · Model routing, failure policy, and the prompt fence
 
+> **Superseded in part by the decision-model round (Phase 3, 2026-09-27; full
+> rewrite in Phase 4).** Routing is now three roles resolved by a rule in
+> `AppPrefs.specForStage`, not a stage map: every text stage goes to the ONE
+> generative model (`generativeSpec`: the owner's server when
+> `model_placement = box` and an address exists, else the managed router's
+> `bond-prose` on the full tier or `bond-bulk` on the inbox tier, else
+> `LLAMA_URL`), the `decision` stage to the decision model (`decisionSpec`,
+> this Mac by default), and `draft_reply`/`draft_improve` to the optional
+> cloud-drafts target only when it is set and either the owner's own host or
+> consented. The fast slot, `stage_targets`, `llm_targets`, the presets and
+> the tier stage defaults below no longer route anything; the failure policy
+> and the prompt fence are unchanged.
+
 ## Routing is data: every stage names a target, resolved per call
 
 Since Round E (2026-09-19) the stage→server mapping is a preference, not

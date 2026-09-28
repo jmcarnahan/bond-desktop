@@ -272,8 +272,13 @@ class DownloadLedger {
 
   /// Every file in [manifest] is [isCurrent] — the whole set, at this build's
   /// digests. What the gate and the wizard's resume both ask.
+  ///
+  /// A `source: local` entry is SKIPPED: it is installed by hand and never
+  /// has a row, and a decision model that is not installed must not send a
+  /// finished setup back through the wizard.
   bool matches(ModelManifest manifest) {
     for (final file in manifest.models) {
+      if (file.isLocal) continue;
       if (!isCurrent(file)) return false;
     }
     return true;

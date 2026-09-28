@@ -273,7 +273,6 @@ class SetupController extends StateNotifier<SetupState> {
     required this.paths,
     required this.readPrefs,
     required this.setModelsFolder,
-    required this.applyTierDefaults,
     this.probe,
     this.storedBearer,
     required this.useBox,
@@ -294,12 +293,6 @@ class SetupController extends StateNotifier<SetupState> {
   final AppPaths paths;
   final AppPrefs Function() readPrefs;
   final Future<void> Function(String) setModelsFolder;
-
-  /// Writes this machine's tier defaults — the stage picks and the draft
-  /// policy. A CLOSURE for the same reason the two above are: the prefs
-  /// notifier's state is protected, and this controller is told what to do
-  /// rather than reaching for the provider.
-  final Future<void> Function(MachineTier) applyTierDefaults;
 
   /// Asks a model server what it serves. Handed DOWN, through [SetupFlow], to
   /// the Where step's form, which is what discovers a model name on Connect.
@@ -333,9 +326,12 @@ class SetupController extends StateNotifier<SetupState> {
   /// without a key.
   final String? Function(String targetId)? storedBearer;
 
-  /// Moves the install to a placement and clears out the stage entries the app
-  /// itself wrote. Managed's answer to **Where the models run**, wired so
-  /// that both answers have one shape.
+  /// Moves the GENERATIVE role to a placement and writes the tier's draft
+  /// policy (`AppPrefsNotifier.usePlacement`, an interim shim onto
+  /// `useGenerative`). Managed's answer to **Where the models run**, and what
+  /// [finish] writes on this Mac. A CLOSURE because the prefs notifier's
+  /// state is protected, and this controller is told what to do rather than
+  /// reaching for the provider.
   final Future<void> Function(
     ModelPlacement placement, {
     required MachineTier hardwareTier,
@@ -478,8 +474,7 @@ class SetupController extends StateNotifier<SetupState> {
   /// goes back should not have to paste the key again. The Models page
   /// behaves the same way.
   ///
-  /// The tier is the HARDWARE's, read here rather than through [tier], which
-  /// answers `remote` while the placement is still the box.
+  /// The tier is the HARDWARE's.
   ///
   /// NOTHING is caught: a refused write propagates to the form, which is the
   /// thing that can draw the sentence under its own fields.
@@ -617,22 +612,33 @@ class SetupController extends StateNotifier<SetupState> {
   /// on a machine whose memory could not be read, it is
   /// [MachineTier.full] — the never-refuse rule [machineTierFor] states.
   ///
-  /// On [ModelPlacement.box] it is [MachineTier.remote] whatever the memory
-  /// is: this Mac serves the embedding model and nothing else, so the models
-  /// step lists one file, the storage step sizes one, the download step
-  /// fetches one and `init`'s ledger comparison asks for one.
-  MachineTier get tier => placement == ModelPlacement.box
-      ? MachineTier.remote
-      : machineTierFor(state.hardware?.memoryBytes ?? 0);
+  MachineTier get tier => machineTierFor(state.hardware?.memoryBytes ?? 0);
 
   /// The answer so far, defaulting to this Mac. Null means nobody has chosen
   /// yet, and the steps before the choice read the same as they always did.
   ModelPlacement get placement => state.placement ?? ModelPlacement.local;
 
-  /// The manifest as [tier] wants it. THE view every step reads: the models
-  /// step's rows and total, the disk preflight, the download run, the ledger
-  /// check and the preset the supervisor starts.
-  ModelManifest get resolvedManifest => manifest.forTier(tier);
+  /// The files this install DOWNLOADS under the role placements. THE view
+  /// every step reads: the models step's rows and total, the disk preflight,
+  /// the download run and the ledger check.
+  ///
+  /// The roles' manifest (`ModelManifest.forRoles`: embeddings, the decision
+  /// model when it runs here, the managed generative model when that runs
+  /// here — so choosing User defined drops the chat model from the download)
+  /// without the hand-installed entries, which are never downloaded: a
+  /// decision model that is not installed never holds the wizard up.
+  ModelManifest get resolvedManifest {
+    final prefs = readPrefs();
+    return manifest
+        .forRoles(
+          hardwareTier: tier,
+          decisionManaged: prefs.decisionSpec.id == localDecisionId,
+          generativeManagedId: placement == ModelPlacement.box
+              ? null
+              : managedGenerativeIdFor(tier, prefs.generativeManagedModel),
+        )
+        .downloadable;
+  }
 
   /// Enough memory for the inbox, not enough for the writing model. A
   /// warning rather than a refusal: triage, extraction and search all run on
@@ -835,17 +841,14 @@ class SetupController extends StateNotifier<SetupState> {
     }
     var saved = false;
     try {
-      // BEFORE the stored word and before the server: the stage picks are
-      // what the first drain resolves a target through, and a machine with no
-      // writing model must not have six stages pointing at a server this tier
-      // never starts. A write that throws leaves the wizard on this screen
-      // with the button again, exactly as a half-written setup does.
-      // Only on the local placement. `applyTierDefaults` returns at once on
-      // [MachineTier.remote] anyway, and saying so here is what keeps the
-      // user-defined adoption's stage map obviously untouched by the wizard's
-      // last step.
+      // BEFORE the stored word and before the server: the generative
+      // placement, the tier and the draft policy are what the first drain
+      // resolves through. A write that throws leaves the wizard on this
+      // screen with the button again, exactly as a half-written setup does.
+      // Only on the local placement: the user-defined adoption was written
+      // by the form's own press and the wizard's last step leaves it alone.
       if (placement == ModelPlacement.local) {
-        await applyTierDefaults(tier);
+        await usePlacement(ModelPlacement.local, hardwareTier: tier);
       }
       // The stash exists only while the welcome step is offering a way back;
       // finishing is the end of that offer, and a leftover value would have
@@ -982,8 +985,6 @@ final setupControllerProvider =
     readPrefs: () => ref.read(appPrefsProvider),
     setModelsFolder: (path) =>
         ref.read(appPrefsProvider.notifier).setModelsFolder(path),
-    applyTierDefaults: (tier) =>
-        ref.read(appPrefsProvider.notifier).applyTierDefaults(tier),
     probe: ModelServerProbe().probe,
     storedBearer: ref.read(appPrefsProvider.notifier).bearerFor,
     useBox: ({

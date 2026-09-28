@@ -8,17 +8,14 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
 
-/// Where a model slot's override lives, and what empty means there.
+/// Where the model-routing preferences live, and what empty means there.
 ///
 /// The subject of this file is one deliberate inconsistency: `mcp_server_url`
-/// resolves its default when it is READ, and these four prefs do not. A model
-/// default is a fact about this machine's `local.mk`, so resolving it on read
-/// would freeze today's dart-define into the database and make a changed one
-/// invisible. Empty is stored as empty, and only [AppPrefs.fastTarget] and
-/// [AppPrefs.proseTarget] turn it into the build's baseline: the managed
-/// router's target in every shipped build, and the compiled default only in a
-/// build that says `BOND_DEV_HAND_SERVERS`. `slotBaseline` is that answer,
-/// which is why the cases below compare against it rather than a constant.
+/// resolves its default when it is READ, and the model-routing prefs do not.
+/// A model address is a fact about this build, so resolving it on read would
+/// freeze today's define into the database and make a changed one invisible.
+/// Empty is stored as empty, and only the role specs on [AppPrefs] turn it
+/// into the build's answer.
 
 void main() {
   late BondDatabase db;
@@ -38,148 +35,75 @@ void main() {
 
   tearDown(() => db.close());
 
-  test('a fresh install follows the build', () async {
+  test('a fresh install follows the build and stores nothing', () async {
     final ref = await container();
     final store = MessageStore(db);
 
-    expect(await store.getPref(fastLlmUrlKey), isNull);
-    expect(await store.getPref(fastLlmModelKey), isNull);
-    expect(await store.getPref(proseLlmUrlKey), isNull);
-    expect(await store.getPref(proseLlmModelKey), isNull);
+    for (final key in [
+      boxBigUrlKey,
+      boxBigModelKey,
+      generativeManagedModelKey,
+      decisionPlacementKey,
+      decisionUrlKey,
+      decisionModelKey,
+      cloudDraftsUrlKey,
+      cloudDraftsModelKey,
+    ]) {
+      expect(await store.getPref(key), isNull, reason: key);
+    }
 
     final prefs = ref.read(appPrefsProvider);
-    expect(prefs.fastTarget, prefs.slotBaseline(ModelSlot.fast));
-    expect(prefs.proseTarget, prefs.slotBaseline(ModelSlot.prose));
-    expect(prefs.isSlotDefault(ModelSlot.fast), isTrue);
-    expect(prefs.isSlotDefault(ModelSlot.prose), isTrue);
+    expect(prefs.generativeSpec.id, localGenerativeId);
+    expect(prefs.generativeSpec.model, routerProseId);
+    expect(prefs.decisionSpec.id, localDecisionId);
+    expect(prefs.decisionPlacement, ModelPlacement.local);
+    expect(prefs.cloudDraftsSpec, isNull);
   });
 
-  test('a set target round-trips', () async {
+  test('the managed generative choice round-trips', () async {
     final ref = await container();
 
-    await ref.read(appPrefsProvider.notifier).setFastLlmTarget(
-          url: 'http://h:9/v1/chat/completions',
-          model: 'mlx-4b',
+    await ref.read(appPrefsProvider.notifier).useGenerative(
+          placement: ModelPlacement.local,
+          managedModel: routerBulkId,
+          hardwareTier: MachineTier.full,
         );
 
+    expect(ref.read(appPrefsProvider).generativeSpec.model, routerBulkId);
+    expect(await MessageStore(db).getPref(generativeManagedModelKey),
+        routerBulkId);
+    // A new container reads it back: the state is a cache of the store.
     expect(
-      ref.read(appPrefsProvider).fastTarget,
-      const LlmTarget(
-        baseUrl: 'http://h:9/v1/chat/completions',
-        model: 'mlx-4b',
-      ),
+      (await container()).read(appPrefsProvider).generativeManagedModel,
+      routerBulkId,
     );
-    expect(ref.read(appPrefsProvider).isSlotDefault(ModelSlot.fast), isFalse);
+  });
 
-    // The exact strings landed in the table, and a new container reads them
-    // back — the state is a cache of the store, not the other way round.
+  test('whitespace is empty, on every model-routing value', () async {
     final store = MessageStore(db);
-    expect(await store.getPref(fastLlmUrlKey), 'http://h:9/v1/chat/completions');
-    expect(await store.getPref(fastLlmModelKey), 'mlx-4b');
-    expect(
-      (await container()).read(appPrefsProvider).fastTarget,
-      const LlmTarget(
-        baseUrl: 'http://h:9/v1/chat/completions',
-        model: 'mlx-4b',
-      ),
-    );
+    await store.setPref(boxBigUrlKey, '   ');
+    await store.setPref(boxBigModelKey, '\n');
+    await store.setPref(decisionUrlKey, ' ');
+    await store.setPref(cloudDraftsUrlKey, '\t');
+
+    final prefs = (await container()).read(appPrefsProvider);
+
+    expect(prefs.boxBigUrl, isEmpty);
+    expect(prefs.boxBigModel, isEmpty);
+    expect(prefs.decisionUrl, isEmpty);
+    expect(prefs.cloudDraftsUrl, isEmpty);
+    expect(prefs.cloudDraftsSpec, isNull);
   });
 
-  test('the two slots are independent', () async {
-    final ref = await container();
-
-    await ref.read(appPrefsProvider.notifier).setFastLlmTarget(
-          url: 'http://h:9/v1/chat/completions',
-          model: 'mlx-4b',
-        );
-
-    expect(ref.read(appPrefsProvider).proseTarget,
-        ref.read(appPrefsProvider).slotBaseline(ModelSlot.prose));
-    expect(ref.read(appPrefsProvider).isSlotDefault(ModelSlot.prose), isTrue);
-  });
-
-  test('empty means the build default, and is stored as empty', () async {
-    final ref = await container();
-    final notifier = ref.read(appPrefsProvider.notifier);
-
-    await notifier.setFastLlmTarget(
-      url: 'http://h:9/v1/chat/completions',
-      model: 'mlx-4b',
-    );
-    await notifier.setFastLlmTarget(url: '', model: '');
-
-    expect(ref.read(appPrefsProvider).fastTarget,
-        ref.read(appPrefsProvider).slotBaseline(ModelSlot.fast));
-    // The assertion that pins the difference from `mcpServerUrl`: what is
-    // STORED is empty, not the resolved default string.
+  test('an unreadable placement reads as the default', () async {
     final store = MessageStore(db);
-    expect(await store.getPref(fastLlmUrlKey), '');
-    expect(await store.getPref(fastLlmModelKey), '');
-    expect(ref.read(appPrefsProvider).isSlotDefault(ModelSlot.fast), isTrue);
-  });
+    await store.setPref(decisionPlacementKey, 'the-moon');
+    await store.setPref(modelPlacementKey, 'the-moon');
 
-  test('whitespace is empty', () async {
-    final store = MessageStore(db);
-    await store.setPref(fastLlmUrlKey, '   ');
-    await store.setPref(fastLlmModelKey, '\n');
+    final prefs = (await container()).read(appPrefsProvider);
 
-    final ref = await container();
-
-    expect(ref.read(appPrefsProvider).fastTarget,
-        ref.read(appPrefsProvider).slotBaseline(ModelSlot.fast));
-    expect(ref.read(appPrefsProvider).isSlotDefault(ModelSlot.fast), isTrue);
-  });
-
-  test('half an override still resolves the other half', () async {
-    final ref = await container();
-
-    await ref.read(appPrefsProvider.notifier).setFastLlmTarget(
-          url: 'http://h:9/v1/chat/completions',
-          model: '',
-        );
-
-    final target = ref.read(appPrefsProvider).fastTarget;
-    expect(target.baseUrl, 'http://h:9/v1/chat/completions');
-    expect(target.model, fastModelDefault);
-    expect(ref.read(appPrefsProvider).isSlotDefault(ModelSlot.fast), isFalse);
-  });
-
-  test('clearSlotTarget puts a slot back on the build', () async {
-    final ref = await container();
-    final notifier = ref.read(appPrefsProvider.notifier);
-
-    await notifier.setProseLlmTarget(
-      url: 'http://h:9/v1/chat/completions',
-      model: 'mlx-27b',
-    );
-    await notifier.clearSlotTarget(ModelSlot.prose);
-
-    expect(ref.read(appPrefsProvider).proseTarget,
-        ref.read(appPrefsProvider).slotBaseline(ModelSlot.prose));
-    expect(await MessageStore(db).getPref(proseLlmUrlKey), '');
-  });
-
-  test('the embed slot is not switchable', () async {
-    final ref = await container();
-    final notifier = ref.read(appPrefsProvider.notifier);
-
-    await notifier.setFastLlmTarget(
-      url: 'http://h:9/v1/chat/completions',
-      model: 'mlx-4b',
-    );
-    await notifier.setProseLlmTarget(
-      url: 'http://h:10/v1/chat/completions',
-      model: 'mlx-27b',
-    );
-    // A no-op rather than an error: the screen may offer Reset for every row.
-    await notifier.clearSlotTarget(ModelSlot.embed);
-
-    final prefs = ref.read(appPrefsProvider);
-    expect(prefs.targetFor(ModelSlot.embed), prefs.slotBaseline(ModelSlot.embed));
-    expect(prefs.isSlotDefault(ModelSlot.embed), isTrue);
-    // And the other two still answer their own overrides.
-    expect(prefs.targetFor(ModelSlot.fast), prefs.fastTarget);
-    expect(prefs.targetFor(ModelSlot.prose), prefs.proseTarget);
+    expect(prefs.decisionPlacement, ModelPlacement.local);
+    expect(prefs.modelPlacement, defaultModelPlacement);
   });
 
   group('the prose lane\'s width', () {

@@ -17,6 +17,34 @@
       "serverArgs": { "embedding": "true", "pooling": "last", "load-on-startup": "true" }
     },
     {
+      "id": "bond-decide",
+      "role": "decide",
+      "source": "local",
+      "displayName": "Bond decision model",
+      "repo": "local/bond-decide",
+      "file": "bond-decide-mbl-v2swap-f16.gguf",
+      "sizeBytes": 791461056,
+      "sha256": "28c10397e79c202895cbbeb200c1e58be8cfea5b889a8857ce51760d95e0a889",
+      "minRamBytes": 0,
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/answerdotai/ModernBERT-large",
+      "notice": null,
+      "heads": {
+        "file": "decide-heads.json",
+        "sha256": "468407826614060d95bbf6f073ee62d655f5b1470b8a52d614430867bbaa7b6f",
+        "sizeBytes": 894584
+      },
+      "serverArgs": {
+        "embedding": "true",
+        "pooling": "mean",
+        "c": "2048",
+        "ub": "2048",
+        "b": "2048",
+        "parallel": "1",
+        "load-on-startup": "true"
+      }
+    },
+    {
       "id": "bond-bulk",
       "role": "bulk",
       "displayName": "Qwen3 4B Instruct",
@@ -62,18 +90,13 @@
     {
       "id": "full",
       "minRamBytes": 42949672960,
-      "models": ["bond-embed", "bond-bulk", "bond-prose"]
+      "models": ["bond-embed", "bond-decide", "bond-bulk", "bond-prose"]
     },
     {
       "id": "inbox",
       "minRamBytes": 0,
-      "models": ["bond-embed", "bond-bulk"],
+      "models": ["bond-embed", "bond-decide", "bond-bulk"],
       "serverArgs": { "bond-bulk": { "c": "16384", "parallel": "2" } }
-    },
-    {
-      "id": "remote",
-      "minRamBytes": 0,
-      "models": ["bond-embed"]
     }
   ]
 }

@@ -10,12 +10,12 @@ import '../services/llm/model_slots.dart'
         LlmTargetSpec,
         ModelPlacement,
         StageRole,
-        builtInFastId,
-        builtInProseId,
         handServersBuild,
         hostPort,
         isLoopbackHost,
-        pipelineStages;
+        routerBulkId,
+        routerDecideId,
+        routerProseId;
 import '../services/models/managed_model_status.dart' show ManagedModelStatus;
 import '../services/server/server_state.dart';
 import '../theme/tokens.dart';
@@ -35,7 +35,8 @@ import 'settings_segments.dart';
 /// functions a test can call.
 @immutable
 class RoleLine {
-  /// `big`, `small` or `embed` — the slug the row's Check key is built on, and
+  /// `decision`, `generative` or `embed` — the slug the row's Check key is
+  /// built on, and
   /// the reason this is a field rather than a position in a list: a test taps
   /// one named row, never the second one.
   final String id;
@@ -102,74 +103,32 @@ class RoleLine {
   /// them. The host calls this and hands the result down; a test calls it on
   /// an [AppPrefs] it built.
   ///
-  /// A role's steps are every stage the placement's rule sends to the same
-  /// default target as the role's LEAD stage, `draft_reply` for the big model
-  /// and `triage` for the small. Membership is read off
-  /// `defaultTargetIdForStage` rather than off `roleOfStage`, and the two
-  /// disagree on purpose: storyline membership is the big model's work on a
-  /// user-defined server and the small model's on this Mac, so grouping by the
-  /// enum would read every Managed install as Custom. `draft_improve` is one
-  /// of the big model's steps like the reply it improves on; nothing is
-  /// optional any more.
+  /// One row per ROLE since the decision-model round, each describing the
+  /// one target its role resolves to: `decision` (the decision model),
+  /// `generative` (every text stage; the drafts may go to the cloud-drafts
+  /// target, which the Cloud drafts section describes rather than this row),
+  /// and `embed`, which is not routed at all, so its row is the one fixed
+  /// answer and its Check asks the embedding server the app would actually
+  /// send to.
   ///
-  /// The row describes the target MOST of the role's steps resolve to, and the
-  /// count is how many do not, so one odd step reads as one wherever it sits,
-  /// the lead stage included, and **Check** asks the target the row is
-  /// actually describing. Steps are compared by the spec `specForStage`
-  /// answers rather than by the stored id, because that is what a request
-  /// would reach: a third-party pick with consent withheld falls back there,
-  /// and the row says so by not saying Custom.
-  ///
-  /// Embeddings is not routed at all, so its row is the one fixed answer and
-  /// its Check asks the embedding server the app would actually send to.
+  /// INTERIM: Phase 4 redesigns the page around the two role placements.
   static List<RoleLine> fromPrefs(AppPrefs prefs) {
-    RoleLine routed(String id, String title, StageRole role, String lead) {
-      final byDefault = prefs.defaultTargetIdForStage(lead);
-      final members = [
-        for (final stage in pipelineStages)
-          if (prefs.defaultTargetIdForStage(stage.id) == byDefault) stage.id,
-      ];
-      final specs = {for (final m in members) m: prefs.specForStage(m)};
-      final counts = <String?, int>{};
-      for (final spec in specs.values) {
-        counts[spec?.id] = (counts[spec?.id] ?? 0) + 1;
-      }
-      // The lead stage's own answer wins a tie, so a role split down the
-      // middle still describes the step a person recognises.
-      var modal = specs[lead]?.id;
-      var best = counts[modal] ?? 0;
-      for (final m in members) {
-        final id = specs[m]?.id;
-        if ((counts[id] ?? 0) > best) {
-          modal = id;
-          best = counts[id]!;
-        }
-      }
-      LlmTargetSpec? spec;
-      for (final m in members) {
-        if (specs[m]?.id == modal) {
-          spec = specs[m];
-          break;
-        }
-      }
-      return RoleLine(
-        id: id,
-        title: title,
-        detail: SettingsModelsPage.roleDetail(
-          role: role,
-          spec: spec,
-          overrides: members.length - best,
-        ),
-        checkUrl: spec?.url,
-        // An ID, never the token: the lookup happens at the press, through
-        // the same `storedBearer` closure every other Check here uses.
-        bearerId: spec != null && spec.hasBearer ? spec.id : null,
-      );
-    }
+    RoleLine routed(String id, String title, StageRole role, LlmTargetSpec spec) =>
+        RoleLine(
+          id: id,
+          title: title,
+          detail: SettingsModelsPage.roleDetail(role: role, spec: spec),
+          checkUrl: spec.url,
+          // An ID, never the token: the lookup happens at the press, through
+          // the same `storedBearer` closure every other Check here uses.
+          bearerId: spec.hasBearer ? spec.id : null,
+        );
 
     return [
-      routed('big', 'Big model', StageRole.big, 'draft_reply'),
-      routed('small', 'Small model', StageRole.small, 'triage'),
+      routed('decision', 'Decision model', StageRole.decision,
+          prefs.decisionSpec),
+      routed('generative', 'Generative model', StageRole.generative,
+          prefs.generativeSpec),
       RoleLine(
         id: 'embed',
         title: 'Embeddings',
@@ -192,12 +151,12 @@ class RoleLine {
   /// [fromPrefs] said: a page that blanked its own answers while a future
   /// settled would flicker on every rebuild.
   ///
-  /// Under the user-defined placement the two chat models run on somebody's
-  /// server, so only the embedding row has local facts to add. The resolved
-  /// manifest holds one file there and the statuses say so already, but the
-  /// [placement] is checked as well rather than trusted to: a list resolved a
-  /// frame before the mode moved would otherwise put a size and a disk state
-  /// on a row about a machine this app cannot see.
+  /// A role on somebody's server has no local facts to add: its status says
+  /// so ([ManagedModelStatus.inUse] false), and under the user-defined
+  /// generative [placement] the generative row is left alone as well rather
+  /// than trusted to the statuses, because a list resolved a frame before the
+  /// mode moved would otherwise put a size and a disk state on a row about a
+  /// machine this app cannot see.
   static List<RoleLine> withStatus(
     List<RoleLine> lines, {
     required List<ManagedModelStatus>? statuses,
@@ -208,11 +167,12 @@ class RoleLine {
     final byRole = {for (final row in statuses) row.roleId: row};
     return [
       for (final line in lines)
-        if (placement == ModelPlacement.box && line.id != 'embed')
+        if (placement == ModelPlacement.box && line.id == 'generative')
           line
         else
           switch (byRole[line.id]) {
             null => line,
+            final status when !status.inUse && line.id != 'embed' => line,
             final status => line.copyWith(
                 detail: '${status.displayName} on this Mac',
                 size: formatBytes(status.bytes),
@@ -235,7 +195,7 @@ class RoleLine {
   /// loaded" would call the idle 27B resident the moment that small server
   /// came up, which is the steady state and the opposite of the fact.
   static String _diskState(ManagedModelStatus status, ServerState state) {
-    if (!status.onDisk) return 'not downloaded';
+    if (!status.onDisk) return status.local ? 'not installed' : 'not downloaded';
     if (!status.inUse) return 'on disk · not loaded';
     final loaded = switch (state) {
       ServerReady() => true,
@@ -505,18 +465,19 @@ class SettingsModelsPage extends StatefulWidget {
   /// serve.
   static const String idleModelsTitle = 'Also on this Mac, not in use';
 
-  /// The two chat models this build runs on this Mac, in the words a person
-  /// recognises, BY TARGET rather than by role: a small Mac runs its seven
-  /// prose steps on the 4B, and the big model's row has to say so rather than
-  /// name the 27B it is not using.
+  /// The models this build runs on this Mac, in the words a person
+  /// recognises, BY ROUTER ID (the `model` a managed request carries): a
+  /// small Mac's generative model is the 4B, and its row has to say so rather
+  /// than name the 27B it is not using.
   ///
   /// A const map rather than a read of the manifest. [RoleLine.withStatus]
   /// replaces these with the manifest's own `displayName` the moment the
   /// host has read it; this is what a row says in the frame before that, and
   /// on a row the statuses do not cover.
   static const Map<String, String> localModelNames = {
-    builtInProseId: 'Qwen3.8 27B',
-    builtInFastId: 'Qwen3 4B',
+    routerProseId: 'Qwen3.8 27B',
+    routerBulkId: 'Qwen3 4B',
+    routerDecideId: 'Bond decision model',
   };
 
   /// The embedding model, which is on this Mac under either mode and is never
@@ -541,7 +502,9 @@ class SettingsModelsPage extends StatefulWidget {
     if (overrides > 0) return customDetail(overrides);
     if (role == StageRole.embed) return '$embedModelName on this Mac';
     if (spec == null) return 'Not pointed at a server';
-    if (spec.isBuiltIn) return '${localModelNames[spec.id]} on this Mac';
+    if (spec.isBuiltIn) {
+      return '${localModelNames[spec.model] ?? spec.model} on this Mac';
+    }
     // A user-defined server and somebody's own target read the same way, and
     // they are the same fact: the page cannot claim which machine either one
     // is, so it says the model and where it dials.

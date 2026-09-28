@@ -165,64 +165,82 @@ class AppPrefs {
   /// work, not anything about the mailbox that was wiped.
   final DraftPolicy draftPolicy;
 
-  /// Where this install's model work runs. [defaultModelPlacement] by
-  /// default, which is the GPU box in any build compiled with an address for
-  /// one and this Mac in every other.
+  /// Where the GENERATIVE model runs. [defaultModelPlacement] by default,
+  /// which is the owner's box in any build compiled with an address for one
+  /// and this Mac in every other.
   ///
-  /// Read by `effectiveTierProvider`, which answers [MachineTier.remote] here
-  /// so the manifest resolves to the embedding model alone, by the rail's
-  /// parked line, which names the box rather than a local server, and — since
-  /// Round H — by [defaultTargetIdForStage], which is what makes the box a
-  /// rule rather than a set of rows somebody pressed a button to write.
+  /// The key is Round H's `model_placement`, REUSED rather than renamed in the
+  /// decision-model round: the one global placement became the generative
+  /// role's, because the generative model is the one that ever ran on the box.
+  /// [generativePlacement] is the same field under its role's name.
   final ModelPlacement modelPlacement;
 
-  /// The BIG model's address, a chat-completions URL, or EMPTY for "whatever
-  /// this build was compiled with".
+  /// The generative remote's address, a chat-completions URL, or EMPTY for
+  /// "whatever this build was compiled with" (`$BOND_BOX_URL/prose/…`).
   ///
-  /// The user-defined placement is two addresses and two model names since
-  /// Round H, because the one server we shipped against is not the only shape
-  /// a person can have: two llama-servers on two machines are as ordinary as
-  /// one router serving both roles under `/prose` and `/bulk`.
-  ///
-  /// Empty is stored as empty, on [fastLlmUrl]'s rule and for its reason: the
-  /// compiled address is a fact about the build, and freezing today's value
-  /// into the database would make a changed [boxUrlDefault] invisible to
-  /// anyone who had once opened the wizard. [effectiveBoxBigUrl] is the one
-  /// place that resolves it.
+  /// Round H's `box_big_url`, reused (see [modelPlacement]). Empty is stored
+  /// as empty: the compiled address is a fact about the build, and freezing
+  /// today's value into the database would make a changed [boxUrlDefault]
+  /// invisible to anyone who had once opened the wizard.
+  /// [effectiveGenerativeUrl] is the one place that resolves it.
   final String boxBigUrl;
 
-  /// The SMALL model's address, on [boxBigUrl]'s rule. The same string as
-  /// [boxBigUrl] is allowed and ordinary: one server can serve both roles.
-  final String boxSmallUrl;
-
-  /// What the big server calls its model on the wire, DISCOVERED from the
-  /// server's own `/v1/models` rather than typed, or empty to follow the
-  /// build's constant.
+  /// What the generative remote calls its model on the wire, DISCOVERED from
+  /// the server's own `/v1/models` rather than typed, or empty to follow the
+  /// build's constant ([boxProseModel]).
   final String boxBigModel;
 
-  /// What the small server calls its model, on [boxBigModel]'s rule.
-  final String boxSmallModel;
-
-  /// Whether the box's access key is in the keychain. NOT the key, and NOT
-  /// persisted: the notifier sets it from the keychain when the prefetch
-  /// returns, and it is false until then.
+  /// Whether the generative remote's access key is in the keychain (entry
+  /// `box-prose`). NOT the key, and NOT persisted: the notifier sets it from
+  /// the keychain when the prefetch returns, and it is false until then.
   ///
   /// False-until-answered is deliberate. The prefetch is a round trip that the
   /// first drain can beat, and a derived spec that claimed a bearer it does
-  /// not yet hold would send one unauthenticated request per stage. Honest
-  /// here means the spec says `hasBearer: false` inside that window, and the
-  /// supervisor's first pump waits for `ready` besides.
-  final bool boxKeyStored;
-
-  /// Whether the BIG server's key is in the keychain, and the SMALL server's.
-  ///
-  /// [boxKeyStored] is either of them, which is what every routing question
-  /// asks; these two are what the form's two hints ask, because the addresses
-  /// may name two operators and a key for one is never sent to the other.
-  /// Neither is persisted, on [boxKeyStored]'s rule.
+  /// not yet hold would send one unauthenticated request per stage.
   final bool boxBigKeyStored;
-  final bool boxSmallKeyStored;
 
+  /// Which managed generative model this Mac serves: `''` to follow the
+  /// hardware tier (the 27B on [MachineTier.full], the 4B on
+  /// [MachineTier.inbox]), or [routerProseId] / [routerBulkId]. The 27B on
+  /// the inbox tier is refused by [managedGenerativeIdFor] and reads as the
+  /// 4B.
+  final String generativeManagedModel;
+
+  /// Where the DECISION model runs. [ModelPlacement.local] by default
+  /// whatever the build: it reads every message, and a local forward pass
+  /// beats any network hop.
+  final ModelPlacement decisionPlacement;
+
+  /// The decision remote's address, the FULL `/v1/embeddings` URL, or empty
+  /// to follow the build (`$BOND_BOX_URL/decide/v1/embeddings`).
+  final String decisionUrl;
+
+  /// What the decision remote calls its model, discovered, or empty for
+  /// [boxDecideModel].
+  final String decisionModel;
+
+  /// Whether the decision remote's key is in the keychain (entry
+  /// `box-decide`). Not persisted, on [boxBigKeyStored]'s rule.
+  final bool decisionKeyStored;
+
+  /// The optional cloud-drafts target: a chat-completions URL (or a Bedrock
+  /// runtime host) and its discovered model. Empty [cloudDraftsUrl] means no
+  /// cloud drafts at all. The ONE place a third-party service may serve, and
+  /// it serves `draft_reply` and `draft_improve` only, behind
+  /// [cloudDraftsConsent].
+  final String cloudDraftsUrl;
+  final String cloudDraftsModel;
+
+  /// Whether the cloud-drafts key is in the keychain (entry `cloud-drafts`).
+  /// Not persisted, on [boxBigKeyStored]'s rule.
+  final bool cloudDraftsKeyStored;
+
+  /// What this Mac can hold, read off its memory. NOT a preference and NOT
+  /// persisted: the notifier is told by `setMachineTier`, from the managed
+  /// server's preset build and from the placement writers, so resolution
+  /// stays synchronous. [MachineTier.full] until told — the never-refuse
+  /// rule `machineTierFor` states.
+  final MachineTier machineTier;
   /// Whether the model work runs at all.
   ///
   /// ON by default and REMEMBERED, unlike the session switch it replaced: a
@@ -254,20 +272,6 @@ class AppPrefs {
   /// the order the store's keyset walk already hands it over in and the order
   /// every other list in this app opens on.
   final HomeSort homeSort;
-
-  /// The bulk slot's server and model, or EMPTY for "whatever this build was
-  /// compiled with".
-  ///
-  /// Empty is stored as empty, deliberately unlike [mcpServerUrl] — which
-  /// resolves its default at read time. A model default is a fact about the
-  /// machine's `local.mk`, and resolving it at read would freeze today's
-  /// default into the database: change `FAST_LLAMA_MODEL` and the app would
-  /// keep asking for the old name because a settings screen had once been
-  /// opened. Empty means "follow the build", and it keeps meaning that.
-  final String fastLlmUrl;
-  final String fastLlmModel;
-  final String proseLlmUrl;
-  final String proseLlmModel;
 
   /// How many days of mail history a sync reaches back for. One per connector,
   /// because the two mailboxes are different sizes and a person who wants a
@@ -309,7 +313,7 @@ class AppPrefs {
 
   /// Where the GGUF files live, or EMPTY for the app's own folder.
   ///
-  /// Empty is stored as empty for [fastLlmUrl]'s reason: the app's folder is
+  /// Empty is stored as empty for [boxBigUrl]'s reason: the app's folder is
   /// derived from the application support directory at read time, and freezing
   /// today's path into the database would survive a move of the support
   /// directory as a stale absolute path. [effectiveModelsFolder] is the one
@@ -333,23 +337,6 @@ class AppPrefs {
   /// survives a `wipeAll` — how many slots this machine's server has is not a
   /// fact about whoever is signed in.
   final int proseParallel;
-
-  /// The targets the user added, and ONLY those.
-  ///
-  /// The two built-ins are derived — see [fastSpec] and [proseSpec] — so there
-  /// is one source of truth for where the local servers are: the four slot
-  /// prefs the two editors and the managed router already write. Stored as a
-  /// JSON array under [llmTargetsKey]; a row that does not parse is dropped on
-  /// the read rather than throwing.
-  final List<LlmTargetSpec> targets;
-
-  /// Which target each stage is pointed at — stage id to target id, and only
-  /// the entries that are NOT the stage's default.
-  ///
-  /// Storing non-defaults only is what makes a fresh install byte-identical to
-  /// the two-slot app: an absent entry resolves through [stageSlot] to the
-  /// built-in the stage always used.
-  final Map<String, String> stageTargets;
 
   /// Whether the owner has acknowledged what a third-party draft target
   /// receives. One acknowledgement for the machine, not one per target: what
@@ -398,40 +385,39 @@ class AppPrefs {
     this.draftPolicy = DraftPolicy.needsYou,
     this.modelPlacement = defaultModelPlacement,
     this.boxBigUrl = '',
-    this.boxSmallUrl = '',
     this.boxBigModel = '',
-    this.boxSmallModel = '',
-    this.boxKeyStored = false,
     this.boxBigKeyStored = false,
-    this.boxSmallKeyStored = false,
+    this.generativeManagedModel = '',
+    this.decisionPlacement = ModelPlacement.local,
+    this.decisionUrl = '',
+    this.decisionModel = '',
+    this.decisionKeyStored = false,
+    this.cloudDraftsUrl = '',
+    this.cloudDraftsModel = '',
+    this.cloudDraftsKeyStored = false,
+    this.machineTier = MachineTier.full,
     this.processingOn = true,
     this.peopleSort = PeopleSort.recent,
     this.roomSort = RoomSort.newest,
     this.notifyStyle = NotifyStyle.native,
     this.homeSort = HomeSort.newest,
-    this.fastLlmUrl = '',
-    this.fastLlmModel = '',
-    this.proseLlmUrl = '',
-    this.proseLlmModel = '',
     this.mailLookbackDays = syncFloorDays,
     this.teamsLookbackDays = syncFloorDays,
     this.managedServer = managedServerDefault,
     this.routerPort = defaultRouterPort,
     this.modelsFolder = '',
     this.proseParallel = defaultProseParallel,
-    this.targets = const [],
-    this.stageTargets = const {},
     this.cloudDraftsConsent = false,
     this.cloudDraftsStanding = false,
     this.cloudDraftsDailyCap = defaultCloudDraftsDailyCap,
   });
 
-  /// The managed router's origin — one server, three models.
+  /// The managed router's origin — one server, every model.
   String get routerBase => 'http://127.0.0.1:$routerPort';
 
-  /// The three targets the managed router answers on. Same origin, different
+  /// Two of the targets the managed router answers on. Same origin, different
   /// `model` field: llama-server in router mode routes on the name alone, so
-  /// the ids in `model_slots.dart` are the whole wiring between a slot and the
+  /// the ids in `model_slots.dart` are the whole wiring between a role and the
   /// weights behind it.
   LlmTarget get routerProseTarget =>
       LlmTarget(baseUrl: '$routerBase/v1/chat/completions', model: routerProseId);
@@ -442,48 +428,11 @@ class AppPrefs {
   LlmTarget get routerEmbedTarget =>
       LlmTarget(baseUrl: '$routerBase/v1/embeddings', model: routerEmbedId);
 
-  /// What the bulk client will dial on its next request.
-  ///
-  /// The router answers only when this slot is on the build's own values. A
-  /// stored override is a deliberate act — someone pointed the slot at a
-  /// server they run — and turning the managed server on must not silently
-  /// take it away from them; clearing the override is what hands the slot back
-  /// to the router.
-  LlmTarget get fastTarget =>
-      managedServer && fastLlmUrl.isEmpty && fastLlmModel.isEmpty
-          ? routerBulkTarget
-          : LlmTarget(
-              baseUrl: fastLlmUrl.isEmpty ? fastUrlDefault : fastLlmUrl,
-              model: fastLlmModel.isEmpty ? fastModelDefault : fastLlmModel,
-            );
-
-  LlmTarget get proseTarget =>
-      managedServer && proseLlmUrl.isEmpty && proseLlmModel.isEmpty
-          ? routerProseTarget
-          : LlmTarget(
-              baseUrl: proseLlmUrl.isEmpty ? proseUrlDefault : proseLlmUrl,
-              model: proseLlmModel.isEmpty ? proseModelDefault : proseLlmModel,
-            );
-
-  /// One slot's target, for the settings screen's table. [ModelSlot.embed] is
-  /// display only — its model is the CORPUS TAG the vectors were written
-  /// under, never a name a request carries, which is why the managed answer
-  /// here is still a display value and [embedRequestTarget] is the one the
-  /// wire uses.
-  LlmTarget targetFor(ModelSlot slot) => switch (slot) {
-        ModelSlot.fast => fastTarget,
-        ModelSlot.prose => proseTarget,
-        ModelSlot.embed => managedServer ? routerEmbedTarget : embedSlotDefault,
-      };
-
-  /// Where the embedding client actually POSTs, and what it puts in `model`.
-  ///
-  /// Deliberately NOT `targetFor(ModelSlot.embed)`: the display target's model
-  /// is [EmbeddingsClient.modelTag], the corpus tag stored beside every vector,
-  /// and sending that to a server would ask for a model no server has. The
-  /// request target's model is what the wire carries — the router's id when the
-  /// app runs the server, and the literal `'embed'` llama-server has always
-  /// ignored when it does not.
+  /// Where the embedding client actually POSTs, and what it puts in `model`:
+  /// the router's id when the app runs the server, and the literal `'embed'`
+  /// llama-server has always ignored when it does not. Never
+  /// [EmbeddingsClient.modelTag], the corpus tag stored beside every vector,
+  /// which no server serves.
   LlmTarget get embedRequestTarget => managedServer
       ? routerEmbedTarget
       : const LlmTarget(
@@ -491,208 +440,189 @@ class AppPrefs {
           model: EmbeddingsClient.requestModel,
         );
 
-  /// What "Default" means for a slot's editor RIGHT NOW: the router target
-  /// while the app runs its own server, the compiled default otherwise. The
-  /// editor normalises a saved value equal to this back to the empty string,
-  /// so pressing Save on an untouched editor keeps the slot following the
-  /// router instead of freezing today's port into an override.
-  LlmTarget slotBaseline(ModelSlot slot) => switch (slot) {
-        ModelSlot.fast => managedServer ? routerBulkTarget : fastSlotDefault,
-        ModelSlot.prose => managedServer ? routerProseTarget : proseSlotDefault,
-        ModelSlot.embed => managedServer ? routerEmbedTarget : embedSlotDefault,
-      };
-
-  /// Whether this slot is on the build's own default — what the screen renders
-  /// as "Default" rather than as an override.
-  bool isSlotDefault(ModelSlot slot) => switch (slot) {
-        ModelSlot.fast => fastLlmUrl.isEmpty && fastLlmModel.isEmpty,
-        ModelSlot.prose => proseLlmUrl.isEmpty && proseLlmModel.isEmpty,
-        ModelSlot.embed => true,
-      };
-
-  /// The built-in fast target, as a spec.
-  ///
-  /// DERIVED from [fastTarget] rather than stored, which is the whole of why
-  /// targets-as-data did not fork the model settings: the four slot prefs,
-  /// [slotBaseline] and the managed router all still mean exactly what they
-  /// meant, and this is a second view of them.
-  LlmTargetSpec get fastSpec => LlmTargetSpec(
-        id: builtInFastId,
-        name: builtInFastName,
-        url: fastTarget.baseUrl,
-        model: fastTarget.model,
-      );
-
-  /// The built-in prose target, on [fastSpec]'s rule. Its width is
-  /// [proseParallel] — the pref the segmented control writes — so a draft
-  /// pointed at this target reads the number it always read.
-  LlmTargetSpec get proseSpec => LlmTargetSpec(
-        id: builtInProseId,
-        name: builtInProseName,
-        url: proseTarget.baseUrl,
-        model: proseTarget.model,
-        parallel: proseParallel,
-      );
-
-  /// The origin the build was compiled with, as the two derived URLs are
-  /// built from it. Empty in the test suite and in any build that passed no
-  /// define.
+  /// The origin the build was compiled with, as the derived URLs are built
+  /// from it. Empty in the test suite and in any build that passed no define.
   static String get _compiledBase => normalizeBoxBaseUrl(boxUrlDefault);
 
-  /// The BIG model's address as a request will dial it: the stored URL when
-  /// there is one, and the build's own `/prose` derivation otherwise.
-  String get effectiveBoxBigUrl => boxBigUrl.isNotEmpty
+  // ── Generative ─────────────────────────────────────────────────────────
+
+  /// [modelPlacement] under its role's name.
+  ModelPlacement get generativePlacement => modelPlacement;
+
+  /// [boxBigUrl] and [boxBigModel] under their role's names: the STORED
+  /// values, empty for "follow the build".
+  String get generativeUrl => boxBigUrl;
+  String get generativeModel => boxBigModel;
+
+  /// The generative remote's address as a request will dial it: the stored
+  /// URL when there is one, and the build's own `/prose` derivation otherwise.
+  String get effectiveGenerativeUrl => boxBigUrl.isNotEmpty
       ? normalizeBoxBaseUrl(boxBigUrl)
       : (_compiledBase.isEmpty
           ? ''
           : '$_compiledBase/prose/v1/chat/completions');
 
-  /// The SMALL model's address, on [effectiveBoxBigUrl]'s rule and the
-  /// build's `/bulk` derivation.
-  String get effectiveBoxSmallUrl => boxSmallUrl.isNotEmpty
-      ? normalizeBoxBaseUrl(boxSmallUrl)
-      : (_compiledBase.isEmpty
-          ? ''
-          : '$_compiledBase/bulk/v1/chat/completions');
-
-  /// What the big server is asked for, and the small one: the discovered name
-  /// when there is one, and the constant the compiled box serves otherwise.
-  String get effectiveBoxBigModel =>
+  /// What the generative remote is asked for: the discovered name, or the
+  /// constant the compiled box serves.
+  String get effectiveGenerativeModel =>
       boxBigModel.isEmpty ? boxProseModel : boxBigModel;
 
-  String get effectiveBoxSmallModel =>
-      boxSmallModel.isEmpty ? boxBulkModel : boxSmallModel;
-
-  /// Whether this install knows where BOTH models run.
-  ///
-  /// The whole of what the placement rule needs to know about the
-  /// user-defined pair, and both halves of it, because a rule that sent the
-  /// big stages to an address and the small ones nowhere would park half the
-  /// pipeline. False in the test suite and in any build that passed no define,
+  /// Whether this install knows where a generative remote is. False in the
+  /// test suite and in any build that passed no define and stored no address,
   /// which is why [defaultModelPlacement] resolves to this Mac there.
-  bool get hasBox =>
-      effectiveBoxBigUrl.isNotEmpty && effectiveBoxSmallUrl.isNotEmpty;
+  bool get hasGenerativeServer => effectiveGenerativeUrl.isNotEmpty;
 
-  /// The box's inbox target, as a spec.
-  ///
-  /// DERIVED from the four pair prefs on [fastSpec]'s rule, and that is the
-  /// change Round H is: the box used to be two rows in `llm_targets` that a
-  /// button wrote, so a fresh install was on this Mac until somebody found the
-  /// button. One address in, two targets out, nothing stored.
-  ///
-  /// The width is four only for an address that FOLLOWS THE BUILD: the
-  /// compiled box is two vLLM servers started with four sequences each, which
-  /// is a fact about that machine. A stored address is one request at a time,
-  /// because a one-slot llama-server queues the other three past the prose
-  /// client's ninety-second ceiling and reads as a server that is broken.
-  ///
-  /// The WIRE is read off the host, so a Bedrock endpoint typed into the form
-  /// speaks Converse without anybody choosing a protocol; [hasBearer] follows
-  /// [boxKeyStored] and is honest about the window before the keychain has
-  /// answered.
-  LlmTargetSpec get boxBulkSpec => LlmTargetSpec(
-        id: boxBulkId,
-        name: boxBulkName,
-        url: effectiveBoxSmallUrl,
-        model: effectiveBoxSmallModel,
-        wire: wireForHost(effectiveBoxSmallUrl),
-        hasBearer: boxKeyStored,
-        parallel: boxSmallUrl.isEmpty ? 4 : 1,
-      );
+  /// The managed generative model's router id on this Mac's tier.
+  String get managedGenerativeId =>
+      managedGenerativeIdFor(machineTier, generativeManagedModel);
 
-  /// The box's writing target, on [boxBulkSpec]'s rule.
-  LlmTargetSpec get boxProseSpec => LlmTargetSpec(
+  /// Whether [url] may serve a role that reads every message: not a third
+  /// party and not the Converse wire. The writers refuse such an address;
+  /// this is the belt at resolution, so a hand-edited row cannot route every
+  /// message off to a vendor.
+  static bool _ownServer(String url) =>
+      !isThirdPartyHost(url) && wireForHost(url) != LlmWire.bedrockConverse;
+
+  /// THE generative target — every text stage resolves here (drafts too,
+  /// unless [cloudDraftsSpec] takes them).
+  ///
+  /// Your server when the placement says so and there is an address to dial;
+  /// else this Mac: the managed router with the tier's chosen model, or the
+  /// hand-started prose server of a `BOND_DEV_HAND_SERVERS` build. The remote
+  /// is four requests wide only when its URL FOLLOWS THE BUILD (the compiled
+  /// box is vLLM with four sequences); a stored address is one at a time,
+  /// because a one-slot llama-server queues the rest past the prose client's
+  /// ceiling. The wire is read off the host.
+  LlmTargetSpec get generativeSpec {
+    final url = effectiveGenerativeUrl;
+    if (modelPlacement == ModelPlacement.box &&
+        url.isNotEmpty &&
+        _ownServer(url)) {
+      return LlmTargetSpec(
         id: boxProseId,
         name: boxProseName,
-        url: effectiveBoxBigUrl,
-        model: effectiveBoxBigModel,
-        wire: wireForHost(effectiveBoxBigUrl),
-        hasBearer: boxKeyStored,
+        url: url,
+        model: effectiveGenerativeModel,
+        wire: wireForHost(url),
+        hasBearer: boxBigKeyStored,
         parallel: boxBigUrl.isEmpty ? 4 : 1,
       );
+    }
+    if (managedServer) {
+      return LlmTargetSpec(
+        id: localGenerativeId,
+        name: localGenerativeName,
+        url: '$routerBase/v1/chat/completions',
+        model: managedGenerativeId,
+        parallel: proseParallel,
+      );
+    }
+    return LlmTargetSpec(
+      id: localGenerativeId,
+      name: localGenerativeName,
+      url: proseUrlDefault,
+      model: proseModelDefault,
+      parallel: proseParallel,
+    );
+  }
 
-  /// Every target a stage may be pointed at: the two built-ins, the box's two
-  /// when there is an address for them, and the ones the user added.
-  List<LlmTargetSpec> get allTargets => [
-        fastSpec,
-        proseSpec,
-        if (hasBox) ...[boxBulkSpec, boxProseSpec],
-        ...targets,
-      ];
+  // ── Decision ───────────────────────────────────────────────────────────
 
-  /// One target by id, or null when nothing carries it.
+  /// The decision remote's address as a request will dial it: the stored URL,
+  /// or the build's own `/decide` derivation.
+  String get effectiveDecisionUrl => decisionUrl.isNotEmpty
+      ? normalizeBoxBaseUrl(decisionUrl)
+      : (_compiledBase.isEmpty ? '' : '$_compiledBase/decide/v1/embeddings');
+
+  /// What the decision remote is asked for.
+  String get effectiveDecisionModel =>
+      decisionModel.isEmpty ? boxDecideModel : decisionModel;
+
+  bool get hasDecisionServer => effectiveDecisionUrl.isNotEmpty;
+
+  /// THE decision target, on [generativeSpec]'s rule: Your server when the
+  /// decision placement says so and there is an address; else the managed
+  /// router's `/v1/embeddings` under [routerDecideId]; else the hand-started
+  /// `make decide` server. The heads always run here, off the local heads
+  /// file, whichever server embeds.
+  LlmTargetSpec get decisionSpec {
+    final url = effectiveDecisionUrl;
+    if (decisionPlacement == ModelPlacement.box &&
+        url.isNotEmpty &&
+        _ownServer(url)) {
+      return LlmTargetSpec(
+        id: boxDecideId,
+        name: boxDecideName,
+        url: url,
+        model: effectiveDecisionModel,
+        wire: wireForHost(url),
+        hasBearer: decisionKeyStored,
+      );
+    }
+    if (managedServer) {
+      return LlmTargetSpec(
+        id: localDecisionId,
+        name: localDecisionName,
+        url: '$routerBase/v1/embeddings',
+        model: routerDecideId,
+      );
+    }
+    return const LlmTargetSpec(
+      id: localDecisionId,
+      name: localDecisionName,
+      url: decideUrlDefault,
+      model: decideModelDefault,
+    );
+  }
+
+  // ── Cloud drafts ───────────────────────────────────────────────────────
+
+  /// The optional cloud-drafts target, or null when none is set (an address
+  /// without a model is not a target: a request has to name one).
+  LlmTargetSpec? get cloudDraftsSpec {
+    final url = normalizeBoxBaseUrl(cloudDraftsUrl);
+    if (url.isEmpty || cloudDraftsModel.isEmpty) return null;
+    return LlmTargetSpec(
+      id: cloudDraftsId,
+      name: cloudDraftsName,
+      url: url,
+      model: cloudDraftsModel,
+      wire: wireForHost(url),
+      hasBearer: cloudDraftsKeyStored,
+    );
+  }
+
+  // ── Routing ────────────────────────────────────────────────────────────
+
+  /// The spec a stage will dial — THE ROUTING RULE, with the consent gate
+  /// applied.
+  ///
+  /// `embeddings` is not routed (null). `decision` is [decisionSpec]. The two
+  /// draft stages go to [cloudDraftsSpec] when one is set AND it is either
+  /// the owner's own host or [cloudDraftsConsent] stands; otherwise, and for
+  /// every other stage, [generativeSpec]. Consent is checked HERE rather than
+  /// only on the screen that sets it, so prefs restored from a backup or
+  /// edited by hand cannot route a draft off this machine on their own.
+  LlmTargetSpec? specForStage(String stageId) {
+    if (stageId == 'embeddings') return null;
+    if (stageId == 'decision') return decisionSpec;
+    if (draftStageIds.contains(stageId)) {
+      final cloud = cloudDraftsSpec;
+      if (cloud != null && (!cloud.isThirdParty || cloudDraftsConsent)) {
+        return cloud;
+      }
+    }
+    return generativeSpec;
+  }
+
+  /// One of the current fixed specs by id, or null when none carries it —
+  /// what the composer's `Improved with <name>` reads back off a draft row.
   LlmTargetSpec? specById(String id) {
-    for (final spec in allTargets) {
-      if (spec.id == id) return spec;
+    for (final spec in [generativeSpec, decisionSpec, cloudDraftsSpec]) {
+      if (spec != null && spec.id == id) return spec;
     }
     return null;
   }
-
-  /// Where a stage goes when nothing is stored for it — the placement rule,
-  /// read through this install's address and placement.
-  ///
-  /// The one door between [placementDefaultTargetId] and everything that asks
-  /// a routing question, so that the rule is stated once and the three methods
-  /// that mean "equal to the default, so store nothing" all mean the same
-  /// thing by it.
-  String? defaultTargetIdForStage(String stageId) => placementDefaultTargetId(
-        placement: modelPlacement,
-        hasBox: hasBox,
-        stageId: stageId,
-      );
-
-  /// Which target id a stage resolves to: the stored entry when it names a
-  /// target that still exists, and the placement's default otherwise.
-  ///
-  /// Null for `embeddings`, which is not routed at all, and for an optional
-  /// stage with no valid entry — that is what "the feature is off" looks like
-  /// in the data.
-  String? targetIdForStage(String stageId) {
-    final stored = stageTargets[stageId];
-    if (stored != null && specById(stored) != null) return stored;
-    return defaultTargetIdForStage(stageId);
-  }
-
-  /// The spec a stage will dial, with the consent rule applied.
-  ///
-  /// A THIRD-PARTY target on either drafting stage without
-  /// [cloudDraftsConsent] resolves to [draftFallbackSpec] instead — the two
-  /// stages whose prompt carries the message, the thread tail and whatever the
-  /// directories contributed. Consent is checked HERE rather than only on the
-  /// screen that sets it so that a stage map restored from a backup, or edited
-  /// by hand, cannot route a draft off this machine on its own. Never null for
-  /// a chat stage.
-  LlmTargetSpec? specForStage(String stageId) {
-    final id = targetIdForStage(stageId);
-    if (id == null) return null;
-    final spec = specById(id);
-    if (spec == null) return null;
-    final gated = draftStageIds.contains(stageId);
-    if (gated && spec.isThirdParty && !cloudDraftsConsent) {
-      return draftFallbackSpec;
-    }
-    return spec;
-  }
-
-  /// Where a gated draft goes instead: the box's writing target on the box,
-  /// and the built-in prose target here.
-  ///
-  /// It FOLLOWS THE PLACEMENT, which it did not before Round H. A box install
-  /// that withdrew cloud-drafts consent used to have its drafts fall back to a
-  /// local port with no server behind it, and the lane parked. The fallback
-  /// has to be somewhere the work can actually run.
-  ///
-  /// And never to a THIRD PARTY. A big address under Bedrock or a vendor is
-  /// exactly what the consent gate refused, so falling back onto it would send
-  /// the draft to the operator the owner declined; this Mac's own prose target
-  /// is the honest answer there.
-  LlmTargetSpec get draftFallbackSpec =>
-      modelPlacement == ModelPlacement.box &&
-              hasBox &&
-              !boxProseSpec.isThirdParty
-          ? boxProseSpec
-          : proseSpec;
-
   /// The folder the router is pointed at: the user's choice, or the app's own
   /// `models/` under Application Support when they have not made one.
   String effectiveModelsFolder(AppPaths paths) =>
@@ -718,29 +648,28 @@ class AppPrefs {
     DraftPolicy? draftPolicy,
     ModelPlacement? modelPlacement,
     String? boxBigUrl,
-    String? boxSmallUrl,
     String? boxBigModel,
-    String? boxSmallModel,
-    bool? boxKeyStored,
     bool? boxBigKeyStored,
-    bool? boxSmallKeyStored,
+    String? generativeManagedModel,
+    ModelPlacement? decisionPlacement,
+    String? decisionUrl,
+    String? decisionModel,
+    bool? decisionKeyStored,
+    String? cloudDraftsUrl,
+    String? cloudDraftsModel,
+    bool? cloudDraftsKeyStored,
+    MachineTier? machineTier,
     bool? processingOn,
     PeopleSort? peopleSort,
     RoomSort? roomSort,
     NotifyStyle? notifyStyle,
     HomeSort? homeSort,
-    String? fastLlmUrl,
-    String? fastLlmModel,
-    String? proseLlmUrl,
-    String? proseLlmModel,
     int? mailLookbackDays,
     int? teamsLookbackDays,
     bool? managedServer,
     int? routerPort,
     String? modelsFolder,
     int? proseParallel,
-    List<LlmTargetSpec>? targets,
-    Map<String, String>? stageTargets,
     bool? cloudDraftsConsent,
     bool? cloudDraftsStanding,
     int? cloudDraftsDailyCap,
@@ -760,29 +689,29 @@ class AppPrefs {
         draftPolicy: draftPolicy ?? this.draftPolicy,
         modelPlacement: modelPlacement ?? this.modelPlacement,
         boxBigUrl: boxBigUrl ?? this.boxBigUrl,
-        boxSmallUrl: boxSmallUrl ?? this.boxSmallUrl,
         boxBigModel: boxBigModel ?? this.boxBigModel,
-        boxSmallModel: boxSmallModel ?? this.boxSmallModel,
-        boxKeyStored: boxKeyStored ?? this.boxKeyStored,
         boxBigKeyStored: boxBigKeyStored ?? this.boxBigKeyStored,
-        boxSmallKeyStored: boxSmallKeyStored ?? this.boxSmallKeyStored,
+        generativeManagedModel:
+            generativeManagedModel ?? this.generativeManagedModel,
+        decisionPlacement: decisionPlacement ?? this.decisionPlacement,
+        decisionUrl: decisionUrl ?? this.decisionUrl,
+        decisionModel: decisionModel ?? this.decisionModel,
+        decisionKeyStored: decisionKeyStored ?? this.decisionKeyStored,
+        cloudDraftsUrl: cloudDraftsUrl ?? this.cloudDraftsUrl,
+        cloudDraftsModel: cloudDraftsModel ?? this.cloudDraftsModel,
+        cloudDraftsKeyStored: cloudDraftsKeyStored ?? this.cloudDraftsKeyStored,
+        machineTier: machineTier ?? this.machineTier,
         processingOn: processingOn ?? this.processingOn,
         peopleSort: peopleSort ?? this.peopleSort,
         roomSort: roomSort ?? this.roomSort,
         notifyStyle: notifyStyle ?? this.notifyStyle,
         homeSort: homeSort ?? this.homeSort,
-        fastLlmUrl: fastLlmUrl ?? this.fastLlmUrl,
-        fastLlmModel: fastLlmModel ?? this.fastLlmModel,
-        proseLlmUrl: proseLlmUrl ?? this.proseLlmUrl,
-        proseLlmModel: proseLlmModel ?? this.proseLlmModel,
         mailLookbackDays: mailLookbackDays ?? this.mailLookbackDays,
         teamsLookbackDays: teamsLookbackDays ?? this.teamsLookbackDays,
         managedServer: managedServer ?? this.managedServer,
         routerPort: routerPort ?? this.routerPort,
         modelsFolder: modelsFolder ?? this.modelsFolder,
         proseParallel: proseParallel ?? this.proseParallel,
-        targets: targets ?? this.targets,
-        stageTargets: stageTargets ?? this.stageTargets,
         cloudDraftsConsent: cloudDraftsConsent ?? this.cloudDraftsConsent,
         cloudDraftsStanding: cloudDraftsStanding ?? this.cloudDraftsStanding,
         cloudDraftsDailyCap: cloudDraftsDailyCap ?? this.cloudDraftsDailyCap,
@@ -807,10 +736,6 @@ const String peopleSortKey = 'people_sort';
 const String roomSortKey = 'person_room_sort';
 const String notifyStyleKey = 'notify_style';
 const String homeSortKey = 'home_sort';
-const String fastLlmUrlKey = 'fast_llm_url';
-const String fastLlmModelKey = 'fast_llm_model';
-const String proseLlmUrlKey = 'prose_llm_url';
-const String proseLlmModelKey = 'prose_llm_model';
 const String mailLookbackDaysKey = 'mail_lookback_days';
 const String teamsLookbackDaysKey = 'teams_lookback_days';
 
@@ -825,34 +750,55 @@ const String modelsFolderKey = 'models_folder';
 /// three keys above's reason — see [AppPrefs.proseParallel].
 const String proseParallelKey = 'prose_parallel';
 
-/// The three routing keys. Machine configuration like the four above and out
-/// of `wipeAll`'s list for their reason: which servers this machine can reach
-/// is not a fact about whoever is signed in.
-///
-/// [llmTargetsKey] is a JSON array of user-added [LlmTargetSpec]s;
-/// [stageTargetsKey] a JSON object of stage id to target id, non-defaults
-/// only; [cloudDraftsConsentKey] the string `'true'` or nothing.
+/// Two INERT keys since the decision-model round, kept only for the frozen
+/// one-shots below that still read them: [llmTargetsKey] (a JSON array of
+/// user-added [LlmTargetSpec]s) and [stageTargetsKey] (a JSON object of stage
+/// id to target id). Nothing routes through either any more.
 const String llmTargetsKey = 'llm_targets';
 const String stageTargetsKey = 'stage_targets';
+
+/// Machine configuration and out of `wipeAll`'s list: how much this machine
+/// may send elsewhere is not a fact about whoever is signed in. The string
+/// `'true'` or nothing.
 const String cloudDraftsConsentKey = 'cloud_drafts_consent';
 
-/// Where this install's model work runs — `ModelPlacement.name`.
+/// Where the GENERATIVE model runs — `ModelPlacement.name`. Round H's global
+/// placement key, reused for the generative role.
 ///
-/// Machine configuration like the three keys above and out of `wipeAll`'s list
-/// for their reason: whether this Mac reaches the shared GPU box is not a fact
-/// about whoever is signed in.
+/// Machine configuration like the keys above and out of `wipeAll`'s list for
+/// their reason: whether this Mac reaches the owner's server is not a fact
+/// about whoever is signed in. Every model-routing key below is the same.
 const String modelPlacementKey = 'model_placement';
 
-/// The user-defined pair: two chat-completions URLs and the two model names
-/// discovered behind them, each empty for "follow the build". Machine
-/// configuration like [modelPlacementKey] beside them and out of `wipeAll`'s
-/// list for its reason.
+/// The generative remote: a chat-completions URL and the model name
+/// discovered behind it, each empty for "follow the build". Round H's
+/// big-model keys, reused.
 const String boxBigUrlKey = 'box_big_url';
-const String boxSmallUrlKey = 'box_small_url';
 const String boxBigModelKey = 'box_big_model';
+
+/// Round H's SMALL-model keys. Inert since the decision-model round (the
+/// small model's work went to the decision model and the one generative
+/// model), and kept only because two one-shots read them: `_splitBoxServers`
+/// (frozen) and `_deriveModelRoles`.
+const String boxSmallUrlKey = 'box_small_url';
 const String boxSmallModelKey = 'box_small_model';
 
-/// The ONE origin the four keys above replaced, kept for the two migrations
+/// The managed generative model: `''`, `bond-prose` or `bond-bulk`.
+const String generativeManagedModelKey = 'generative_managed_model';
+
+/// The decision role: its placement (`ModelPlacement.name`, absent =
+/// local), its remote `/v1/embeddings` URL and discovered model (each empty
+/// for "follow the build").
+const String decisionPlacementKey = 'decision_placement';
+const String decisionUrlKey = 'decision_url';
+const String decisionModelKey = 'decision_model';
+
+/// The optional cloud-drafts target's URL and discovered model. Empty URL =
+/// no cloud drafts.
+const String cloudDraftsUrlKey = 'cloud_drafts_url';
+const String cloudDraftsModelKey = 'cloud_drafts_model';
+
+/// The ONE origin the Round H URLs replaced, kept for the two migrations
 /// that read it and written by nothing. Round G stored the box as an origin
 /// and derived both URLs from it; Round H splits it in two.
 const String boxUrlKey = 'box_url';
@@ -888,6 +834,110 @@ const String boxServersDerivedKey = 'box_servers_derived';
 /// are inert, and deleting them would ask for a keychain sweep for no visible
 /// payoff. A PLAIN pref on [boxTargetsDerivedKey]'s rule.
 const String stageTargetsClearedKey = 'stage_targets_cleared';
+
+/// The one-shot flag over the decision-model round's role split, written by
+/// [AppPrefsNotifier.read] through `_deriveModelRoles`.
+///
+/// Three kinds of value. Absent: not run. [modelRolesDoneValue] (`'1'`):
+/// done. A PENDING value, [modelRolesPendingPrefix] followed by the keychain
+/// moves still owed, comma-separated in the order they run:
+/// [modelRolesMoveProseToCloud] (the vendor key under `box-prose` becomes the
+/// cloud-drafts key), [modelRolesDropProse] (the vendor key is deleted) and
+/// [modelRolesMoveBulkToProse] (the owner's own small-server key becomes the
+/// generative key). The pending value is written BEFORE the preferences move,
+/// so a crash between the two re-runs only the keychain half; each move
+/// advances the value only after a read-back confirms it; and while any move
+/// is owed the notifier attaches no `box-prose` token at all. A PLAIN pref on
+/// [boxTargetsDerivedKey]'s rule.
+const String modelRolesDerivedKey = 'model_roles_derived';
+const String modelRolesDoneValue = '1';
+const String modelRolesPendingPrefix = 'pending:';
+const String modelRolesMoveProseToCloud = 'prose>cloud';
+const String modelRolesDropProse = 'prose>x';
+const String modelRolesMoveBulkToProse = 'bulk>prose';
+
+/// Whether [flag] says keychain moves are still owed.
+bool modelRolesPending(String? flag) =>
+    flag != null && flag.startsWith(modelRolesPendingPrefix);
+
+/// Where the generative role lands after a third-party big address.
+enum GenerativeAfterVendor {
+  /// The owner's own stored small server becomes the generative remote.
+  small,
+
+  /// The small server followed the build: the generative remote follows the
+  /// build's `/prose` too (`box_big_url` emptied, the placement kept).
+  followBuild,
+
+  /// Nothing of the owner's to dial: the generative model comes home.
+  local,
+}
+
+/// What `_deriveModelRoles` does to a Round H install whose big address is a
+/// third party. A value, so the decision is a PURE function
+/// ([planModelRoles]) a test can drive with any compiled address.
+@immutable
+class ModelRolesPlan {
+  /// Whether the vendor address becomes the cloud-drafts target.
+  final bool adoptCloud;
+  final GenerativeAfterVendor generative;
+
+  /// The keychain moves owed, in order.
+  final List<String> moves;
+
+  const ModelRolesPlan({
+    required this.adoptCloud,
+    required this.generative,
+    required this.moves,
+  });
+}
+
+/// The role split's decision, or null when [bigUrl] is not a third party
+/// (every other shape is a no-op: the keys were reused).
+///
+/// A vendor big address is ADOPTED as cloud drafts only when the owner was
+/// actually using it and had agreed to it: the effective generative
+/// [placement] was the box, [consent] stood, and a model name had been
+/// discovered. Anything else is an address the owner walked away from, and
+/// it is dropped along with its key rather than turned into a live target.
+/// The generative role then goes to the owner's own stored small server,
+/// else follows the build when the small server did ([compiledBase] non-empty
+/// and no small address stored), else comes home to this Mac.
+ModelRolesPlan? planModelRoles({
+  required String bigUrl,
+  required String bigModel,
+  required String smallUrl,
+  required ModelPlacement placement,
+  required bool consent,
+  required String compiledBase,
+}) {
+  bool ownServer(String url) =>
+      !isThirdPartyHost(url) && wireForHost(url) != LlmWire.bedrockConverse;
+  if (bigUrl.isEmpty || ownServer(bigUrl)) return null;
+  final adopt =
+      placement == ModelPlacement.box && consent && bigModel.isNotEmpty;
+  final small = normalizeBoxBaseUrl(smallUrl);
+  final GenerativeAfterVendor generative;
+  if (small.isNotEmpty && isBoxOrigin(small) && ownServer(small)) {
+    generative = GenerativeAfterVendor.small;
+  } else if (small.isEmpty && compiledBase.isNotEmpty) {
+    generative = GenerativeAfterVendor.followBuild;
+  } else {
+    generative = GenerativeAfterVendor.local;
+  }
+  return ModelRolesPlan(
+    adoptCloud: adopt,
+    generative: generative,
+    moves: [
+      adopt ? modelRolesMoveProseToCloud : modelRolesDropProse,
+      if (generative != GenerativeAfterVendor.local) modelRolesMoveBulkToProse,
+    ],
+  );
+}
+
+/// Round H's small-model keychain id, which only `_deriveModelRoles` still
+/// names: it is where an existing install's small-server key lives.
+const String legacyBoxBulkId = 'box-bulk';
 
 /// The two cloud-draft rules the consent stands in front of. Machine
 /// configuration like the three keys above and out of `wipeAll`'s list for
@@ -948,41 +998,50 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       : _tokens = tokens,
         super(initial ?? const AppPrefs()) {
     // The load FIRST and the prefetch after it, in that order and not in
-    // parallel: the prefetch reads `state.targets` to know which ids have a
-    // token, and a `Future.wait` of the two would run it against the defaults.
-    ready = (initial != null ? Future<void>.value() : _load())
+    // parallel. With [initial] supplied the load already happened in
+    // `main()`, which has no token store, so the one keychain step the
+    // role-split migration may still owe is finished here instead — and
+    // before the prefetch, so the cache never holds a token under the id it
+    // is about to leave.
+    ready = (initial != null
+            ? finishModelRoles(_store, _tokens)
+            : _load())
         .then((_) => _loadBearers());
   }
 
   Future<void> _load() async {
-    final prefs = await read(_store);
+    final prefs = await read(_store, tokens: _tokens);
     if (!mounted) return;
-    state = prefs;
+    // The machine tier is not stored; a load must not reset one already
+    // learned.
+    state = prefs.copyWith(machineTier: state.machineTier);
   }
 
-  /// Fills the bearer cache from the keychain, once, and records whether the
-  /// box's key is among what came back.
+  /// Fills the bearer cache from the keychain, once, and records which of
+  /// the three keyed targets have one.
   ///
   /// A no-op with no keychain. Guarded whole: a keychain that refuses costs
   /// the header on the next request — one 401 the user can see and act on —
-  /// and never the launch.
-  ///
-  /// The two box ids are asked for UNCONDITIONALLY, unlike the stored rows,
-  /// because the derived specs have no row to carry a presence flag on: the
-  /// keychain is the only thing that knows, and a miss is one absent entry the
-  /// per-id try already swallows.
+  /// and never the launch. The three ids are asked for UNCONDITIONALLY,
+  /// because the derived specs have no stored row to carry a presence flag
+  /// on: the keychain is the only thing that knows.
   Future<void> _loadBearers() async {
     final tokens = _tokens;
     if (tokens == null) return;
-    final wanted = <String>{
-      for (final spec in state.targets)
-        if (spec.hasBearer) spec.id,
-      boxProseId,
-      boxBulkId,
-    };
-    for (final id in wanted) {
+    // While the role split still owes keychain moves, `box-prose` may hold a
+    // VENDOR's key; the generative remote goes keyless (a 401 park the owner
+    // can fix) rather than send it to the owner's server.
+    var pending = true;
+    try {
+      pending = modelRolesPending(await _store.getPref(modelRolesDerivedKey));
+    } catch (_) {}
+    for (final id in [
+      if (!pending) boxProseId,
+      boxDecideId,
+      cloudDraftsId,
+    ]) {
       // The try sits INSIDE the loop: one key the keychain refuses costs that
-      // one target its header, not every target after it in the list.
+      // one target its header, not every target after it.
       try {
         final value = await tokens.read('$llmTargetBearerKeyPrefix$id');
         if (value != null && value.isNotEmpty) _bearers[id] = value;
@@ -992,28 +1051,24 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       }
     }
     // The flags move only now, which is what makes the window honest: until
-    // this line every derived box spec has said `hasBearer: false`. Either
-    // entry counts for [AppPrefs.boxKeyStored], because a keychain that kept
-    // one and lost the other still holds a key; the two per-id flags are what
-    // the form's hints read, since the two addresses may name two operators.
+    // this line every derived spec has said `hasBearer: false`.
     if (!mounted) return;
-    final big = _bearers.containsKey(boxProseId);
-    final small = _bearers.containsKey(boxBulkId);
     state = state.copyWith(
-      boxKeyStored: big || small,
-      boxBigKeyStored: big,
-      boxSmallKeyStored: small,
+      boxBigKeyStored: _bearers.containsKey(boxProseId),
+      decisionKeyStored: _bearers.containsKey(boxDecideId),
+      cloudDraftsKeyStored: _bearers.containsKey(cloudDraftsId),
     );
   }
 
   /// Where a stage's next request goes, bearer included.
   ///
-  /// The one resolver `stageLlmClientProvider` calls, at the top of every
-  /// request. Synchronous by construction — the token is already in
-  /// [_bearers] — because it runs on a drain's hot path.
+  /// The one resolver `stageLlmClientProvider` and the decision client call,
+  /// at the top of every request. Synchronous by construction — the token is
+  /// already in [_bearers] — because it runs on a drain's hot path.
+  /// `embeddings` has no spec and answers the embedding request target.
   LlmTarget targetForStage(String stageId) {
     final spec = state.specForStage(stageId);
-    if (spec == null) return state.targetFor(stageSlot(stageId));
+    if (spec == null) return state.embedRequestTarget;
     return spec.toTarget(bearer: spec.hasBearer ? _bearers[spec.id] : null);
   }
 
@@ -1033,14 +1088,20 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// hand-edited, or written by a build that meant something else by the key —
   /// falls back to the default rather than throwing: a bad preference must not
   /// be able to stop the app from starting.
-  static Future<AppPrefs> read(MessageStore store) async {
-    // The THREE one-shots, in this order and no other. The Round G derive
+  ///
+  /// [tokens] is the keychain, for the one migration step that moves a
+  /// token. `main()`'s preload passes none, and the notifier finishes that
+  /// step on its own load — see [modelRolesDerivedKey].
+  static Future<AppPrefs> read(MessageStore store, {TokenStore? tokens}) async {
+    // The FOUR one-shots, in this order and no other. The Round G derive
     // needs the old `box-prose` row and writes [boxUrlKey]; the split reads
-    // what it wrote; the clear runs last, because both of the others can leave
-    // stage entries behind and the clear is what empties the lot.
+    // what it wrote; the clear runs after both, because both can leave stage
+    // entries behind; the role split runs last, over the URLs the split
+    // wrote.
     await _deriveBoxTargets(store);
     await _splitBoxServers(store);
     await _clearStageTargets(store);
+    await _deriveModelRoles(store, tokens);
     final raw = await store.getPref(attentionThresholdKey);
     return AppPrefs(
       attentionThreshold: (raw == null ? null : double.tryParse(raw)) ??
@@ -1082,9 +1143,18 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
         defaultModelPlacement,
       ),
       boxBigUrl: _slotValue(await store.getPref(boxBigUrlKey)),
-      boxSmallUrl: _slotValue(await store.getPref(boxSmallUrlKey)),
       boxBigModel: _slotValue(await store.getPref(boxBigModelKey)),
-      boxSmallModel: _slotValue(await store.getPref(boxSmallModelKey)),
+      generativeManagedModel:
+          _slotValue(await store.getPref(generativeManagedModelKey)),
+      decisionPlacement: _enumOrDefault(
+        ModelPlacement.values,
+        await store.getPref(decisionPlacementKey),
+        ModelPlacement.local,
+      ),
+      decisionUrl: _slotValue(await store.getPref(decisionUrlKey)),
+      decisionModel: _slotValue(await store.getPref(decisionModelKey)),
+      cloudDraftsUrl: _slotValue(await store.getPref(cloudDraftsUrlKey)),
+      cloudDraftsModel: _slotValue(await store.getPref(cloudDraftsModelKey)),
       // Defaults ON, so the read is [contextSelectExpand]'s inverse: only the
       // one spelling the setter writes reads as off, and an absent key leaves
       // a fresh install working.
@@ -1110,17 +1180,11 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
         await store.getPref(homeSortKey),
         HomeSort.newest,
       ),
-      fastLlmUrl: _slotValue(await store.getPref(fastLlmUrlKey)),
-      fastLlmModel: _slotValue(await store.getPref(fastLlmModelKey)),
-      proseLlmUrl: _slotValue(await store.getPref(proseLlmUrlKey)),
-      proseLlmModel: _slotValue(await store.getPref(proseLlmModelKey)),
       mailLookbackDays: _lookback(await store.getPref(mailLookbackDaysKey)),
       teamsLookbackDays: _lookback(await store.getPref(teamsLookbackDaysKey)),
       routerPort: _routerPort(await store.getPref(routerPortKey)),
       modelsFolder: _slotValue(await store.getPref(modelsFolderKey)),
       proseParallel: _proseParallel(await store.getPref(proseParallelKey)),
-      targets: _targets(await store.getPref(llmTargetsKey)),
-      stageTargets: _stageTargets(await store.getPref(stageTargetsKey)),
       cloudDraftsConsent:
           await store.getPref(cloudDraftsConsentKey) == 'true',
       // Only the string this notifier writes reads as on, on the rule every
@@ -1139,8 +1203,8 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// Round G adopted the box by WRITING two `llm_targets` rows and fifteen
   /// `stage_targets` entries. Round H derives both from [boxUrlKey] and the
   /// placement, so a surviving pair would shadow the derived specs: the id
-  /// would appear twice in [AppPrefs.allTargets] and the stage picker asserts
-  /// on a duplicate dropdown value. This lifts the origin out of the writing
+  /// would have appeared twice in the target list Round H showed, and its
+  /// stage picker asserted on a duplicate dropdown value. This lifts the origin out of the writing
   /// row, drops the pair, and drops every stage entry that now equals what the
   /// rule answers anyway — a hand-picked target is not one of those and
   /// survives.
@@ -1169,7 +1233,10 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
           if (row is Map<String, Object?>) kept.add(row);
           continue;
         }
-        if (!spec.isBox) {
+        // Round G's two box ids, spelled out: this one-shot is frozen
+        // history, and `isBox` has meant another pair since the
+        // decision-model round.
+        if (spec.id != boxProseId && spec.id != legacyBoxBulkId) {
           kept.add(spec.toJson());
           continue;
         }
@@ -1238,56 +1305,164 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await store.setPref(stageTargetsClearedKey, '1');
   }
 
+  /// Splits Round H's big/small pair into the decision-model round's roles.
+  /// Runs at most once per install, and is a NO-OP for every shape but one.
+  ///
+  /// The keys were REUSED (the plan's R1): `model_placement`, `box_big_url`,
+  /// `box_big_model` and the `box-prose` keychain entry already mean the
+  /// generative remote, so an install that followed the build, or that named
+  /// its own big server, needs nothing. The one shape that does is a
+  /// THIRD-PARTY big address (a vendor host or the Converse wire): the
+  /// generative model reads every message and may not run there.
+  /// [planModelRoles] decides what happens to it; see there.
+  ///
+  /// ORDER: the pending flag (naming the keychain moves owed) is written
+  /// FIRST and the preferences after it, so a crash between the two leaves a
+  /// flag that re-runs only the keychain half, never the preference moves.
+  /// The keychain half is [finishModelRoles], which needs a token store.
+  static Future<void> _deriveModelRoles(
+    MessageStore store,
+    TokenStore? tokens,
+  ) async {
+    final flag = await store.getPref(modelRolesDerivedKey);
+    if (flag == modelRolesDoneValue) return;
+    if (!modelRolesPending(flag)) {
+      final big = _slotValue(await store.getPref(boxBigUrlKey));
+      final bigModel = _slotValue(await store.getPref(boxBigModelKey));
+      final plan = planModelRoles(
+        bigUrl: big,
+        bigModel: bigModel,
+        smallUrl: _slotValue(await store.getPref(boxSmallUrlKey)),
+        placement: _enumOrDefault(
+          ModelPlacement.values,
+          await store.getPref(modelPlacementKey),
+          defaultModelPlacement,
+        ),
+        consent: await store.getPref(cloudDraftsConsentKey) == 'true',
+        compiledBase: normalizeBoxBaseUrl(boxUrlDefault),
+      );
+      if (plan == null) {
+        await store.setPref(modelRolesDerivedKey, modelRolesDoneValue);
+        return;
+      }
+      await store.setPref(
+        modelRolesDerivedKey,
+        '$modelRolesPendingPrefix${plan.moves.join(',')}',
+      );
+      if (plan.adoptCloud) {
+        await store.setPref(cloudDraftsUrlKey, normalizeBoxBaseUrl(big));
+        await store.setPref(cloudDraftsModelKey, bigModel);
+      }
+      switch (plan.generative) {
+        case GenerativeAfterVendor.small:
+          await store.setPref(
+            boxBigUrlKey,
+            normalizeBoxBaseUrl(_slotValue(await store.getPref(boxSmallUrlKey))),
+          );
+          await store.setPref(
+            boxBigModelKey,
+            _slotValue(await store.getPref(boxSmallModelKey)),
+          );
+        case GenerativeAfterVendor.followBuild:
+          await store.setPref(boxBigUrlKey, '');
+          await store.setPref(boxBigModelKey, '');
+        case GenerativeAfterVendor.local:
+          await store.setPref(boxBigUrlKey, '');
+          await store.setPref(boxBigModelKey, '');
+          await store.setPref(modelPlacementKey, ModelPlacement.local.name);
+      }
+    }
+    await finishModelRoles(store, tokens);
+  }
+
+  /// The keychain half of [_deriveModelRoles]: runs the moves a pending
+  /// [modelRolesDerivedKey] names, in order, advancing the flag after each
+  /// one only when a read-back confirms it, and marking the migration done
+  /// when none is left. A no-op without a token store and on any flag that is
+  /// not pending.
+  ///
+  /// NEVER throws and never logs: a keychain that refuses leaves the flag
+  /// pending, the notifier then attaches no `box-prose` token (a 401 park the
+  /// owner can fix), and the next launch tries again. Every move is safe to
+  /// repeat, because the flag only ever advances past a move that verified.
+  static Future<void> finishModelRoles(
+    MessageStore store,
+    TokenStore? tokens,
+  ) async {
+    if (tokens == null) return;
+    try {
+      final flag = await store.getPref(modelRolesDerivedKey);
+      if (!modelRolesPending(flag)) return;
+      final moves = flag!
+          .substring(modelRolesPendingPrefix.length)
+          .split(',')
+          .where((m) => m.isNotEmpty)
+          .toList();
+      while (moves.isNotEmpty) {
+        if (!await _runMove(tokens, moves.first)) return;
+        moves.removeAt(0);
+        await store.setPref(
+          modelRolesDerivedKey,
+          moves.isEmpty
+              ? modelRolesDoneValue
+              : '$modelRolesPendingPrefix${moves.join(',')}',
+        );
+      }
+    } catch (_) {
+      // Silent on the bearer rules: the flag stays where it last verified.
+    }
+  }
+
+  /// One keychain move, then its read-back. True only when `box-prose`
+  /// holds exactly what the move meant it to: nothing after a prose move, the
+  /// owner's own small-server key (or nothing, when there was none left to
+  /// move) after the bulk move. An unknown move word is refused.
+  static Future<bool> _runMove(TokenStore tokens, String move) async {
+    const prose = '$llmTargetBearerKeyPrefix$boxProseId';
+    switch (move) {
+      case modelRolesMoveProseToCloud:
+      case modelRolesDropProse:
+        final value = await tokens.read(prose);
+        if (move == modelRolesMoveProseToCloud &&
+            value != null &&
+            value.isNotEmpty) {
+          try {
+            await tokens.write(
+              '$llmTargetBearerKeyPrefix$cloudDraftsId',
+              value,
+            );
+          } catch (_) {
+            // The key is lost rather than left where the next id would send
+            // it: the delete below still runs.
+          }
+        }
+        await tokens.write(prose, null);
+        final after = await tokens.read(prose);
+        return after == null || after.isEmpty;
+      case modelRolesMoveBulkToProse:
+        const bulk = '$llmTargetBearerKeyPrefix$legacyBoxBulkId';
+        final value = await tokens.read(bulk);
+        // Already moved on an earlier run (the prose move before this one
+        // verified `box-prose` empty, so whatever it holds now came from
+        // here), or there was never a small-server key.
+        if (value == null || value.isEmpty) return true;
+        await tokens.write(prose, value);
+        try {
+          await tokens.write(bulk, null);
+        } catch (_) {
+          // A leftover `box-bulk` entry is read by nothing.
+        }
+        return await tokens.read(prose) == value;
+    }
+    return false;
+  }
+
   /// A stored cap, or fifty. [_proseParallel]'s rule and its reason: a number
   /// nothing wrote, or one somebody typed into the table by hand, must not be
   /// able to uncap what leaves this machine.
   static int _cloudDraftsDailyCap(String? raw) => clampCloudDraftsDailyCap(
         int.tryParse(raw ?? '') ?? AppPrefs.defaultCloudDraftsDailyCap,
       );
-
-  /// The stored target list, or none of it.
-  ///
-  /// Every layer is forgiving on its own terms, and none of them throws: text
-  /// that is not JSON, or JSON that is not an array, reads as no targets at
-  /// all; a row [LlmTargetSpec.tryParse] refuses is dropped and the rest
-  /// survive; a row claiming a BUILT-IN id is dropped because those two are
-  /// derived and a stored copy would shadow the live slot prefs; and a
-  /// duplicate id keeps the first, because the alternative is two rows one
-  /// stage map entry cannot choose between.
-  ///
-  /// A row claiming a BOX id is dropped for the built-ins' reason, and it is
-  /// the belt to [_deriveBoxTargets]' braces: a pair that survived the
-  /// migration — restored from a backup, or written by a build in between —
-  /// would put the same id in [AppPrefs.allTargets] twice, and the stage
-  /// picker asserts on a duplicate dropdown value.
-  static List<LlmTargetSpec> _targets(String? raw) {
-    final decoded = _json(raw);
-    if (decoded is! List) return const [];
-    final seen = <String>{};
-    final specs = <LlmTargetSpec>[];
-    for (final row in decoded) {
-      final spec = LlmTargetSpec.tryParse(row);
-      if (spec == null || spec.isFixed) continue;
-      if (!seen.add(spec.id)) continue;
-      specs.add(spec);
-    }
-    return specs;
-  }
-
-  /// The stored stage map, on [_targets]' rule: not an object reads as empty,
-  /// and an entry whose value is not a string is dropped. An entry naming a
-  /// target that no longer exists is NOT dropped here — it is ignored by
-  /// [AppPrefs.targetIdForStage] instead, so removing a target and putting it
-  /// back does not silently lose where it was pointed.
-  static Map<String, String> _stageTargets(String? raw) {
-    final decoded = _json(raw);
-    if (decoded is! Map) return const {};
-    final map = <String, String>{};
-    decoded.forEach((key, value) {
-      if (key is String && value is String) map[key] = value;
-    });
-    return map;
-  }
 
   /// Decoded JSON, or null for anything that is not.
   static Object? _json(String? raw) {
@@ -1490,32 +1665,6 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _store.setPref(homeSortKey, value.name);
   }
 
-  /// Points the bulk slot somewhere. Empty for either field means the compiled
-  /// default; the pair is set together so no request can ever see half a move.
-  ///
-  /// State first, then the writes — the order every setter here uses.
-  Future<void> setFastLlmTarget({
-    required String url,
-    required String model,
-  }) async {
-    final cleanUrl = url.trim();
-    final cleanModel = model.trim();
-    state = state.copyWith(fastLlmUrl: cleanUrl, fastLlmModel: cleanModel);
-    await _store.setPref(fastLlmUrlKey, cleanUrl);
-    await _store.setPref(fastLlmModelKey, cleanModel);
-  }
-
-  Future<void> setProseLlmTarget({
-    required String url,
-    required String model,
-  }) async {
-    final cleanUrl = url.trim();
-    final cleanModel = model.trim();
-    state = state.copyWith(proseLlmUrl: cleanUrl, proseLlmModel: cleanModel);
-    await _store.setPref(proseLlmUrlKey, cleanUrl);
-    await _store.setPref(proseLlmModelKey, cleanModel);
-  }
-
   /// How far back each connector reaches. Clamped on the way in as well as on
   /// the way out — [_lookback] guards the read, and this guards a caller that
   /// hands over a number no control on screen could have produced.
@@ -1559,354 +1708,266 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _store.setPref(proseParallelKey, clamped.toString());
   }
 
-  /// Adds a target, or replaces the one with the same id.
-  ///
-  /// [bearer] is the only way a token is ever written, and it goes to the
-  /// KEYCHAIN and the in-memory cache — never to `app_prefs`, where the spec's
-  /// `bearer` field is a boolean saying only that one exists. The three cases:
-  /// a non-null [bearer] stores it and sets the flag; a null [bearer] on a
-  /// spec that claims none deletes whatever was there, which is how a token is
-  /// cleared; and a null [bearer] on a spec that claims one KEEPS the stored
-  /// token, which is what an edit of the name or the model has to do — the
-  /// screen shows "set" and cannot show the secret back, so it cannot resend
-  /// it either.
-  ///
-  /// The keychain first and the pref after it, because a spec that claims a
-  /// token the keychain refused would send an unauthenticated request every
-  /// time. Throws on a DERIVED id: the two built-ins come from the slot prefs
-  /// and are edited through the slot editors, and the two box targets come
-  /// from [boxUrlKey] and are edited by changing that one address.
-  Future<void> upsertTarget(LlmTargetSpec spec, {String? bearer}) async {
-    if (spec.isFixed) {
-      throw ArgumentError.value(
-        spec.id,
-        'spec.id',
-        'the derived targets are not rows: edit the slot prefs or the box '
-            'address',
-      );
-    }
-    final key = '$llmTargetBearerKeyPrefix${spec.id}';
-    var hasBearer = spec.hasBearer;
-    if (bearer != null) {
-      hasBearer = true;
-      _bearers[spec.id] = bearer;
-      await _writeToken(key, bearer);
-    } else if (!spec.hasBearer) {
-      _bearers.remove(spec.id);
-      await _writeToken(key, null);
-    }
-
-    final stored = spec.copyWith(
-      hasBearer: hasBearer,
-      parallel: clampProseParallel(spec.parallel),
-    );
-    final targets = [
-      for (final existing in state.targets)
-        if (existing.id == stored.id) stored else existing,
-    ];
-    if (!targets.any((t) => t.id == stored.id)) targets.add(stored);
-
-    state = state.copyWith(targets: targets);
-    await _writeTargets(targets);
-  }
-
-  /// Forgets a target: its token, its row, and every stage pointed at it.
-  ///
-  /// The stage entries go in the SAME write rather than being left to resolve
-  /// as defaults, because a stale entry would silently re-point those stages
-  /// the day somebody added a target with the same id back.
-  ///
-  /// A no-op for a DERIVED id — neither the two built-ins nor the two box
-  /// targets are rows, so there is nothing to remove — and for an id nothing
-  /// carries.
-  Future<void> removeTarget(String id) async {
-    if (id == builtInFastId || id == builtInProseId) return;
-    if (id == boxProseId || id == boxBulkId) return;
-    if (!state.targets.any((spec) => spec.id == id)) return;
-
-    _bearers.remove(id);
-    await _writeToken('$llmTargetBearerKeyPrefix$id', null);
-
-    final targets = [
-      for (final spec in state.targets)
-        if (spec.id != id) spec,
-    ];
-    final stageTargets = {
-      for (final entry in state.stageTargets.entries)
-        if (entry.value != id) entry.key: entry.value,
-    };
-    state = state.copyWith(targets: targets, stageTargets: stageTargets);
-    await _writeTargets(targets);
-    await _writeStageTargets(stageTargets);
-  }
-
-  /// Points one stage at one target.
-  ///
-  /// Writing the stage's own DEFAULT removes the entry instead of storing it,
-  /// so the map holds non-defaults only and a fresh install stays empty.
-  ///
-  /// A no-op for an unknown target id and for `embeddings`, which is not
-  /// routed at all.
-  Future<void> setStageTarget(String stageId, String targetId) async {
-    if (stageId == 'embeddings') return;
-    if (state.specById(targetId) == null) return;
-
-    // The PLACEMENT's default, not the slot's: on the box, picking `box-bulk`
-    // for the storyline confirm is a real override and has to be stored,
-    // while picking `box-prose` there is the rule and stores nothing.
-    final isDefault = targetId == state.defaultTargetIdForStage(stageId);
-    if (isDefault) return clearStageTarget(stageId);
-
-    if (state.stageTargets[stageId] == targetId) return;
-    final map = {...state.stageTargets, stageId: targetId};
-    state = state.copyWith(stageTargets: map);
-    await _writeStageTargets(map);
-  }
-
-  /// Puts a stage back on its default target.
-  Future<void> clearStageTarget(String stageId) async {
-    if (!state.stageTargets.containsKey(stageId)) return;
-    final map = {...state.stageTargets}..remove(stageId);
-    state = state.copyWith(stageTargets: map);
-    await _writeStageTargets(map);
-  }
-
-  /// Points whole groups of stages at one target, the way the add screen's
-  /// three checkboxes do.
-  ///
-  /// One state write and one pref write for the lot: a preset that wrote each
-  /// stage separately would put a dozen rebuilds and a dozen round trips
-  /// behind one tick. [proseStageIds], [confirmStageIds] and [bulkStageIds]
-  /// are the sets, and `model_slots_test` pins them against `pipelineStages`.
-  ///
-  /// A preset onto a THIRD-PARTY target skips the two draft stages until the
-  /// consent stands. [AppPrefs.specForStage] would gate those back to the
-  /// local prose target anyway, but only until consent was granted for some
-  /// other reason — and at that moment drafts would start leaving the machine
-  /// from a stage nobody was asked about. Writing nothing is what keeps the
-  /// acknowledgement about the stage it was given for.
-  Future<void> applyPreset({
-    required String targetId,
-    bool prose = false,
-    bool confirm = false,
-    bool bulk = false,
-  }) async {
-    final target = state.specById(targetId);
-    if (target == null) return;
-    final skipDrafts = target.isThirdParty && !state.cloudDraftsConsent;
-    final map = {...state.stageTargets};
-    for (final stageId in [
-      if (prose) ...proseStageIds,
-      if (confirm) ...confirmStageIds,
-      if (bulk) ...bulkStageIds,
-    ]) {
-      // Untouched, not cleared: a stage the user pointed somewhere by hand is
-      // theirs, and a preset that silently reset it would be a second
-      // surprise on top of the one this guard exists to prevent.
-      if (skipDrafts && draftStageIds.contains(stageId)) continue;
-      // The placement's default, on [setStageTarget]'s rule and for its
-      // reason.
-      final isDefault = targetId == state.defaultTargetIdForStage(stageId);
-      if (isDefault) {
-        map.remove(stageId);
-      } else {
-        map[stageId] = targetId;
-      }
-    }
-    if (_sameMap(map, state.stageTargets)) return;
-    state = state.copyWith(stageTargets: map);
-    await _writeStageTargets(map);
-  }
-
-  /// Writes what this Mac can actually run: the tier's stage picks and its
-  /// draft policy, in one press or at the end of the wizard.
-  ///
-  /// The stages a tier governs are the ones ANY tier names, so moving between
-  /// tiers is symmetric: [MachineTier.inbox] points the six prose-slot stages
-  /// at the built-in fast target, and [MachineTier.full] puts those same six
-  /// back on their own default, which by [setStageTarget]'s rule REMOVES the
-  /// entry rather than storing it. A fresh install on a big Mac therefore
-  /// keeps an empty `stage_targets`, which is the invariant
-  /// `10-model-routing.md` states and `llm_targets_test` pins.
-  ///
-  /// It overwrites a pick the owner made on one of those six: the button's
-  /// caption says which stages it rewrites, and nothing is destroyed because
-  /// any stage can be re-picked from the same section. The bulk stages, the
-  /// confirm stage, the targets themselves, the consent and the bearers are
-  /// all untouched. `draft_improve` is one of the seven prose stages since
-  /// Round H, so the inbox tier moves it onto the small model with the rest of
-  /// them. Calling it twice changes nothing.
-  Future<void> applyTierDefaults(MachineTier tier) async {
-    // [MachineTier.remote] is a PLACEMENT, and [usePlacement] owns its stage
-    // map. Falling through would clear every governed stage back to a local
-    // built-in, because `wanted[stageId]` is null for all of them there — the
-    // box's picks would be undone by the very call meant to leave them alone.
-    if (tier == MachineTier.remote) return;
-    final wanted = tierStageDefaults(tier);
-    final governed = <String>{
-      for (final other in MachineTier.values) ...tierStageDefaults(other).keys,
-    };
-    final map = {...state.stageTargets};
-    for (final stageId in governed) {
-      final slot = stageSlot(stageId);
-      if (slot == ModelSlot.embed) continue;
-      // The SLOT's default and deliberately not the placement's, unlike
-      // [setStageTarget] and [applyPreset]: this method runs only on the local
-      // placement, and reading the placement's default here would have it
-      // remove box entries it was never meant to see.
-      final fallback = defaultTargetIdFor(slot);
-      final targetId = wanted[stageId] ?? fallback;
-      if (targetId == fallback) {
-        map.remove(stageId);
-      } else {
-        map[stageId] = targetId;
-      }
-    }
-    if (!_sameMap(map, state.stageTargets)) {
-      state = state.copyWith(stageTargets: map);
-      await _writeStageTargets(map);
-    }
-    await setDraftPolicy(tierDraftPolicy(tier));
-  }
-
-  /// Records where this install's model work runs. State first and the write
-  /// after it, like every setter here.
+  /// Records where the GENERATIVE model runs. State first and the write after
+  /// it, like every setter here. The role writers below call it; nothing else
+  /// should, because a placement moved alone skips the draft policy.
   Future<void> setModelPlacement(ModelPlacement value) async {
     state = state.copyWith(modelPlacement: value);
     await _store.setPref(modelPlacementKey, value.name);
   }
 
-  /// Records where the two models run: two addresses and the two model names
-  /// discovered behind them. Empty is not an answer for either address.
+  /// Tells the prefs what this Mac can hold. NOT persisted: the tier is read
+  /// off the hardware on every launch (see [AppPrefs.machineTier]). Called
+  /// by the managed server's preset build, which precedes every managed
+  /// request, and by the generative writer. A no-op when unchanged.
+  void setMachineTier(MachineTier tier) {
+    if (!mounted || state.machineTier == tier) return;
+    state = state.copyWith(machineTier: tier);
+  }
+
+  /// The sentence both role writers throw on a third-party address.
+  static const String generativeThirdPartyRefusal =
+      'the generative model reads every message; a third-party service can '
+      'serve cloud drafts only';
+  static const String decisionThirdPartyRefusal =
+      'the decision model reads every message; it runs on this Mac or a '
+      'server of your own';
+
+  /// Points the GENERATIVE role somewhere: this Mac (optionally choosing the
+  /// managed model) or the owner's own server (URL, discovered model, key).
+  ///
+  /// Everything is validated BEFORE anything is written, so a refusal leaves
+  /// the install exactly as it was. Throws [ArgumentError] on a URL that is
+  /// not an http or https origin, on a third-party host or the Converse wire
+  /// ([generativeThirdPartyRefusal]: the generative model reads every
+  /// message), and on a managed model that is not one of the two router ids.
   ///
   /// What is STORED is the empty string wherever the value equals what this
-  /// build already derives, which is [AppPrefs.boxBigUrl]'s whole meaning: an
-  /// install that agrees with its build follows the build, and a changed
-  /// define reaches it.
+  /// build already derives, which is [AppPrefs.boxBigUrl]'s whole meaning. A
+  /// null [url] or [model] keeps what is stored; a blank [key] keeps the
+  /// stored token, so a Connect with the field empty cannot replace a good
+  /// key with nothing.
   ///
-  /// Throws [ArgumentError] on an address that is not an http or https URL,
-  /// on a big address whose host belongs to a third party while
-  /// [AppPrefs.cloudDraftsConsent] is false, and on a SMALL address whose
-  /// host belongs to a third party at all: the consent covers drafts on the
-  /// big model, and no cloud service serves the small role from any screen,
-  /// because that role reads every message body. The form in front of this
-  /// one refuses all three before the press arrives; the guards are a last
-  /// line, and what they stop is a target nothing can dial and message text
-  /// leaving this machine for an operator nobody agreed to.
-  Future<void> setBoxServers({
-    required String bigUrl,
-    required String smallUrl,
-    required String bigModel,
-    required String smallModel,
+  /// Then the placement, the tier, and the draft policy: on this Mac the
+  /// 4B's drafts are the tier's policy (on demand on the inbox tier), the 27B
+  /// and a remote keep the shipped default.
+  Future<void> useGenerative({
+    required ModelPlacement placement,
+    String? managedModel,
+    String? url,
+    String? model,
+    String? key,
+    required MachineTier hardwareTier,
   }) async {
-    final big = normalizeBoxBaseUrl(bigUrl);
-    final small = normalizeBoxBaseUrl(smallUrl);
-    for (final url in [big, small]) {
-      if (!isBoxOrigin(url)) {
-        throw ArgumentError.value(url, 'url', 'must be an http or https URL');
+    String? storedUrl;
+    if (placement == ModelPlacement.box && url != null) {
+      final clean = normalizeBoxBaseUrl(url);
+      if (!isBoxOrigin(clean)) {
+        throw ArgumentError.value(clean, 'url', 'must be an http or https URL');
       }
+      if (!AppPrefs._ownServer(clean)) {
+        throw ArgumentError.value(clean, 'url', generativeThirdPartyRefusal);
+      }
+      final compiled = normalizeBoxBaseUrl(boxUrlDefault);
+      storedUrl =
+          compiled.isNotEmpty && clean == '$compiled/prose/v1/chat/completions'
+              ? ''
+              : clean;
     }
-    if (isThirdPartyHost(big) && !state.cloudDraftsConsent) {
+    if (managedModel != null &&
+        managedModel != '' &&
+        managedModel != routerProseId &&
+        managedModel != routerBulkId) {
       throw ArgumentError.value(
-        big,
-        'bigUrl',
-        'a third-party server needs cloud drafts consent first',
+        managedModel,
+        'managedModel',
+        'must be $routerProseId or $routerBulkId',
       );
     }
-    if (isThirdPartyHost(small) ||
-        wireForHost(small) == LlmWire.bedrockConverse) {
+
+    if (storedUrl != null) {
+      state = state.copyWith(boxBigUrl: storedUrl);
+      await _store.setPref(boxBigUrlKey, storedUrl);
+    }
+    if (placement == ModelPlacement.box && model != null) {
+      final trimmed = model.trim();
+      final storedModel = trimmed == boxProseModel ? '' : trimmed;
+      state = state.copyWith(boxBigModel: storedModel);
+      await _store.setPref(boxBigModelKey, storedModel);
+    }
+    if (placement == ModelPlacement.box) {
+      await _storeKey(boxProseId, key);
+      // A key typed for the generative remote REPLACES whatever the role
+      // split still owed under `box-prose`, so nothing is left to move.
+      final typed = key?.trim() ?? '';
+      if (typed.isNotEmpty) await _settleModelRoles(typed);
+    }
+    if (managedModel != null) {
+      state = state.copyWith(generativeManagedModel: managedModel);
+      await _store.setPref(generativeManagedModelKey, managedModel);
+    }
+    setMachineTier(hardwareTier);
+    await setModelPlacement(placement);
+    if (placement == ModelPlacement.local) {
+      final managedId =
+          managedGenerativeIdFor(hardwareTier, state.generativeManagedModel);
+      await setDraftPolicy(
+        managedId == routerBulkId
+            ? tierDraftPolicy(hardwareTier)
+            : DraftPolicy.needsYou,
+      );
+    } else {
+      // A remote runs whatever writing model its owner chose, and the box the
+      // ledger measured is the 27B, so prefetched drafts are worth their cost.
+      await setDraftPolicy(DraftPolicy.needsYou);
+    }
+  }
+
+  /// Points the DECISION role somewhere: this Mac, or the owner's own server
+  /// (its full `/v1/embeddings` URL, discovered model, key). The same
+  /// validate-then-write shape and refusals as [useGenerative], with
+  /// [decisionThirdPartyRefusal]. The heads still run here from the local
+  /// heads file whichever server embeds.
+  Future<void> useDecision({
+    required ModelPlacement placement,
+    String? url,
+    String? model,
+    String? key,
+  }) async {
+    String? storedUrl;
+    if (placement == ModelPlacement.box && url != null) {
+      final clean = normalizeBoxBaseUrl(url);
+      if (!isBoxOrigin(clean)) {
+        throw ArgumentError.value(clean, 'url', 'must be an http or https URL');
+      }
+      if (!AppPrefs._ownServer(clean)) {
+        throw ArgumentError.value(clean, 'url', decisionThirdPartyRefusal);
+      }
+      final compiled = normalizeBoxBaseUrl(boxUrlDefault);
+      storedUrl =
+          compiled.isNotEmpty && clean == '$compiled/decide/v1/embeddings'
+              ? ''
+              : clean;
+    }
+    if (storedUrl != null) {
+      state = state.copyWith(decisionUrl: storedUrl);
+      await _store.setPref(decisionUrlKey, storedUrl);
+    }
+    if (placement == ModelPlacement.box && model != null) {
+      final trimmed = model.trim();
+      final storedModel = trimmed == boxDecideModel ? '' : trimmed;
+      state = state.copyWith(decisionModel: storedModel);
+      await _store.setPref(decisionModelKey, storedModel);
+    }
+    if (placement == ModelPlacement.box) {
+      await _storeKey(boxDecideId, key);
+    }
+    state = state.copyWith(decisionPlacement: placement);
+    await _store.setPref(decisionPlacementKey, placement.name);
+  }
+
+  /// Sets the optional cloud-drafts target: the one place a third-party
+  /// service may serve, and only the two draft stages.
+  ///
+  /// Throws [ArgumentError] on a URL that is not an http or https origin, and
+  /// on a third-party host or the Converse wire while
+  /// [AppPrefs.cloudDraftsConsent] is false: the consent pane records the
+  /// acknowledgement FIRST, and this is the last line behind it. The owner's
+  /// own server needs no consent. A blank [key] keeps the stored token.
+  Future<void> useCloudDrafts({
+    required String url,
+    required String model,
+    String? key,
+  }) async {
+    final clean = normalizeBoxBaseUrl(url);
+    if (!isBoxOrigin(clean)) {
+      throw ArgumentError.value(clean, 'url', 'must be an http or https URL');
+    }
+    if (!AppPrefs._ownServer(clean) && !state.cloudDraftsConsent) {
       throw ArgumentError.value(
-        small,
-        'smallUrl',
-        'the small model runs on a server of your own; a third-party '
-        'service can serve the big model only',
+        clean,
+        'url',
+        'a third-party service needs cloud drafts consent first',
       );
     }
-    final compiled = normalizeBoxBaseUrl(boxUrlDefault);
-    final storedBig =
-        big == '$compiled/prose/v1/chat/completions' && compiled.isNotEmpty
-            ? ''
-            : big;
-    final storedSmall =
-        small == '$compiled/bulk/v1/chat/completions' && compiled.isNotEmpty
-            ? ''
-            : small;
-    final storedBigModel = bigModel.trim() == boxProseModel ? '' : bigModel.trim();
-    final storedSmallModel =
-        smallModel.trim() == boxBulkModel ? '' : smallModel.trim();
-    state = state.copyWith(
-      boxBigUrl: storedBig,
-      boxSmallUrl: storedSmall,
-      boxBigModel: storedBigModel,
-      boxSmallModel: storedSmallModel,
-    );
-    await _store.setPref(boxBigUrlKey, storedBig);
-    await _store.setPref(boxSmallUrlKey, storedSmall);
-    await _store.setPref(boxBigModelKey, storedBigModel);
-    await _store.setPref(boxSmallModelKey, storedSmallModel);
-  }
-
-  /// Puts an access key in the keychain, PER SERVER.
-  ///
-  /// A SECRET: it reaches the keychain, the private bearer cache and the
-  /// `Authorization` header, and nothing else. What [state] gains is three
-  /// booleans.
-  ///
-  /// One token per id, because the two addresses may name two operators and a
-  /// key for one must never be sent to the other. The form passes the same
-  /// token twice when the two addresses share a host, which is the ordinary
-  /// case: one server serving both roles under two path prefixes.
-  ///
-  /// A no-op on an omitted or empty token, so a Connect with a blank field
-  /// cannot replace a good key with nothing.
-  Future<void> setBoxKey({String? big, String? small}) async {
-    var bigStored = state.boxBigKeyStored;
-    var smallStored = state.boxSmallKeyStored;
-    for (final entry in [(boxProseId, big), (boxBulkId, small)]) {
-      final token = entry.$2?.trim() ?? '';
-      if (token.isEmpty) continue;
-      _bearers[entry.$1] = token;
-      await _writeToken('$llmTargetBearerKeyPrefix${entry.$1}', token);
-      if (entry.$1 == boxProseId) {
-        bigStored = true;
-      } else {
-        smallStored = true;
-      }
+    final trimmed = model.trim();
+    if (trimmed.isEmpty) {
+      throw ArgumentError.value(model, 'model', 'must name a model');
     }
-    state = state.copyWith(
-      boxKeyStored: bigStored || smallStored,
-      boxBigKeyStored: bigStored,
-      boxSmallKeyStored: smallStored,
-    );
+    state = state.copyWith(cloudDraftsUrl: clean, cloudDraftsModel: trimmed);
+    await _store.setPref(cloudDraftsUrlKey, clean);
+    await _store.setPref(cloudDraftsModelKey, trimmed);
+    await _storeKey(cloudDraftsId, key);
   }
 
-  /// Forgets the box's key, both entries at once.
+  /// Forgets the cloud-drafts target: its address, its model and its token.
+  /// The draft stages go back to the generative model at once. The consent is
+  /// the caller's to withdraw (Stop cloud drafts does both).
+  Future<void> clearCloudDrafts() async {
+    state = state.copyWith(
+      cloudDraftsUrl: '',
+      cloudDraftsModel: '',
+      cloudDraftsKeyStored: false,
+    );
+    await _store.setPref(cloudDraftsUrlKey, '');
+    await _store.setPref(cloudDraftsModelKey, '');
+    _bearers.remove(cloudDraftsId);
+    await _writeToken('$llmTargetBearerKeyPrefix$cloudDraftsId', null);
+  }
+
+  /// Marks the role split done if it was pending, after the owner typed a
+  /// generative key over whatever it still owed. Its token moves are
+  /// abandoned: `box-prose` now holds the owner's own key. Silent.
+  ///
+  /// ONLY once a read-back shows [typed] really is what the keychain holds
+  /// under `box-prose`. [_writeToken] swallows a refusal, and a keychain that
+  /// refused the migration's delete is exactly the one likely to refuse this
+  /// write too: settling then would leave the VENDOR key under `box-prose`
+  /// with the flag done, and the next launch would attach it to the owner's
+  /// own server. Unsettled, the typed key still works for this session from
+  /// the cache, and the next launch retries the moves.
+  Future<void> _settleModelRoles(String typed) async {
+    final tokens = _tokens;
+    if (tokens == null) return;
+    try {
+      if (!modelRolesPending(await _store.getPref(modelRolesDerivedKey))) {
+        return;
+      }
+      final stored =
+          await tokens.read('$llmTargetBearerKeyPrefix$boxProseId');
+      if (stored != typed) return;
+      await _store.setPref(modelRolesDerivedKey, modelRolesDoneValue);
+    } catch (_) {}
+  }
+
+  /// One role's access key into the keychain and the cache, and its presence
+  /// flag into the state. A SECRET: what [state] gains is a boolean. A no-op
+  /// on an omitted or blank token.
+  Future<void> _storeKey(String id, String? key) async {
+    final token = key?.trim() ?? '';
+    if (token.isEmpty) return;
+    _bearers[id] = token;
+    await _writeToken('$llmTargetBearerKeyPrefix$id', token);
+    state = switch (id) {
+      boxProseId => state.copyWith(boxBigKeyStored: true),
+      boxDecideId => state.copyWith(decisionKeyStored: true),
+      _ => state.copyWith(cloudDraftsKeyStored: true),
+    };
+  }
+
+  /// Forgets the generative remote's key.
   ///
   /// A no-op when there is nothing to forget, which is every install that
   /// never typed one. Not an optimisation: a keychain write is a platform
-  /// channel round trip, and making the first run take two of them to delete
-  /// nothing is how a wizard step stops advancing within the pumps its test
-  /// gives it.
+  /// channel round trip, and making the first run take one to delete nothing
+  /// is how a wizard step stops advancing within the pumps its test gives
+  /// it. Decided from the cache, not the keychain, and NOT behind `ready`.
   Future<void> clearBoxKey() async {
-    final stored = state.boxKeyStored ||
-        _bearers.containsKey(boxProseId) ||
-        _bearers.containsKey(boxBulkId);
-    // Decided from the cache, not the keychain, and NOT behind `ready`: a
-    // clear that lands before the prefetch returns would keep a stored key,
-    // but the only caller that early is code, never a button, and waiting for
-    // `ready` here holds the wizard's This Mac choice behind the whole prefs
-    // load, which is dozens of store reads. The cache is the honest answer
-    // for every press a person can make.
+    final stored = state.boxBigKeyStored || _bearers.containsKey(boxProseId);
     if (!stored) return;
-    for (final id in [boxProseId, boxBulkId]) {
-      _bearers.remove(id);
-      await _writeToken('$llmTargetBearerKeyPrefix$id', null);
-    }
-    state = state.copyWith(
-      boxKeyStored: false,
-      boxBigKeyStored: false,
-      boxSmallKeyStored: false,
-    );
+    _bearers.remove(boxProseId);
+    await _writeToken('$llmTargetBearerKeyPrefix$boxProseId', null);
+    state = state.copyWith(boxBigKeyStored: false);
   }
 
   /// Remembers whether model work runs. State first and the write after it,
@@ -1916,67 +1977,22 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _store.setPref(processingOnKey, value.toString());
   }
 
-  /// Moves this install between the two placements, and clears out the stage
-  /// entries the app itself wrote.
-  ///
-  /// The placement is a RULE since Round H, so moving it re-answers every
-  /// stage that has no entry of its own. What would spoil that is a stored
-  /// entry the app wrote under the old placement: it outranks the rule, so a
-  /// machine that had been on the box would keep dialling it stage by stage.
-  ///
-  /// An entry is dropped exactly when its value is one the app itself could
-  /// have written: either box id, the slot's own built-in, or what the inbox
-  /// tier writes (the box rule's own answers are the two box ids, so they
-  /// need no clause of their own). A hand-picked `local-prose` on a bulk stage
-  /// is in none of those and survives, as does every user target — those are
-  /// choices somebody made, and a placement switch is not permission to undo
-  /// them.
-  ///
-  /// [hardwareTier] is what THIS MAC could run, never the effective tier: on
-  /// the way back to local the tier's own picks are applied, and the effective
-  /// tier reads [MachineTier.remote] right up until the placement moves.
+  /// INTERIM (Phase 4 deletes it): the Round H door between placements, as a
+  /// shim onto [useGenerative] for the pages that still call it.
   Future<void> usePlacement(
     ModelPlacement placement, {
     required MachineTier hardwareTier,
-  }) async {
-    await setModelPlacement(placement);
+  }) =>
+      useGenerative(placement: placement, hardwareTier: hardwareTier);
 
-    final inboxTier = tierStageDefaults(MachineTier.inbox);
-    final kept = <String, String>{};
-    state.stageTargets.forEach((stageId, targetId) {
-      final slot = stageSlot(stageId);
-      final appWrote = targetId == boxBulkId ||
-          targetId == boxProseId ||
-          (slot != ModelSlot.embed && targetId == defaultTargetIdFor(slot)) ||
-          targetId == inboxTier[stageId];
-      if (!appWrote) kept[stageId] = targetId;
-    });
-    if (!_sameMap(kept, state.stageTargets)) {
-      state = state.copyWith(stageTargets: kept);
-      await _writeStageTargets(kept);
-    }
-
-    if (placement == ModelPlacement.local) {
-      await applyTierDefaults(hardwareTier);
-    } else {
-      // The box runs the writing model the ledger measured, so prefetched
-      // drafts are worth their cost there whatever this Mac could manage.
-      await setDraftPolicy(DraftPolicy.needsYou);
-    }
-  }
-
-  /// Points this install at the servers a person named: the two addresses,
-  /// the two discovered model names, a key for each server where one was
-  /// typed, and the placement.
+  /// INTERIM (Phase 4 deletes it): the Round H pair form's door, as a shim.
   ///
-  /// Preference writes and a keychain pair, and NOT atomic — it cannot be. A
-  /// throw partway leaves an address with no placement rather than a corrupt
-  /// install, and calling it again repairs that, because every step here is
-  /// idempotent.
-  ///
-  /// The two keys are optional so that somebody changing only an address keeps
-  /// the key they already stored; the door in front of this one decides which
-  /// of those two things is happening.
+  /// The big address is the generative remote and the small half is
+  /// IGNORED — except when the big address is a third party. That was Round
+  /// H's cloud-drafts mechanism, so it becomes the cloud-drafts target
+  /// (the consent pane recorded consent before this press), and the small
+  /// address, when it is the owner's own, becomes the generative remote;
+  /// otherwise the generative placement is left where it is.
   Future<void> useBox({
     required String bigUrl,
     required String smallUrl,
@@ -1986,19 +2002,35 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     String? smallKey,
     required MachineTier hardwareTier,
   }) async {
-    await setBoxServers(
-      bigUrl: bigUrl,
-      smallUrl: smallUrl,
-      bigModel: bigModel,
-      smallModel: smallModel,
+    final big = normalizeBoxBaseUrl(bigUrl);
+    if (isBoxOrigin(big) && !AppPrefs._ownServer(big)) {
+      await useCloudDrafts(url: big, model: bigModel, key: bigKey);
+      final small = normalizeBoxBaseUrl(smallUrl);
+      if (isBoxOrigin(small) && AppPrefs._ownServer(small)) {
+        await useGenerative(
+          placement: ModelPlacement.box,
+          url: small,
+          model: smallModel,
+          key: smallKey,
+          hardwareTier: hardwareTier,
+        );
+      } else {
+        setMachineTier(hardwareTier);
+      }
+      return;
+    }
+    await useGenerative(
+      placement: ModelPlacement.box,
+      url: bigUrl,
+      model: bigModel,
+      key: bigKey,
+      hardwareTier: hardwareTier,
     );
-    await setBoxKey(big: bigKey, small: smallKey);
-    await usePlacement(ModelPlacement.box, hardwareTier: hardwareTier);
   }
 
   /// Records that the owner has read what a third-party draft target
   /// receives. Until it is true, [AppPrefs.specForStage] sends both drafting
-  /// stages to [AppPrefs.draftFallbackSpec] instead.
+  /// stages to the generative model instead of a third-party cloud target.
   Future<void> setCloudDraftsConsent(bool value) async {
     state = state.copyWith(cloudDraftsConsent: value);
     await _store.setPref(cloudDraftsConsentKey, value.toString());
@@ -2025,14 +2057,6 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _store.setPref(cloudDraftsDailyCapKey, clamped.toString());
   }
 
-  Future<void> _writeTargets(List<LlmTargetSpec> targets) => _store.setPref(
-        llmTargetsKey,
-        jsonEncode([for (final spec in targets) spec.toJson()]),
-      );
-
-  Future<void> _writeStageTargets(Map<String, String> map) =>
-      _store.setPref(stageTargetsKey, jsonEncode(map));
-
   /// One keychain write, guarded on [_loadBearers]' rule and for its reason: a
   /// refusal costs the header on the next request, never the spec — which is
   /// written either way, so the target still appears in the list and the user
@@ -2047,14 +2071,6 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     }
   }
 
-  static bool _sameMap(Map<String, String> a, Map<String, String> b) {
-    if (a.length != b.length) return false;
-    for (final entry in a.entries) {
-      if (b[entry.key] != entry.value) return false;
-    }
-    return true;
-  }
-
   /// Points the downloader and the router at a folder. Empty means the app's
   /// own — see [AppPrefs.effectiveModelsFolder]. Trimmed on the way in as well
   /// as on the way out, for [_slotValue]'s reason: a path with a trailing
@@ -2064,13 +2080,6 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     state = state.copyWith(modelsFolder: clean);
     await _store.setPref(modelsFolderKey, clean);
   }
-
-  /// Back to the build's defaults for one slot.
-  Future<void> clearSlotTarget(ModelSlot slot) => switch (slot) {
-        ModelSlot.fast => setFastLlmTarget(url: '', model: ''),
-        ModelSlot.prose => setProseLlmTarget(url: '', model: ''),
-        ModelSlot.embed => Future<void>.value(),
-      };
 }
 
 /// The range a port may be in: below 1024 wants root, and 65535 is the top of

@@ -67,6 +67,7 @@ class SetupModelsBody extends StatelessWidget {
         ModelRole.embed => 'Finds related messages',
         ModelRole.bulk => 'Reads and sorts your mail',
         ModelRole.prose => 'Writes drafts and replies',
+        ModelRole.decide => 'Sorts and flags every message',
       };
 
   /// What a checkpoint's second file adds, under its size. Named here so a

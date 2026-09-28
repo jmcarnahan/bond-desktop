@@ -24,6 +24,8 @@ import 'package:flutter_test/flutter_test.dart';
 const _bigUrl = 'https://box.example.com/prose/v1/chat/completions';
 const _smallUrl = 'https://box.example.com/bulk/v1/chat/completions';
 
+const _decideUrl = 'https://box.example.com/decide/v1/embeddings';
+
 const _boxProse = LlmTargetSpec(
   id: boxProseId,
   name: boxProseName,
@@ -33,49 +35,48 @@ const _boxProse = LlmTargetSpec(
   parallel: 4,
 );
 
-const _boxBulk = LlmTargetSpec(
-  id: boxBulkId,
-  name: boxBulkName,
-  url: _smallUrl,
-  model: boxBulkModel,
+const _boxDecide = LlmTargetSpec(
+  id: boxDecideId,
+  name: boxDecideName,
+  url: _decideUrl,
+  model: boxDecideModel,
   hasBearer: true,
-  parallel: 4,
 );
 
-const _localProse = LlmTargetSpec(
-  id: builtInProseId,
-  name: builtInProseName,
-  url: 'http://localhost:8080/v1/chat/completions',
-  model: 'qwen3.8',
+const _localGenerative = LlmTargetSpec(
+  id: localGenerativeId,
+  name: localGenerativeName,
+  url: 'http://127.0.0.1:8080/v1/chat/completions',
+  model: routerProseId,
 );
 
-const _localFast = LlmTargetSpec(
-  id: builtInFastId,
-  name: builtInFastName,
-  url: 'http://localhost:8082/v1/chat/completions',
-  model: 'qwen3-4b',
+const _localDecision = LlmTargetSpec(
+  id: localDecisionId,
+  name: localDecisionName,
+  url: 'http://127.0.0.1:8080/v1/embeddings',
+  model: routerDecideId,
 );
 
 /// The three rows a Managed install reports, built the way the host builds
 /// them.
 List<RoleLine> _localLines() => [
       RoleLine(
-        id: 'big',
-        title: 'Big model',
+        id: 'decision',
+        title: 'Decision model',
         detail: SettingsModelsPage.roleDetail(
-          role: StageRole.big,
-          spec: _localProse,
+          role: StageRole.decision,
+          spec: _localDecision,
         ),
-        checkUrl: _localProse.url,
+        checkUrl: _localDecision.url,
       ),
       RoleLine(
-        id: 'small',
-        title: 'Small model',
+        id: 'generative',
+        title: 'Generative model',
         detail: SettingsModelsPage.roleDetail(
-          role: StageRole.small,
-          spec: _localFast,
+          role: StageRole.generative,
+          spec: _localGenerative,
         ),
-        checkUrl: _localFast.url,
+        checkUrl: _localGenerative.url,
       ),
       RoleLine(
         id: 'embed',
@@ -88,28 +89,28 @@ List<RoleLine> _localLines() => [
       ),
     ];
 
-/// And the three a user-defined install reports, both chat rows carrying a
+/// And the three a user-defined install reports, both model rows carrying a
 /// stored key.
 List<RoleLine> _boxLines() => [
       RoleLine(
-        id: 'big',
-        title: 'Big model',
+        id: 'decision',
+        title: 'Decision model',
         detail: SettingsModelsPage.roleDetail(
-          role: StageRole.big,
+          role: StageRole.decision,
+          spec: _boxDecide,
+        ),
+        checkUrl: _boxDecide.url,
+        bearerId: _boxDecide.id,
+      ),
+      RoleLine(
+        id: 'generative',
+        title: 'Generative model',
+        detail: SettingsModelsPage.roleDetail(
+          role: StageRole.generative,
           spec: _boxProse,
         ),
         checkUrl: _boxProse.url,
         bearerId: _boxProse.id,
-      ),
-      RoleLine(
-        id: 'small',
-        title: 'Small model',
-        detail: SettingsModelsPage.roleDetail(
-          role: StageRole.small,
-          spec: _boxBulk,
-        ),
-        checkUrl: _boxBulk.url,
-        bearerId: _boxBulk.id,
       ),
       RoleLine(
         id: 'embed',
@@ -129,6 +130,7 @@ ManagedModelStatus _status(
   int bytes = 20 * 1024 * 1024 * 1024,
   bool onDisk = true,
   bool inUse = true,
+  bool local = false,
 }) =>
     ManagedModelStatus(
       roleId: roleId,
@@ -137,6 +139,7 @@ ManagedModelStatus _status(
       onDisk: onDisk,
       routerId: routerId,
       inUse: inUse,
+      local: local,
     );
 
 void main() {
@@ -537,8 +540,14 @@ void main() {
         roleLines: RoleLine.withStatus(
           _localLines(),
           statuses: [
-            _status('big', 'Qwen3.8 27B', routerId: routerProseId),
-            _status('small', 'Qwen3 4B Instruct', routerId: routerBulkId),
+            _status('generative', 'Qwen3.8 27B', routerId: routerProseId),
+            _status(
+              'decision',
+              'Bond decision model',
+              routerId: routerDecideId,
+              onDisk: false,
+              local: true,
+            ),
             _status(
               'embed',
               'Qwen3 Embedding 0.6B',
@@ -552,13 +561,15 @@ void main() {
         ),
       );
 
-      expect(find.text('Big model'), findsOneWidget);
+      expect(find.text('Generative model'), findsOneWidget);
+      expect(find.text('Decision model'), findsOneWidget);
       expect(
         find.text('Qwen3.8 27B on this Mac · 20.0 GB · on disk · loaded'),
         findsOneWidget,
       );
+      // Hand-installed, so a missing one is "not installed", never a download.
       expect(
-        find.text('Qwen3 4B Instruct on this Mac · 20.0 GB · on disk · loaded'),
+        find.text('Bond decision model on this Mac · 20.0 GB · not installed'),
         findsOneWidget,
       );
       expect(
@@ -589,7 +600,7 @@ void main() {
       );
 
       expect(find.text('qwen3.8 at box.example.com'), findsOneWidget);
-      expect(find.text('qwen3-4b at box.example.com'), findsOneWidget);
+      expect(find.text('$boxDecideModel at box.example.com'), findsOneWidget);
       expect(
         find.text(
           'Qwen3 Embedding 0.6B on this Mac · 1.1 GB · on disk · loaded',
@@ -613,9 +624,10 @@ void main() {
         },
       );
 
-      await press(tester, find.byKey(SettingsModelsPage.roleCheckKey('small')));
+      await press(
+          tester, find.byKey(SettingsModelsPage.roleCheckKey('decision')));
 
-      expect(asked, [(_smallUrl, 'sk-fixture-stored-$boxBulkId')]);
+      expect(asked, [(_decideUrl, 'sk-fixture-stored-$boxDecideId')]);
       expect(find.text('Reachable · 1 model'), findsOneWidget);
       expect(rendered(tester), everyElement(isNot(contains('sk-fixture'))));
     });
@@ -631,7 +643,7 @@ void main() {
             const ModelProbeResult(reachable: true, modelIds: ['qwen3.8']),
         roleLines: _boxLines(),
       );
-      await press(tester, find.byKey(SettingsModelsPage.roleCheckKey('big')));
+      await press(tester, find.byKey(SettingsModelsPage.roleCheckKey('generative')));
       expect(find.textContaining('Reachable'), findsOneWidget);
 
       await open(tester, roleLines: _localLines());
@@ -651,7 +663,7 @@ void main() {
         roleLines: _boxLines(),
       );
 
-      await tester.tap(find.byKey(SettingsModelsPage.roleCheckKey('big')));
+      await tester.tap(find.byKey(SettingsModelsPage.roleCheckKey('generative')));
       await tester.pump();
       expect(find.text('Checking…'), findsOneWidget);
 
@@ -680,7 +692,7 @@ void main() {
         roleLines: _boxLines(),
       );
 
-      await tester.tap(find.byKey(SettingsModelsPage.roleCheckKey('big')));
+      await tester.tap(find.byKey(SettingsModelsPage.roleCheckKey('generative')));
       await tester.pump();
 
       // The host left Settings while the answer was still out.
@@ -697,7 +709,7 @@ void main() {
         (tester) async {
       await open(tester, roleLines: _localLines());
 
-      for (final id in ['big', 'small', 'embed']) {
+      for (final id in ['decision', 'generative', 'embed']) {
         expect(
           find.byKey(SettingsModelsPage.roleCheckKey(id)),
           findsNothing,
@@ -717,7 +729,7 @@ void main() {
         _localLines(),
         statuses: [
           _status(
-            'big',
+            'generative',
             'Qwen3.8 27B',
             routerId: routerProseId,
             onDisk: false,
@@ -727,39 +739,41 @@ void main() {
         placement: ModelPlacement.local,
       );
 
-      expect(row(rows, 'big').detail, 'Qwen3.8 27B on this Mac');
-      expect(row(rows, 'big').size, '20.0 GB');
-      expect(row(rows, 'big').state, 'not downloaded');
+      expect(row(rows, 'generative').detail, 'Qwen3.8 27B on this Mac');
+      expect(row(rows, 'generative').size, '20.0 GB');
+      expect(row(rows, 'generative').state, 'not downloaded');
       // The rows the statuses say nothing about keep what the prefs said.
-      expect(row(rows, 'small').size, isNull);
-      expect(row(rows, 'small').detail, 'Qwen3 4B on this Mac');
+      expect(row(rows, 'decision').size, isNull);
+      expect(row(rows, 'decision').detail, 'Bond decision model on this Mac');
     });
 
     test('on disk is not loaded until the router says so', () {
       List<RoleLine> join(ServerState state) => RoleLine.withStatus(
             _localLines(),
-            statuses: [_status('big', 'Qwen3.8 27B', routerId: routerProseId)],
+            statuses: [
+              _status('generative', 'Qwen3.8 27B', routerId: routerProseId),
+            ],
             serverState: state,
             placement: ModelPlacement.local,
           );
 
       expect(
-        row(join(const ServerStopped()), 'big').state,
+        row(join(const ServerStopped()), 'generative').state,
         'on disk · not loaded',
       );
       expect(
-        row(join(const ServerReady(port: 8080, pid: 42)), 'big').state,
+        row(join(const ServerReady(port: 8080, pid: 42)), 'generative').state,
         'on disk · loaded',
       );
-      // Keyed by ROUTER id, which on a small Mac is the bulk file's even for
-      // the big row.
+      // Keyed by ROUTER id, which on a small Mac is the bulk file's for the
+      // generative row.
       expect(
         row(
           join(const ServerLoading(port: 8080, pid: 42, loaded: {
             routerProseId: true,
             routerBulkId: false,
           })),
-          'big',
+          'generative',
         ).state,
         'on disk · loaded',
       );
@@ -768,7 +782,7 @@ void main() {
           join(const ServerLoading(port: 8080, pid: 42, loaded: {
             routerProseId: false,
           })),
-          'big',
+          'generative',
         ).state,
         'on disk · not loaded',
       );
@@ -790,9 +804,17 @@ void main() {
       final rows = RoleLine.withStatus(
         _boxLines(),
         statuses: [
-          // A big row resolved a frame before the mode moved. It names a
-          // machine this app cannot see, and the placement is what says so.
-          _status('big', 'Qwen3.8 27B', routerId: routerProseId),
+          // A generative row resolved a frame before the mode moved. It names
+          // a machine this app cannot see, and the placement is what says so.
+          _status('generative', 'Qwen3.8 27B', routerId: routerProseId),
+          // The decision role is on the owner's server too, so its status is
+          // not in use and the row keeps what the prefs said.
+          _status(
+            'decision',
+            'Bond decision model',
+            routerId: routerDecideId,
+            inUse: false,
+          ),
           _status(
             'embed',
             'Qwen3 Embedding 0.6B',
@@ -804,9 +826,12 @@ void main() {
         placement: ModelPlacement.box,
       );
 
-      expect(row(rows, 'big').size, isNull);
-      expect(row(rows, 'big').state, isNull);
-      expect(row(rows, 'big').detail, 'qwen3.8 at box.example.com');
+      expect(row(rows, 'generative').size, isNull);
+      expect(row(rows, 'generative').state, isNull);
+      expect(row(rows, 'generative').detail, 'qwen3.8 at box.example.com');
+      expect(row(rows, 'decision').size, isNull);
+      expect(row(rows, 'decision').detail,
+          '$boxDecideModel at box.example.com');
       expect(row(rows, 'embed').size, '1.1 GB');
       expect(row(rows, 'embed').state, 'on disk · loaded');
     });
@@ -815,46 +840,52 @@ void main() {
       // The screen that could have shown which ones went with the fold.
       expect(
         SettingsModelsPage.roleDetail(
-          role: StageRole.big,
-          spec: _localProse,
+          role: StageRole.generative,
+          spec: _localGenerative,
           overrides: 1,
         ),
         'Custom · 1 step points elsewhere',
       );
       expect(
         SettingsModelsPage.roleDetail(
-          role: StageRole.small,
-          spec: _localFast,
+          role: StageRole.decision,
+          spec: _localDecision,
           overrides: 3,
         ),
         'Custom · 3 steps point elsewhere',
       );
     });
 
-    test('a fresh install on this Mac reads the two built-ins and embeddings',
-        () {
+    test('a fresh install on this Mac reads the three roles here', () {
       const prefs = AppPrefs();
       final rows = RoleLine.fromPrefs(prefs);
 
-      expect([for (final r in rows) r.id], ['big', 'small', 'embed']);
-      expect(row(rows, 'big').detail, 'Qwen3.8 27B on this Mac');
-      expect(row(rows, 'small').detail, 'Qwen3 4B on this Mac');
+      expect([for (final r in rows) r.id], ['decision', 'generative', 'embed']);
+      expect(row(rows, 'decision').detail, 'Bond decision model on this Mac');
+      expect(row(rows, 'generative').detail, 'Qwen3.8 27B on this Mac');
       expect(row(rows, 'embed').detail, 'Qwen3 Embedding 0.6B on this Mac');
+      // A small Mac's generative model is the 4B, and the row says so.
+      final inbox =
+          RoleLine.fromPrefs(const AppPrefs(machineTier: MachineTier.inbox));
+      expect(row(inbox, 'generative').detail, 'Qwen3 4B on this Mac');
     });
 
-    test('a user-defined install reads the two servers it was given', () {
+    test('a user-defined install reads the servers it was given', () {
       const prefs = AppPrefs(
         modelPlacement: ModelPlacement.box,
         boxBigUrl: _bigUrl,
-        boxSmallUrl: _smallUrl,
-        boxKeyStored: true,
+        boxBigKeyStored: true,
+        decisionPlacement: ModelPlacement.box,
+        decisionUrl: _decideUrl,
+        decisionKeyStored: true,
       );
       final rows = RoleLine.fromPrefs(prefs);
 
-      expect(row(rows, 'big').detail, 'qwen3.8 at box.example.com');
-      expect(row(rows, 'big').bearerId, boxProseId);
-      expect(row(rows, 'small').detail, 'qwen3-4b at box.example.com');
-      expect(row(rows, 'small').bearerId, boxBulkId);
+      expect(row(rows, 'generative').detail, 'qwen3.8 at box.example.com');
+      expect(row(rows, 'generative').bearerId, boxProseId);
+      expect(row(rows, 'decision').detail,
+          '$boxDecideModel at box.example.com');
+      expect(row(rows, 'decision').bearerId, boxDecideId);
     });
   });
 

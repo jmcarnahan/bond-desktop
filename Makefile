@@ -1091,17 +1091,11 @@ APP_LLM_DEFINES :=
 ifneq ($(strip $(LLAMA_URL)),)
 APP_LLM_DEFINES += --dart-define=LLAMA_URL='$(LLAMA_URL)'
 endif
-ifneq ($(strip $(FAST_LLAMA_URL)),)
-APP_LLM_DEFINES += --dart-define=FAST_LLAMA_URL='$(FAST_LLAMA_URL)'
-endif
 ifneq ($(strip $(EMBED_URL)),)
 APP_LLM_DEFINES += --dart-define=EMBED_URL='$(EMBED_URL)'
 endif
 ifneq ($(strip $(LLAMA_MODEL)),)
 APP_LLM_DEFINES += --dart-define=LLAMA_MODEL='$(LLAMA_MODEL)'
-endif
-ifneq ($(strip $(FAST_LLAMA_MODEL)),)
-APP_LLM_DEFINES += --dart-define=FAST_LLAMA_MODEL='$(FAST_LLAMA_MODEL)'
 endif
 # The decision model's endpoint and name (`DecisionClient`), for a decide
 # server somewhere other than `make decide`'s :8083. DECIDE_URL is the FULL

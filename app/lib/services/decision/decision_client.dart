@@ -32,7 +32,8 @@ import 'package:flutter/foundation.dart' show immutable;
 import 'package:http/http.dart' as http;
 
 import '../llm/llm_client.dart';
-import '../llm/model_slots.dart' show LlmTarget;
+import '../llm/model_slots.dart'
+    show LlmTarget, decideModelDefault, decideUrlDefault;
 import 'decision_heads.dart';
 import 'decision_input.dart';
 import 'decision_state.dart';
@@ -73,17 +74,13 @@ class _CallFacts {
 class DecisionClient {
   /// Overridable at build time (`--dart-define=DECIDE_URL=…`), like
   /// `EMBED_URL`. The FULL endpoint, as every target's `baseUrl` is.
-  static const String defaultBaseUrl = String.fromEnvironment(
-    'DECIDE_URL',
-    defaultValue: 'http://127.0.0.1:8083/v1/embeddings',
-  );
+  /// A const alias of `decideUrlDefault` in `model_slots.dart`, where the
+  /// prefs compose the hand-servers decision target from it.
+  static const String defaultBaseUrl = decideUrlDefault;
 
   /// The `model` field on the wire. A single-model llama-server ignores it;
   /// the managed router routes on it.
-  static const String defaultModel = String.fromEnvironment(
-    'DECIDE_MODEL',
-    defaultValue: 'bond-decide',
-  );
+  static const String defaultModel = decideModelDefault;
 
   /// ModernBERT's `[CLS]` and `[SEP]` ids — what a token-array input must
   /// carry itself, since the server adds no specials to one.

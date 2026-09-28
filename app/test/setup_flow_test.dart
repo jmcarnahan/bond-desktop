@@ -228,7 +228,7 @@ void main() {
     await settle(tester);
     await tapContinue(tester);
 
-    // 4 — Models. This Mac, so all three.
+    // 4 — Models. This Mac: the embedding model and the one generative model.
     expect(find.text('Models'), findsOneWidget);
     expect(find.text('Step 4 of 9'), findsOneWidget);
     expect(find.text('Finds related messages'), findsOneWidget);
@@ -247,7 +247,7 @@ void main() {
     expect(find.text('Download'), findsOneWidget);
     expect(find.text('Step 6 of 9'), findsOneWidget);
     expect(find.text('All models are on this Mac.'), findsOneWidget);
-    expect(find.text('Ready'), findsNWidgets(3));
+    expect(find.text('Ready'), findsNWidgets(2));
 
     await tapContinue(tester);
 
@@ -466,7 +466,6 @@ void main() {
                 paths: AppPaths(support),
                 readPrefs: () => prefs.state,
                 setModelsFolder: prefs.setModelsFolder,
-                applyTierDefaults: prefs.applyTierDefaults,
                 probe: probe,
                 storedBearer: prefs.bearerFor,
                 useBox: ({
@@ -580,12 +579,13 @@ void main() {
         initial: const AppPrefs(
           modelPlacement: ModelPlacement.box,
           boxBigUrl: bigUrl,
-          boxSmallUrl: smallUrl,
         ),
       );
       await reachWhere(tester);
 
-      // Chosen, so the form is up without a tap and both addresses are in it.
+      // Chosen, so the form is up without a tap and both addresses are in it
+      // (INTERIM: both open on the generative remote's, because the small
+      // half is ignored since the decision-model round).
       expect(
         tester.widget<TextField>(find.byKey(ModelServersForm.bigUrlKey))
             .controller!
@@ -596,7 +596,7 @@ void main() {
         tester.widget<TextField>(find.byKey(ModelServersForm.smallUrlKey))
             .controller!
             .text,
-        smallUrl,
+        bigUrl,
       );
       // The one thing a compiled address does not answer.
       expect(
@@ -609,7 +609,7 @@ void main() {
     });
 
     testWidgets('Continue on Managed writes local and the next step lists '
-        'three', (tester) async {
+        'this Mac\'s two', (tester) async {
       makeWithPrefs(probe: twoServers);
       await reachWhere(tester);
 
@@ -618,16 +618,16 @@ void main() {
       expect(continueEnabled(tester), isTrue);
       await tapContinue(tester);
 
-      // No key and nothing stored: on a first run `usePlacement` finds no
-      // entry the app wrote, and what it leaves is a fresh install with this
-      // machine's tier defaults applied.
+      // No key and nothing stored: what it leaves is a fresh install with
+      // this machine's tier defaults applied.
       expect(prefs.state.modelPlacement, ModelPlacement.local);
-      expect(prefs.state.targets, isEmpty);
       expect(tokens.values, isEmpty);
 
+      // The embedding model and the one generative model this Mac runs (the
+      // 27B on the full tier); the 4B is not downloaded beside it.
       expect(find.text('Models'), findsOneWidget);
       expect(find.text('Test Embed'), findsOneWidget);
-      expect(find.text('Test Bulk'), findsOneWidget);
+      expect(find.text('Test Bulk'), findsNothing);
       expect(find.text('Test Prose'), findsOneWidget);
     });
 
@@ -648,19 +648,14 @@ void main() {
 
       // Both servers, the big one first, each with the typed key.
       expect(asked, [(bigUrl, key), (smallUrl, key)]);
-      // The placement, the pair, the two names the servers listed, and the
-      // key in the keychain under BOTH derived ids rather than a preference.
+      // The placement, the generative remote, the name its server listed,
+      // and the key in the keychain rather than a preference. The small half
+      // is ignored since the decision-model round (INTERIM form).
       expect(prefs.state.modelPlacement, ModelPlacement.box);
       expect(prefs.state.boxBigUrl, bigUrl);
-      expect(prefs.state.boxSmallUrl, smallUrl);
-      expect(prefs.state.effectiveBoxBigModel, 'qwen3.8');
-      expect(prefs.state.effectiveBoxSmallModel, 'qwen3-4b');
+      expect(prefs.state.effectiveGenerativeModel, 'qwen3.8');
+      expect(tokens.values.keys, ['$llmTargetBearerKeyPrefix$boxProseId']);
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'], key);
-      expect(tokens.values['$llmTargetBearerKeyPrefix$boxBulkId'], key);
-      // Derived, not stored: nothing in the target list and nothing in the
-      // stage map.
-      expect(prefs.state.targets, isEmpty);
-      expect(prefs.state.stageTargets, isEmpty);
       expect(prefs.state.draftPolicy, DraftPolicy.needsYou);
 
       // And the models step is about what THIS Mac downloads, which under
@@ -774,7 +769,6 @@ void main() {
       // The work moves here, and the way back is not thrown away: changing
       // where the models run is not forgetting how to reach the servers.
       expect(prefs.state.modelPlacement, ModelPlacement.local);
-      expect(prefs.state.stageTargets, isEmpty);
       expect(prefs.state.boxBigUrl, bigUrl);
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'], key);
 
@@ -795,7 +789,6 @@ void main() {
       expect(prefs.state.modelPlacement, ModelPlacement.box);
       expect(prefs.state.boxBigUrl, bigUrl);
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'], key);
-      expect(tokens.values['$llmTargetBearerKeyPrefix$boxBulkId'], key);
       expect(find.text('Step 4 of 9'), findsOneWidget);
       expect(find.text('Test Embed'), findsOneWidget);
       expect(find.text('Test Prose'), findsNothing);
@@ -811,7 +804,7 @@ void main() {
       // The step is recorded on ARRIVAL, and the choice is not.
       expect(await store.get(SetupStore.setupKey), 'where');
       expect(prefs.state.modelPlacement, ModelPlacement.local);
-      expect(prefs.state.targets, isEmpty);
+      expect(prefs.state.boxBigUrl, isEmpty);
     });
   });
 

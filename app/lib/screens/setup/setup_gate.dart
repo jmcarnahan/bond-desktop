@@ -4,9 +4,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/setup_store.dart';
 import '../../models/setup_step.dart';
 import '../../providers/app_providers.dart';
+import '../../providers/prefs_provider.dart';
 import '../../providers/setup_provider.dart';
 import '../../services/attachments/file_dialogs.dart';
 import '../../services/llm/model_slots.dart';
+import '../../services/models/model_manifest.dart';
 import '../../services/system/system_info.dart';
 import 'setup_flow.dart';
 
@@ -72,19 +74,19 @@ class _SetupGateState extends ConsumerState<SetupGate> {
   /// ledger is the cheap way to notice: the wizard opens on its download step
   /// and fetches what has moved.
   ///
-  /// The comparison is against the EFFECTIVE tier's manifest: the memory of
-  /// the Mac this launch is on, or the embedding model alone when this install
-  /// is pointed at the shared GPU box. A models folder carried to a smaller
-  /// Mac holds a writing model that machine will not start, and a gate
-  /// demanding it would send a finished setup back through the wizard for a
-  /// file it is never going to want.
+  /// The comparison is against [managedManifestProvider]'s DOWNLOADABLE view:
+  /// the files this Mac serves under the role placements, on the memory of
+  /// the Mac this launch is on. A models folder carried to a smaller Mac holds
+  /// a writing model that machine will not start, and a gate demanding it
+  /// would send a finished setup back through the wizard for a file it is
+  /// never going to want. A hand-installed entry (the decision model) is
+  /// never demanded: it is not downloaded, and a missing one parks the
+  /// decision pass rather than forcing the wizard.
   ///
   /// `DownloadLedger.matches` asks whether every file the RESOLVED manifest
   /// names is current and says nothing about the rest, so an install that
-  /// adopts the box after a full download keeps three files on disk and still
-  /// passes. Confirmed before this provider was wired in here; a ledger that
-  /// demanded an exact set would send every such install back into the
-  /// wizard.
+  /// moves a role to its own server after a full download keeps the files on
+  /// disk and still passes.
   Future<bool> _decide() async {
     if (SetupGate.skipsSetup(SetupGate.skipDefine)) return true;
     try {
@@ -100,16 +102,26 @@ class _SetupGateState extends ConsumerState<SetupGate> {
       // throws would fall into the catch below and send a machine that IS set
       // up back through the wizard. Both answer the same way instead: unknown
       // memory, which is the full tier.
-      MachineTier tier;
+      ModelManifest served;
       try {
-        tier = await ref
-            .read(effectiveTierProvider.future)
+        served = await ref
+            .read(managedManifestProvider.future)
             .timeout(hardwareProbeTimeout);
       } on Object {
-        tier = machineTierFor(HardwareInfo.unknown.memoryBytes);
+        // The same roles on the tier unknown memory answers (the full one),
+        // so a role on the owner's server is not demanded here either.
+        final prefs = ref.read(appPrefsProvider);
+        final tier = machineTierFor(HardwareInfo.unknown.memoryBytes);
+        served = ref.read(modelManifestProvider).forRoles(
+              hardwareTier: tier,
+              decisionManaged: prefs.decisionSpec.id == localDecisionId,
+              generativeManagedId: prefs.managedServer &&
+                      prefs.generativeSpec.id == localGenerativeId
+                  ? managedGenerativeIdFor(tier, prefs.generativeManagedModel)
+                  : null,
+            );
       }
-      return (await store.downloadLedger())
-          .matches(ref.read(modelManifestProvider).forTier(tier));
+      return (await store.downloadLedger()).matches(served.downloadable);
     } on Object {
       // A store read that throws is treated as "not set up", exactly as
       // `AuthGate` treats an unreadable keychain: the wizard is the

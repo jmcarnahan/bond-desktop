@@ -41,6 +41,16 @@ embedding = true
 pooling = last
 load-on-startup = true
 
+[bond-decide]
+model = /tmp/Bond Models/local_bond-decide/bond-decide-mbl-v2swap-f16.gguf
+embedding = true
+pooling = mean
+c = 2048
+ub = 2048
+b = 2048
+parallel = 1
+load-on-startup = true
+
 [bond-bulk]
 model = /tmp/Bond Models/ggml-org_Qwen3-4B-Instruct-2507-Q8_0-GGUF/qwen3-4b-instruct-2507-q8_0.gguf
 c = 16384
@@ -137,7 +147,7 @@ spec-type = draft-mtp
       // the preset names and refuses while any of their files is missing, so
       // a section for a checkpoint this tier never downloads would be a
       // server that cannot start on a machine that is set up correctly.
-      expect(inbox.modelIds, ['bond-embed', 'bond-bulk']);
+      expect(inbox.modelIds, ['bond-embed', 'bond-decide', 'bond-bulk']);
       expect(inbox.toIni(), isNot(contains('[bond-prose]')));
       expect(inbox.toIni(), contains('parallel = 2'));
 
@@ -147,6 +157,34 @@ spec-type = draft-mtp
           manifest.forTier(MachineTier.full).toPreset('/tmp/Bond Models');
       expect(inbox.hash, isNot(full.hash));
       expect(full.hash, manifest.toPreset('/tmp/Bond Models').hash);
+    });
+
+    test('the decision section is an embedding model with no heads line', () {
+      // The heads file sits beside the GGUF but llama-server never reads it:
+      // the nine heads run in Dart. So the section is the encoder alone, and
+      // `missingFiles` asks for the GGUF only.
+      final preset = testManifest(withDecide: true).toPreset('/tmp/models');
+      final lines = preset.toIni().split('\n');
+      final start = lines.indexOf('[bond-decide]');
+
+      expect(start, greaterThan(0));
+      expect(lines.sublist(start, start + 9), [
+        '[bond-decide]',
+        'model = /tmp/models/local_bond-decide/bond-decide-mbl-v2swap-f16.gguf',
+        'embedding = true',
+        'pooling = mean',
+        'c = 2048',
+        'ub = 2048',
+        'b = 2048',
+        'parallel = 1',
+        'load-on-startup = true',
+      ]);
+      expect(preset.toIni(), isNot(contains('decide-heads.json')));
+      expect(preset.draftPath(preset.models[1]), isNull);
+      expect(
+        preset.missingFiles().where((f) => f.contains('local_bond-decide')),
+        ['/tmp/models/local_bond-decide/bond-decide-mbl-v2swap-f16.gguf'],
+      );
     });
 
     test('modelIds are the router ids, in file order', () {

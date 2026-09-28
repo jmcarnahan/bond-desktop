@@ -313,33 +313,30 @@ void main() {
   });
 
   group('providers', () {
-    test('a stage client defaults to its slot\'s server', () async {
+    test('every text stage defaults to the one generative model', () async {
       // The family watches the activity log, which watches the store — so
       // even this read-only test needs a real database under it.
       final container = ProviderContainer(
         overrides: [dbProvider.overrideWithValue(db)],
       );
       addTearDown(container.dispose);
-      // And reading `baseUrl` resolves the stage map, so the settings have to
-      // be in before the assertion rather than landing on a database this
+      // And reading `baseUrl` resolves the prefs, so the settings have to be
+      // in before the assertion rather than landing on a database this
       // test's tearDown has already closed.
       await container.read(appPrefsProvider.notifier).ready;
 
-      // The app runs its own server unless the build hands them over, so a
-      // slot on the build's own values is the ROUTER's target: one port, and
-      // the model is what says which of its models a stage asks for.
+      // The app runs its own server unless the build hands them over, so the
+      // generative role on this Mac is the ROUTER's target: one port, and the
+      // model is what says which of its models a stage asks for.
       final prefs = container.read(appPrefsProvider);
       final draft = container.read(stageLlmClientProvider('draft_reply'));
       final triage = container.read(stageLlmClientProvider('triage'));
       expect(draft.baseUrl, prefs.routerProseTarget.baseUrl);
       expect(draft.model, routerProseId);
-      expect(triage.baseUrl, prefs.routerBulkTarget.baseUrl);
-      expect(triage.model, routerBulkId);
-      // Two models, and not the same object — one stage accidentally aliasing
-      // the other would route every label back onto the 27B.
-      expect(draft.model, isNot(triage.model));
-      // And a build that hands the servers over still has two servers.
-      expect(LlmClient.fastBaseUrl, isNot(LlmClient.defaultBaseUrl));
+      // One generative model since the decision-model round: the label
+      // stages and the drafts ask the same model.
+      expect(triage.baseUrl, draft.baseUrl);
+      expect(triage.model, draft.model);
       expect(
         identical(container.read(stageLlmClientProvider('draft_reply')),
             container.read(stageLlmClientProvider('triage'))),
@@ -366,7 +363,7 @@ void main() {
         overrides: [
           dbProvider.overrideWithValue(db),
           stageLlmClientProvider.overrideWith(
-            (ref, id) => stageSlot(id) == ModelSlot.fast ? fast : primary,
+            (ref, id) => id == 'storyline_membership' ? fast : primary,
           ),
         ],
       );
@@ -437,7 +434,7 @@ void main() {
       expect(clients['storyline_recap']!.schemas, ['storyline_recap']);
     });
 
-    test('a stored target moves the fast client without rebuilding it',
+    test('a role write moves the clients without rebuilding them',
         () async {
       final container = ProviderContainer(
         overrides: [dbProvider.overrideWithValue(db)],
@@ -445,56 +442,51 @@ void main() {
       addTearDown(container.dispose);
       await container.read(appPrefsProvider.notifier).ready;
 
-      final client = container.read(stageLlmClientProvider('triage'));
-      expect(client.baseUrl,
-          container.read(appPrefsProvider).routerBulkTarget.baseUrl);
+      final triage = container.read(stageLlmClientProvider('triage'));
+      final draft = container.read(stageLlmClientProvider('draft_reply'));
+      expect(triage.baseUrl,
+          container.read(appPrefsProvider).routerProseTarget.baseUrl);
 
-      await container.read(appPrefsProvider.notifier).setFastLlmTarget(
+      await container.read(appPrefsProvider.notifier).useGenerative(
+            placement: ModelPlacement.box,
             url: 'http://127.0.0.1:9/v1/chat/completions',
-            model: 'mlx-4b',
+            model: 'mlx-27b',
+            hardwareTier: MachineTier.full,
           );
 
-      // The SAME instance follows the setting — that is the whole design. A
+      // The SAME instances follow the setting — that is the whole design. A
       // rebuild here would abort a drain to change the next request's server.
-      expect(identical(container.read(stageLlmClientProvider('triage')), client),
+      expect(identical(container.read(stageLlmClientProvider('triage')), triage),
           isTrue);
-      expect(client.baseUrl, 'http://127.0.0.1:9/v1/chat/completions');
-      expect(client.model, 'mlx-4b');
+      expect(
+          identical(container.read(stageLlmClientProvider('draft_reply')), draft),
+          isTrue);
+      for (final client in [triage, draft]) {
+        expect(client.baseUrl, 'http://127.0.0.1:9/v1/chat/completions');
+        expect(client.model, 'mlx-27b');
+      }
     });
 
-    test('the prose client reads its own slot', () async {
+    test('every generative stage gets the prose ceiling', () async {
       final container = ProviderContainer(
         overrides: [dbProvider.overrideWithValue(db)],
       );
       addTearDown(container.dispose);
       await container.read(appPrefsProvider.notifier).ready;
 
-      final prose = container.read(stageLlmClientProvider('draft_reply'));
-      final fast = container.read(stageLlmClientProvider('triage'));
-
-      await container.read(appPrefsProvider.notifier).setProseLlmTarget(
-            url: 'http://127.0.0.1:9/v1/chat/completions',
-            model: 'mlx-27b',
-          );
-
-      expect(
-          identical(
-              container.read(stageLlmClientProvider('draft_reply')), prose),
-          isTrue);
-      expect(prose.baseUrl, 'http://127.0.0.1:9/v1/chat/completions');
-      expect(prose.model, 'mlx-27b');
-      // Two slots, not one setting: moving prose must not move the bulk work.
-      final bulk = container.read(appPrefsProvider).routerBulkTarget;
-      expect(fast.baseUrl, bulk.baseUrl);
-      expect(fast.model, bulk.model);
-      // And two ceilings. Prose runs one long call — a draft at every input
-      // cap — so it gets the number sized to that; the bulk client's calls
-      // answer in seconds, so its 120 costs nothing and stays.
-      expect(prose.timeout, LlmClient.proseTimeout);
-      expect(fast.timeout, const Duration(seconds: 120));
+      // One generative model does the short calls and the drafts alike, and
+      // on the 27B a short call can wait behind a draft in the same slot, so
+      // every text stage gets the number sized to the longest draft.
+      for (final stage in pipelineStages) {
+        if (stage.slot != ModelSlot.generative) continue;
+        expect(container.read(stageLlmClientProvider(stage.id)).timeout,
+            LlmClient.proseTimeout,
+            reason: stage.id);
+      }
     });
 
-    test('a stage map entry moves one stage and leaves the others', () async {
+    test('cloud drafts move the two draft stages and leave the others',
+        () async {
       final container = ProviderContainer(
         overrides: [dbProvider.overrideWithValue(db)],
       );
@@ -502,35 +494,21 @@ void main() {
       final prefs = container.read(appPrefsProvider.notifier);
       await prefs.ready;
 
+      final draft = container.read(stageLlmClientProvider('draft_reply'));
       final triage = container.read(stageLlmClientProvider('triage'));
-      final extraction = container.read(stageLlmClientProvider('extraction'));
-      final bulkUrl =
-          container.read(appPrefsProvider).routerBulkTarget.baseUrl;
-      expect(triage.baseUrl, bulkUrl);
+      final generativeUrl =
+          container.read(appPrefsProvider).routerProseTarget.baseUrl;
 
-      await prefs.upsertTarget(
-        const LlmTargetSpec(
-          id: 'gpu-1',
-          name: 'GPU box',
-          url: 'http://127.0.0.1:9/v1/chat/completions',
-          model: 'qwen3-4b',
-        ),
+      await prefs.useCloudDrafts(
+        url: 'https://drafts.example.com/v1/chat/completions',
+        model: 'drafter',
       );
-      await prefs.setStageTarget('triage', 'gpu-1');
 
-      // Per STAGE, which is what the map buys over the two slots: one stage
-      // moves and its neighbour on the same slot does not.
-      expect(triage.baseUrl, 'http://127.0.0.1:9/v1/chat/completions');
-      expect(triage.model, 'qwen3-4b');
-      expect(extraction.baseUrl, bulkUrl);
-      // And still the same instances, for the reason above.
-      expect(identical(container.read(stageLlmClientProvider('triage')), triage),
-          isTrue);
-      expect(
-        identical(
-            container.read(stageLlmClientProvider('extraction')), extraction),
-        isTrue,
-      );
+      expect(draft.baseUrl, 'https://drafts.example.com/v1/chat/completions');
+      expect(draft.model, 'drafter');
+      expect(triage.baseUrl, generativeUrl);
+      expect(identical(container.read(stageLlmClientProvider('draft_reply')),
+          draft), isTrue);
     });
 
     test('pointing a stage elsewhere rebuilds no worker', () async {
@@ -546,18 +524,19 @@ void main() {
       final storyline = container.read(storylineWorkerProvider);
       final drafts = container.read(draftWorkerProvider);
 
-      await prefs.upsertTarget(
-        const LlmTargetSpec(
-          id: 'gpu-1',
-          name: 'GPU box',
-          url: 'http://127.0.0.1:9/v1/chat/completions',
-          model: 'qwen3.8',
-        ),
+      await prefs.useGenerative(
+        placement: ModelPlacement.box,
+        url: 'http://127.0.0.1:9/v1/chat/completions',
+        model: 'qwen3.8',
+        hardwareTier: MachineTier.full,
       );
-      await prefs.setStageTarget('draft_reply', 'gpu-1');
+      await prefs.useDecision(
+        placement: ModelPlacement.box,
+        url: 'http://127.0.0.1:9/decide/v1/embeddings',
+      );
 
-      // The same requirement as the slot test below, one level up: the stage
-      // map is reached by `ref.read` of the NOTIFIER inside a resolver
+      // The same requirement as the test below, one level up: the prefs are
+      // reached by `ref.read` of the NOTIFIER inside a resolver
       // closure, so a write creates no dependency edge. The day someone makes
       // it a `ref.watch`, every one of these becomes a new object and a drain
       // in flight is disposed to change where the NEXT request goes.
@@ -583,9 +562,10 @@ void main() {
       final activity = container.read(activityLogProvider);
       final progress = container.read(progressBusProvider);
 
-      await container.read(appPrefsProvider.notifier).setFastLlmTarget(
-            url: 'http://127.0.0.1:9/v1/chat/completions',
-            model: 'mlx-4b',
+      await container.read(appPrefsProvider.notifier).useGenerative(
+            placement: ModelPlacement.local,
+            managedModel: routerBulkId,
+            hardwareTier: MachineTier.inbox,
           );
 
       // The no-rebuild requirement, which nothing else enforces: the resolver

@@ -152,6 +152,19 @@ void main() {
       expect(DownloadLedger.empty.matches(manifest), isFalse);
     });
 
+    test('matches never asks for a hand-installed entry', () {
+      // The decision model is installed by `make decide-install` and has no
+      // row: a ledger complete for the downloads is complete.
+      final manifest = testManifest(withDecide: true);
+      var ledger = DownloadLedger.empty;
+      for (final model in manifest.models) {
+        if (model.isLocal) continue;
+        ledger = ledger.record(state(model.id, sha: model.sha256));
+      }
+      expect(ledger['bond-decide'], isNull);
+      expect(ledger.matches(manifest), isTrue);
+    });
+
     test('parse tolerates null, empty and rubbish', () {
       expect(DownloadLedger.parse(null), DownloadLedger.empty);
       expect(DownloadLedger.parse(''), DownloadLedger.empty);

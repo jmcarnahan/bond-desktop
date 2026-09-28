@@ -82,7 +82,6 @@ void main() {
       paths: AppPaths(root),
       readPrefs: () => AppPrefs(modelsFolder: folder()),
       setModelsFolder: (_) async {},
-      applyTierDefaults: (_) async {},
       useBox: ({
         required bigUrl,
         required smallUrl,
@@ -161,9 +160,11 @@ void main() {
     );
 
     expect(controller.state.downloadsComplete, isTrue);
-    // The finished file was never asked for again: two resolves, not three.
-    expect(hub.resolveCount, 2);
-    for (final model in manifest.models) {
+    // The finished file was never asked for again: one resolve, for the one
+    // other file this install downloads (the 27B on the full tier; the 4B is
+    // not the managed generative model there, so it is not fetched at all).
+    expect(hub.resolveCount, 1);
+    for (final model in controller.resolvedManifest.models) {
       expect(File(destOf(model)).existsSync(), isTrue, reason: model.id);
     }
   });
@@ -199,7 +200,7 @@ void main() {
 
     expect(controller.state.downloadsComplete, isTrue);
     // Exactly one ranged request, for exactly the bytes that were missing:
-    // the other two files are fresh and ask for no range at all.
+    // the other file is fresh and asks for no range at all.
     expect(hub.cdnRanges.where((r) => r != null).toList(), ['bytes=$partLen-']);
     expect(
       File(destOf(embed)).readAsBytesSync(),

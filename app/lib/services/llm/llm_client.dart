@@ -262,7 +262,14 @@ class LlmClient {
 
   /// The small model that does the bulk work — triage, extraction, storyline
   /// membership. Same wire protocol, its own server: see `make fast`.
-  static const String fastBaseUrl = fastUrlDefault;
+  ///
+  /// Bench-only since the decision-model round: the app has one generative
+  /// model and no fast slot, but `make fast` and the benches that dial it
+  /// still read these two.
+  static const String fastBaseUrl = String.fromEnvironment(
+    'FAST_LLAMA_URL',
+    defaultValue: 'http://localhost:8082/v1/chat/completions',
+  );
 
   /// The model name every request carries, and the reason it is per instance
   /// rather than the one constant it used to be.
@@ -275,7 +282,8 @@ class LlmClient {
 
   /// The same, for the bulk-work server — the two may be different models on
   /// different runtimes, so they get separate defines.
-  static const String fastModel = fastModelDefault;
+  static const String fastModel =
+      String.fromEnvironment('FAST_LLAMA_MODEL', defaultValue: 'qwen3.8');
 
   /// The model generates at roughly 12 tokens a second, so a full 512-token
   /// answer can legitimately take most of a minute. This ceiling is here to

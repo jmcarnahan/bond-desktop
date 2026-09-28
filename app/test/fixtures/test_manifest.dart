@@ -19,7 +19,10 @@ import 'package:bond_inbox/services/server/router_preset.dart';
 /// committed manifest carries, so a test that resolves a tier is resolving
 /// the ladder the app ships. The entries' own arguments stay fictional.
 /// [proseSidecar] is OPT-IN and null by default, so the fixture every other
-/// suite builds still describes three files and one INI line per model. A
+/// suite builds still describes three files and one INI line per model.
+/// [withDecide] is opt-in for the same reason: the hand-installed decision
+/// model (`source: local`, real repo and file names, a heads record) is a
+/// fourth INI section, and only the suites about it want one. A
 /// sidecar changes the preset's text, the download count, the ledger's rows
 /// and the total, and only the suites that are about those want it.
 ModelManifest testManifest({
@@ -27,6 +30,7 @@ ModelManifest testManifest({
   Map<String, String>? sha256s,
   String revision = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
   ModelSidecar? proseSidecar,
+  bool withDecide = false,
 }) {
   final defaultSha = '0' * 64;
   ModelFile file({
@@ -69,6 +73,7 @@ ModelManifest testManifest({
         'load-on-startup': 'true',
       },
     ),
+    if (withDecide) testDecideFile(),
     file(
       id: routerBulkId,
       role: ModelRole.bulk,
@@ -91,6 +96,38 @@ ModelManifest testManifest({
   ]);
 }
 
+/// The hand-installed decision model with the REAL repo, file and heads
+/// names (what the paths and the parity with `make decide-install` are
+/// written against) and fictional sizes and digests.
+ModelFile testDecideFile() => ModelFile(
+      id: routerDecideId,
+      role: ModelRole.decide,
+      displayName: 'Test Decide',
+      repo: 'local/bond-decide',
+      file: 'bond-decide-mbl-v2swap-f16.gguf',
+      revision: '',
+      sizeBytes: 2048,
+      sha256: 'e' * 64,
+      minRamBytes: 0,
+      license: 'Fictional-1.0',
+      licenseUrl: 'https://example.invalid/licence',
+      source: sourceLocal,
+      heads: ModelHeads(
+        file: 'decide-heads.json',
+        sha256: 'f' * 64,
+        sizeBytes: 512,
+      ),
+      serverArgs: const {
+        'embedding': 'true',
+        'pooling': 'mean',
+        'c': '2048',
+        'ub': '2048',
+        'b': '2048',
+        'parallel': '1',
+        'load-on-startup': 'true',
+      },
+    );
+
 /// The fictional MTP head for the prose entry — the real file NAME, because
 /// the path and the INI line are what the assertions are written against, and
 /// a size and digest the test chooses.
@@ -106,28 +143,23 @@ ModelSidecar testSidecar({
       sizeBytes: sizeBytes,
     );
 
-/// The three the committed manifest declares: the full tier takes all three
-/// checkpoints, the inbox tier takes the embedding and inbox models and halves
-/// the inbox model's slots, and the remote tier takes the embedding model
-/// alone, because on the shared GPU box placement that is all this Mac serves.
+/// The two the committed manifest declares: the full tier takes every
+/// checkpoint, the inbox tier takes all but the 27B and halves the 4B's slots.
+/// Both list the decision model, which a fixture built without [withDecide]
+/// simply does not carry.
 final List<ManifestTier> testTiers = List.unmodifiable([
   ManifestTier(
     tier: MachineTier.full,
     minRamBytes: fullTierMinBytes,
-    models: const [routerEmbedId, routerBulkId, routerProseId],
+    models: const [routerEmbedId, routerDecideId, routerBulkId, routerProseId],
   ),
   const ManifestTier(
     tier: MachineTier.inbox,
     minRamBytes: 0,
-    models: [routerEmbedId, routerBulkId],
+    models: [routerEmbedId, routerDecideId, routerBulkId],
     serverArgs: {
       routerBulkId: {'c': '16384', 'parallel': '2'},
     },
-  ),
-  const ManifestTier(
-    tier: MachineTier.remote,
-    minRamBytes: 0,
-    models: [routerEmbedId],
   ),
 ]);
 

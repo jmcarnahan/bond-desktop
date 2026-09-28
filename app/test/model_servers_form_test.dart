@@ -425,7 +425,9 @@ void main() {
 
       expect(asked, [
         (_bigUrl, 'sk-fixture-stored-$boxProseId'),
-        (_smallUrl, 'sk-fixture-stored-$boxBulkId'),
+        // The small half's probe borrows the generative remote's stored key
+        // since the decision-model round (the half itself is ignored).
+        (_smallUrl, 'sk-fixture-stored-$boxProseId'),
       ]);
       // Null, not the empty string: the host reads that as "keep what is
       // stored" and writes no keychain entry.
@@ -645,7 +647,9 @@ void main() {
       await connect(tester);
 
       expect(asks.single.isThirdParty, isTrue);
-      expect(asks.single.id, boxProseId);
+      // What the pane is about: the cloud-drafts target a third-party big
+      // address becomes (the interim `useBox` shim).
+      expect(asks.single.id, cloudDraftsId);
       expect(asks.single.url, _openAiUrl);
       expect(asks.single.model, 'gpt-x');
       expect(asks.single.hasBearer, isTrue);

@@ -859,9 +859,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void didUpdateWidget(SettingsScreen old) {
     super.didUpdateWidget(old);
     // Six controls seeded from props once, as field initializers. The host can
-    // change any of them underneath this screen — `applyPreset` refuses a
-    // third-party target and forces the standing rule back off, a tier's
-    // defaults rewrite the draft policy — and a control still showing the old
+    // change any of them underneath this screen — Stop cloud drafts forces
+    // the standing rule back off, a tier's defaults rewrite the draft
+    // policy — and a control still showing the old
     // answer would be reporting a setting that is no longer in force. No
     // `setState`: the framework rebuilds after this runs.
     if (old.threshold != widget.threshold) {
@@ -1231,7 +1231,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     //
     // Null when there is nobody to record the answer, so the form refuses a
     // vendor's address under the field instead. A pane whose Continue wrote
-    // no consent would hand the connect straight back to `setBoxServers`,
+    // no consent would hand the connect straight back to `useCloudDrafts`,
     // which refuses a third-party address while the flag is false: a question
     // that can only be answered wrong is worse than no question.
     onThirdParty: widget.onCloudDraftsConsent == null
@@ -1252,9 +1252,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   /// Continue: the consent is recorded FIRST and the connect made after it.
   ///
-  /// That order is the whole protection. `AppPrefsNotifier.setBoxServers`
-  /// refuses a third-party big address while the flag is false, so a connect
-  /// made before the flag would throw rather than write.
+  /// That order is the whole protection. `AppPrefsNotifier.useCloudDrafts`
+  /// (reached through the interim `useBox` shim) refuses a third-party
+  /// address while the flag is false, so a connect made before the flag
+  /// would throw rather than write.
   ///
   /// The connect can still refuse — the form is unmounted by the pane that
   /// replaced it, so it has nowhere to draw its own sentence — and a pane

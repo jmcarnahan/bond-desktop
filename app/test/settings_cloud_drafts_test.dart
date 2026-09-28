@@ -226,9 +226,9 @@ void main() {
 
     testWidgets('follows the host when the rule is forced back off',
         (tester) async {
-      // `AppPrefs.specForStage` and `applyPreset` can refuse a third-party
-      // target and put the standing rule back off with nobody touching this
-      // switch. It is seeded from the prop once, so without the resync in
+      // `AppPrefs.specForStage` and Stop cloud drafts can refuse a
+      // third-party target and put the standing rule back off with nobody
+      // touching this switch. It is seeded from the prop once, so without the resync in
       // `didUpdateWidget` it would go on reading on over a rule that is off.
       await open(
         tester,
@@ -446,7 +446,9 @@ void main() {
       await openConsent(tester, order: order, cloudDraftsDailyCap: 200);
 
       expect(find.byType(CloudDraftsConsentPane), findsOneWidget);
-      expect(find.text('Send drafts to $boxProseName?'), findsOneWidget);
+      // The pane is about the cloud-drafts target a third-party big address
+      // becomes (the interim `useBox` shim).
+      expect(find.text('Send drafts to $cloudDraftsName?'), findsOneWidget);
       expect(find.text(CloudDraftsConsentPane.scopeLine), findsOneWidget);
       expect(
         find.text(
@@ -470,7 +472,7 @@ void main() {
       await tester.tap(find.byKey(CloudDraftsConsentPane.continueKey));
       await tester.pumpAndSettle();
 
-      // That order is the protection: `setBoxServers` refuses a third-party
+      // That order is the protection: `useCloudDrafts` refuses a third-party
       // big address while the flag is false, so a connect made first would
       // throw rather than write.
       expect(order, ['consent', 'connect']);

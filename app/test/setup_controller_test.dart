@@ -74,7 +74,6 @@ void main() {
   late bool managed;
   late List<bool> seeded;
   late List<String> foldersSet;
-  late List<MachineTier> tiersApplied;
 
   /// What `useBox` was called with, KEYS INCLUDED — this is a fake, the
   /// "keys" are the fictional strings the test typed, and nothing real is
@@ -159,7 +158,6 @@ void main() {
         foldersSet.add(path);
         prefs = prefs.copyWith(modelsFolder: path);
       },
-      applyTierDefaults: (tier) async => tiersApplied.add(tier),
       useBox: ({
         required bigUrl,
         required smallUrl,
@@ -213,6 +211,8 @@ void main() {
   /// three on the full tier, two on the inbox one.
   Future<void> seedComplete() async {
     var ledger = DownloadLedger.empty;
+    // Every file this Mac's TIER holds, the unchosen generative model
+    // included: a set that is complete for any choice.
     final wanted =
         manifest.forTier(machineTierFor(system.hardwareInfo.memoryBytes));
     for (final model in wanted.models) {
@@ -242,7 +242,6 @@ void main() {
     managed = false;
     seeded = [];
     foldersSet = [];
-    tiersApplied = [];
     boxUses = [];
     placementUses = [];
     boxRefuses = false;
@@ -254,9 +253,18 @@ void main() {
       // A binary that resolves, so a spawn that DID happen happened because
       // finish asked for it rather than because nothing was in the way.
       binaryPath: () => '/usr/bin/true',
-      buildPreset: () =>
-          manifest.forTier(machineTierFor(system.hardwareInfo.memoryBytes))
-              .toPreset(folder()),
+      // What the app's own supervisor serves: the roles' manifest on this
+      // Mac's tier, both roles here.
+      buildPreset: () {
+        final tier = machineTierFor(system.hardwareInfo.memoryBytes);
+        return manifest
+            .forRoles(
+              hardwareTier: tier,
+              decisionManaged: true,
+              generativeManagedId: managedGenerativeIdFor(tier, ''),
+            )
+            .toPreset(folder());
+      },
       routerPort: () => 8080,
       onPortMoved: (_) async {},
       managed: () => managed,
@@ -402,9 +410,14 @@ void main() {
     await controller.init();
 
     // Unknown memory is the full tier: nothing is refused for a fact the app
-    // could not read, and every model is offered.
+    // could not read, and the 27B is the managed generative model. The 4B is
+    // not downloaded beside it: one generative model runs, and the files are
+    // the roles' (the embedding model and the chosen generative one).
     expect(controller.tier, MachineTier.full);
-    expect(controller.resolvedManifest.models.length, 3);
+    expect(
+      [for (final m in controller.resolvedManifest.models) m.id],
+      [routerEmbedId, routerProseId],
+    );
 
     system.hardwareInfo = const HardwareInfo(
       chip: 'Apple M2',
@@ -472,9 +485,15 @@ void main() {
     expect(controller.state.disk, isNotNull);
     expect(controller.state.disk!.ok, isTrue);
     expect(controller.state.disk!.freeBytes, system.free);
-    // Nothing is downloaded yet, so everything in the manifest is still to
-    // come.
-    expect(controller.state.disk!.neededBytes, manifest.totalBytes);
+    // Nothing is downloaded yet, so every file this install downloads is
+    // still to come: the embedding model and the 27B on the full tier.
+    expect(controller.state.disk!.neededBytes,
+        controller.resolvedManifest.totalBytes);
+    expect(
+      controller.resolvedManifest.totalBytes,
+      manifest.byId(routerEmbedId).downloadBytes +
+          manifest.byId(routerProseId).downloadBytes,
+    );
   });
 
   test('choosing a folder writes the preference and re-checks the volume',
@@ -535,7 +554,7 @@ void main() {
     );
 
     expect(controller.state.downloadsComplete, isTrue);
-    for (final model in manifest.models) {
+    for (final model in controller.resolvedManifest.models) {
       expect(
         controller.state.downloads[model.id]?.status,
         DownloadStatus.done,
@@ -543,6 +562,8 @@ void main() {
       );
       expect(File(destOf(model)).existsSync(), isTrue, reason: model.id);
     }
+    // The generative model this Mac does not run is not fetched.
+    expect(controller.state.downloads[routerBulkId], isNull);
   });
 
   test('a set already on disk starts no run at all', () async {
@@ -780,9 +801,10 @@ void main() {
 
     expect(await controller.finish(), isTrue);
 
-    // The tier this Mac is on, written once, before the stored word that lets
-    // the gate past.
-    expect(tiersApplied, [MachineTier.inbox]);
+    // The generative model comes home on this Mac's tier, written once,
+    // before the stored word that lets the gate past.
+    expect(placementUses,
+        [(placement: ModelPlacement.local, hardwareTier: MachineTier.inbox)]);
   });
 
   test('Finish on a full Mac applies the full tier', () async {
@@ -794,21 +816,26 @@ void main() {
 
     expect(await controller.finish(), isTrue);
 
-    expect(tiersApplied, [MachineTier.full]);
+    expect(placementUses,
+        [(placement: ModelPlacement.local, hardwareTier: MachineTier.full)]);
   });
 
   group('Where the models run', () {
-    test('the box placement reads as the remote tier and one model', () async {
-      // A big Mac, so the tier this would otherwise be is `full`. The
-      // placement outranks the memory: what this Mac SERVES is the embedding
-      // model, and the models, storage and download steps are about that.
+    test('the box placement drops the chat model from the downloads', () async {
+      // A big Mac, so the tier is `full` whatever the placement. What the
+      // placement moves is what this Mac SERVES: with the generative model
+      // on the owner's server, the models, storage and download steps are
+      // about the embedding model (and a hand-installed decision model, which
+      // is never downloaded and so never listed).
       final controller = build();
       await controller.init();
       expect(controller.tier, MachineTier.full);
+      expect([for (final m in controller.resolvedManifest.models) m.id],
+          [routerEmbedId, routerProseId]);
 
       controller.chooseBox();
 
-      expect(controller.tier, MachineTier.remote);
+      expect(controller.tier, MachineTier.full);
       expect([for (final m in controller.resolvedManifest.models) m.id],
           [routerEmbedId]);
       // And `lowMemory` still answers about the MACHINE, which is what the
@@ -832,7 +859,7 @@ void main() {
 
       controller.chooseBox();
 
-      expect(controller.tier, MachineTier.remote);
+      expect(controller.tier, MachineTier.inbox);
       // Unchanged: the writing model is still one this Mac could not run.
       expect(controller.lowMemory, isTrue);
     });
@@ -903,9 +930,9 @@ void main() {
       await controller.init();
 
       // The stored answer is seeded, so the step opens on the box rather than
-      // on nothing and the tier reads `remote`.
+      // on nothing.
       expect(controller.placement, ModelPlacement.box);
-      expect(controller.tier, MachineTier.remote);
+      expect(controller.tier, MachineTier.full);
 
       controller.chooseLocal();
       await controller.continueFromWhere();
@@ -918,8 +945,7 @@ void main() {
     });
 
     test('the tier usePlacement is given is the HARDWARE tier', () async {
-      // Not `tier`, which answers `remote` while the placement is still the
-      // box: the defaults being restored are the ones this machine can run.
+      // The defaults being restored are the ones this machine can run.
       system.hardwareInfo = const HardwareInfo(
         chip: 'Apple M2',
         memoryBytes: 17179869184,
@@ -990,7 +1016,8 @@ void main() {
       expect(await store.get(SetupStore.setupKey), isNull);
     });
 
-    test('Finish on the box placement writes no tier defaults', () async {
+    test('Finish on the box placement leaves the generative placement alone',
+        () async {
       await seedComplete();
       await store.set(SetupStore.setupKey, SetupStep.notifications.name);
       final controller = build();
@@ -1000,9 +1027,9 @@ void main() {
 
       expect(await controller.finish(), isTrue);
 
-      // The placement RULE owns the stage map here. A tier write would put
-      // stored entries over it, every one of them a local built-in.
-      expect(tiersApplied, isEmpty);
+      // The form's own press wrote the user-defined adoption; Finish must not
+      // move the generative model back to this Mac on top of it.
+      expect(placementUses, isEmpty);
     });
   });
 
@@ -1126,7 +1153,7 @@ void main() {
     // the two chat models a user-defined install has no use for.
     await seedComplete();
     managed = true;
-    var tier = MachineTier.full;
+    var generativeHere = true;
     final earlier = supervisor;
     addTearDown(earlier.dispose);
     supervisor = ModelServerSupervisor(
@@ -1135,7 +1162,13 @@ void main() {
       binaryPath: () => '/usr/bin/true',
       // What the placement asks this Mac for, which is what the wizard's box
       // step moves.
-      buildPreset: () => manifest.forTier(tier).toPreset(folder()),
+      buildPreset: () => manifest
+          .forRoles(
+            hardwareTier: MachineTier.full,
+            decisionManaged: true,
+            generativeManagedId: generativeHere ? routerProseId : null,
+          )
+          .toPreset(folder()),
       routerPort: () => 8080,
       onPortMoved: (_) async {},
       managed: () => managed,
@@ -1147,7 +1180,7 @@ void main() {
     expect(runner.starts.length, 1);
 
     controller.chooseBox();
-    tier = MachineTier.remote;
+    generativeHere = false;
     await controller.finish();
 
     await waitUntil(

@@ -64,9 +64,9 @@ class DraftRoutes {
   /// `specForStage('draft_reply')`; never null in the app, null in tests.
   final LlmTargetSpec? Function() draftTarget;
 
-  /// `specForStage('draft_improve')`: the big model by the placement rule, or
-  /// the draft fallback while a third-party target is still behind consent;
-  /// never null in the app, null in tests.
+  /// `specForStage('draft_improve')`: the cloud-drafts target when it is set
+  /// and allowed, else the generative model; never null in the app, null in
+  /// tests.
   final LlmTargetSpec? Function() improveTarget;
 
   /// `cloud_drafts_standing`.

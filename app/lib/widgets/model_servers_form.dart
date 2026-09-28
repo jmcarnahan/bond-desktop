@@ -7,9 +7,9 @@ import '../services/llm/model_slots.dart'
     show
         LlmTargetSpec,
         LlmWire,
-        boxBulkId,
         boxProseId,
-        boxProseName,
+        cloudDraftsId,
+        cloudDraftsName,
         isBoxOrigin,
         isThirdPartyHost,
         wireForHost;
@@ -66,8 +66,9 @@ class ModelServersForm extends StatefulWidget {
   final String? Function(String targetId)? storedBearer;
 
   /// The write, once both names are known. May throw [ArgumentError], whose
-  /// message is rendered under the form: `setBoxServers` refuses a
-  /// third-party big address while cloud drafts consent is false, and the
+  /// message is rendered under the form: `useCloudDrafts` refuses a
+  /// third-party big address while cloud drafts consent is false (and
+  /// `useGenerative` refuses one for the generative role outright), and the
   /// person has to read why.
   final Future<void> Function({
     required String bigUrl,
@@ -498,7 +499,9 @@ class _ModelServersFormState extends State<ModelServersForm> {
     final bigKey = typedBig.isEmpty ? null : typedBig;
     final smallKey = typedSmall.isEmpty ? null : typedSmall;
     final bigBearer = bigKey ?? widget.storedBearer?.call(boxProseId);
-    final smallBearer = smallKey ?? widget.storedBearer?.call(boxBulkId);
+    // INTERIM: the small half is ignored by `useBox` since the decision-model
+    // round; its probe borrows the generative remote's stored key.
+    final smallBearer = smallKey ?? widget.storedBearer?.call(boxProseId);
 
     final bigConverse = _isConverse(bigUrl);
     final smallConverse = _isConverse(smallUrl);
@@ -597,8 +600,10 @@ class _ModelServersFormState extends State<ModelServersForm> {
       }
       await ask(
         LlmTargetSpec(
-          id: boxProseId,
-          name: boxProseName,
+          // The consent pane is about the cloud-drafts target a third-party
+          // big address becomes (`useBox`'s interim shim).
+          id: cloudDraftsId,
+          name: cloudDraftsName,
           url: bigUrl,
           model: bigName.value,
           wire: wireForHost(bigUrl),

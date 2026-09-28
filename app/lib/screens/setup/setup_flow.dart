@@ -178,12 +178,15 @@ class _SetupFlowState extends ConsumerState<SetupFlow> {
         final prefs = ref.watch(appPrefsProvider);
         return SetupWhereBody(
           placement: state.placement,
-          bigUrl: prefs.effectiveBoxBigUrl,
-          smallUrl: prefs.effectiveBoxSmallUrl,
-          bigModel: prefs.effectiveBoxBigModel,
-          smallModel: prefs.effectiveBoxSmallModel,
+          // INTERIM (Phase 4 redesigns this step): the form still has two
+          // addresses, and both open on the generative remote's, because the
+          // small half is ignored by `useBox` now.
+          bigUrl: prefs.effectiveGenerativeUrl,
+          smallUrl: prefs.effectiveGenerativeUrl,
+          bigModel: prefs.effectiveGenerativeModel,
+          smallModel: prefs.effectiveGenerativeModel,
           bigKeyStored: prefs.boxBigKeyStored,
-          smallKeyStored: prefs.boxSmallKeyStored,
+          smallKeyStored: prefs.boxBigKeyStored,
           probe: _controller.probe,
           storedBearer: _controller.storedBearer,
           onChoose: (choice) => choice == ModelPlacement.box
