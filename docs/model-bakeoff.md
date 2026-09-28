@@ -1918,6 +1918,25 @@ importance; against the 4B it wins or ties everywhere. Label and extraction evid
 produced, and a model-decided needs-you verdict carries a templated reason, so the needs-you evidence
 rubric is not comparable across the two pipelines.
 
+**Storyline model-free fixes** (2026-09-28, `make golden-sweep`, the box 27B as confirm and namer,
+embeddings on this Mac, `GOLDEN_RUN` = the shipped one-text-call run above). The baseline was run
+twice and gave identical counts, so on this setup a changed count is the change, not noise.
+
+| SWEEP_CARD | SWEEP_POSSIBLE_ROOM | storyline.id | forbidden hits | correct positives | formed / tombstoned / incoherent | confirms / namer calls | shipped |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| topics (shipped card) | 1 (today) | 59/98 | 1 | 10 | 2 / 3 / 2 | 43 / 5 | baseline, twice |
+| thread (thread topics + project + no names on untitled chats) | 1 | 58/98 | 0 | 9 | 2 / 4 / 4 | 48 / 6 | no |
+| topics_untitled (shipped card + no names on untitled chats) | 1 | 58/98 | 0 | 9 | 2 / 4 / 3 | 50 / 6 | no |
+| topics | 0 (possible rows hold no room) | 59/98 | 1 | 10 | 2 / 3 / 2 | 43 / 5 | yes |
+| thread | 0 | 58/98 | 0 | 9 | 2 / 4 / 4 | 48 / 6 | no |
+
+Reading it: taking participant names off untitled Teams chats (14 of the set's 36) is what moves the
+row, alone or inside the thread card: it removes the one forbidden hit and loses one correct item.
+The rule written before the runs was "no regression on storyline.id or forbidden hits", so neither
+card change ships; both stay as bench variants. Letting `possible` rows hold no room is identical on
+the bench (the harness dismisses them after every pass, so it shows only inside a pass: 15 then 0
+proposals instead of 11, 4, 0) and ships for what it does over days in the app.
+
 ### Recommendations (golden set, 2026-09)
 
 Superseded on 2026-09-20 by the section of the same name dated 2026-09-20

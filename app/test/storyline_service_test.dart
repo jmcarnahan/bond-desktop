@@ -2478,7 +2478,9 @@ void main() {
         'storyline_name': [nameAnswer(coherent: false)],
         'storyline_membership': [confirmAnswer()],
       });
-      final service = StorylineService(store, llm);
+      // The rule before Phase 8, pinned explicitly now that it is not the
+      // default.
+      final service = StorylineService(store, llm, possibleHoldsRoom: true);
 
       await service.sweep();
 
@@ -2513,6 +2515,191 @@ void main() {
         await store.loadStorylines(statuses: const ['possible']),
         hasLength(3),
       );
+    });
+
+    /// Five declined clusters of three, every pair inside a cluster far above
+    /// the link threshold and every pair across two of them at zero.
+    Future<void> seedFiveClusters() async {
+      List<double> clusterVector(int cluster, int member) => [
+            for (var i = 0; i < 5; i++) i == cluster ? 1.0 : 0.0,
+            for (var i = 0; i < 15; i++)
+              i == cluster * 3 + member ? 0.3 : 0.0,
+          ];
+      for (var cluster = 0; cluster < 5; cluster++) {
+        for (var member = 0; member < 3; member++) {
+          await seed(store, 'k$cluster$member',
+              vector: clusterVector(cluster, member),
+              lastMessageAt: '2026-08-2${9 - cluster}T0${3 - member}:00:00Z');
+        }
+      }
+    }
+
+    test('with possibleHoldsRoom off, possible rows spend no room but the '
+        'per-pass question cap still holds', () async {
+      await seedFiveClusters();
+      final llm = fakeLlm({
+        'storyline_name': [nameAnswer(coherent: false)],
+        'storyline_membership': [confirmAnswer()],
+      });
+      final service =
+          StorylineService(store, llm, possibleHoldsRoom: false);
+
+      await service.sweep();
+
+      // Three, the per-pass cap: the room never ran out, the cap did.
+      expect(StorylineTuning.maxQuestionsPerPass, 3);
+      expect(
+        await store.loadStorylines(statuses: const ['possible']),
+        hasLength(3),
+      );
+      expect(llm.callsFor('storyline_name'), 3);
+
+      // Three possible rows in the rail do not stop the next pass. The three
+      // filed sets are answered by their hashes, and the two held back are
+      // rebuilt and asked now.
+      await service.sweep();
+      expect(llm.callsFor('storyline_name'), 5);
+      expect(
+        await store.loadStorylines(statuses: const ['possible']),
+        hasLength(5),
+      );
+
+      // And then nothing is left to ask.
+      await service.sweep();
+      expect(llm.callsFor('storyline_name'), 5);
+    });
+
+    test('with possibleHoldsRoom on, proposals stop at three per pass too',
+        () async {
+      await seedFiveClusters();
+      final llm = fakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm, possibleHoldsRoom: true).sweep();
+
+      expect(llm.callsFor('storyline_name'), 3);
+      expect(
+        await store.loadStorylines(statuses: const ['suggested']),
+        hasLength(3),
+      );
+    });
+
+    test('a declined cluster that gains a thread is not asked again',
+        () async {
+      // The growth case: a possible storyline's threads stay in the pool, so
+      // one new thread beside them forms a NEW set with a new hash. Without
+      // the overlap rule that is a namer call and a second possible row over
+      // the same threads.
+      await seed(store, 'g1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'g2',
+          vector: vectorAt(0.97), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(store, 'g3',
+          vector: vectorAt(0.94), lastMessageAt: '2026-08-29T02:00:00Z');
+      final llm = fakeLlm({
+        'storyline_name': [nameAnswer(coherent: false)],
+        'storyline_membership': [confirmAnswer()],
+      });
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      final service = StorylineService(store, llm, activityLog: log);
+
+      await service.sweep();
+      expect(llm.callsFor('storyline_name'), 1);
+      expect(
+        await store.loadStorylines(statuses: const ['possible']),
+        hasLength(1),
+      );
+      await log.record('storyline_sweep', source: 'email', entityId: 'sweep');
+
+      await seed(store, 'g4',
+          vector: vectorAt(0.99), lastMessageAt: '2026-08-29T05:00:00Z');
+      await service.sweep();
+      await log.record('storyline_sweep', source: 'email', entityId: 'sweep');
+
+      expect(llm.callsFor('storyline_name'), 1);
+      expect(llm.callsFor('storyline_membership'), 0);
+      expect(
+        await store.loadStorylines(statuses: const ['possible']),
+        hasLength(1),
+      );
+      final newest = ActivityEvent.fromRow((await store.recentActivity()).first);
+      expect(newest.detail['overlaps_possible'], 1);
+    });
+
+    test('the overlap rule reads LIVE automatic possible rows only', () async {
+      // The same growth, but the possible row was answered first: its
+      // threads are free, and the grown cluster is asked.
+      await seed(store, 'g1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'g2',
+          vector: vectorAt(0.97), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(store, 'g3',
+          vector: vectorAt(0.94), lastMessageAt: '2026-08-29T02:00:00Z');
+      final llm = fakeLlm({
+        'storyline_name': [nameAnswer(coherent: false)],
+        'storyline_membership': [confirmAnswer()],
+      });
+      final service = StorylineService(store, llm);
+
+      await service.sweep();
+      final possible =
+          (await store.loadStorylines(statuses: const ['possible'])).single;
+      await service.dismissSuggestion(possible.id);
+
+      await seed(store, 'g4',
+          vector: vectorAt(0.99), lastMessageAt: '2026-08-29T05:00:00Z');
+      await service.sweep();
+
+      expect(llm.callsFor('storyline_name'), 2);
+    });
+
+    test('with possibleHoldsRoom off, suggested rows still hold the room',
+        () async {
+      await seedMailbox(store);
+      for (var i = 0; i < 3; i++) {
+        await store.insertStoryline(
+          id: 'sl-pending-$i',
+          title: 'Pending $i',
+          status: 'suggested',
+          createdBy: 'auto',
+        );
+      }
+      final llm = fakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm, possibleHoldsRoom: false).sweep();
+
+      expect(llm.schemas, isEmpty);
+    });
+
+    test('with possibleHoldsRoom on, possible rows fill the room',
+        () async {
+      await seedMailbox(store);
+      for (var i = 0; i < 3; i++) {
+        await store.insertStoryline(
+          id: 'sl-possible-$i',
+          title: 'Possible $i',
+          status: 'possible',
+          createdBy: 'auto',
+        );
+      }
+      final llm = fakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm, possibleHoldsRoom: true).sweep();
+      expect(llm.schemas, isEmpty);
+
+      // The same rail under what ships: the pass runs and proposes.
+      expect(StorylineTuning.possibleHoldsRoom, isFalse);
+      await StorylineService(store, llm).sweep();
+      expect(llm.callsFor('storyline_name'), greaterThan(0));
     });
 
     test('clustering is deterministic — same mailbox, same groups', () async {
@@ -3068,16 +3255,22 @@ void main() {
       // three free to be clustered into a group a person would recognise.
       expect(await store.assignedOrBlockedKeys('email'), isEmpty);
 
-      // And the hash check is the only thing stopping a re-ask. The IDENTICAL
-      // set is recognised; a set with one more thread in it is a different
-      // question and IS asked.
+      // The IDENTICAL set is recognised by its hash; a set with one more
+      // thread in it is a different set, but three of its four threads sit in
+      // this live possible storyline, so the overlap rule
+      // (`StorylineTuning.possibleOverlapShare`) skips it without a model
+      // call rather than filing a second possible row over the same threads.
       await seed(store, 'q4',
           subject: 'Roof replacement gutters',
           vector: vectorAt(0.85),
           lastMessageAt: '2026-08-29T01:00:00Z');
       await StorylineService(store, llm).sweep();
 
-      expect(llm.callsFor('storyline_name'), 2);
+      expect(llm.callsFor('storyline_name'), 1);
+      expect(
+        await store.loadStorylines(statuses: const ['possible']),
+        hasLength(1),
+      );
     });
 
     test('keeping a possible storyline nobody touched activates it whole',

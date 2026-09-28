@@ -1257,6 +1257,9 @@ void main() {
       final variant = parseSweepCard(GoldenDefines.sweepCardRaw);
       final stage = parseSweepStage(GoldenDefines.sweepStageRaw);
       final groupingMode = parseSweepGrouping(GoldenDefines.sweepGroupingRaw);
+      final possibleHoldsRoom =
+          parseSweepPossibleRoom(GoldenDefines.sweepPossibleRoomRaw);
+      final roomRule = sweepRoomRuleName(possibleHoldsRoom);
       final prefix = GoldenDefines.sweepEmbedPrefix;
 
       final db = vecTestDb();
@@ -1282,7 +1285,7 @@ void main() {
         // ignore: avoid_print
         print(
           'stage ${stage.name}, grouping ${groupingMode.name}, '
-          'card ${variant.wireName}, '
+          'card ${variant.wireName}, room $roomRule, '
           'prefix length ${report.prefixLength}, dims ${report.dims}, '
           'cards from the run for '
           '${set.items.where((i) => cards.byId.containsKey(i.id)).length} of '
@@ -1344,6 +1347,8 @@ void main() {
               // No `groupClient`: the grouping call goes to the prose client,
               // exactly as the naming call does.
               groupingMode: groupingMode,
+              // SWEEP_POSSIBLE_ROOM, defaulting to what the app ships.
+              possibleHoldsRoom: possibleHoldsRoom,
               // The overlap rule counts shared people who are not the owner,
               // so the bench has to name the owner the way the app does or
               // every mailbox-wide participant would buy the lower gate.
@@ -1467,9 +1472,11 @@ void main() {
             await service.keepSuggestion(storyline.id);
             keptSuggestions++;
           }
-          // The possible rows hold a slot of the sweep's room exactly as the
-          // suggestions do, so they need an answer too or this loop stops
-          // walking the mailbox after three declined clusters. The answer is
+          // Under SWEEP_POSSIBLE_ROOM=1 the possible rows hold a slot of the
+          // sweep's room exactly as the suggestions do, so they need an answer
+          // too or this loop stops walking the mailbox after three declined
+          // clusters. Answered under both settings, so the two rows differ in
+          // the room rule alone. The answer is
           // Dismiss and not Keep: these are groups no model vouched for, and
           // keeping them would inflate every number the run reports. A
           // dismissal keeps both hashes, so the population `tombstoned` counts
@@ -1828,6 +1835,7 @@ void main() {
             'recruited': recruited,
             'multi_filed': multiFiled,
             'card': variant.wireName,
+            'room': roomRule,
             'prefix_length': report.prefixLength,
             'sweep': tally.toJson(),
             'seed': report.toJson(),
@@ -1858,7 +1866,8 @@ void main() {
         print(
           '\n${confirmCollector.banner}\n${confirmCollector.table()}\n'
           '\n${nameCollector.banner}\n${nameCollector.table()}\n'
-          '\n${tally.table()}\n'
+          '\n  card ${variant.wireName}, room $roomRule\n'
+          '${tally.table()}\n'
           '${stage != SweepStage.declared ? '' : '\n  declared '
               '${slugById.length}, recruit calls $recruitCalls, '
               'recruited $recruited, multi-filed $multiFiled'}'

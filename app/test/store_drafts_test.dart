@@ -1,5 +1,7 @@
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/services/clustering_card.dart'
+    show ClusteringCardVariant;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
@@ -583,6 +585,98 @@ void main() {
       await seedMessage(id: 'o1', direction: 'outbound');
 
       expect(await store.newestInboundCardData('email', 'conv-1'), isNull);
+    });
+  });
+
+  /// The `thread` clustering card's data: the thread's newest five KEPT
+  /// inbound messages' extraction blobs, newest first, and the newest kept
+  /// inbound summary.
+  group('threadCardData', () {
+    Future<void> summarise(String id, String summary) => db.customStatement(
+          'UPDATE messages SET summary = ? WHERE source_message_id = ?',
+          [summary, id],
+        );
+    Future<void> gate(String id) => db.customStatement(
+          "UPDATE messages SET triage_status = 'skipped', "
+          "gate_reason = 'no_reply' WHERE source_message_id = ?",
+          [id],
+        );
+
+    test('reads the newest five kept inbound, newest first', () async {
+      for (var day = 1; day <= 7; day++) {
+        await seedMessage(
+          id: 'm$day',
+          receivedAt: '2026-08-${(10 + day).toString()}T10:00:00Z',
+        );
+        await store.writeExtraction('email', 'm$day', '{"topics":["t$day"]}');
+      }
+      await summarise('m6', 'The newest kept message.');
+      await summarise('m7', 'A gated autoresponder.');
+      await gate('m7');
+      await seedMessage(
+        id: 'o1',
+        direction: 'outbound',
+        receivedAt: '2026-08-30T10:00:00Z',
+      );
+
+      final data = await store.threadCardData('email', 'conv-1');
+
+      expect(data!['summary'], 'The newest kept message.');
+      expect(data['extraction_json'], '{"topics":["t6"]}');
+      expect(data['thread_extractions'], [
+        '{"topics":["t6"]}',
+        '{"topics":["t5"]}',
+        '{"topics":["t4"]}',
+        '{"topics":["t3"]}',
+        '{"topics":["t2"]}',
+      ]);
+    });
+
+    test('agrees with newestInboundCardData on the newest row', () async {
+      await seedMessage(id: 'm1', receivedAt: '2026-08-20T10:00:00Z');
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T10:00:00Z');
+      await summarise('m2', 'Asks what time to come on Friday.');
+
+      final thread = await store.threadCardData('email', 'conv-1');
+      final newest = await store.newestInboundCardData('email', 'conv-1');
+
+      expect(thread!['summary'], newest!['summary']);
+      expect(thread['extraction_json'], newest['extraction_json']);
+      // Neither message has an extraction yet: the LEFT JOIN keeps both.
+      expect(thread['thread_extractions'], [null, null]);
+    });
+
+    test('a thread with nothing kept falls back to the gated row', () async {
+      await seedMessage(id: 'm1');
+      await summarise('m1', 'A gated autoresponder.');
+      await store.writeExtraction('email', 'm1', '{"topics":["auto"]}');
+      await gate('m1');
+
+      final data = await store.threadCardData('email', 'conv-1');
+
+      expect(data!['summary'], 'A gated autoresponder.');
+      expect(data['thread_extractions'], ['{"topics":["auto"]}']);
+    });
+
+    test('is null for a thread with nothing inbound', () async {
+      await seedMessage(id: 'o1', direction: 'outbound');
+
+      expect(await store.threadCardData('email', 'conv-1'), isNull);
+    });
+
+    test('clusteringCardData routes by variant', () async {
+      await seedMessage(id: 'm1', receivedAt: '2026-08-20T10:00:00Z');
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T10:00:00Z');
+
+      final shipped = await store.clusteringCardData('email', 'conv-1');
+      final thread = await store.clusteringCardData(
+        'email',
+        'conv-1',
+        variant: ClusteringCardVariant.thread,
+      );
+
+      expect(shipped!.containsKey('thread_extractions'), isFalse);
+      expect(thread!['thread_extractions'], hasLength(2));
     });
   });
 

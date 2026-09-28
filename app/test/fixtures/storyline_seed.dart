@@ -366,11 +366,17 @@ Future<SeedReport> seedGoldenMailbox(
           deadline: '',
         );
       }
-      if (card.topics.isNotEmpty) {
+      // The project rides in the same blob the app's extraction writes it
+      // into. Only the `thread` card reads it; the others read the topics
+      // alone, so their cards are the bytes they always were.
+      if (card.topics.isNotEmpty || card.project.isNotEmpty) {
         await store.writeExtraction(
           source,
           row.id,
-          jsonEncode({'topics': card.topics}),
+          jsonEncode({
+            'topics': card.topics,
+            if (card.project.isNotEmpty) 'project': card.project,
+          }),
         );
       }
     }
@@ -384,9 +390,11 @@ Future<SeedReport> seedGoldenMailbox(
       // corpus the app never has, which is the one thing this bench must not
       // measure.
       final stored = await store.getConversationRow(source, key);
+      // The data the app's own routing picks for [variant] — the thread's
+      // recent messages for `thread`, the newest one for every other card.
       final card = clusteringCardForConversationRow(
         stored!,
-        await store.newestInboundCardData(source, key),
+        await store.clusteringCardData(source, key, variant: variant),
         variant: variant,
       );
       final result = await embeddings.embedResult(card, prefix: prefix);

@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../models/message_models.dart';
+import 'chat_roster.dart' show isTeamsNamesSubject;
 import 'conversation_state.dart';
 
 /// The text a conversation becomes before anything measures it against another
@@ -72,7 +73,40 @@ enum ClusteringCardVariant {
   /// ` |  | topics | summary` — what the thread is about with no subject line
   /// at all, for a mailbox whose subjects are boilerplate.
   summary,
+
+  /// `subject |  | project, topics | summary` built from the THREAD rather
+  /// than its newest message (decision-model round, Phase 8): the topics of
+  /// the thread's newest [threadCardMessages] kept inbound messages merged
+  /// (case-insensitively de-duplicated, newest first, at most
+  /// [threadCardTopicCap]), the thread's `project` — the most frequent
+  /// non-empty one across those messages, ties to the newest — in front of
+  /// them, and the newest kept inbound summary. Its data comes from
+  /// `MessageStore.threadCardData`, which `MessageStore.clusteringCardData`
+  /// picks for this variant.
+  ///
+  /// It also leaves the subject EMPTY on an untitled Teams chat — one whose
+  /// subject is the participant names the sync wrote on first sight
+  /// ([isTeamsNamesSubject]) — so the same few names on every chat stop
+  /// pulling unrelated chats together. That rule rides on this variant only,
+  /// on purpose: the two changes are measured together by one
+  /// `SWEEP_CARD=thread` row, and every other variant stays byte-identical to
+  /// the rows already in the ledger. Display is untouched; the names stay the
+  /// chat's subject everywhere a person reads it.
+  thread,
+
+  /// `subject |  | topics | summary` — exactly [topics], the shipped card,
+  /// except that an untitled Teams chat ([isTeamsNamesSubject]) gets an
+  /// EMPTY subject. The untitled rule alone, measured apart from the thread
+  /// merge after `SWEEP_CARD=thread` cost one `storyline.id` point.
+  topicsUntitled,
 }
+
+/// How many of a thread's newest kept inbound messages the
+/// [ClusteringCardVariant.thread] card reads.
+const int threadCardMessages = 5;
+
+/// How many merged topics the [ClusteringCardVariant.thread] card carries.
+const int threadCardTopicCap = 5;
 
 /// The variant the app embeds.
 ///
@@ -107,7 +141,14 @@ String buildClusteringCard({
   required ClusteringCardVariant variant,
 }) =>
     switch (variant) {
-      ClusteringCardVariant.topics => buildConversationCard(
+      // `thread` and `topicsUntitled` are the shipped shape too: the thread's
+      // facts arrive already merged (project first, then the topics), and an
+      // untitled chat's subject already emptied, from
+      // [clusteringCardForConversationRow].
+      ClusteringCardVariant.topics ||
+      ClusteringCardVariant.topicsUntitled ||
+      ClusteringCardVariant.thread =>
+        buildConversationCard(
           subject: subject,
           participants: const [],
           topics: topics,
@@ -144,11 +185,15 @@ String buildClusteringCard({
 /// `subjectTopics` is `subject_topics` on the wire and nowhere else: Dart
 /// spells an enum in camel case and a define is typed by hand in snake case,
 /// and a result file that recorded the Dart spelling could not be matched
-/// against the `SWEEP_CARD=` that produced it. Every other variant is its own
+/// against the `SWEEP_CARD=` that produced it; `topicsUntitled` is
+/// `topics_untitled` for the same reason. Every other variant is its own
 /// name. [parseClusteringCardVariant] round-trips this.
 extension ClusteringCardVariantWire on ClusteringCardVariant {
-  String get wireName =>
-      this == ClusteringCardVariant.subjectTopics ? 'subject_topics' : name;
+  String get wireName => switch (this) {
+        ClusteringCardVariant.subjectTopics => 'subject_topics',
+        ClusteringCardVariant.topicsUntitled => 'topics_untitled',
+        _ => name,
+      };
 }
 
 /// The variant a define names, or a thrown [ArgumentError].
@@ -163,11 +208,13 @@ ClusteringCardVariant parseClusteringCardVariant(String raw) =>
       'subject' => ClusteringCardVariant.subject,
       'subject_topics' => ClusteringCardVariant.subjectTopics,
       'summary' => ClusteringCardVariant.summary,
+      'thread' => ClusteringCardVariant.thread,
+      'topics_untitled' => ClusteringCardVariant.topicsUntitled,
       _ => throw ArgumentError.value(
           raw,
           'SWEEP_CARD',
           'must be one of participants, topics, subject, subject_topics, '
-              'summary',
+              'summary, thread, topics_untitled',
         ),
     };
 
@@ -180,12 +227,47 @@ ClusteringCardVariant parseClusteringCardVariant(String raw) =>
 /// pass nothing and cannot drift from it; it is a parameter at all for the
 /// benches, which price a card the app is NOT currently writing through this
 /// same recipe rather than through a second copy of it.
+///
+/// For [ClusteringCardVariant.thread], [cardData] is
+/// `MessageStore.threadCardData`'s shape: the newest kept inbound message's
+/// `summary` and `extraction_json`, plus `thread_extractions`, the
+/// extraction blobs of the thread's newest [threadCardMessages] kept inbound
+/// messages, newest first. A map without that list (an older caller, or
+/// `newestInboundCardData`) reads as a one-message thread.
 String clusteringCardForConversationRow(
   Map<String, Object?> row,
   Map<String, Object?>? cardData, {
   ClusteringCardVariant variant = shippedClusteringCard,
 }) {
   final conversation = Conversation.fromRow(row);
+  bool untitledChat() =>
+      conversation.source == 'teams' &&
+      isTeamsNamesSubject(conversation.subject, [
+        for (final participant in conversation.participants)
+          {'name': participant.name, 'email': participant.email},
+      ]);
+  if (variant == ClusteringCardVariant.topicsUntitled && untitledChat()) {
+    return buildClusteringCard(
+      subject: null,
+      participants: const [],
+      topics: topicsOfExtraction(cardData?['extraction_json']),
+      summary: cardData?['summary'] as String?,
+      variant: variant,
+    );
+  }
+  if (variant == ClusteringCardVariant.thread) {
+    final raw = cardData?['thread_extractions'];
+    final extractions = raw is List
+        ? List<Object?>.of(raw)
+        : [cardData?['extraction_json']];
+    return buildClusteringCard(
+      subject: untitledChat() ? null : stripReFw(conversation.subject),
+      participants: const [],
+      topics: threadCardTopics(extractions),
+      summary: cardData?['summary'] as String?,
+      variant: variant,
+    );
+  }
   return buildClusteringCard(
     subject: stripReFw(conversation.subject),
     participants: [
@@ -216,4 +298,66 @@ List<String> topicsOfExtraction(Object? extractionJson) {
     for (final topic in topics)
       if (topic is String && topic.isNotEmpty) topic,
   ];
+}
+
+/// The `project` string out of a stored extraction blob, trimmed, or empty.
+/// Fails to empty for [topicsOfExtraction]'s reason.
+String projectOfExtraction(Object? extractionJson) {
+  if (extractionJson is! String || extractionJson.isEmpty) return '';
+  final Object? decoded;
+  try {
+    decoded = jsonDecode(extractionJson);
+  } on FormatException {
+    return '';
+  }
+  if (decoded is! Map) return '';
+  final project = decoded['project'];
+  return project is String ? project.trim() : '';
+}
+
+/// The third segment of the [ClusteringCardVariant.thread] card, over the
+/// thread's extraction blobs NEWEST FIRST: the thread's project, then its
+/// merged topics.
+///
+/// The project is the most frequent non-empty one, counted
+/// case-insensitively; a tie goes to the one seen first, which is the newest,
+/// and it is spelled the way that message spelled it. The topics are every
+/// blob's topics in order — newest message first, each message's own order
+/// inside it — de-duplicated case-insensitively (a topic equal to the project
+/// is dropped as a duplicate of it) and capped at [threadCardTopicCap]. The
+/// project does not count against the cap.
+List<String> threadCardTopics(List<Object?> extractionsNewestFirst) {
+  final counts = <String, int>{};
+  final spelling = <String, String>{};
+  for (final blob in extractionsNewestFirst) {
+    final project = projectOfExtraction(blob);
+    if (project.isEmpty) continue;
+    final key = project.toLowerCase();
+    counts[key] = (counts[key] ?? 0) + 1;
+    spelling.putIfAbsent(key, () => project);
+  }
+  String? project;
+  var best = 0;
+  // Insertion order is newest-first, and only a strictly larger count
+  // replaces the leader, so a tie stays with the newest.
+  for (final entry in counts.entries) {
+    if (entry.value > best) {
+      best = entry.value;
+      project = spelling[entry.key];
+    }
+  }
+
+  final seen = <String>{if (project != null) project.toLowerCase()};
+  final topics = <String>[];
+  outer:
+  for (final blob in extractionsNewestFirst) {
+    for (final topic in topicsOfExtraction(blob)) {
+      final trimmed = topic.trim();
+      if (trimmed.isEmpty) continue;
+      if (!seen.add(trimmed.toLowerCase())) continue;
+      topics.add(trimmed);
+      if (topics.length >= threadCardTopicCap) break outer;
+    }
+  }
+  return [?project, ...topics];
 }

@@ -66,11 +66,15 @@ void main() {
     String id, {
     List<String> topics = const ['fit-out schedule', 'capped allowance'],
     String summary = 'Dana asks for a decision on the allowance clause.',
+    String? project,
   }) =>
       GoldenCards.fromRunJson([
         {
           'id': id,
-          'extract': {'topics': topics},
+          'extract': {
+            'topics': topics,
+            'project': ?project,
+          },
           'triage': {'summary': summary},
         },
       ]);
@@ -313,6 +317,38 @@ void main() {
       expect(segments[1], isEmpty);
       expect(segments[0], 'Addendum for the River Street suite');
       expect(segments[2], 'fit-out schedule, capped allowance');
+    });
+
+    test('the thread variant embeds exactly the card the app builds',
+        () async {
+      final server = FakeEmbedServer();
+      final set = setWith();
+      await seed(
+        set,
+        cards: cardsFor('email:fx-keep-tail', project: 'River Street lease'),
+        variant: ClusteringCardVariant.thread,
+        server: server,
+      );
+
+      // The app's own routing and recipe over the stored rows.
+      final row =
+          await store.getConversationRow('email', 'email:fx-conv-lease');
+      final expected = clusteringCardForConversationRow(
+        row!,
+        await store.clusteringCardData(
+          'email',
+          'email:fx-conv-lease',
+          variant: ClusteringCardVariant.thread,
+        ),
+        variant: ClusteringCardVariant.thread,
+      );
+      expect(await cardFor(server, set), expected);
+      final segments = expected.split(' | ');
+      expect(segments[1], isEmpty);
+      expect(
+        segments[2],
+        'River Street lease, fit-out schedule, capped allowance',
+      );
     });
 
     test('a thread the run file carded nothing for embeds its durable half',

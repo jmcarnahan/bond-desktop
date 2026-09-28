@@ -112,3 +112,80 @@ bool matchesPersonQuery(Person person, String query) {
   final upn = person.userPrincipalName?.toLowerCase();
   return upn != null && upn.startsWith(needle);
 }
+
+/// Names in an unnamed Teams chat's title before it becomes "and so on".
+const int teamsSubjectNameCap = 3;
+
+/// The title an unnamed Teams chat is given on first sight: the people in it,
+/// by name, at most [teamsSubjectNameCap] of them and an ellipsis after that.
+/// Null when nobody on the roster has a name to show.
+///
+/// [participants] are the roster maps `TeamsSync` stores in
+/// `participants_json` (`name`, `email`). A null name falls back to the
+/// address and an EMPTY name is skipped, exactly as the sync always did it.
+/// Public, and here rather than in `teams_sync.dart`, because the clustering
+/// card has to recognise this title as a derived one ([isTeamsNamesSubject]),
+/// and a second copy of the rule would be the one that drifted.
+String? teamsNamesSubject(List<Map<String, Object?>> participants) {
+  final names = [
+    for (final participant in participants)
+      (participant['name'] as String?) ?? (participant['email'] as String? ?? ''),
+  ]..removeWhere((name) => name.isEmpty);
+  if (names.isEmpty) return null;
+  if (names.length <= teamsSubjectNameCap) return names.join(', ');
+  return '${names.take(teamsSubjectNameCap).join(', ')}…';
+}
+
+/// Whether [subject] is a title [teamsNamesSubject] wrote rather than a topic
+/// somebody gave the chat.
+///
+/// The stored row keeps no separate "topic" column: the sync writes the topic
+/// when the chat has one and the names when it does not, into the same
+/// `subject`. So the question is answered from the subject and the roster.
+/// Exact equality with [teamsNamesSubject] over the stored roster is the
+/// first reading. The second covers a roster that changed after first sight
+/// (the title is written ONCE and never follows the members): the subject,
+/// with a trailing ellipsis dropped, reads as nothing but roster names joined
+/// by `, ` — matched name by name rather than split on commas, so a
+/// directory name like `Whitfield, Dana` still counts as one name.
+/// Case-insensitive. The cost is a chat somebody deliberately titled with
+/// exactly its members' names, which reads as untitled — the same title the
+/// sync would have written.
+bool isTeamsNamesSubject(
+  String? subject,
+  List<Map<String, Object?>> participants,
+) {
+  final trimmed = subject?.trim() ?? '';
+  if (trimmed.isEmpty) return false;
+  if (trimmed == teamsNamesSubject(participants)) return true;
+
+  final tokens = <String>{
+    for (final participant in participants) ...[
+      if ((participant['name'] as String?)?.trim() case final String name
+          when name.isNotEmpty)
+        name.toLowerCase(),
+      if ((participant['email'] as String?)?.trim() case final String email
+          when email.isNotEmpty)
+        email.toLowerCase(),
+    ],
+  };
+  if (tokens.isEmpty) return false;
+
+  var text = trimmed.toLowerCase();
+  if (text.endsWith('…')) text = text.substring(0, text.length - 1).trimRight();
+  if (text.isEmpty) return false;
+
+  // reachable[i]: the first i characters are a whole run of names.
+  final reachable = List<bool>.filled(text.length + 1, false)..[0] = true;
+  for (var i = 0; i < text.length; i++) {
+    if (!reachable[i]) continue;
+    final start = i == 0 ? 0 : (text.startsWith(', ', i) ? i + 2 : -1);
+    if (start < 0) continue;
+    for (final token in tokens) {
+      if (text.startsWith(token, start)) {
+        reachable[start + token.length] = true;
+      }
+    }
+  }
+  return reachable[text.length];
+}

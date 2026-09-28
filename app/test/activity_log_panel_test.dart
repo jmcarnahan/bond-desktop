@@ -1266,6 +1266,24 @@ void main() {
       );
     });
 
+    test('a sweep that only skipped clusters a possible storyline holds says why',
+        () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {
+            'proposed': 0,
+            'confirmed': 0,
+            'rejected': 0,
+            'joined': 0,
+            'overlaps_possible': 1,
+          },
+        )),
+        'Storyline sweep — 0 proposed, 0 threads confirmed, 0 rejected, '
+        '0 joined, 1 left for a possible storyline',
+      );
+    });
+
     test('a sweep that folded rows but shipped none of them says so', () {
       // `fragments` counts the siblings that JOINED and `folded` counts every
       // row the rule folded, so a pass whose cluster was turned down still

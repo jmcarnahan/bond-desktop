@@ -470,6 +470,14 @@ class ActivityLogPanel extends StatefulWidget {
     if (folded is num && folded > 0) {
       sentence = '$sentence, ${folded.toInt()} folded';
     }
+    // The clusters a pass left alone because a live possible storyline
+    // already holds most of their threads. Said, because it is the one reason
+    // a pass writes a row with nothing proposed, and a row with no reason
+    // reads as a pass that did nothing for nothing.
+    final overlaps = detail['overlaps_possible'];
+    if (overlaps is num && overlaps > 0) {
+      sentence = '$sentence, ${overlaps.toInt()} left for a possible storyline';
+    }
     return expiredText.isEmpty ? sentence : '$sentence, $expiredText';
   }
 

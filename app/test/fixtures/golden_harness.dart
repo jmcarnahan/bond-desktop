@@ -115,6 +115,14 @@ class GoldenDefines {
   static const String sweepGroupingRaw =
       String.fromEnvironment('SWEEP_GROUPING', defaultValue: 'cosine');
 
+  /// Whether a `possible` storyline spends a slot of the sweep's room: `0`
+  /// (what the app ships — suggested rows only) or `1` (the old rule, both
+  /// count). Parsed by [parseSweepPossibleRoom], which refuses anything else;
+  /// handed to the service as `possibleHoldsRoom`. A define and not a `sed` of
+  /// `StorylineTuning.possibleHoldsRoom`, for [sweepGroupingRaw]'s reason.
+  static const String sweepPossibleRoomRaw =
+      String.fromEnvironment('SWEEP_POSSIBLE_ROOM', defaultValue: '0');
+
   /// The instruction the embedding model is given about what a card is FOR,
   /// verbatim — a trailing space included, which is why nothing here trims it.
   ///
@@ -339,6 +347,26 @@ GroupingMode parseSweepGrouping(String raw) =>
           'must be one of cosine, model, pool',
         ),
     };
+
+/// Whether `SWEEP_POSSIBLE_ROOM` says a `possible` row holds room, or a
+/// thrown [ArgumentError].
+///
+/// Loud for [parseSweepStage]'s reason: the two settings are the two sides
+/// of one A/B, and a typo that quietly ran the shipped rule would record a
+/// row for the candidate that is the baseline again.
+bool parseSweepPossibleRoom(String raw) => switch (raw.trim().toLowerCase()) {
+      '1' => true,
+      '0' => false,
+      _ => throw ArgumentError.value(
+          raw,
+          'SWEEP_POSSIBLE_ROOM',
+          'must be 0 or 1',
+        ),
+    };
+
+/// The words a sweep row prints and records for its room rule.
+String sweepRoomRuleName(bool possibleHoldsRoom) =>
+    possibleHoldsRoom ? 'suggested+possible' : 'suggested-only';
 
 /// [k] if it names a concurrency, or a thrown [ArgumentError].
 ///

@@ -577,7 +577,7 @@ class ExtractHandler extends WorkHandler {
     // changed. One thread has one card.
     final card = clusteringCardForConversationRow(
       conversation,
-      await _store.newestInboundCardData(source, key),
+      await _store.clusteringCardData(source, key),
     );
     final hash = cardHash(card);
 

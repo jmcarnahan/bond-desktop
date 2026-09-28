@@ -24,6 +24,12 @@ import '../services/chat_roster.dart';
 // copy of the "an outbound may go quiet, but never off `done`" asymmetry is
 // exactly how a send would start disagreeing with the sync about a thread.
 import '../services/conversation_state.dart';
+// And `clustering_card.dart`, on the same licence: a pure recipe over a row
+// map with no I/O, importing nothing above `models/` but the two pure files
+// above. [clusteringCardData] has to pick the data shape the card variant
+// reads, and it is the variant's own enum that names which one.
+import '../services/clustering_card.dart'
+    show ClusteringCardVariant, shippedClusteringCard, threadCardMessages;
 // And `deadline_parse.dart`, on the same licence: pure date arithmetic with no
 // imports at all. [stripPlanRelativeBanners] must judge a stored banner's
 // deadline by [showableDeadline] itself, because a second spelling of "Day 1
@@ -7335,6 +7341,67 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
         .get();
     if (result.isEmpty) return null;
     return Map<String, Object?>.from(result.first.data);
+  }
+
+  /// The message-side data the clustering card for [variant] is built from:
+  /// [threadCardData] for [ClusteringCardVariant.thread], and
+  /// [newestInboundCardData] for every other card.
+  ///
+  /// The ONE routing point, so the extraction's card refresh, the sweep's
+  /// re-embed and the golden seeding cannot pick different data for the same
+  /// card. Defaults to [shippedClusteringCard], which is what the app's own
+  /// callers pass by passing nothing.
+  Future<Map<String, Object?>?> clusteringCardData(
+    String source,
+    String conversationKey, {
+    ClusteringCardVariant variant = shippedClusteringCard,
+  }) =>
+      variant == ClusteringCardVariant.thread
+          ? threadCardData(source, conversationKey)
+          : newestInboundCardData(source, conversationKey);
+
+  /// [newestInboundCardData]'s map, plus `thread_extractions`: the stored
+  /// extraction blobs (null where none was written) of the thread's newest
+  /// [threadCardMessages] KEPT inbound messages, newest first, same tie-break.
+  ///
+  /// `summary` and `extraction_json` are the newest KEPT inbound message's —
+  /// the [newestInboundCardData] row whenever the thread has one kept, so the
+  /// two shapes agree on it. A thread with nothing kept falls back to that
+  /// method's last-resort gated row with its one blob as the list, and a
+  /// thread with no inbound at all is null, exactly as it is there.
+  Future<Map<String, Object?>?> threadCardData(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT m.summary, ai.extraction_json '
+          'FROM messages m '
+          'LEFT JOIN message_ai ai '
+          '  ON ai.source = m.source '
+          '  AND ai.source_message_id = m.source_message_id '
+          "WHERE m.source = ? AND m.conversation_key = ? "
+          "AND m.direction = 'inbound' AND ${keptMessageSql('m')} "
+          'ORDER BY m.received_at DESC, m.source_message_id DESC LIMIT ?',
+          variables: _args([source, conversationKey, threadCardMessages]),
+        )
+        .get();
+    if (result.isEmpty) {
+      final fallback = await newestInboundCardData(source, conversationKey);
+      if (fallback == null) return null;
+      return {
+        ...fallback,
+        'thread_extractions': [fallback['extraction_json']],
+      };
+    }
+    final newest = result.first.data;
+    return {
+      'summary': newest['summary'],
+      'extraction_json': newest['extraction_json'],
+      'thread_extractions': [
+        for (final row in result) row.data['extraction_json'],
+      ],
+    };
   }
 
   /// The user's own recent replies to one address, newest first — the tone the

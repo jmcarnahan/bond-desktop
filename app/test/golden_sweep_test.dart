@@ -1070,6 +1070,30 @@ void main() {
       expect(ClusteringCardVariant.subjectTopics.wireName, 'subject_topics');
     });
 
+    test('SWEEP_CARD=thread names the thread card', () {
+      expect(parseSweepCard('thread'), ClusteringCardVariant.thread);
+      expect(ClusteringCardVariant.thread.wireName, 'thread');
+    });
+
+    test('SWEEP_POSSIBLE_ROOM is 0 or 1 or fails loudly', () {
+      expect(parseSweepPossibleRoom('1'), isTrue);
+      expect(parseSweepPossibleRoom(' 0 '), isFalse);
+      for (final raw in ['', 'true', 'false', '2', 'yes']) {
+        expect(
+          () => parseSweepPossibleRoom(raw),
+          throwsArgumentError,
+          reason: raw,
+        );
+      }
+      // The default follows the app.
+      expect(
+        parseSweepPossibleRoom(GoldenDefines.sweepPossibleRoomRaw),
+        StorylineTuning.possibleHoldsRoom,
+      );
+      expect(sweepRoomRuleName(true), 'suggested+possible');
+      expect(sweepRoomRuleName(false), 'suggested-only');
+    });
+
     test('SWEEP_EMBED_PREFIX has three readings and keeps every space', () {
       expect(resolveEmbedPrefix(''), EmbeddingsClient.clusteringPrefix);
       expect(resolveEmbedPrefix('none'), '');

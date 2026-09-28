@@ -29,7 +29,7 @@ first, and the text stage's own `_embedMessage` re-embeds it when the card's
 hash changes. `project` is stored but not yet on the card (Phase 8 of the
 round adds it).
 
-**The clustering card has a module and five variants.** `clustering_card.dart`
+**The clustering card has a module and seven variants.** `clustering_card.dart`
 is the one recipe for the text a CONVERSATION is embedded from, and both
 writers go through it over the same stored facts:
 `clusteringCardForConversationRow(conversationRow, newestInboundCardData(...))`
@@ -43,7 +43,7 @@ had not changed. The module is its own file since Round E Phase 1, on
 recipe in `storyline_service.dart`, each importing the other for its half, and
 neither could be read without the other.
 
-**The five variants.** Every card is `buildConversationCard`'s four segments,
+**The seven variants.** Every card is `buildConversationCard`'s four segments,
 `subject | participants | topics | summary`, joined by ` | `. A variant keeps
 some of them and leaves the rest EMPTY rather than removing them: the card is
 four segments by contract, and a shorter one would make `cardHash` disagree
@@ -56,6 +56,16 @@ with itself about nothing.
 | `subject` | subject |
 | `subject_topics` | subject, topics |
 | `summary` | topics, summary |
+| `thread` | subject (empty on an untitled Teams chat), project + topics merged across the thread's newest five kept inbound messages, the newest kept inbound summary — bench only |
+| `topics_untitled` | `topics`, with the subject empty on an untitled Teams chat — bench only |
+
+The last two are the decision-model round's Phase 8 candidates, built behind
+`SWEEP_CARD` and not shipped. An untitled Teams chat is one whose subject is
+the participant names the sync wrote on first sight (`isTeamsNamesSubject` in
+`chat_roster.dart`); display keeps the names. `thread` reads
+`MessageStore.threadCardData`, and `MessageStore.clusteringCardData` is the one
+place that picks the data a variant reads. `SWEEP_CARD=thread` read 58/98 on
+`storyline.id` against the shipped card's 59/98 and did not ship.
 
 `shippedClusteringCard` is what the app passes, and since Round D Phase 2, on
 2026-09-18, it is `topics`: the people are out of the vector. The sweep bench

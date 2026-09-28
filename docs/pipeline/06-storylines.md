@@ -901,15 +901,24 @@ the moment it is inserted, so a row still at `pending` is an inbound one
 waiting to be judged.
 
 **Suggestions expire, and so do possible storylines.** At most
-`maxPendingSuggestions`, three, unanswered questions the app asked may sit in
+`maxPendingSuggestions`, three, unanswered proposals the app made may sit in
 the rail at once, and the sweep's room count is what enforces it. The count
-reads `suggested` and `possible` rows with `created_by = 'auto'`, because both
-kinds ask: a possible storyline is a rail row with a **Keep** and a **Dismiss**
-on it, and a wall of them is the same chore a wall of proposals is. A question
-nobody ever answers holds its slot for the life of the mailbox, so three of
-them and the room is zero on every future pass: the app quietly stops proposing
-anything at all, with no error anywhere. The expiry is what keeps the room
-moving. An automatic `suggested` or `possible` storyline proposed more than
+reads `suggested` rows with `created_by = 'auto'` only
+(`StorylineTuning.possibleHoldsRoom = false`, decision-model round Phase 8).
+Until then it read `possible` rows too, and a cluster filed as possible spent a
+slot in the pass that filed it, so three declined clusters stopped the proposer
+for a fortnight; `make golden-sweep SWEEP_POSSIBLE_ROOM=0|1` measured the two
+rules identical on `storyline.id` (59/98) and forbidden hits (1). What bounds a
+pass now is `maxQuestionsPerPass`, three: proposals and filings together, room
+or no room, and a cluster past it is rebuilt and asked on a later pass. A filed
+set writes its hash, so the IDENTICAL set is never asked again; a re-cluster
+that is a different set but has at least half its threads in one live automatic
+possible storyline (`possibleOverlapShare`) is skipped without a model call and
+counted as `overlaps_possible` on the sweep's row. A proposal nobody ever
+answers holds its slot for the life of the mailbox, so three of them and the
+room is zero on every future pass: the app quietly stops proposing anything at
+all, with no error anywhere. The expiry is what keeps the room moving. An
+automatic `suggested` or `possible` storyline proposed more than
 `suggestionTtlDays`, fourteen days, ago goes to `dismissed`, and the count
 lands on the activity row as `expired`. Nothing is rebuilt and nothing is
 deleted: the row keeps the hash it has carried since it was written, its
@@ -1110,17 +1119,19 @@ What that means in each direction:
 | expiry | the suggestion's 14-day clock, into a `dismissed` row that keeps its members and can be restored |
 | Keep | `active`, which is when its threads leave the pool |
 
-A filing spends a slot of the pass's room, exactly as a proposal does, and the
-cluster loop stops when the proposals and the filings together reach it. While
-a declined cluster wrote an invisible tombstone it could fill nothing up, so
-the loop counted proposals alone; now that it writes a rail row with members, a
-pass whose models declined every cluster it built would otherwise walk the
-whole list and hand back **Possible · 40**. The clusters left behind are not
-lost: nothing wrote their hashes, so the next pass rebuilds them and asks about
-the next one as soon as a slot comes free. A cluster that reached no model at
-all, because a hash already answered it, spends nothing — it would otherwise
-consume the same slot on every future sweep and starve the genuinely new
-clusters ranked behind it.
+A filing spends no slot of the pass's room since the decision-model round's
+Phase 8 (`possibleHoldsRoom = false`): the room counts proposals alone. What
+bounds a pass whose models decline every cluster it built is
+`maxQuestionsPerPass`, three, which counts proposals and filings together, so
+such a pass asks three and never hands back **Possible · 40**. The clusters
+past the cap are not lost: nothing wrote their hashes, so the next pass
+rebuilds them and asks the next three. A cluster whose threads are at least
+half one live automatic possible storyline's is skipped before any model call
+(`overlaps_possible`), so a declined cluster that gains a thread does not come
+back as a second possible row over the same threads. A cluster that reached no
+model at all, because a hash already answered it, spends nothing — it would
+otherwise consume the same slot on every future sweep and starve the genuinely
+new clusters ranked behind it.
 
 A cluster the sweep merely dropped for sitting under the coherence floor or
 under `proposeMinClusterSize` is filed nowhere at all, because nothing was
