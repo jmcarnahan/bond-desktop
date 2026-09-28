@@ -379,12 +379,13 @@ void main() {
       expect(status(tester), SettingsModelsPage.keyNeededText);
     });
 
-    testWidgets('all three parks are answered under User defined',
+    testWidgets('all four parks are answered under User defined',
         (tester) async {
       for (final (reason, sentence) in [
         ('model_unavailable', SettingsModelsPage.serverParkedText),
         ('unauthorized', SettingsModelsPage.serverUnauthorizedText),
         ('embed_unavailable', SettingsModelsPage.embedUnavailableText),
+        ('decision_unavailable', SettingsModelsPage.decisionUnavailableText),
       ]) {
         await open(
           tester,
@@ -396,8 +397,8 @@ void main() {
       }
     });
 
-    testWidgets('under Managed only the embedding park is this page’s to '
-        'answer', (tester) async {
+    testWidgets('under Managed only the embedding and decision parks are this '
+        'page’s to answer', (tester) async {
       // The other two are about a server whose own line is right here, and
       // the rail already says `Model server unreachable`.
       await open(
@@ -413,6 +414,13 @@ void main() {
         parked: const ParkedFact(reason: 'embed_unavailable', waiting: 3),
       );
       expect(status(tester), SettingsModelsPage.embedUnavailableText);
+
+      await open(
+        tester,
+        serverState: const ServerReady(port: 8080, pid: 42),
+        parked: const ParkedFact(reason: 'decision_unavailable', waiting: 3),
+      );
+      expect(status(tester), SettingsModelsPage.decisionUnavailableText);
     });
 
     testWidgets('a park word this page cannot answer for is left alone',

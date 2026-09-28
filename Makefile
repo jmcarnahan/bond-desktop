@@ -1083,7 +1083,8 @@ endef
 # edit to llm_client.dart.
 #
 # Emitted only for the vars that are SET, which is the whole reason this is
-# nine lines instead of one: an empty define is not the same as no define.
+# one block per var instead of one line: an empty define is not the same as no
+# define.
 # `--dart-define=LLAMA_URL=` makes String.fromEnvironment read '' — the app
 # would POST to nowhere instead of falling back to its default.
 APP_LLM_DEFINES :=
@@ -1101,6 +1102,15 @@ APP_LLM_DEFINES += --dart-define=LLAMA_MODEL='$(LLAMA_MODEL)'
 endif
 ifneq ($(strip $(FAST_LLAMA_MODEL)),)
 APP_LLM_DEFINES += --dart-define=FAST_LLAMA_MODEL='$(FAST_LLAMA_MODEL)'
+endif
+# The decision model's endpoint and name (`DecisionClient`), for a decide
+# server somewhere other than `make decide`'s :8083. DECIDE_URL is the FULL
+# `/v1/embeddings` URL, as EMBED_URL is.
+ifneq ($(strip $(DECIDE_URL)),)
+APP_LLM_DEFINES += --dart-define=DECIDE_URL='$(DECIDE_URL)'
+endif
+ifneq ($(strip $(DECIDE_MODEL)),)
+APP_LLM_DEFINES += --dart-define=DECIDE_MODEL='$(DECIDE_MODEL)'
 endif
 # Points a DEV build at a llama-server it did not ship with — Homebrew's, or a
 # checkout's build directory — so Settings -> Models -> Local server can run

@@ -468,6 +468,13 @@ class SettingsModelsPage extends StatefulWidget {
       'The embedding model on this Mac is not answering. Work is waiting and '
       'will retry each minute.';
 
+  /// And the decision model's. It can run on this Mac or on your server, so
+  /// the sentence names the model and not a machine, and it is answered under
+  /// both modes for the same reason.
+  static const String decisionUnavailableText =
+      'The decision model is not answering. Work is waiting and will retry '
+      'each minute.';
+
   /// The user-defined status line before a key has been pasted, and after one
   /// has. A server on this machine needs no key, so the first is asked for
   /// only when at least one address is somewhere else.
@@ -834,9 +841,9 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
   /// it is; then the form standing open over an install that has not moved
   /// yet; then a park; and only then the ordinary report.
   ///
-  /// Under Managed the page answers for the embedding park alone. The other
-  /// two are about a server, and under Managed the server line directly here
-  /// is already saying what that server is doing.
+  /// Under Managed the page answers for the embedding and decision parks
+  /// alone. The other two are about a server, and under Managed the server
+  /// line directly here is already saying what that server is doing.
   ///
   /// A refused ADDRESS is not on this line. The form owns that rule and says
   /// so under the field it is about.
@@ -849,6 +856,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
         'model_unavailable' when _onBox => SettingsModelsPage.serverParkedText,
         'unauthorized' when _onBox => SettingsModelsPage.serverUnauthorizedText,
         'embed_unavailable' => SettingsModelsPage.embedUnavailableText,
+        'decision_unavailable' => SettingsModelsPage.decisionUnavailableText,
         // Every other park word is about something this page cannot answer
         // for — a sign-out — and it must not claim it.
         _ => null,

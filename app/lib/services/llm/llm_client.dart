@@ -113,13 +113,27 @@ class EmbedUnavailableException extends LlmUnavailableException {
   const EmbedUnavailableException(super.message);
 }
 
+/// The DECISION server is the one that could not be reached.
+///
+/// A subclass of [LlmUnavailableException] for [EmbedUnavailableException]'s
+/// reason: every existing `on LlmUnavailableException` arm keeps catching it
+/// and a drain parks exactly as it does for the generating server. What it
+/// adds is which server died — the decision model is placed on its own, so a
+/// park that said only `model_unavailable` would send a person to look at a
+/// generating server that is answering fine. The drains record the reason
+/// `decision_unavailable`.
+class DecisionUnavailableException extends LlmUnavailableException {
+  const DecisionUnavailableException(super.message);
+}
+
 /// The word a drain records when [e] parked it, for the rail to read.
 ///
-/// One recipe rather than one per drain: the three subclasses are a closed set
+/// One recipe rather than one per drain: the subclasses are a closed set
 /// and the rail's sentences are written against these exact words, so a new
 /// subclass that is added here reaches every park site at once.
 String parkReasonFor(Object e) => switch (e) {
       LlmUnauthorizedException() => 'unauthorized',
+      DecisionUnavailableException() => 'decision_unavailable',
       EmbedUnavailableException() => 'embed_unavailable',
       _ => 'model_unavailable',
     };

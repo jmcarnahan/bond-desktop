@@ -488,14 +488,17 @@ order, and the order is the order the jobs come in:
 2. `Running on this Mac until you connect.` while the form is open over an
    install that has not moved yet.
 3. A park this page can answer for, when something is waiting. Under **User
-   defined** all three: `model_unavailable` reads `Your server is not
+   defined** all four: `model_unavailable` reads `Your server is not
    answering. Work is waiting and will retry each minute.`, `unauthorized`
-   reads `Your server refused the access key. Change it here.`, and
+   reads `Your server refused the access key. Change it here.`,
    `embed_unavailable` reads `The embedding model on this Mac is not
-   answering. Work is waiting and will retry each minute.` Under **Managed**
-   only the embedding one: the other two are about a server whose own line is
-   the next thing on this page, and the rail already says `Model server
-   unreachable`. A park word this page cannot answer for, such as a sign-out,
+   answering. Work is waiting and will retry each minute.`, and
+   `decision_unavailable` reads `The decision model is not answering. Work is
+   waiting and will retry each minute.` (it names the model rather than a
+   machine, because the decision model can run on either). Under **Managed**
+   only the embedding and decision ones: the other two are about a server
+   whose own line is the next thing on this page, and the rail already says
+   `Model server unreachable`. A park word this page cannot answer for, such as a sign-out,
    is left alone: the inbox already routes it.
 4. Under **Managed**, the server's own state: `Not running`, `Starting…`,
    `Loading models · N of M`, `Running`, `Not running: <reason>`, `Port <p> is

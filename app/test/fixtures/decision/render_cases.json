@@ -1,0 +1,989 @@
+[
+ {
+  "name": "mail_sole_to",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "mail_to_count_2",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 0,
+   "to_count": 2
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: you and 1 others.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "mail_to_count_3",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 0,
+   "to_count": 3
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: you and 2 others.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "mail_indirect_to_count_1",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 0,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: you indirectly (CC, a list, or unknown).\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "mail_indirect_to_count_0",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 0,
+   "to_count": 0
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: you indirectly (CC, a list, or unknown).\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "teams_direct",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "teams",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Got a minute to look at the deck?",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: you directly (a 1:1 chat, or you are @mentioned).\n\nThe message to judge:\nFrom: Dana Whitfield\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nGot a minute to look at the deck?"
+ },
+ {
+  "name": "teams_group",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "teams",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Lunch order closes at noon.",
+   "body_preview": "",
+   "addressed_me": 0,
+   "to_count": 6
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: a group chat, not you specifically.\n\nThe message to judge:\nFrom: Dana Whitfield\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nLunch order closes at noon."
+ },
+ {
+  "name": "teams_subject_omitted",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "teams",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Weekly recap",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Posting the recap here.",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: you directly (a 1:1 chat, or you are @mentioned).\n\nThe message to judge:\nFrom: Dana Whitfield\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nPosting the recap here."
+ },
+ {
+  "name": "teams_missing_from_name",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "teams",
+   "from_name": "",
+   "from_address": "",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "ping",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: you directly (a 1:1 chat, or you are @mentioned).\n\nThe message to judge:\nFrom: \nReceived: 2026-09-15T17:05:00Z\n\nBody:\nping"
+ },
+ {
+  "name": "mail_missing_from_name",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "",
+   "from_address": "noreply@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom:  <noreply@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "empty_body_preview_fallback",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "",
+   "body_preview": "Preview line about the venue shortlist",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nPreview line about the venue shortlist"
+ },
+ {
+  "name": "empty_body_card_text",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [
+   {
+    "name": "card",
+    "is_inline": false,
+    "card_text": "Approval requested: travel for Dana Whitfield"
+   }
+  ],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nApproval requested: travel for Dana Whitfield"
+ },
+ {
+  "name": "empty_body_card_text_over_300",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [
+   {
+    "name": "card",
+    "is_inline": false,
+    "card_text": "Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. "
+   }
+  ],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nCard line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Card line. Car"
+ },
+ {
+  "name": "empty_body_1_file",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [
+   {
+    "name": "venues.xlsx",
+    "is_inline": false,
+    "card_text": null
+   }
+  ],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nShared a file: venues.xlsx"
+ },
+ {
+  "name": "empty_body_3_files",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [
+   {
+    "name": "a.pdf",
+    "is_inline": false,
+    "card_text": null
+   },
+   {
+    "name": "b.docx",
+    "is_inline": false,
+    "card_text": null
+   },
+   {
+    "name": "c.png",
+    "is_inline": false,
+    "card_text": null
+   }
+  ],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nShared a file: a.pdf, b.docx, c.png"
+ },
+ {
+  "name": "empty_body_5_files",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [
+   {
+    "name": "file1.pdf",
+    "is_inline": false,
+    "card_text": null
+   },
+   {
+    "name": "file2.pdf",
+    "is_inline": false,
+    "card_text": null
+   },
+   {
+    "name": "file3.pdf",
+    "is_inline": false,
+    "card_text": null
+   },
+   {
+    "name": "file4.pdf",
+    "is_inline": false,
+    "card_text": null
+   },
+   {
+    "name": "file5.pdf",
+    "is_inline": false,
+    "card_text": null
+   }
+  ],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nShared a file: file1.pdf, file2.pdf, file3.pdf"
+ },
+ {
+  "name": "empty_body_unnamed_file",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [
+   {
+    "name": "",
+    "is_inline": false,
+    "card_text": null
+   },
+   {
+    "name": "notes.txt",
+    "is_inline": false,
+    "card_text": null
+   }
+  ],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nShared a file: (unnamed), notes.txt"
+ },
+ {
+  "name": "empty_body_only_inline",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [
+   {
+    "name": "image001.png",
+    "is_inline": true,
+    "card_text": null
+   }
+  ],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nShared an image"
+ },
+ {
+  "name": "empty_body_inline_and_file",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [
+   {
+    "name": "image001.png",
+    "is_inline": true,
+    "card_text": null
+   },
+   {
+    "name": "budget.xlsx",
+    "is_inline": false,
+    "card_text": null
+   }
+  ],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nShared a file: budget.xlsx"
+ },
+ {
+  "name": "empty_body_no_attachments",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\n"
+ },
+ {
+  "name": "body_with_att_markers",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "See the plan [[att:plan.pdf]] and   the map\n\n\n\n[[att:map.png]] below.",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [
+   {
+    "name": "plan.pdf",
+    "is_inline": false,
+    "card_text": null
+   }
+  ],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nSee the plan and the map\n\n below."
+ },
+ {
+  "name": "body_only_markers",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "[[att:plan.pdf]]",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [
+   {
+    "name": "plan.pdf",
+    "is_inline": false,
+    "card_text": null
+   }
+  ],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nShared a file: plan.pdf"
+ },
+ {
+  "name": "body_over_4000",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review.",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nAgenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. Agenda item notes for the planning review. A"
+ },
+ {
+  "name": "tail_0_explicit_empty",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "tail_1_outbound",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [
+   {
+    "who": "You",
+    "received_at": "2026-09-14T15:00:00Z",
+    "text": "Sent the draft over."
+   }
+  ],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nRecent thread before this message, oldest first, for context only:\nYou: Sent the draft over.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "tail_3_mixed",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [
+   {
+    "who": "Dana Whitfield",
+    "received_at": "2026-09-10T15:00:00Z",
+    "text": "Can we move the sync to Friday?"
+   },
+   {
+    "who": "You",
+    "received_at": "2026-09-11T15:00:00Z",
+    "text": "Friday works for me."
+   },
+   {
+    "who": "Marcus Oyelaran",
+    "received_at": "2026-09-12T15:00:00Z",
+    "text": "Adding Priya for the budget part."
+   }
+  ],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nRecent thread before this message, oldest first, for context only:\nDana Whitfield: Can we move the sync to Friday?\n---\nYou: Friday works for me.\n---\nMarcus Oyelaran: Adding Priya for the budget part.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "tail_5_keeps_last_3",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [
+   {
+    "who": "Dana Whitfield",
+    "received_at": "2026-09-10T15:00:00Z",
+    "text": "Can we move the sync to Friday?"
+   },
+   {
+    "who": "You",
+    "received_at": "2026-09-11T15:00:00Z",
+    "text": "Friday works for me."
+   },
+   {
+    "who": "Marcus Oyelaran",
+    "received_at": "2026-09-12T15:00:00Z",
+    "text": "Adding Priya for the budget part."
+   },
+   {
+    "who": "You",
+    "received_at": "2026-09-13T15:00:00Z",
+    "text": "Budget draft is in the shared folder."
+   },
+   {
+    "who": "Priya Anand",
+    "received_at": "2026-09-14T15:00:00Z",
+    "text": "Thanks, reviewing now."
+   }
+  ],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nRecent thread before this message, oldest first, for context only:\nMarcus Oyelaran: Adding Priya for the budget part.\n---\nYou: Budget draft is in the shared folder.\n---\nPriya Anand: Thanks, reviewing now.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "tail_items_over_300",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [
+   {
+    "who": "Dana Whitfield",
+    "received_at": "2026-09-10T15:00:00Z",
+    "text": "Can we move the sync to Friday? Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering."
+   },
+   {
+    "who": "You",
+    "received_at": "2026-09-11T15:00:00Z",
+    "text": "Friday works for me. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering."
+   },
+   {
+    "who": "Marcus Oyelaran",
+    "received_at": "2026-09-12T15:00:00Z",
+    "text": "Adding Priya for the budget part. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering."
+   }
+  ],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nRecent thread before this message, oldest first, for context only:\nDana Whitfield: Can we move the sync to Friday? Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the \n---\nYou: Friday works for me. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout\n---\nMarcus Oyelaran: Adding Priya for the budget part. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about the room layout and catering. Extra detail about th\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "tail_item_empty_who",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [
+   {
+    "who": "",
+    "received_at": "",
+    "text": "Forwarded note."
+   }
+  ],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nRecent thread before this message, oldest first, for context only:\n: Forwarded note.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "non_ascii_accents",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Zoë Lefèvre",
+   "from_address": "zoe@example.com",
+   "subject": "Réunion",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Réunion à Genève: café, crème brûlée, naïve façade.",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Zoë Lefèvre <zoe@example.com>\nSubject: Réunion\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nRéunion à Genève: café, crème brûlée, naïve façade."
+ },
+ {
+  "name": "non_ascii_cjk",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "会議",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "会議は来週の火曜日です。资料已上传。",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: 会議\nReceived: 2026-09-15T17:05:00Z\n\nBody:\n会議は来週の火曜日です。资料已上传。"
+ },
+ {
+  "name": "non_ascii_emoji",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "teams",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Great work team 🎉🚀 see you Friday 👋",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: you directly (a 1:1 chat, or you are @mentioned).\n\nThe message to judge:\nFrom: Dana Whitfield\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nGreat work team 🎉🚀 see you Friday 👋"
+ },
+ {
+  "name": "whitespace_no_markers",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Line one   with    spaces\n\n\n\nLine two\t\ttabs",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nLine one   with    spaces\n\n\n\nLine two\t\ttabs"
+ },
+ {
+  "name": "whitespace_with_marker",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Line one   with    spaces\n\n\n\n[[att:x.pdf]]Line two\t\ttabs",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [
+   {
+    "name": "x.pdf",
+    "is_inline": false,
+    "card_text": null
+   }
+  ],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nLine one with spaces\n\n Line two tabs"
+ },
+ {
+  "name": "midnight_before_pdt",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T06:40:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-14 (Monday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T06:40:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "midnight_after_pdt",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T07:20:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T07:20:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "midnight_before_pst",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-12-02T07:50:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -480,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-12-01 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-12-02T07:50:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "received_at_explicit_offset",
+  "owner": "Rivera, Sam <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T01:30:00+02:00",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Rivera, Sam <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-14 (Monday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T01:30:00+02:00\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "owner_address_only",
+  "owner": "sam.rivera@example.org",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is sam.rivera@example.org. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ },
+ {
+  "name": "owner_given_surname_form",
+  "owner": "Sam Rivera <sam.rivera@example.org>",
+  "message": {
+   "source": "email",
+   "from_name": "Dana Whitfield",
+   "from_address": "dana@example.com",
+   "subject": "Offsite venues",
+   "received_at": "2026-09-15T17:05:00Z",
+   "body_text": "Could you send the revised venue list before Thursday?",
+   "body_preview": "",
+   "addressed_me": 1,
+   "to_count": 1
+  },
+  "attachments": [],
+  "tail": [
+   {
+    "who": "Dana Whitfield",
+    "received_at": "2026-09-10T15:00:00Z",
+    "text": "Can we move the sync to Friday?"
+   },
+   {
+    "who": "You",
+    "received_at": "2026-09-11T15:00:00Z",
+    "text": "Friday works for me."
+   }
+  ],
+  "tz_name": "America/Los_Angeles",
+  "utc_offset_minutes": -420,
+  "expected_state": "The reader, the owner of this inbox, is Sam Rivera <sam.rivera@example.org>. Any mention of that name or address refers to the reader.\n\nToday is 2026-09-15 (Tuesday).\n\nAddressed to: only you.\n\nRecent thread before this message, oldest first, for context only:\nDana Whitfield: Can we move the sync to Friday?\n---\nYou: Friday works for me.\n\nThe message to judge:\nFrom: Dana Whitfield <dana@example.com>\nSubject: Offsite venues\nReceived: 2026-09-15T17:05:00Z\n\nBody:\nCould you send the revised venue list before Thursday?"
+ }
+]

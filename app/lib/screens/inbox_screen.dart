@@ -205,7 +205,8 @@ typedef _Selection = ({
 /// `model_unavailable` and `unauthorized` read differently on the two
 /// placements, because there the answer changes what a person should go and
 /// look at; `embed_unavailable` does not, because that server is on this Mac
-/// under either placement.
+/// under either placement, and `decision_unavailable` names its model rather
+/// than a machine.
 ///
 /// "Retrying each minute" is the inbox's own poll and the supervisor's
 /// `onReady`, and it is the only cadence this sentence may claim: nothing
@@ -234,6 +235,14 @@ String railProgressLine({
     // name a machine that is answering fine.
     case 'embed_unavailable':
       return 'Embedding server unreachable · $waiting waiting · retrying each '
+          'minute';
+    // Its own sentence because it is its own server: the decision model is
+    // placed apart from the generating one, and "Model server unreachable"
+    // would send a person to a server that is answering fine. One wording on
+    // both placements, like the embedding arm, because the word names the
+    // model rather than the machine.
+    case 'decision_unavailable':
+      return 'Decision model unreachable · $waiting waiting · retrying each '
           'minute';
     // Named for the machine that refused, like the arm above it: a local
     // server behind a reverse proxy can answer 401 too, and telling that

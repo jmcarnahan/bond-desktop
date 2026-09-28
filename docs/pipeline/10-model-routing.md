@@ -707,8 +707,8 @@ what Bond is would be the app asking for credentials as its opening line.
   row it is written into.
 - **Parking is VISIBLE, and nothing polls for it.** Both drains carry the
   reason on their progress streams — `WorkProgress.parkedReason` and
-  `TriageProgress.parkedReason`, one of `model_unavailable`, `unauthorized` or
-  `session` — and `parkedProvider` merges them. Triage keeps one slot and the
+  `TriageProgress.parkedReason`, one of `model_unavailable`, `unauthorized`,
+  `embed_unavailable`, `decision_unavailable` or `session` — and `parkedProvider` merges them. Triage keeps one slot and the
   worker lanes keep ONE SLOT PER KIND, because `AiWorkers` forwards three lanes
   onto one stream and a drain emits per handler even when that handler had no
   rows: a single slot would let the storyline lane's empty emit erase the fast
@@ -722,13 +722,17 @@ what Bond is would be the app asking for credentials as its opening line.
   | `model_unavailable` | local | `Model server unreachable · N waiting · retrying each minute` |
   | `unauthorized` | box | `Your server refused the access key · N waiting` |
   | `unauthorized` | local | `Model server refused the access key · N waiting` |
+  | `embed_unavailable` | either | `Embedding server unreachable · N waiting · retrying each minute` |
+  | `decision_unavailable` | either | `Decision model unreachable · N waiting · retrying each minute` |
   | `session` | either | today's `Triaging N remaining…` |
 
-  Processing being off still wins over all five. The Models page carries the
+  Processing being off still wins over all of them. The Models page carries the
   same fact as one line, but not all of it and not under both modes: under
-  **User defined** it answers all three parks in its own words, and under
-  **Managed** it answers the embedding one alone, because the other two are
-  about a server whose own state sentence is the next thing on that page.
+  **User defined** it answers all four parks in its own words, and under
+  **Managed** it answers the embedding and decision ones alone, because the
+  other two are about a server whose own state sentence is the next thing on
+  that page. `decision_unavailable` comes from `DecisionUnavailableException`
+  (`parkReasonFor`); nothing throws it until the decision pass is wired in.
   **What clears it is the next pump**: the reason is dropped at the top of
   `pump()` and again on the first item that gets through, so the line goes
   away because work got done rather than on a timer. Pumps come from the

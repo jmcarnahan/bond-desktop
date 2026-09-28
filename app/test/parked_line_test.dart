@@ -201,6 +201,24 @@ void main() {
       }
     });
 
+    test('a dead decision model reads the same on both placements', () {
+      // The decision model can run on either placement, so the sentence names
+      // the model rather than a machine.
+      for (final onBox in [true, false]) {
+        expect(
+          railProgressLine(
+            on: true,
+            remaining: 3,
+            reason: 'decision_unavailable',
+            waiting: 3,
+            onBox: onBox,
+          ),
+          'Decision model unreachable · 3 waiting · retrying each minute',
+          reason: 'onBox: $onBox',
+        );
+      }
+    });
+
     test('session keeps the wording it always had', () {
       // A sign-out is already routed by the inbox notifier, and a second
       // sentence about it here would be the app saying the same thing twice.
@@ -239,6 +257,7 @@ void main() {
         'model_unavailable',
         'unauthorized',
         'embed_unavailable',
+        'decision_unavailable',
       ]) {
         expect(
           railProgressLine(
@@ -275,6 +294,7 @@ void main() {
         'model_unavailable',
         'unauthorized',
         'embed_unavailable',
+        'decision_unavailable',
         'session',
       ]) {
         for (final on in [true, false]) {

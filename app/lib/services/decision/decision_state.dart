@@ -1,0 +1,138 @@
+/// The text the decision model reads for one message — its "state".
+///
+/// A byte-for-byte port of the Python that rendered the model's training data:
+/// `distill/state.py` `render_state`, and `distill/build_states.py`'s block
+/// helpers composed as `distill/serve_decision.py` `render_states` composes
+/// them. The model learned THESE bytes, so a harmless-looking tidy-up here (a
+/// trimmed line, a different date format, a UTF-16 cap) is a silent accuracy
+/// loss rather than a style choice. `test/decision_state_test.dart` checks
+/// every case of the fixture the Python service rendered.
+library;
+
+import 'decision_input.dart';
+
+/// The owner line, the date line, the directness line, the tail (when there
+/// is one) and the message block, joined by blank lines.
+///
+/// [toLocal] turns an aware `received_at` (in UTC) into the local wall time
+/// the date line names; it defaults to this machine's zone, which is what
+/// training used (the states were rendered on this Mac). A test passes a
+/// fixed offset. Its result's fields are formatted as they stand, so a
+/// returned UTC `DateTime` shifted by an offset is read as that wall time.
+String renderDecisionState(
+  DecisionInput input, {
+  DateTime Function(DateTime utc)? toLocal,
+}) {
+  final owner = input.owner;
+  final tail = input.tail.length > DecisionInput.tailMax
+      ? input.tail.sublist(input.tail.length - DecisionInput.tailMax)
+      : input.tail;
+  return [
+    if (owner != null && owner.isNotEmpty)
+      'The reader, the owner of this inbox, is $owner. Any mention of that '
+          'name or address refers to the reader.',
+    'Today is ${decisionNowAnchor(input.receivedAt, toLocal: toLocal)}.',
+    _directnessLine(input),
+    if (tail.isNotEmpty)
+      'Recent thread before this message, oldest first, for context only:\n'
+          '${[
+        for (final t in tail)
+          // Capped here as the service capped it, and NOT marker-stripped
+          // here: `DecisionInput.fromRows` strips, the service did not.
+          '${t.who}: ${cutCodePoints(t.text, DecisionInput.tailTextCap)}',
+      ].join('\n---\n')}',
+    'The message to judge:\n${_messageBlock(input)}',
+  ].join('\n\n');
+}
+
+/// How many code points of the body the block keeps
+/// (`message_block.dart` `messageBlockBodyCap`, as the packer copied it).
+const int decisionBodyCap = 4000;
+
+/// `build_states.now_anchor`: `yyyy-MM-dd (Weekday)` in local time, or `''`
+/// when there is no stamp.
+///
+/// Python replaced `Z` with `+00:00` and asked `datetime.fromisoformat`; an
+/// aware stamp became local time, a naive one was used as it stood, and one
+/// that did not parse fell back to its first ten characters. `DateTime
+/// .tryParse` accepts the same ISO shapes the app stores (Graph's `…Z`, with or
+/// without fractional seconds, and an explicit offset); the two parsers differ
+/// only on strings no connector writes, and there the fallback agrees too
+/// wherever the first ten characters are a date.
+String decisionNowAnchor(
+  String? receivedAt, {
+  DateTime Function(DateTime utc)? toLocal,
+}) {
+  if (receivedAt == null || receivedAt.isEmpty) return '';
+  final parsed = DateTime.tryParse(receivedAt);
+  if (parsed == null) return cutCodePoints(receivedAt, 10);
+  // `tryParse` marks a stamp that carried `Z` or an offset as UTC and leaves a
+  // naive one local, with its fields exactly as written.
+  final wall = parsed.isUtc
+      ? (toLocal ?? (d) => d.toLocal())(parsed.toUtc())
+      : parsed;
+  return '${_pad(wall.year, 4)}-${_pad(wall.month, 2)}-${_pad(wall.day, 2)} '
+      '(${_weekdays[wall.weekday - 1]})';
+}
+
+const List<String> _weekdays = [
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+  'Sunday',
+];
+
+String _pad(int value, int width) => value.toString().padLeft(width, '0');
+
+/// `build_states.directness_line`, with its exact sentences.
+String _directnessLine(DecisionInput input) {
+  if (input.source == 'teams') {
+    return input.addressedMe
+        ? 'Addressed to: you directly (a 1:1 chat, or you are @mentioned).'
+        : 'Addressed to: a group chat, not you specifically.';
+  }
+  if (input.addressedMe) return 'Addressed to: only you.';
+  if (input.toCount > 1) {
+    return 'Addressed to: you and ${input.toCount - 1} others.';
+  }
+  return 'Addressed to: you indirectly (CC, a list, or unknown).';
+}
+
+/// `build_states.message_block`: sender, subject (mail only, even when
+/// empty), the raw received stamp, and the body.
+String _messageBlock(DecisionInput input) {
+  final teams = input.source == 'teams';
+  final sender = teams
+      ? 'From: ${input.fromName ?? ''}'
+      : 'From: ${input.fromName ?? ''} <${input.fromAddress ?? ''}>';
+  final subject = teams ? '' : 'Subject: ${input.subject ?? ''}\n';
+  final bodyText = input.bodyText ?? '';
+  var body = stripDecisionMarkers(
+    bodyText.isNotEmpty ? bodyText : (input.bodyPreview ?? ''),
+  );
+  if (body.isEmpty) body = _attachmentStandIn(input.attachments);
+  body = cutCodePoints(body, decisionBodyCap);
+  return '$sender\n${subject}Received: ${input.receivedAt ?? ''}\n\nBody:\n'
+      '$body';
+}
+
+/// `build_states.attachment_stand_in`: what an empty body says instead.
+String _attachmentStandIn(List<DecisionAttachment> attachments) {
+  final shared = [
+    for (final a in attachments)
+      if (!a.isInline) a,
+  ];
+  if (shared.isEmpty) return attachments.isEmpty ? '' : 'Shared an image';
+  for (final a in shared) {
+    final card = pythonStrip(a.cardText ?? '');
+    if (card.isNotEmpty) return cutCodePoints(card, 300);
+  }
+  final names = [
+    for (final a in shared.take(3))
+      pythonStrip(a.name ?? '').isEmpty ? '(unnamed)' : pythonStrip(a.name!),
+  ];
+  return 'Shared a file: ${names.join(', ')}';
+}

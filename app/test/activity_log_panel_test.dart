@@ -990,6 +990,14 @@ void main() {
         )),
         'Embed message parked — embedding server unreachable',
       );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'triage',
+          status: 'parked',
+          detail: const {'reason': 'decision_unavailable'},
+        )),
+        'Triage parked — decision model unreachable',
+      );
     });
 
     test('a document read says how many passages it became', () {
