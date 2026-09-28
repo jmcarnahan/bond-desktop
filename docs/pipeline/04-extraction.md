@@ -137,14 +137,18 @@ flow on this call (the Phase 6 measurement in `docs/model-bakeoff.md`).
    [07-replies.md](07-replies.md), "When a draft is written"): `onDemand`
    queues nothing, `needsYou` — the default — queues what `prefetchWorthy(row)`
    admits while fewer than ten drafts are in flight, and `all` queues whatever
-   `asksForAReply(row)` admits. Either way this is the cheap filter in front of
-   the 27B's reply decision, and the reason for a skip goes on the activity row
-   as `draft: on_demand | automated_sender | not_prefetched | prefetch_cap |
-   no_cue`.
+   `asksForAReply(row)` admits. Either way these pre-gates run behind the
+   reply decision (the decision model's stored `reply_expected`, see
+   [07-replies.md](07-replies.md)), and the reason for a skip goes on the activity row
+   as `draft: on_demand | automated_sender | no_reply_needed | not_prefetched |
+   prefetch_cap | no_cue`. `no_reply_needed` is the reply decision itself
+   (`replyVerdict` in `app/lib/services/reply_policy.dart`), asked right after
+   `automated_sender` so a message nobody is waiting on never takes a queue
+   row or a prefetch slot.
 
    `automated_sender` is asked right after `onDemand` and ahead of every
    other mode, because it is not a preference: `replySuppressed`
-   (`app/lib/services/llm/reply_decision_task.dart`) says a machine wrote the
+   (`app/lib/services/reply_policy.dart`) says a machine wrote the
    message, from an automated `gate_reason` or `classificationOf` answering
    `automated_notification`. It is the same authority the draft handler and
    the composer ask, so the three cannot disagree (see

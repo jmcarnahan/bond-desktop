@@ -15,7 +15,7 @@ import 'llm/embeddings_client.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'llm/message_text_task.dart';
-import 'llm/reply_decision_task.dart' show replySuppressed;
+import 'reply_policy.dart' show replySuppressed, replyVerdict;
 import 'pipeline_progress.dart';
 
 // The card builders moved to `clustering_card.dart` in Round E Phase 1, and
@@ -364,6 +364,20 @@ class ExtractHandler extends WorkHandler {
       return _skipDraft(source, id, 'automated_sender');
     }
 
+    // The reply decision, ahead of every mode for the same reason: it is the
+    // judgement the draft handler would apply first, so a message it says
+    // needs no reply is never queued — it cannot take a
+    // [DraftPolicy.prefetchCap] slot or cost a queue row. [replyVerdict] is the one rule;
+    // the handler asks it again for queue rows written before this existed.
+    // A person's **Draft reply** never comes through here.
+    final verdict = replyVerdict(
+      replyExpectedP: (await _store.decisionFor(source, id))?.replyExpectedP,
+      storedReplyExpected: row['reply_expected'],
+    );
+    if (verdict.skipWhy != null) {
+      return _skipDraft(source, id, 'no_reply_needed');
+    }
+
     if (policy == DraftPolicy.all) {
       if (!asksForAReply(row)) return _skipDraft(source, id, 'no_cue');
       return _enqueueDraft(source, id);
@@ -640,10 +654,10 @@ class ExtractHandler extends WorkHandler {
 /// might have to answer.
 ///
 /// This is [DraftPolicy.all]'s pre-gate — one of three policies, and the
-/// widest of them. It is a PRE-GATE and nothing more: the verdict that decides
-/// whether a suggestion is written comes from the big model behind the draft
-/// queue, which reads the whole conversation, and this only decides which
-/// messages are worth asking about. [prefetchWorthy] is the narrower gate
+/// widest of them. It is a PRE-GATE and nothing more: whether a suggestion is
+/// written is the decision model's reply probability ([replyVerdict], asked in
+/// `_queueDraft` before this and again by the draft handler), and this only
+/// decides which of the messages it let through are worth drafting for. [prefetchWorthy] is the narrower gate
 /// [DraftPolicy.needsYou] uses, and under [DraftPolicy.onDemand] neither runs.
 /// If this proves too tight for someone who has chosen `all`, this is the line
 /// to widen: the false negatives are silent, and a message it drops is never
@@ -653,7 +667,7 @@ class ExtractHandler extends WorkHandler {
 /// message and called it the user's to answer, the sender is waiting, the
 /// reader has to do something, the message is loud, or it names a date. Read
 /// off the row rather than re-judged, because the point is to be cheap — the
-/// expensive judgement is the model call this gate decides whether to spend.
+/// expensive work is the draft this gate decides whether to spend.
 ///
 /// The first is the odd one out: the other four are the fast triage's fields
 /// ABOUT the message, while `needs_you_verdict` is the needs-you stage's answer
@@ -694,9 +708,9 @@ bool asksForAReply(Map<String, Object?> row) {
 /// messages a person would have opened first anyway, which is exactly the set
 /// worth having an answer ready for before they ask.
 ///
-/// It is not a second opinion about whether a reply is warranted; the big
-/// model still decides that behind the queue. It decides which messages get
-/// asked about without anyone having pressed a button.
+/// It is not a second opinion about whether a reply is warranted; the decision
+/// model's reply probability decides that ([replyVerdict]). It decides which
+/// messages get a draft written without anyone having pressed a button.
 ///
 /// [asksForAReply]'s disciplines, for its reasons: outbound answers false, and
 /// the flags are INTEGERs compared against 1 rather than trusted to be truthy.

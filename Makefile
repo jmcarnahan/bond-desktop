@@ -1313,12 +1313,16 @@ golden: golden-check _decide-health
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'triage' $(BENCH_DEFINES) $(DECISION_DEFINES)
 
-# The prose half: a reply decision for every gold-keep item and a draft for
-# every item that carries a reply rubric, on the prose slot. Same two files,
-# bench name golden-prose; the drafts are judged by rubric in a later phase.
-golden-prose: golden-check
+# The prose half: a reply decision for every gold-keep item — the decision
+# model's reply_expected probability (make decide, :$(DECIDE_PORT), or
+# DECIDE_URL), as the app's draft lane reads it — and a draft for every item
+# that carries a reply rubric, on the prose slot. Same two files, bench name
+# golden-prose; the drafts are judged by rubric in a later phase. Set
+# GOLDEN_OWNER_NAME and GOLDEN_OWNER_ADDRESS: the decision state reads the
+# owner line.
+golden-prose: golden-check _decide-health
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
-	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'reply' $(BENCH_DEFINES)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'reply' $(BENCH_DEFINES) $(DECISION_DEFINES)
 
 # The storyline half: `ConfirmMembershipTask` alone, on the bulk slot, for every
 # golden item against the gold registry. The candidate list is BOUNDED — the

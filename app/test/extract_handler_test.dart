@@ -1310,26 +1310,42 @@ void main() {
           row.data['entity_id'] as String,
       ];
 
+  /// What triage stored. [replyP] is the decision model's p(reply_expected)
+  /// — 0.8 by default, a yes, because the tests in these groups are about the
+  /// pre-gates BEHIND the reply decision; null writes no decision row, so the
+  /// stored `reply_expected` column decides, as for a row triaged before the
+  /// decision model.
   Future<void> triageSaid({
     String id = 'm1',
     bool replyExpected = false,
     bool needsAction = false,
     String urgency = 'normal',
     String deadline = '',
-  }) =>
-      writeTriaged(
-        store,
+    double? replyP = 0.8,
+  }) async {
+    await writeTriaged(
+      store,
+      'email',
+      id,
+      status: 'triaged',
+      urgency: urgency,
+      category: 'work',
+      summary: 'what it says',
+      needsAction: needsAction,
+      actionItems: const [],
+      replyExpected: replyExpected,
+      deadline: deadline,
+    );
+    if (replyP != null) {
+      await store.writeDecision(
         'email',
         id,
-        status: 'triaged',
-        urgency: urgency,
-        category: 'work',
-        summary: 'what it says',
-        needsAction: needsAction,
-        actionItems: const [],
-        replyExpected: replyExpected,
-        deadline: deadline,
+        fakeDecision(fakeAnswers(replyExpected: replyP)),
+        qhash: 'test',
+        ownerKnown: true,
       );
+    }
+  }
 
   /// One extraction, under [policy]. No closure at all is the default every
   /// existing caller gets, which the handler answers as [DraftPolicy.all].
@@ -1427,6 +1443,70 @@ void main() {
 
       expect(await queuedDrafts(), ['m1']);
       expect(await draftStateOf('m1'), 'pending');
+    });
+
+    test('the reply decision is asked first: a no is never queued', () async {
+      // Every cue the wide gate reads, and the decision model says nobody is
+      // waiting. The same rule the draft handler applies, asked here so the
+      // no costs no queue row and no prefetch slot.
+      for (final policy in [DraftPolicy.all, DraftPolicy.needsYou]) {
+        final id = 'm-${policy.name}';
+        await seedMessage(id: id, conversationKey: 'conv-${policy.name}');
+        await triageSaid(
+          id: id,
+          replyExpected: true,
+          needsAction: true,
+          urgency: 'urgent',
+          replyP: 0.2,
+        );
+        await store.writeNeedsYouVerdict('email', id,
+            verdict: true, reason: 'Priya is waiting on your number');
+        final log = _Recorder();
+        var woken = 0;
+
+        await extract(
+          id: id,
+          policy: policy,
+          activityLog: log,
+          onDraftQueued: () => woken++,
+        );
+
+        expect(await queuedDrafts(), isEmpty, reason: policy.name);
+        expect(await draftStateOf(id), 'skipped', reason: policy.name);
+        expect(log.notes['draft'], 'no_reply_needed', reason: policy.name);
+        expect(woken, 0, reason: policy.name);
+      }
+    });
+
+    test('with no decision row, a stored reply_expected of 0 is a no',
+        () async {
+      await seedMessage();
+      await triageSaid(urgency: 'urgent', replyP: null);
+      final log = _Recorder();
+
+      await extract(policy: DraftPolicy.needsYou, activityLog: log);
+
+      expect(await queuedDrafts(), isEmpty);
+      expect(log.notes['draft'], 'no_reply_needed');
+    });
+
+    test('and a stored reply_expected of 1 goes on to the pre-gate', () async {
+      await seedMessage();
+      await triageSaid(replyExpected: true, urgency: 'urgent', replyP: null);
+
+      await extract(policy: DraftPolicy.needsYou);
+
+      expect(await queuedDrafts(), ['m1']);
+    });
+
+    test('onDemand still answers first, whatever the decision says', () async {
+      await seedMessage();
+      await triageSaid(replyP: 0.1);
+      final log = _Recorder();
+
+      await extract(policy: DraftPolicy.onDemand, activityLog: log);
+
+      expect(log.notes['draft'], 'on_demand');
     });
 
     test('but a judged no leaves the narrow row exactly where it was', () async {
@@ -1985,12 +2065,11 @@ void main() {
       expect(embeddings.documentInputs.length, 1);
     });
 
-    test('a message queued on its needs-you verdict still faces the 27B',
-        () async {
-      // The pre-gate only ever WIDENS what gets asked about. Nothing triage
-      // wrote asks for anything here, so this message reaches drafting on the
-      // verdict alone — and the reply decision behind the queue still closes it
-      // with a no, without a drafting call being spent.
+    test('a message the reply decision refuses is never queued, even on its '
+        'needs-you verdict', () async {
+      // The needs-you verdict would pass the pre-gate on its own, but the
+      // reply decision is asked first, at the queue: no draft row, no prefetch
+      // slot, no drafting call.
       await seedConversation();
       await seedMessage();
       await writeTriaged(
@@ -2009,12 +2088,7 @@ void main() {
       await store.writeNeedsYouVerdict('email', 'm1',
           verdict: true, reason: 'Priya is waiting on your number');
       await store.enqueueWork('extract', 'email', 'm1');
-      final drafting = scripted(
-        [
-          {'needs_reply': false, 'reason': 'A heads-up; nobody is waiting.'}
-        ],
-        schemaName: 'reply_decision',
-      );
+      final drafting = scripted([answer()], schemaName: 'draft_reply');
       final worker = AiWorker(
         store,
         handlers: [
@@ -2026,9 +2100,8 @@ void main() {
       await worker.pump();
       await worker.pump();
 
-      expect(await store.workCounts('draft'), {'done': 1});
-      expect(drafting.userMessages, hasLength(1),
-          reason: 'the decision ran and the drafting model was never reached');
+      expect(await store.workCounts('draft'), isEmpty);
+      expect(drafting.userMessages, isEmpty);
       expect(await store.getDraftForMessage('email', 'm1'), isNull);
     });
 

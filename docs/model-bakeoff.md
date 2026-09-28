@@ -28,7 +28,7 @@ depends on a server being up, and each `make` target below runs it with
 | `make golden-baseline` | Not a model run at all: what the shipping app already scored on the golden set, from the labels the set stores. See "The golden set". |
 | `make golden-score R=…` | Scores a golden run file, keep-only first and all items second. See "The golden set". |
 | `make golden` | The golden set through triage, needs-you and extraction on the bulk slot — the run behind a golden-ledger row. Writes the run file and the timing/cost JSON. |
-| `make golden-prose` | Reply decisions for every gold-keep item and drafts for the reply-rubric items, on the prose slot. |
+| `make golden-prose` | Reply decisions for every gold-keep item — the decision model's `reply_expected` probability from the decide server (`make decide` or `DECIDE_URL`), as the app's draft lane reads it — and drafts for the reply-rubric items, on the prose slot. |
 | `make golden-sweep GOLDEN_RUN=…` | The app's own filing path over the golden set: the sweep, the naming pass, the per-member confirms and the assign shortlist, scored by membership against the gold registry. Needs the embed, bulk and prose servers. `SWEEP_CARD` picks whether the people on a thread are inside the clustering vector. See "The golden set". |
 | `make golden-vector GOLDEN_RUN=…` | The clustering vector alone, added 2026-09-19: the same seeding as `golden-sweep`, stopped the moment the mailbox is embedded. The clusters it WOULD form and their gold purity, every pool pair by cosine on two scales, by subject-word overlap and by shared people, and one separation line. Since Round F it also counts the series pre-pass it does not apply, printing `series` and `series_excluded` beside `folded`, which is how far its clusters could differ from a sweep's on the same pool. Needs only the embedding server, takes about a minute, asks no model anything and scores nothing. See "The golden set". |
 | `make golden-gate` | Offline, no server: the golden set through the app's own gates — direction, sender address and body. Tier 2 (headers) and the Teams ingest gates are not in the set and go unmeasured. `GOLDEN_RUN=` adds the model's `notification` proxy column. See "The golden set". |
@@ -347,10 +347,12 @@ baseline's all-items pass: the baseline reads those items as "not attempted",
 the replay as answers. The keep-only pass, which a ledger row quotes, is
 unaffected.
 
-The prose run differs in three ways worth stating. First, its decision context
-is the plain tail whatever `GOLDEN_CTX` says, because the decision keeps six
-messages at 500 characters and the tail already fits it whole — the ladder is a
-question about the two stages that clip. Second, a draft gets the message and
+The prose run differs in three ways worth stating. First, its reply decision
+is the decision model's: each gold-keep item's decision state (rendered from
+the packer's parts, as `make golden` renders it) goes to the decide server, and
+the verdict is p(reply_expected = yes) against `DecisionPolicy.replyYes` —
+`GOLDEN_CTX` does not touch it. (Before 2026-09-28 it was the 27B
+`ReplyDecisionTask` over the plain tail.) Second, a draft gets the message and
 its tail and nothing else: no style examples, no about-me, no storyline summary, no
 directory pack, because the set carries none of them, so a prose row measures
 the model rather than the retrieval that would feed it in the app. Third, in a
@@ -358,7 +360,8 @@ prose run file `triage.reply_expected` IS the reply decision: the scorer's
 `triage.reply_expected` asks "is the sender waiting on an answer", which is
 exactly what the reply-decision stage answers and what gold has one label for,
 so a decision-only row writes its verdict there and repeats it in a `decision`
-object with the model's reason beside it.
+object, `{source: decision_model, p, needs_reply}` (older files carry the 27B's
+`reason` instead of `p`).
 
 A `compressed` row carries the lower-bound caveat above, printed by the run
 itself so it travels with the number rather than being remembered.
@@ -788,6 +791,8 @@ not in date order.
 | 2026-09-20 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260920-144740.json` | 88% / 88% / 71% / 74% / 92% / 75% / 39% / 66% / 26% / 87% | label 84% · action items 60% · summary 64% · needs-you evidence 28% · extract evidence 25% | 2840 / 1608 / 1977 (triage / needs_you / extraction) | 44.9 (62.9 srv) | 8.3 | $0.00 | Round F Phase 5: the local matrix on the final tree, `feat/pipeline-round-f` @ efca7b1, the tree the PR ships; second of two passes and the keeper, judged from ten Opus packets with 0 rubric keys unmatched over 76 of 76 keep-only items. Against the round B phase 1 row of record every enum and every rubric field sits inside the four-point floor: reply_expected up 2, label down 2, summary up 1, everything else identical. K=1, so the throughput is read against that row's 8.9 at K=1 and not against its 12.5 at K=4; deadline 92%, orgs 93%; 0 failures and 0 retries; prompt tokens 138,331 / 97,697 / 104,548 per stage, identical across both passes, which is the check that no prompt moved; all-items rubric 74 / 61 / 65 / 29 / 27; pass 1 `…-20260920-143526.json` read 88 / 89 / 70 / 72; wall 724 s |
 | 2026-09-20 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260920-153701.json` | — / — / — / 82% / — / — / — / — / — / — | draft 20% (not re-judged) | 6063 / 12677 (reply_decision / draft_reply) | 5.8 decision · 12.1 draft (16.3 / 17.6 srv) | 5.0 | $0.00 | Round F Phase 5 on the final tree; second of two passes and the keeper. All 25 drafts are byte-identical to the 2026-09-17 v4 row of record and to pass 1 (`draft_compare.py`: common 25, identical 25, different 0), so the run was NOT re-judged and the 5 of 25 stands. The decision reads 62 of 76 on both passes; p95 12,460 / 28,313 ms; 0 failures, 0 retries, 0 reasoning leaks; the local 27B at temperature 0 with MTP is deterministic on this build; pass 1 `…-20260920-152144.json`; wall 909 s |
 | 2026-09-20 | prose | vllm-g6e/Qwen3.8-27B-FP8+MTP | tail (fixed) | `golden-run-vllm-g6e-qwen3-8-27b-fp8-mtp-20260920-165412.json` | — / — / — / 83% / — / — / — / — / — / — | draft 24% (not re-judged) | 1376 / 3760 (reply_decision / draft_reply) | 29.5 decision · 42.8 draft | 21.2 | not taken | Round F Phase 5: the box 27B-FP8 with MTP re-read on the final tree `feat/pipeline-round-f` @ efca7b1 at 16:54 UTC, after the local matrix, with the embedding and the confirm local. 63 of 76 on the reply decision, the same count as the Phase 1 pass on `main @ e9fee6f`; all 25 drafts byte-identical to that pass's `…-062529.json`, so this run was NOT re-judged and its 6 of 25 stands. 0 failures. One pass, because the box rows reproduce to the count. This row and the box sweep row of the same afternoon close the construction argument from the box's side |
+
+**Reply decision, retired 2026-09-28.** The prose rows' `reply_expected` column above is the 27B `ReplyDecisionTask` (82% on the 76 gold-keep items). The decision model's `reply_expected` head scores 84% on the same field and population, so the decision-model round replaced the 27B call with it; `make golden-prose` now writes the decision model's verdict there.
 
 **What the first rows say** (2026-09-14, all at `GOLDEN_K=1`, keep-only, every
 row the second of two passes unless its note says otherwise; the 2026-09-16

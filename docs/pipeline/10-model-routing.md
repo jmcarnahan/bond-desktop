@@ -28,9 +28,13 @@ Every stage that dials a model has a row in `pipelineStages`, and the row's
 | `decision` | Decision |
 | `needs_you`, `message_text`, `attachment_digest`, `context_file_digest`, `context_brief`, `context_select` | Generative |
 | `storyline_membership`, `storyline_group`, `storyline_name`, `storyline_refresh`, `storyline_recap` | Generative |
-| `reply_decision` | Generative |
 | `draft_reply`, `draft_improve` | Generative, or cloud drafts (below) |
 | `embeddings` | Embeddings, not routed |
+
+There is no reply-decision stage: whether a prefetched draft is wanted is the
+decision model's `reply_expected` probability, stored at triage and read by
+`DraftHandler` before it gathers anything (see
+[07-replies.md](07-replies.md#reply-decision--should-we-spend-drafting-time-at-all)).
 
 `AppPrefs.specForStage(stageId)` is the whole routing rule:
 

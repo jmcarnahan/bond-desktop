@@ -445,11 +445,17 @@ class DraftTask implements JsonTask<DraftResult> {
 
   static String _formatMessage(Message message) {
     // Markers out, for [buildMessageBlock]'s reason.
-    final body = stripAttachmentMarkers(
+    final stripped = stripAttachmentMarkers(
       message.bodyText?.isNotEmpty == true
           ? message.bodyText!
           : message.bodyPreview,
     );
+    // And [buildMessageBlock]'s stand-in for a message that was nothing but a
+    // shared file: an empty body would tell the model the sender said
+    // nothing, when they sent a document.
+    final body = stripped.isEmpty
+        ? attachmentStandIn(message.attachments)
+        : stripped;
     final from = message.outbound ? 'From: you' : senderLine(message);
     return '$from\n'
         'Sent: ${message.receivedAt ?? ''}\n'

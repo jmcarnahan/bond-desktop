@@ -1585,7 +1585,7 @@ final cloudDraftLedgerProvider = Provider<CloudDraftLedger>(
 /// object. One instance for both, so the routing closures and the ledger can
 /// only ever say one thing.
 ///
-/// It watches the store, its three stage clients, the recorder, the two
+/// It watches the store, its two stage clients, the recorder, the two
 /// retrievers, the embedder, progress, the bus and the ledger — and NEVER
 /// `appPrefsProvider`. That omission is the whole of why pointing a stage
 /// somewhere else rebuilds no worker and aborts no drain.
@@ -1604,10 +1604,6 @@ final draftHandlerProvider = Provider<DraftHandler>((ref) {
   return DraftHandler(
     ref.watch(messageStoreProvider),
     ref.watch(stageLlmClientProvider('draft_reply')),
-    // Its own stage, and its own client: the decision is a yes/no under a
-    // tight schema and the draft is prose, so a machine with a second
-    // server can put the cheap half of a prefetch somewhere else.
-    decisionClient: ref.watch(stageLlmClientProvider('reply_decision')),
     activityLog: ref.watch(activityLogProvider),
     attachments: ref.watch(attachmentRetrieverProvider),
     contextDirs: ref.watch(contextRetrieverProvider),

@@ -109,12 +109,22 @@ class GoldenNeedsYouOut {
   });
 }
 
-/// The reply-decision stage's answer for one item.
+/// The reply decision for one item: the decision model's p(reply_expected =
+/// yes), and the verdict the app's draft lane reads off it
+/// (`p >= DecisionPolicy.replyYes`).
 class GoldenDecisionOut {
   final bool needsReply;
-  final String reason;
+  final double p;
 
-  const GoldenDecisionOut({required this.needsReply, this.reason = ''});
+  /// What answered — `decision_model` since the 27B reply decision was
+  /// retired. Older run files carry a `reason` sentence instead.
+  final String source;
+
+  const GoldenDecisionOut({
+    required this.needsReply,
+    required this.p,
+    this.source = 'decision_model',
+  });
 }
 
 /// The decision model's answer for one item: every classification field the
@@ -236,9 +246,9 @@ class GoldenCall {
 /// and the rest of the row still scores.
 ///
 /// [calls] is keyed by stage — `decision`, `message_text`, `needs_you`,
-/// `reply_decision`, `draft_reply`, `storyline_membership` — the same words
-/// the tasks use for their labels (older run files carry `triage` and
-/// `extraction`).
+/// `draft_reply`, `storyline_membership` — the same words the tasks use for
+/// their labels (older run files carry `triage`, `extraction` and
+/// `reply_decision`).
 class GoldenRunEntry {
   final String id;
 
@@ -307,10 +317,10 @@ class GoldenRunEntry {
   /// `triage: {reply_expected: …}` carrying the decision's verdict and no
   /// other triage key. The scorer's `triage.reply_expected` field is the
   /// question "is the sender waiting on an answer", which is exactly what the
-  /// reply-decision stage answers, and gold has one label for it. So in a
-  /// prose run file `triage.reply_expected` IS the reply decision; the
-  /// `decision` object beside it carries the same verdict plus the model's
-  /// reason, which the scorer ignores and a reader does not.
+  /// reply decision answers, and gold has one label for it. So in a prose run
+  /// file `triage.reply_expected` IS the reply decision; the `decision` object
+  /// beside it carries what answered and its probability, which the scorer
+  /// ignores and a reader does not.
   Map<String, Object?> toScoreRunJson() => {
         'id': id,
         'stratum': stratum,
@@ -405,8 +415,9 @@ class GoldenRunEntry {
         if (storylineId != null) 'storyline': {'id': storylineId},
         if (decision != null)
           'decision': {
+            'source': decision!.source,
+            'p': decision!.p,
             'needs_reply': decision!.needsReply,
-            'reason': decision!.reason,
           },
         if (draft != null)
           'draft': {

@@ -18,9 +18,9 @@ import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'llm/model_slots.dart' show LlmTargetSpec;
 import 'llm/partial_json.dart';
-import 'llm/reply_decision_task.dart';
 import 'mail_body.dart' show stripLinkTargets;
 import 'pipeline_progress.dart';
+import 'reply_policy.dart';
 
 /// Decides whether ONE message needs an answer, and writes one when it does.
 ///
@@ -29,12 +29,13 @@ import 'pipeline_progress.dart';
 /// that gets a second question gets a second decision and a second draft
 /// rather than living with the answer to the first.
 ///
-/// Two model calls, and the first is the point. The fast triage's
-/// `reply_expected` is a guess made on one message in isolation, and the
-/// enqueue in front of this handler treats it as nothing more than a coarse
-/// pre-gate; this is where the model that will do the writing reads the actual
-/// conversation and says whether writing is warranted. A `no` costs one small
-/// call and stores nothing.
+/// The decision comes first and costs nothing here: the decision model read
+/// this message at triage and stored the chance a reply is expected
+/// (`message_decisions.reply_expected_p`). A prefetch below
+/// `DecisionPolicy.replyYes` ends before the thread is read, before the
+/// embedding call, the retrievals and the context select — a `no` pays for
+/// none of them and stores nothing. What is left is one model call, the
+/// draft.
 ///
 /// The draft call STREAMS when this handler was given a live [DraftStreamBus]
 /// — which the app always does and no test does unless it is testing the
@@ -83,23 +84,12 @@ class DraftHandler extends WorkHandler {
           ? thread.sublist(thread.length - DraftTask.maxThreadMessages)
           : thread;
 
-  /// A yes/no and one sentence. Room for the sentence to run long, and no room
-  /// for the model to start drafting inside the decision.
-  static const int _decisionMaxTokens = 256;
-
   /// Two past replies, clipped: a tone sample, not a second thread.
   static const int _styleExamples = 2;
   static const int _styleExampleCap = 750;
 
   final MessageStore _store;
   final LlmClient _client;
-
-  /// Where the reply DECISION goes. Its own stage (`reply_decision`) and so
-  /// its own client: the decision is a yes/no under a tight schema and the
-  /// draft is prose, so a machine with a second server can put the cheap half
-  /// of a prefetch somewhere else. Defaults to [_client], which is the
-  /// one-client behaviour every test and every bench here gets.
-  final LlmClient _decisionClient;
 
   final ActivityLog _log;
 
@@ -151,7 +141,6 @@ class DraftHandler extends WorkHandler {
   DraftHandler(
     this._store,
     this._client, {
-    LlmClient? decisionClient,
     LlmClient? improveClient,
     this._routes = DraftRoutes.none,
     ActivityLog? activityLog,
@@ -166,14 +155,13 @@ class DraftHandler extends WorkHandler {
     this._concurrency,
     this._streams,
     this._stream = const DraftStreamBus.disabled(),
-  })  : _decisionClient = decisionClient ?? _client,
+  })  : _log = activityLog ?? ActivityLog.disabled(),
         // ignore: prefer_initializing_formals
         _improveClient = improveClient,
         // ignore: prefer_initializing_formals
         _contextDirs = contextDirs,
         // ignore: prefer_initializing_formals
-        _embeddings = embeddings,
-        _log = activityLog ?? ActivityLog.disabled();
+        _embeddings = embeddings;
 
   @override
   String get kind => 'draft';
@@ -255,10 +243,10 @@ class DraftHandler extends WorkHandler {
     // as at the draft queue (`ExtractHandler._queueDraft`) because a row can
     // reach this handler from an older build's queue, and because the headers
     // that answer it may only have arrived since. BEFORE `_gather`, which is the
-    // embedding call and the attachment reads, and well before the 27B decision.
+    // embedding call and the attachment reads, and before the reply decision.
     //
-    // An ASKED-FOR draft is exempt, exactly as it is exempt from the decision
-    // call below and for the same reason: pressing **Draft reply** on a
+    // An ASKED-FOR draft is exempt, exactly as it is exempt from the reply
+    // decision below and for the same reason: pressing **Draft reply** on a
     // notification is the owner overruling this, and a press that produced an
     // empty box and no sentence would be a button that silently does nothing.
     if (!request.asked && replySuppressed(Message.fromRow(row))) {
@@ -268,6 +256,25 @@ class DraftHandler extends WorkHandler {
         'automated_sender',
         why: 'a machine wrote this message',
       );
+    }
+
+    // Whether anybody is waiting for an answer — read from what triage stored,
+    // and BEFORE `_gather`, so a message that needs no reply pays no
+    // embedding, no retrieval and no context select. The decision model's
+    // probability when it read this message; the triage column for a row
+    // decided before it existed. An ASKED-FOR draft skips this for the reason
+    // it skips the suppression above: pressing **Draft reply** is the answer,
+    // and a "no" would leave the person who pressed it an empty box.
+    final Map<String, Object?>? decided;
+    if (request.asked) {
+      decided = null;
+    } else {
+      final verdict = await _replyVerdict(source, id, row);
+      if (verdict.skipWhy != null) {
+        _log.note(verdict.detail);
+        return _skip(source, id, 'no_reply_needed', why: verdict.skipWhy);
+      }
+      decided = verdict.detail;
     }
 
     final consulted = request.contextFileIds.length;
@@ -282,39 +289,6 @@ class DraftHandler extends WorkHandler {
     final key = gathered.key;
     final excerpts = gathered.excerpts;
     final pack = gathered.pack;
-
-    // The decision the person already made, when they made it. A prefetched
-    // draft asks the model whether a reply is wanted; an ASKED-FOR one does
-    // not, because pressing **Draft reply** is that answer — and a model that
-    // came back "no" would leave the person who pressed it an empty box and no
-    // sentence. It is also the expensive half of a keypress they are waiting
-    // on: one 27B call, about five seconds, off every asked-for draft.
-    final decision = request.asked
-        ? null
-        : await runTask(
-            _decisionClient,
-            const ReplyDecisionTask(),
-            ReplyDecisionInput(
-              context: gathered.context,
-              message: replyTo,
-              aboutMe: gathered.aboutMe,
-              attachmentExcerpts: excerpts,
-              directories: pack,
-              now: DateTime.now(),
-            ),
-            // Zero, like every judgement in this app: the same message must get
-            // the same verdict twice, or a re-drain would offer a suggestion
-            // the last one did not.
-            temperature: 0,
-            maxTokens: _decisionMaxTokens,
-          );
-
-    if (decision != null && !decision.needsReply) {
-      // A real END state, not a failure: the model read the conversation and
-      // said nobody is waiting. The reason is recorded so a person looking at
-      // the activity row can see what it read.
-      return _skip(source, id, 'no_reply_needed', why: decision.reason);
-    }
 
     // Where this draft is about to go, and whether that is somebody else's
     // machine. Read HERE, once, so the count below and the write above the
@@ -379,10 +353,9 @@ class DraftHandler extends WorkHandler {
         _stream.enabled && (_streams?.call() ?? true) ? PartialJsonStrings() : null;
 
     try {
-      // Built AFTER the decision and INSIDE this try, exactly where it was
-      // built before: the two store reads inside it are the last two this
-      // path makes, a draft the model said was not wanted must not pay for
-      // them, and one of them throwing must still reach the `done` below.
+      // Built INSIDE this try, exactly where it was built before: the two
+      // store reads inside it are the last two this path makes, and one of
+      // them throwing must still reach the `done` below.
       final input = await _draftInput(source, gathered);
 
       final result = await runTask(
@@ -436,9 +409,9 @@ class DraftHandler extends WorkHandler {
       await _progress.noteDraft(source, id, state: 'done');
       _log.note({
         'chars': result.replyBody.length,
-        // Why there is no decision call on this row's timeline: a person asked
-        // for it, so the judgement was theirs.
-        if (request.asked) 'decision': 'asked',
+        // What said a reply was wanted: a person who asked for it, the
+        // decision model's probability, or the triage column of an older row.
+        if (request.asked) 'decision': 'asked' else ...?decided,
         // The activity row keeps its own copy, which is not a duplicate of the
         // stored provenance: a person reading the log is asking what the app
         // DID, and the row has to answer after the draft it belongs to has been
@@ -817,22 +790,16 @@ class DraftHandler extends WorkHandler {
       sources: [source],
       untilIso: row['received_at'] as String? ?? row['created_at'] as String?,
     );
-    final context = [
-      for (final message in thread)
-        if (message.id != replyTo.id) message,
-    ];
     final aboutMe = await _store.getPref(aboutMeKey);
 
-    // ONE retrieval, read by both model calls below. The decision and the
-    // draft are asking about the same message on the same thread, so a second
-    // pass would be a second embedding call for an answer that cannot come
-    // back different.
+    // ONE retrieval, read by the draft call (and, for [improve], by the
+    // improve call too — they build the same prompt from it).
     //
     // The thread's ids are passed rather than left to be read: this thread is
     // the thread AS IT WAS when the message landed, and a document attached
     // after it must not be quoted in the answer to it.
     //
-    // And ONE embedding, for the same reason again. The two retrievals below
+    // And ONE embedding. The two retrievals below
     // search two different indexes with the SAME question — what is this
     // message about — and each of them would otherwise embed the card itself
     // when the queue has not reached it yet. The closure is memoised on the
@@ -851,9 +818,7 @@ class DraftHandler extends WorkHandler {
       queryVector: vector,
     );
 
-    // ONE pack, for the same reason there is one retrieval: both calls below
-    // ask about the same message on the same thread, and the directories have
-    // not changed between the two.
+    // ONE pack, read by the same prompt the excerpts are.
     final pack = await _packFor(
       source,
       key,
@@ -866,7 +831,6 @@ class DraftHandler extends WorkHandler {
       replyTo: replyTo,
       key: key,
       thread: thread,
-      context: context,
       aboutMe: aboutMe,
       excerpts: excerpts,
       pack: pack,
@@ -1060,15 +1024,26 @@ class DraftHandler extends WorkHandler {
     return () => cached ??= replyToQueryVector(_store, embeddings, source, id);
   }
 
+  /// [replyVerdict] over this message's stored decision and its row.
+  Future<({Map<String, Object?> detail, String? skipWhy})> _replyVerdict(
+    String source,
+    String id,
+    Map<String, Object?> row,
+  ) async =>
+      replyVerdict(
+        replyExpectedP: (await _store.decisionFor(source, id))?.replyExpectedP,
+        storedReplyExpected: row['reply_expected'],
+      );
+
   /// This message gets no draft, and its stage says so.
   ///
-  /// The four ends that are not failures — the row is gone, it is the user's
-  /// own mail, triage gated it, or the model read the thread and said nobody
-  /// is waiting — record the same three things in the same order: the item is
+  /// The ends that are not failures — the row is gone, it is the user's own
+  /// mail, triage gated it, a machine wrote it, or the stored decision says
+  /// nobody is waiting — record the same three things in the same order: the item is
   /// `skipped` rather than `ok`, [reason] says which end it was, and the
   /// progress row closes the stage so the message settles instead of waiting
-  /// for a draft nothing is going to write. [why] carries the model's own
-  /// sentence, which only the last of them has.
+  /// for a draft nothing is going to write. [why] carries a sentence saying
+  /// why, when the end has one.
   ///
   /// Not used for "already drafted": that one is `done`, because the draft the
   /// caller wanted exists.
@@ -1139,10 +1114,6 @@ class _Gathered {
   final String key;
   final List<Message> thread;
 
-  /// The thread WITHOUT the message being answered — what the reply decision
-  /// reads, and the one field the draft prompt does not.
-  final List<Message> context;
-
   final String? aboutMe;
   final List<AttachmentExcerpt> excerpts;
   final ContextPack pack;
@@ -1151,7 +1122,6 @@ class _Gathered {
     required this.replyTo,
     required this.key,
     required this.thread,
-    required this.context,
     required this.aboutMe,
     required this.excerpts,
     required this.pack,

@@ -895,20 +895,15 @@ with runs of whitespace collapsed, because the prose packer trims paragraphs
 and rejoins them and a verbatim comparison would miss for no reason.
 
 The sections have their own ceiling (two × 3,000); the ranked tail keeps the
-`budgetChars` it was already trimmed to, and nothing re-budgets it. The one
-exception is the DECISION prompt, whose directory fence is 800 (`07-replies.md`):
-there one expanded section is all that fits, and the ranked tail behind it is
-clamped away by the renderer. That is the intended trade — the decision is a
-yes or no about whether to draft, and the section the model asked to read is
-the part of the pack most likely to decide it.
+`budgetChars` it was already trimmed to, and nothing re-budgets it. (The
+retired 27B reply-decision prompt had an 800 directory fence; the pack now has
+one reader, the draft.)
 
-**The select call runs before the reply decision, by design.** One pack
-serves both calls (§Serving), so the section pick happens while building it,
-which means a message the decision then declines to draft has already spent
-one fast-slot call. Splitting the two — decide first, expand only for the
-messages that get a draft — is a follow-up, not an oversight: it would mean
-two packs, two scope reads and a second embedding closure for the sake of
-one small call on the messages nobody replies to.
+**The select call runs after the reply decision.** Since the decision-model
+round the reply decision is a stored probability read BEFORE the
+pack is built (`07-replies.md`), so a message the decision declines to draft
+spends no section pick, no scope read and no embedding. (Before it, the 27B
+decision read the same pack, and the select ran first by design.)
 
 **Two reads that overlap each other are one read.** An answer naming both
 `Pricing` and `Pricing > Q4 rates` has named one thing and part of it, and
@@ -949,9 +944,6 @@ pack chooses between them: **3,000** ordinarily, and **8,700** when
 two 3,000-character sections and the two bracket lines the render writes above
 them. The larger number is a ceiling for a pack that asked to read closer, not
 a target, and `07-replies.md` carries the arithmetic for both.
-`reply_decision_task.dart` stays at **800** — the decision reads the head of
-the first section, which is the most relevant text there is, and a yes-or-no
-about whether a reply is owed needs no more than that.
 
 **The preference** is `AppPrefs.contextSelectExpand`, key
 `context_select_expand`, default **ON** — the one bounded call per
@@ -1261,9 +1253,8 @@ that call.
   `replyToQueryVector`, shared by both retrievals.
 - `app/lib/services/draft_handler.dart` — one pack per draft, both prompts,
   the stored provenance and the activity keys.
-- `app/lib/services/llm/draft_task.dart`,
-  `app/lib/services/llm/reply_decision_task.dart` — the three fences and the
-  widened invention rule.
+- `app/lib/services/llm/draft_task.dart` — the three fences and the widened
+  invention rule (the retired `reply_decision_task.dart` carried them too).
 - `app/lib/widgets/context_panel.dart`, `app/lib/widgets/side_panel.dart` —
   the link panel with its `Files ›` disclosure, and the sixth and seventh
   panel kinds.

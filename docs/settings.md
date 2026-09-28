@@ -185,10 +185,11 @@ keeps its `errorText` and the stored window is left exactly as it was.
 
 ## About me
 
-Read by exactly two steps of the pipeline: the reply decision
-(`app/lib/services/llm/reply_decision_task.dart`) and draft generation
-(`app/lib/services/llm/draft_task.dart`), both reached through
-`DraftHandler` and both clamping the text to **600 characters**. Nothing else
+Read by exactly one step of the pipeline: draft generation
+(`app/lib/services/llm/draft_task.dart`, and Improve a draft, which sends the
+same prompt), reached through `DraftHandler` and clamping the text to **600
+characters**. (The 27B reply decision read it too until the decision model's
+`reply_expected` replaced it.) Nothing else
 reads it — not triage, not storylines, and deliberately not the Needs You
 judgement, which excludes it on purpose (see
 [pipeline/11-needs-you.md](pipeline/11-needs-you.md)).

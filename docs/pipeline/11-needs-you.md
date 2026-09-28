@@ -46,8 +46,9 @@ replies** setting, one of three `DraftPolicy` modes: `asksForAReply` counts
 default mode's narrower `prefetchWorthy` counts it as one of three. Either way
 this handler is registered ahead of `ExtractHandler` so the verdict is on the
 row when the gate reads it. A gate only decides what gets asked about;
-`ReplyDecisionTask` still decides whether a draft is written — except when a
-person pressed **Draft reply**, which is that decision.
+the reply decision (the decision model's stored `reply_expected`, see
+[07-replies.md](07-replies.md)) still decides whether a draft is written —
+except when a person pressed **Draft reply**, which is that decision.
 
 **What happens.** `NeedsYouHandler`
 (`app/lib/services/needs_you_handler.dart`, run by `AiWorker`) answers one
@@ -119,8 +120,8 @@ The answer is three fields, in this order:
 | `needs_you` | boolean |
 | `confidence` | `low` \| `medium` \| `high` |
 
-`evidence` comes **first**, the opposite of the reply decision's verdict-first
-order, and the difference is the input: the floor has already taken the easy
+`evidence` comes **first**, the opposite of a verdict-first order, and the
+difference is the input: the floor has already taken the easy
 cases, so what reaches this call is the ambiguous residue. Locating the
 sentence that points at the owner *is* the work, and the boolean should fall
 out of having written it.

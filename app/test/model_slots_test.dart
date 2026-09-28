@@ -9,7 +9,6 @@ import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
-import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -35,7 +34,6 @@ Set<String> taskSchemaNames() => {
       const NameStorylineTask().schemaName,
       const RefineStorylineTask().schemaName,
       const StorylineRecapTask().schemaName,
-      const ReplyDecisionTask().schemaName,
       const DraftTask().schemaName,
     };
 
@@ -107,12 +105,17 @@ void main() {
       'storyline_name',
       'storyline_refresh',
       'storyline_recap',
-      'reply_decision',
       'draft_reply',
       'draft_improve',
     });
     expect(idsOn(ModelSlot.decide), {'decision'});
     expect(idsOn(ModelSlot.embed), {'embeddings'});
+  });
+
+  test('no reply-decision row: the decision model answers it at triage', () {
+    final ids = [for (final stage in pipelineStages) stage.id];
+    expect(ids, isNot(contains('reply_decision')));
+    expect(ids, containsAll(['draft_reply', 'draft_improve']));
   });
 
   test('one text row per message, where triage and extraction were', () {

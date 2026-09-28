@@ -7,7 +7,6 @@ import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
-import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 import 'package:bond_inbox/services/storyline_service.dart'
     show StorylineTuning;
 import 'package:flutter_test/flutter_test.dart';
@@ -316,13 +315,22 @@ void main() {
       ]);
     });
 
-    test('a reply decision copies its verdict and its reason', () {
-      final out = decisionOut(const ReplyDecisionResult(
-        needsReply: true,
-        reason: 'The sender asks a direct question.',
-      ));
-      expect(out.needsReply, isTrue);
-      expect(out.reason, 'The sender asks a direct question.');
+    test('a reply decision is the decision model at replyYes', () {
+      final yes = decisionOut(fakeAnswers(replyExpected: 0.8));
+      expect(yes.needsReply, isTrue);
+      expect(yes.p, closeTo(0.8, 1e-9));
+      expect(yes.source, 'decision_model');
+
+      final no = decisionOut(fakeAnswers(replyExpected: 0.3));
+      expect(no.needsReply, isFalse);
+      expect(no.p, closeTo(0.3, 1e-9));
+
+      // The bar itself is a yes, as the draft lane reads it.
+      expect(
+        decisionOut(fakeAnswers(replyExpected: DecisionPolicy.replyYes))
+            .needsReply,
+        isTrue,
+      );
     });
   });
 
@@ -427,15 +435,13 @@ void main() {
       id: 'email:fx-reply',
       stratum: 'triage-spread',
       difficulty: 'medium',
-    )..decision = decisionOut(const ReplyDecisionResult(
-        needsReply: true,
-        reason: 'A direct question is open.',
-      ));
+    )..decision = const GoldenDecisionOut(needsReply: true, p: 0.75);
     final json = entry.toScoreRunJson();
     expect(json['triage'], {'reply_expected': true});
     expect(json['decision'], {
+      'source': 'decision_model',
+      'p': 0.75,
       'needs_reply': true,
-      'reason': 'A direct question is open.',
     });
   });
 

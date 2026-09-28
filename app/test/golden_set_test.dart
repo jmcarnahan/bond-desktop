@@ -466,21 +466,19 @@ void main() {
       id: 'email:fx-reply',
       stratum: 'triage-spread',
       difficulty: 'medium',
-    )..decision = const GoldenDecisionOut(
-        needsReply: true,
-        reason: 'The sender asks a direct question.',
-      );
+    )..decision = const GoldenDecisionOut(needsReply: false, p: 0.2);
     final json = entry.toScoreRunJson();
-    expect(json['triage'], {'reply_expected': true});
+    expect(json['triage'], {'reply_expected': false});
     expect(json['decision'], {
-      'needs_reply': true,
-      'reason': 'The sender asks a direct question.',
+      'source': 'decision_model',
+      'p': 0.2,
+      'needs_reply': false,
     });
   });
 
   test('a triage section wins over a decision for the triage key', () {
     final entry = _fullEntry()
-      ..decision = const GoldenDecisionOut(needsReply: false);
+      ..decision = const GoldenDecisionOut(needsReply: false, p: 0.1);
     final triage = entry.toScoreRunJson()['triage'] as Map<String, Object?>;
     expect(triage['reply_expected'], isTrue);
     expect(triage['category'], 'work');

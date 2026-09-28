@@ -743,12 +743,6 @@ const List<PipelineStageInfo> pipelineStages = [
     slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
-    id: 'reply_decision',
-    label: 'Reply decision',
-    description: 'Whether a message needs an answer at all',
-    slot: ModelSlot.generative,
-  ),
-  PipelineStageInfo(
     id: 'draft_reply',
     label: 'Draft generation',
     description: 'The suggested reply itself',

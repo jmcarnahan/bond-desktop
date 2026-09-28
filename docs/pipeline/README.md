@@ -125,7 +125,6 @@ labels, the scorer and the populations a number is quoted on — is described in
 | Storyline naming | Local prose | `:8080` |
 | Storyline refresh | Local prose | `:8080` |
 | Storyline recap | Local prose | `:8080` |
-| Reply decision | Local prose | `:8080` |
 | Draft generation | Local prose | `:8080` |
 | Improve a draft | Local prose | `:8080` |
 | Embeddings | embed | `:8081` Qwen3-Embedding-0.6B (`make embed`) |

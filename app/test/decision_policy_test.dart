@@ -1,6 +1,6 @@
 import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/decision/decision_policy.dart';
-import 'package:bond_inbox/services/llm/reply_decision_task.dart'
+import 'package:bond_inbox/services/reply_policy.dart'
     show automatedGateReasons;
 import 'package:bond_inbox/widgets/home_result.dart';
 import 'package:flutter_test/flutter_test.dart';

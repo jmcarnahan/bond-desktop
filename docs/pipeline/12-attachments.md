@@ -82,7 +82,7 @@ that:
 - **Every place a body reaches a model or an embedding calls
   `stripAttachmentMarkers`** (`app/lib/services/attachments/attachment_markers.dart`):
   `buildMessageBlock`, the triage thread tail, `DraftTask._formatMessage`,
-  `ReplyDecisionTask._body`, `NeedsYouTask._body`, `_recapLine`, and
+  `NeedsYouTask._body`, `_recapLine`, and
   `embedMessageRow` — which is the ONE place the shared search-card path is
   stripped, so `ExtractHandler` and `EmbedHandler` cannot produce different
   cards and different hashes for the same message. That change gives every
@@ -1201,8 +1201,8 @@ a regenerate whose spinner is off screen is not visible feedback.
 - `app/lib/data/message_store.dart` — `messageVectorBlob` (tag-guarded, so a
   vector in an older space sends the caller to re-embed) and `requeueWork`'s
   `payloadJson`, which is overwritten on conflict including with null.
-- `app/lib/services/llm/draft_task.dart`, `reply_decision_task.dart` —
-  `attachmentExcerpts` and their 2,500 / 800 caps;
+- `app/lib/services/llm/draft_task.dart` — `attachmentExcerpts` and their
+  2,500 cap (the retired `reply_decision_task.dart` read them at 800);
   `app/lib/services/llm/needs_you_task.dart` — `attachmentDigests` and its 600
   cap. All three system prompts are unchanged and `const`.
 - `app/lib/services/draft_handler.dart` — the one retrieval both calls read,

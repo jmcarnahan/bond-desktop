@@ -10,7 +10,6 @@ import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
-import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 // `show`: the two things this file wants from the storyline service are the
 // charter clamp the app ships and the grouping mode a define can pick, so a
 // harness default cannot drift from either.
@@ -436,9 +435,13 @@ GoldenNeedsYouOut needsYouOut(NeedsYouResult r) => GoldenNeedsYouOut(
 GoldenNeedsYouOut floorOut() =>
     const GoldenNeedsYouOut(verdict: true, floor: true);
 
-/// The reply decision, as the run file records it.
-GoldenDecisionOut decisionOut(ReplyDecisionResult r) =>
-    GoldenDecisionOut(needsReply: r.needsReply, reason: r.reason);
+/// The reply decision, as the run file records it: the decision model's
+/// p(reply_expected = yes) against [DecisionPolicy.replyYes] — the bar the
+/// draft lane applies before it gathers anything.
+GoldenDecisionOut decisionOut(DecisionAnswers answers) {
+  final p = answers.p('reply_expected', 'yes');
+  return GoldenDecisionOut(needsReply: p >= DecisionPolicy.replyYes, p: p);
+}
 
 /// A drafted reply, as the rubric judge reads it.
 ///

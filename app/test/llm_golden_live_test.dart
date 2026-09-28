@@ -24,7 +24,6 @@ import 'package:bond_inbox/services/llm/message_block.dart'
     show threadDigestCap;
 import 'package:bond_inbox/services/llm/model_slots.dart' show LlmTarget;
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
-import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -473,6 +472,15 @@ void main() {
     timeout: const Timeout(Duration(minutes: 90)),
   );
 
+  /// `make golden-prose`: the reply decision and the drafts.
+  ///
+  /// The decision is the decision model's p(reply_expected = yes) against
+  /// `DecisionPolicy.replyYes` — what the app's draft lane reads before it
+  /// gathers anything — from the live decide server (`DECIDE_URL`, heads
+  /// from `DECIDE_HEADS`, the state rendered exactly as the `make golden`
+  /// leg renders it), on every gold-keep item. Drafts are the prose slot's,
+  /// on every item carrying a reply rubric. The name keeps `reply` (what
+  /// `make golden-prose` filters on).
   test(
     'the golden set through reply decision and drafts',
     () async {
@@ -484,6 +492,25 @@ void main() {
         fail('the set holds no gold-keep items — the prose half has nothing '
             'to decide on');
       }
+
+      final stageInputs = await _decoded(
+        GoldenDefines.setPath,
+        () async => _stageInputsById(
+          jsonDecode(await File(GoldenDefines.setPath).readAsString()),
+        ),
+      );
+      final owner = GoldenDefines.decisionOwner;
+      if (owner == null) {
+        // ignore: avoid_print
+        print('WARNING: GOLDEN_OWNER_NAME and GOLDEN_OWNER_ADDRESS are not '
+            'both set — the decision states carry no owner line');
+      }
+      final headsPath = decideHeadsPath();
+      if (!File(headsPath).existsSync()) {
+        fail('no decision heads at $headsPath — run make decide-install, or '
+            'pass --dart-define=DECIDE_HEADS=<path>');
+      }
+      final heads = await DecisionHeads.load(File(headsPath));
 
       // The decision population is gold-keep; the draft population is the
       // items carrying a reply rubric. An entry exists for every item so the
@@ -500,7 +527,34 @@ void main() {
       ];
       final lines = List<String?>.filled(set.items.length, null);
 
+      final shared = http.Client();
+      final decider = DecisionClient(
+        resolveTarget: () => const LlmTarget(
+          baseUrl: DecisionClient.defaultBaseUrl,
+          model: DecisionClient.defaultModel,
+        ),
+        heads: () => heads,
+        client: shared,
+      );
+      String stateOf(GoldenItem item) => goldenDecisionState(
+            stageInputs[item.id] ??
+                (throw StateError('golden item ${item.id} has no stage_input')),
+            owner: owner,
+          );
+
+      // Thrown away, as in the triage leg: the first request of each server
+      // pays for its weights and graph.
+      try {
+        await decider.decideStates([stateOf(set.keep.first)]);
+      } on LlmUnavailableException {
+        fail('the decision server at ${DecisionClient.defaultBaseUrl} is not '
+            'answering — run make decide');
+      }
       final warmupClient = target.client();
+      final warmupItem = set.items.firstWhere(
+        (item) => item.gold.hasReply,
+        orElse: () => set.keep.first,
+      );
       for (var i = 0; i < BenchTarget.warmup; i++) {
         try {
           // Retried for the bulk half's reason: a throttled first call is
@@ -508,23 +562,22 @@ void main() {
           await retryingUnavailable(
             () => runTask(
               warmupClient,
-              const ReplyDecisionTask(),
-              ReplyDecisionInput(
-                context: set.keep.first.tail,
-                message: set.keep.first.message,
-                now: set.keep.first.now,
+              const DraftTask(),
+              DraftInput(
+                thread: [...warmupItem.tail, warmupItem.message],
+                replyTo: warmupItem.message,
+                now: warmupItem.now,
               ),
               temperature: 0,
-              maxTokens: 256,
+              maxTokens: DraftHandler.draftMaxTokens,
               think: BenchTarget.allowReasoning,
             ),
           );
         } on LlmException catch (e) {
-          _warmupFailed('reply_decision', e, target);
+          _warmupFailed('draft_reply', e, target);
         }
       }
 
-      final shared = http.Client();
       final master = target.collector();
       // Throttled stages retried, printed with the failures: a cloud row
       // that had to wait is a slower row, and the wall clock above cannot
@@ -550,30 +603,19 @@ void main() {
           )..onReasoningLeak = master.noteLeak;
 
           if (wantsDecision) {
+            final sw = Stopwatch()..start();
             try {
-              final decision = await retryingUnavailable(
-                () => runTask(
-                  client,
-                  const ReplyDecisionTask(),
-                  // The plain tail, whatever GOLDEN_CTX says. The decision
-                  // keeps six messages at 500 characters, so the tail already
-                  // fits it whole — the ladder is a question about the two
-                  // stages that clip, and answering it here would move a
-                  // number for a reason that has nothing to do with context.
-                  ReplyDecisionInput(
-                    context: item.tail,
-                    message: item.message,
-                    now: item.now,
-                  ),
-                  temperature: 0,
-                  maxTokens: 256,
-                  think: BenchTarget.allowReasoning,
-                ),
-                onRetry: () => retries++,
+              final decided =
+                  (await decider.decideStates([stateOf(item)])).single;
+              entry.calls['decision'] =
+                  GoldenCall(ms: sw.elapsedMilliseconds, outcome: 'ok');
+              entry.decision = decisionOut(decided.answers);
+            } on LlmException catch (e) {
+              // No observer sees the decision client: record it here.
+              entry.calls['decision'] = GoldenCall(
+                ms: sw.elapsedMilliseconds,
+                outcome: e is LlmUnavailableException ? 'unavailable' : 'error',
               );
-              entry.decision = decisionOut(decision);
-            } on LlmException catch (_) {
-              // Recorded by the observer, with its outcome.
             }
           }
 
@@ -621,7 +663,8 @@ void main() {
           final decision = entry.decision;
           final draft = entry.draft;
           lines[index] = '${item.id.padRight(40)} '
-              'decision ${_ms(itemCalls['reply_decision'])} '
+              'decision ${entry.calls['decision']?.ms ?? '—'} ms '
+              'p=${decision?.p.toStringAsFixed(2) ?? '—'} '
               'needs_reply=${decision?.needsReply ?? '—'}  '
               'draft ${_ms(itemCalls['draft_reply'])} '
               'options=${draft == null ? '—' : draft.options.length}';
@@ -701,15 +744,14 @@ void main() {
         isTrue,
         reason: 'no call succeeded — is the server up?',
       );
-      // Shape only, and the shape the SCHEMA promises: a string. Neither
-      // schema sets a minimum length, so an empty reason or body is a poor
-      // answer for the judge to fail, not a broken run for this test to fail —
-      // Sonnet 5 on Bedrock returned one empty reason in 76 decisions, and
-      // failing the whole row for it would have thrown away the other 75.
+      // Shape only: a probability, and the shape the draft SCHEMA promises —
+      // a string. The schema sets no minimum length, so an empty body is a
+      // poor answer for the judge to fail, not a broken run for this test to
+      // fail.
       for (final entry in entries) {
         final decision = entry.decision;
         if (decision != null) {
-          expect(decision.reason, isA<String>(), reason: entry.id);
+          expect(decision.p, inInclusiveRange(0, 1), reason: entry.id);
         }
         final draft = entry.draft;
         if (draft != null) {
