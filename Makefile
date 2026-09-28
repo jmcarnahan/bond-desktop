@@ -129,6 +129,29 @@ FAST_HF      ?= ggml-org/Qwen3-4B-Instruct-2507-Q8_0-GGUF
 # fewer makes the extra requests queue on the server instead of batching.
 FAST_SLOTS   ?= 4
 
+# The fourth server: the decision model, the fine-tuned ModernBERT-large
+# classifier from jev-prototype served as a mean-pooled embedding model — the
+# app applies its nine heads itself (tmp/PLAN-decision-model.md, D1). Its own
+# port because 8090 is OMLX_PORT, and its own process because the embed server
+# pools `last` and one llama-server serves one pooling mode per model.
+DECIDE_PORT  ?= 8083
+# Where `make decide-install` copies from: the export the decision-model round's
+# Phase 1 writes (GGUF, heads JSON, SHA256SUMS). Never downloaded — the weights
+# were trained on the owner's own mail (the plan's D12).
+DECIDE_SRC   ?= $(HOME)/projects/jev-prototype/runs/modernbert-large-v2-swap/export
+# The app's models folder, where the managed server will look:
+# <models>/<repo with '/' as '_'>/<file> (RouterPreset.modelPath), for the repo
+# `local/bond-decide`. It holds a space, so every recipe quotes it.
+DECIDE_DIR   ?= $(HOME)/Library/Application Support/com.bondinbox.app/models/local_bond-decide
+DECIDE_QUANT ?= f16
+DECIDE_FILE  ?= bond-decide-mbl-v2swap-$(DECIDE_QUANT).gguf
+DECIDE_HEADS ?= decide-heads.json
+DECIDE_GGUF  ?= $(DECIDE_DIR)/$(DECIDE_FILE)
+# 2048 because the heads were trained on states truncated at 2048 tokens: a
+# wider context would pool over text the model never saw in training. Batch and
+# ubatch match it because an embedding is one pass over the whole input.
+DECIDE_ARGS  ?= --pooling mean -c 2048 -ub 2048 -b 2048 -np 1
+
 # Where llama-server's -hf flag parks the weights: the repo half of MODEL_HF
 # (everything before the ':'), with '/' turned into '--' the way huggingface's
 # cache names its directories.
@@ -153,6 +176,7 @@ RESET  := \033[0m
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop omlx omlx-stop _wait-omlx \
+        decide decide-stop decide-install _wait-decide \
         app-install app-run app-test app-gen app-migrations app-analyze \
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ab ab-membership drain bench-pipeline bench-compare \
@@ -173,6 +197,9 @@ help:
 	@printf "  make embed-stop   → stop the embedding server on :$(EMBED_PORT)\n"
 	@printf "  make fast         → start the bulk-work server :$(FAST_PORT) ($(FAST_HF))\n"
 	@printf "  make fast-stop    → stop the bulk-work server on :$(FAST_PORT)\n"
+	@printf "  make decide       → start the decision-model server :$(DECIDE_PORT) ($(DECIDE_FILE))\n"
+	@printf "  make decide-stop  → stop the decision-model server on :$(DECIDE_PORT)\n"
+	@printf "  make decide-install → copy the decision model from DECIDE_SRC into the models folder\n"
 	@printf "  make omlx         → start the oMLX bakeoff server :$(OMLX_PORT) (all cached models)\n"
 	@printf "  make omlx-stop    → stop the oMLX server on :$(OMLX_PORT)\n"
 	@printf "  make status       → are the servers up? [up]/[down] + pid\n"
@@ -511,6 +538,129 @@ fast-stop:
 	 fi; \
 	 printf "  $(GREEN)✓$(RESET) :$(FAST_PORT) free\n"
 
+# The decision-model server. Same port guard as `embed:`, same split between the
+# launch line and the wait line so `make -n decide` stays a dry run. -m rather
+# than -hf: the weights are a local install (`make decide-install`), so a
+# missing file is a missing install, said as one, not a download to wait for.
+# Like `embed:`, any llama-server already on the port counts as up, whichever
+# model it holds — `make decide-stop` first to swap the file.
+decide:
+	@pid=$$(lsof -nP -iTCP:$(DECIDE_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 if [ -n "$$pid" ]; then \
+	   cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
+	   case "$$cmd" in \
+	     *llama-server*) exit 0 ;; \
+	     *) printf "  $(YELLOW)!$(RESET) :$(DECIDE_PORT) is held by a foreign process (pid %s): %s\n" "$$pid" "$$cmd"; \
+	        printf "    not ours to reuse — free it, or: make decide DECIDE_PORT=<other>\n"; \
+	        exit 1 ;; \
+	   esac; \
+	 fi; \
+	 if [ ! -f "$(DECIDE_GGUF)" ]; then \
+	   printf "  $(RED)✗$(RESET) no decision model at %s\n" "$(DECIDE_GGUF)"; \
+	   printf "    install it first: make decide-install\n"; \
+	   exit 1; \
+	 fi; \
+	 mkdir -p $(LOG_DIR); \
+	 printf "→ llama-server on :$(DECIDE_PORT)  ($(DECIDE_FILE), decision embeddings)\n"; \
+	 nohup llama-server -m "$(DECIDE_GGUF)" --embeddings --host 127.0.0.1 --port $(DECIDE_PORT) \
+	   -ngl 99 $(DECIDE_ARGS) \
+	   > $(LOG_DIR)/model-$(DECIDE_PORT).log 2>&1 &
+	@$(MAKE) --no-print-directory _wait-decide
+
+# Port-based only, for the reason `stop:` is: killing by name would take the
+# other servers down with it.
+decide-stop:
+	@pid=$$(lsof -nP -iTCP:$(DECIDE_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 if [ -z "$$pid" ]; then \
+	   printf "  $(RED)[down]$(RESET) nothing holds :$(DECIDE_PORT)\n"; \
+	   exit 0; \
+	 fi; \
+	 cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
+	 case "$$cmd" in \
+	   *llama-server*) ;; \
+	   *) printf "  $(YELLOW)[skip]$(RESET) :$(DECIDE_PORT) held by a foreign process (pid %s): %s\n" "$$pid" "$$cmd" >&2; \
+	      exit 0 ;; \
+	 esac; \
+	 printf "  stopping llama-server :$(DECIDE_PORT) (pid %s)\n" "$$pid"; \
+	 kill -TERM $$pid 2>/dev/null || true; \
+	 for i in 1 2 3 4 5 6 7 8 9 10; do \
+	   rem=$$(lsof -nP -iTCP:$(DECIDE_PORT) -sTCP:LISTEN -t 2>/dev/null); \
+	   [ -z "$$rem" ] && break; \
+	   sleep 1; \
+	 done; \
+	 rem=$$(lsof -nP -iTCP:$(DECIDE_PORT) -sTCP:LISTEN -t 2>/dev/null); \
+	 if [ -n "$$rem" ]; then \
+	   printf "  $(RED)✗$(RESET) :$(DECIDE_PORT) still held after 10s (pid %s)\n" "$$rem"; \
+	   exit 1; \
+	 fi; \
+	 printf "  $(GREEN)✓$(RESET) :$(DECIDE_PORT) free\n"
+
+# Copies the GGUF and the heads file — the heads are needed even when the
+# decision server is remote, because the app applies them — from DECIDE_SRC
+# into the models folder, and refuses unless each is named exactly once in the
+# export's SHA256SUMS and matches it on both sides of the copy. Each file lands
+# as a dot-temp beside its final name and is renamed only once it verifies: a
+# running server has the installed GGUF mmapped, and overwriting it in place
+# can bring that server down or leave a half-written file behind. The two lines
+# it checked are kept as decide.sha256 beside them, so what is installed can be
+# named later.
+decide-install:
+	@src="$(DECIDE_SRC)"; dir="$(DECIDE_DIR)"; \
+	 for f in "$(DECIDE_FILE)" "$(DECIDE_HEADS)"; do \
+	   if [ ! -f "$$src/$$f" ]; then \
+	     printf "  $(RED)✗$(RESET) %s is not in %s\n" "$$f" "$$src"; \
+	     printf "    the export is written by Phase 1 of tmp/PLAN-decision-model.md (distill/export/)\n"; \
+	     exit 1; \
+	   fi; \
+	 done; \
+	 if [ ! -f "$$src/SHA256SUMS" ]; then \
+	   printf "  $(RED)✗$(RESET) no SHA256SUMS in %s — refusing an unpinned copy\n" "$$src"; \
+	   exit 1; \
+	 fi; \
+	 for f in "$(DECIDE_FILE)" "$(DECIDE_HEADS)"; do \
+	   n=$$(awk -v a="$$f" '{ g = $$2; sub(/^\*/, "", g) } g == a' "$$src/SHA256SUMS" | grep -c .); \
+	   if [ "$$n" -ne 1 ]; then \
+	     printf "  $(RED)✗$(RESET) SHA256SUMS must name %s exactly once (it names it %s times)\n" "$$f" "$$n"; \
+	     exit 1; \
+	   fi; \
+	 done; \
+	 sums=$$(awk -v a="$(DECIDE_FILE)" -v b="$(DECIDE_HEADS)" \
+	   '{ g = $$2; sub(/^\*/, "", g) } g == a || g == b' "$$src/SHA256SUMS"); \
+	 if ! (cd "$$src" && printf '%s\n' "$$sums" | shasum -a 256 -c - >/dev/null 2>&1); then \
+	   printf "  $(RED)✗$(RESET) checksum mismatch in %s\n" "$$src"; \
+	   exit 1; \
+	 fi; \
+	 mkdir -p "$$dir"; \
+	 for f in "$(DECIDE_FILE)" "$(DECIDE_HEADS)"; do \
+	   want=$$(printf '%s\n' "$$sums" | awk -v a="$$f" '{ g = $$2; sub(/^\*/, "", g) } g == a { print $$1 }'); \
+	   cp "$$src/$$f" "$$dir/.$$f.tmp" || { rm -f "$$dir/.$$f.tmp"; exit 1; }; \
+	   got=$$(shasum -a 256 "$$dir/.$$f.tmp" | cut -d' ' -f1); \
+	   if [ "$$got" != "$$want" ]; then \
+	     rm -f "$$dir/.$$f.tmp"; \
+	     printf "  $(RED)✗$(RESET) the copy of %s does not match — nothing was replaced\n" "$$f"; \
+	     exit 1; \
+	   fi; \
+	   mv -f "$$dir/.$$f.tmp" "$$dir/$$f"; \
+	 done; \
+	 printf '%s\n' "$$sums" > "$$dir/decide.sha256"; \
+	 printf "  $(GREEN)✓$(RESET) decision model installed in %s\n" "$$dir"; \
+	 printf '%s\n' "$$sums" | sed 's/^/    /'
+
+# ~0.8GB from local disk: no download, so a timeout here is a failure worth the
+# log.
+_wait-decide:
+	@for i in $$(seq 1 $(WAIT_TIMEOUT)); do \
+	   pid=$$(lsof -nP -iTCP:$(DECIDE_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	   if [ -n "$$pid" ]; then \
+	     printf "  $(GREEN)✓$(RESET) decide bound :$(DECIDE_PORT) (pid $$pid)\n"; \
+	     exit 0; \
+	   fi; \
+	   sleep 1; \
+	 done; \
+	 printf "  $(YELLOW)!$(RESET) decide has not bound :$(DECIDE_PORT) after $(WAIT_TIMEOUT)s\n"; \
+	 printf "    the log has the reason: tail -f $(LOG_DIR)/model-$(DECIDE_PORT).log\n"; \
+	 exit 1
+
 # pgrep -x, NOT `ps ax | grep llama-server`: this recipe's own /bin/sh -c
 # command line contains the literal string "llama-server" (in the printf
 # below), and ps shows that shell, so a full-command-line grep matches the
@@ -529,6 +679,7 @@ status:
 	 epid=$$(lsof -nP -iTCP:$(EMBED_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
 	 fpid=$$(lsof -nP -iTCP:$(FAST_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
 	 opid=$$(lsof -nP -iTCP:$(OMLX_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 dpid=$$(lsof -nP -iTCP:$(DECIDE_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
 	 if [ -n "$$mpid" ]; then \
 	   printf "  $(GREEN)[up]$(RESET)   %-12s :%s  (pid %s)\n" "model" "$(MODEL_PORT)" "$$mpid"; \
 	 else \
@@ -549,7 +700,12 @@ status:
 	 else \
 	   printf "  $(RED)[down]$(RESET) %-12s :%s\n" "omlx" "$(OMLX_PORT)"; \
 	 fi; \
-	 if [ -z "$$mpid" ] && [ -z "$$epid" ] && [ -z "$$fpid" ]; then \
+	 if [ -n "$$dpid" ]; then \
+	   printf "  $(GREEN)[up]$(RESET)   %-12s :%s  (pid %s)\n" "decide" "$(DECIDE_PORT)" "$$dpid"; \
+	 else \
+	   printf "  $(RED)[down]$(RESET) %-12s :%s\n" "decide" "$(DECIDE_PORT)"; \
+	 fi; \
+	 if [ -z "$$mpid" ] && [ -z "$$epid" ] && [ -z "$$fpid" ] && [ -z "$$dpid" ]; then \
 	   lpid=$$(pgrep -x llama-server 2>/dev/null | head -1); \
 	   if [ -n "$$lpid" ]; then \
 	     printf "  $(YELLOW)[..]$(RESET)   llama-server (pid %s) is loading/downloading — watch: make logs\n" "$$lpid"; \

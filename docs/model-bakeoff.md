@@ -1810,6 +1810,55 @@ is not `no_reply` — `identity_service`, `machine_sender` and
 `teams_missed_activity_digest` — which is why the verdict column counts them
 and the reason column does not.
 
+### Decision model ledger
+
+The decision model is the fine-tuned ModernBERT-large classifier distilled in
+jev-prototype. It has nine calibrated heads and question hash `6eba387492208260`.
+Here it runs as a GGUF on llama-server, pooling `mean`, with the heads applied
+outside the server (`tmp/PLAN-decision-model.md`, D1).
+
+This ledger answers one question per row: does that runtime give the same
+answers as the PyTorch model it was exported from? The reference is the stored
+PyTorch predictions (fp32 on CUDA, rounded to 5 decimals) over the same
+rendered states:
+- the dev split: 5,956 messages. It is not held out from calibration, because
+  it also fitted the temperatures;
+- golden: the 100-item set.
+
+The keep-only columns come from `score_run.py --keep-only`. The column order is
+gate.verdict / category / urgency / needs_action / reply_expected / needs_you /
+intent / importance.
+
+The request that matters:
+- `POST /v1/embeddings` with `"embd_normalize": -1`. Without it llama-server
+  returns an L2-normalized vector, and the linear heads were trained on the raw
+  mean.
+- A state over 2048 tokens is refused with HTTP 500 rather than truncated. It
+  goes as the id array `[CLS] + the first 2046 ids + [SEP]`: `/tokenize` with
+  `add_special: false`, then those ids as `input`. That reproduced HF's
+  truncation on all 43 long states in the two sets.
+
+The latency sample held no state over 2048 tokens. The truncated path, a refused
+call then `/tokenize` then the id array, is therefore untimed. It applies to
+about 0.7% of states.
+
+| date | runtime | file | dev argmax agreement (min field) | golden argmax | keep-only | tokenizer ids | p50 / p95 ms, batch 1 (≥700 tokens) | batch 16 ms/msg | RSS idle / peak seen | note |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-09-27 | PyTorch, stored predictions | `model.pt` (1.58 GB) | reference | reference | 94 / 96 / 89 / 86 / 84 / 88 / 83 / 74 | reference | — | — | — | jev-prototype round two, v2-swap |
+| 2026-09-27 | llama-server b10896 (the bundled build), F16 | `bond-decide-mbl-v2swap-f16.gguf` (791 MB) | 99.97% (urgency); drop_reason on gated rows 100% (n 2,282) | 100% on all 9 fields, max \|Δp\| 0.006 | identical | 300 / 300 | 38.7 / 115.7 (117.4 / 254.1) | 42.6 | 802 / 1,234 MB | **row of record, and the shipped quant.** Dev max \|Δp\| 0.0124. Not under load |
+| 2026-09-27 | llama-server b10621 (Homebrew), F16 | same file | 99.80% (gate), dev 500 rows | 100% on all 9 fields | identical | 300 / 300 | not timed | — | — | the build `make decide` runs |
+| 2026-09-27 | llama-server b10896, Q8_0 | `bond-decide-mbl-v2swap-q8_0.gguf` (421 MB) | 99.75% (urgency); drop_reason gated 99.87% | 100% on 8 fields, importance 99% | identical | 300 / 300 | 41.2 / 122.0 (125.0 / 277.5) | 45.7 | 446 / 885 MB | passes the bar but is 3× further from the reference (dev max \|Δp\| 0.039) and no faster on Metal; not shipped |
+
+The pre-registered bar was:
+- at least 99.5% dev argmax agreement on every field;
+- the golden keep-only table within ±1 point;
+- tokenizer ids identical on at least 99% of states;
+- p50 at or under 100 ms.
+
+Both quants pass every item. The Mac's decision call therefore costs about
+40 ms. The 4B triage call it replaces reads 2.4 s p50 at K=1 and 7.6 s at K=4 in
+the Golden ledger's Qwen3-4B rows above.
+
 ### Recommendations (golden set, 2026-09)
 
 Superseded on 2026-09-20 by the section of the same name dated 2026-09-20
