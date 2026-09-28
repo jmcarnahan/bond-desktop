@@ -116,8 +116,8 @@ EMBED_HF     ?= Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0
 # server is stood up beside it for `make golden-vector`.
 EMBED_ARGS   ?= --pooling last
 
-# The third server: the bulk-work model. Triage, extraction and
-# storyline-confirm all run here; the 27B on :$(MODEL_PORT) keeps drafting and
+# The third server: the bulk-work model. The message text, the needs-you band
+# and storyline-confirm run here in the bench shape; the 27B on :$(MODEL_PORT) keeps drafting and
 # naming, where prose quality is the product. Same chat-completions wire, its
 # own port — the app picks a server per task, and a task whose server is down
 # parks exactly as it always has.
@@ -222,7 +222,7 @@ help:
 	@printf "  make drain        → drain concurrency race, BENCH_K rounds (needs make fast up)\n"
 	@printf "  make bench-pipeline → the backlog end to end, PIPE_SHAPE=single|lanes, PIPE_POLICY=all|needsYou|onDemand (needs fast + model up)\n"
 	@printf "  make bench-compare A=<a.json> B=<b.json> → diff two bench results\n"
-	@printf "  make golden        → the golden set through triage/needs-you/extraction on the bulk slot (GOLDEN_CTX=none|tail3|compressed|digest, GOLDEN_EXTRACT_CTX=none|tail3|digest, GOLDEN_K=…)\n"
+	@printf "  make golden        → the golden set through the decision model + needs-you ladder + message text on the bulk slot (needs make decide; GOLDEN_CTX=none|tail3|compressed|digest, GOLDEN_K=…)\n"
 	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
 	@printf "  make golden-storyline GOLDEN_RUN=<run.json> → storyline confirm for every golden item against the gold registry, on the bulk slot (GOLDEN_CHARTER_CAP=…)\n"
 	@printf "  make golden-sweep GOLDEN_RUN=<run.json> → the golden set through the app's own sweep, naming, confirms and assign shortlist, scored against the gold registry (SWEEP_CARD=participants|topics|subject|subject_topics|summary)\n"
@@ -749,8 +749,8 @@ clean:
 	@printf "removed $(LOG_DIR)\n"
 
 # ── $(APP_DIR)/ — the Flutter desktop inbox ────────────────────────────
-# The app talks to ALL THREE servers above: :$(FAST_PORT) for triage,
-# extraction and storyline membership, :$(MODEL_PORT) for drafts and storyline
+# The app talks to ALL THREE servers above: :$(FAST_PORT) for the message
+# text and storyline membership, :$(MODEL_PORT) for drafts and storyline
 # names, :$(EMBED_PORT) for conversation embeddings. None is required to run it
 # — with a server down the work that needs it simply parks and retries on the
 # next sync — but `make model`, `make fast` and `make embed` are what make it do
@@ -780,8 +780,8 @@ MS_ENV ?= $(CURDIR)/.env
 # code edit: `make bench BENCH_URL=http://localhost:9000/v1/chat/completions
 # BENCH_LABEL=omlx/qwen3-4b-4bit BENCH_MODEL=qwen3-4b`.
 #
-# BENCH_* is the BULK slot — triage, extraction, membership, the work the fast
-# server does today. Defaults to exactly that, so a bench with no overrides
+# BENCH_* is the BULK slot — the message text, the needs-you band, membership,
+# the work the fast server does in the bench shape. Defaults to exactly that, so a bench with no overrides
 # still measures what ships.
 BENCH_URL    ?= http://localhost:$(FAST_PORT)/v1/chat/completions
 # Names the run, and lands in the result filename. Name the weights as well as
@@ -878,20 +878,18 @@ GOLDEN_K   ?= 1
 # How many items ride in one rubric-judge packet; one Claude Code agent reads
 # one packet, so this is really "how much work per agent".
 GOLDEN_BATCH ?= 10
-# Which context rung triage and needs-you see: none | tail3 | compressed | digest.
+# Which context rung the message text and needs-you see: none | tail3 |
+# compressed | digest.
 GOLDEN_CTX ?= tail3
-# The bulk run file (from `make golden`) whose extraction topics and triage
-# summary build each storyline candidate card, the way the app's card carries
+# The bulk run file (from `make golden`) whose topics and summary build each
+# storyline candidate card, the way the app's card carries
 # the newest inbound message's; required by golden-storyline.
 GOLDEN_RUN ?=
 # The confirm task's charter clamp for golden-storyline; the app's default is
 # 400, and the replay runs 400 / 800 / 1200 against the same cards to choose it.
 GOLDEN_CHARTER_CAP ?= 400
-# Which context rung EXTRACTION sees, on its own axis: none | tail3 | digest.
-# The app gives extraction no thread today; the replay prices giving it one.
-GOLDEN_EXTRACT_CTX ?= none
-# The decision server `make golden-decision` and `make decision-agreement`
-# call: `make decide`'s own port unless DECIDE_URL (the FULL /v1/embeddings
+# The decision server `make golden`, `make golden-decision` and
+# `make decision-agreement` call: `make decide`'s own port unless DECIDE_URL (the FULL /v1/embeddings
 # URL, as the app's define takes it) points somewhere else. Recursive, so a
 # DECIDE_PORT given on the command line moves it too.
 DECISION_URL = $(if $(strip $(DECIDE_URL)),$(DECIDE_URL),http://127.0.0.1:$(DECIDE_PORT)/v1/embeddings)
@@ -962,7 +960,6 @@ BENCH_DEFINES := \
   --dart-define=GOLDEN_OWNER_ADDRESS='$(GOLDEN_OWNER_ADDRESS)' \
   --dart-define=GOLDEN_K='$(GOLDEN_K)' \
   --dart-define=GOLDEN_CTX='$(GOLDEN_CTX)' \
-  --dart-define=GOLDEN_EXTRACT_CTX='$(GOLDEN_EXTRACT_CTX)' \
   --dart-define=GOLDEN_RUN='$(if $(GOLDEN_RUN),$(abspath $(GOLDEN_RUN)),)' \
   --dart-define=GOLDEN_CHARTER_CAP='$(GOLDEN_CHARTER_CAP)' \
   --dart-define=SWEEP_CARD='$(SWEEP_CARD)' \
@@ -1194,9 +1191,10 @@ bench-verify-prose:
 # and prints a latency table. The test file is @Skip'd so `make app-test` never
 # depends on a server being up; --run-skipped is what actually runs it here.
 #
-# Runs against the BULK slot, not :$(MODEL_PORT): after phase 3 triage and
-# extraction are the fast server's work, so benching them anywhere else would
-# be measuring a path the app no longer takes.
+# Runs against the BULK slot, not :$(MODEL_PORT): the per-message text call
+# (MessageTextTask, which replaced triage's and extraction's calls) is timed
+# where the bulk work runs; the classification is the decision model's and is
+# benched by golden-decision.
 #
 # The `:` arm of every $(if) below is load-bearing — an empty command after an
 # @ is a make error, so BENCH_VERIFY=0 needs a no-op to expand to.
@@ -1211,8 +1209,8 @@ bench-prose:
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_prose_live_test.dart --run-skipped $(BENCH_DEFINES)
 
-# Side-by-side: the same corpus through triage and extraction on BOTH servers,
-# printing where the 4B and the 27B disagree and what each cost. Live and never
+# Side-by-side: the same corpus through the message-text call on BOTH servers,
+# printing where the 4B and the 27B disagree (counts) and what each cost. Live and never
 # a gate — agreement is a judgement about labels, not a defect to fail on.
 #
 # Both slots are verified, because both are measured: a comparison against an
@@ -1231,7 +1229,7 @@ ab-membership:
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_membership_live_test.dart --run-skipped $(BENCH_DEFINES)
 
 # The drain race live: one round per concurrency in BENCH_K (default 1,3) over
-# the same backlog on the bulk server, which needs parallel slots to show
+# the same backlog's message-text calls on the bulk server, which needs parallel slots to show
 # anything — start it with FAST_SLOTS >= max(K) or the high rounds measure
 # queue-wait instead. The check that re-verified the atomic-claim redesign
 # against real inference, and the only bench that can see batching at all.
@@ -1240,9 +1238,9 @@ drain:
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_drain_live_test.dart --run-skipped $(BENCH_DEFINES)
 
 # The whole backlog through the real queues, both shapes: PIPE_COPIES copies of
-# the fixture corpus through triage, needs-you and extraction on the bulk
-# server and the drafts they queue on the prose one. What `drain` measures is
-# triage's batching; what this measures is the thing a person feels — when the
+# the fixture corpus through triage (a fake decision model), needs-you and the
+# message text on the bulk server and the drafts they queue on the prose one.
+# What `drain` measures is the text stage's batching; what this measures is the thing a person feels — when the
 # inbox is usable, when the drafts are done, and how long a message that
 # arrives mid-backlog waits (PIPE_LATE).
 #
@@ -1299,18 +1297,21 @@ golden-score: golden-check
 	@cd $(dir $(GOLDEN)) && python3 tools/score_run.py --run '$(abspath $(R))' --keep-only $(if $(BREAKDOWN),--breakdown $(BREAKDOWN),) $(if $(JSON),--json '$(abspath $(JSON))',)
 	@cd $(dir $(GOLDEN)) && python3 tools/score_run.py --run '$(abspath $(R))'
 
-# The golden set through the real tasks on the bulk slot (triage, needs-you,
-# extraction) — the run that produces a ledger row. Writes two files to
-# $(BENCH_OUT): golden-run-<label>-<stamp>.json (score it with
-# `make golden-score R=…`; the test prints the exact command) and the
-# golden-bulk timing/cost JSON beside it. GOLDEN_CTX picks the context rung
-# triage and needs-you see and GOLDEN_EXTRACT_CTX the one extraction sees —
-# two knobs because the app's two halves differ today. GOLDEN_K > 1 needs the
-# server started with FAST_SLOTS >= K, or the pool measures queue-wait dressed
-# up as throughput.
-golden: golden-check
+# The golden set through the app's per-message pipeline — the run that
+# produces a ledger row. Per item: the decision model (make decide, :$(DECIDE_PORT),
+# or DECIDE_URL) for every classification field, the app's needs-you ladder
+# (floor, the decision's p(yes), NeedsYouTask on the bulk slot inside the
+# band) and ONE MessageTextTask call on the bulk slot for summary, action
+# items, deadline, topics and project. Writes two files to $(BENCH_OUT):
+# golden-run-<label>-<stamp>.json (score it with `make golden-score R=…`; the
+# test prints the exact command) and the golden-bulk timing/cost JSON beside
+# it. GOLDEN_CTX picks the context rung the text and needs-you see. Set
+# GOLDEN_OWNER_NAME and GOLDEN_OWNER_ADDRESS: the decision's needs-you reads
+# the owner line. GOLDEN_K > 1 needs the server started with FAST_SLOTS >= K,
+# or the pool measures queue-wait dressed up as throughput.
+golden: golden-check _decide-health
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
-	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'triage' $(BENCH_DEFINES)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'triage' $(BENCH_DEFINES) $(DECISION_DEFINES)
 
 # The prose half: a reply decision for every gold-keep item and a draft for
 # every item that carries a reply rubric, on the prose slot. Same two files,

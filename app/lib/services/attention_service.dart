@@ -3,7 +3,7 @@ import 'dart:convert';
 import '../data/message_store.dart';
 import '../models/message_models.dart';
 import 'attention.dart';
-import 'llm/extract_task.dart';
+import '../models/extraction_models.dart';
 
 /// Scores and files the whole mailbox in one pass.
 ///

@@ -13,6 +13,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -49,24 +50,24 @@ class FakeEmbeddings {
       );
 }
 
+/// The decision model's answer, through `ScriptedDecisionClient`
+/// (`scriptedAnswers` reads the booleans and the enums).
 const Map<String, dynamic> _triageAnswer = {
   'urgency': 'high',
   'category': 'work',
-  'summary': 'Sarah is asking whether Thursday still holds.',
   'needs_action': true,
-  'action_items': ['Confirm the launch date'],
   'reply_expected': true,
-  'deadline': '',
-};
-
-const Map<String, dynamic> _extractionAnswer = {
-  'evidence': 'Sarah is asking whether the launch date holds.',
-  'topics': ['launch date'],
-  'people': ['Sarah Chen'],
-  'organizations': ['Northline'],
-  'project': 'Website redesign',
   'intent': 'request',
   'importance': 'high',
+};
+
+/// The message-text stage's answer.
+const Map<String, dynamic> _textAnswer = {
+  'summary': 'Sarah is asking whether Thursday still holds.',
+  'action_items': ['Confirm the launch date'],
+  'deadline': '',
+  'topics': ['launch date'],
+  'project': 'Website redesign',
 };
 
 const Map<String, dynamic> _needsYouAnswer = {
@@ -145,14 +146,14 @@ void main() {
       pipeline({Map<String, Map<String, dynamic>>? answers}) {
     final gate = DrainGate();
     // The order is the assertion in most of this file, so the reading is
-    // `schemas` — `triage`, `extraction`, `needs_you` — rather than a call
+    // `schemas` — `decision`, `message_text`, `needs_you` — rather than a call
     // count, which cannot tell a drain that ran twice from one that ran
     // backwards.
     final llm = ScriptedLlm(
       answers: answers ??
           const {
-            'triage': _triageAnswer,
-            'extraction': _extractionAnswer,
+            'decision': _triageAnswer,
+            'message_text': _textAnswer,
             'needs_you': _needsYouAnswer,
           },
     );
@@ -168,7 +169,7 @@ void main() {
     addTearDown(worker.dispose);
     final triage = TriageQueue(
       store,
-      llm,
+      decisionClient: ScriptedDecisionClient(llm),
       gate: gate,
       // No `ensureBody`: there is no Graph here, and the seeded row already
       // carries the body a detail fetch would have written.
@@ -268,10 +269,18 @@ void main() {
 
     // Triage first, and exactly one extraction: a second claim would mean the
     // item was handed out twice.
-    expect(p.llm.schemas.first, 'triage');
-    expect(p.llm.schemas.where((c) => c == 'triage').length, 1);
-    expect(p.llm.schemas.where((c) => c == 'extraction').length, 1);
+    expect(p.llm.schemas.first, 'decision');
+    expect(p.llm.schemas.where((c) => c == 'decision').length, 1);
+    expect(p.llm.schemas.where((c) => c == 'message_text').length, 1);
     expect(p.llm.schemas, contains('needs_you'));
+    // The decision wrote the row; the text call wrote its words AFTER it.
+    expect(p.llm.schemas.indexOf('message_text'),
+        greaterThan(p.llm.schemas.indexOf('decision')));
+    final row = (await store.getMessageRow('email', 'm1'))!;
+    expect(row['urgency'], 'high');
+    expect(row['summary'], 'Sarah is asking whether Thursday still holds.');
+    expect((await store.getConversationRow('email', 'conv-1'))!['cta_text'],
+        'Confirm the launch date');
 
     // The fan-out extraction owns: the thread is embedded and queued for
     // filing, which is what must not happen for gated mail.
@@ -303,8 +312,8 @@ void main() {
         'triaged');
     expect(await statusOf('extract', 'm1'), 'done');
     expect(await statusOf('needs_you', 'm1'), 'done');
-    expect(p.llm.schemas.first, 'triage');
-    expect(p.llm.schemas.where((c) => c == 'extraction').length, 1);
+    expect(p.llm.schemas.first, 'decision');
+    expect(p.llm.schemas.where((c) => c == 'message_text').length, 1);
     expect(p.llm.schemas.where((c) => c == 'needs_you').length, 1);
     expect(await store.getExtraction('email', 'm1'), isNotNull);
   });
@@ -340,9 +349,9 @@ void main() {
     }
     // Two messages, two of each call: a row claimed by both paths would show
     // up here as a third.
-    expect(p.llm.schemas.where((c) => c == 'extraction').length, 2);
+    expect(p.llm.schemas.where((c) => c == 'message_text').length, 2);
     expect(p.llm.schemas.where((c) => c == 'needs_you').length, 2);
-    expect(p.llm.schemas, isNot(contains('triage')));
+    expect(p.llm.schemas, isNot(contains('decision')));
   });
 
   test('a drain with nothing pending does not wake the worker', () async {
@@ -351,10 +360,10 @@ void main() {
     // that has not moved.
     var pumps = 0;
     final gate = DrainGate();
-    final llm = ScriptedLlm(answers: const {'triage': _triageAnswer});
+    final llm = ScriptedLlm(answers: const {'decision': _triageAnswer});
     final triage = TriageQueue(
       store,
-      llm,
+      decisionClient: ScriptedDecisionClient(llm),
       gate: gate,
       onDrained: (_) async => pumps++,
     );

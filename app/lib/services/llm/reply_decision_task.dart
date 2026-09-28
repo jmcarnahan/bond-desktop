@@ -151,7 +151,7 @@ class ReplyDecisionInput {
   /// what the project says is on the page.
   final ContextPack? directories;
 
-  /// Injected for the same reason `TriageInput.now` is: so a test can pin the
+  /// Injected for the same reason `MessageTextInput.now` is: so a test can pin the
   /// date anchor, and so the anchor is the owner's local day.
   final DateTime now;
 

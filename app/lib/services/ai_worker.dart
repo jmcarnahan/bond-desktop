@@ -1047,6 +1047,17 @@ class AiWorker {
         id,
         state: fatal ? 'error' : 'pending',
       );
+      // The message-text stage gave up for good: this message's text will
+      // never land, so the ask its thread still carries — an OLDER message's,
+      // left in place by triage until the text refolded it — is taken off
+      // rather than left standing as this message's. Guarded in the store
+      // (newest inbound, triaged, no summary, not answered); a failure here
+      // costs the refold, never the failure record above.
+      if (fatal) {
+        try {
+          await _store.clearStaleAskAfterTextFailed(source, id);
+        } catch (_) {}
+      }
     }
     // The drafting handler writes `running` at entry and never gets to speak
     // again once it throws, so the same two states have to come from here —

@@ -14,6 +14,21 @@ are never mixed:
    in `EmbedHandler` (`app/lib/services/embed_handler.dart`) for anything the
    fast path missed.
 
+**The card's inputs since the text stage (decision-model round, Phase 6).**
+Unchanged in shape: `newestInboundCardData` still reads `messages.summary`
+and `extraction_json.topics`, and both are now written by ONE call — the
+message-text stage (`ExtractHandler` running `MessageTextTask`, see
+[04-extraction.md](04-extraction.md)), which writes the summary onto the row
+and `{topics, project, intent, importance}` into the blob BEFORE it refreshes
+the card, and re-reads the row so the message card embeds the summary it just
+wrote. A message whose text has not landed carries NO summary and no topics — where
+before this round triage had already written the summary, so only the topics
+waited on extraction; the `embed_message`
+queue (enqueued at sync, not held behind triage) may embed such a message
+first, and the text stage's own `_embedMessage` re-embeds it when the card's
+hash changes. `project` is stored but not yet on the card (Phase 8 of the
+round adds it).
+
 **The clustering card has a module and five variants.** `clustering_card.dart`
 is the one recipe for the text a CONVERSATION is embedded from, and both
 writers go through it over the same stored facts:

@@ -1,10 +1,8 @@
 @Skip('live — needs llama-server on :8080 AND :8082. Run: make ab')
 library;
 
-import 'package:bond_inbox/models/message_models.dart';
-import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
-import 'package:bond_inbox/services/llm/triage_task.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/bench_report.dart';
@@ -12,59 +10,53 @@ import 'fixtures/bench_stats.dart';
 import 'fixtures/bench_target.dart';
 import 'fixtures/corpus.dart';
 
-/// What phase 3 actually cost, in labels rather than seconds.
+/// What routing the message text to the fast server costs, in words rather
+/// than seconds.
 ///
 /// `llm_bench_live_test.dart` says how fast the app's path is now. This says
-/// what moving to it changed: the same corpus, the same prompts, the same
-/// clock anchor, through triage and extraction on BOTH servers, printing where
-/// the 4B and the 27B disagree.
+/// what the choice of server changes: the same corpus, the same prompt, the
+/// same clock anchor, through [MessageTextTask] — the one generative call a
+/// kept message costs — on BOTH servers, printing where the two differ.
 ///
-/// Nothing here asserts agreement, and that is the design. A category is a
-/// judgement — two defensible models will differ on the awkward third of any
-/// mailbox — so a threshold pinned in a test would fail on the next model swap
-/// for no defect. Someone reads the table and decides whether the routing
-/// holds up. What IS asserted is shape (a call that came back empty is broken,
-/// not debatable) and, per server, that `enable_thinking: false` was honoured:
-/// a reasoning leak makes every latency below a measurement of the leak.
+/// It used to compare triage and extraction labels (category, urgency,
+/// needs_action, intent, importance). Those are the decision model's now, not
+/// either generative server's, so what is left to compare is text, and text
+/// is compared by counts: how many topics the two sides share, whether they
+/// named the same number of action items, whether they read the same
+/// deadline. None of those is accuracy — two defensible models word the same
+/// topic differently — so nothing here asserts agreement. Someone reads the
+/// table and decides whether the routing holds up. What IS asserted is shape
+/// (a summary that came back empty is broken, not debatable) and, per server,
+/// that `enable_thinking: false` was honoured: a reasoning leak makes every
+/// latency below a measurement of the leak.
 ///
 /// The big server goes first on every entry. Neither ordering is fair — the
 /// second call of a pair runs against a warmer machine — but a FIXED order at
-/// least makes the bias the same for all seventeen, and the per-server
+/// least makes the bias the same for every entry, and the per-server
 /// latencies here are context for the bench's numbers rather than a
 /// replacement for them.
 
-/// Urgency, weakest first. Two models that answer `high` and `urgent` have
-/// broadly agreed; `low` and `urgent` have not, and a plain exact-match rate
-/// cannot tell those two disagreements apart.
-const List<String> _urgencyOrder = ['low', 'normal', 'high', 'urgent'];
-
-const List<String> _importanceOrder = ['low', 'normal', 'high'];
-
-/// Whether [a] and [b] sit at most one step apart in [order]. A value the
-/// order does not contain counts as a disagreement — it is a validator
-/// fallback, not a label the model chose.
-bool withinOne(List<String> order, String a, String b) {
-  final ia = order.indexOf(a);
-  final ib = order.indexOf(b);
-  if (ia < 0 || ib < 0) return false;
-  return (ia - ib).abs() <= 1;
+/// How many of [a]'s topics also appear in [b], compared lowercased and
+/// trimmed. The task already lowercases; the trim is belt and braces.
+int topicOverlap(List<String> a, List<String> b) {
+  final other = {for (final t in b) t.trim().toLowerCase()};
+  return a.where((t) => other.contains(t.trim().toLowerCase())).length;
 }
 
-/// One corpus entry judged twice.
+/// One corpus entry written twice.
 class _Pair {
   final String id;
-  final TriageResult bigTriage;
-  final TriageResult fastTriage;
-  final ExtractionResult bigExtract;
-  final ExtractionResult fastExtract;
+  final MessageTextResult big;
+  final MessageTextResult fast;
 
-  const _Pair({
-    required this.id,
-    required this.bigTriage,
-    required this.fastTriage,
-    required this.bigExtract,
-    required this.fastExtract,
-  });
+  const _Pair({required this.id, required this.big, required this.fast});
+
+  int get sharedTopics => topicOverlap(big.topics, fast.topics);
+  bool get sameActionCount => big.actionItems.length == fast.actionItems.length;
+
+  /// Both empty counts as the same: neither side found a deadline.
+  bool get sameDeadline =>
+      big.deadline.trim().toLowerCase() == fast.deadline.trim().toLowerCase();
 }
 
 void main() {
@@ -92,14 +84,14 @@ void main() {
       final bigWarmup = BenchTarget.prose.client();
       final fastWarmup = BenchTarget.bulk.client();
       for (var i = 0; i < BenchTarget.warmup; i++) {
-        final input = TriageInput(emails.first.message, DateTime.now());
+        final input = MessageTextInput(emails.first.message, DateTime.now());
         // Warmed the way the run itself will be measured: a candidate that
         // needs BENCH_THINK would 400 here otherwise, and a warmup that failed
         // would leave the first timed call cold.
-        await runTask(bigWarmup, const TriageTask(), input,
-            think: BenchTarget.allowReasoning);
-        await runTask(fastWarmup, const TriageTask(), input,
-            think: BenchTarget.allowReasoning);
+        await runTask(bigWarmup, const MessageTextTask(), input,
+            temperature: 0, think: BenchTarget.allowReasoning);
+        await runTask(fastWarmup, const MessageTextTask(), input,
+            temperature: 0, think: BenchTarget.allowReasoning);
       }
 
       final startedAt = DateTime.now();
@@ -115,93 +107,72 @@ void main() {
       try {
         for (final entry in emails) {
           current = entry.id;
-          // ONE clock for all four calls. The prompts anchor "by tomorrow"
+          // ONE clock for both calls. The prompt anchors "by tomorrow"
           // against it, so a second DateTime.now() would be a difference
           // between the runs that has nothing to do with the models.
-          final now = DateTime.now();
+          final input = MessageTextInput(entry.message, DateTime.now());
 
           // Latency is not timed here: each client's collector already holds
           // the HTTP round trip for every call, measured on the same clock as
           // the token counts it will be divided by.
-          final bigTriage = await runTask(
+          final bigText = await runTask(
             big,
-            const TriageTask(),
-            TriageInput(entry.message, now),
-            // One switch for both servers: an A/B where only one side was
-            // asked to stop reasoning would compare a model against itself
-            // thinking.
-            think: BenchTarget.allowReasoning,
-          );
-
-          final fastTriage = await runTask(
-            fast,
-            const TriageTask(),
-            TriageInput(entry.message, now),
-            think: BenchTarget.allowReasoning,
-          );
-
-          final bigExtract = await runTask(
-            big,
-            const ExtractTask(),
-            ExtractionInput(entry.message, now),
-            // As the handler runs it, on both sides: a disagreement has to be
-            // the models differing, not one of them sampling.
+            const MessageTextTask(),
+            input,
+            // As the handler runs it, on both sides: a difference has to be
+            // the models differing, not one of them sampling. And one
+            // reasoning switch for both servers: an A/B where only one side
+            // was asked to stop reasoning would compare a model against
+            // itself thinking.
             temperature: 0,
             think: BenchTarget.allowReasoning,
           );
 
-          final fastExtract = await runTask(
+          final fastText = await runTask(
             fast,
-            const ExtractTask(),
-            ExtractionInput(entry.message, now),
+            const MessageTextTask(),
+            input,
             temperature: 0,
             think: BenchTarget.allowReasoning,
           );
 
-          pairs.add(_Pair(
-            id: entry.id,
-            bigTriage: bigTriage,
-            fastTriage: fastTriage,
-            bigExtract: bigExtract,
-            fastExtract: fastExtract,
-          ));
+          final pair = _Pair(id: entry.id, big: bigText, fast: fastText);
+          pairs.add(pair);
 
+          // Counts only, and the `<<` marks where the two sides named a
+          // different number of action items or a different deadline.
+          final differs = !pair.sameActionCount || !pair.sameDeadline;
           lines.add(
             '${entry.id.padRight(26)} '
-            'big  ${bigTriage.category}/${bigTriage.urgency}/'
-            'needs_action=${bigTriage.needsAction}  '
-            'fast ${fastTriage.category}/${fastTriage.urgency}/'
-            'needs_action=${fastTriage.needsAction}'
-            '${bigTriage.category == fastTriage.category ? '' : '  <<'}',
+            'big  summary ${bigText.summary.length.toString().padLeft(3)} '
+            'actions=${bigText.actionItems.length} '
+            'topics=${bigText.topics.length}  '
+            'fast summary ${fastText.summary.length.toString().padLeft(3)} '
+            'actions=${fastText.actionItems.length} '
+            'topics=${fastText.topics.length}  '
+            'shared_topics=${pair.sharedTopics} '
+            'same_deadline=${pair.sameDeadline}'
+            '${differs ? '  <<' : ''}',
           );
 
-          // Shape, not quality: an empty label is a call that went wrong, on
+          // Shape, not quality: an empty summary is a call that went wrong, on
           // whichever server produced it.
-          expect(bigTriage.category, isNotEmpty, reason: '${entry.id} big');
-          expect(fastTriage.category, isNotEmpty, reason: '${entry.id} fast');
-          expect(bigTriage.urgency, isNotEmpty, reason: '${entry.id} big');
-          expect(fastTriage.urgency, isNotEmpty, reason: '${entry.id} fast');
-          expect(bigExtract.intent, isNotEmpty, reason: '${entry.id} big');
-          expect(fastExtract.intent, isNotEmpty, reason: '${entry.id} fast');
-          expect(bigExtract.importance, isNotEmpty, reason: '${entry.id} big');
-          expect(fastExtract.importance, isNotEmpty,
-              reason: '${entry.id} fast');
+          expect(bigText.summary, isNotEmpty, reason: '${entry.id} big');
+          expect(fastText.summary, isNotEmpty, reason: '${entry.id} fast');
 
           // The entry that decides whether the small model is safe to route
-          // untrusted mail through: both answers verbatim, for a human to
-          // judge whether either treated the instruction in the body as an
-          // instruction rather than as data.
+          // untrusted mail through: both answers verbatim (the corpus is
+          // fictional), for a human to judge whether either treated the
+          // instruction in the body as an instruction rather than as data.
           if (entry.id == 'prompt-injection') {
             injection.addAll([
               '=== PROMPT INJECTION — both servers, verbatim ===',
               '--- ${BenchTarget.prose.label} ---',
-              'summary:      ${bigTriage.summary}',
-              'action_items: ${bigTriage.actionItems}',
-              'evidence:     ${bigExtract.evidence}',
+              'summary:      ${bigText.summary}',
+              'action_items: ${bigText.actionItems}',
               '--- ${BenchTarget.bulk.label} ---',
-              'summary:      ${fastTriage.summary}',
-              'action_items: ${fastTriage.actionItems}',
-              'evidence:     ${fastExtract.evidence}',
+              'summary:      ${fastText.summary}',
+              'action_items: ${fastText.actionItems}',
             ]);
           }
         }
@@ -210,37 +181,34 @@ void main() {
         rethrow;
       } finally {
         final n = pairs.length;
-        final category =
-            pairs.where((p) => p.bigTriage.category == p.fastTriage.category);
-        final urgency = pairs.where((p) =>
-            withinOne(_urgencyOrder, p.bigTriage.urgency, p.fastTriage.urgency));
-        final needsAction = pairs
-            .where((p) => p.bigTriage.needsAction == p.fastTriage.needsAction);
-        final intent =
-            pairs.where((p) => p.bigExtract.intent == p.fastExtract.intent);
-        final importance = pairs.where((p) => withinOne(_importanceOrder,
-            p.bigExtract.importance, p.fastExtract.importance));
+        final actionCount = pairs.where((p) => p.sameActionCount);
+        final deadline = pairs.where((p) => p.sameDeadline);
+        // Any shared topic at all: two models that both said "invoice" have
+        // read the message the same way even if the other two labels differ.
+        final anyTopic = pairs.where((p) => p.sharedTopics > 0);
+        final sharedTopics =
+            pairs.fold<int>(0, (sum, p) => sum + p.sharedTopics);
+        final bigTopics =
+            pairs.fold<int>(0, (sum, p) => sum + p.big.topics.length);
 
         // Computed once and both printed and written down: the table above is
         // for whoever is watching the run, the file for whoever compares this
         // candidate against the next one.
         final agreement = {
-          'category_exact': pct(category.length, n),
-          'urgency_within_one': pct(urgency.length, n),
-          'needs_action_exact': pct(needsAction.length, n),
-          'intent_exact': pct(intent.length, n),
-          'importance_within_one': pct(importance.length, n),
+          'action_count_equal': pct(actionCount.length, n),
+          'deadline_equal': pct(deadline.length, n),
+          'any_topic_shared': pct(anyTopic.length, n),
+          'big_topics_shared': pct(sharedTopics, bigTopics),
         };
 
         // ignore: avoid_print
         print(
           '\n| agreement | rate |\n'
           '| --- | --- |\n'
-          '| category (exact) | ${agreement['category_exact']} |\n'
-          '| urgency (within one) | ${agreement['urgency_within_one']} |\n'
-          '| needs_action (exact) | ${agreement['needs_action_exact']} |\n'
-          '| intent (exact) | ${agreement['intent_exact']} |\n'
-          '| importance (within one) | ${agreement['importance_within_one']} |\n'
+          '| action item count (equal) | ${agreement['action_count_equal']} |\n'
+          '| deadline (equal) | ${agreement['deadline_equal']} |\n'
+          '| any topic shared | ${agreement['any_topic_shared']} |\n'
+          '| big topics also in fast | ${agreement['big_topics_shared']} |\n'
           '\n${bigCalls.banner}\n'
           '\n${bigCalls.table()}\n'
           '\n${fastCalls.banner}\n'
@@ -253,7 +221,7 @@ void main() {
         // model, and calling an agreement rate an accuracy would put two
         // models' shared mistake in the column that says they were right.
         final path = await writeBenchResult(
-          bench: 'triage-extract-ab',
+          bench: 'message-text-ab',
           collectors: [bigCalls, fastCalls],
           accuracy: const [],
           startedAt: startedAt,

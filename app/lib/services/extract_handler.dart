@@ -2,17 +2,19 @@ import 'dart:convert';
 
 import '../data/message_store.dart';
 import '../models/draft_policy.dart';
+import '../models/extraction_models.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'ai_worker.dart';
 import 'attention.dart';
 import 'clustering_card.dart';
+import 'conversation_cta.dart';
 import 'conversation_state.dart';
 import 'embed_handler.dart';
 import 'llm/embeddings_client.dart';
-import 'llm/extract_task.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
+import 'llm/message_text_task.dart';
 import 'llm/reply_decision_task.dart' show replySuppressed;
 import 'pipeline_progress.dart';
 
@@ -28,13 +30,27 @@ import 'pipeline_progress.dart';
 // and imports the module by name.
 export 'clustering_card.dart' show buildClusteringCard, buildConversationCard;
 
-/// Extracts structured facts from one message, then refreshes its thread's
-/// embedding if the thread now reads differently.
+/// The MESSAGE-TEXT stage: writes one kept message's text, then files it,
+/// refreshes its thread's card and embedding, and queues its draft.
 ///
-/// The two halves are deliberately unequal. The extraction is the work and its
-/// failure is the item's failure; the embedding is an optimisation on top, and
-/// an embedding server that is down must never cost a message the extraction
-/// that already succeeded.
+/// One generative call per kept message, [MessageTextTask]: the summary, the
+/// reader's action items and the deadline (onto `messages`), and the topics
+/// and project (into `extraction_json`, beside the decision model's intent
+/// and importance). It runs AFTER triage, which since the decision model is
+/// no language-model call at all — so the rail, notify-worthy and filing have
+/// the row state within ~100 ms and the text fills in here.
+///
+/// **The work kind is still `extract`**, and the class keeps its name. A
+/// rename would need a work-kind migration of every queued row and a requeue,
+/// and would move the activity kind, the progress stage (`extract_state`, which
+/// the settle machine waits on) and the activity panel's words with it — all
+/// for a label. The kind names the stage's slot in the pipeline, not the task
+/// it runs.
+///
+/// The halves are deliberately unequal. The text is the work and its failure
+/// is the item's failure; the embedding is an optimisation on top, and an
+/// embedding server that is down must never cost a message the text that
+/// already succeeded.
 class ExtractHandler extends WorkHandler {
   static const String _source = 'email';
 
@@ -176,53 +192,97 @@ class ExtractHandler extends WorkHandler {
       ));
     }
 
-    final extracted = await runTask(
+    // The context the retired triage call read — the attachment names and
+    // the thread tail before this message — so the summary can say what an
+    // unanswered question a few messages back is still asking.
+    final attachments = await _store.attachmentsForMessage(source, id);
+    final key = row['conversation_key'] as String?;
+    var thread = const <Message>[];
+    if (key != null && key.isNotEmpty) {
+      final loaded = await _store.loadThread(key, sources: [source]);
+      final receivedAt = message.receivedAt ?? '';
+      thread = [
+        for (final m in loaded)
+          if (m.id != message.id &&
+              (m.receivedAt ?? '').compareTo(receivedAt) <= 0)
+            m,
+      ];
+    }
+
+    final text = await runTask(
       _client,
-      const ExtractTask(),
-      ExtractionInput(message, DateTime.now()),
+      const MessageTextTask(),
+      MessageTextInput(
+        message,
+        DateTime.now(),
+        thread: thread,
+        attachments: attachments,
+      ),
       // Zero, not the default: the same email must yield the same facts twice,
-      // or a re-extraction would move a conversation between clusters for no
-      // reason a human could see.
+      // or a re-run would move a conversation between clusters for no reason
+      // a human could see.
       temperature: 0,
     );
-    // Intent and importance are the decision model's when it read this
-    // message (the triage pass stored its answers): its heads beat the
-    // language model on both. Replaced BEFORE the write, so the stored
-    // extraction, the activity row and the bucket filing all read one answer.
+    await _store.writeMessageText(
+      source,
+      id,
+      summary: text.summary,
+      actionItems: text.actionItems,
+      deadline: text.deadline,
+    );
+    // Intent and importance are the decision model's (the triage pass stored
+    // its answers); a message decided before this build has none, and reads
+    // the quiet middle, exactly as a failed extraction used to.
     final decision = await _store.decisionFor(source, id);
     final decided = decision?.answers.fields;
-    final result = decided == null ||
-            !decided.containsKey('intent') ||
-            !decided.containsKey('importance')
-        ? extracted
-        : ExtractionResult(
-            evidence: extracted.evidence,
-            topics: extracted.topics,
-            people: extracted.people,
-            organizations: extracted.organizations,
-            project: extracted.project,
-            intent: decided['intent']!.choice,
-            importance: decided['importance']!.choice,
-          );
+    final result = ExtractionResult(
+      topics: text.topics,
+      project: text.project,
+      intent: decided?['intent']?.choice ?? 'fyi',
+      importance: decided?['importance']?.choice ?? 'normal',
+    );
     await _store.writeExtraction(source, id, jsonEncode(result.toJson()));
-    // After the write and before the two optional passes below: the facts are
-    // stored, so the stage is done however the bucket filing and the embedding
-    // refresh go.
+
+    // Every reader below reads the ROW — the card, the message embedding,
+    // the draft pre-gates — so it is read again now the text is on it.
+    final written = await _store.getMessageRow(source, id) ?? row;
+
+    // The ask lands on the conversation the moment the text does. Only on a
+    // row triage decided: an `error` row has no urgency to fold with.
+    if (written['triage_status'] == 'triaged') {
+      await foldCtaUp(
+        _store,
+        source,
+        written,
+        urgency: written['urgency'] as String? ?? 'normal',
+        category: written['category'] as String?,
+        needsAction: written['needs_action'] == 1,
+        summary: text.summary,
+        actionItems: text.actionItems,
+        deadline: text.deadline,
+      );
+    }
+
+    // After the writes and before the optional passes below: the text is
+    // stored, so the stage is done however the bucket filing and the
+    // embedding refresh go.
     await _pipeline.noteExtract(source, id, state: 'done');
     // Enough of the answer to make the activity row readable without opening
-    // the extraction itself. Five topics, because the row is one line.
+    // the message. Counts and labels, never the summary.
     _log.note({
       'intent': result.intent,
       'importance': result.importance,
       'topics': result.topics.take(5).toList(),
       if (result.project.isNotEmpty) 'project': result.project,
+      'action_items': text.actionItems.length,
+      if (text.deadline.isNotEmpty) 'deadline': text.deadline,
     });
 
-    await _fileBucket(source, row, result);
-    await _refreshCard(source, row);
-    await _queueRecap(source, row);
-    await _embedMessage(source, row);
-    await _queueDraft(source, id, row);
+    await _fileBucket(source, written, result);
+    await _refreshCard(source, written);
+    await _queueRecap(source, written);
+    await _embedMessage(source, written);
+    await _queueDraft(source, id, written);
   }
 
   /// Wakes the running recap of every storyline this message's thread is
@@ -369,10 +429,11 @@ class ExtractHandler extends WorkHandler {
   /// unreachable server until `make embed` is running, so queueing anything
   /// from here would only be a second name for the same wait.
   ///
-  /// The summary it embeds is TRIAGE's, not this handler's extraction output.
-  /// That is deliberate: the card has to be buildable from the message row
-  /// alone, or [EmbedHandler] could not produce the same card without
-  /// re-running an extraction to get it.
+  /// The summary it embeds is the one this handler just wrote onto the
+  /// message ROW, read back from the row rather than taken from the result in
+  /// hand: the card has to be buildable from the message row alone, or
+  /// [EmbedHandler] could not produce the same card without re-running the
+  /// text call to get it.
   Future<void> _embedMessage(String source, Map<String, Object?> row) async {
     final outcome = await embedMessageRow(_store, _embeddings, source, row);
     if (outcome == MessageEmbedOutcome.unavailable) {

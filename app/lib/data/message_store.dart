@@ -36,12 +36,11 @@ import '../services/deadline_parse.dart';
 import '../services/decision/decision_client.dart' show DecisionResult;
 import '../services/decision/decision_heads.dart' show DecisionAnswers;
 import '../services/decision/stored_decision.dart';
-// The third read out of `services/`, on the same licence as the two above:
-// `extract_task.dart` imports `models/` and nothing else, and [extractionFor]
-// needs `ExtractionResult.fromJson` to be the same decoder the handler wrote
-// through — a second copy of it here is how a stored blob and its reader come
-// to disagree about a field name.
-import '../services/llm/extract_task.dart' show ExtractionResult;
+// [extractionFor] needs `ExtractionResult.fromJson` to be the same decoder the
+// text handler wrote through — a second copy of it here is how a stored blob
+// and its reader come to disagree about a field name. It lives in `models/`
+// since the extraction call it came from was retired.
+import '../models/extraction_models.dart';
 // The third, on the same licence as the two above: `search_fusion.dart` is
 // arithmetic and string work over the models with no I/O. The keyword reads
 // need the query BUILT — quoted, stopworded, capped — and a second copy of
@@ -2028,6 +2027,8 @@ RETURNING conversation_key
   /// a finished pipeline: the message settles again on stages that never ran,
   /// and [reviveOwedStorylineStages] cannot heal it either, since its
   /// `dropped = 0` guard correctly refuses a row that says it was dropped.
+  /// Each re-pended message's `extract` item is requeued in the same
+  /// transaction — the text is that stage's now, not triage's.
   Future<int> rependGatedTriage({
     required String source,
     required String gateReason,
@@ -2047,6 +2048,15 @@ RETURNING conversation_key
         for (final row in rows) row.data['source_message_id'] as String? ?? '',
       ];
       await _resetProgressRows(source, ids);
+      // The message-text stage too, as Restore does: a re-pended message
+      // is about to be triaged, and triage no longer writes any text, so an
+      // `extract` row the gated run closed as `done` (or never had) would
+      // leave it with a verdict and no summary for good. `requeueWork`
+      // revives a finished row and leaves a pending or processing one alone;
+      // no fresh stamp, because nobody asked — this is a one-shot repair.
+      for (final id in ids) {
+        await requeueWork('extract', source, id);
+      }
       return ids.length;
     });
   }
@@ -2294,13 +2304,31 @@ RETURNING conversation_key
   /// `cta_text` is written unconditionally, null included: when the newest
   /// inbound message asks for nothing, the thread's ask is gone, and leaving
   /// the previous one on screen would be worse than showing none.
+  ///
+  /// [keepCtaText] leaves `cta_text` exactly as it is and writes the urgency
+  /// and category alone: the triage queue's fold for a message whose text has
+  /// not landed yet. The ask is the text's to write (`foldCtaUp` again, from
+  /// the message-text handler), and clearing it in between would drop the
+  /// thread out of Needs You for the seconds the text call takes.
   Future<void> updateConversationTriage(
     String source,
     String conversationKey, {
     String? ctaText,
     required String ctaUrgency,
     String? category,
+    bool keepCtaText = false,
   }) async {
+    if (keepCtaText) {
+      await db.customUpdate(
+        'UPDATE conversations SET cta_urgency = ?, '
+        'category = COALESCE(?, category), updated_at = ? '
+        'WHERE source = ? AND conversation_key = ?',
+        variables: _args(
+          [ctaUrgency, category, _nowIso(), source, conversationKey],
+        ),
+      );
+      return;
+    }
     await db.customUpdate(
       'UPDATE conversations SET cta_text = ?, cta_urgency = ?, '
       'category = COALESCE(?, category), updated_at = ? '
@@ -2323,6 +2351,12 @@ RETURNING conversation_key
   /// the owner's own gate and it outranks the model's opinion of the same
   /// message. It is only THIS gate that blocks: [restoreMessage] clears
   /// `gate_reason`, so a restored row is written like any other.
+  ///
+  /// [result] is the CLASSIFICATION only — urgency, category, needs_action,
+  /// reply_expected. `label`, `summary`, `action_items_json` and `deadline`
+  /// are never touched here: the text is the message-text stage's
+  /// ([writeMessageText]), which lands later, so they are NULL on a new row
+  /// and a message re-triaged after its text landed keeps the text.
   Future<void> writeTriage(
     String source,
     String sourceMessageId, {
@@ -2339,29 +2373,17 @@ RETURNING conversation_key
       sets.addAll([
         'urgency = ?',
         'category = ?',
-        'label = ?',
-        'summary = ?',
+        // An explicit int — `needs_action` is read back as `row != 0`.
         'needs_action = ?',
-        'action_items_json = ?',
+        // Writing this is what takes a row out of `rejudgeStaleTriage`'s
+        // reach: NULL means v2 never looked, and 0 is a judgement it made.
         'reply_expected = ?',
-        'deadline = ?',
       ]);
       args.addAll([
         result.urgency,
         result.category,
-        // NULL, not '': an empty label means the model offered none, and the
-        // column reads the same as a message triage never reached.
-        result.label.isEmpty ? null : result.label,
-        result.summary,
-        // An explicit int — `needs_action` is read back as `row != 0`.
         result.needsAction ? 1 : 0,
-        jsonEncode(result.actionItems),
-        // Writing this is what takes a row out of `rejudgeStaleTriage`'s
-        // reach: NULL means v2 never looked, and 0 is a judgement it made.
         result.replyExpected ? 1 : 0,
-        // NULL, not '': the same rule `label` takes, and it means the message
-        // named no date rather than naming an empty one.
-        result.deadline.isEmpty ? null : result.deadline,
       ]);
     }
     if (error != null) {
@@ -2384,6 +2406,78 @@ RETURNING conversation_key
       "AND NOT (triage_status = 'skipped' AND gate_reason = 'user')",
       variables: _args(args),
     );
+  }
+
+  /// Writes the message-text stage's three message columns — `summary`,
+  /// `action_items_json`, `deadline` — and nothing else.
+  ///
+  /// Narrow on purpose (app/CLAUDE.md: narrow SQL over a widened copyWith):
+  /// the classification columns are the triage queue's, written from the
+  /// decision model before this runs, and a text write must never move them.
+  /// `deadline` is NULL when empty, [writeTriage]'s rule: the message named no
+  /// date rather than an empty one. `label` is never written — the text stage
+  /// has none, so a new row keeps it NULL.
+  ///
+  /// `updated_at` IS stamped, as [writeTriage] stamped it when the summary
+  /// was triage's: the word index (`fts_messages`, which files `summary`)
+  /// re-files a row by that watermark, and a summary written without it would
+  /// never become searchable. The settle machine's freshness check (the
+  /// attention row newer than the message, `NotificationCoordinator
+  /// ._isComplete`) is met the way it was when triage stamped the row: the
+  /// text handler refreshes the thread's card AFTER this write, and a changed
+  /// card re-stamps `conversation_ai`.
+  Future<void> writeMessageText(
+    String source,
+    String sourceMessageId, {
+    required String summary,
+    required List<String> actionItems,
+    required String deadline,
+  }) async {
+    await db.customUpdate(
+      'UPDATE messages SET summary = ?, action_items_json = ?, deadline = ?, '
+      'updated_at = ? WHERE source = ? AND source_message_id = ?',
+      variables: _args([
+        summary,
+        jsonEncode(actionItems),
+        deadline.isEmpty ? null : deadline,
+        _nowIso(),
+        source,
+        sourceMessageId,
+      ]),
+    );
+  }
+
+  /// Clears a thread's `cta_text` when its newest inbound message's text
+  /// stage failed for good, and reports whether it did.
+  ///
+  /// Triage writes the row from the decision model and keeps the thread's
+  /// current ask until the message-text stage refolds it; if that stage ends
+  /// in `error`, the ask left standing is an OLDER message's. Only for the
+  /// message that owns the fold: triaged, with no summary, the thread's
+  /// newest inbound, and not answered by an outbound at or after it (the
+  /// `foldCtaUp` guards). `cta_urgency` and `category` stay — they are this
+  /// message's own, from the decision.
+  Future<bool> clearStaleAskAfterTextFailed(
+    String source,
+    String sourceMessageId,
+  ) async {
+    final n = await db.customUpdate(
+      '''
+UPDATE conversations SET cta_text = NULL, updated_at = ?
+WHERE COALESCE(cta_text, '') <> ''
+  AND EXISTS (
+    SELECT 1 FROM messages m
+    WHERE m.source = ? AND m.source_message_id = ?
+      AND m.source = conversations.source
+      AND m.conversation_key = conversations.conversation_key
+      AND m.triage_status = 'triaged'
+      AND m.summary IS NULL
+      AND COALESCE(m.received_at, '') >= COALESCE(conversations.last_inbound_at, '')
+      AND COALESCE(conversations.last_outbound_at, '') < COALESCE(m.received_at, ''))
+''',
+      variables: _args([_nowIso(), source, sourceMessageId]),
+    );
+    return n > 0;
   }
 
   /// Stores the decision model's answers for one message, replacing any
@@ -2567,7 +2661,10 @@ RETURNING conversation_key
   /// `created_at`, so the worker's `created_at DESC` drain order means
   /// newest mail first — the same promise triage makes. (One-off
   /// [enqueueWork] rows stamp wall-clock time instead; for freshly synced
-  /// mail the two orderings agree.)
+  /// mail the two orderings agree.) The `extract` claim orders the newest
+  /// [textClaimWindow] of them by its priority keys first — a stamp in the
+  /// last [textClaimRequestedWithin], needs-you, not-Later, importance — and
+  /// only then by this stamp; see [claimPendingWork].
   ///
   /// [triageStatuses] and [gateReasons] narrow that for a caller whose
   /// messages reach this table some other way; both connectors take the
@@ -2725,27 +2822,104 @@ LIMIT ?
     List<String> sources = const ['email'],
   }) async {
     if (sources.isEmpty) return null;
-    final claimed = await db.customWriteReturning(
-      '''
-UPDATE work_items SET status = 'processing', updated_at = ?
-WHERE rowid IN (
-  SELECT rowid FROM work_items
+    final eligible = '''
+  SELECT rowid, source, entity_id, created_at FROM work_items
   WHERE task_kind = ? AND status = 'pending'
     AND source IN (${_placeholders(sources.length)})
     AND NOT (? IN ('needs_you','extract') AND EXISTS (
       SELECT 1 FROM messages m
       WHERE m.source = work_items.source
         AND m.source_message_id = work_items.entity_id
-        AND m.triage_status IN ('pending','processing')))
+        AND m.triage_status IN ('pending','processing')))''';
+    final now = DateTime.now().toUtc();
+    final claimed = await db.customWriteReturning(
+      kind == 'extract'
+          ? '''
+UPDATE work_items SET status = 'processing', updated_at = ?
+WHERE rowid IN (
+  SELECT w.rowid FROM (
+$eligible
+    ORDER BY created_at DESC, entity_id DESC LIMIT $textClaimWindow
+  ) AS w
+  ORDER BY $_textClaimOrder LIMIT 1
+)
+RETURNING *
+'''
+          : '''
+UPDATE work_items SET status = 'processing', updated_at = ?
+WHERE rowid IN (
+  SELECT rowid FROM (
+$eligible
   ORDER BY created_at DESC, entity_id DESC LIMIT 1
+  )
 )
 RETURNING *
 ''',
-      variables: _args([_nowIso(), kind, ...sources, kind]),
+      variables: _args([
+        isoStamp(now),
+        kind,
+        ...sources,
+        kind,
+        if (kind == 'extract')
+          isoStamp(now.subtract(textClaimRequestedWithin)),
+      ]),
     );
     if (claimed.isEmpty) return null;
     return Map<String, Object?>.from(claimed.first.data);
   }
+
+  /// How many of the newest eligible `extract` items the priority keys order
+  /// per claim. The keys are correlated lookups, and a Clear AI results
+  /// backlog is tens of thousands of rows: ordering all of them inside the
+  /// claim's write transaction, per claim, is the cost this bounds. The window
+  /// is the existing `created_at DESC` path, so the newest work is always in
+  /// it; an older item outside it waits its turn exactly as before.
+  static const int textClaimWindow = 500;
+
+  /// An `extract` item stamped this recently jumps every priority key: that
+  /// is what an owner-asked requeue looks like (`requeueWork(refreshCreatedAt:
+  /// true)` — Retry in the history, Restore), and mail that arrived in the
+  /// last few minutes rides with it, which is the "newest message first"
+  /// doctrine the fast lane already keeps.
+  static const Duration textClaimRequestedWithin = Duration(minutes: 5);
+
+  /// The ORDER BY the backlog claims `extract` (the message-text stage) by,
+  /// over the [textClaimWindow] newest eligible items (alias `w`). ORDER
+  /// only: which items are claimable is [claimPendingWork]'s WHERE,
+  /// unchanged.
+  ///
+  /// The text is the one per-message generative call left, so what reaches
+  /// the model first is what the owner most wants to read:
+  /// 1. an item requested in the last [textClaimRequestedWithin] (an
+  ///    owner-asked requeue refreshes `created_at`; the cutoff is the last
+  ///    bound parameter);
+  /// 2. a message the needs-you pass called theirs;
+  /// 3. anything NOT filed Later before anything that is;
+  /// 4. the decision's importance, high > normal > low (the stored decision,
+  ///    else an older build's extraction; neither reads as normal);
+  /// 5. the queue's own newest first.
+  /// A missing message row reads as neither needs-you nor Later.
+  static const String _textClaimOrder = '''
+(w.created_at > ?) DESC,
+  COALESCE((SELECT m.needs_you_verdict = 1 FROM messages m
+    WHERE m.source = w.source
+      AND m.source_message_id = w.entity_id), 0) DESC,
+  COALESCE((SELECT c.bucket = 'later' FROM messages m
+      JOIN conversation_ai c
+        ON c.source = m.source AND c.conversation_key = m.conversation_key
+    WHERE m.source = w.source
+      AND m.source_message_id = w.entity_id), 0) ASC,
+  COALESCE((SELECT CASE COALESCE(
+        (SELECT json_extract(d.answers_json, '\$.importance.choice')
+           FROM message_decisions d
+          WHERE d.source = w.source
+            AND d.source_message_id = w.entity_id),
+        (SELECT json_extract(x.extraction_json, '\$.importance')
+           FROM message_ai x
+          WHERE x.source = w.source
+            AND x.source_message_id = w.entity_id))
+      WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 END), 1) ASC,
+  w.created_at DESC, w.entity_id DESC''';
 
   /// Claims ONE NAMED item, by the key `writeWork` updates by — the priority
   /// lane's claim, where [claimPendingWork] is the backlog's.
@@ -6451,7 +6625,8 @@ FROM storylines s''';
   /// hopeless on the attempt that was going to succeed.
   /// [refreshCreatedAt] moves the row to the FRONT of the drain, and it is
   /// opt-in rather than the default because most requeues are not a person
-  /// asking. [claimPendingWork] drains `created_at DESC`, so a revived `done`
+  /// asking. [claimPendingWork] drains `created_at DESC` (and claims a fresh
+  /// `extract` stamp ahead of its priority keys), so a revived `done`
   /// row keeps its original stamp and is claimed LAST — behind every newer
   /// prefetch — which is the exact opposite of what a Regenerate, a Retry or a
   /// Restore means. With the flag a row that is still `pending` is moved too:
@@ -7388,9 +7563,9 @@ RETURNING source_message_id
         .customSelect(
           '''
 SELECT n.source, n.source_message_id, n.conversation_key, n.deadline_at,
-  m.subject, m.from_name, m.summary, m.urgency, m.deadline, m.needs_action,
-  m.reply_expected, m.needs_you_verdict, m.is_read, m.triage_status,
-  m.received_at,
+  m.subject, m.from_name, m.summary, m.body_preview, m.urgency, m.deadline,
+  m.needs_action, m.reply_expected, m.needs_you_verdict, m.is_read,
+  m.triage_status, m.received_at,
   m.updated_at AS message_updated_at,
   c.cta_text, c.cta_urgency, c.state AS conversation_state,
   ai.attention_score, ai.bucket, ai.updated_at AS ai_updated_at,
@@ -7439,8 +7614,8 @@ LIMIT ?
     final rows = await db
         .customSelect(
           '''
-SELECT m.subject, m.from_name, m.summary, m.urgency, m.deadline,
-  m.needs_action, m.reply_expected, m.needs_you_verdict, m.is_read,
+SELECT m.subject, m.from_name, m.summary, m.body_preview, m.urgency,
+  m.deadline, m.needs_action, m.reply_expected, m.needs_you_verdict, m.is_read,
   m.triage_status, m.received_at,
   c.cta_text, c.cta_urgency, c.state AS conversation_state,
   c.last_outbound_at,

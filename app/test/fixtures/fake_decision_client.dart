@@ -3,8 +3,11 @@ import 'package:bond_inbox/providers/app_providers.dart'
 import 'package:bond_inbox/services/decision/decision_client.dart';
 import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/decision/decision_input.dart';
+import 'package:bond_inbox/services/decision/decision_state.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart' show LlmTarget;
 import 'package:flutter_riverpod/flutter_riverpod.dart' show Override;
+
+import 'scripted_llm.dart';
 
 /// Nine answers built from the handful of numbers a pipeline test cares
 /// about. Two-option fields take a p(yes)/p(drop); multi-option fields take
@@ -83,6 +86,11 @@ class FakeDecisionClient extends DecisionClient {
           heads: () => throw StateError('fake: heads never read'),
         );
 
+  /// A client a test's queue must never call: any call fails the test.
+  factory FakeDecisionClient.never() => FakeDecisionClient(
+        (_) => throw StateError('this decision client must never be called'),
+      );
+
   /// Always answers [answers].
   factory FakeDecisionClient.fixed(DecisionAnswers answers,
           {void Function()? onDecide}) =>
@@ -110,11 +118,71 @@ class FakeDecisionClient extends DecisionClient {
 /// - needs_you: 0.5, INSIDE the band, so the needs-you pass still asks the
 ///   language model and a scripted needs-you answer decides as before;
 /// - needs_action and reply_expected: 0.2, so the triage booleans come from
-///   THIS fake (no) and not from a scripted TriageTask answer — a screen test
-///   that needs a triaged ask seeds the columns, or overrides this with its
-///   own [FakeDecisionClient];
+///   THIS fake (no) — a screen test that needs a triaged ask seeds the
+///   columns, or overrides this with its own [FakeDecisionClient];
 /// - urgency `normal`, category `work`, intent `fyi`, importance `normal`.
 Override keepingDecisionClient() =>
     decisionClientProvider.overrideWithValue(
       FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.5)),
     );
+
+/// A [FakeDecisionClient] driven by a [ScriptedLlm] script under the schema
+/// name `decision` — how a queue test HOLDS, THROWS or COUNTS decision calls
+/// with the one scripting vocabulary the suite already speaks.
+///
+/// Each [decide] is one `completeJson` call on [llm], whose `user` is the
+/// rendered decision state (what the model would read: owner line, date,
+/// directness, tail, the message block), so `llm.userMessages`,
+/// `llm.maxInFlight` and every hold, throw and computed step behave exactly
+/// as they did when the triage queue's model was a language model.
+///
+/// A step's map is read by [scriptedAnswers]: `urgency`, `category`,
+/// `needs_action`, `reply_expected` (booleans, as the retired triage answer
+/// carried them), and optionally `gate_drop`, `drop_reason`, `needs_you`,
+/// `intent`, `importance`. Keys it does not know (a summary, action items)
+/// are ignored — triage writes no text now.
+class ScriptedDecisionClient extends FakeDecisionClient {
+  final ScriptedLlm llm;
+
+  ScriptedDecisionClient(this.llm)
+      : super((_) => throw StateError('scripted: answered by the llm'));
+
+  @override
+  Future<DecisionResult> decide(DecisionInput input) async {
+    calls.add(input);
+    onDecide?.call();
+    final json = await llm.completeJson(
+      system: '',
+      user: renderDecisionState(input, toLocal: (utc) => utc),
+      schema: const {},
+      schemaName: 'decision',
+    );
+    return fakeDecision(scriptedAnswers(json));
+  }
+}
+
+/// [ScriptedDecisionClient] over a fresh [ScriptedLlm] scripted with
+/// [steps] under `decision`.
+ScriptedDecisionClient scriptedDecision(List<Object> steps) =>
+    ScriptedDecisionClient(ScriptedLlm()..scriptFor('decision', steps));
+
+/// A scripted step's map as the decision model's nine answers.
+DecisionAnswers scriptedAnswers(Map<String, dynamic> json) {
+  double yes(Object? v, double fallback) => switch (v) {
+        true => 0.8,
+        false => 0.2,
+        num n => n.toDouble(),
+        _ => fallback,
+      };
+  return fakeAnswers(
+    gateDrop: yes(json['gate_drop'], 0.05),
+    dropReason: json['drop_reason'] as String? ?? 'other',
+    category: json['category'] as String? ?? 'work',
+    urgency: json['urgency'] as String? ?? 'normal',
+    needsAction: yes(json['needs_action'], 0.2),
+    replyExpected: yes(json['reply_expected'], 0.2),
+    needsYou: yes(json['needs_you'], 0.2),
+    intent: json['intent'] as String? ?? 'fyi',
+    importance: json['importance'] as String? ?? 'normal',
+  );
+}

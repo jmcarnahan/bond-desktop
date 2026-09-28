@@ -26,7 +26,7 @@ Every stage that dials a model has a row in `pipelineStages`, and the row's
 | Stage | Role |
 |-------|------|
 | `decision` | Decision |
-| `triage`, `needs_you`, `extraction`, `attachment_digest`, `context_file_digest`, `context_brief`, `context_select` | Generative |
+| `needs_you`, `message_text`, `attachment_digest`, `context_file_digest`, `context_brief`, `context_select` | Generative |
 | `storyline_membership`, `storyline_group`, `storyline_name`, `storyline_refresh`, `storyline_recap` | Generative |
 | `reply_decision` | Generative |
 | `draft_reply`, `draft_improve` | Generative, or cloud drafts (below) |
@@ -48,15 +48,21 @@ cannot route a draft off the machine on their own. `specById` answers the
 fixed ids back (the composer's "Improved with <name>" reads it off a draft
 row).
 
-**Classification is the decision model's (Phase 5).** The triage queue runs
-one decision pass per kept inbound message before its text call, and the
-learned gate, urgency, category, the two booleans, the needs-you verdict
-outside its band and extraction's intent/importance come from it (see
+**Classification is the decision model's; text is one generative call
+(Phases 5–6).** The triage queue runs one decision pass per kept inbound
+message and makes NO language-model call: the learned gate, urgency,
+category, the two booleans, the needs-you verdict outside its band and the
+intent/importance filed into the extraction blob come from it (see
 [03-triage.md](03-triage.md) and [11-needs-you.md](11-needs-you.md)). The
-generative calls `triage` (for its text), `extraction` and the needs-you band
-still run until one text call per message lands in Phase 6; until then a
-full-tier managed install runs those on the 27B, and the branch is not meant
-to ship between those phases.
+message's text is ONE generative call, the `message_text` stage
+(`MessageTextTask`, run by `ExtractHandler` under work kind `extract`: summary,
+action items, deadline, topics, project — see
+[04-extraction.md](04-extraction.md)). The retired `triage` and `extraction`
+stage rows are gone from `pipelineStages`; a per-message pipeline now costs
+the decision pass, the needs-you band when the decision is unsure, and one
+`message_text` call (plus the draft, when one is written). The label a call
+records (`LlmCallRecord.label`) is its schema: `decision`, `message_text`,
+`needs_you`, …
 
 Why one generative model: the decision model answers every classification
 field in one forward pass of tens of milliseconds, so what is left for a chat
@@ -537,7 +543,8 @@ ledger.
 
 - **No fallback between servers.** A down server throws
   `LlmUnavailableException` (or a subclass); `AiWorker` parks only that kind
-  of work, and the triage drain parks whole. Work resumes when the server
+  of work, and the triage drain (whose one model is the decision model)
+  parks whole. Work resumes when the server
   comes back. There is no LLM fallback for the decision model and no second
   server for the generative one.
 - **Status mapping** (`LlmClient`, and the decision client's own):
@@ -600,6 +607,12 @@ waits for), but they now contend at one server, which queues them. On a
 managed full-tier Mac that server is the 27B with one slot, so today every
 lane's calls take turns there; that is the cost the decision pass (Phase 5)
 began to remove and the one-call-per-message task (Phase 6) finishes.
+
+**Triage still holds the fast gate (Phase 6).** Triage no longer calls the
+generative server, but it shares `fastDrainGateProvider` with the fast worker
+for ORDERING — the yield ticket and `onDrained` below — so a triage pump can
+wait behind a message-text call already in flight. A separate triage gate is
+a Phase 9 candidate.
 
 **The newest message goes first.** A triage pump that finds work asks the fast
 gate for a yield. The fast worker reads the flag only where it is about to

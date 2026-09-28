@@ -2,11 +2,11 @@ import 'dart:typed_data';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
-import 'package:bond_inbox/models/message_models.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 void main() {
   late BondDatabase db;
@@ -1617,18 +1617,17 @@ void main() {
     /// The card is what a thread is embedded and compared as, so a gated
     /// message landing on a live thread — an autoresponder on a real
     /// conversation — must not become the sentence it is clustered by.
-    Future<void> summarise(String id, String summary) => store.writeTriage(
-          'email',
-          id,
-          status: 'triaged',
-          result: TriageResult(
-            urgency: 'normal',
-            category: 'work',
-            summary: summary,
-            needsAction: false,
-            actionItems: const [],
-          ),
-        );
+    Future<void> summarise(String id, String summary) => writeTriaged(
+      store,
+      'email',
+      id,
+      status: 'triaged',
+      urgency: 'normal',
+      category: 'work',
+      summary: summary,
+      needsAction: false,
+      actionItems: const [],
+    );
 
     test('a newer gated inbound does not displace the kept one', () async {
       await seedConversation('c1');

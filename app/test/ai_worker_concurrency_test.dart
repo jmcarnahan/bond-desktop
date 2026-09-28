@@ -23,7 +23,8 @@ import 'fixtures/test_db.dart';
 /// raises [WorkHandler.concurrency] — so the number it declares is exercised
 /// rather than asserted about in isolation.
 
-/// A client that answers the extraction script, never opens a socket, and
+/// A client that answers the message-text script (the task behind the
+/// `extract` kind), never opens a socket, and
 /// counts how many answers it is producing at once.
 ///
 /// The script is consumed in order, the last entry repeating: a `Map` is
@@ -34,7 +35,7 @@ import 'fixtures/test_db.dart';
 /// the next one launched, and the ceiling this file measures would always
 /// read 1.
 ScriptedLlm extractLlm(List<Object> script) =>
-    ScriptedLlm()..scriptFor('extraction', script);
+    ScriptedLlm()..scriptFor('message_text', script);
 
 /// Stands in for [DraftHandler]: a second kind, on a second server, whose own
 /// model is answering perfectly well while extraction's is not.
@@ -52,13 +53,11 @@ class DraftStub extends WorkHandler {
 }
 
 Map<String, dynamic> extraction() => {
-      'evidence': 'Jordan is asking whether the launch date holds.',
+      'summary': 'Jordan is asking whether the launch date holds.',
+      'action_items': const ['Confirm the launch date'],
+      'deadline': '',
       'topics': const ['launch date'],
-      'people': const ['Sarah Chen'],
-      'organizations': const ['Northline'],
       'project': 'Website redesign',
-      'intent': 'request',
-      'importance': 'high',
     };
 
 void main() {

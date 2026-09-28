@@ -49,7 +49,7 @@ class AttachmentDigestInput {
   /// The extracted words, as the connector gave them.
   final String text;
 
-  /// Injected for `TriageInput.now`'s reason: so a test can pin the date
+  /// Injected for `MessageTextInput.now`'s reason: so a test can pin the date
   /// anchor, and so the anchor is the owner's local day.
   final DateTime now;
 

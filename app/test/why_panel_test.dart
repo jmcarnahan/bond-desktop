@@ -1,6 +1,5 @@
+import 'package:bond_inbox/models/extraction_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
-import 'package:bond_inbox/services/llm/extract_task.dart'
-    show ExtractionResult;
 import 'package:bond_inbox/services/decision/stored_decision.dart';
 import 'package:bond_inbox/widgets/why_panel.dart';
 import 'package:flutter/material.dart';
@@ -267,6 +266,42 @@ void main() {
         find.text('Urgency high · Category work · Label survey'),
         findsOneWidget,
       );
+    });
+  });
+
+  group('a row written since the decision model', () {
+    // Triage wrote no label and the text stage writes no evidence, people or
+    // organizations: each line is simply absent, never drawn empty.
+    testWidgets('no label on the triage line', (tester) async {
+      await pump(tester, message: msg(label: null));
+
+      expect(find.text('Urgency high · Category work'), findsOneWidget);
+      expect(find.textContaining('Label'), findsNothing);
+    });
+
+    testWidgets('no evidence, people or organizations lines', (tester) async {
+      await pump(
+        tester,
+        extraction: const ExtractionResult(
+          topics: ['survey'],
+          project: 'Lot 14',
+          intent: 'request',
+          importance: 'high',
+        ),
+      );
+
+      expect(find.text('Intent request · Importance high'), findsOneWidget);
+      expect(find.text('Topics: survey'), findsOneWidget);
+      expect(find.text('Project: Lot 14'), findsOneWidget);
+      expect(find.textContaining('People'), findsNothing);
+      expect(find.textContaining('Organizations'), findsNothing);
+    });
+
+    testWidgets('text not landed yet: the triage line alone', (tester) async {
+      await pump(tester, message: msg(summary: null, label: null));
+
+      expect(find.text('Urgency high · Category work'), findsOneWidget);
+      expect(find.text('They want the survey back.'), findsNothing);
     });
   });
 

@@ -20,9 +20,9 @@ is always the authority when they disagree.
 | 2 | Tier-1 gates — sender-only checks on delta fields | no | [02-gates.md](02-gates.md) |
 | 3 | Detail fetch (mail) — full body + headers | no | [02-gates.md](02-gates.md) |
 | 4 | Tier-2 gates — list/auto-generated header checks | no | [02-gates.md](02-gates.md) |
-| 5 | **Triage** — urgency, category, summary, action items | **yes** | [03-triage.md](03-triage.md) |
+| 5 | **Triage** — the decision model: learned gate, urgency, category, needs_action, reply_expected (no text) | decision model§ | [03-triage.md](03-triage.md) |
 | 6 | **Needs-you verdict** — does this message want the owner | **yes**† | [11-needs-you.md](11-needs-you.md) |
-| 7 | **Extraction** — evidence, topics, people, intent, importance | **yes** | [04-extraction.md](04-extraction.md) |
+| 7 | **Message text** (work kind `extract`) — summary, action items, deadline, topics, project; the ask onto the thread | **yes** | [04-extraction.md](04-extraction.md) |
 | 8 | Bucket filing — low-value mail to Later, unless the thread holds an open ask | no | [04-extraction.md](04-extraction.md) |
 | 9 | Embeddings — clustering + per-message search vectors | no* | [05-embeddings.md](05-embeddings.md) |
 | 10 | Attachments — text extraction and chunk embeddings, then one digest per document | **yes**‡ | [12-attachments.md](12-attachments.md) |
@@ -35,6 +35,10 @@ is always the authority when they disagree.
 
 \* embeddings call the embedding server, but no chat model.
 
+§ one forward pass of the decision model (an embedding call whose heads run
+in Dart), no chat model; the text the retired triage call wrote is stage 7's
+since the decision-model round's Phase 6.
+
 **Stage numbers are the order inside a lane, not a single queue.** Since Round
 C (2026-09) the work queue drains through THREE `AiWorker` instances on three
 gates: a fast lane (stages 6–10b, plus triage's own queue in front of it on
@@ -42,7 +46,7 @@ the same gate), a storyline lane (stage 11) and a draft lane (stages 12–13).
 Within a lane the order above is exactly the order the work happens in; ACROSS
 lanes, a stage reaches the next one by enqueuing a row and waking the lane that
 owns it. What that buys is stage 5's seconds: a new message's triage,
-needs-you verdict and extraction no longer wait behind a storyline recap or a
+needs-you verdict and text no longer wait behind a storyline recap or a
 draft. The lanes, their gates and the two writers that ride the storyline gate
 are in [10-model-routing.md](10-model-routing.md); `make bench-pipeline`
 measures the whole thing end to end.
@@ -109,9 +113,9 @@ labels, the scorer and the populations a number is quoted on — is described in
 
 | Task | Default target | Default server (compile-time) |
 |------|------|----------------|
-| Triage | Local fast | `:8082` Qwen3-4B-Instruct (`make fast`) |
-| Needs-you verdict | Local fast | `:8082` |
-| Extraction | Local fast | `:8082` |
+| Triage (the decision model, no chat model) | decision | `:8083` (`make decide`) |
+| Needs-you verdict (the band only) | Local fast | `:8082` |
+| Message text | Local fast | `:8082` Qwen3-4B-Instruct (`make fast`) |
 | Attachment digest | Local fast | `:8082` |
 | Directory file digest | Local fast | `:8082` |
 | Directory brief | Local fast | `:8082` |

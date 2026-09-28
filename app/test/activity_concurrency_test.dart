@@ -1,15 +1,21 @@
 import 'dart:async';
+import 'dart:convert';
 
 // `show`: drift generates an `ActivityEvent` row class from the
 // `activity_events` table, and this file means the log's own.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/activity_log.dart';
+import 'package:bond_inbox/services/decision/decision_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/model_slots.dart' show LlmTarget;
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
-import 'fixtures/fake_llama_server.dart';
+import 'fixtures/decision_heads_fixture.dart';
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -24,7 +30,7 @@ import 'fixtures/test_db.dart';
 /// because overlap is the whole condition — a fake that answers instantly
 /// would pass on the broken single slot too.
 
-/// Answers every triage request only after [release] completes, reporting a
+/// Answers every decision request only after [release] completes, reporting a
 /// per-message [LlmCallRecord] the way the real client's observer does —
 /// from inside the request, which is what places it inside the item's span.
 ///
@@ -46,7 +52,7 @@ Future<Map<String, dynamic>> Function(LlmCall) heldTriage(
 
       await release.future;
       log.noteLlmCall(LlmCallRecord(
-        label: 'triage',
+        label: 'decision',
         durationMs: durationMs,
         outcome: 'ok',
         completionTokens: durationMs,
@@ -104,13 +110,13 @@ void main() {
     final release = Completer<void>();
     final reported = <String, int>{};
     final llm = ScriptedLlm(
-      answers: {'triage': heldTriage(log, release, reported)},
+      answers: {'decision': heldTriage(log, release, reported)},
       // No artificial tick before the step, as this double never had one: the
       // window below is 20 ms, and the three requests have to be AT the
       // server inside it.
       delay: Duration.zero,
     );
-    final queue = TriageQueue(store, llm, activityLog: log);
+    final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), activityLog: log);
 
     final drain = queue.pump();
     // All three must be AT the server together before any answers: overlap is
@@ -134,29 +140,36 @@ void main() {
 
   test('the real observer path lands in the item\'s span too', () async {
     // The design's load-bearing claim, exercised with the PRODUCTION wiring
-    // rather than a shortcut: a real LlmClient whose `onCall` observer is the
-    // log's noteLlmCall, against a real socket that delays every answer so
-    // three requests genuinely overlap. The observer fires inside `_post`,
-    // which runs in the item's zone — a Dart callback executes in the zone
-    // that invokes it, and this test is where that stops being an inference.
-    final fake = await FakeLlamaServer.start();
-    addTearDown(fake.close);
-    fake.delay = const Duration(milliseconds: 30);
-    fake.scriptFor('triage', [
-      {
-        'urgency': 'normal',
-        'category': 'work',
-        'summary': 'A client question.',
-        'needs_action': true,
-        'action_items': const ['Reply'],
-      },
-    ]);
+    // rather than a shortcut: a real DecisionClient whose `onCall` observer
+    // is the log's noteLlmCall, against a server that delays every answer so
+    // three requests genuinely overlap. The observer fires inside the
+    // client's request, which runs in the item's zone — a Dart callback
+    // executes in the zone that invokes it, and this test is where that stops
+    // being an inference.
     for (final id in ['m0', 'm1', 'm2']) {
       await seedMessage(id);
     }
 
-    final client = LlmClient(baseUrl: fake.chatUrl, onCall: log.noteLlmCall);
-    await TriageQueue(store, client, activityLog: log).pump();
+    final client = DecisionClient(
+      resolveTarget: () => const LlmTarget(
+        baseUrl: 'http://127.0.0.1:8083/v1/embeddings',
+        model: 'bond-decide',
+      ),
+      heads: syntheticHeads,
+      onCall: log.noteLlmCall,
+      client: MockClient((request) async {
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        return http.Response(
+          jsonEncode({
+            'data': [
+              {'index': 0, 'embedding': syntheticVector()},
+            ],
+          }),
+          200,
+        );
+      }),
+    );
+    await TriageQueue(store, decisionClient: client, activityLog: log).pump();
 
     final events = await triageEventsById();
     expect(events.keys, unorderedEquals(['m0', 'm1', 'm2']));
@@ -164,7 +177,7 @@ void main() {
       // Exactly one observed call per row. The single-slot design would have
       // lumped whichever calls had answered onto the first row to record.
       expect(event.detail['llm_calls'], 1, reason: event.entityId);
-      expect(event.detail['llm_label'], 'triage', reason: event.entityId);
+      expect(event.detail['llm_label'], 'decision', reason: event.entityId);
     }
   });
 

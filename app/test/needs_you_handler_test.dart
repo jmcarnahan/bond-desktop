@@ -72,14 +72,13 @@ EmbeddingsClient fakeEmbeddings() => EmbeddingsClient(
       }),
     );
 
-const Map<String, dynamic> extraction = {
-  'evidence': 'Dana wants the DPA looked at.',
+/// The message-text stage's answer (the handler behind the `extract` kind).
+const Map<String, dynamic> messageText = {
+  'summary': 'Dana wants the DPA looked at.',
+  'action_items': ['Review the DPA'],
+  'deadline': '',
   'topics': ['DPA'],
-  'people': ['Dana'],
-  'organizations': ['Acme'],
   'project': 'Acme renewal',
-  'intent': 'request',
-  'importance': 'high',
 };
 
 void main() {
@@ -1198,8 +1197,8 @@ void main() {
 
       Object? verdictWhenExtractRan;
       final llm = scriptedLlm(
-        extraction,
-        schemaName: 'extraction',
+        messageText,
+        schemaName: 'message_text',
         onCall: () async {
           verdictWhenExtractRan =
               (await store.getMessageRow('teams', 't1'))!['needs_you_verdict'];

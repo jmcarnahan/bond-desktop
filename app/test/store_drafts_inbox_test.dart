@@ -6,6 +6,7 @@ import 'package:bond_inbox/models/message_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// The two reads behind the Drafts & sent pane, and the two read-time columns
 /// on `loadConversations` that put a count on the rail beside them.
@@ -49,18 +50,17 @@ void main() {
     if (deadline != null) {
       // The one path that writes a deadline: triage reads it out of the
       // message in the sender's own words.
-      await store.writeTriage(
+      await writeTriaged(
+        store,
         source,
         id,
         status: 'triaged',
-        result: TriageResult(
-          urgency: 'normal',
-          category: 'work',
-          summary: 'the hero paragraph',
-          needsAction: true,
-          actionItems: const [],
-          deadline: deadline,
-        ),
+        urgency: 'normal',
+        category: 'work',
+        summary: 'the hero paragraph',
+        needsAction: true,
+        actionItems: const [],
+        deadline: deadline,
       );
     }
   }

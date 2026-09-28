@@ -674,21 +674,15 @@ const List<PipelineStageInfo> pipelineStages = [
     slot: ModelSlot.decide,
   ),
   PipelineStageInfo(
-    id: 'triage',
-    label: 'Triage',
-    description: 'Urgency, category, summary, action items',
-    slot: ModelSlot.generative,
-  ),
-  PipelineStageInfo(
     id: 'needs_you',
     label: 'Needs-you verdict',
     description: 'Whether a message wants the owner',
     slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
-    id: 'extraction',
-    label: 'Extraction',
-    description: 'Evidence, topics, people, intent, importance',
+    id: 'message_text',
+    label: 'Message text',
+    description: 'Summary, action items, deadline, topics, project',
     slot: ModelSlot.generative,
   ),
   PipelineStageInfo(

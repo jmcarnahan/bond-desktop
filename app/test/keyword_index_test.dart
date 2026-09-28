@@ -3,10 +3,10 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/keyword_index.dart';
 import 'package:bond_inbox/data/message_store.dart';
-import 'package:bond_inbox/models/message_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// The FTS5 tables' lifecycle: when they come into existence, what keeps them
 /// in step with the rows they are derived from, and what happens to them when
@@ -90,17 +90,16 @@ void main() {
     await seed('m1', subject: 'Weekly roundup', body: 'nothing much happened');
     expect(await find('escalator'), isEmpty);
 
-    await store.writeTriage(
+    await writeTriaged(
+      store,
       'email',
       'm1',
       status: 'triaged',
-      result: TriageResult(
-        urgency: 'normal',
-        category: 'work',
-        summary: 'The lease escalator changes in March.',
-        needsAction: false,
-        actionItems: const [],
-      ),
+      urgency: 'normal',
+      category: 'work',
+      summary: 'The lease escalator changes in March.',
+      needsAction: false,
+      actionItems: const [],
     );
 
     // `writeTriage` stamps `updated_at`, which is the whole reason the

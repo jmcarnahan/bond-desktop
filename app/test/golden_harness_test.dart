@@ -1,11 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/decision/decision_heads.dart';
+import 'package:bond_inbox/services/decision/decision_policy.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
-import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 import 'package:bond_inbox/services/storyline_service.dart'
@@ -13,6 +13,7 @@ import 'package:bond_inbox/services/storyline_service.dart'
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/bench_stats.dart';
+import 'fixtures/fake_decision_client.dart' show fakeAnswers;
 import 'fixtures/golden_gate.dart';
 import 'fixtures/golden_harness.dart';
 import 'fixtures/golden_prices.dart';
@@ -184,52 +185,118 @@ void main() {
 
   // ── results into run-file sections ────────────────────────────────────
   group('a stage result becomes the section the scorer reads', () {
-    test('triage copies every field', () {
-      final out = triageOut(const TriageResult(
-        urgency: 'high',
-        category: 'work',
-        label: 'lease addendum',
+    test('the message text copies every field', () {
+      final out = textOut(const MessageTextResult(
         summary: 'The allowance is capped.',
-        needsAction: true,
         actionItems: ['Answer by Friday'],
-        replyExpected: true,
         deadline: 'Friday',
+        topics: ['allowance'],
+        project: 'River Street office',
       ));
-      expect(out.urgency, 'high');
-      expect(out.category, 'work');
-      expect(out.label, 'lease addendum');
       expect(out.summary, 'The allowance is capped.');
-      expect(out.needsAction, isTrue);
       expect(out.actionItems, ['Answer by Friday']);
-      expect(out.replyExpected, isTrue);
       expect(out.deadline, 'Friday');
+      expect(out.topics, ['allowance']);
+      expect(out.project, 'River Street office');
     });
 
     test('a message that named no deadline keeps the empty string', () {
       // Never null: the run file's one trap is that an empty deadline is the
       // ANSWER "this message named none", while a null is a stage that never
       // ran, and the scorer reads the difference.
-      final out = triageOut(TriageResult.fallback());
+      final out = textOut(const MessageTextResult(summary: ''));
       expect(out.deadline, '');
     });
 
-    test('extraction copies every field', () {
-      final out = extractOut(const ExtractionResult(
-        evidence: 'capped at 18,000',
-        topics: ['allowance'],
-        people: ['Dana Whitfield'],
-        organizations: ['Harbor Lane'],
-        project: 'River Street office',
-        intent: 'request',
-        importance: 'high',
-      ));
-      expect(out.evidence, 'capped at 18,000');
-      expect(out.topics, ['allowance']);
-      expect(out.people, ['Dana Whitfield']);
-      expect(out.organizations, ['Harbor Lane']);
-      expect(out.project, 'River Street office');
-      expect(out.intent, 'request');
-      expect(out.importance, 'high');
+    test('the text completes the classifier sections, with no label or '
+        'evidence', () {
+      final entry = GoldenRunEntry(id: 'g1', stratum: 's', difficulty: 'd')
+        ..classifier = classifierOut(
+          fakeAnswers(needsYou: 0.9),
+          rule: DecisionGateRule.policy,
+        )
+        ..text = const GoldenTextOut(
+          summary: 'The allowance is capped.',
+          actionItems: ['Answer by Friday'],
+          deadline: 'Friday',
+          topics: ['allowance'],
+          project: 'River Street office',
+        )
+        ..needsYou = decidedNeedsYouOut(fakeAnswers(needsYou: 0.9));
+      final json = entry.toScoreRunJson();
+      final triage = json['triage']! as Map;
+      expect(triage['summary'], 'The allowance is capped.');
+      expect(triage['action_items'], ['Answer by Friday']);
+      expect(triage['deadline'], 'Friday');
+      expect(triage['category'], 'work');
+      expect(triage.containsKey('label'), isFalse);
+      final extract = json['extract']! as Map;
+      expect(extract['topics'], ['allowance']);
+      expect(extract['project'], 'River Street office');
+      expect(extract['intent'], 'fyi');
+      expect(extract.containsKey('evidence'), isFalse);
+      expect(extract.containsKey('people'), isFalse);
+      // The ladder's typed section wins the key.
+      expect(json['needs_you'], containsPair('verdict', true));
+      expect(json['needs_you'], containsPair('confidence', 'high'));
+    });
+
+    test('without text the classifier sections stay classification-only', () {
+      final entry = GoldenRunEntry(id: 'g1', stratum: 's', difficulty: 'd')
+        ..classifier = classifierOut(
+          fakeAnswers(),
+          rule: DecisionGateRule.policy,
+        );
+      final json = entry.toScoreRunJson();
+      expect((json['triage']! as Map).containsKey('summary'), isFalse);
+      expect((json['extract']! as Map).containsKey('topics'), isFalse);
+    });
+
+    test("the ladder settles outside the band and asks inside it", () {
+      GoldenNeedsYouOut? at(double p) =>
+          decidedNeedsYouOut(fakeAnswers(needsYou: p));
+      expect(at(0.65)!.verdict, isTrue);
+      expect(at(0.97)!.confidence, 'high');
+      expect(at(0.34)!.verdict, isFalse);
+      expect(at(0.05)!.confidence, 'high');
+      // The band: the generative model is asked, so the ladder says nothing.
+      expect(at(0.35), isNull);
+      expect(at(0.5), isNull);
+      expect(at(0.649), isNull);
+    });
+
+    test("a decided item carries the app's templated reason as evidence", () {
+      final yes = fakeAnswers(needsYou: 0.9, intent: 'approval');
+      expect(decidedNeedsYouOut(yes)!.evidence, needsYouYesReason(yes));
+      expect(decidedNeedsYouOut(fakeAnswers(needsYou: 0.1))!.evidence,
+          needsYouNoReason);
+      expect(
+        (GoldenRunEntry(id: 'g', stratum: 's', difficulty: 'd')
+              ..needsYou = decidedNeedsYouOut(yes))
+            .toScoreRunJson()['needs_you'],
+        containsPair('evidence', needsYouYesReason(yes)),
+      );
+    });
+
+    test('the text scores on its own when the decision failed', () {
+      final json = (GoldenRunEntry(id: 'g', stratum: 's', difficulty: 'd')
+            ..text = const GoldenTextOut(
+              summary: 'The allowance is capped.',
+              actionItems: ['Answer by Friday'],
+              deadline: 'Friday',
+              topics: ['allowance'],
+              project: 'River Street office',
+            ))
+          .toScoreRunJson();
+      expect(json['triage'], {
+        'deadline': 'Friday',
+        'summary': 'The allowance is capped.',
+        'action_items': ['Answer by Friday'],
+      });
+      expect(json['extract'], {
+        'project': 'River Street office',
+        'topics': ['allowance'],
+      });
     });
 
     test('a draft flattens its options and keeps its evidence', () {
@@ -548,44 +615,6 @@ void main() {
         reason: 'cap=$bad',
       );
     }
-  });
-
-  group('GOLDEN_EXTRACT_CTX names a rung extraction could actually be shown',
-      () {
-    test('the three rungs, in any case and with room around them', () {
-      expect(parseExtractCtx('none'), GoldenCtx.none);
-      expect(parseExtractCtx('TAIL3'), GoldenCtx.tail3);
-      expect(parseExtractCtx(' digest '), GoldenCtx.digest);
-    });
-
-    test('compressed is refused — extraction has no thread to ride in', () {
-      // That rung carries the digest as a synthetic thread message, and
-      // extraction has never quoted a thread. Accepting the name would
-      // quietly measure `none` under another label.
-      expect(
-        () => parseExtractCtx('compressed'),
-        throwsA(isA<ArgumentError>()
-            .having((e) => e.name, 'name', contains('GOLDEN_EXTRACT_CTX'))),
-      );
-    });
-
-    test('and so is anything else somebody typed', () {
-      for (final bad in const ['tail', '']) {
-        expect(
-          () => parseExtractCtx(bad),
-          throwsA(isA<ArgumentError>()),
-          reason: 'raw "$bad"',
-        );
-      }
-    });
-
-    test('with no define extraction reads the message alone', () {
-      // A bare `flutter test` passes none, and `none` is what the app itself
-      // gives extraction today — the control every extraction number so far
-      // was measured at.
-      expect(GoldenDefines.extractCtxRaw, 'none');
-      expect(parseExtractCtx(GoldenDefines.extractCtxRaw), GoldenCtx.none);
-    });
   });
 
   test("with no define the charter cap is the app's own", () {

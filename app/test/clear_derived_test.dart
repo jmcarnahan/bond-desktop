@@ -78,7 +78,7 @@ class _Handler extends WorkHandler {
 /// wants to stop the drain mid-flight returns a completer's future from it.
 ScriptedLlm _triageLlm({Future<void> Function()? hold}) => ScriptedLlm(
       answers: const {
-        'triage': {
+        'decision': {
           'urgency': 'normal',
           'category': 'work',
           'summary': 'Sarah asks about the launch date.',
@@ -1353,7 +1353,7 @@ void main() {
         first = false;
         return held.future;
       });
-      final queue = TriageQueue(store, llm, concurrency: 1);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1);
       addTearDown(queue.dispose);
 
       final drain = queue.pump();
@@ -1418,7 +1418,7 @@ void main() {
         first = false;
         return held.future;
       });
-      final queue = TriageQueue(store, llm, concurrency: 1);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1);
       addTearDown(queue.dispose);
 
       final drain = queue.pump();
@@ -1493,7 +1493,7 @@ void main() {
         first = false;
         return held.future;
       });
-      final queue = TriageQueue(store, llm, concurrency: 1);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1);
       addTearDown(queue.dispose);
 
       final drain = queue.pump();

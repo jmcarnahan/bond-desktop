@@ -5,13 +5,12 @@ import 'package:bond_inbox/services/llm/context_digest_task.dart';
 import 'package:bond_inbox/services/llm/context_select_task.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
-import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
-import 'package:bond_inbox/services/llm/triage_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The authored stage table, held against the pipeline it claims to describe.
@@ -25,9 +24,8 @@ import 'package:flutter_test/flutter_test.dart';
 /// The `schemaName` of every task that makes a model call, built from real
 /// instances so a renamed schema fails this file rather than drifting.
 Set<String> taskSchemaNames() => {
-      const TriageTask().schemaName,
       const NeedsYouTask().schemaName,
-      const ExtractTask().schemaName,
+      const MessageTextTask().schemaName,
       const AttachmentDigestTask().schemaName,
       const ContextDigestTask().schemaName,
       const ContextBriefTask().schemaName,
@@ -98,9 +96,8 @@ void main() {
     // round (the fast and prose slots merged), and the decision model is a
     // role of its own.
     expect(idsOn(ModelSlot.generative), {
-      'triage',
       'needs_you',
-      'extraction',
+      'message_text',
       'attachment_digest',
       'context_file_digest',
       'context_brief',
@@ -116,6 +113,17 @@ void main() {
     });
     expect(idsOn(ModelSlot.decide), {'decision'});
     expect(idsOn(ModelSlot.embed), {'embeddings'});
+  });
+
+  test('one text row per message, where triage and extraction were', () {
+    final ids = [for (final stage in pipelineStages) stage.id];
+    expect(ids, isNot(contains('triage')));
+    expect(ids, isNot(contains('extraction')));
+    final text = pipelineStages.singleWhere((s) => s.id == 'message_text');
+    expect(text.label, 'Message text');
+    expect(text.description,
+        'Summary, action items, deadline, topics, project');
+    expect(text.slot, ModelSlot.generative);
   });
 
   test('the decision row comes first, and has no schema of its own', () {

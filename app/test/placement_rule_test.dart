@@ -74,8 +74,9 @@ void main() {
         expect(spec.url, 'http://127.0.0.1:8080/v1/chat/completions');
         expect(spec.model, routerProseId, reason: id);
       }
-      // Fifteen, so the list has not quietly shrunk.
-      expect(generativeStages, hasLength(15));
+      // Fourteen (triage and extraction became message_text), so the list
+      // has not quietly shrunk.
+      expect(generativeStages, hasLength(14));
     });
 
     test('managed on the inbox tier: the 4B', () {
@@ -129,7 +130,7 @@ void main() {
       expect(const AppPrefs().specForStage('storyline_membership')!.id,
           localGenerativeId);
       expect(onBox.specForStage('storyline_membership'),
-          onBox.specForStage('triage'));
+          onBox.specForStage('message_text'));
     });
 
     test('the discovered model name is asked for, and the wire read off the '
@@ -186,7 +187,7 @@ void main() {
       expect(spec.url, '$url/decide/v1/embeddings');
       expect(spec.model, boxDecideModel);
       // And the text stages are untouched by it.
-      expect(prefs.specForStage('triage')!.id, localGenerativeId);
+      expect(prefs.specForStage('message_text')!.id, localGenerativeId);
     });
 
     test('your server with no address is this Mac', () {
@@ -293,14 +294,14 @@ void main() {
       // that claims a key it does not hold, because that is one
       // unauthenticated request per stage.
       expect(prefs.state.boxBigKeyStored, isFalse);
-      expect(prefs.state.specForStage('triage')!.hasBearer, isFalse);
-      expect(prefs.targetForStage('triage').bearer, isNull);
+      expect(prefs.state.specForStage('message_text')!.hasBearer, isFalse);
+      expect(prefs.targetForStage('message_text').bearer, isNull);
 
       await prefs.ready;
 
       expect(prefs.state.boxBigKeyStored, isTrue);
-      expect(prefs.state.specForStage('triage')!.hasBearer, isTrue);
-      expect(prefs.targetForStage('triage').bearer, key);
+      expect(prefs.state.specForStage('message_text')!.hasBearer, isTrue);
+      expect(prefs.targetForStage('message_text').bearer, key);
       expect(prefs.targetForStage('draft_reply').bearer, key);
       // The decision model runs here, so the generative key never rides it.
       expect(prefs.targetForStage('decision').bearer, isNull);
@@ -381,7 +382,7 @@ void main() {
       // And the map is EMPTY: nothing routes through it any more.
       expect(await store.getPref(stageTargetsKey), isEmpty);
       // Routing is the rule.
-      expect(prefs.specForStage('triage')!.id, boxProseId);
+      expect(prefs.specForStage('message_text')!.id, boxProseId);
       expect(prefs.specForStage('draft_improve')!.id, boxProseId);
     });
 
@@ -424,7 +425,7 @@ void main() {
 
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'], key);
       expect(prefs.state.boxBigKeyStored, isTrue);
-      expect(prefs.targetForStage('triage').bearer, key);
+      expect(prefs.targetForStage('message_text').bearer, key);
     });
 
     test('a fresh install writes the flags and nothing else', () async {

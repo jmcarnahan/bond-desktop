@@ -6,7 +6,6 @@ import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/context_models.dart';
 import 'package:bond_inbox/models/home_models.dart';
-import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/embed_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/message_search.dart';
@@ -18,6 +17,7 @@ import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
 import 'fixtures/fake_embed_server.dart' show embedDims;
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 import 'fixtures/vec_test_db.dart';
 
 /// A full-width vector with a few named axes set — everything else zero.
@@ -253,17 +253,16 @@ void main() {
         'received_at': receivedAt,
         'body_text': body,
       });
-      await store.writeTriage(
+      await writeTriaged(
+        store,
         source,
         id,
         status: 'triaged',
-        result: TriageResult(
-          urgency: 'normal',
-          category: 'work',
-          summary: subject,
-          needsAction: false,
-          actionItems: const [],
-        ),
+        urgency: 'normal',
+        category: 'work',
+        summary: subject,
+        needsAction: false,
+        actionItems: const [],
       );
     }
 

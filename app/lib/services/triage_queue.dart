@@ -4,7 +4,6 @@ import '../data/message_store.dart';
 import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
-import 'deadline_parse.dart' show showableDeadline;
 import 'decision/decision_client.dart';
 import 'decision/decision_heads.dart';
 import 'decision/decision_input.dart';
@@ -12,9 +11,8 @@ import 'decision/decision_policy.dart';
 import 'drain_gate.dart';
 import 'gates.dart';
 import 'backend/backend_types.dart';
-import 'llm/json_task.dart';
+import 'conversation_cta.dart';
 import 'llm/llm_client.dart';
-import 'llm/triage_task.dart';
 import 'owner_lookup.dart';
 import 'pipeline_progress.dart';
 
@@ -126,12 +124,7 @@ class TriageQueue {
   /// worth more than it is.
   static const int _maxAttempts = 2;
 
-  /// A conversation row's CTA is one line in a list, and the model was told to
-  /// write imperatives — this is a backstop, not a formatting step.
-  static const int _ctaCap = 200;
-
   final MessageStore _store;
-  final LlmClient _client;
   final DrainGate _gate;
 
   /// Fetches one message's body and headers into the store — in the app,
@@ -237,12 +230,12 @@ class TriageQueue {
   /// rebuild.
   final bool Function()? _enabled;
 
-  /// The decision model, which classifies every kept message before the text
-  /// call: the learned gate, urgency, category, needs_action and
-  /// reply_expected. The app ALWAYS passes one ([triageQueueProvider]); null
-  /// is a TEST SEAM that keeps the language model's own classification, so
-  /// the tests written before the decision model still describe a queue.
-  final DecisionClient? _decisionClient;
+  /// The decision model, which classifies every kept message: the learned
+  /// gate, urgency, category, needs_action and reply_expected. It is the only
+  /// model this queue calls — the message's text (summary, action items,
+  /// deadline) is the message-text stage's, on the fast lane behind it — so
+  /// it is required: there is no triage without it.
+  final DecisionClient _decisionClient;
 
   /// Who the owner is, for the decision state's owner line — a keychain read
   /// in the app. NEVER awaited by a claim: [_askOwner] starts it at a pump
@@ -256,8 +249,8 @@ class TriageQueue {
   bool _ownerAsking = false;
 
   TriageQueue(
-    this._store,
-    this._client, {
+    this._store, {
+    required this._decisionClient,
     this._userAddress,
     this._ensureBody,
     DrainGate? gate,
@@ -267,7 +260,6 @@ class TriageQueue {
     this._enabled,
     this._onDrained,
     this._onGated,
-    this._decisionClient,
     this._owner,
   })  : _gate = gate ?? DrainGate(),
         _log = activityLog ?? ActivityLog.disabled(),
@@ -687,21 +679,15 @@ class TriageQueue {
       return true;
     }
 
-    // The thread is context for `reply_expected`: an unanswered question a few
-    // messages back still expects an answer, and this message on its own does
-    // not say so. Only what came BEFORE it — a later message is not context
-    // for a judgement about this one. TriageTask takes the last few.
-    // Names and sizes, never contents: the line this feeds is metadata the
-    // connector already wrote, so it costs a local query and no network at all.
-    // The rows are here by now for mail because the detail fetch above wrote
-    // them, and for chat because the ingest loop did; a failed fetch simply
-    // leaves the list empty and the line absent.
+    // The decision state's inputs. The attachment rows are metadata the
+    // connector already wrote — a local query, no network: here by now for
+    // mail because the detail fetch above wrote them, and for chat because
+    // the ingest loop did; a failed fetch leaves the list empty. They are
+    // hydrated onto the message because the state renders an empty body as
+    // "Shared a file: …" from them, so a chat message that is nothing but a
+    // dropped contract is not judged as blank.
     final attachments = await _store.attachmentsForMessage(source, id);
     final key = current['conversation_key'] as String?;
-    // Hydrated from the rows just read — `loadThread` does this for a whole
-    // thread; a single-row read has to ask. The block the model sees
-    // synthesises "Shared a file: …" from these, so a chat message that is
-    // nothing but a dropped contract stops arriving with an empty body.
     if (attachments.isNotEmpty) {
       message = message.withAttachments([
         for (final row in attachments)
@@ -709,6 +695,10 @@ class TriageQueue {
       ]);
     }
 
+    // The thread is context for `reply_expected` and needs-you: an unanswered
+    // question a few messages back still expects an answer. Only what came
+    // BEFORE this message — a later one is not context for a judgement about
+    // it. The decision state takes the last three.
     var thread = const <Message>[];
     if (key != null && key.isNotEmpty) {
       final loaded = await _store.loadThread(key, sources: [source]);
@@ -723,84 +713,89 @@ class TriageQueue {
 
     try {
       // The decision pass: one forward pass of the decision model answers
-      // every classification question from the message's rendered state,
-      // before any language-model call. INSIDE this try on purpose: a
+      // every classification question from the message's rendered state. It
+      // is the only model call triage makes — the text is the message-text
+      // stage's, behind it on the fast lane. INSIDE this try on purpose: a
       // decision server that is down throws [DecisionUnavailableException],
       // an [LlmUnavailableException], so the message parks under
-      // `decision_unavailable` exactly as it parks for the text model, and an
-      // unusable answer is a failure that spends an attempt.
-      final decisionClient = _decisionClient;
-      DecisionResult? decided;
-      if (decisionClient != null) {
-        final owner = decisionOwnerString(_ownerKnown);
-        decided = await decisionClient.decide(DecisionInput.fromRows(
-          message: message,
-          thread: thread,
-          attachments: message.attachments,
-          owner: owner,
-        ));
-        await _store.writeDecision(
+      // `decision_unavailable`, and an unusable answer is a failure that
+      // spends an attempt.
+      final owner = decisionOwnerString(_ownerKnown);
+      final decided = await _decisionClient.decide(DecisionInput.fromRows(
+        message: message,
+        thread: thread,
+        attachments: message.attachments,
+        owner: owner,
+      ));
+      await _store.writeDecision(
+        source,
+        id,
+        decided,
+        qhash: DecisionHeads.expectedQhash,
+        ownerKnown: owner != null,
+      );
+
+      // The learned gate, after the rules gates and under the same escape
+      // hatch: a message the owner restored is never gated again. Shaped
+      // like the header gate above, plus an activity row, because unlike a
+      // rules gate this one DID consult a model.
+      final learned = overridden ? null : learnedGateReason(decided.answers);
+      if (learned != null) {
+        await _writeTriage(
           source,
           id,
-          decided,
-          qhash: DecisionHeads.expectedQhash,
-          ownerKnown: owner != null,
+          status: 'skipped',
+          gateReason: learned,
         );
-
-        // The learned gate, after the rules gates and under the same escape
-        // hatch: a message the owner restored is never gated again. Shaped
-        // like the header gate above, plus an activity row, because unlike a
-        // rules gate this one DID consult a model.
-        final learned =
-            overridden ? null : learnedGateReason(decided.answers);
-        if (learned != null) {
-          await _writeTriage(
-            source,
-            id,
-            status: 'skipped',
-            gateReason: learned,
-          );
-          await _store.refoldThreadState(source, id, restored: false);
-          await _notifyGated(source, id);
-          await _log.record(
-            'triage',
-            status: 'skipped',
-            source: source,
-            entityId: id,
-            durationMs: sw.elapsedMilliseconds,
-            detail: {
-              // `reason` is what the activity panel prints on a skipped row.
-              'reason': learned,
-              'gate': learned,
-              'learned': true,
-              'gate_p': _p2(decided.answers.p('gate', 'drop')),
-              'decision_ms': decided.latencyMs,
-            },
-          );
-          await _emit();
-          return true;
-        }
+        await _store.refoldThreadState(source, id, restored: false);
+        await _notifyGated(source, id);
+        await _log.record(
+          'triage',
+          status: 'skipped',
+          source: source,
+          entityId: id,
+          durationMs: sw.elapsedMilliseconds,
+          detail: {
+            // `reason` is what the activity panel prints on a skipped row.
+            'reason': learned,
+            'gate': learned,
+            'learned': true,
+            'gate_p': _p2(decided.answers.p('gate', 'drop')),
+            'decision_ms': decided.latencyMs,
+          },
+        );
+        await _emit();
+        return true;
       }
 
-      final text = await runTask(
-        _client,
-        const TriageTask(),
-        TriageInput(
-          message,
-          DateTime.now(),
-          thread: thread,
-          attachments: attachments,
-        ),
+      // The row, from the decision alone, written ONCE: the rail,
+      // notify-worthy and the bucket filing react now, and the text fills in
+      // when the message-text stage lands (it refolds the CTA then).
+      final result = decidedTriage(decided.answers);
+      await _writeTriage(
+        source,
+        id,
+        status: 'triaged',
+        result: result,
       );
-      // The text call's summary, action items, deadline and label, under the
-      // decision model's classification. Written ONCE, so no reader ever sees
-      // the language model's urgency flash past on its way out.
-      final result = decided == null ? text : _merged(text, decided.answers);
-      await _writeTriage(source, id, status: 'triaged', result: result);
-      await _foldUp(source, current, message, result);
-      // What the models decided, on the row. The `llm_*` tally the text call
-      // reported folds in from the log's pending slot; the decision's numbers
-      // ride in their own key, because the log keeps one label per span.
+      // The decision's urgency and category onto the thread now. The ask is
+      // the text's: on a new message (no summary yet) the thread's current
+      // ask is left alone until the text lands; a re-triaged message whose
+      // text already landed folds its ask from that text again.
+      await foldCtaUp(
+        _store,
+        source,
+        current,
+        urgency: result.urgency,
+        category: result.category,
+        needsAction: result.needsAction,
+        summary: message.summary ?? '',
+        actionItems: message.actionItems,
+        deadline: message.deadline ?? '',
+        textLanded: message.summary != null,
+      );
+      // What the decision model said, on the row. Its numbers ride in their
+      // own key as well, because the log keeps one label per span.
       await _log.record(
         'triage',
         source: source,
@@ -810,10 +805,8 @@ class TriageQueue {
           'urgency': result.urgency,
           'category': result.category,
           'needs_action': result.needsAction,
-          'action_items': result.actionItems.length,
           'reply_expected': result.replyExpected,
-          if (result.deadline.isNotEmpty) 'deadline': result.deadline,
-          if (decided != null) 'decision': decisionLine(decided),
+          'decision': decisionLine(decided),
         },
       );
       await _emit();
@@ -876,18 +869,16 @@ class TriageQueue {
     ).whenComplete(() => _ownerAsking = false);
   }
 
-  /// The text call's result with the decision model's classification laid
-  /// over it: urgency and category are the heads' choices, and the two
-  /// booleans are their yes-probabilities against the policy bars
-  /// (`booleanYes` for needs_action, `replyYes` for reply_expected).
-  static TriageResult _merged(TriageResult text, DecisionAnswers a) =>
-      text.copyWith(
+  /// The row state the decision model's answers make: urgency and category
+  /// are the heads' choices, and the two booleans are their
+  /// yes-probabilities against the policy bars (`booleanYes` for
+  /// needs_action, `replyYes` for reply_expected). No text: the
+  /// message-text stage writes that.
+  static TriageResult decidedTriage(DecisionAnswers a) => TriageResult(
         urgency: a['urgency'].choice,
         category: a['category'].choice,
-        needsAction:
-            a.p('needs_action', 'yes') >= DecisionPolicy.booleanYes,
-        replyExpected:
-            a.p('reply_expected', 'yes') >= DecisionPolicy.replyYes,
+        needsAction: a.p('needs_action', 'yes') >= DecisionPolicy.booleanYes,
+        replyExpected: a.p('reply_expected', 'yes') >= DecisionPolicy.replyYes,
       );
 
   static String _p2(double p) => p.toStringAsFixed(2);
@@ -1054,79 +1045,6 @@ class TriageQueue {
     );
     await _emit();
     return true;
-  }
-
-  /// Copies one message's result up onto its conversation — but only when the
-  /// message is the thread's newest inbound, and only while the user has not
-  /// already replied to it.
-  ///
-  /// Without the newest-inbound check a backlog would end up showing the wrong
-  /// ask: the worker runs newest-first, so an older message finishing later
-  /// would overwrite a current CTA with one from last week.
-  ///
-  /// Without the already-replied check a RE-triage would resurrect a dead ask.
-  /// Ingest clears the CTA on exactly the outbound that answers it
-  /// ([outboundResolves]); anything that sends the same message through triage
-  /// again afterwards — a re-judgment backfill, an error revive, a reply that
-  /// lands before the first drain gets there — would write that ask straight
-  /// back, along with the urgency multiplier that pushes an answered thread
-  /// into Needs You. The tie goes to the reply, matching [outboundResolves]:
-  /// an outbound at the same instant as the inbound counts as the answer.
-  Future<void> _foldUp(
-    String source,
-    Map<String, Object?> row,
-    Message message,
-    TriageResult result,
-  ) async {
-    final key = row['conversation_key'] as String?;
-    if (key == null || key.isEmpty) return;
-    final conversation = await _store.getConversationRow(source, key);
-    if (conversation == null) return;
-
-    final lastInbound = conversation['last_inbound_at'] as String?;
-    final receivedAt = message.receivedAt ?? '';
-    if (lastInbound != null &&
-        lastInbound.isNotEmpty &&
-        receivedAt.compareTo(lastInbound) < 0) {
-      return;
-    }
-
-    final lastOutbound = conversation['last_outbound_at'] as String?;
-    if (lastOutbound != null &&
-        lastOutbound.isNotEmpty &&
-        lastOutbound.compareTo(receivedAt) >= 0) {
-      return;
-    }
-
-    // The first action item is the ask, in the imperative the model was asked
-    // for. With no items, a summary stands in only when the message actually
-    // needs something — a summary shown as a CTA on mail that needs nothing
-    // reads as work that isn't there.
-    var ask = result.actionItems.isNotEmpty
-        ? result.actionItems.first
-        : (result.needsAction ? result.summary : null);
-
-    // The deadline rides the banner for free — "Send the invoice — by Friday"
-    // is the line the row wanted anyway. Appended BEFORE the clamp below, so
-    // the pair stays honest: a long ask loses its own tail rather than ending
-    // up with a deadline the cap would have cut in half. Through
-    // [showableDeadline], because this WRITES the banner: "— by Day 1"
-    // stamped here would outlive every display-time filter.
-    final deadline =
-        showableDeadline(result.deadline, now: DateTime.now());
-    if (ask != null && ask.isNotEmpty && deadline != null) {
-      ask = '$ask — by $deadline';
-    }
-
-    await _store.updateConversationTriage(
-      source,
-      key,
-      ctaText: (ask == null || ask.isEmpty)
-          ? null
-          : (ask.length > _ctaCap ? ask.substring(0, _ctaCap) : ask),
-      ctaUrgency: result.urgency,
-      category: result.category,
-    );
   }
 
   /// Awaited by every caller, never fired and forgotten: the counts are read

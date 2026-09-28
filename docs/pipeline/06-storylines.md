@@ -1843,7 +1843,7 @@ the stored one, where naming substitutes `Untitled storyline`.
 slot**, **temperature 0**. Two fences (`storyline` with the title, charter and
 previous recap; `messages` with the window). Four fields: `evidence`, then a
 2–4 sentence present-tense `recap`, then `open_items` and `decisions` as plain
-string arrays — the shape `triage_task.dart` proves this server's grammar
+string arrays — the shape `message_text_task.dart` proves this server's grammar
 converter handles, no `$defs`. The previous recap rides *inside* the fence
 even though this app stored it: a model wrote it out of other people's mail,
 and text laundered through one of our own columns is still theirs. Its

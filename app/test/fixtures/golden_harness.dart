@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/decision/decision_input.dart';
@@ -8,8 +7,8 @@ import 'package:bond_inbox/services/decision/decision_policy.dart';
 import 'package:bond_inbox/services/decision/decision_state.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
-import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 // `show`: the two things this file wants from the storyline service are the
@@ -55,22 +54,12 @@ class GoldenDefines {
   /// How many items are in flight at once.
   static const int k = int.fromEnvironment('GOLDEN_K', defaultValue: 1);
 
-  /// Which context rung triage and needs-you are shown, by name. Parsed by
-  /// `parseGoldenCtx`, which refuses anything that is not a rung.
+  /// Which context rung the message text and needs-you are shown, by name.
+  /// Parsed by `parseGoldenCtx`, which refuses anything that is not a rung.
+  /// (Extraction's own axis, `GOLDEN_EXTRACT_CTX`, went with the extraction
+  /// call: the text stage reads the tail the retired triage call read.)
   static const String ctxRaw =
       String.fromEnvironment('GOLDEN_CTX', defaultValue: 'tail3');
-
-  /// Which context rung EXTRACTION is shown, by name — its own axis, parsed
-  /// by `parseExtractCtx`.
-  ///
-  /// Separate from `GOLDEN_CTX` because the app's two halves are not the same
-  /// today: triage and needs-you read the last three thread messages and
-  /// extraction reads the message alone. Defaulting to `none` is what keeps
-  /// that true — a replay that moved extraction whenever triage moved could
-  /// never say which of the two a number came from, and `none` is the control
-  /// every extraction figure so far was measured at.
-  static const String extractCtxRaw =
-      String.fromEnvironment('GOLDEN_EXTRACT_CTX', defaultValue: 'none');
 
   /// The gold storyline registry — the thirty efforts a storyline replay files
   /// candidates into, and the anti-storylines it must not. Machine-local like
@@ -280,25 +269,6 @@ GoldenClassifierOut classifierOut(
   );
 }
 
-/// Reads the `GOLDEN_EXTRACT_CTX` define. Case-insensitive, and loud rather
-/// than defaulted for `parseGoldenCtx`'s reason: a typo would silently bench
-/// the wrong rung.
-///
-/// `compressed` is refused rather than accepted. That rung rides the digest
-/// in as a synthetic thread message, and extraction has never quoted a thread
-/// at all — there is no slot for it to ride in, so the name means nothing
-/// here and accepting it would quietly measure `none`.
-GoldenCtx parseExtractCtx(String raw) => switch (raw.trim().toLowerCase()) {
-      'none' => GoldenCtx.none,
-      'tail3' => GoldenCtx.tail3,
-      'digest' => GoldenCtx.digest,
-      _ => throw ArgumentError.value(
-          raw,
-          'GOLDEN_EXTRACT_CTX',
-          'must be one of none, tail3, digest',
-        ),
-    };
-
 /// `SWEEP_EMBED_PREFIX`'s three readings, apart from the define so they can be
 /// pinned without one.
 ///
@@ -399,35 +369,49 @@ int checkCharterCap(int cap) {
   return cap;
 }
 
-/// Triage's answer, as the run file records it.
-///
-/// A straight copy, and it has to stay one: the scorer reads these fields by
-/// name, so anything clever here would be scoring a transformation rather than
-/// the model. `deadline` needs no null guard because `TriageTask.validate`
-/// already clamps it to a string — the empty one meaning "this message named
-/// no deadline", which is an answer and scores as one.
-GoldenTriageOut triageOut(TriageResult r) => GoldenTriageOut(
-      category: r.category,
-      urgency: r.urgency,
-      needsAction: r.needsAction,
-      replyExpected: r.replyExpected,
-      deadline: r.deadline,
-      label: r.label,
+/// The message-text stage's answer, as the run file records it. A straight
+/// copy: the scorer reads these fields by name, so anything clever here would
+/// be scoring a transformation rather than the model. `deadline` needs no null
+/// guard because `MessageTextTask.validate` already clamps it to a string —
+/// the empty one meaning "this message named no deadline", which is an answer.
+GoldenTextOut textOut(MessageTextResult r) => GoldenTextOut(
       summary: r.summary,
       actionItems: r.actionItems,
+      deadline: r.deadline,
+      topics: r.topics,
+      project: r.project,
     );
 
-/// Extraction's answer, as the run file records it. A straight copy, for
-/// [triageOut]'s reason.
-GoldenExtractOut extractOut(ExtractionResult r) => GoldenExtractOut(
-      intent: r.intent,
-      importance: r.importance,
-      project: r.project,
-      topics: r.topics,
-      people: r.people,
-      organizations: r.organizations,
-      evidence: r.evidence,
+/// The needs-you answer the app's ladder settles from the decision model
+/// alone, or null when p(yes) sits in the band and the generative model is
+/// asked (`NeedsYouHandler`, D6): yes at [DecisionPolicy.needsYouYes] and
+/// above, no below [DecisionPolicy.needsYouNo]. The confidence word is the
+/// head's, as the decision leg records it, and the evidence is the app's own
+/// TEMPLATED `needs_you_reason` ([needsYouYesReason] / [needsYouNoReason]),
+/// so a decided item carries evidence the way the app's row does.
+///
+/// The ONE bar the replay cannot reproduce is the cold-outreach one
+/// ([DecisionPolicy.needsYouYesCold]): the app decides "cold" from the
+/// owner's own sender history, which a golden item does not carry, so the
+/// replay uses the ordinary bar throughout.
+GoldenNeedsYouOut? decidedNeedsYouOut(DecisionAnswers a) {
+  final pYes = a.p('needs_you', 'yes');
+  if (pYes >= DecisionPolicy.needsYouYes) {
+    return GoldenNeedsYouOut(
+      verdict: true,
+      confidence: decisionConfidenceWord(pYes),
+      evidence: needsYouYesReason(a),
     );
+  }
+  if (pYes < DecisionPolicy.needsYouNo) {
+    return GoldenNeedsYouOut(
+      verdict: false,
+      confidence: decisionConfidenceWord(pYes),
+      evidence: needsYouNoReason,
+    );
+  }
+  return null;
+}
 
 /// The needs-you answer, as the HANDLER would have written it down.
 ///

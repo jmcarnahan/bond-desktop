@@ -145,7 +145,7 @@ class NeedsYouInput {
   final String? ownerName;
   final String? ownerAddress;
 
-  /// Injected for the same reason `TriageInput.now` is: so a test can pin the
+  /// Injected for the same reason `MessageTextInput.now` is: so a test can pin the
   /// date anchor, and so the anchor is the owner's local day.
   final DateTime now;
 

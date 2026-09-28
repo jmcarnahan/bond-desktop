@@ -21,7 +21,6 @@ import 'package:http/testing.dart';
 
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/memory_token_store.dart';
-import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// The one sentence that tells somebody the pipeline is stuck, and why.
@@ -68,7 +67,8 @@ class _FakeSync implements MailSync {
 
 /// A triage queue that drains nothing and publishes whatever a test pushes.
 class _FeedTriage extends TriageQueue {
-  _FeedTriage(MessageStore store) : super(store, ScriptedLlm.never());
+  _FeedTriage(super.store)
+      : super(decisionClient: FakeDecisionClient.never());
 
   final StreamController<TriageProgress> _feed =
       StreamController<TriageProgress>.broadcast();

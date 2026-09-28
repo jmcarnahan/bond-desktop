@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/message_models.dart';
 import '../services/decision/stored_decision.dart';
-import '../services/llm/extract_task.dart' show ExtractionResult;
+import '../models/extraction_models.dart';
 import 'app_providers.dart';
 
 /// Which message the Why panel is explaining.

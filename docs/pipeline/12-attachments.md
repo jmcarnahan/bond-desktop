@@ -51,9 +51,10 @@ never one per message. A handler that read a SINGLE row with `getMessageRow`
 gets no such hydration, so needs-you, extraction, drafting and the digest
 handler each hydrate the message they judge — `MessageStore.attachmentRefsFor`,
 guarded on the row's own `has_attachments` — before it reaches a prompt
-builder. Triage is the exception in mechanism and not in outcome: `TriageQueue`
-reads `attachmentsForMessage` unconditionally into `TriageInput.attachments`,
-because it wants the raw rows for the attachment line rather than refs. Without
+builder. The message-text stage (which replaced triage's text call) does both:
+it hydrates the refs and reads `attachmentsForMessage` into
+`MessageTextInput.attachments`, because it wants the raw rows for the
+attachment line; triage hydrates refs for the decision input. Without
 one or the other, a chat message whose whole body is a marker arrives at the
 model empty.
 

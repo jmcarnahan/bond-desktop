@@ -853,88 +853,44 @@ class Message {
   }
 }
 
-/// What the triage model returns for one inbound message. The store writes
-/// these fields onto the message row.
+/// What triage decides about one inbound message — the decision model's
+/// classification, which [MessageStore.writeTriage] writes onto the row.
+///
+/// Classification ONLY since the decision-model round's Phase 6: the text
+/// (summary, action items, deadline) is the message-text stage's, written by
+/// `MessageStore.writeMessageText`, and the retired triage call's `label` has
+/// no writer at all.
 @immutable
 class TriageResult {
   final String urgency;
   final String category;
-
-  /// A couple of free-text words naming what the message is about ("dinner
-  /// plans", "invoice"). Empty when the model offered none — the store writes
-  /// it as-is, and an empty label renders as no label.
-  final String label;
-  final String summary;
   final bool needsAction;
-  final List<String> actionItems;
 
   /// Whether the sender is waiting on an answer from the owner. Stored as the
   /// message's `reply_expected`, which is what turns a NULL (never judged by
   /// v2) into a judgement.
   final bool replyExpected;
 
-  /// The date or timeframe the message named, in its own words. Empty when it
-  /// named none — the store writes that as NULL, the same rule [label] takes.
-  final String deadline;
-
   const TriageResult({
     required this.urgency,
     required this.category,
-    this.label = '',
-    required this.summary,
     required this.needsAction,
-    required this.actionItems,
     this.replyExpected = false,
-    this.deadline = '',
   });
 
-  /// What a message gets when the model fails or answers unparseably: the
-  /// quiet middle. Never a guess that would push mail up the list.
+  /// The quiet middle. Never a guess that would push mail up the list.
   factory TriageResult.fallback() => const TriageResult(
         urgency: 'normal',
         category: 'other',
-        label: '',
-        summary: '',
         needsAction: false,
-        actionItems: [],
-        replyExpected: false,
-        deadline: '',
       );
 
-  /// This result with the classification fields replaced — how the triage
-  /// queue lays the decision model's answers over the text call's.
-  TriageResult copyWith({
-    String? urgency,
-    String? category,
-    bool? needsAction,
-    bool? replyExpected,
-  }) =>
-      TriageResult(
-        urgency: urgency ?? this.urgency,
-        category: category ?? this.category,
-        label: label,
-        summary: summary,
-        needsAction: needsAction ?? this.needsAction,
-        actionItems: actionItems,
-        replyExpected: replyExpected ?? this.replyExpected,
-        deadline: deadline,
+  factory TriageResult.fromJson(Map<String, dynamic> json) => TriageResult(
+        urgency: json['urgency'] as String? ?? 'normal',
+        category: json['category'] as String? ?? 'other',
+        needsAction: json['needs_action'] as bool? ?? false,
+        replyExpected: json['reply_expected'] as bool? ?? false,
       );
-
-  factory TriageResult.fromJson(Map<String, dynamic> json) {
-    final rawActionItems = json['action_items'] as List<dynamic>?;
-    return TriageResult(
-      urgency: json['urgency'] as String? ?? 'normal',
-      category: json['category'] as String? ?? 'other',
-      label: json['label'] as String? ?? '',
-      summary: json['summary'] as String? ?? '',
-      needsAction: json['needs_action'] as bool? ?? false,
-      actionItems: [
-        for (final a in rawActionItems ?? const []) a.toString(),
-      ],
-      replyExpected: json['reply_expected'] as bool? ?? false,
-      deadline: json['deadline'] as String? ?? '',
-    );
-  }
 }
 
 /// The activity panel's header numbers, computed over one window of

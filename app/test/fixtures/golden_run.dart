@@ -164,6 +164,31 @@ class GoldenClassifierOut {
   });
 }
 
+/// The message-text stage's answer for one item (`MessageTextTask`): the text
+/// half of what the retired triage and extraction calls answered between
+/// them. Written only beside a [GoldenClassifierOut], whose sections it
+/// completes: summary, action items and deadline under `triage`, topics and
+/// project under `extract`. No `label` and no `evidence` — neither exists any
+/// more, and the scorer reads a missing key as "not attempted".
+class GoldenTextOut {
+  final String summary;
+  final List<String> actionItems;
+
+  /// Empty string when the message named none — an ANSWER, see the note at
+  /// the top of this file.
+  final String deadline;
+  final List<String> topics;
+  final String project;
+
+  const GoldenTextOut({
+    required this.summary,
+    this.actionItems = const [],
+    this.deadline = '',
+    this.topics = const [],
+    this.project = '',
+  });
+}
+
 /// A drafted reply, for the rubric judge.
 class GoldenDraftOut {
   final String body;
@@ -210,9 +235,10 @@ class GoldenCall {
 /// each in its own `try`, so a stage that throws leaves its section absent
 /// and the rest of the row still scores.
 ///
-/// [calls] is keyed by stage — `triage`, `needs_you`, `extraction`,
+/// [calls] is keyed by stage — `decision`, `message_text`, `needs_you`,
 /// `reply_decision`, `draft_reply`, `storyline_membership` — the same words
-/// the tasks use for their labels.
+/// the tasks use for their labels (older run files carry `triage` and
+/// `extraction`).
 class GoldenRunEntry {
   final String id;
 
@@ -239,9 +265,15 @@ class GoldenRunEntry {
   GoldenDraftOut? draft;
 
   /// The decision model's classification-only answer. A run that sets it
-  /// sets none of [gate], [triage], [extract] or [needsYou]; if one of those
-  /// is set as well, the typed section wins its key.
+  /// sets none of [gate], [triage] or [extract]; if one of those is set as
+  /// well, the typed section wins its key. [needsYou] beside it is the app's
+  /// ladder (the `triage` leg) and wins the `needs_you` key.
   GoldenClassifierOut? classifier;
+
+  /// The message-text stage's answer, merged into [classifier]'s `triage`
+  /// and `extract` sections — or written as those sections on its own when
+  /// the item has no [classifier] (its decision call failed).
+  GoldenTextOut? text;
 
   final Map<String, GoldenCall> calls = {};
 
@@ -317,6 +349,19 @@ class GoldenRunEntry {
             'urgency': classifier!.urgency,
             'needs_action': classifier!.needsAction,
             'reply_expected': classifier!.replyExpected,
+            if (text != null) ...{
+              'deadline': text!.deadline,
+              'summary': text!.summary,
+              'action_items': text!.actionItems,
+            },
+          }
+        else if (text != null)
+          // The decision failed on this item and the text did not: the text
+          // still scores.
+          'triage': {
+            'deadline': text!.deadline,
+            'summary': text!.summary,
+            'action_items': text!.actionItems,
           },
         if (extract != null)
           'extract': {
@@ -332,6 +377,15 @@ class GoldenRunEntry {
           'extract': {
             'intent': classifier!.intent,
             'importance': classifier!.importance,
+            if (text != null) ...{
+              'project': text!.project,
+              'topics': text!.topics,
+            },
+          }
+        else if (text != null)
+          'extract': {
+            'project': text!.project,
+            'topics': text!.topics,
           },
         if (needsYou != null)
           'needs_you': {

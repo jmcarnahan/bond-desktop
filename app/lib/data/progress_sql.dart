@@ -40,13 +40,19 @@ String needsYouSql({required String threshold, bool verdict = true}) {
   // frozen arm renders nothing here, for the reason the clause above gives.
   final vetoClause =
       verdict ? '\n  AND COALESCE(m.needs_you_verdict, -1) <> 0' : '';
+  // The thread's CTA is this message's ask only once its OWN text has
+  // landed: triage writes the row from the decision model and leaves the
+  // thread's older ask in place until the message-text stage refolds it, so a
+  // triaged row with no summary yet must not claim that older ask. The frozen
+  // arm renders nothing, for the migration's reason above.
+  final textClause = verdict ? ' AND m.summary IS NOT NULL' : '';
   return '''
 CASE WHEN (
 ${verdictClause}m.reply_expected = 1
     OR m.needs_action = 1
     OR m.urgency IN ('urgent', 'high')
     OR COALESCE(m.deadline, '') <> ''
-    OR (m.triage_status = 'triaged' AND COALESCE((
+    OR (m.triage_status = 'triaged'$textClause AND COALESCE((
          SELECT c.cta_text FROM conversations c
           WHERE c.source = m.source AND c.conversation_key = m.conversation_key
        ), '') <> '')

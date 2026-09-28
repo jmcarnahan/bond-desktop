@@ -7,11 +7,10 @@ import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/extract_handler.dart'
     show buildConversationCard;
 import 'package:bond_inbox/services/llm/draft_task.dart';
-import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
-import 'package:bond_inbox/services/llm/triage_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/bench_target.dart';
@@ -65,8 +64,7 @@ List<Probe> _bulkProbes() {
   final first = corpus.first;
   final membership = membershipCases.first;
   return [
-    Probe(const TriageTask(), TriageInput(first.message, now)),
-    Probe(const ExtractTask(), ExtractionInput(first.message, now)),
+    Probe(const MessageTextTask(), MessageTextInput(first.message, now)),
     Probe(
       const ConfirmMembershipTask(),
       ConfirmInput(

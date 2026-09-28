@@ -147,7 +147,7 @@ class DraftInput {
   /// file named — where the thread's own documents are only ever quoted.
   final ContextPack? directories;
 
-  /// Injected for the same reason `TriageInput.now` is: so a test can pin the
+  /// Injected for the same reason `MessageTextInput.now` is: so a test can pin the
   /// date anchor, and so the anchor is the owner's local day.
   final DateTime now;
 

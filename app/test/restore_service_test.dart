@@ -16,6 +16,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -427,7 +428,7 @@ void main() {
     // without it the two drains would overlap here in a way they never do in
     // the app.
     final gate = DrainGate();
-    final queue = TriageQueue(store, llm, progress: progress, gate: gate);
+    final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), progress: progress, gate: gate);
     await queue.pump();
     expect((await messageOf('m1'))['gate_reason'], 'no_reply');
     expect((await progressOf('m1'))['dropped'], 1);

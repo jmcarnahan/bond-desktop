@@ -1,10 +1,10 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
-import 'package:bond_inbox/models/message_models.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// The reads and the one write behind "what happened to this message".
 ///
@@ -567,18 +567,17 @@ void main() {
       await seed('m1');
       await store.dropMessage('email', 'm1');
 
-      await store.writeTriage(
+      await writeTriaged(
+        store,
         'email',
         'm1',
         status: 'triaged',
-        result: const TriageResult(
-          urgency: 'high',
-          category: 'work',
-          summary: 'asks for the DPA',
-          needsAction: true,
-          actionItems: [],
-          replyExpected: true,
-        ),
+        urgency: 'high',
+        category: 'work',
+        summary: 'asks for the DPA',
+        needsAction: true,
+        actionItems: [],
+        replyExpected: true,
       );
 
       final message = await messageRow('m1');

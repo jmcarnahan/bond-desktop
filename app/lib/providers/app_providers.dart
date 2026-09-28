@@ -977,12 +977,20 @@ final stageLlmClientProvider = Provider.family<LlmClient, String>(
 /// The FAST lane's gate: the triage drain and the fast worker, and nothing
 /// else.
 ///
-/// It keeps those two drains from running at once, because both send their
-/// bulk work to the fast server: overlapping them would double-book its slots
-/// and have each drain's byte-identical system prompt evict the other's from
-/// the KV prefix cache. It deliberately does NOT serialize the handful of
-/// requests one drain has in flight — those are batched by the server on
-/// purpose, and are what the slot count is sized for.
+/// It keeps those two drains from running at once. Since the decision-model
+/// round's Phase 6 triage no longer calls the generative server (its one
+/// model is the decision model), so the old reason — two drains
+/// double-booking one server's slots — no longer holds for triage. It still
+/// shares the gate for ORDERING: triage speaks before the worker claims a
+/// message's needs-you and text work, the yield ticket lets a newly arrived
+/// message's triage cut into a long worker drain, and `onDrained` hands the
+/// worker the refs triage just wrote. The cost is that a triage pump waits
+/// for the worker item already in flight (a text call can be seconds). A
+/// separate triage gate — ordering kept by the claim's untriaged guard and
+/// `onDrained` alone — is a Phase 9 candidate. It deliberately does NOT
+/// serialize the handful of requests one drain has in flight — those are
+/// batched by the server on purpose, and are what the slot count is sized
+/// for.
 ///
 /// One instance for the app, or it would serialize nothing — see [DrainGate].
 final fastDrainGateProvider = Provider<DrainGate>((ref) => DrainGate());
@@ -1032,14 +1040,12 @@ final gateRepairServiceProvider = Provider<GateRepairService>(
 final triageQueueProvider = Provider<TriageQueue>((ref) {
   final queue = TriageQueue(
     ref.watch(messageStoreProvider),
-    // Bulk work by default: the fast server. See [stageLlmClientProvider].
-    ref.watch(stageLlmClientProvider('triage')),
     // Triage fetches its own bodies rather than waiting for a human to open
     // the thread. Taken off [MailSync], so this stays typed to the interface
     // a test can override.
     ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
-    // The FAST lane's gate: this drain and the fast worker share the fast
-    // server, and nothing else is on it.
+    // The FAST lane's gate, shared with the fast worker for ordering (see
+    // [fastDrainGateProvider]); triage itself calls only the decision model.
     gate: ref.watch(fastDrainGateProvider),
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
@@ -1069,9 +1075,9 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     onGated: (source, id) => ref
         .read(gateRepairServiceProvider)
         .afterGate(source, id, reason: 'extracted_then_gated'),
-    // The decision model classifies every kept message before the text call.
-    // Late-bound like the text client (its target resolves per call), so a
-    // prefs write rebuilds no queue; always passed — only tests leave it out.
+    // The decision model: the ONLY model triage calls — the text is the
+    // message-text stage's, on the fast lane. Late-bound (its target resolves
+    // per call), so a prefs write rebuilds no queue.
     decisionClient: ref.watch(decisionClientProvider),
     // The decision state's owner line. Asked without waiting (see the
     // queue's `_askOwner`), so a keychain read never holds a claim.
@@ -1324,14 +1330,15 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         // most builds of this provider never drain.
         ownerDomains: _ownerDomainsLookup(ref),
       ),
-      // Extraction next, and it drains completely before either storyline
-      // handler starts. That order is the point: extraction is what writes the
-      // embeddings both storyline passes compare, so running them alongside it
-      // would have them clustering a mailbox half of which has no vector yet.
+      // The message-text stage next (kind `extract`), and it drains completely
+      // before either storyline handler starts. That order is the point: it is
+      // what writes the embeddings both storyline passes compare, so running
+      // them alongside it would have them clustering a mailbox half of which
+      // has no vector yet.
       ExtractHandler(
         ref.watch(messageStoreProvider),
-        // Bulk work by default: the fast server. See [stageLlmClientProvider].
-        ref.watch(stageLlmClientProvider('extraction')),
+        // The message-text stage: the one generative call per kept message.
+        ref.watch(stageLlmClientProvider('message_text')),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
         progress: ref.watch(pipelineProgressProvider),

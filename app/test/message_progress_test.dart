@@ -1198,6 +1198,33 @@ void main() {
       expect(row['outcome'], 'pending');
     });
 
+    test("the message's text stage is queued again with it", () async {
+      await ingest('m1', triageStatus: 'skipped', gateReason: 'teams_source');
+      // The gated run closed the item without writing any text.
+      await store.enqueueWork('extract', 'email', 'm1');
+      await store.writeWork('extract', 'email', 'm1', status: 'done');
+
+      await store.rependGatedTriage(
+        source: 'email',
+        gateReason: 'teams_source',
+        sinceIso: '2026-08-01T00:00:00Z',
+      );
+
+      expect(await store.workCounts('extract'), {'pending': 1});
+    });
+
+    test('and a message that never had an extract item gets one', () async {
+      await ingest('m1', triageStatus: 'skipped', gateReason: 'teams_source');
+
+      await store.rependGatedTriage(
+        source: 'email',
+        gateReason: 'teams_source',
+        sinceIso: '2026-08-01T00:00:00Z',
+      );
+
+      expect(await store.workCounts('extract'), {'pending': 1});
+    });
+
     test('a message another gate stopped keeps its cascade', () async {
       await ingest('m1', triageStatus: 'skipped', gateReason: 'newsletter');
 

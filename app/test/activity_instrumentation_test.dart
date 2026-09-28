@@ -8,6 +8,7 @@ import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
 import 'package:bond_inbox/services/chat_mentions.dart';
+import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart'
     show encodeEmbedding, EmbeddingsClient;
 import 'package:bond_inbox/services/llm/llm_client.dart';
@@ -19,7 +20,10 @@ import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -404,7 +408,7 @@ void main() {
       await seedMessage('m1');
       final llm = scriptedLlm(triageAnswer(), observer: log.noteLlmCall);
 
-      await TriageQueue(store, llm, activityLog: log).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), activityLog: log).pump();
 
       final row = (await rows('triage')).single;
       expect(row.status, 'ok');
@@ -414,10 +418,13 @@ void main() {
       expect(row.detail['urgency'], 'high');
       expect(row.detail['category'], 'work');
       expect(row.detail['needs_action'], isTrue);
-      expect(row.detail['action_items'], 1);
-      // The tally the client reported, folded onto the item's own row.
+      expect(row.detail['reply_expected'], isFalse);
+      expect(row.detail['decision'], startsWith('gate=keep urgency=high'));
+      // The text keys went with the text call, to the extract row.
+      expect(row.detail.containsKey('action_items'), isFalse);
+      // The decision call's tally, folded onto the item's own row.
       expect(row.detail['llm_calls'], 1);
-      expect(row.detail['llm_label'], 'triage');
+      expect(row.detail['llm_label'], 'decision');
     });
 
     test('a gated message writes no row at all', () async {
@@ -435,7 +442,7 @@ void main() {
       });
       final llm = scriptedLlm(triageAnswer(), observer: log.noteLlmCall);
 
-      await TriageQueue(store, llm, activityLog: log).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), activityLog: log).pump();
 
       // A gate is what keeps the model from being consulted, so there is
       // nothing to report — and a row per newsletter would bury the work the
@@ -454,7 +461,7 @@ void main() {
         observer: log.noteLlmCall,
       );
 
-      await TriageQueue(store, llm, activityLog: log).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), activityLog: log).pump();
 
       final row = (await rows('triage')).single;
       expect(row.status, 'parked');
@@ -471,7 +478,7 @@ void main() {
       await seedMessage('m1');
       final llm = scriptedLlm(const LlmFormatException('not JSON'));
 
-      await TriageQueue(store, llm, activityLog: log).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), activityLog: log).pump();
 
       // The message row cannot tell these apart after the fact — it goes back
       // to `pending` and then to `error` — so the distinction lives here.
@@ -480,6 +487,51 @@ void main() {
       expect(triage.last.detail['attempts'], 1);
       expect(triage.last.detail['error'], contains('not JSON'));
       expect(triage.first.detail['attempts'], 2);
+    });
+  });
+
+  group('the message-text stage', () {
+    test('its row carries the counts and labels, and the text call',
+        () async {
+      await seedMessage('m1');
+      await store.writeTriage('email', 'm1', status: 'triaged');
+      await store.enqueueWork('extract', 'email', 'm1');
+      final llm = ScriptedLlm(
+        answers: {
+          'message_text': {
+            'summary': 'Sarah asks whether Thursday holds.',
+            'action_items': ['Confirm Thursday', 'Book the room'],
+            'deadline': 'Thursday',
+            'topics': ['launch date'],
+            'project': 'Website redesign',
+          },
+        },
+        observer: log.noteLlmCall,
+        emitRecords: true,
+      );
+      final embeddings = EmbeddingsClient(
+        baseUrl: 'http://localhost:8081/v1/embeddings',
+        httpClient: MockClient((_) async => http.Response('down', 503)),
+      );
+
+      await AiWorker(
+        store,
+        handlers: [
+          ExtractHandler(store, llm, embeddings, activityLog: log),
+        ],
+        activityLog: log,
+      ).pump();
+
+      final row = (await rows('extract')).single;
+      expect(row.status, 'ok');
+      expect(row.detail['action_items'], 2);
+      expect(row.detail['deadline'], 'Thursday');
+      expect(row.detail['topics'], ['launch date']);
+      expect(row.detail['project'], 'Website redesign');
+      // Counts and labels — never the summary.
+      expect(row.detail.values, isNot(contains('Sarah asks whether Thursday '
+          'holds.')));
+      expect(row.detail['llm_label'], 'message_text');
     });
   });
 

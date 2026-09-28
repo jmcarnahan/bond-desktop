@@ -5,7 +5,7 @@ import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/message_block.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/llm/reply_decision_task.dart';
-import 'package:bond_inbox/services/llm/triage_task.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -180,10 +180,10 @@ void main() {
       expect(prompt, isNot(contains('[[img:')));
     }
 
-    test('triage', () {
+    test('the message text', () {
       expectClean(
-        const TriageTask().buildUserMessage(
-          TriageInput(chat(), now, thread: [chat()]),
+        const MessageTextTask().buildUserMessage(
+          MessageTextInput(chat(), now, thread: [chat()]),
         ),
       );
     });
@@ -246,8 +246,8 @@ void main() {
     test('and a mail whose file came as a link', () {
       expectClean(buildMessageBlock(linked()));
       expectClean(
-        const TriageTask().buildUserMessage(
-          TriageInput(linked(), now, thread: [linked()]),
+        const MessageTextTask().buildUserMessage(
+          MessageTextInput(linked(), now, thread: [linked()]),
         ),
       );
       expectClean(

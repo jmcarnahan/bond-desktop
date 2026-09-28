@@ -2,10 +2,28 @@
 
 **What happens.** Every message *settles* — notified or suppressed — exactly
 once, within six minutes of arrival. `NotificationCoordinator`
-(`app/lib/services/notification_coordinator.dart`) waits for the triage,
-needs-you, extraction, and storyline verdicts, then emits at most one
-`MessageSettled` per message (the `message_notify` state machine, schema v6,
-PR #9).
+(`app/lib/services/notification_coordinator.dart`) waits for the triage
+(decision model), needs-you, message-text (`extract` kind) and storyline
+verdicts, then emits at most one `MessageSettled` per message (the
+`message_notify` state machine, schema v6, PR #9).
+
+**The toast body and the text stage (decision-model round, Phase 6).** The
+settle waits on the text stage exactly as it waited on extraction: the text
+is the `extract` kind's work, so `extract_state` is still the stage
+`_isComplete` holds for — no longer and no shorter. What changed is where the
+summary comes from: triage writes the row from the decision model with no
+text, and the message-text stage writes `summary` later. So a COMPLETE settle
+always has the summary, while a DEADLINE settle may fire before the text
+lands (a slow or parked text server). `NotificationCoordinator.toastSummary`
+puts the summary on the event when it is present and the message's own
+`body_preview` otherwise (both candidate projections select `body_preview`);
+the desktop toast's body stays `ctaText ?? summary`. The thread's CTA is
+quoted, and counted as an ask, only by a message that OWNS it: `ownsCta`
+requires the message triaged AND its summary present, because until the text
+lands the CTA on the thread is an older message's. The text write stamps
+`messages.updated_at` (the word index needs it), and the handler's card
+refresh right after it re-stamps `conversation_ai`, so the freshness check
+below is met as it was when triage stamped the row.
 
 **No model call.** Worthiness is computed from stored verdicts: a
 message-level ask AND thread-level volume. `needs_you_verdict = 1` is one of

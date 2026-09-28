@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/message_models.dart';
 import '../services/deadline_parse.dart' show showableDeadline;
 import '../services/decision/stored_decision.dart';
-import '../services/llm/extract_task.dart' show ExtractionResult;
+import '../models/extraction_models.dart';
 import '../theme/tokens.dart';
 import 'home_result.dart' show homeDropLabels;
 import 'time_format.dart';

@@ -236,14 +236,15 @@ void main() {
     /// again. Before the queues released them, a switch taken while a message
     /// was at the model left that message `processing` until the next launch.
     test('strands no processing row', () async {
-      // An LLM that holds its answer until the test lets go, so the backend
-      // switch below lands while a message is genuinely at the model. The
-      // hold is an `onCall` closure rather than a subclass: the two completers
-      // belong to this test and nothing else reads them.
+      // A decision model that holds its answer until the test lets go, so
+      // the backend switch below lands while a message is genuinely at the
+      // model (the decision is the one model call triage makes). The hold is
+      // an `onCall` closure rather than a subclass: the two completers belong
+      // to this test and nothing else reads them.
       final started = Completer<void>();
       final release = Completer<void>();
       final llm = ScriptedLlm(
-        answers: const {'triage': heldTriageAnswer},
+        answers: const {'decision': heldTriageAnswer},
         onCall: (_) {
           if (!started.isCompleted) started.complete();
           return release.future;
@@ -252,10 +253,8 @@ void main() {
       final made = ProviderContainer(
         overrides: [
           dbProvider.overrideWithValue(db),
-          stageLlmClientProvider.overrideWith((ref, _) => llm),
-          // The decision pass runs before the held text call; a fake that
-          // keeps the message lets it through to the model.
-          keepingDecisionClient(),
+          decisionClientProvider
+              .overrideWithValue(ScriptedDecisionClient(llm)),
         ],
       );
       addTearDown(made.dispose);

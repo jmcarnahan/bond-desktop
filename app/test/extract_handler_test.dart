@@ -21,13 +21,14 @@ import 'package:http/testing.dart';
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// A client that answers one task from a script and never opens a socket.
-/// The extraction is what almost everything here asks for; the one drafting
-/// client below names its own task instead.
+/// The message text is what almost everything here asks for; the one
+/// drafting client below names its own task instead.
 ScriptedLlm scripted(
   List<Object> script, {
-  String schemaName = 'extraction',
+  String schemaName = 'message_text',
 }) =>
     ScriptedLlm()..scriptFor(schemaName, script);
 
@@ -87,21 +88,27 @@ class FakeEmbeddings {
       );
 }
 
+/// The message-text stage's answer. `intent` and `importance` ride along as
+/// keys `MessageTextTask.validate` ignores: they are the decision model's
+/// now, and `decidedStep` (in `main`) writes them as a stored decision while
+/// the call is at the server, so the handler reads them where the app does.
 Map<String, dynamic> answer({
-  String evidence = 'Jordan is asking whether the launch date holds.',
+  String summary = 'Jordan is asking whether the launch date holds.',
+  List<String> actionItems = const ['Confirm the launch date'],
+  String deadline = '',
   List<String> topics = const ['launch date'],
   String project = 'Website redesign',
-  String intent = 'request',
-  String importance = 'high',
+  String? intent,
+  String? importance,
 }) =>
     {
-      'evidence': evidence,
+      'summary': summary,
+      'action_items': actionItems,
+      'deadline': deadline,
       'topics': topics,
-      'people': const ['Sarah Chen'],
-      'organizations': const ['Northline'],
       'project': project,
-      'intent': intent,
-      'importance': importance,
+      'intent': ?intent,
+      'importance': ?importance,
     };
 
 void main() {
@@ -141,17 +148,16 @@ void main() {
           headers == null ? null : jsonEncode({'headers': headers}),
     });
     if (summary != null) {
-      await store.writeTriage(
+      await writeTriaged(
+        store,
         'email',
         id,
         status: 'triaged',
-        result: TriageResult(
-          urgency: 'high',
-          category: 'work',
-          summary: summary,
-          needsAction: true,
-          actionItems: const ['Ship on Thursday'],
-        ),
+        urgency: 'high',
+        category: 'work',
+        summary: summary,
+        needsAction: true,
+        actionItems: const ['Ship on Thursday'],
       );
     } else if (triageStatus != null) {
       await store.writeTriage('email', id, status: triageStatus);
@@ -170,6 +176,28 @@ void main() {
       'state': 'needs_reply',
       'last_message_at': '2026-08-29T10:00:00Z',
     });
+  }
+
+  /// A scripted step answering [a], which first stores the decision model's
+  /// intent and importance for [id] when [a] carries them — the triage pass
+  /// wrote them before this stage ran, in the app.
+  Object decidedStep(Map<String, dynamic> a, {String id = 'm1'}) {
+    final intent = a['intent'] as String?;
+    final importance = a['importance'] as String?;
+    if (intent == null && importance == null) return a;
+    return (LlmCall _) async {
+      await store.writeDecision(
+        'email',
+        id,
+        fakeDecision(fakeAnswers(
+          intent: intent ?? 'fyi',
+          importance: importance ?? 'normal',
+        )),
+        qhash: 'test',
+        ownerKnown: true,
+      );
+      return a;
+    };
   }
 
   Future<void> runOne(ExtractHandler handler, {String id = 'm1'}) =>
@@ -263,19 +291,177 @@ void main() {
       expect(llm.userMessages.single, isNot(contains('[[att:')));
     });
 
-    test('stores the model answer as JSON', () async {
-      await seedMessage();
-      final llm = scripted([answer()]);
-      final embeddings = FakeEmbeddings();
+    test('writes the text onto the row and the facts beside it', () async {
+      await seedMessage(summary: 'An older summary.');
+      await store.writeDecision(
+        'email',
+        'm1',
+        fakeDecision(fakeAnswers(intent: 'request', importance: 'high')),
+        qhash: 'test',
+        ownerKnown: true,
+      );
+      final llm = scripted([
+        answer(
+          summary: 'Jordan asks whether the launch date holds.',
+          actionItems: const ['Confirm the launch date'],
+          deadline: 'Friday',
+        ),
+      ]);
 
-      await runOne(ExtractHandler(store, llm, embeddings.client));
+      await runOne(ExtractHandler(store, llm, FakeEmbeddings().client));
 
-      final stored =
-          jsonDecode((await store.getExtraction('email', 'm1'))!) as Map<String, dynamic>;
-      expect(stored['evidence'], 'Jordan is asking whether the launch date holds.');
+      expect(llm.schemas, ['message_text']);
+      final row = (await store.getMessageRow('email', 'm1'))!;
+      expect(row['summary'], 'Jordan asks whether the launch date holds.');
+      expect(jsonDecode(row['action_items_json'] as String),
+          ['Confirm the launch date']);
+      expect(row['deadline'], 'Friday');
+      // The text stage writes no label and moves no classification column.
+      expect(row['label'], isNull);
+      expect(row['urgency'], 'high');
+      expect(row['needs_action'], 1);
+
+      // `{topics, project, intent, importance}` — the retired extraction's
+      // evidence, people and organizations are absent, not empty.
+      final stored = jsonDecode((await store.getExtraction('email', 'm1'))!)
+          as Map<String, dynamic>;
+      expect(stored.keys.toSet(), {'topics', 'project', 'intent', 'importance'});
       expect(stored['topics'], ['launch date']);
+      expect(stored['project'], 'Website redesign');
       expect(stored['intent'], 'request');
       expect(stored['importance'], 'high');
+    });
+
+    test('a message decided before the decision model reads the quiet middle',
+        () async {
+      await seedMessage(triageStatus: 'triaged');
+
+      await runOne(
+          ExtractHandler(store, scripted([answer()]), FakeEmbeddings().client));
+
+      final stored = jsonDecode((await store.getExtraction('email', 'm1'))!)
+          as Map<String, dynamic>;
+      expect(stored['intent'], 'fyi');
+      expect(stored['importance'], 'normal');
+    });
+
+    test('the conversation CTA is recomputed when the text lands', () async {
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'conv-1',
+        'subject': 'Launch date',
+        'state': 'needs_reply',
+        'last_inbound_at': '2026-08-29T10:00:00Z',
+        'last_message_at': '2026-08-29T10:00:00Z',
+      });
+      await seedMessage(triageStatus: 'triaged');
+      // What triage wrote from the decision: urgency and category, and no
+      // ask yet.
+      await store.writeTriage(
+        'email',
+        'm1',
+        status: 'triaged',
+        result: const TriageResult(
+          urgency: 'high',
+          category: 'work',
+          needsAction: true,
+        ),
+      );
+      await store.updateConversationTriage('email', 'conv-1',
+          ctaText: null, ctaUrgency: 'high', category: 'work');
+
+      await runOne(ExtractHandler(
+        store,
+        scripted([
+          answer(actionItems: const ['Send the signed lease'], deadline: 'Friday'),
+        ]),
+        FakeEmbeddings().client,
+      ));
+
+      final conversation = (await store.getConversationRow('email', 'conv-1'))!;
+      expect(conversation['cta_text'], 'Send the signed lease — by Friday');
+      expect(conversation['cta_urgency'], 'high');
+    });
+
+    test("a text stage that fails for good takes the older message's ask "
+        'off the thread', () async {
+      // Triage kept the thread's older ask in place for the text to refold;
+      // the text will never land, so that ask must not stand as this
+      // message's.
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'conv-1',
+        'subject': 'Launch date',
+        'state': 'needs_reply',
+        'cta_text': 'An older message\'s ask',
+        'cta_urgency': 'high',
+        'last_inbound_at': '2026-08-29T10:00:00Z',
+        'last_message_at': '2026-08-29T10:00:00Z',
+      });
+      await seedMessage(triageStatus: 'triaged');
+      await store.enqueueWork('extract', 'email', 'm1');
+      final worker = AiWorker(
+        store,
+        handlers: [
+          ExtractHandler(
+            store,
+            scripted([
+              const LlmException('the schema is wrong', 400),
+            ]),
+            FakeEmbeddings().client,
+          ),
+        ],
+      );
+
+      await worker.pump();
+
+      expect(await store.workCounts('extract'), {'error': 1});
+      final conversation = (await store.getConversationRow('email', 'conv-1'))!;
+      expect(conversation['cta_text'], isNull);
+      // The decision's urgency is this message's own and stays.
+      expect(conversation['cta_urgency'], 'high');
+    });
+
+    test('a failed text on an older message leaves the newest ask alone',
+        () async {
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'conv-1',
+        'subject': 'Launch date',
+        'state': 'needs_reply',
+        'cta_text': 'The newest message\'s ask',
+        'cta_urgency': 'high',
+        'last_inbound_at': '2026-08-30T10:00:00Z',
+        'last_message_at': '2026-08-30T10:00:00Z',
+      });
+      await seedMessage(triageStatus: 'triaged');
+
+      expect(await store.clearStaleAskAfterTextFailed('email', 'm1'), isFalse);
+      expect((await store.getConversationRow('email', 'conv-1'))!['cta_text'],
+          'The newest message\'s ask');
+    });
+
+    test('an errored triage gets text but no fold', () async {
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'conv-1',
+        'subject': 'Launch date',
+        'state': 'needs_reply',
+        'last_inbound_at': '2026-08-29T10:00:00Z',
+        'last_message_at': '2026-08-29T10:00:00Z',
+      });
+      await seedMessage(triageStatus: 'error');
+
+      await runOne(ExtractHandler(
+        store,
+        scripted([answer(actionItems: const ['Send the signed lease'])]),
+        FakeEmbeddings().client,
+      ));
+
+      expect((await store.getMessageRow('email', 'm1'))!['summary'],
+          isNotNull);
+      expect((await store.getConversationRow('email', 'conv-1'))!['cta_text'],
+          isNull);
     });
 
     test('runs at temperature 0 — the same email twice is the same facts',
@@ -288,14 +474,12 @@ void main() {
       expect(llm.temperatures, [0.0]);
     });
 
-    test('extraction sees the message alone even when the thread has history',
+    test('the text reads the thread tail before it, and never a digest',
         () async {
-      // The context ladder measured on 2026-09-17 tried a thread for
-      // extraction on both rungs and neither shipped: the tail bought intent
-      // 75 -> 78 but lost people 87 -> 75 and project 66 -> 53, and the digest
-      // lost people 87 -> 66. `ExtractionInput` still takes `thread` and
-      // `threadDigest`; this pins that the handler passes neither, which is
-      // also what keeps the prompt byte-identical to every measured 4B row.
+      // The retired triage call's context, kept by the text stage: the newest
+      // earlier turns of the thread, so a summary can say what a question a
+      // message back is still asking. No digest: nothing in the app builds
+      // one.
       await store.upsertMessage({
         'source': 'email',
         'source_message_id': 'earlier',
@@ -315,12 +499,11 @@ void main() {
 
       final sent = llm.userMessages.single;
       expect(sent, contains('<untrusted_data source="inbound_message">'));
-      expect(sent, isNot(contains('source="thread"')));
+      expect(sent, contains('<untrusted_data source="thread">'));
       expect(sent, isNot(contains('thread_digest')));
-      expect(sent, isNot(contains('Extract from ONLY this message:')));
       expect(
-        sent,
-        isNot(contains('The build cut is scheduled for Wednesday night.')),
+        sent.indexOf('The build cut is scheduled for Wednesday night.'),
+        lessThan(sent.indexOf('Judge ONLY this message:')),
       );
     });
 
@@ -348,10 +531,14 @@ void main() {
   group('conversation card', () {
     test('embeds the card and records the hash and the model', () async {
       await seedConversation();
-      await seedMessage(summary: 'Sarah needs the lock extended.');
+      await seedMessage();
       final embeddings = FakeEmbeddings();
 
-      await runOne(ExtractHandler(store, scripted([answer()]), embeddings.client));
+      await runOne(ExtractHandler(
+        store,
+        scripted([answer(summary: 'Sarah needs the lock extended.')]),
+        embeddings.client,
+      ));
 
       // The people segment is empty since Round D Phase 2 — the card is four
       // segments by contract whatever the flag says, so the vector is taken
@@ -414,17 +601,16 @@ void main() {
         'body_text': 'And the photography?',
         'triage_status': 'triaged',
       });
-      await store.writeTriage(
+      await writeTriaged(
+        store,
         'email',
         'm2',
         status: 'triaged',
-        result: const TriageResult(
-          urgency: 'normal',
-          category: 'work',
-          summary: 'Sarah is asking about the photography.',
-          needsAction: true,
-          actionItems: ['Send the photo selects'],
-        ),
+        urgency: 'normal',
+        category: 'work',
+        summary: 'Sarah is asking about the photography.',
+        needsAction: true,
+        actionItems: ['Send the photo selects'],
       );
       await store.writeExtraction(
         'email',
@@ -790,10 +976,15 @@ void main() {
       // The fast path: by the time a message has been extracted it is also
       // findable, without the `embed_message` queue having had to drain.
       await seedConversation();
-      await seedMessage(summary: 'Sarah needs the lock extended.');
+      await seedMessage(triageStatus: 'triaged');
       final embeddings = FakeEmbeddings();
 
-      await runOne(ExtractHandler(store, scripted([answer()]), embeddings.client));
+      // The summary the card carries is the one this stage just wrote.
+      await runOne(ExtractHandler(
+        store,
+        scripted([answer(summary: 'Sarah needs the lock extended.')]),
+        embeddings.client,
+      ));
 
       final row = (await vectorRow('m1'))!;
       expect(row['embed_model'], EmbeddingsClient.documentModelTag);
@@ -885,8 +1076,8 @@ void main() {
         (await store.getConversationAi('email', 'conv-1'))?['bucket_reason']
             as String?;
 
-    ExtractHandler handlerFor(Map<String, dynamic> result) =>
-        ExtractHandler(store, scripted([result]), FakeEmbeddings().client);
+    ExtractHandler handlerFor(Map<String, dynamic> result) => ExtractHandler(
+        store, scripted([decidedStep(result)]), FakeEmbeddings().client);
 
     test('a low-value fyi is deferred as the fact lands', () async {
       // Without this the row would appear in the inbox, sit there while the
@@ -902,9 +1093,8 @@ void main() {
 
     test("the decision model's intent and importance are what get filed",
         () async {
-      // The language model reads a request; the decision model read an FYI
-      // of low importance. Its answer replaces the text model's before the
-      // write, so the stored blob and the filing agree.
+      // The decision model read an FYI of low importance; the text stage
+      // stores that beside its own topics and project, and files by it.
       await seedCurrentConversation();
       await seedMessage();
       await store.writeDecision(
@@ -915,7 +1105,8 @@ void main() {
         ownerKnown: true,
       );
 
-      await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
+      await runOne(ExtractHandler(
+          store, scripted([answer()]), FakeEmbeddings().client));
 
       expect(await bucketOf(), 'later');
       expect(await reasonOf(), 'low_value');
@@ -923,7 +1114,7 @@ void main() {
           as Map<String, dynamic>;
       expect(stored['intent'], 'fyi');
       expect(stored['importance'], 'low');
-      // Everything else is still the text model's.
+      // Topics and project are the text model's.
       expect(stored['project'], 'Website redesign');
     });
 
@@ -1126,25 +1317,25 @@ void main() {
     String urgency = 'normal',
     String deadline = '',
   }) =>
-      store.writeTriage(
+      writeTriaged(
+        store,
         'email',
         id,
         status: 'triaged',
-        result: TriageResult(
-          urgency: urgency,
-          category: 'work',
-          summary: 'what it says',
-          needsAction: needsAction,
-          actionItems: const [],
-          replyExpected: replyExpected,
-          deadline: deadline,
-        ),
+        urgency: urgency,
+        category: 'work',
+        summary: 'what it says',
+        needsAction: needsAction,
+        actionItems: const [],
+        replyExpected: replyExpected,
+        deadline: deadline,
       );
 
   /// One extraction, under [policy]. No closure at all is the default every
   /// existing caller gets, which the handler answers as [DraftPolicy.all].
   Future<void> extract({
     String id = 'm1',
+    String deadline = '',
     DraftPolicy? policy,
     ActivityLog? activityLog,
     void Function()? onDraftQueued,
@@ -1152,7 +1343,7 @@ void main() {
       runOne(
         ExtractHandler(
           store,
-          scripted([answer()]),
+          scripted([answer(deadline: deadline)]),
           FakeEmbeddings().client,
           progress: PipelineProgress(store),
           activityLog: activityLog,
@@ -1196,10 +1387,12 @@ void main() {
     });
 
     test('and so is one that names a date', () async {
+      // The date is the TEXT's now: the handler reads the row back after
+      // writing it, so the pre-gate sees the deadline this call just wrote.
       await seedMessage();
-      await triageSaid(deadline: 'Friday');
+      await triageSaid();
 
-      await extract();
+      await extract(deadline: 'Friday');
 
       expect(await queuedDrafts(), ['m1']);
     });
@@ -1800,19 +1993,18 @@ void main() {
       // with a no, without a drafting call being spent.
       await seedConversation();
       await seedMessage();
-      await store.writeTriage(
+      await writeTriaged(
+        store,
         'email',
         'm1',
         status: 'triaged',
-        result: TriageResult(
-          urgency: 'normal',
-          category: 'work',
-          summary: 'what it says',
-          needsAction: false,
-          actionItems: const [],
-          replyExpected: false,
-          deadline: '',
-        ),
+        urgency: 'normal',
+        category: 'work',
+        summary: 'what it says',
+        needsAction: false,
+        actionItems: const [],
+        replyExpected: false,
+        deadline: '',
       );
       await store.writeNeedsYouVerdict('email', 'm1',
           verdict: true, reason: 'Priya is waiting on your number');

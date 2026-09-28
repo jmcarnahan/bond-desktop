@@ -149,11 +149,13 @@ class LlmFormatException extends LlmException {
 /// import upward: the client reports what happened and has no opinion about
 /// who is listening.
 class LlmCallRecord {
-  /// Which task asked — a [completeJson] caller's `schemaName`, or
-  /// `'complete'` for free text. The five names in the app today: `triage`,
-  /// `extraction`, `draft_reply`, `storyline_membership`, `storyline_name`
-  /// (the storyline propose path reuses the naming task's schema, so there is
-  /// deliberately no sixth).
+  /// Which task asked — a [completeJson] caller's `schemaName`, `'complete'`
+  /// for free text, or `'decision'` for the decision model's embedding call
+  /// (`DecisionClient`). The task names in the app today: `message_text`,
+  /// `needs_you`, `attachment_digest`, `context_file_digest`,
+  /// `context_brief`, `context_select`, `reply_decision`, `draft_reply`
+  /// (Improve a draft reuses it), `storyline_membership`, `storyline_name`,
+  /// `storyline_group`, `storyline_refresh` and `storyline_recap`.
   final String label;
 
   final int durationMs;

@@ -69,7 +69,7 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
   wants a different one from `CTX_SIZE`. llama.cpp splits `-c` across
   `--parallel` slots, so `SLOTS=2` at 16K is 8K a slot; `make model SLOTS=2
   MODEL_CTX=32768` is how a second slot is bought without narrowing either one.
-- `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_EXTRACT_CTX`, `GOLDEN_K`,
+- `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_K`,
   `GOLDEN_CHARTER_CAP`, `GOLDEN_OWNER_NAME` / `GOLDEN_OWNER_ADDRESS` — see
   "The golden set".
 - `SWEEP_CARD` — which clustering card `make golden-sweep` and `make
@@ -271,12 +271,27 @@ capped at 900 characters by `fitThreadDigest`, which drops whole lines from the
 OLD end and keeps the header line. Prefer `digest`; `compressed` stays only so
 older rows can be read.
 
-`GOLDEN_EXTRACT_CTX` is extraction's own axis — `none` (the default, what
-ships), `tail3` or `digest` — because extraction's question is not triage's
-and the two stages had never been measured apart. It is recorded as
-`extra.extract_ctx` in the timing JSON, and every run prints a
+`GOLDEN_EXTRACT_CTX` was extraction's own axis (`none`, `tail3`, `digest`)
+and is RETIRED with the extraction call (decision-model round, Phase 6): the
+one message-text call reads the rung `GOLDEN_CTX` names, as triage did. Older
+rows carry `extra.extract_ctx`; new ones do not. A digest run prints a
 `digests: N items carry one, M trimmed to 900` line so a reader knows how much
 of the set the rung actually touched.
+
+**What `make golden` runs since Phase 6.** Per item: the live decision model
+(`make decide`, `DECIDE_URL`; heads from `DECIDE_HEADS`) for gate, category,
+urgency, the booleans, intent and importance — the policy gate, the same
+answers `make golden-decision` scores; the app's needs-you ladder (the floor,
+then the decision's p(yes) against 0.65 / 0.35, and `NeedsYouTask` on the
+bulk slot only inside the band — the cold-outreach bar needs the owner's
+sender history, which a golden item does not carry, so the ordinary bar is
+used throughout); and ONE `MessageTextTask` call on the bulk slot for summary,
+action items, deadline, topics and project. One run file carries all of it,
+`label` and `evidence` absent. The per-item line prints `decision <ms>`,
+`needs_you <ms|floor|decided>`, `text <ms>` and counts; the summary line
+prints the decision p50/p95 and the band size. Rows before Phase 6 are the
+TriageTask + NeedsYouTask + ExtractTask pipeline on the bulk slot (the
+baseline for the Phase 6 comparison is `p6-baseline-4b`).
 
 Gold records, per stage, which rung a label needs, so
 `BREAKDOWN=derivable_from` answers the question the ladder was built for: what
@@ -292,7 +307,7 @@ carry.
 ```sh
 make golden                               # bulk slot, tail3 — the shipping rung
 make golden GOLDEN_CTX=none               # the same, message alone
-make golden GOLDEN_CTX=digest GOLDEN_EXTRACT_CTX=digest   # the digest as its own fence, extraction on the same rung
+make golden GOLDEN_CTX=digest            # the digest as its own fence
 make golden GOLDEN_CTX=compressed         # the digest rung, with its caveat (superseded)
 make golden BENCH_URL=… BENCH_LABEL=…     # point it at a candidate
 make golden-prose                         # prose slot: decisions + drafts
@@ -1873,6 +1888,30 @@ The acceptance for the cutover was the ModernBERT row within ±2 points on every
 field; it is identical, so the Dart renderer, heads and truncation path add no
 error. The policy gate drops four fewer messages than argmax (18 against 22),
 which is the cautious direction for a drop.
+
+**One text call per message** (2026-09-28, `make golden`, keep-only 76 items; text judged by Opus
+subagents under one judge tag, `opus-subagent-2026-09-28`, packets of 25). "Old" is the pre-round
+pipeline (TriageTask + NeedsYouTask + ExtractTask, three calls) from a clean copy of commit 68540a4;
+"new" is the decision model on this Mac for every classification plus one `MessageTextTask` call and
+the needs-you band on the generative model.
+
+| generative | pipeline | wall, 100 items | summary | action items | deadline | project | topics | category / urgency / needs_action / reply / needs_you / intent / importance |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| box 27B (vLLM FP8, `/prose`) | old | 771 s | 68% | 28/45 | 89 | 59 | 30 | 91 / 96 / 72 / 82 / 93 / 87 / 70 |
+| box 27B | new, first prompt | 354 s | 74% | 26/45 | 83 | 61 | 34 | 96 / 89 / 86 / 84 / 89 / 83 / 74 |
+| box 27B | new, deadline rule tightened (shipped) | 346 s | 74% | 25/45 | 89 | 64 | 30 | same classification |
+| local 4B (`make fast`) | old | 718 s | 63% | 29/45 | 89 | 66 | 25 | 88 / 91 / 70 / 71 / 91 / 74 / 39 |
+| local 4B | new, first prompt | 328 s | 65% | 27/45 | 87 | 56 | 24 | 96 / 89 / 85 / 84 / 89 / 83 / 73 |
+
+Reading it: the new pipeline is 2.2× faster on the same server, summaries rise six points on the
+27B, and deadline returned to 89 once the rule said only a deadline set for the READER counts (the
+first prompt invented deadlines on 8 of 66 messages that have none; the shipped one on 3, the old
+pipeline on 4). Action items slip by two to three items of 45 on every new row, at the edge of this
+set's noise. Against the 27B as a classifier the decision model gives up urgency (89 against 96),
+needs-you (89 against 93) and intent (83 against 87) and gains category, needs_action, reply and
+importance; against the 4B it wins or ties everywhere. Label and extraction evidence are no longer
+produced, and a model-decided needs-you verdict carries a templated reason, so the needs-you evidence
+rubric is not comparable across the two pipelines.
 
 ### Recommendations (golden set, 2026-09)
 

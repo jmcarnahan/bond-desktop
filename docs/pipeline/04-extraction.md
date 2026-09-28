@@ -1,8 +1,87 @@
-# 4 · Extraction and its fan-out
+# 4 · The text stage (work kind `extract`) and its fan-out
 
 **What happens.** After triage, `ExtractHandler`
-(`app/lib/services/extract_handler.dart`, run by `AiWorker`) pulls stable
-facts out of each message, then fans out three cheap follow-ons:
+(`app/lib/services/extract_handler.dart`, run by `AiWorker` on the fast lane)
+writes each kept message's TEXT with ONE generative call, `MessageTextTask`,
+then fans out cheap follow-ons. It replaced two language-model calls in the
+decision-model round's Phase 6: the retired triage call's summary / action
+items / deadline and the retired extraction call's topics / project. The
+classification that used to ride on both (urgency, category, the booleans,
+intent, importance, the label) is the decision model's
+([03-triage.md](03-triage.md)).
+
+**The kind stays `extract`, and the class keeps its name.** A rename would
+need a work-kind migration of every queued row and a requeue, and would move
+the activity kind, the progress stage (`extract_state`, which the settle
+machine waits on — [09-notifications.md](09-notifications.md)) and the
+activity panel's words with it, for a label. The kind names the stage's slot
+in the pipeline, not the task it runs.
+
+**What it writes, in order.**
+
+1. `MessageStore.writeMessageText` — `summary`, `action_items_json`,
+   `deadline` (NULL when empty) on `messages`, narrow SQL. It DOES stamp
+   `updated_at`, as triage did when the summary was triage's: the word index
+   (`fts_messages`, which files `summary`) re-files a row by that watermark.
+   The settle's freshness check (attention newer than the message) is met
+   because the card refresh right after re-stamps `conversation_ai`.
+   `label` is never written: NULL on every new row.
+2. `extraction_json` (`message_ai`, `writeExtraction`) as
+   `{topics, project, intent, importance}` — topics and project from the text
+   call (topics LOWERCASED by `validate` — a one-time card re-embed churn on
+   threads whose newest message is re-run), intent and importance from the
+   stored decision (`message_decisions`;
+   a message decided before the decision model reads the quiet middle, `fyi` /
+   `normal`). `evidence`, `people` and `organizations` are ABSENT on new rows
+   (`ExtractionResult.toJson` leaves an empty one out); old rows keep theirs
+   and the Why panel still shows them there.
+3. The row is READ BACK, so every reader below (the card, the message
+   embedding, the draft pre-gates) sees the text this call just wrote.
+4. The conversation CTA, recomputed WHEN THE TEXT LANDS: `foldCtaUp`
+   (`app/lib/services/conversation_cta.dart`) with the row's urgency and
+   category and the text's action items, summary and deadline — only on a row
+   triage decided (`triaged`; an `error` row has no urgency to fold with), and
+   under the fold's two guards (newest inbound, not already answered). See
+   [03-triage.md](03-triage.md), "The CTA rollup".
+5. `extract_state = done`, then the fan-out below. The activity row notes
+   intent, importance, up to five topics, the project, the action-item COUNT
+   and the deadline — never the summary.
+
+**Claim order.** The text is the one per-message generative call left, so the
+backlog claims `extract` items in the order the owner most wants them read
+(`MessageStore._textClaimOrder`, used by `claimPendingWork` for this kind
+only), over a WINDOW of the newest `textClaimWindow` (500) eligible items by
+`created_at DESC` — so a Clear AI results backlog of tens of thousands is not
+sorted per claim inside the write transaction:
+1. an item stamped in the last `textClaimRequestedWithin` (5 minutes) — what
+   an owner-asked requeue (`requeueWork(refreshCreatedAt: true)`: Retry,
+   Restore) looks like; mail that arrived in the last few minutes rides with
+   it;
+2. a message the needs-you pass called theirs (`needs_you_verdict = 1`);
+3. everything not filed Later before what is;
+4. the decision's importance, high > normal > low (from
+   `message_decisions.answers_json`, else an older build's `extraction_json`;
+   neither reads as normal);
+5. the queue's own `created_at DESC`.
+
+ORDER only: which items are claimable is the WHERE below, unchanged, and
+every other kind keeps `created_at DESC`. The priority lane (`claimWorkItem`,
+the refs triage just wrote) is a named claim and has no order. Tests:
+`app/test/text_claim_order_test.dart`.
+
+**A text stage that fails for good.** Triage keeps the thread's current ask
+until the text refolds it, so when the `extract` item ends in `error`
+(attempts spent, or a schema 400) the worker's fatal path calls
+`MessageStore.clearStaleAskAfterTextFailed`: for the thread's newest inbound,
+triaged, with no summary and not answered, `cta_text` is cleared (the
+decision's `cta_urgency` and `category` stay). Until then the stale ask is
+neither counted nor quoted as this message's: `ownsCta` (notify-worthy, the
+toast) and `needsYouSql` both require the message's own summary to be
+present.
+
+**A retired gate re-pended.** `rependGatedTriage` (the `teams_source` /
+label-rule one-shots) requeues each re-pended message's `extract` item in the
+same transaction, as Restore does — triage writes no text any more.
 
 "After triage" is enforced, not hoped for. `extract` and `needs_you` rows are
 enqueued at sync time, while every fresh message is still `pending`, and the
@@ -28,30 +107,18 @@ kind per pass for mail (`backlogEnqueueCap`) and 100 for Teams
 (`TeamsSync._extractCap`), so a restart or a narrowed window loses
 nothing (see [01-sync-ingest.md](01-sync-ingest.md)).
 
-**A thread for extraction, measured and not given (2026-09-17).** The task can
-take one. `ExtractionInput(message, now, {thread, threadDigest})` renders, in
-order, the date line, a `thread_digest` fence when a digest is passed, a
-`thread` fence built by the shared `buildThreadTailText` (newest three, 300
-characters each) when a thread is passed, the line "Extract from ONLY this
-message:" when either of those was written, and then the `inbound_message`
-fence. With neither the prompt is byte-identical to what this task has always
-built — the date line and one fence, no label between them — which is what
-keeps every prior 4B row comparable. `make golden GOLDEN_EXTRACT_CTX=none`,
-`=tail3` or `=digest` measures the three rungs on extraction's own axis. It
-was measured on the 4B at `GOLDEN_K=4`, two passes each, keep-only (76 items),
-and the five fields read intent / importance / project / topics / people: with
-nothing, 75% / 39% / 66% / 26% / 87%; with the tail, 78% / 39% / 53% / 25% /
-75%; with the digest and the tail, 76% / 37% / 53% / 30% / 66%. The tail buys
-3 points of intent and costs 12 of people and 13 of project; the digest costs
-21 of people and 13 of project. Neither is a trade worth making, so extraction
-stays message-alone: `ExtractHandler` builds `ExtractionInput(message,
-DateTime.now())` and passes neither field, pinned by `extraction sees the
-message alone even when the thread has history` in
-`app/test/extract_handler_test.dart`. The fields stay because the ladder will
-be re-run against a future prompt, not because anything calls them.
+**The thread tail.** The text call reads the block the retired triage call
+read: the attachments line, the newest three earlier messages (300 characters
+each) in a `thread` fence, then the judged message — see
+[03-triage.md](03-triage.md) and `MessageTextTask.buildUserMessage`. The
+2026-09-17 ladder that kept the retired EXTRACTION call message-alone (the
+tail cost it 12 points of people and 13 of project) measured fields this call
+no longer has, except project; project is re-read against the golden judge
+flow on this call (the Phase 6 measurement in `docs/model-bakeoff.md`).
+`GOLDEN_EXTRACT_CTX` went with that call.
 
-1. **Bucket filing** (`_fileBucket`) — the extraction's read of the message
-   files low-value mail into Later, unless a standing per-sender rule or an
+1. **Bucket filing** (`_fileBucket`) — the decision's intent and importance
+   (stored in the extraction blob) file low-value mail into Later, unless a standing per-sender rule or an
    explicit "keep this in my inbox" overrides it. Nothing automatic overturns
    a person. A thread holding an **open ask** — an unanswered message the
    needs-you stage judged yes, anywhere in the thread, not only the newest one
@@ -60,7 +127,7 @@ be re-run against a future prompt, not because anything calls them.
 2. **Conversation card + clustering embedding** (`_refreshCard`) — builds the
    thread card, hash-guards it against no-op rewrites, embeds it under the
    clustering prefix, and requeues `storyline` work for the conversation. It
-   runs after the extraction is written and builds the card from the STORED
+   runs after the text is written and builds the card from the STORED
    facts (`clusteringCardForConversationRow` over `newestInboundCardData`),
    not from the result in hand, so the hash it writes is the hash the heal
    path in `StorylineService._reembed` computes for the same thread.
@@ -85,7 +152,8 @@ be re-run against a future prompt, not because anything calls them.
 
    `asksForAReply` takes five signals off the row, any one enough:
    `needs_you_verdict = 1`, `reply_expected`, `needs_action`, an urgent/high
-   urgency, or a named deadline. The deadline arm still admits any non-empty
+   urgency, or a named deadline (the deadline this call just wrote — the row
+   is read back first). The deadline arm still admits any non-empty
    `deadline`, a plan-relative "Day 1" included (it does not go through
    `showableDeadline`); that is a recorded follow-up. `prefetchWorthy` keeps the two that do not
    fire on ordinary mail — `needs_you_verdict = 1` or an urgent/high urgency —
@@ -105,30 +173,22 @@ It also embeds the message's own document vector on the fast path
 
 | | |
 |---|---|
-| Task | `ExtractTask` — `app/lib/services/llm/extract_task.dart` |
-| Prompt | top of that file, fenced by `prompt_guard.dart` |
-| Schema | `extraction` |
-| Output | evidence sentence (written first), topics, people, organizations, a stable project label, an intent enum, an importance enum (intent and importance are replaced by the decision model's, below) |
-| Slot | **fast / bulk** by default (`stageLlmClientProvider('extraction')`; re-pointable per stage in Settings → Models, see [10-model-routing.md](10-model-routing.md)) |
-| Params | **temperature 0** (set in `extract_handler.dart`), maxTokens 512 |
+| Task | `MessageTextTask` — `app/lib/services/llm/message_text_task.dart` |
+| Prompt | `_messageTextRules` at the top of that file (the retired triage prompt's summary / action-item / deadline rules and the retired extraction prompt's topics / project rules, and nothing about the fields the decision model answers), composed with the shared untrusted-data fence (`prompt_guard.dart`); one prompt for mail and chat, pinned by `prompt_parity_test.dart` |
+| Schema | `message_text` — flat, `summary` FIRST (the model states what the message is about before anything that follows from it), then `action_items` (≤3), `deadline`, `topics` (≤3), `project` |
+| Caps | summary 500, action item 200, deadline 40, topic 80 (lowercased), project 60 — enforced in `validate` / `MessageTextResult.fromJson`, not the schema (this llama-server build turns the schema into a grammar and a `maxLength` it cannot convert costs the request) |
+| Slot | the **generative** role (`stageLlmClientProvider('message_text')`, see [10-model-routing.md](10-model-routing.md)) |
+| Params | **temperature 0** (set in `extract_handler.dart`: the same email must yield the same facts twice), maxTokens 512 |
 | Concurrency | 3 (the handler's `concurrency` override) |
 
 The `inbound_message` fence is `buildMessageBlock`
 (`app/lib/services/llm/message_block.dart`), so the body is link-stripped
-(`stripLinkTargets`, keeping each label) before its cap, the same block triage
-reads.
+(`stripLinkTargets`, keeping each label) before its cap.
 
-**Intent and importance come from the decision model (schema v20).** When
-the triage pass stored a decision for the message (`message_decisions`), the
-handler replaces the language model's `intent` and `importance` with the
-decision heads' choices BEFORE the extraction is written — so the stored
-blob, the activity row and `_fileBucket`'s `bucketFor` all read one answer.
-A message with no stored decision (triaged before the decision model) keeps
-the language model's. Everything else in the extraction is still the
-language model's.
-
-**What the prompt instructs.** Pull the stable facts out of one message, with
-the evidence sentence first to force grounding. The prompt's bullets restate
-the schema in prose deliberately: the grammar already guarantees shape, so the
-words exist to make each field *mean* something. The doc comment above the
-prompt explains this.
+**What the prompt instructs.** Write the text for one message: a summary that
+carries the specifics (the rule and its measurement are in
+[03-triage.md](03-triage.md), "The summary rule"), the READER's action items
+as the model's own judgement (with the wire-fraud rule: never copy a payment
+or "reply to confirm" demand — the action is independent verification), the
+deadline in the sender's words, up to three lowercase topics, and a stable
+project label. It asks nothing a classifier answers.

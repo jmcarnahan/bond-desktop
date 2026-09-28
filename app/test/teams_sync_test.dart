@@ -14,6 +14,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// End-to-end chat syncs: a scripted Graph on one side, a real sqlite database
 /// on the other, and the real [GraphAuth], [GraphTeams] and [TeamsSync] in
@@ -1627,8 +1628,12 @@ void main() {
       // into the queue. Finished means a result, not just a status — a row
       // carrying a status and no verdict is what the v2 re-judgement pass
       // beside this one exists to pick up.
-      await store.writeTriage('teams', 'in-window',
-          status: 'triaged', result: TriageResult.fallback());
+      await writeTriaged(
+        store,
+        'teams',
+        'in-window',
+        status: 'triaged',
+      );
       await build().syncNow();
       expect((await row('in-window'))['triage_status'], 'triaged');
     });
@@ -1678,8 +1683,12 @@ void main() {
 
       // Self-exhausting, exactly like the gate re-pend above it: once v2 has
       // answered, the next refresh leaves the row alone.
-      await store.writeTriage('teams', 'v1-judged',
-          status: 'triaged', result: TriageResult.fallback());
+      await writeTriaged(
+        store,
+        'teams',
+        'v1-judged',
+        status: 'triaged',
+      );
       graph.chats
         ..clear()
         ..add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));

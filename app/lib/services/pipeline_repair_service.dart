@@ -246,7 +246,7 @@ class PipelineRepairService {
 
       // `refreshCreatedAt`: a person is asking, so the row goes to the front
       // of the drain rather than behind every prefetch queued since it first
-      // ran — the claim order is `created_at DESC`.
+      // ran — the claim order is `created_at DESC` for this kind.
       await _store.requeueWork(
         'needs_you',
         source,
@@ -283,9 +283,11 @@ class PipelineRepairService {
   ) async {
     final before = await _store.workStatusOf(kind, source, entityId);
     if (before == 'pending' || before == 'processing') return;
-    // `refreshCreatedAt`: Retry is a person asking for this stage NOW, and
-    // the claim order is `created_at DESC` — a revived row that kept its old
-    // stamp would be drained last.
+    // `refreshCreatedAt`: Retry is a person asking for this stage NOW. Most
+    // kinds claim `created_at DESC`, and `extract` (the message text) claims
+    // a freshly stamped item ahead of every priority key
+    // (`MessageStore.textClaimRequestedWithin`) — either way a revived row
+    // that kept its old stamp would be drained last.
     await _store.requeueWork(kind, source, entityId, refreshCreatedAt: true);
     stages.add(kind);
   }

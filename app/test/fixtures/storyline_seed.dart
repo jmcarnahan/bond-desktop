@@ -352,13 +352,18 @@ Future<SeedReport> seedGoldenMailbox(
           // on the clustering path reads them: the card is built from
           // `messages.summary` and the extraction topics, and those are what
           // this write exists to put where `newestInboundCardData` looks.
-          result: TriageResult(
+          result: const TriageResult(
             urgency: 'normal',
             category: 'other',
-            summary: card.summary!,
             needsAction: false,
-            actionItems: const [],
           ),
+        );
+        await store.writeMessageText(
+          source,
+          row.id,
+          summary: card.summary!,
+          actionItems: const [],
+          deadline: '',
         );
       }
       if (card.topics.isNotEmpty) {
