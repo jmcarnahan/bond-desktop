@@ -135,7 +135,7 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.text('One extra fast call per suggestion that reads a '
+        find.text('One extra model call per suggestion that reads a '
             'directory. Off, a reply sees only the nearest passages.'),
         findsOneWidget,
       );

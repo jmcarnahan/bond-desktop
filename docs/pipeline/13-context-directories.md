@@ -469,7 +469,7 @@ moved is not a frontmatter that changed.
 **On by default** (`context_dirs.digests` = 1; the Settings switch is
 **Summaries**). `ContextDigestHandler`
 (`app/lib/services/context/context_digest_handler.dart`), kind
-`context_digest`, source `local`, concurrency 1, fast slot, 512 tokens,
+`context_digest`, source `local`, concurrency 1, generative model, 512 tokens,
 temperature 0.
 
 The entity id is `'<dirId>|<fileId>'` (`entityIdFor` / `splitEntityId`). The
@@ -507,15 +507,15 @@ conclusion very rarely shares vocabulary with the code that produced it.
 reconcile pass: the model call is already paid for, and parking the kind would
 put it at risk of being spent twice. The passage keeps a NULL embedding, which
 is invisible to the index and to every KNN until something re-reads the file.
-A fast slot that is down DOES park, leaving `digest_status = 'pending'`.
+A generative model that is down DOES park, leaving `digest_status = 'pending'`.
 
 **The cap paces a new project.** `maxDigestsPerPass` = 40 per reconcile pass,
 worklist `digest_status = 'pending' AND text_chars >= 200` ordered by
 `updated_at DESC, id` — the freshest edits first, because what the owner wants
 read first is what they were last working on. The drain runs every handler to
 EXHAUSTION in registration order and the three context kinds sit ahead of the
-storylines and the drafts, so the cap is not a rate: it is how many fast-slot
-calls one pass may spend before the drafts run, about a minute of fast-slot
+storylines and the drafts, so the cap is not a rate: it is how many generative
+calls one pass may spend before the drafts run, about a minute of generative
 time at the sync cadence. A backlog past the cap lands on the following
 passes, and that is why the brief is queued whenever THIS PASS queued anything
 rather than only when the disk moved.
@@ -535,7 +535,7 @@ left `pending` against a work row already written `error`.
 
 **One per directory.** `ContextBriefHandler`
 (`app/lib/services/context/context_brief_handler.dart`), kind `context_brief`,
-entity the directory id, fast slot, 768 tokens, temperature 0.
+entity the directory id, generative model, 768 tokens, temperature 0.
 
 Two inputs, and only two:
 
@@ -1271,7 +1271,7 @@ that call.
 - `app/lib/widgets/composer.dart` — the provenance chips.
 - `app/lib/widgets/thread_detail_panel.dart`,
   `app/lib/widgets/storyline_timeline.dart` — the **Context** room action.
-- `app/lib/services/llm/model_slots.dart` — the three fast-slot stage rows.
+- `app/lib/services/llm/model_slots.dart` — the three generative stage rows.
 - `app/lib/services/sync_service.dart` — the tail enqueue.
 - `app/lib/services/ai_worker.dart` — `local` in `_sources`.
 - `app/lib/services/attachments/file_dialogs.dart` — `chooseDirectory()`.

@@ -82,9 +82,10 @@ answers false, because a true takes a message off the rail.
 
 1. **Forced to the language model:** the owner saved custom
    `needs_you_rules` (non-blank and not a retype of the defaults — a trained
-   head cannot follow them), or the message has ANY attachment digest (the
-   decision model read the message, never its files; this is also what the
-   digest handler's requeue lands on).
+   head cannot follow them), or the message has an attachment digest WITH an
+   ask (the decision model read the message, never its files; this is also
+   what the digest handler's requeue lands on). A digest that asks nothing
+   leaves the decision model to settle it.
 2. **No usable decision**: no `message_decisions` row (triaged before the
    decision model), or a row decided with NO owner line in its state
    (`owner_known` false inside `answers_json` — the account had not answered

@@ -5,6 +5,8 @@ import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
+import 'package:bond_inbox/services/decision/decision_client.dart'
+    show rawEmbeddingsText;
 import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
@@ -146,8 +148,10 @@ void main() {
     String? bodyText,
     String? bodyPreview,
     Map<String, String>? headers,
+    bool addressedMe = false,
   }) async {
     await store.upsertMessage({
+      if (addressedMe) 'addressed_me': 1,
       'source': source,
       'source_message_id': id,
       'conversation_key': conversationKey,
@@ -383,6 +387,39 @@ void main() {
       expect(row['gate_reason'], isNull);
     });
 
+    test('a Teams 1:1 or @mention is never gated by the model', () async {
+      // The needs-you floor's rows: somebody wrote to the owner by name, and
+      // no gate took one before the decision model existed.
+      await seedMessage(
+        id: 'c1',
+        source: 'teams',
+        conversationKey: 'chat-1',
+        from: 'teams:sarah',
+        subject: null,
+        addressedMe: true,
+      );
+      await seedMessage(
+        id: 'c2',
+        source: 'teams',
+        conversationKey: 'chat-2',
+        from: 'teams:sarah',
+        subject: null,
+      );
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(gateDrop: 0.99, dropReason: 'newsletter'),
+        ),
+      ).pump();
+
+      final floor = await messageRow('c1', source: 'teams');
+      expect(floor['triage_status'], 'triaged');
+      expect(floor['gate_reason'], isNull);
+      // The same answer on a chat that did not name the owner still gates.
+      expect((await messageRow('c2', source: 'teams'))['gate_reason'],
+          'newsletter');
+    });
+
     test('a restored message is never gated by the model either', () async {
       await seedMessage(id: 'm1');
       await store.restoreMessage('email', 'm1');
@@ -429,6 +466,50 @@ void main() {
       expect(row['triage_status'], 'pending');
       expect(row['triage_attempts'], 0);
     });
+
+    for (final fault in <(String, DecisionUnavailableException, String)>[
+      (
+        'a missing heads file',
+        const DecisionNotInstalledException('not installed'),
+        'decision_not_installed',
+      ),
+      (
+        'a heads file this build refuses',
+        const DecisionMisconfiguredException('heads do not match'),
+        'decision_unavailable',
+      ),
+      (
+        'a server answering normalised or wrong-width vectors',
+        const DecisionMisconfiguredException(rawEmbeddingsText),
+        'decision_unavailable',
+      ),
+    ]) {
+      test('${fault.$1} parks: pending, no attempt, and no text or needs-you '
+          'work proceeds', () async {
+        await seedMessage(id: 'm1');
+        await store.enqueueWork('extract', 'email', 'm1');
+        await store.enqueueWork('needs_you', 'email', 'm1');
+        final queue = TriageQueue(
+          store,
+          concurrency: 1,
+          decisionClient: FakeDecisionClient((_) => throw fault.$2),
+        );
+        TriageProgress? last;
+        final subscription = queue.progress.listen((p) => last = p);
+
+        await queue.pump();
+        await Future<void>.delayed(Duration.zero);
+        await subscription.cancel();
+
+        expect(last!.parkedReason, fault.$3);
+        final row = await messageRow('m1');
+        expect(row['triage_status'], 'pending');
+        expect(row['triage_attempts'], 0);
+        // An untriaged row holds its text and needs-you work back.
+        expect(await store.claimPendingWork('extract'), isNull);
+        expect(await store.claimPendingWork('needs_you'), isNull);
+      });
+    }
 
     test('an unusable decision is a failure that spends an attempt', () async {
       await seedMessage(id: 'm1');

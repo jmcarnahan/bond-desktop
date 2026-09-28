@@ -26,8 +26,7 @@ before this round triage had already written the summary, so only the topics
 waited on extraction; the `embed_message`
 queue (enqueued at sync, not held behind triage) may embed such a message
 first, and the text stage's own `_embedMessage` re-embeds it when the card's
-hash changes. `project` is stored but not yet on the card (Phase 8 of the
-round adds it).
+hash changes. `project` is stored but is not on the card.
 
 **The clustering card has a module and seven variants.** `clustering_card.dart`
 is the one recipe for the text a CONVERSATION is embedded from, and both

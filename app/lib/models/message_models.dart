@@ -877,20 +877,6 @@ class TriageResult {
     required this.needsAction,
     this.replyExpected = false,
   });
-
-  /// The quiet middle. Never a guess that would push mail up the list.
-  factory TriageResult.fallback() => const TriageResult(
-        urgency: 'normal',
-        category: 'other',
-        needsAction: false,
-      );
-
-  factory TriageResult.fromJson(Map<String, dynamic> json) => TriageResult(
-        urgency: json['urgency'] as String? ?? 'normal',
-        category: json['category'] as String? ?? 'other',
-        needsAction: json['needs_action'] as bool? ?? false,
-        replyExpected: json['reply_expected'] as bool? ?? false,
-      );
 }
 
 /// The activity panel's header numbers, computed over one window of

@@ -14,6 +14,16 @@ import 'embeddings_client.dart';
 /// compare vectors from two different spaces.
 enum ModelSlot { generative, decide, embed }
 
+/// What an access key with characters no HTTP header can carry says. Never
+/// the key itself.
+const String accessKeyCharsText =
+    'The access key has characters a server cannot accept. Paste it again.';
+
+/// Whether [key] can ride an `Authorization` header: printable ASCII only
+/// (0x21 to 0x7E), no spaces, no line breaks, nothing a paste can smuggle in.
+bool isUsableAccessKey(String key) =>
+    key.isNotEmpty && key.codeUnits.every((c) => c >= 0x21 && c <= 0x7E);
+
 /// Which request shape a client puts on the wire.
 ///
 /// Lives HERE rather than beside `LlmClient` because a resolved [LlmTarget]
@@ -62,7 +72,8 @@ class LlmTarget {
   /// on, or null when it can. Set on a MANAGED target whose model the router
   /// is not serving (a chosen generative model not yet downloaded, a
   /// decision model not yet installed): the client then throws its
-  /// unavailable exception WITHOUT a request, so the work PARKS rather than
+  /// not-installed exception WITHOUT a request, so the work PARKS under the
+  /// reason `not_installed` rather than
   /// taking the router's 400 for an unknown model, which is fatal.
   final String? unavailable;
 
@@ -93,25 +104,25 @@ class LlmTarget {
   String toString() => '$model @ $baseUrl';
 }
 
-/// The prose slot's compiled defaults (`--dart-define=LLAMA_URL=…`,
+/// The generative role's compiled defaults (`--dart-define=LLAMA_URL=…`,
 /// `LLAMA_MODEL=…`). Moved here from `LlmClient` so this file can build const
 /// targets from them without importing upward; `LlmClient.defaultBaseUrl` and
 /// friends are now const aliases of these, and every existing reference to
 /// those names keeps working.
-const String proseUrlDefault = String.fromEnvironment(
+const String generativeUrlDefault = String.fromEnvironment(
   'LLAMA_URL',
   defaultValue: 'http://localhost:8080/v1/chat/completions',
 );
-const String proseModelDefault =
+const String generativeModelDefault =
     String.fromEnvironment('LLAMA_MODEL', defaultValue: 'qwen3.8');
 
-const LlmTarget proseSlotDefault =
-    LlmTarget(baseUrl: proseUrlDefault, model: proseModelDefault);
+const LlmTarget generativeSlotDefault =
+    LlmTarget(baseUrl: generativeUrlDefault, model: generativeModelDefault);
 
 /// The decision server's compiled defaults (`--dart-define=DECIDE_URL=…`,
 /// `DECIDE_MODEL=…`): the FULL `/v1/embeddings` URL `make decide` serves on
 /// :8083, and the name a router would route on. Here rather than in
-/// `DecisionClient` for [proseUrlDefault]'s reason: the prefs compose the
+/// `DecisionClient` for [generativeUrlDefault]'s reason: the prefs compose the
 /// hand-servers decision target out of them, and this file may not import the
 /// client back. `DecisionClient.defaultBaseUrl` and `defaultModel` are const
 /// aliases of these.
@@ -432,23 +443,6 @@ class LlmTargetSpec {
     this.parallel = 1,
     this.streams = true,
   });
-
-  /// Whether this target runs on THIS MAC: the managed router or the
-  /// hand-started servers.
-  bool get isBuiltIn => id == localGenerativeId || id == localDecisionId;
-
-  /// Whether this is one of the two "Your server" targets derived from a
-  /// stored or compiled address.
-  bool get isBox => id == boxProseId || id == boxDecideId;
-
-  /// Whether this is the optional cloud-drafts target.
-  bool get isCloudDrafts => id == cloudDraftsId;
-
-  /// Whether this is one of the five FIXED targets. Every target is derived
-  /// since the decision-model round, so this is true of everything the prefs
-  /// resolve; a spec parsed out of a legacy `llm_targets` row is the only
-  /// thing it can be false for.
-  bool get isFixed => isBuiltIn || isBox || isCloudDrafts;
 
   /// Whether somebody else's company operates the machine this dials. The
   /// consent rule's whole question — see [thirdPartyHosts].

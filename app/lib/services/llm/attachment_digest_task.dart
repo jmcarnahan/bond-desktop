@@ -77,7 +77,7 @@ class AttachmentDigestTask implements JsonTask<AttachmentDigest> {
   /// was sent, not to be summarised itself.
   static const int _messageBodyCap = 600;
 
-  /// The document. Past six thousand characters a fast model is reading
+  /// The document. Past six thousand characters a model is reading
   /// appendices, and the passages are indexed separately anyway — a search
   /// finds page forty; this record is about what the file IS.
   static const int _documentCap = 6000;

@@ -62,7 +62,7 @@ class ContextDirectoriesSection extends StatefulWidget {
   final DateTime Function() now;
 
   /// Whether a draft that reads one of these directories may spend one extra
-  /// fast call picking two sections to read in full first.
+  /// model call picking two sections to read in full first.
   ///
   /// A prop and no local state: the host watches the preference and rebuilds,
   /// so what this switch shows is always what is stored rather than what was
@@ -200,7 +200,7 @@ class _ContextDirectoriesSectionState extends State<ContextDirectoriesSection> {
               style: BondType.body.copyWith(fontWeight: FontWeight.w600),
             ),
             subtitle: Text(
-              'One extra fast call per suggestion that reads a directory. '
+              'One extra model call per suggestion that reads a directory. '
               'Off, a reply sees only the nearest passages.',
               style: BondType.caption,
             ),

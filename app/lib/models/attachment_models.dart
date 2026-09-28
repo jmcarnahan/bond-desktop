@@ -235,7 +235,7 @@ class AttachmentRef {
   static bool _flag(Object? raw) => raw == 1 || raw == true;
 }
 
-/// What the fast model made of one attached document.
+/// What the generative model made of one attached document.
 ///
 /// Written by the digest handler, read by the row (`AI:` line), the storyline
 /// recap, and the needs-you re-verdict. Every field is model output and is

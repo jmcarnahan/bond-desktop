@@ -98,7 +98,9 @@ are in `homeDropLabels`; the four machine senders are also in
 
 `cold_outreach` NEVER gates, however sure the head is: a human writing to the
 owner stays kept, and the needs-you pass holds a stranger's first approach to
-its higher bar instead. A restored message (`gate_override = 'user'`) is
+its higher bar instead. A Teams 1:1 or @mention (`needsYouFloor`) is never
+learned-gated: somebody wrote to the owner by name, and no gate took one
+before the decision model. A restored message (`gate_override = 'user'`) is
 never gated by the model either — Restore bypasses every gate.
 
 A learned drop takes the tier-2 path (`skipped` → `refoldThreadState` →

@@ -334,7 +334,7 @@ void main() {
       final prefs = container.read(appPrefsProvider);
       final draft = container.read(stageLlmClientProvider('draft_reply'));
       final triage = container.read(stageLlmClientProvider('triage'));
-      expect(draft.baseUrl, prefs.routerProseTarget.baseUrl);
+      expect(draft.baseUrl, '${prefs.routerBase}/v1/chat/completions');
       expect(draft.model, routerProseId);
       // One generative model since the decision-model round: the label
       // stages and the drafts ask the same model.
@@ -448,7 +448,7 @@ void main() {
       final triage = container.read(stageLlmClientProvider('triage'));
       final draft = container.read(stageLlmClientProvider('draft_reply'));
       expect(triage.baseUrl,
-          container.read(appPrefsProvider).routerProseTarget.baseUrl);
+          '${container.read(appPrefsProvider).routerBase}/v1/chat/completions');
 
       await container.read(appPrefsProvider.notifier).useGenerative(
             placement: ModelPlacement.box,
@@ -500,7 +500,7 @@ void main() {
       final draft = container.read(stageLlmClientProvider('draft_reply'));
       final triage = container.read(stageLlmClientProvider('triage'));
       final generativeUrl =
-          container.read(appPrefsProvider).routerProseTarget.baseUrl;
+          '${container.read(appPrefsProvider).routerBase}/v1/chat/completions';
 
       await prefs.useCloudDrafts(
         url: 'https://drafts.example.com/v1/chat/completions',

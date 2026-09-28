@@ -9,7 +9,7 @@ import 'bench_stats.dart';
 /// A target is an ordinary VALUE, not configuration the app reads: the live
 /// tests construct their own clients, and the dart-defines below are only the
 /// defaults the Makefile fills in. Nothing in `lib/` looks at any of this —
-/// the app's own servers stay on `LLAMA_URL`/`FAST_LLAMA_URL`, so pointing a
+/// the app's own servers stay on `LLAMA_URL`/`DECIDE_URL`, so pointing a
 /// bakeoff at an experimental runtime cannot move the app onto it by accident.
 ///
 /// [label] is the whole reason a run is readable a week later. It names the
@@ -39,12 +39,17 @@ class BenchTarget {
     this.wireName = 'openai',
   });
 
-  /// The bulk-work slot: triage, extraction, membership. Defaults to the fast
-  /// server the app already uses, so a bench with no defines benches today.
+  /// Where `make fast` serves the 4B. Bench-only: the app has had one
+  /// generative model and no fast slot since the decision-model round, so
+  /// the address lives here rather than in `lib/`.
+  static const String makeFastUrl = 'http://localhost:8082/v1/chat/completions';
+
+  /// The bulk-work slot: triage, extraction, membership. Defaults to the
+  /// `make fast` server, so a bench with no defines benches the 4B.
   static const BenchTarget bulk = BenchTarget(
     slot: 'bulk',
     label: String.fromEnvironment('BENCH_LABEL', defaultValue: 'fast (default)'),
-    url: String.fromEnvironment('BENCH_URL', defaultValue: LlmClient.fastBaseUrl),
+    url: String.fromEnvironment('BENCH_URL', defaultValue: makeFastUrl),
     model: String.fromEnvironment('BENCH_MODEL',
         defaultValue: LlmClient.defaultModel),
     wireName: String.fromEnvironment('BENCH_WIRE', defaultValue: 'openai'),

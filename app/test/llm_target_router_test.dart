@@ -20,8 +20,8 @@ const AppPrefs _managed = AppPrefs();
 
 void main() {
   test('hand-started, each role dials its make-target server', () {
-    expect(_handStarted.generativeSpec.url, proseUrlDefault);
-    expect(_handStarted.generativeSpec.model, proseModelDefault);
+    expect(_handStarted.generativeSpec.url, generativeUrlDefault);
+    expect(_handStarted.generativeSpec.model, generativeModelDefault);
     expect(_handStarted.generativeSpec.id, localGenerativeId);
     expect(_handStarted.decisionSpec.url, decideUrlDefault);
     expect(_handStarted.decisionSpec.model, decideModelDefault);

@@ -109,7 +109,7 @@ void main() {
       // No compiled address and none stored: the placement cannot be honoured,
       // and a target nothing can reach would park every lane.
       const prefs = AppPrefs(modelPlacement: ModelPlacement.box);
-      expect(prefs.hasGenerativeServer, isFalse);
+      expect(prefs.effectiveGenerativeUrl, isEmpty);
       for (final id in generativeStages) {
         expect(prefs.specForStage(id)!.id, localGenerativeId, reason: id);
       }
@@ -120,8 +120,8 @@ void main() {
       for (final id in generativeStages) {
         final spec = prefs.specForStage(id)!;
         expect(spec.id, localGenerativeId, reason: id);
-        expect(spec.url, proseUrlDefault, reason: id);
-        expect(spec.model, proseModelDefault, reason: id);
+        expect(spec.url, generativeUrlDefault, reason: id);
+        expect(spec.model, generativeModelDefault, reason: id);
       }
     });
 
@@ -193,7 +193,7 @@ void main() {
 
     test('your server with no address is this Mac', () {
       const prefs = AppPrefs(decisionPlacement: ModelPlacement.box);
-      expect(prefs.hasDecisionServer, isFalse);
+      expect(prefs.effectiveDecisionUrl, isEmpty);
       expect(prefs.specForStage('decision')!.id, localDecisionId);
     });
 
@@ -456,7 +456,7 @@ void main() {
       final prefs = await AppPrefsNotifier.read(store);
 
       expect(prefs.boxBigUrl, isEmpty);
-      expect(prefs.hasGenerativeServer, isFalse);
+      expect(prefs.effectiveGenerativeUrl, isEmpty);
       expect(await store.getPref(llmTargetsKey), '[]');
     });
 

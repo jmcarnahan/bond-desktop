@@ -11,7 +11,7 @@ waits for a download.
 
 > **Live.** Every stage runs, and so does everything that uses them: the
 > metadata stage inside stage 1, then `attachment_text` (Graph plus the
-> embedding server, no chat model) and `attachment_digest` (one fast-slot call
+> embedding server, no chat model) and `attachment_digest` (one generative call
 > per document) — and then retrieval into replies, recap lines, and the
 > needs-you re-verdict on a document that asks for something. Each of those
 > three is documented further down this file.
@@ -566,7 +566,7 @@ from `wipeAll`) is the eventual cleanup.
 
 ## The digest
 
-`AttachmentDigestHandler` (kind `attachment_digest`, concurrency 1, fast slot)
+`AttachmentDigestHandler` (kind `attachment_digest`, concurrency 1, generative model)
 runs `AttachmentDigestTask` over one document and writes
 `AttachmentDigest` — five keys, always all five:
 
@@ -1099,7 +1099,7 @@ storyline from a pin to another one; the panel passes its own.
 a composer to write into. The full viewer has none, so `AttachmentViewerPane`
 takes no such callback at all. Neither does a thread the pane cannot reply to:
 a chat without `Chat.ReadWrite` shows no composer, so the host passes a null
-target and the offer disappears rather than spending a fast-slot draft on words
+target and the offer disappears rather than spending a generative draft on words
 nobody would see. It asks the draft notifier to regenerate with this
 attachment's id in `pinned_attachment_ids`, which is what floats it to the
 front of what the retriever quotes, and it takes the cursor to the box the

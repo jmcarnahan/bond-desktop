@@ -951,13 +951,12 @@ final stageLlmClientProvider = Provider.family<LlmClient, String>(
     final slot = stageSlot(stageId);
     // What a resolver that threw falls back to. Every text stage is
     // generative now, so the one compiled generative default serves them all.
-    const fallback = proseSlotDefault;
+    const fallback = generativeSlotDefault;
     return LlmClient(
       baseUrl: fallback.baseUrl,
       // Its own name as well as its own URL: a runtime that serves more than
-      // one model routes on this field, so a bulk stage's client must say
-      // which of them it is asking for rather than inherit the big server's
-      // answer.
+      // one model routes on this field, so a stage's client must say which
+      // of them it is asking for.
       model: fallback.model,
       resolveTarget: () =>
           ref.read(appPrefsProvider.notifier).targetForStage(stageId),
@@ -987,7 +986,7 @@ final stageLlmClientProvider = Provider.family<LlmClient, String>(
 /// worker the refs triage just wrote. The cost is that a triage pump waits
 /// for the worker item already in flight (a text call can be seconds). A
 /// separate triage gate — ordering kept by the claim's untriaged guard and
-/// `onDrained` alone — is a Phase 9 candidate. It deliberately does NOT
+/// `onDrained` alone — is a follow-up round candidate. It deliberately does NOT
 /// serialize the handful of requests one drain has in flight — those are
 /// batched by the server on purpose, and are what the slot count is sized
 /// for.
@@ -1214,10 +1213,9 @@ final contextRetrieverProvider = Provider<ContextRetriever>(
     ref.watch(messageStoreProvider),
     ref.watch(contextStoreProvider),
     ref.watch(embeddingsClientProvider),
-    // Bulk work on the fast server: one small structured call per
-    // directory-fed draft, which is the slot every other per-item call in
-    // this app already lands on — [stageLlmClientProvider].
-    fastClient: ref.watch(stageLlmClientProvider('context_select')),
+    // One small structured call per directory-fed draft, on the generative
+    // model like every other text stage — [stageLlmClientProvider].
+    selectClient: ref.watch(stageLlmClientProvider('context_select')),
     // `ref.read` inside the closure, never `watch`, in the `lookbackDays`
     // shape above and for its reason: watching would rebuild this provider —
     // and the worker holding it, mid-drain — the moment somebody moved the
@@ -1287,12 +1285,12 @@ final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
 /// directly and six read this provider; the fast lane is what every one of
 /// them means by "the worker".
 ///
-/// Its own load on the fast server is one kind at a time at K=3 — needs-you,
-/// then extraction — and the gate it shares with the triage drain is what
-/// keeps that K=3 off the back of triage's. The fourth slot is the STORYLINE
-/// lane's: that lane is on a gate of its own and its membership confirms are
-/// fast-server calls, so the worst case at that server is three plus one,
-/// which is `FAST_SLOTS`.
+/// Its own load on the generative server is one kind at a time at K=3 —
+/// needs-you, then extraction — and the gate it shares with the triage drain
+/// orders the two (triage itself calls only the decision model since the
+/// decision-model round; see [fastDrainGateProvider]). The storyline and
+/// draft lanes are on gates of their own and dial the same generative model,
+/// so the SERVER queues whatever they add.
 final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
   // Named before it is built, because one handler below has to reach it: the
   // digest's requeue wakes the drain it is running inside, and a `ref.read` of
@@ -1314,7 +1312,8 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       // written yet.
       NeedsYouHandler(
         ref.watch(messageStoreProvider),
-        // Bulk work by default: the fast server. See [stageLlmClientProvider].
+        // The generative model, like every text stage. See
+        // [stageLlmClientProvider].
         ref.watch(stageLlmClientProvider('needs_you')),
         activityLog: ref.watch(activityLogProvider),
         // A verdict this pass CHANGES has to move the chip beside it, and
@@ -1367,11 +1366,12 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         draftPolicy: () => ref.read(appPrefsProvider).draftPolicy,
       ),
       // After extraction and before the storylines. After, because the summary
-      // it embeds is triage's and the drain order keeps the fast server's slots
-      // for extraction while there is extraction left to do. Before, because it
-      // talks to no model at all: a park here is a park on the embedding
-      // server, and it parks only its own kind, so a missing `make embed` must
-      // never be allowed to sit in front of the storyline queue.
+      // it embeds is the text stage's and the drain order keeps the
+      // generative server's slots for extraction while there is extraction
+      // left to do. Before, because it talks to no model at all: a park here
+      // is a park on the embedding server, and it parks only its own kind,
+      // so a missing `make embed` must never be allowed to sit in front of
+      // the storyline queue.
       EmbedHandler(
         ref.watch(messageStoreProvider),
         ref.watch(embeddingsClientProvider),
@@ -1395,7 +1395,8 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       ),
       AttachmentDigestHandler(
         ref.watch(messageStoreProvider),
-        // Bulk work by default: the fast server. See [stageLlmClientProvider].
+        // The generative model, like every text stage. See
+        // [stageLlmClientProvider].
         ref.watch(stageLlmClientProvider('attachment_digest')),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
@@ -1430,7 +1431,8 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       // drain reads a brief that already knows what changed this morning.
       ContextDigestHandler(
         ref.watch(contextStoreProvider),
-        // Bulk work by default: the fast server. See [stageLlmClientProvider].
+        // The generative model, like every text stage. See
+        // [stageLlmClientProvider].
         ref.watch(stageLlmClientProvider('context_file_digest')),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
@@ -1506,13 +1508,13 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
 /// require, behind a gate of their own.
 ///
 /// All six in ONE worker, and that is the decision rather than an accident of
-/// where they were. They are mixed-slot — assignment, the audit, the recruit
-/// and the sweep's confirms are fast-server calls; the sweep's naming, the
-/// refresh and the recap are the 27B's — so neither server is the thing that
-/// groups them. What groups them is that they mutate shared membership, and
-/// the ordering arguments below only hold while they run one after another in
-/// this list: refresh before recruit, audit between them, recap after the
-/// sweep.
+/// where they were. They were mixed-slot when there were two generating
+/// servers (confirms on the 4B, naming and recaps on the 27B); every pass is
+/// on the one generative model now, and the server was never the thing that
+/// groups them anyway. What groups them is that they mutate shared
+/// membership, and the ordering arguments below only hold while they run
+/// one after another in this list: refresh before recruit, audit between
+/// them, recap after the sweep.
 ///
 /// Off the fast lane entirely, which is the point: a twelve-to-twenty-three
 /// second recap used to sit in front of the next message's triage.
@@ -1878,11 +1880,10 @@ final parkedProvider = StreamProvider.autoDispose<ParkedFact>((ref) {
 /// be harmless — it is a provider because the handlers and the notifier must
 /// agree on the same store.
 ///
-/// The one place the routing split runs through a single object: five of the
-/// six storyline passes carry their own client, each on its own stage, so
-/// membership can sit on the fast server while naming, refresh, recap and the
-/// dark grouping sit on the prose one — and any of the five can be pointed
-/// somewhere else from Settings without touching the other four.
+/// Five of the six storyline passes carry their own client, each on its own
+/// stage, so the activity log labels each call by its stage. Every stage
+/// resolves to the one generative model since the decision-model round
+/// ([stageLlmClientProvider]).
 ///
 /// The same embedding client the extraction handler holds, deliberately: a
 /// thread whose embed failed there is one this service re-embeds itself when

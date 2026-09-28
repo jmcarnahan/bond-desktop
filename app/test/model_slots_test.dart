@@ -282,7 +282,6 @@ void main() {
       model: 'qwen3.8',
     );
     expect(local.isThirdParty, isFalse);
-    expect(local.isBuiltIn, isFalse);
 
     // The wire alone is enough: Converse is only served by one company.
     expect(local.copyWith(wire: LlmWire.bedrockConverse).isThirdParty, isTrue);
@@ -314,27 +313,6 @@ void main() {
     expect(local.copyWith(name: 'Renamed').id, 'box');
   });
 
-  test('the five fixed ids say which kind of target they are', () {
-    LlmTargetSpec spec(String id) =>
-        LlmTargetSpec(id: id, name: id, url: 'http://h/v1', model: 'm');
-
-    for (final id in [localGenerativeId, localDecisionId]) {
-      expect(spec(id).isBuiltIn, isTrue, reason: id);
-      expect(spec(id).isBox, isFalse, reason: id);
-      expect(spec(id).isFixed, isTrue, reason: id);
-    }
-    for (final id in [boxProseId, boxDecideId]) {
-      expect(spec(id).isBox, isTrue, reason: id);
-      expect(spec(id).isBuiltIn, isFalse, reason: id);
-      expect(spec(id).isFixed, isTrue, reason: id);
-    }
-    expect(spec(cloudDraftsId).isCloudDrafts, isTrue);
-    expect(spec(cloudDraftsId).isFixed, isTrue);
-    // Round H's small-model id is nothing any more.
-    expect(spec('box-bulk').isFixed, isFalse);
-    expect(spec('t-mine').isFixed, isFalse);
-  });
-
   test('ids are unique and labels are non-empty', () {
     final ids = pipelineStages.map((stage) => stage.id).toList();
     expect(ids.toSet(), hasLength(ids.length));
@@ -346,15 +324,12 @@ void main() {
   });
 
   test('the compiled defaults are the clients\' constants', () {
-    expect(proseSlotDefault.baseUrl, LlmClient.defaultBaseUrl);
-    expect(proseSlotDefault.model, LlmClient.defaultModel);
+    expect(generativeSlotDefault.baseUrl, LlmClient.defaultBaseUrl);
+    expect(generativeSlotDefault.model, LlmClient.defaultModel);
     // The hand-started `make decide` server, as `DecisionClient` names it.
     expect(decideUrlDefault, 'http://127.0.0.1:8083/v1/embeddings');
     expect(decideModelDefault, 'bond-decide');
     expect(routerDecideId, 'bond-decide');
-    // The bench-only fast server is not a slot any more, and its address
-    // lives on the client alone.
-    expect(LlmClient.fastBaseUrl, isNot(LlmClient.defaultBaseUrl));
     expect(EmbeddingsClient.modelTag, isNotEmpty);
   });
 

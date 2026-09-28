@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../models/message_models.dart';
 import '../services/deadline_parse.dart' show showableDeadline;
 import '../services/decision/stored_decision.dart';
+import '../services/decision/decision_policy.dart'
+    show DecisionPolicy, learnedGateReasons;
 import '../models/extraction_models.dart';
 import '../theme/tokens.dart';
 import 'home_result.dart' show homeDropLabels;
@@ -206,7 +208,12 @@ class WhyPanelBody extends StatelessWidget {
       lines.add('Skipped by the gate: '
           '${homeDropLabels[gate]?.toLowerCase() ?? _words(gate)}.');
     }
-    final line = decisionLine(decision, dropped: gate.isNotEmpty);
+    // Dropped means the LEARNED gate took it: one of its words AND a stored
+    // p(drop) over its bar. Any other gate word (an owner's Ignore is `user`)
+    // is not the model's verdict, so its line reads what the model said.
+    final learnedDrop = learnedGateReasons.contains(gate) &&
+        (decision?.gateP ?? 0) >= DecisionPolicy.gateDrop;
+    final line = decisionLine(decision, dropped: learnedDrop);
     if (line != null) lines.add(line);
     return lines;
   }
@@ -215,11 +222,13 @@ class WhyPanelBody extends StatelessWidget {
   /// 0.94, needs you 0.71, action 0.66, reply 0.12 · 58 ms`, fixed to two
   /// places. Null when the model never read the message.
   ///
-  /// The gate is worded by the VERDICT ([dropped]: a gate took the message),
-  /// not by the head's argmax: a dropped message reads `gate drop 0.91`; a
-  /// kept one reads `gate keep 0.94`, or `gate keep (drop 0.60)` when the head
-  /// leaned drop but under the bar, from a cold approach, or on a message the
-  /// owner restored. The other three are each field's probability of yes.
+  /// The gate is worded by the VERDICT ([dropped]: the LEARNED gate took the
+  /// message), not by the head's argmax: a dropped message reads `gate drop
+  /// 0.91`; every other one reads `gate keep 0.94`, or `gate keep (drop
+  /// 0.60)` when the head leaned drop but under the bar, from a cold
+  /// approach, or on a message the owner restored. A message another gate
+  /// took (an owner's Ignore) is not dropped here: it reads as the model saw
+  /// it. The other three are each field's probability of yes.
   static String? decisionLine(StoredDecision? d, {required bool dropped}) {
     if (d == null) return null;
     String p2(double? p) => p == null ? '–' : p.toStringAsFixed(2);

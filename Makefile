@@ -116,11 +116,12 @@ EMBED_HF     ?= Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0
 # server is stood up beside it for `make golden-vector`.
 EMBED_ARGS   ?= --pooling last
 
-# The third server: the bulk-work model. The message text, the needs-you band
-# and storyline-confirm run here in the bench shape; the 27B on :$(MODEL_PORT) keeps drafting and
-# naming, where prose quality is the product. Same chat-completions wire, its
-# own port — the app picks a server per task, and a task whose server is down
-# parks exactly as it always has.
+# The third server: the bulk-work model (the 4B), for the BENCHES. The bench
+# shape's bulk slot (`make bench`, `make golden`, the message text, the
+# needs-you band, storyline confirm) defaults here; the 27B on :$(MODEL_PORT)
+# is the prose slot. The APP no longer dials it: since the decision-model round
+# the app has ONE generative model (the box 27B, or the 27B/4B its own router
+# serves), and a hand-servers build sends every text stage to :$(MODEL_PORT).
 FAST_PORT    ?= 8082
 FAST_HF      ?= ggml-org/Qwen3-4B-Instruct-2507-Q8_0-GGUF
 # Matched to the app's drain concurrency of 3, plus one slot of headroom for a
@@ -283,9 +284,11 @@ install:
 # WAIT_TIMEOUT seconds because the download (~19GB / ~4.3GB) has not finished
 # and the port is not bound yet. That is the expected first-run outcome, not a
 # failure — the download keeps going in the background and the polls below are
-# what actually wait for it. Both servers, not just the 27B: triage PARKS
-# rather than degrades when the fast server is down, so a setup that skipped
-# it would hand over an inbox whose AI silently never runs.
+# what actually wait for it. Both servers, not just the 27B: every bench's
+# bulk slot defaults to the fast server, so a setup that skipped it would hand
+# over benches that fail on their first call. The app itself needs neither by
+# default (it runs its own router); the decision model is not downloaded here
+# at all — `make decide-install` copies it, `make decide` serves it by hand.
 setup:
 	@printf "$(BLUE)==>$(RESET) [1/7] installing prerequisites\n"
 	@$(MAKE) --no-print-directory install
@@ -749,13 +752,19 @@ clean:
 	@printf "removed $(LOG_DIR)\n"
 
 # ── $(APP_DIR)/ — the Flutter desktop inbox ────────────────────────────
-# The app talks to ALL THREE servers above: :$(FAST_PORT) for the message
-# text and storyline membership, :$(MODEL_PORT) for drafts and storyline
-# names, :$(EMBED_PORT) for conversation embeddings. None is required to run it
-# — with a server down the work that needs it simply parks and retries on the
-# next sync — but `make model`, `make fast` and `make embed` are what make it do
-# anything intelligent. Override the URLs with --dart-define=LLAMA_URL=... /
-# --dart-define=FAST_LLAMA_URL=... / --dart-define=EMBED_URL=... .
+# By default the app runs its OWN llama-server router (the decision model, the
+# embeddings and, unless the build names a box, the generative model) and
+# none of the servers above is needed. A BOND_DEV_HAND_SERVERS build instead
+# talks to three hand-started servers: :$(DECIDE_PORT) for the decision model
+# (every kept message's classification), :$(MODEL_PORT) for every generative
+# stage (message text, the needs-you band, storylines, drafts) and
+# :$(EMBED_PORT) for embeddings. :$(FAST_PORT) is bench-only. None is required
+# to run it — with a server down the work that needs it parks and retries on
+# the next sync — but `make decide`, `make model` and `make embed` are what make
+# it do anything intelligent. Override the URLs with
+# --dart-define=DECIDE_URL=... / --dart-define=LLAMA_URL=... /
+# --dart-define=EMBED_URL=... (DECIDE_URL and EMBED_URL are the FULL
+# /v1/embeddings URLs).
 
 # Dev-stage Microsoft auth: the app registration's client id, tenant id, and
 # (because the shared Azure registration has no public-client platform, and
@@ -1078,8 +1087,9 @@ omlx-stop:
 # value that can be read; emits nothing for any that cannot (sign-in then
 # refuses with a config error; a missing secret alone means public-client
 # behavior). BOND_BOX_URL rides along: it makes the GPU server the build's
-# default placement and prefills the box address in the wizard and in
-# Settings. The box's access key is NOT here. It is typed in the app and kept
+# default place for the GENERATIVE model (`/prose`) and prefills both role
+# addresses in the wizard and in Settings (`/prose` and `/decide`); the
+# decision model still defaults to this Mac. The box's access key is NOT here. It is typed in the app and kept
 # in the keychain.
 define APP_SECRET_DEFINE
 $$(CID=$$(grep -m1 '^MICROSOFT_CLIENT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
@@ -1123,8 +1133,8 @@ ifneq ($(strip $(DECIDE_MODEL)),)
 APP_LLM_DEFINES += --dart-define=DECIDE_MODEL='$(DECIDE_MODEL)'
 endif
 # Points a DEV build at a llama-server it did not ship with — Homebrew's, or a
-# checkout's build directory — so Settings -> Models -> Local server can run
-# the one bundled-style router without packaging an .app first. The shipped
+# checkout's build directory — so the app's managed router (Settings ->
+# Models, This Mac) can run without packaging an .app first. The shipped
 # bundle carries its own copy beside the executable and needs none of this.
 ifneq ($(strip $(BOND_LLAMA_SERVER)),)
 APP_LLM_DEFINES += --dart-define=BOND_LLAMA_SERVER='$(BOND_LLAMA_SERVER)'
@@ -1137,7 +1147,7 @@ ifneq ($(strip $(BOND_DEV_SKIP_SETUP)),)
 APP_LLM_DEFINES += --dart-define=BOND_DEV_SKIP_SETUP='$(BOND_DEV_SKIP_SETUP)'
 endif
 # Read by `managedServerDefault` (app/lib/services/llm/model_slots.dart) so a
-# developer who runs `make model fast embed` by hand keeps this app off its own
+# developer who runs `make decide model embed` by hand keeps this app off its own
 # llama-server. Round H took that switch off the Models page, and this define
 # is what replaced it — same shape as the skip above, same `local.mk` line.
 ifneq ($(strip $(BOND_DEV_HAND_SERVERS)),)

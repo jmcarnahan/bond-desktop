@@ -68,6 +68,16 @@ void main() {
       }
     });
 
+    test('learnedGateReasons is exactly the words it can write', () {
+      final written = <String>{
+        for (final reason in decisionOptions['drop_reason']!)
+          ?learnedGateReason(fakeAnswers(gateDrop: 0.9, dropReason: reason)),
+      };
+      expect(learnedGateReasons, written);
+      // The owner's Ignore is never the model's word.
+      expect(learnedGateReasons, isNot(contains('user')));
+    });
+
     test('every word it can write has a label a person can read', () {
       for (final reason in decisionOptions['drop_reason']!) {
         final word =

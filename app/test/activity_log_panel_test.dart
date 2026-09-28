@@ -998,6 +998,30 @@ void main() {
         )),
         'Triage parked — decision model unreachable',
       );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'triage',
+          status: 'parked',
+          detail: const {'reason': 'not_installed'},
+        )),
+        'Triage parked — model not downloaded',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'triage',
+          status: 'parked',
+          detail: const {'reason': 'decision_not_installed'},
+        )),
+        'Triage parked — decision model not installed',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'triage',
+          status: 'parked',
+          detail: const {'reason': 'decision_unauthorized'},
+        )),
+        'Triage parked — the decision server refused the access key',
+      );
     });
 
     test('a document read says how many passages it became', () {

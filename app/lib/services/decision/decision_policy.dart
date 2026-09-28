@@ -49,6 +49,15 @@ const Map<String, String> _gateReasonFor = {
   'other': 'model_other',
 };
 
+/// Every `gate_reason` word [learnedGateReason] can write. The rules gates
+/// share some of these words, so a word alone never says the MODEL dropped a
+/// message: a reader pairs it with the stored p(drop) ≥
+/// [DecisionPolicy.gateDrop] (the Why panel's `dropped`).
+///
+/// `other` already maps to `model_other` in the table above, so the table's
+/// values are the whole set.
+final Set<String> learnedGateReasons = {..._gateReasonFor.values};
+
 /// The learned gate: the `gate_reason` to drop this message with, or null to
 /// keep it.
 ///

@@ -16,12 +16,12 @@ import 'attachment_policy.dart';
 ///
 /// Its own kind rather than the tail of [AttachmentTextHandler], because the
 /// two talk to different servers: reading a file is Graph plus the embedder,
-/// and understanding it is the fast slot. Folded together, a fast server that
-/// is not running would hold back the words as well — and the words are what
-/// search, retrieval and the panel's Text segment want whether or not any
-/// model has read them.
+/// and understanding it is the generative model. Folded together, a
+/// generative server that is not running would hold back the words as well
+/// — and the words are what search, retrieval and the panel's Text segment
+/// want whether or not any model has read them.
 ///
-/// Concurrency stays at the inherited 1. It is one fast-slot call per
+/// Concurrency stays at the inherited 1. It is one generative call per
 /// document, and the queue behind it is already draining as fast as the server
 /// answers.
 class AttachmentDigestHandler extends WorkHandler {

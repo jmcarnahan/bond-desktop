@@ -71,6 +71,12 @@ class _CallFacts {
   int? statusCode;
 }
 
+/// The first sentence of every "the server's vectors are not the decision
+/// model's" misconfiguration. No URL and no key: it is shown as it stands.
+const String rawEmbeddingsText =
+    'The decision server did not answer with raw embeddings from the '
+    'decision model. Check its address in Settings, Models.';
+
 class DecisionClient {
   /// Overridable at build time (`--dart-define=DECIDE_URL=…`), like
   /// `EMBED_URL`. The FULL endpoint, as every target's `baseUrl` is.
@@ -141,9 +147,11 @@ class DecisionClient {
   }
 
   /// One message's answers. Throws [DecisionUnavailableException] when the
-  /// server is not answering, [LlmUnauthorizedException] when it refused the
-  /// key, and [LlmFormatException] when it answered with something that is
-  /// not a usable vector.
+  /// server is not answering ([DecisionNotInstalledException] when the model
+  /// or its heads are not on this Mac, [DecisionMisconfiguredException] when
+  /// the heads or the server's answers fail every message alike),
+  /// [DecisionUnauthorizedException] when it refused the key, and
+  /// [LlmFormatException] only when the server rejected this one request.
   Future<DecisionResult> decide(DecisionInput input) async {
     final sw = Stopwatch()..start();
     final destination = target;
@@ -274,8 +282,9 @@ class DecisionClient {
     );
     final tokens = decoded['tokens'];
     if (tokens is! List || tokens.any((t) => t is! int)) {
-      throw LlmFormatException(
-        'The decision model at $url answered with no token list.',
+      throw const DecisionMisconfiguredException(
+        'The decision server did not answer /tokenize with a token list. '
+        'Check that its address serves the decision model.',
       );
     }
     final room = heads.maxTokens - 2;
@@ -317,16 +326,16 @@ class DecisionClient {
       );
     } on _TooLarge {
       if (textRequest) return null;
-      throw LlmFormatException(
-        'The decision model at $url refused even the truncated input as too '
-        'long. Its context must be ${heads.maxTokens} tokens.',
+      throw DecisionMisconfiguredException(
+        'The decision server refused even a truncated message as too long. '
+        'It must run with a context of ${heads.maxTokens} tokens.',
       );
     }
 
     final data = decoded['data'];
     if (data is! List || data.length != inputs.length) {
-      throw LlmFormatException(
-        'The decision model at $url answered with '
+      throw DecisionMisconfiguredException(
+        '$rawEmbeddingsText It answered with '
         '${data is List ? data.length : 'no'} vectors for ${inputs.length} '
         'inputs.',
       );
@@ -335,17 +344,15 @@ class DecisionClient {
     for (var position = 0; position < data.length; position++) {
       final item = data[position];
       if (item is! Map) {
-        throw LlmFormatException(
-          'The decision model at $url answered with an unexpected payload.',
-        );
+        throw const DecisionMisconfiguredException(rawEmbeddingsText);
       }
       // Ordered by `index` where the server says one — the OpenAI shape does
       // not promise array order — and by position where it does not.
       final index = item['index'];
       final slot = index is int ? index : position;
       if (slot < 0 || slot >= inputs.length || vectors[slot] != null) {
-        throw LlmFormatException(
-          'The decision model at $url answered with a bad vector index.',
+        throw const DecisionMisconfiguredException(
+          '$rawEmbeddingsText It answered with a bad vector index.',
         );
       }
       vectors[slot] = _checkedVector(item['embedding'], heads, url);
@@ -353,17 +360,19 @@ class DecisionClient {
     return [for (final v in vectors) v!];
   }
 
-  /// [raw] as a vector the heads can read, or a format error saying why not.
+  /// [raw] as a vector the heads can read, or a misconfiguration saying why
+  /// not. Every one of these is the SERVER, not the message: a server that
+  /// answers one message this way answers them all this way, so they park.
   List<double> _checkedVector(Object? raw, DecisionHeads heads, Uri url) {
     if (raw is! List || raw.any((v) => v is! num)) {
-      throw LlmFormatException(
-        'The decision model at $url answered with no flat vector.',
+      throw const DecisionMisconfiguredException(
+        '$rawEmbeddingsText It answered with no flat vector.',
       );
     }
     if (raw.length != heads.hidden) {
-      throw LlmFormatException(
-        'The decision model at $url answered with a vector of ${raw.length} '
-        'numbers, not ${heads.hidden}. Is it serving the decision model?',
+      throw DecisionMisconfiguredException(
+        '$rawEmbeddingsText It answered with a vector of ${raw.length} '
+        'numbers, not ${heads.hidden}.',
       );
     }
     final vector = [for (final v in raw) (v as num).toDouble()];
@@ -372,9 +381,9 @@ class DecisionClient {
       sumSquares += v * v;
     }
     if ((math.sqrt(sumSquares) - 1.0).abs() <= 1e-3) {
-      throw LlmFormatException(
-        'The decision model at $url returned a normalised vector: the server '
-        'ignored embd_normalize: -1, and the heads read only the raw one.',
+      throw const DecisionMisconfiguredException(
+        '$rawEmbeddingsText It normalised them, and the heads read only raw '
+        'vectors.',
       );
     }
     return vector;
@@ -392,9 +401,13 @@ class DecisionClient {
     // A managed decision model the router is not serving (not installed):
     // refused before any request, so the pass parks on its own reason.
     if (destination.unavailable case final why?) {
-      throw DecisionUnavailableException(why);
+      throw DecisionNotInstalledException(why);
     }
     final bearer = destination.bearer;
+    // Refused before anything is sent, on `LlmClient`'s rule.
+    if (bearer != null && bearer.isNotEmpty && !isUsableAccessKey(bearer)) {
+      throw const DecisionUnauthorizedException(accessKeyCharsText);
+    }
     final http.Response response;
     try {
       response = await _http
@@ -421,6 +434,12 @@ class DecisionClient {
         'The decision model at $url did not answer within '
         '${timeout.inSeconds} seconds — run: make decide',
       );
+    } on FormatException {
+      // Raised while the request is built: a header dart:io refuses, which
+      // here can only be the key. The sentence never includes it.
+      throw const DecisionUnauthorizedException(accessKeyCharsText);
+    } on ArgumentError {
+      throw const DecisionUnauthorizedException(accessKeyCharsText);
     }
     facts.statusCode = response.statusCode;
     // utf8 explicitly: llama-server sends application/json with no charset,
@@ -440,13 +459,15 @@ class DecisionClient {
     try {
       decoded = jsonDecode(text);
     } on FormatException {
-      throw LlmFormatException(
-        'The decision model at $url answered with something that is not JSON.',
+      throw const DecisionMisconfiguredException(
+        'The decision server answered with something that is not JSON. Check '
+        'its address in Settings, Models.',
       );
     }
     if (decoded is! Map) {
-      throw LlmFormatException(
-        'The decision model at $url answered with an unexpected payload.',
+      throw const DecisionMisconfiguredException(
+        'The decision server answered with something that is not a JSON '
+        'object. Check its address in Settings, Models.',
       );
     }
     return decoded.cast<String, Object?>();
@@ -454,11 +475,12 @@ class DecisionClient {
 
   /// The one status mapping. A 5xx and a 429 are the SERVER's condition — it
   /// is loading, or busy — so they park; a 401/403 is the key, which parks
-  /// under its own reason; any other 4xx is this request.
+  /// under its own reason; any other 4xx is this request (the one decision
+  /// fault that stays a per-message [LlmFormatException]).
   Never _throwForStatus(Uri url, int status, String body, String? bearer) {
     final snippet = _snippet(body, bearer);
     if (status == 401 || status == 403) {
-      throw LlmUnauthorizedException(
+      throw DecisionUnauthorizedException(
         'The decision model at $url refused the access key (HTTP $status). '
         'Check it in Settings, Models.',
       );
@@ -491,8 +513,9 @@ class DecisionClient {
   static Uri _parse(String url) {
     final parsed = Uri.tryParse(url);
     if (parsed == null || !parsed.hasScheme || parsed.host.isEmpty) {
-      throw LlmFormatException(
-        'The decision model address is not a URL: $url',
+      throw const DecisionMisconfiguredException(
+        'The decision model address is not a URL. Check it in Settings, '
+        'Models.',
       );
     }
     return parsed;
@@ -510,9 +533,9 @@ class DecisionClient {
     } else if (path.endsWith('/embeddings')) {
       prefix = path.substring(0, path.length - '/embeddings'.length);
     } else {
-      throw LlmFormatException(
+      throw const DecisionMisconfiguredException(
         'The decision model address does not end in /v1/embeddings, so there '
-        'is no tokenize endpoint beside it: $embeddingsUrl',
+        'is no tokenize endpoint beside it. Check it in Settings, Models.',
       );
     }
     // Built afresh rather than `replace`d: `replace` keeps a query it is

@@ -13,6 +13,7 @@ import 'gates.dart';
 import 'backend/backend_types.dart';
 import 'conversation_cta.dart';
 import 'llm/llm_client.dart';
+import 'needs_you.dart' show needsYouFloor;
 import 'owner_lookup.dart';
 import 'pipeline_progress.dart';
 
@@ -718,8 +719,11 @@ class TriageQueue {
       // stage's, behind it on the fast lane. INSIDE this try on purpose: a
       // decision server that is down throws [DecisionUnavailableException],
       // an [LlmUnavailableException], so the message parks under
-      // `decision_unavailable`, and an unusable answer is a failure that
-      // spends an attempt.
+      // `decision_unavailable` — as does every fault that would fail every
+      // message alike (a refused heads file, vectors that are not the
+      // decision model's: [DecisionMisconfiguredException]) and a missing
+      // install (`decision_not_installed`). Only a 4xx the server gives this
+      // one request is a failure that spends an attempt.
       final owner = decisionOwnerString(_ownerKnown);
       final decided = await _decisionClient.decide(DecisionInput.fromRows(
         message: message,
@@ -738,8 +742,13 @@ class TriageQueue {
       // The learned gate, after the rules gates and under the same escape
       // hatch: a message the owner restored is never gated again. Shaped
       // like the header gate above, plus an activity row, because unlike a
-      // rules gate this one DID consult a model.
-      final learned = overridden ? null : learnedGateReason(decided.answers);
+      // rules gate this one DID consult a model. A Teams 1:1 or @mention
+      // ([needsYouFloor]) is never learned-gated either: somebody wrote to
+      // the owner by name, which the needs-you floor treats as settled, and
+      // before the decision model no gate ever took one.
+      final learned = overridden || needsYouFloor(current)
+          ? null
+          : learnedGateReason(decided.answers);
       if (learned != null) {
         await _writeTriage(
           source,

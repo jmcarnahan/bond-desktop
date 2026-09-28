@@ -1,5 +1,5 @@
 @Skip('live — needs the embedding server (make embed) and the fast server '
-    '(make fast) up at the addresses EmbeddingsClient and LlmClient.fastBaseUrl '
+    '(make fast) up at the addresses EmbeddingsClient and BenchTarget.bulk '
     'default to, and CONTEXT_DIR. Run: cd app && CONTEXT_DIR=/path/to/a/project '
     'flutter test test/context_pack_live_test.dart --run-skipped')
 library;
@@ -21,6 +21,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
+import 'fixtures/bench_target.dart';
 import 'fixtures/vec_test_db.dart';
 
 /// What a real project actually hands a reply, PRINTED for a person to read.
@@ -64,8 +65,8 @@ void main() {
       final context = ContextStore(db);
       final embeddings = EmbeddingsClient();
       final fast = LlmClient(
-        baseUrl: LlmClient.fastBaseUrl,
-        model: LlmClient.fastModel,
+        baseUrl: BenchTarget.bulk.url,
+        model: BenchTarget.bulk.model,
       );
 
       final dirId = await context.registerDirectory(
@@ -129,7 +130,7 @@ void main() {
         messages,
         context,
         embeddings,
-        fastClient: fast,
+        selectClient: fast,
         selectExpand: () => true,
       );
 

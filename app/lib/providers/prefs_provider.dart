@@ -125,7 +125,7 @@ class AppPrefs {
   final bool showActivityLog;
 
   /// Whether a draft that reads a registered directory may spend one extra
-  /// fast call choosing two sections of it to read IN FULL before it writes.
+  /// model call choosing two sections of it to read IN FULL before it writes.
   ///
   /// ON by default, unlike most switches here, because the one bounded call
   /// per directory-fed draft IS the feature: six passages of a thousand
@@ -424,16 +424,10 @@ class AppPrefs {
   /// The managed router's origin — one server, every model.
   String get routerBase => 'http://127.0.0.1:$routerPort';
 
-  /// Two of the targets the managed router answers on. Same origin, different
-  /// `model` field: llama-server in router mode routes on the name alone, so
-  /// the ids in `model_slots.dart` are the whole wiring between a role and the
-  /// weights behind it.
-  LlmTarget get routerProseTarget =>
-      LlmTarget(baseUrl: '$routerBase/v1/chat/completions', model: routerProseId);
-
-  LlmTarget get routerBulkTarget =>
-      LlmTarget(baseUrl: '$routerBase/v1/chat/completions', model: routerBulkId);
-
+  /// The embedding target the managed router answers on. Same origin as every
+  /// other role, different `model` field: llama-server in router mode routes
+  /// on the name alone, so the ids in `model_slots.dart` are the whole wiring
+  /// between a role and the weights behind it.
   LlmTarget get routerEmbedTarget =>
       LlmTarget(baseUrl: '$routerBase/v1/embeddings', model: routerEmbedId);
 
@@ -475,11 +469,6 @@ class AppPrefs {
   /// constant the compiled box serves.
   String get effectiveGenerativeModel =>
       boxBigModel.isEmpty ? boxProseModel : boxBigModel;
-
-  /// Whether this install knows where a generative remote is. False in the
-  /// test suite and in any build that passed no define and stored no address,
-  /// which is why [defaultModelPlacement] resolves to this Mac there.
-  bool get hasGenerativeServer => effectiveGenerativeUrl.isNotEmpty;
 
   /// The managed generative model's router id on this Mac's tier.
   String get managedGenerativeId =>
@@ -529,8 +518,8 @@ class AppPrefs {
     return LlmTargetSpec(
       id: localGenerativeId,
       name: localGenerativeName,
-      url: proseUrlDefault,
-      model: proseModelDefault,
+      url: generativeUrlDefault,
+      model: generativeModelDefault,
       parallel: proseParallel,
     );
   }
@@ -546,8 +535,6 @@ class AppPrefs {
   /// What the decision remote is asked for.
   String get effectiveDecisionModel =>
       decisionModel.isEmpty ? boxDecideModel : decisionModel;
-
-  bool get hasDecisionServer => effectiveDecisionUrl.isNotEmpty;
 
   /// THE decision target, on [generativeSpec]'s rule: Your server when the
   /// decision placement says so and there is an address; else the managed
@@ -1270,8 +1257,8 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
           continue;
         }
         // Round G's two box ids, spelled out: this one-shot is frozen
-        // history, and `isBox` has meant another pair since the
-        // decision-model round.
+        // history, and the "Your server" pair has been `box-prose` and
+        // `box-decide` since the decision-model round.
         if (spec.id != boxProseId && spec.id != legacyBoxBulkId) {
           kept.add(spec.toJson());
           continue;
@@ -2045,6 +2032,12 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     required bool flagged,
   }) async {
     final token = key?.trim() ?? '';
+    // Refused before the keychain is touched, and never quoted: a key with a
+    // line break or a character outside printable ASCII is not a header any
+    // server accepts, and stored it would park every request on it.
+    if (token.isNotEmpty && !isUsableAccessKey(token)) {
+      throw ArgumentError(accessKeyCharsText);
+    }
     if (token.isNotEmpty) {
       await _writeToken('$llmTargetBearerKeyPrefix$id', token);
       return (token: token, clear: false, flag: true);

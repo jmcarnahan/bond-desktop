@@ -7,12 +7,14 @@ import '../services/llm/model_slots.dart'
     show
         LlmTargetSpec,
         LlmWire,
+        accessKeyCharsText,
         boxDecideId,
         boxProseId,
         cloudDraftsId,
         cloudDraftsName,
         isBoxOrigin,
         isThirdPartyHost,
+        isUsableAccessKey,
         wireForHost;
 import '../theme/tokens.dart';
 import 'inline_alert.dart';
@@ -250,6 +252,9 @@ class _ModelServersFormState extends State<ModelServersForm> {
   bool _choose = false;
   String? _error;
 
+  /// The sentence under the key field when what was typed cannot be sent.
+  String? _keyError;
+
   /// Which press is the current one. Every edit bumps it and every press
   /// takes a new number, so an answer about a server nobody is asking about
   /// any more is dropped rather than rendered.
@@ -376,6 +381,7 @@ class _ModelServersFormState extends State<ModelServersForm> {
                 decoration: InputDecoration(
                   labelText: ModelServersForm.keyLabel,
                   hintText: hint,
+                  errorText: _keyError,
                 ),
               ),
             ),
@@ -424,6 +430,7 @@ class _ModelServersFormState extends State<ModelServersForm> {
       _refusal = null;
       _choose = false;
       _error = null;
+      _keyError = null;
     });
   }
 
@@ -460,6 +467,13 @@ class _ModelServersFormState extends State<ModelServersForm> {
     // key before writing it means. A stored key rides the probe only to the
     // host it was typed for.
     final typed = _key.text.trim();
+    // Refused here, before any probe carries it: a key with a line break or
+    // a character outside printable ASCII is not a header any server
+    // accepts. The sentence never quotes it.
+    if (typed.isNotEmpty && !isUsableAccessKey(typed)) {
+      setState(() => _keyError = accessKeyCharsText);
+      return;
+    }
     final key = typed.isEmpty ? null : typed;
     final hostChanged = _hostChanged;
     final bearer = key ??

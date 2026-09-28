@@ -123,9 +123,10 @@ class ExtractHandler extends WorkHandler {
   /// and the storyline requeue is idempotent by construction (`requeueWork`
   /// on a key that is already queued is the same row).
   ///
-  /// Three and not more: it is the batch the fast server is started with slots
-  /// for (`FAST_SLOTS`), and past a small batch each individual request slows
-  /// down enough that the first result takes longer to reach the screen.
+  /// Three and not more: past a small batch each individual request slows
+  /// down enough that the first result takes longer to reach the screen. (It
+  /// was sized to the 4B server's `FAST_SLOTS` when there was one; the one
+  /// generative model queues whatever its slots cannot take.)
   @override
   int get concurrency => 3;
 

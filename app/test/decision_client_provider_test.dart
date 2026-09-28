@@ -114,11 +114,14 @@ void main() {
 
     expect(
       heads.current,
-      throwsA(isA<DecisionUnavailableException>().having(
-        (e) => e.message,
-        'message',
-        DecisionHeadsFile.notInstalledText,
-      )),
+      throwsA(isA<DecisionNotInstalledException>()
+          .having((e) => parkReasonFor(e), 'park word',
+              'decision_not_installed')
+          .having(
+            (e) => e.message,
+            'message',
+            DecisionHeadsFile.notInstalledText,
+          )),
     );
     expect(DecisionHeadsFile.notInstalledText, contains('make decide-install'));
     expect(DecisionHeadsFile.notInstalledText, isNot(contains('—')));
@@ -155,5 +158,54 @@ void main() {
 
     await container.read(appPrefsProvider.notifier).setModelsFolder(elsewhere);
     expect(heads.current().model, 'bond-decide-synthetic');
+  });
+
+  group('a heads file this build cannot use parks, and is read once', () {
+    for (final (what, contents) in [
+      ('not JSON', '{not json'),
+      ('not a JSON object', '[1, 2]'),
+      (
+        'a different question set',
+        jsonEncode({...syntheticHeadsJson(), 'qhash': 'not-this-one'}),
+      ),
+      ('another schema', jsonEncode({...syntheticHeadsJson(), 'schema': 2})),
+    ]) {
+      test(what, () async {
+        final container = containerFor(const AppPrefs());
+        final file = File(headsPath());
+        await file.parent.create(recursive: true);
+        await file.writeAsString(contents);
+        final heads = container.read(decisionHeadsProvider);
+
+        Object? first;
+        try {
+          heads.current();
+        } catch (e) {
+          first = e;
+        }
+        expect(
+          first,
+          isA<DecisionMisconfiguredException>()
+              .having((e) => parkReasonFor(e), 'park word',
+                  'decision_unavailable')
+              .having((e) => e.message, 'message',
+                  startsWith(DecisionHeadsFile.mismatchText)),
+        );
+        // Cached on the file's mtime: the same failure, with no re-parse.
+        Object? second;
+        try {
+          heads.current();
+        } catch (e) {
+          second = e;
+        }
+        expect(identical(first, second), isTrue);
+
+        // A re-install (a newer mtime) is read again, and a good file loads.
+        await file.writeAsString(jsonEncode(syntheticHeadsJson()));
+        await file
+            .setLastModified(DateTime.now().add(const Duration(minutes: 1)));
+        expect(heads.current().model, 'bond-decide-synthetic');
+      });
+    }
   });
 }

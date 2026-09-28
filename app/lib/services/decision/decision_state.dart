@@ -11,6 +11,18 @@ library;
 
 import 'decision_input.dart';
 
+/// The state format this renderer writes: the one the decision model was
+/// trained against, jev-prototype's `distill/state.py` (`render_state`) and
+/// `distill/build_states.py` (the block helpers) as of 2026-09-27.
+///
+/// Forward-compatible, and read by nothing yet: a future model bundle
+/// declares the renderer it needs (tmp/PLAN-decision-model.md "Next round
+/// pointer", jev-prototype `docs/DESIGN-model-bundles.md`), and a bundle
+/// whose renderer is not this one must be REFUSED rather than fed these
+/// bytes. Bump it only with a change to the bytes, which the render-parity
+/// fixture pins.
+const String decisionRendererVersion = 'bond-state/1';
+
 /// The owner line, the date line, the directness line, the tail (when there
 /// is one) and the message block, joined by blank lines.
 ///

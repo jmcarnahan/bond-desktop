@@ -47,7 +47,7 @@ class ContextStore {
   /// show as a directory whose progress line never reaches its own total.
   ///
   /// Two hundred characters is about four lines. Below that a file is an
-  /// `__init__.py`, a one-line config or a stub, and a fast-slot call on it
+  /// `__init__.py`, a one-line config or a stub, and a generative call on it
   /// buys a sentence saying it is short.
   static const int digestMinChars = 200;
 

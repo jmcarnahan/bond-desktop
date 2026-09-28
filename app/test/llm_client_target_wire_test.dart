@@ -414,7 +414,7 @@ void main() {
   });
 
   group('a target that says it cannot answer', () {
-    test('throws LlmUnavailableException with its sentence and sends '
+    test('throws ModelNotInstalledException with its sentence and sends '
         'nothing', () async {
       final records = <LlmCallRecord>[];
       final client = LlmClient(
@@ -432,11 +432,15 @@ void main() {
 
       await expectLater(
         client.complete(system: 's', user: 'u'),
-        throwsA(isA<LlmUnavailableException>().having(
-          (e) => e.message,
-          'message',
-          contains('not downloaded'),
-        )),
+        throwsA(isA<ModelNotInstalledException>()
+            // Still an unavailable, so every drain's park arm catches it.
+            .having((e) => e, 'parks', isA<LlmUnavailableException>())
+            .having((e) => parkReasonFor(e), 'park word', 'not_installed')
+            .having(
+              (e) => e.message,
+              'message',
+              contains('not downloaded'),
+            )),
       );
       await expectLater(
         client.completeJson(system: 's', user: 'u', schema: const {}),

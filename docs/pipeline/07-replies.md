@@ -287,9 +287,10 @@ sends the draft that was just written back through the same prompt on a target
 the owner picked, and replaces it.
 
 **The stage.** `draft_improve` is a routable stage like the other fourteen
-(`pipelineStages`, `slot: prose`, label "Improve a draft"), and since Round H
-it is routed like them too: the big model, wherever the placement says that
-is. It was the one `PipelineStageInfo.optional` row until then, meaning no
+(`pipelineStages`, `slot: generative`, label "Improve a draft"), and since
+Round H it is routed like them too: the generative model, wherever its
+placement says that is, or the Cloud drafts target when one is set and
+consented. It was the one `PipelineStageInfo.optional` row until then, meaning no
 target until somebody picked one and no Improve button before they did — and
 the stage picker that was the only way to pick one went with the Advanced
 fold, which Round H deleted, so the feature would have gone with it. A

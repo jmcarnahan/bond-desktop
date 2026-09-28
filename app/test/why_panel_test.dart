@@ -217,6 +217,55 @@ void main() {
       );
     });
 
+    testWidgets('an owner-Ignored message reads what the model said, not a '
+        'drop', (tester) async {
+      // `user` is the owner's gate word, not the learned gate's, so the line
+      // is the model's keep rather than "gate drop 0.05".
+      await pump(
+        tester,
+        message: msg(gateReason: 'user', triageStatus: 'skipped'),
+        decision: StoredDecision(
+          answers: fakeAnswers(gateDrop: 0.05),
+          model: 'bond-decide-fake',
+          gateP: 0.05,
+          needsYouP: 0.3,
+          needsActionP: 0.2,
+          replyExpectedP: 0.1,
+          latencyMs: 40,
+        ),
+      );
+
+      expect(
+        find.text('Decision model: gate keep 0.95, needs you 0.30, '
+            'action 0.20, reply 0.10 · 40 ms'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a learned word under the bar is not the model dropping it',
+        (tester) async {
+      // A rules gate can write a word the learned gate also writes; without
+      // p(drop) over the bar the model did not take it.
+      await pump(
+        tester,
+        message: msg(gateReason: 'newsletter', triageStatus: 'skipped'),
+        decision: StoredDecision(
+          answers: fakeAnswers(gateDrop: 0.2),
+          model: 'bond-decide-fake',
+          gateP: 0.2,
+          needsYouP: 0.1,
+          needsActionP: 0.1,
+          replyExpectedP: 0.1,
+        ),
+      );
+
+      expect(
+        find.text('Decision model: gate keep 0.80, needs you 0.10, '
+            'action 0.10, reply 0.10'),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('a kept message the head leaned against says so',
         (tester) async {
       await pump(

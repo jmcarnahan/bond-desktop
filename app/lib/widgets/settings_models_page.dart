@@ -203,6 +203,17 @@ class SettingsModelsPage extends StatefulWidget {
       'The decision model is not answering. Work is waiting and will retry '
       'each minute.';
 
+  /// The decision server refused the key, whichever way the generative
+  /// model is placed.
+  static const String decisionUnauthorizedText =
+      'The decision server refused the access key. Change it here.';
+
+  /// A managed GENERATIVE model the router cannot serve because it is not on
+  /// disk. Said on this Mac's server line.
+  static const String notInstalledText =
+      'A model this Mac runs is not downloaded. Open Settings, Models, and '
+      'set up again.';
+
   /// Your server's status before a key has been pasted, and after one has.
   static const String keyNeededText =
       'Access key needed. Paste it and press Connect.';
@@ -345,6 +356,9 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
       'unauthorized' => SettingsModelsPage.serverUnauthorizedText,
       'embed_unavailable' => SettingsModelsPage.embedUnavailableText,
       'decision_unavailable' => SettingsModelsPage.decisionUnavailableText,
+      'not_installed' => SettingsModelsPage.notInstalledText,
+      'decision_not_installed' => SettingsModelsPage.decisionNotInstalledText,
+      'decision_unauthorized' => SettingsModelsPage.decisionUnauthorizedText,
       _ => null,
     };
   }
@@ -358,7 +372,10 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
         Text(
           key: SettingsModelsPage.statusKey,
           widget.processingOn
-              ? SettingsModelsPage.serverLine(widget.serverState)
+              // Only a generative model this Mac runs can be not
+              // downloaded, so that park is said on this Mac's server line.
+              ? _parked(const {'not_installed'}) ??
+                  SettingsModelsPage.serverLine(widget.serverState)
               : SettingsModelsPage.processingOffText,
           style: BondType.small,
         ),
@@ -497,7 +514,12 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
   }
 
   String _decisionStatus(ManagedModelStatus? row) {
-    if (_parked(const {'decision_unavailable'}) case final parked?) {
+    if (_parked(const {
+      'decision_unavailable',
+      'decision_not_installed',
+      'decision_unauthorized',
+    })
+        case final parked?) {
       return parked;
     }
     if (_decisionEditing) return SettingsModelsPage.untilConnectText;

@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../data/message_store.dart';
+import '../models/attachment_models.dart' show decodeAttachmentDigest;
 import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'attachments/attachment_digest_lines.dart';
@@ -229,12 +230,20 @@ class NeedsYouHandler extends WorkHandler {
     // Below the floor, the decision model's probability settles everything
     // outside the band — unless something the model never read has a say.
     // Owner-written rules (a trained head cannot follow them) and an
-    // attachment digest (the model read the message, not its files) both send
+    // attachment digest WITH an ask (the model read the message, not its
+    // files; a digest that asks nothing has nothing to add, per D6) both send
     // the message to the language model, as does a message decided before
     // the decision model existed and one decided with no owner line in its
     // state (the head was trained with that line, so its number is not
     // trusted without it).
-    if (!_hasCustomRules(rules) && digests.isEmpty) {
+    final filesAsk = digests.any(
+      (row) =>
+          (decodeAttachmentDigest(row['digest_json'] as String?)
+                  ?.asks
+                  .isNotEmpty ??
+              false),
+    );
+    if (!_hasCustomRules(rules) && !filesAsk) {
       final stored = await _store.decisionFor(source, id);
       final p = stored?.needsYouP;
       if (stored != null &&

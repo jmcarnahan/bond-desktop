@@ -299,20 +299,31 @@ box's `/decide/` slot.
   beside the GGUF. `decisionHeadsProvider` loads it through
   `DecisionHeadsFile`, cached and re-read when its mtime changes. **It is
   needed even when the decision server is remote**, because the heads run
-  here. Missing, it throws `DecisionUnavailableException` with "The decision
-  model is not installed. Run: make decide-install".
+  here. Missing, it throws `DecisionNotInstalledException` with "The
+  decision model is not installed. Run: make decide-install" (never cached,
+  so an install is seen at the next claim). A file this build refuses (not
+  JSON, another schema or question set) throws
+  `DecisionMisconfiguredException`, and that failure IS cached on the file's
+  mtime, so a bad file is parsed once rather than once per claim. Settings'
+  **Check** does not drop the cache: rebuilding it would rebuild the decision
+  client and the triage queue under it mid-drain.
 
 What goes wrong, and what the owner sees:
 
 | Failure | Exception | Park reason | Rail |
 |---------|-----------|-------------|------|
-| Connection refused, TLS failure, timeout, 5xx, 429, heads file missing | `DecisionUnavailableException` | `decision_unavailable` | `Decision model unreachable · N waiting · retrying each minute` |
-| 401 / 403 | `LlmUnauthorizedException` ("The decision model at <url> refused the access key…") | `unauthorized` | `Your server refused the access key · N waiting` when the GENERATIVE placement is Your server, else `Model server refused the access key · N waiting` |
-| Unit vector, wrong length, bad JSON, other 4xx | `LlmFormatException` | none: counted against the item | none |
+| Connection refused, TLS failure, timeout, 5xx, 429 | `DecisionUnavailableException` | `decision_unavailable` | `Decision model unreachable · N waiting · retrying each minute` |
+| Heads file refused (not JSON, schema, question set); the server answers a normalised or wrong-width vector, the wrong vector count or index, no token list, non-JSON, or refuses even the truncated ids; the address is not an embeddings URL | `DecisionMisconfiguredException` (a `DecisionUnavailableException`; its sentence names the cause and carries no key) | `decision_unavailable` | `Decision model unreachable · N waiting · retrying each minute` |
+| Heads file missing, or the managed decision model the router does not serve (`LlmTarget.unavailable`), refused before any request | `DecisionNotInstalledException` (a `DecisionUnavailableException`) | `decision_not_installed` | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
+| 401 / 403, or a key no header can carry (refused before sending) | `DecisionUnauthorizedException` (an `LlmUnauthorizedException`) | `decision_unauthorized` | `The decision server refused the access key · N waiting` |
+| Any other 4xx | `LlmFormatException` | none: counted against the item | none |
 
-The rail's `onBox` is the generative placement, so a refused decision key reads
-by that placement's words. The activity log's words for the reasons are in
-`activity_log_panel.dart` (`decision model unreachable`), and the Models page
+Every fault that would fail every message alike parks: counting it per
+message would error the backlog and let each row flow on to its text with no
+decision. The one per-message fault is a 4xx the server gives this request.
+The activity log's words for the reasons are in `activity_log_panel.dart`
+(`decision model unreachable`, `decision model not installed`, `the decision
+server refused the access key`), and the Models page
 carries the same park as one status line (`docs/settings.md`). The
 unreachable sentences name `make decide`, the hand-server fix; the URL in any
 of them is taken out by `redactEndpoints` wherever it is written.
@@ -567,7 +578,22 @@ ledger.
   `DecisionUnavailableException` are subclasses too, because the three
   servers are placed apart and "model server unreachable" would send a person
   to a server that is answering fine. `parkReasonFor` maps the closed set to
-  one word each.
+  one word each, subclasses first. `ModelNotInstalledException` (thrown by
+  `LlmClient` for a managed generative target carrying
+  `LlmTarget.unavailable`) is `not_installed`; the decision client's own
+  `DecisionNotInstalledException` is `decision_not_installed`, because its fix
+  is a command rather than a download; `DecisionUnauthorizedException` is
+  `decision_unauthorized`, named for the decision server rather than worded by
+  the generative placement. A failed TLS handshake (`TlsException`, e.g. an
+  expired certificate) parks on both clients like a refused connection, at
+  the handshake or mid-stream.
+- **A key no header can carry is refused, never sent.** The writers
+  (`useGenerative`/`useDecision`/`useCloudDrafts`) throw an `ArgumentError`
+  and the form says so under the field for a key outside printable ASCII
+  (`isUsableAccessKey`); a stored one that slips through is refused by both
+  clients before the request (and a `FormatException`/`ArgumentError` raised
+  while sending maps the same way) as an unauthorized park whose sentence
+  never includes the key. Error-body snippets blank the key in both clients.
 - **Parking is VISIBLE, and nothing polls for it.** Both drains carry the
   reason on their progress streams (`TriageProgress.parkedReason`,
   `WorkProgress.parkedReason`, merged by `parkedProvider`); triage keeps one
@@ -583,6 +609,9 @@ ledger.
   | `unauthorized` | this Mac | `Model server refused the access key · N waiting` |
   | `embed_unavailable` | either | `Embedding server unreachable · N waiting · retrying each minute` |
   | `decision_unavailable` | either | `Decision model unreachable · N waiting · retrying each minute` |
+  | `not_installed` | either | `A model this Mac runs is not downloaded · N waiting · set up again in Settings` |
+  | `decision_not_installed` | either | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
+  | `decision_unauthorized` | either | `The decision server refused the access key · N waiting` |
   | `session` | either | `Triaging N remaining…` |
 
   Processing being off wins over all of them. The Models page carries the
@@ -616,7 +645,7 @@ began to remove and the one-call-per-message task (Phase 6) finishes.
 generative server, but it shares `fastDrainGateProvider` with the fast worker
 for ORDERING — the yield ticket and `onDrained` below — so a triage pump can
 wait behind a message-text call already in flight. A separate triage gate is
-a Phase 9 candidate.
+a follow-up round candidate.
 
 **The newest message goes first.** A triage pump that finds work asks the fast
 gate for a yield. The fast worker reads the flag only where it is about to

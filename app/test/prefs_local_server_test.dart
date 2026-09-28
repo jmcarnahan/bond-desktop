@@ -3,7 +3,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart'
-    show proseSlotDefault, managedServerDefault;
+    show generativeSlotDefault, managedServerDefault;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -68,7 +68,7 @@ void main() {
     expect(ref.read(appPrefsProvider).managedServer, isTrue);
     // And a build that hands the servers over reads the compiled targets.
     const handStarted = AppPrefs(managedServer: false);
-    expect(handStarted.generativeSpec.url, proseSlotDefault.baseUrl);
+    expect(handStarted.generativeSpec.url, generativeSlotDefault.baseUrl);
     expect(handStarted.embedRequestTarget.baseUrl,
         isNot(contains('${AppPrefs.defaultRouterPort}')));
   });

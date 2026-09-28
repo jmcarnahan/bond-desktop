@@ -14,7 +14,8 @@ import 'ai_worker.dart';
 /// Why each lane holds what it holds is documented once, on [AiWorker].
 class AiWorkers {
   /// Triage's neighbour: the kinds a new message's first seconds run through,
-  /// on the fast server, behind the same gate the triage drain takes.
+  /// behind the same gate the triage drain takes. "Fast" names the lane, not
+  /// a server: its text calls go to the one generative model.
   final AiWorker fast;
 
   /// The six storyline passes, in one worker because their ORDER is the

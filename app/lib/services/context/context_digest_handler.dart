@@ -15,16 +15,17 @@ import '../llm/llm_client.dart';
 /// Its own kind rather than the tail of the reconcile pass, and for the same
 /// reason the attachment digest is not the tail of the text handler: the two
 /// talk to different servers. Reading a folder is the disk plus the embedder;
-/// understanding a file is the fast slot. Folded together, a fast server that
-/// is not running would hold back the passages as well — and the passages are
-/// what retrieval wants whether or not any model has read them.
+/// understanding a file is the generative model. Folded together, a
+/// generative server that is not running would hold back the passages as
+/// well — and the passages are what retrieval wants whether or not any model
+/// has read them.
 ///
 /// The digest lands in two places on purpose. On the file row it is what the
 /// brief's file map is built from; as a passage of the file it is the one
 /// passage a question about FINDINGS can land on, because a question about a
 /// conclusion very rarely shares vocabulary with the code that produced it.
 ///
-/// Concurrency one: one fast-slot call per file, and the queue behind it is
+/// Concurrency one: one generative call per file, and the queue behind it is
 /// already draining as fast as the server answers.
 class ContextDigestHandler extends WorkHandler {
   /// A digest is a RECORD of one file — a purpose, a few findings, the

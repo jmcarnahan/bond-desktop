@@ -550,15 +550,18 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
   /// The Decision model's **Check** on This Mac.
   ///
   /// `make decide-install` can land while the app runs, and nothing else
-  /// notices: the heads file is cached, the install state was read once and
-  /// the router's preset left the decision model out while its files were
-  /// missing. So Check drops the heads cache, asks the supervisor for the
-  /// placements' preset (which restarts the router only when the hash moved,
-  /// which a newly installed model makes it do) and re-reads the disk, and
-  /// the press returns once the disk has answered.
+  /// notices: the install state was read once and the router's preset left
+  /// the decision model out while its files were missing. So Check asks the
+  /// supervisor for the placements' preset (which restarts the router only
+  /// when the hash moved, which a newly installed model makes it do) and
+  /// re-reads the disk, and the press returns once the disk has answered.
+  ///
+  /// The heads cache is NOT dropped: `DecisionHeadsFile` re-reads on a new
+  /// modification time and never caches a missing file, and invalidating
+  /// its provider would rebuild the decision client, the triage queue under
+  /// it mid-drain and everything that watches that.
   Future<void> _checkDecision() async {
     if (!mounted) return;
-    ref.invalidate(decisionHeadsProvider);
     // Fire and forget: a restart onto the new preset is tens of seconds, the
     // bar above says so, and the status provider re-reads again at ready.
     unawaited(ref.read(modelServerSupervisorProvider).ensurePreset());

@@ -1835,7 +1835,7 @@ and the reason column does not.
 The decision model is the fine-tuned ModernBERT-large classifier distilled in
 jev-prototype. It has nine calibrated heads and question hash `6eba387492208260`.
 Here it runs as a GGUF on llama-server, pooling `mean`, with the heads applied
-outside the server (`tmp/PLAN-decision-model.md`, D1).
+outside the server (the round's plan, kept out of the repo, D1).
 
 This ledger answers one question per row: does that runtime give the same
 answers as the PyTorch model it was exported from? The reference is the stored
@@ -1936,6 +1936,69 @@ The rule written before the runs was "no regression on storyline.id or forbidden
 card change ships; both stay as bench variants. Letting `possible` rows hold no room is identical on
 the bench (the harness dismisses them after every pass, so it shows only inside a pass: 15 then 0
 proposals instead of 11, 4, 0) and ships for what it does over days in the app.
+
+### Recommendations (decision-model round, 2026-09-28)
+
+What the round ships, and the rows that justify each. All numbers are keep-only
+over the 76 gold-keep items unless a row says otherwise.
+
+1. **The decision model classifies every kept message.** One forward pass of
+   the F16 GGUF (managed router id `bond-decide`, or `make decide` by hand)
+   answers the learned gate, category, urgency, needs_action, reply_expected,
+   needs-you, intent and importance; no chat model is asked any of them. Its
+   export is lossless and the app's Dart path reproduces it exactly: golden
+   keep-only identical to the PyTorch row (94 / 96 / 89 / 86 / 84 / 88 / 83 /
+   74), p50 43 ms per item, 16 of 100 golden states on the tokenize path
+   ([Decision model ledger](#decision-model-ledger), "Through the app's own Dart
+   path"). The policy gate (drop at p ≥ 0.70, never cold outreach) drops 18
+   where argmax drops 22.
+2. **One text call per message on the generative model.** `MessageTextTask`
+   (summary, action items, deadline, topics, project) replaces the triage and
+   extraction calls. On the box 27B the pipeline is 2.2× faster (346 s against
+   771 s for 100 items), summaries rise from 68% to 74%, deadline holds at 89,
+   project rises from 59 to 64 ("One text call per message" under the same
+   ledger).
+3. **The reply gate.** The decision model's `reply_expected` probability, read
+   before any context is gathered, replaces the 27B `ReplyDecisionTask`: 84%
+   against the 27B's 82% and the 4B's 64% on the same field and population
+   ([Golden ledger](#golden-ledger), "Reply decision, retired 2026-09-28"). A
+   no now costs no embedding, retrieval or context pick.
+4. **The storyline room rule.** `possible` rows no longer hold the sweep's
+   room, bounded by at most three model questions per pass and a skip for a
+   cluster that a live possible row already holds. The sweep is identical to
+   the baseline on the bench (storyline.id 59/98, forbidden hits 1, correct
+   positives 10), on the candidate tree and again on the final tree with the
+   bound in ("Storyline model-free fixes" under the same ledger).
+
+**The honest trade-off.** Against the 4B it replaced, the decision model wins
+or ties on every field. Against the 27B as a classifier (the box 27B's old
+pipeline in "One text call per message") it gives up a few points: urgency
+89 against 96, needs-you 89 against 93 (the app's pipeline, with the band still
+asked of the generative model), intent 83 against 87. It is better on category
+(96 against 91), needs_action (86 against 72), reply (84 against 82) and
+importance (74 against 70). In exchange the pipeline is 2.2× faster, a
+message is classified in about 40 ms on this Mac, and classification needs no
+box at all: with the generative model down, remote or slow, the gate,
+urgency, category and the asks still land within a pass; what reads the
+text (a thread's ask on the rail, the summaries) waits for it. The `DecisionPolicy` bars were fitted on this set; any move needs a
+golden row on each side.
+
+**Not shipped, kept as bench variants.** The thread card (`SWEEP_CARD=thread`:
+the thread's topics and project) and the untitled-subject rule
+(`topics_untitled`: no participant names on untitled Teams chats) both read
+58/98 against 59/98. The untitled rule is what moves both rows: it removes the
+one forbidden hit and loses one correct item. Shipping it is an owner call.
+
+**Owed measurements.**
+- `make bench-pipeline` before and after on the managed app pipeline: calls
+  per kept message, time to row state, time to text. Never taken this round.
+- `make decision-agreement DECISION_DB=<a copy of the app database>`: the
+  decision model against the stored 4B labels, counts only.
+- The box `decide` slot (`tools/inference.sh --decide-gguf`) run live: image,
+  key, GPU memory beside prose, `/tokenize` through Caddy, `test --decide`.
+- The golden judge flow re-run on any future change to the `MessageTextTask`
+  prompt (summary and action items are judged, not scored; action items sit
+  two to three items of 45 under the old pipeline on every new row).
 
 ### Recommendations (golden set, 2026-09)
 

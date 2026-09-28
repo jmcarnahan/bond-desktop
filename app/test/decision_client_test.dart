@@ -204,6 +204,9 @@ void main() {
       expect(records.single.error, isNull);
     });
 
+    /// Every one of these is the server, not the message: a server that
+    /// answers one message this way answers them all this way, so the pass
+    /// parks under `decision_unavailable` instead of spending attempts.
     Future<void> expectFormat(
       http.Response Function(Map<String, dynamic>) answer,
       String words,
@@ -211,7 +214,7 @@ void main() {
       server.onEmbed = answer;
       await expectLater(
         client().decide(_input('a')),
-        throwsA(isA<LlmFormatException>()
+        throwsA(isA<DecisionMisconfiguredException>()
             .having((e) => e.message, 'message', contains(words))),
       );
     }
@@ -229,7 +232,8 @@ void main() {
             200),
         'normalised',
       );
-      expect(records.single.outcome, 'format');
+      // A misconfiguration parks, so it is recorded as the server's.
+      expect(records.single.outcome, 'unavailable');
     });
 
     test('a vector of the wrong width is refused', () async {
@@ -270,7 +274,7 @@ void main() {
           200);
       await expectLater(
         client().decideBatch([_input('a'), _input('b')]),
-        throwsA(isA<LlmFormatException>()
+        throwsA(isA<DecisionMisconfiguredException>()
             .having((e) => e.message, 'message', contains('bad vector index'))),
       );
     });
@@ -281,7 +285,7 @@ void main() {
           _FakeDecide.inputsOf(body).take(1).toList());
       await expectLater(
         client().decideBatch([_input('a'), _input('b'), _input('c')]),
-        throwsA(isA<LlmFormatException>()
+        throwsA(isA<DecisionMisconfiguredException>()
             .having((e) => e.message, 'message', contains('1 vectors for 3'))),
       );
     });
@@ -318,11 +322,14 @@ void main() {
       fail('expected a throw');
     }
 
-    test('401 and 403 are the key', () async {
+    test("401 and 403 are the key, under the decision server's own word",
+        () async {
       for (final status in [401, 403]) {
-        expect(await failure(status: status),
-            isA<LlmUnauthorizedException>(),
-            reason: '$status');
+        final e = await failure(status: status);
+        expect(e, isA<DecisionUnauthorizedException>(), reason: '$status');
+        // Still an unauthorized, so every arm that parks on one still does.
+        expect(e, isA<LlmUnauthorizedException>());
+        expect(parkReasonFor(e), 'decision_unauthorized');
       }
       // LlmClient's own choice: the subclass parks, so it reads unavailable.
       expect(records.map((r) => r.outcome), ['unavailable', 'unavailable']);
@@ -380,6 +387,38 @@ void main() {
       expect(records.single.error, contains('<endpoint>'));
     });
 
+    test('a key no header can carry is refused before anything is sent',
+        () async {
+      for (final bad in [
+        'sk-line\nbreak',
+        'sk-tab\tkey',
+        'sk-caf\u00e9',
+        'sk key',
+      ]) {
+        target = LlmTarget(baseUrl: _url, model: 'm', bearer: bad);
+        final before = server.requests.length;
+        final e = await failure();
+        expect(e, isA<DecisionUnauthorizedException>(), reason: bad);
+        expect((e as LlmException).message, accessKeyCharsText);
+        expect(e.message, isNot(contains(bad)));
+        expect(server.requests.length, before, reason: 'nothing sent');
+      }
+    });
+
+    test('a header dart:io refuses while sending reads as the key', () async {
+      target = const LlmTarget(baseUrl: _url, model: 'm', bearer: _bearer);
+      for (final error in <Object>[
+        const FormatException('Invalid HTTP header field value'),
+        ArgumentError('header'),
+      ]) {
+        server.transportError = error;
+        final e = await failure();
+        expect(e, isA<DecisionUnauthorizedException>());
+        expect((e as LlmException).message, accessKeyCharsText);
+        expect(e.message, isNot(contains(_bearer)));
+      }
+    });
+
     test('the bearer is never in an exception or a record', () async {
       target = const LlmTarget(baseUrl: _url, model: 'm', bearer: _bearer);
       for (final status in [401, 500, 400]) {
@@ -406,6 +445,17 @@ void main() {
           'embed_unavailable');
       expect(parkReasonFor(const LlmUnavailableException('m')),
           'model_unavailable');
+      expect(parkReasonFor(const ModelNotInstalledException('n')),
+          'not_installed');
+      expect(parkReasonFor(const DecisionNotInstalledException('n')),
+          'decision_not_installed');
+      expect(parkReasonFor(const DecisionUnauthorizedException('k')),
+          'decision_unauthorized');
+      // A misconfiguration is the decision server's park.
+      expect(parkReasonFor(const DecisionMisconfiguredException('m')),
+          'decision_unavailable');
+      expect(const DecisionMisconfiguredException('m'),
+          isA<DecisionUnavailableException>());
     });
 
     test('a throwing observer never breaks the call', () async {
@@ -473,7 +523,7 @@ void main() {
       );
       expect(
         () => DecisionClient.tokenizeUrlFor('http://127.0.0.1:8083/v1/other'),
-        throwsA(isA<LlmFormatException>()),
+        throwsA(isA<DecisionMisconfiguredException>()),
       );
     });
 
@@ -508,7 +558,7 @@ void main() {
       expect((await client().decide(_longInput())).truncated, true);
     });
 
-    test('a tokenize answer that is not a list of ids is a format error',
+    test('a tokenize answer that is not a list of ids parks as misconfigured',
         () async {
       for (final body in [
         {'tokens': 'abc'},
@@ -530,7 +580,7 @@ void main() {
           }),
         );
         await expectLater(c.decide(_longInput()),
-            throwsA(isA<LlmFormatException>()),
+            throwsA(isA<DecisionMisconfiguredException>()),
             reason: jsonEncode(body));
         expect(fake.embeds, isEmpty, reason: 'no id request after a bad list');
       }
@@ -556,14 +606,15 @@ void main() {
       }
     });
 
-    test('the id request refused as too long is a format error', () async {
+    test('the id request refused as too long parks as misconfigured',
+        () async {
       server.onEmbed = (_) => http.Response(_tooLargeBody, 500);
       await expectLater(
         client().decide(_input('a')),
-        throwsA(isA<LlmFormatException>()),
+        throwsA(isA<DecisionMisconfiguredException>()),
       );
       expect(server.requests, hasLength(3));
-      expect(records.single.outcome, 'format');
+      expect(records.single.outcome, 'unavailable');
     });
   });
 
@@ -720,11 +771,16 @@ void main() {
 
     await expectLater(
       c.decide(_input('a')),
-      throwsA(isA<DecisionUnavailableException>().having(
-        (e) => e.message,
-        'message',
-        contains('make decide-install'),
-      )),
+      throwsA(isA<DecisionNotInstalledException>()
+          // The cause wins the park word: the rail says not installed
+          // rather than a decision server that is not answering.
+          .having((e) => parkReasonFor(e), 'park word',
+              'decision_not_installed')
+          .having(
+            (e) => e.message,
+            'message',
+            contains('make decide-install'),
+          )),
     );
     await expectLater(
       c.decide(_longInput()),

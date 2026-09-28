@@ -487,6 +487,40 @@ void main() {
       expect(prefs.targetForStage('triage').bearer, key);
     });
 
+    test('a key no header can carry is refused by every writer, and the '
+        'keychain is not touched', () async {
+      final tokens = MemoryTokenStore();
+      final prefs = await notifier(tokens);
+      const bad = 'sk-fixture\nsplit';
+      final writes = <Future<void> Function()>[
+        () => prefs.useGenerative(
+              placement: ModelPlacement.box,
+              url: generativeUrl,
+              key: bad,
+              hardwareTier: MachineTier.full,
+            ),
+        () => prefs.useDecision(
+              placement: ModelPlacement.box,
+              url: 'https://box.example.com/decide/v1/embeddings',
+              key: bad,
+            ),
+        () => prefs.useCloudDrafts(
+              url: 'https://drafts.example.com/v1/chat/completions',
+              model: 'm',
+              key: bad,
+            ),
+      ];
+      for (final write in writes) {
+        await expectLater(
+          write(),
+          throwsA(isA<ArgumentError>()
+              .having((e) => e.message, 'message', accessKeyCharsText)
+              .having((e) => '$e', 'never the key', isNot(contains('split')))),
+        );
+      }
+      expect(tokens.values, isEmpty);
+    });
+
     test('clearRoleKey forgets one role\'s key and nothing else', () async {
       final tokens = MemoryTokenStore();
       final prefs = await notifier(tokens);

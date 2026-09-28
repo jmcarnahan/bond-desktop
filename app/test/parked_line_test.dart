@@ -220,6 +220,60 @@ void main() {
       }
     });
 
+    test('a model this Mac has not downloaded says so on both placements', () {
+      // The server is answering fine, and waiting will not fix it, so the
+      // sentence claims no retry and says where the fix is.
+      for (final onBox in [true, false]) {
+        expect(
+          railProgressLine(
+            on: true,
+            remaining: 3,
+            reason: 'not_installed',
+            waiting: 3,
+            onBox: onBox,
+          ),
+          'A model this Mac runs is not downloaded · 3 waiting · set up again '
+          'in Settings',
+          reason: 'onBox: $onBox',
+        );
+      }
+    });
+
+    test('the decision model not installed says the command, on both '
+        'placements', () {
+      for (final onBox in [true, false]) {
+        expect(
+          railProgressLine(
+            on: true,
+            remaining: 3,
+            reason: 'decision_not_installed',
+            waiting: 3,
+            onBox: onBox,
+          ),
+          'The decision model is not installed · 3 waiting · run make '
+          'decide-install, then Check in Settings',
+          reason: 'onBox: $onBox',
+        );
+      }
+    });
+
+    test('a refused decision key names the decision server, whatever the '
+        'generative placement', () {
+      for (final onBox in [true, false]) {
+        expect(
+          railProgressLine(
+            on: true,
+            remaining: 3,
+            reason: 'decision_unauthorized',
+            waiting: 3,
+            onBox: onBox,
+          ),
+          'The decision server refused the access key · 3 waiting',
+          reason: 'onBox: $onBox',
+        );
+      }
+    });
+
     test('session keeps the wording it always had', () {
       // A sign-out is already routed by the inbox notifier, and a second
       // sentence about it here would be the app saying the same thing twice.
@@ -259,6 +313,9 @@ void main() {
         'unauthorized',
         'embed_unavailable',
         'decision_unavailable',
+        'not_installed',
+        'decision_not_installed',
+        'decision_unauthorized',
       ]) {
         expect(
           railProgressLine(
@@ -296,6 +353,9 @@ void main() {
         'unauthorized',
         'embed_unavailable',
         'decision_unavailable',
+        'not_installed',
+        'decision_not_installed',
+        'decision_unauthorized',
         'session',
       ]) {
         for (final on in [true, false]) {

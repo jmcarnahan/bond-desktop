@@ -721,6 +721,40 @@ void main() {
       expect((await verdictOf('email', 'm1'))['verdict'], 1);
     });
 
+    test('a digest that asks nothing leaves the decision model to settle it',
+        () async {
+      // D6: only a file with an ask can move the verdict, so a digest with
+      // none is no reason to pay for a language-model call.
+      await seedAmbiguousMail(body: 'See attached.');
+      await store.upsertAttachments('email', 'm1', [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Quarterly Report.pdf',
+          'size': 4096,
+        },
+      ]);
+      await store.setAttachmentDigest(
+        'email',
+        'm1',
+        'a1',
+        status: 'done',
+        digestJson: jsonEncode(const AttachmentDigest(
+          evidence: 'The quarterly report, for reading.',
+          kind: 'report',
+          summary: 'Revenue rose four percent.',
+        ).toJson()),
+      );
+      await decide(fakeAnswers(needsYou: 0.1));
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(llm.calls, isEmpty);
+      expect((await verdictOf('email', 'm1'))['verdict'], 0);
+    });
+
     group('a cold approach', () {
       Future<Set<String>> owned() async => {'northwind.example.com'};
 

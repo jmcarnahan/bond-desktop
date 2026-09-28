@@ -212,9 +212,9 @@ class ActivityLog {
     slot.llmLabel = call.label;
     // Last writer wins, exactly as [_PendingSlot.llmLabel] does — and for one
     // row it is the same answer, because a row's calls are one unit of work on
-    // one slot. The storyline sweep is the exception (membership on the fast
-    // client, naming on the prose one), and there this reports the last model
-    // dialled.
+    // one slot. A row whose calls went to two models (a sweep from before
+    // the decision-model round, or a stage pointed elsewhere) reports the
+    // last model dialled.
     final model = call.model;
     if (model != null && model.isNotEmpty) slot.llmModel = model;
     if (call.outcome != 'ok') slot.llmError = call.error ?? call.outcome;

@@ -505,7 +505,14 @@ Mac is not answering. Work is waiting and will retry each minute.`), and
 retry each minute.`) and `unauthorized` (`Your server refused the access key.
 Change it here.`) under the Generative model while it runs on your server.
 With the generative model on this Mac the server line above already says what
-the router is doing, and the rail says `Model server unreachable`. A park word
+the router is doing, and the rail says `Model server unreachable`.
+`decision_not_installed` (`Not installed · run make decide-install`) and
+`decision_unauthorized` (`The decision server refused the access key. Change
+it here.`) are said under the Decision model whatever the generative
+placement. `not_installed` (the managed generative model, which the router
+does not serve because it is not on disk) is said on this Mac's server line
+instead of the router state: `A model this Mac runs is not downloaded. Open
+Settings, Models, and set up again.` A park word
 this page cannot answer for, such as a sign-out, is left alone.
 
 **The server follows the placements.** Every placement write is followed by

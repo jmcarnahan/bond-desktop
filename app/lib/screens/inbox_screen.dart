@@ -205,8 +205,10 @@ typedef _Selection = ({
 /// `model_unavailable` and `unauthorized` read differently on the two
 /// placements, because there the answer changes what a person should go and
 /// look at; `embed_unavailable` does not, because that server is on this Mac
-/// under either placement, and `decision_unavailable` names its model rather
-/// than a machine.
+/// under either placement, `decision_unavailable`, `decision_not_installed`
+/// and `decision_unauthorized` name the decision model rather than a
+/// machine, and `not_installed` is a generative model this Mac has not
+/// downloaded, which no server restart fixes.
 ///
 /// "Retrying each minute" is the inbox's own poll and the supervisor's
 /// `onReady`, and it is the only cadence this sentence may claim: nothing
@@ -244,6 +246,23 @@ String railProgressLine({
     case 'decision_unavailable':
       return 'Decision model unreachable · $waiting waiting · retrying each '
           'minute';
+    // The decision model's own install is missing (the router is not serving
+    // it, or its heads file is not there). Its fix is a command, not the
+    // generative download below, so it says which.
+    case 'decision_not_installed':
+      return 'The decision model is not installed · $waiting waiting · run '
+          'make decide-install, then Check in Settings';
+    // Named for the decision server whichever way the generative model is
+    // placed: that placement says nothing about where this key went.
+    case 'decision_unauthorized':
+      return 'The decision server refused the access key · $waiting waiting';
+    // A managed generative model the router cannot serve because it is not
+    // on disk.
+    // Not "unreachable": the server is fine, and waiting will not help, so
+    // no retry cadence is claimed and the sentence says what to do.
+    case 'not_installed':
+      return 'A model this Mac runs is not downloaded · $waiting waiting · '
+          'set up again in Settings';
     // Named for the machine that refused, like the arm above it: a local
     // server behind a reverse proxy can answer 401 too, and telling that
     // person to go and look at a server they named would send them to the

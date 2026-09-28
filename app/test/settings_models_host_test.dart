@@ -536,6 +536,7 @@ void main() {
     await pumpHost(tester, probe: _ScriptedProbe(const {}), server: server);
     await openHostSection(tester, 'Models');
     final before = server.presets;
+    final heads = container.read(decisionHeadsProvider);
 
     await tapKey(tester, SettingsModelsPage.checkDecisionKey);
     await settle(tester);
@@ -544,6 +545,10 @@ void main() {
     // pick up the placements' preset, which restarts it only when the hash
     // moved.
     expect(server.presets, before + 1);
+    // And the heads cache is left alone: it re-reads on a new mtime by
+    // itself, and rebuilding it would rebuild the decision client and the
+    // triage queue under it mid-drain.
+    expect(identical(container.read(decisionHeadsProvider), heads), isTrue);
     expect(tester.takeException(), isNull);
   });
 

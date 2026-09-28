@@ -525,12 +525,19 @@ void main() {
       'embed_unavailable': SettingsModelsPage.embedStatusKey,
       'model_unavailable': SettingsModelsPage.generativeStatusKey,
       'unauthorized': SettingsModelsPage.generativeStatusKey,
+      // The managed generative model, said on this Mac's server line.
+      'not_installed': SettingsModelsPage.statusKey,
+      'decision_not_installed': SettingsModelsPage.decisionStatusKey,
+      'decision_unauthorized': SettingsModelsPage.decisionStatusKey,
     };
     const sentence = {
       'decision_unavailable': SettingsModelsPage.decisionUnavailableText,
       'embed_unavailable': SettingsModelsPage.embedUnavailableText,
       'model_unavailable': SettingsModelsPage.serverParkedText,
       'unauthorized': SettingsModelsPage.serverUnauthorizedText,
+      'not_installed': SettingsModelsPage.notInstalledText,
+      'decision_not_installed': SettingsModelsPage.decisionNotInstalledText,
+      'decision_unauthorized': SettingsModelsPage.decisionUnauthorizedText,
     };
 
     for (final reason in parkedAt.keys) {

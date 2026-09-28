@@ -267,6 +267,21 @@ void main() {
       expect(rendered(tester), isNot(contains(_key)));
     });
 
+    testWidgets('a key no header can carry is refused under its field, and '
+        'nothing is asked or written', (tester) async {
+      await open(tester);
+      await type(tester, ModelServersForm.keyKey(gen), 'sk-fixture\u00e9key');
+      await connect(tester);
+
+      expect(find.text(accessKeyCharsText), findsOneWidget);
+      expect(asked, isEmpty);
+      expect(connected, isEmpty);
+
+      // Typing again clears the sentence.
+      await type(tester, ModelServersForm.keyKey(gen), _key);
+      expect(find.text(accessKeyCharsText), findsNothing);
+    });
+
     testWidgets('a server that lists several waits for a pick, and the second '
         'press takes it', (tester) async {
       await open(

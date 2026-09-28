@@ -3,11 +3,11 @@ import 'dart:async';
 /// Serializes whole queue DRAINS against the model servers.
 ///
 /// Not a claim that concurrency never pays — it does, and each drain now runs
-/// up to K items in flight internally (K=3, matched by the fast server's
-/// `FAST_SLOTS` slots): a batched decode reads the weights once for the whole
-/// batch, so K requests cost far less than K times one. What rises with the
-/// batch is any ONE request's latency, which is why K is small and why the
-/// number of clients is kept equal to the number of slots.
+/// up to K items in flight internally (K=3, first sized to the old 4B
+/// server's `FAST_SLOTS` slots): a batched decode reads the weights once for
+/// the whole batch, so K requests cost far less than K times one. What rises
+/// with the batch is any ONE request's latency, which is why K is small and
+/// why the number of clients is kept equal to the number of slots.
 ///
 /// This gate is about the other axis. Two DRAINS at the same server would put
 /// an unbounded, unowned number of requests in front of it — triage's K plus
@@ -20,7 +20,8 @@ import 'dart:async';
 ///
 /// Since Round C there are THREE of these, one per lane, and the paragraph
 /// above is about the FAST one: the triage drain and the fast worker share it
-/// because they share the fast server. The storyline and draft lanes hold
+/// (for ordering since the decision-model round, when triage stopped calling
+/// the generative server). The storyline and draft lanes hold
 /// their own, which is what lets a recap or a draft run beside a new message's
 /// triage instead of in front of it — see `AiWorker`'s header for how the
 /// lanes are cut.

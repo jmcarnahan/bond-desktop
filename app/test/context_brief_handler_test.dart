@@ -489,7 +489,10 @@ void main() {
     );
 
     await expectLater(
-      runFor(briefLlm([const LlmUnavailableException('fast slot off')]), dirId),
+      runFor(
+        briefLlm([const LlmUnavailableException('generative server off')]),
+        dirId,
+      ),
       throwsA(isA<LlmUnavailableException>()),
     );
 

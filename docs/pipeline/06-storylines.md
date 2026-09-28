@@ -1097,7 +1097,7 @@ what the namer wrote, noted `lint`. Or the per-member confirms left fewer than
 `minClusterSize` survivors. Which rows are filed differs by reason: the whole
 cluster on the first, the namer's kept rows on the other two. The confirms' own
 verdicts are deliberately not applied, because the person is being asked about
-the group and not about the small model's answer thread by thread.
+the group and not about the confirm model's answer thread by thread.
 
 All three used to write a member-less `dismissed` tombstone instead, and on the
 owner's own mailbox that was the entire sweep: four groups a person would
@@ -1695,8 +1695,8 @@ each cost that entry and nothing else. The upper bound is the service's, since
 only it knows how many cards it showed.
 
 **ConfirmMembershipTask** — `app/lib/services/llm/storyline_tasks.dart`,
-schema `storyline_membership`, **fast / bulk slot** (`confirmClient` in
-`app_providers.dart`), **temperature 0** at all five call sites (assign,
+schema `storyline_membership`, **the generative model** since the
+decision-model round (`confirmClient` in `app_providers.dart`), **temperature 0** at all five call sites (assign,
 recruit, the sweep's members, its probe, the audit), which all go through one
 `StorylineService._confirm`. Given a storyline described by its *charter* and
 one candidate thread: an evidence sentence first, a boolean `belongs`, and a
