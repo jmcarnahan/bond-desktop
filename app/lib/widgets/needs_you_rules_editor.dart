@@ -155,9 +155,14 @@ class _NeedsYouRulesEditorState extends State<NeedsYouRulesEditor> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        // Custom rules take every needs-you away from the decision model,
+        // which cannot read them (D6), and that costs a generative call per
+        // message: the person saving them is told so before they do.
         Text(
-          'These are the rules the model reads for every message Bond cannot '
-          'settle on its own. Edit them freely — they replace the defaults '
+          'These are the rules the generative model reads to decide what '
+          'needs you. While your own rules are saved it answers for every '
+          "message and the decision model's verdict is not used, so each "
+          'message takes longer. Edit them freely — they replace the defaults '
           'entirely. Bond adds the answer format automatically.',
           style: BondType.small,
         ),

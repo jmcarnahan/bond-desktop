@@ -205,9 +205,9 @@ typedef _Selection = ({
 /// `model_unavailable` and `unauthorized` read differently on the two
 /// placements, because there the answer changes what a person should go and
 /// look at; `embed_unavailable` does not, because that server is on this Mac
-/// under either placement, `decision_unavailable`, `decision_not_installed`
-/// and `decision_unauthorized` name the decision model rather than a
-/// machine, and `not_installed` is a generative model this Mac has not
+/// under either placement, `decision_unavailable`, `decision_not_installed`,
+/// `decision_misconfigured` and `decision_unauthorized` name the decision
+/// model rather than a machine, and `not_installed` is a generative model this Mac has not
 /// downloaded, which no server restart fixes.
 ///
 /// "Retrying each minute" is the inbox's own poll and the supervisor's
@@ -252,6 +252,14 @@ String railProgressLine({
     case 'decision_not_installed':
       return 'The decision model is not installed · $waiting waiting · run '
           'make decide-install, then Check in Settings';
+    // A server that answers, but not as the decision model does (another
+    // model's tokenizer, normalised vectors, no /tokenize), or a heads file
+    // this build refuses. Waiting fixes neither, so no retry cadence is
+    // claimed: the sentence names both causes and both fixes.
+    case 'decision_misconfigured':
+      return 'The decision server is not the decision model, or its heads '
+          'file does not match · $waiting waiting · check its address in '
+          'Settings, or run make decide-install';
     // Named for the decision server whichever way the generative model is
     // placed: that placement says nothing about where this key went.
     case 'decision_unauthorized':

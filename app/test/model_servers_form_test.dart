@@ -339,6 +339,43 @@ void main() {
       expect(connected.single.model, 'decide-a');
     });
 
+    testWidgets("a router's list is searched for the decision model, "
+        'wherever it sits', (tester) async {
+      await open(
+        tester,
+        role: dec,
+        url: _decisionUrl,
+        probe: fake(const {
+          _decisionUrl: ModelProbeResult(
+            reachable: true,
+            modelIds: ['bond-embed', 'bond-decide', 'bond-prose'],
+          ),
+        }),
+      );
+      await connect(tester, dec);
+
+      expect(find.byKey(ModelServersForm.modelKey(dec)), findsNothing);
+      expect(connected.single.model, 'bond-decide');
+    });
+
+    testWidgets('the name this install already uses counts too',
+        (tester) async {
+      await open(
+        tester,
+        role: dec,
+        url: _decisionUrl,
+        model: 'decide-mine',
+        probe: fake(const {
+          _decisionUrl: ModelProbeResult(
+            reachable: true,
+            modelIds: ['bond-embed', 'decide-mine'],
+          ),
+        }),
+      );
+      await connect(tester, dec);
+      expect(connected.single.model, 'decide-mine');
+    });
+
     testWidgets('a server that did not answer connects nothing',
         (tester) async {
       await open(

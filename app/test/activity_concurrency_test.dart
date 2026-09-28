@@ -159,6 +159,15 @@ void main() {
       onCall: log.noteLlmCall,
       client: MockClient((request) async {
         await Future<void>.delayed(const Duration(milliseconds: 30));
+        // The identity probe: ModernBERT's [CLS] … [SEP].
+        if (request.url.path.endsWith('/tokenize')) {
+          return http.Response(
+            jsonEncode({
+              'tokens': [DecisionClient.clsId, 64, DecisionClient.sepId],
+            }),
+            200,
+          );
+        }
         return http.Response(
           jsonEncode({
             'data': [

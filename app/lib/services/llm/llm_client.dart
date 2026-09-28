@@ -152,8 +152,9 @@ class DecisionNotInstalledException extends DecisionUnavailableException {
 /// The decision model is set up in a way that fails EVERY message the same
 /// way: a heads file this build refuses, heads that are not JSON, or a server
 /// that does not answer with the decision model's raw embeddings (the
-/// address points at another server, or it normalises). Parks under
-/// `decision_unavailable` rather than spending attempts, because counting it
+/// address points at another server — its tokenizer is not ModernBERT's — or
+/// it normalises, or it has no `/tokenize`). Parks under its own
+/// `decision_misconfigured` rather than spending attempts, because counting it
 /// against each message would error the whole backlog and let every row flow
 /// on to its text with no decision. [message] names the cause in a sentence
 /// that carries no key.
@@ -180,6 +181,9 @@ String parkReasonFor(Object e) => switch (e) {
       LlmUnauthorizedException() => 'unauthorized',
       DecisionNotInstalledException() => 'decision_not_installed',
       ModelNotInstalledException() => 'not_installed',
+      // Waiting fixes nothing here — the address or the heads file does —
+      // so it is not worded as a server that is still coming up.
+      DecisionMisconfiguredException() => 'decision_misconfigured',
       DecisionUnavailableException() => 'decision_unavailable',
       EmbedUnavailableException() => 'embed_unavailable',
       _ => 'model_unavailable',

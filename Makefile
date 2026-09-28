@@ -849,6 +849,11 @@ PIPE_LATE    ?= 1
 # default stays `all` so every row in the ledger keeps the meaning it was
 # written with, and `needsYou` is how the shipped default is measured.
 PIPE_POLICY  ?= all
+# The p(needs_you) the bench's stand-in decision model answers. 0.5 sits
+# INSIDE the band, so every message still asks the generative model — the
+# worst case, and what every row before the decision model paid. 0.9 is the
+# default path: the verdict comes from the decision model and costs no call.
+PIPE_NEEDS_YOU_P ?= 0.5
 
 # ── the bakeoff: Bedrock as a target ────────────────────────────────────
 # Two wires. Most Bedrock models speak the OpenAI shape at
@@ -969,6 +974,7 @@ BENCH_DEFINES := \
   --dart-define=PIPE_SHAPE='$(PIPE_SHAPE)' \
   --dart-define=PIPE_LATE=$(if $(filter-out 0,$(PIPE_LATE)),true,false) \
   --dart-define=PIPE_POLICY='$(PIPE_POLICY)' \
+  --dart-define=PIPE_NEEDS_YOU_P='$(PIPE_NEEDS_YOU_P)' \
   --dart-define=GOLDEN_SET='$(GOLDEN)' \
   --dart-define=GOLDEN_REGISTRY='$(GOLDEN_REGISTRY)' \
   --dart-define=GOLDEN_OWNER_NAME='$(GOLDEN_OWNER_NAME)' \

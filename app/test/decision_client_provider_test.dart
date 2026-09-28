@@ -62,6 +62,21 @@ void main() {
     return made;
   }
 
+  test('the install folder is named only when the models folder moved',
+      () async {
+    final plain = containerFor(const AppPrefs());
+    expect(plain.read(decideInstallDirProvider), isNull);
+
+    final moved = p.join(support.path, 'elsewhere');
+    final custom = containerFor(AppPrefs(modelsFolder: moved));
+    expect(
+      custom.read(decideInstallDirProvider),
+      p.dirname(p.join(moved, decide.relativePath)),
+    );
+    expect(p.basename(custom.read(decideInstallDirProvider)!),
+        'local_bond-decide');
+  });
+
   test('on this Mac it dials the managed router under bond-decide', () async {
     final container = containerFor(const AppPrefs());
     await container.read(appPrefsProvider.notifier).ready;
@@ -187,7 +202,7 @@ void main() {
           first,
           isA<DecisionMisconfiguredException>()
               .having((e) => parkReasonFor(e), 'park word',
-                  'decision_unavailable')
+                  'decision_misconfigured')
               .having((e) => e.message, 'message',
                   startsWith(DecisionHeadsFile.mismatchText)),
         );

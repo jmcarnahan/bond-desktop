@@ -121,7 +121,9 @@ nothing they read has changed.
 model call; below it the decision model's stored probability answers yes at
 `p >= 0.65` (0.85 for cold outreach) and no under 0.35, and only the band
 between them — plus every message when the owner saved custom Needs You rules,
-and any message with an attachment digest — asks the generative model. See
+any message whose attachment digest carries an ask (a digest that asks nothing
+leaves it to the decision model), and any message decided before the owner
+was known or before the decision model existed — asks the generative model. See
 [11-needs-you.md](11-needs-you.md).
 
 Cross-cutting concerns — which client serves which task, ports and defaults,

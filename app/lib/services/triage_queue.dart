@@ -239,15 +239,31 @@ class TriageQueue {
   final DecisionClient _decisionClient;
 
   /// Who the owner is, for the decision state's owner line — a keychain read
-  /// in the app. NEVER awaited by a claim: [_askOwner] starts it at a pump
-  /// and a claim uses [_ownerKnown], whatever has arrived. The self gate's
-  /// `userAddress` has the same shape for the same reason: a read that has
-  /// not answered must not hold the drain. In practice it has answered long
-  /// before the first claim, since triage runs after a sync that needed the
-  /// same account.
+  /// in the app. [_askOwner] starts it at a pump and a claim uses
+  /// [_ownerKnown], whatever has arrived — after waiting at most
+  /// [_ownerWait] for a lookup still in flight ([_awaitOwner]). The first
+  /// claims after launch are the ones that race it: a Teams message has no
+  /// body fetch to give the keychain time, and a state with no owner line is
+  /// not the state the heads were trained on — the gate, reply and urgency
+  /// heads read it too, not only needs-you. Never longer than that, for the
+  /// self gate's `userAddress` reason: a read that has not answered must not
+  /// hold the drain.
   final OwnerLookup? _owner;
   OwnerIdentity? _ownerKnown;
   bool _ownerAsking = false;
+
+  /// The lookup [_askOwner] started, until it settles or a claim has waited
+  /// [_ownerWait] for it once. Null means nobody waits.
+  Future<void>? _ownerAsk;
+
+  /// The one wait the claims launched together share, and its timer. Held
+  /// so [quiesce] can end it: a test's fake clock never reaches 300 ms after
+  /// its tree is gone, and a timer left behind fails the test.
+  Completer<void>? _ownerWaiting;
+  Timer? _ownerTimer;
+
+  /// How long a claim waits for an owner lookup still in flight.
+  static const Duration _ownerWait = Duration(milliseconds: 300);
 
   TriageQueue(
     this._store, {
@@ -339,6 +355,9 @@ class TriageQueue {
   Future<void> _quiesceOnce() async {
     _stopped = true;
     _quiescing = true;
+    // A claim waiting for the owner goes on now, ownerless, so the loop
+    // below has something to wait for that ends.
+    _endOwnerWait();
     try {
       // A LOOP, not one wait: a claim that was already at the store when
       // [_stopped] flipped lands in [_inFlight] after the first snapshot was
@@ -432,8 +451,8 @@ class TriageQueue {
       // enqueues in the same step, exactly as [DrainGate.yieldRequested]
       // promises.
       if ((counts['pending'] ?? 0) == 0) return;
-      // Who the owner is, for the decision state — started here, never
-      // awaited (see [_owner]).
+      // Who the owner is, for the decision state — started here; a claim
+      // waits a moment for it at most (see [_owner]).
       _askOwner();
       // Asked in the same synchronous step as the `_gate.run` below, which is
       // what makes the flag transient — this run holds the ticket that clears
@@ -719,11 +738,14 @@ class TriageQueue {
       // stage's, behind it on the fast lane. INSIDE this try on purpose: a
       // decision server that is down throws [DecisionUnavailableException],
       // an [LlmUnavailableException], so the message parks under
-      // `decision_unavailable` — as does every fault that would fail every
-      // message alike (a refused heads file, vectors that are not the
-      // decision model's: [DecisionMisconfiguredException]) and a missing
-      // install (`decision_not_installed`). Only a 4xx the server gives this
-      // one request is a failure that spends an attempt.
+      // `decision_unavailable` — as does, under its own word, every fault
+      // that would fail every message alike (a refused heads file, a server
+      // that is not the decision model: `decision_misconfigured`) and a
+      // missing install (`decision_not_installed`). Every park is retried by
+      // the next pump, so a fixed address or a fresh install recovers with
+      // nobody pressing anything. Only a 4xx the server gives this one
+      // request is a failure that spends an attempt.
+      await _awaitOwner();
       final owner = decisionOwnerString(_ownerKnown);
       final decided = await _decisionClient.decide(DecisionInput.fromRows(
         message: message,
@@ -803,6 +825,20 @@ class TriageQueue {
         deadline: message.deadline ?? '',
         textLanded: message.summary != null,
       );
+      // A kept message with no text yet is owed its message-text call. What
+      // this is for is a revived errored or terminal triage row from before
+      // the decision model: its `extract` row closed `done` back when triage
+      // wrote the summary, so without this it would stay triaged with no text
+      // for good. The same repair `rependGatedTriage` makes, with no fresh
+      // stamp, because nobody asked. Only a FINISHED row is revived: new mail
+      // has a pending one already, and a message the sync queued no text for
+      // gets none from here either (`requeueWork` alone would insert one).
+      if (message.summary == null) {
+        final text = await _store.workStatusOf('extract', source, id);
+        if (text == 'done' || text == 'error') {
+          await _store.requeueWork('extract', source, id);
+        }
+      }
       // What the decision model said, on the row. Its numbers ride in their
       // own key as well, because the log keeps one label per span.
       await _log.record(
@@ -866,16 +902,64 @@ class TriageQueue {
   }
 
   /// Starts the owner lookup when the owner is not yet known and no lookup is
-  /// in flight. Unawaited on purpose (see [_owner]); a throw or a null answer
+  /// in flight. Not awaited here (see [_owner]); a throw or a null answer
   /// leaves the owner unknown, and the next pump asks again.
   void _askOwner() {
     final lookup = _owner;
     if (lookup == null || _ownerKnown != null || _ownerAsking) return;
     _ownerAsking = true;
-    Future<OwnerIdentity?>.sync(lookup).then(
-      (owner) => _ownerKnown = owner,
-      onError: (Object _) => null,
-    ).whenComplete(() => _ownerAsking = false);
+    late final Future<void> asking;
+    asking = Future<OwnerIdentity?>.sync(lookup).then<void>(
+      (owner) {
+        _ownerKnown = owner;
+      },
+      onError: (Object _) {},
+    ).whenComplete(() {
+      _ownerAsking = false;
+      if (identical(_ownerAsk, asking)) _ownerAsk = null;
+    });
+    _ownerAsk = asking;
+  }
+
+  /// Waits for an owner lookup still in flight, [_ownerWait] at most, then
+  /// lets the claim go on with whatever is known. The claims launched
+  /// together wait on the one lookup together, and a lookup that outlives
+  /// the wait is waited for ONCE: after it, no claim waits on it again, so a
+  /// keychain that never answers costs the first claims 300 ms and the rest
+  /// nothing.
+  Future<void> _awaitOwner() {
+    final asking = _ownerAsk;
+    if (_ownerKnown != null || asking == null) return Future.value();
+    final shared = _ownerWaiting;
+    if (shared != null) return shared.future;
+    final waiting = _ownerWaiting = Completer<void>();
+    void finish() {
+      if (identical(_ownerWaiting, waiting)) {
+        _ownerTimer?.cancel();
+        _ownerTimer = null;
+        _ownerWaiting = null;
+      }
+      if (!waiting.isCompleted) waiting.complete();
+    }
+
+    _ownerTimer = Timer(_ownerWait, () {
+      // Waited for once: no later claim waits on this lookup again.
+      if (identical(_ownerAsk, asking)) _ownerAsk = null;
+      finish();
+    });
+    asking.whenComplete(finish);
+    return waiting.future;
+  }
+
+  /// Ends a wait for the owner early, for [quiesce]: the claims waiting go
+  /// on ownerless and nothing waits on the lookup again.
+  void _endOwnerWait() {
+    _ownerTimer?.cancel();
+    _ownerTimer = null;
+    _ownerAsk = null;
+    final waiting = _ownerWaiting;
+    _ownerWaiting = null;
+    if (waiting != null && !waiting.isCompleted) waiting.complete();
   }
 
   /// The row state the decision model's answers make: urgency and category

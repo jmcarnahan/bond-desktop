@@ -115,6 +115,12 @@ class SettingsModelsPage extends StatefulWidget {
   /// Why the pipeline is parked and how much is waiting.
   final ParkedFact? parked;
 
+  /// Where `make decide-install` has to put the decision model when that is
+  /// NOT the Makefile's default: the `local_bond-decide` folder inside the
+  /// models folder the app reads, which the wizard may have moved. Null while
+  /// the models folder is the default one.
+  final String? decideInstallDir;
+
   const SettingsModelsPage({
     super.key,
     this.decisionPlacement = ModelPlacement.local,
@@ -139,6 +145,7 @@ class SettingsModelsPage extends StatefulWidget {
     this.onSetUpAgain,
     this.onShowLog,
     this.parked,
+    this.decideInstallDir,
   });
 
   static const Key decisionModeKey = ValueKey('settings-decision-mode');
@@ -203,16 +210,26 @@ class SettingsModelsPage extends StatefulWidget {
       'The decision model is not answering. Work is waiting and will retry '
       'each minute.';
 
+  /// The decision server answers, but not as the decision model: another
+  /// model's tokenizer, normalised vectors, no `/tokenize` — or this Mac's
+  /// heads file does not match this build. No retry is promised, because
+  /// waiting fixes neither.
+  static const String decisionMisconfiguredText =
+      'The decision server is not the decision model, or its heads file does '
+      'not match this build. Check its address here, or run make '
+      'decide-install.';
+
   /// The decision server refused the key, whichever way the generative
   /// model is placed.
   static const String decisionUnauthorizedText =
       'The decision server refused the access key. Change it here.';
 
   /// A managed GENERATIVE model the router cannot serve because it is not on
-  /// disk. Said on this Mac's server line.
+  /// disk. Said on this Mac's server line, on the page that has the button,
+  /// so it names the button rather than the way here.
   static const String notInstalledText =
-      'A model this Mac runs is not downloaded. Open Settings, Models, and '
-      'set up again.';
+      'A model this Mac runs is not downloaded. Press Set up again to download '
+      'it.';
 
   /// Your server's status before a key has been pasted, and after one has.
   static const String keyNeededText =
@@ -223,8 +240,22 @@ class SettingsModelsPage extends StatefulWidget {
   /// This Mac's install states.
   static const String decisionNotInstalledText =
       'Not installed · run make decide-install';
+
+  /// [decisionNotInstalledText] for a models folder the Makefile does not
+  /// know: `make decide-install` writes to `DECIDE_DIR`, the default folder,
+  /// and the app would never read what it put there. The folder is
+  /// shell-quoted, `'\''` for an apostrophe in it, so the command pastes as
+  /// one argument whatever the folder is called.
+  static String decisionNotInstalledIn(String? dir) => dir == null
+      ? decisionNotInstalledText
+      : 'Not installed · run make decide-install '
+          "DECIDE_DIR='${dir.replaceAll("'", "'\\''")}'";
   static const String installedLoadedText = 'Installed · loaded';
   static const String installedNotLoadedText = 'Installed · not loaded';
+
+  /// Installed since the park that still says otherwise: the files are on
+  /// disk and the router is on its way to serving them.
+  static const String installedLoadingText = 'Installed · loading';
   static const String notDownloadedText =
       'Not downloaded · Set up again to download it';
   static const String onDiskLoadedText = 'On disk · loaded';
@@ -357,7 +388,9 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
       'embed_unavailable' => SettingsModelsPage.embedUnavailableText,
       'decision_unavailable' => SettingsModelsPage.decisionUnavailableText,
       'not_installed' => SettingsModelsPage.notInstalledText,
-      'decision_not_installed' => SettingsModelsPage.decisionNotInstalledText,
+      'decision_not_installed' =>
+        SettingsModelsPage.decisionNotInstalledIn(widget.decideInstallDir),
+      'decision_misconfigured' => SettingsModelsPage.decisionMisconfiguredText,
       'decision_unauthorized' => SettingsModelsPage.decisionUnauthorizedText,
       _ => null,
     };
@@ -514,20 +547,37 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
   }
 
   String _decisionStatus(ManagedModelStatus? row) {
+    final onServer = widget.decisionPlacement == ModelPlacement.box;
+    // A not-installed park outlives the install that fixed it: it clears
+    // only when triage next drains, and on this Mac that waits for the router
+    // to restart onto a preset with the decision model in it, behind whatever
+    // else that preset loads. Once the files are on disk the row is the
+    // fresher fact, so a Check after `make decide-install` stops saying Not
+    // installed.
+    final stale = row != null && row.headsOnDisk && (onServer || row.onDisk);
     if (_parked(const {
       'decision_unavailable',
       'decision_not_installed',
+      'decision_misconfigured',
       'decision_unauthorized',
     })
         case final parked?) {
-      return parked;
+      if (widget.parked?.reason != 'decision_not_installed' || !stale) {
+        return parked;
+      }
+      if (!onServer && !_decisionEditing) {
+        return SettingsModelsPage.loaded(row, widget.serverState)
+            ? SettingsModelsPage.installedLoadedText
+            : SettingsModelsPage.installedLoadingText;
+      }
     }
     if (_decisionEditing) return SettingsModelsPage.untilConnectText;
-    if (widget.decisionPlacement == ModelPlacement.box) {
+    if (onServer) {
       // The heads run here whichever server embeds (D12): without the heads
       // file a connected server still cannot decide anything.
       if (row != null && !row.headsOnDisk) {
-        return SettingsModelsPage.decisionNotInstalledText;
+        return SettingsModelsPage.decisionNotInstalledIn(
+            widget.decideInstallDir);
       }
       return _remoteStatus(
         widget.decisionUrl,
@@ -539,7 +589,9 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
     if (row == null) {
       return '${SettingsModelsPage.localModelNames[routerDecideId]} on this Mac';
     }
-    if (!row.onDisk) return SettingsModelsPage.decisionNotInstalledText;
+    if (!row.onDisk) {
+      return SettingsModelsPage.decisionNotInstalledIn(widget.decideInstallDir);
+    }
     return SettingsModelsPage.loaded(row, widget.serverState)
         ? SettingsModelsPage.installedLoadedText
         : SettingsModelsPage.installedNotLoadedText;

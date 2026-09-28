@@ -488,6 +488,24 @@ final serverStateProvider = StreamProvider<ServerState>(
   (ref) => ref.watch(modelServerSupervisorProvider).states,
 );
 
+/// Where `make decide-install` must put the decision model for this app to
+/// read it, when that is not the Makefile's `DECIDE_DIR` default: the decide
+/// entry's folder inside a models folder the wizard moved. Null while the
+/// models folder is the default one, where the plain command already lands —
+/// and then the manifest is never read, so a host that did not override it
+/// still builds.
+final decideInstallDirProvider = Provider<String?>((ref) {
+  final paths = ref.watch(appPathsProvider);
+  final folder = ref.watch(
+    appPrefsProvider.select((prefs) => prefs.effectiveModelsFolder(paths)),
+  );
+  if (p.equals(folder, paths.models.path)) return null;
+  final decide =
+      ref.watch(modelManifestProvider).byRoleOrNull(ModelRole.decide);
+  if (decide == null) return null;
+  return p.dirname(p.join(folder, decide.relativePath));
+});
+
 /// The three role models this Mac would run, with what each costs and
 /// whether it is on disk.
 ///
@@ -1173,6 +1191,30 @@ final decisionClientProvider = Provider<DecisionClient>((ref) {
     onCall: ref.watch(activityLogProvider).noteLlmCall,
   );
 });
+
+/// A decision Connect's last question before it writes: is the server at
+/// [url] the decision model? `/v1/models` cannot say — llama-server lists
+/// whatever name it was started with — so this is the client's own identity
+/// probe, with the key the write would store: the typed one, else the stored
+/// one unless the host changed ([clearKey]). Throws the sentence as an
+/// [ArgumentError], which the form draws under its field, and nothing is
+/// written. Settings and the wizard both call it, so neither says Connected
+/// over the embedding model's port.
+Future<void> refuseWrongDecisionServer(
+  DecisionClient client,
+  AppPrefsNotifier prefs, {
+  required String url,
+  required String model,
+  String? key,
+  required bool clearKey,
+}) async {
+  final refusal = await client.checkServer(
+    url: url,
+    model: model,
+    bearer: key ?? (clearKey ? null : prefs.bearerFor(boxDecideId)),
+  );
+  if (refusal != null) throw ArgumentError(refusal);
+}
 
 /// Semantic search over messages.
 ///

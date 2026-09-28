@@ -55,6 +55,9 @@ void main() {
 
   const vendor = 'https://api.openai.com/v1/chat/completions';
   const own = 'https://box.example.com/bulk/v1/chat/completions';
+  // What `own` becomes as the one generative server: the box's 27B slot
+  // beside its 4B one.
+  const ownProse = 'https://box.example.com/prose/v1/chat/completions';
   // Fictional strings, and the only "keys" anywhere in this file.
   const vendorKey = 'sk-fixture-not-a-real-vendor-token';
   const smallKey = 'sk-fixture-not-a-real-small-token';
@@ -92,7 +95,8 @@ void main() {
 
   group('adopting the vendor address as cloud drafts', () {
     test('in use, consented and named: adopted, the vendor key moves with '
-        'it, and the own small server is the generative remote', () async {
+        "it, and the own small server's prose slot is the generative remote",
+        () async {
       await seed(small: own);
       final tokens = bothKeys();
 
@@ -100,10 +104,13 @@ void main() {
 
       expect(prefs.cloudDraftsUrl, vendor);
       expect(prefs.cloudDraftsModel, 'gpt-big');
-      expect(prefs.boxBigUrl, own);
-      expect(prefs.boxBigModel, 'qwen3-4b');
+      expect(prefs.boxBigUrl, ownProse);
+      // The 4B's name stays with the 4B: the prose slot is asked for the
+      // build's constant until a Connect discovers its own.
+      expect(prefs.boxBigModel, isEmpty);
+      expect(prefs.effectiveGenerativeModel, boxProseModel);
       expect(prefs.modelPlacement, ModelPlacement.box);
-      expect(prefs.generativeSpec.url, own);
+      expect(prefs.generativeSpec.url, ownProse);
       expect(tokens.values, {
         bearer(cloudDraftsId): vendorKey,
         bearer(boxProseId): smallKey,
@@ -229,6 +236,16 @@ void main() {
         expect(p.generative, GenerativeAfterVendor.small);
       });
 
+      test("a box's /bulk slot hands the role to its /prose sibling; any "
+          'other small address is kept as it is', () {
+        expect(plan(small: own)!.generativeUrl, ownProse);
+        const other = 'https://gpu.example.com/v1/chat/completions';
+        expect(plan(small: other)!.generativeUrl, other);
+        expect(plan(compiled: 'https://box.example.com')!.generativeUrl,
+            isEmpty);
+        expect(plan()!.generativeUrl, isEmpty);
+      });
+
       test('nothing of the owner\'s to dial: home, and no small key to move',
           () {
         final p = plan()!;
@@ -338,7 +355,7 @@ void main() {
 
       final prefs = await launch(refusing);
 
-      expect(prefs.state.boxBigUrl, own);
+      expect(prefs.state.boxBigUrl, ownProse);
       expect(prefs.state.cloudDraftsUrl, vendor);
       expect(modelRolesPending(await store.getPref(modelRolesDerivedKey)),
           isTrue);
@@ -395,7 +412,7 @@ void main() {
       final preload = await AppPrefsNotifier.read(store);
 
       expect(preload.cloudDraftsUrl, vendor);
-      expect(preload.boxBigUrl, own);
+      expect(preload.boxBigUrl, ownProse);
       expect(
         await store.getPref(modelRolesDerivedKey),
         '$modelRolesPendingPrefix'

@@ -32,7 +32,7 @@ class DecisionHeadsFile {
       'The decision model is not installed. Run: make decide-install';
 
   /// What a file this build cannot use says, before the parser's own
-  /// reason. It parks under `decision_unavailable`.
+  /// reason. It parks under `decision_misconfigured`.
   static const String mismatchText =
       "The decision model's heads file does not match this build. Run: make "
       'decide-install';

@@ -16,6 +16,7 @@ import 'package:bond_inbox/screens/settings_host.dart';
 import 'package:bond_inbox/services/attachments/file_dialogs.dart';
 import 'package:bond_inbox/services/llm/model_probe.dart';
 import 'package:bond_inbox/services/server/model_server_supervisor.dart';
+import 'package:bond_inbox/widgets/inline_alert.dart';
 import 'package:bond_inbox/widgets/model_servers_form.dart';
 import 'package:bond_inbox/widgets/settings_models_page.dart';
 import 'package:bond_inbox/widgets/settings_screen.dart';
@@ -242,6 +243,7 @@ void main() {
     required ModelServerProbe probe,
     bool withServer = false,
     ModelServerSupervisor? server,
+    FakeDecisionClient? decision,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 1600));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -250,7 +252,10 @@ void main() {
     await tester.pumpWidget(ProviderScope(
       overrides: [
         dbProvider.overrideWithValue(db),
-        keepingDecisionClient(),
+        if (decision != null)
+          decisionClientProvider.overrideWithValue(decision)
+        else
+          keepingDecisionClient(),
         initialAppPrefsProvider.overrideWithValue(prefs),
         syncServiceProvider.overrideWithValue(_FakeSync()),
         modelManifestProvider.overrideWithValue(testManifest()),
@@ -420,6 +425,41 @@ void main() {
     expect(prefs.decisionSpec.url, url);
     expect(prefs.decisionSpec.model, 'bond-decide-x');
     expect(prefs.modelPlacement, ModelPlacement.local);
+  });
+
+  testWidgets('Connect refuses a server that is not the decision model, and '
+      'writes nothing', (tester) async {
+    // The embedding model on its own port: it lists a name and answers
+    // /v1/models, so only the identity probe can tell.
+    const url = 'http://127.0.0.1:8081/v1/embeddings';
+    const refusal = 'The server at http://127.0.0.1:8081 is not the decision '
+        "model: its tokenizer is not ModernBERT's.";
+    final probe = _ScriptedProbe(const {
+      url: ModelProbeResult(reachable: true, modelIds: ['bond-embed']),
+    });
+    final decision = FakeDecisionClient.fixed(fakeAnswers())
+      ..serverRefusal = refusal;
+    await pumpHost(tester, probe: probe, decision: decision);
+
+    await openHostSection(tester, 'Models');
+    await tapSegment(tester, SettingsModelsPage.decisionModeKey,
+        SettingsModelsPage.yourServerLabel);
+    await tester.enterText(
+      find.byKey(ModelServersForm.urlKey(ServerFormRole.decision)),
+      url,
+    );
+    await tester.pump();
+    await tapKey(tester, ModelServersForm.connectKey(ServerFormRole.decision));
+    await settle(tester);
+
+    expect(decision.checks, ['$url|bond-embed']);
+    final error = tester.widget<InlineAlert>(
+        find.byKey(ModelServersForm.errorKey(ServerFormRole.decision)));
+    expect(error.text, refusal);
+    expect(find.textContaining('Connected'), findsNothing);
+    final prefs = container.read(appPrefsProvider);
+    expect(prefs.decisionPlacement, ModelPlacement.local);
+    expect(prefs.decisionSpec.url, isNot(url));
   });
 
   /// The server this Mac runs follows the placement, not only the launch.

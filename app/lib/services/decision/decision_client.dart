@@ -19,6 +19,10 @@
 ///   model's own `[CLS]`/`[SEP]` and sent as a token array, which gives the
 ///   same vector HF truncation gave.
 ///
+/// Before the first embedding a target gets, `/tokenize` is asked to add the
+/// specials to `"a"`, and anything but `[CLS] … [SEP]` is a server of the
+/// wrong kind (see `_verifyServer`).
+///
 /// Unlike `EmbeddingsClient` this THROWS: the triage queue must park when the
 /// decision model is down, exactly as it parks for the generating model.
 library;
@@ -77,6 +81,19 @@ const String rawEmbeddingsText =
     'The decision server did not answer with raw embeddings from the '
     'decision model. Check its address in Settings, Models.';
 
+/// The identity probe's refusal: the server at [origin] tokenizes, but not
+/// as ModernBERT does, so it is some other model — the embedding model on
+/// the next port is the one it is most likely to be.
+String notDecisionModelText(String origin) =>
+    'The server at $origin is not the decision model: its tokenizer is not '
+    "ModernBERT's. Check its address in Settings, Models.";
+
+/// A server with no `/tokenize` at [origin]: the identity probe and a long
+/// message's truncation both need it, so nothing it answers can be used.
+String noTokenizeText(String origin) =>
+    'The server at $origin does not offer /tokenize, which the decision '
+    'model needs. Check its address in Settings, Models.';
+
 class DecisionClient {
   /// Overridable at build time (`--dart-define=DECIDE_URL=…`), like
   /// `EMBED_URL`. The FULL endpoint, as every target's `baseUrl` is.
@@ -107,6 +124,12 @@ class DecisionClient {
 
   /// The phrase llama-server's refusal of an over-long input carries.
   static const String _tooLargePhrase = 'too large to process';
+
+  /// The targets whose identity probe PASSED, as `'<baseUrl>|<model>'`. Only
+  /// a success is kept: a probe that failed is asked again on the next call,
+  /// so a server that was down, or an address that was fixed, recovers
+  /// without anybody pressing anything.
+  final Set<String> _verified = {};
 
   final LlmTarget Function() _resolveTarget;
   final DecisionHeads Function() _heads;
@@ -157,6 +180,7 @@ class DecisionClient {
     final destination = target;
     return _instrumented(destination, sw, (facts) async {
       final heads = _heads();
+      await _verifyServer(destination, facts);
       final state = renderDecisionState(input, toLocal: _toLocal);
       final (vector, truncated) =
           await _vectorFor(state, destination, heads, facts);
@@ -191,6 +215,8 @@ class DecisionClient {
     final destination = target;
     return _instrumented(destination, sw, (facts) async {
       final heads = _heads();
+      // Once per batch, before the first array goes.
+      await _verifyServer(destination, facts);
       final vectors = List<List<double>?>.filled(states.length, null);
       final truncated = List<bool>.filled(states.length, false);
 
@@ -246,6 +272,54 @@ class DecisionClient {
     });
   }
 
+  /// For a Connect that must not write a server of the wrong kind: whether
+  /// the server at [url], asked for [model], is the decision model. The same
+  /// identity probe [decide] makes before its first request, and a pass here
+  /// spares that first request the probe. Null when it is; otherwise the
+  /// sentence to show under the form, which carries no key.
+  Future<String?> checkServer({
+    required String url,
+    required String model,
+    String? bearer,
+  }) async {
+    try {
+      await _verifyServer(
+        LlmTarget(baseUrl: url, model: model, bearer: bearer),
+        _CallFacts(),
+      );
+      return null;
+    } on LlmException catch (e) {
+      return e.message;
+    }
+  }
+
+  /// The identity probe, once per target: `/tokenize` with the specials
+  /// added must answer ModernBERT's `[CLS] … [SEP]`. The vector checks below
+  /// cannot tell the decision model from the embedding model — both answer
+  /// 1024 raw numbers, and llama-server echoes the request's `model` back —
+  /// but the tokenizers differ, and a message decided on the wrong model's
+  /// vectors can be learned-gated into Dropped with no error anywhere.
+  Future<void> _verifyServer(LlmTarget destination, _CallFacts facts) async {
+    final key = '${destination.baseUrl}|${destination.model}';
+    if (_verified.contains(key)) return;
+    final url = tokenizeUrlFor(destination.baseUrl);
+    final decoded = await _postJson(
+      url,
+      destination,
+      {'model': destination.model, 'content': 'a', 'add_special': true},
+      facts,
+      tokenizeRequest: true,
+    );
+    final tokens = decoded['tokens'];
+    if (tokens is! List ||
+        tokens.isEmpty ||
+        tokens.first != clsId ||
+        tokens.last != sepId) {
+      throw DecisionMisconfiguredException(notDecisionModelText(_origin(url)));
+    }
+    _verified.add(key);
+  }
+
   /// [state]'s vector, and whether ids had to be cut to get one.
   Future<(List<double>, bool)> _vectorFor(
     String state,
@@ -279,6 +353,7 @@ class DecisionClient {
       destination,
       {'content': state, 'add_special': false, 'model': destination.model},
       facts,
+      tokenizeRequest: true,
     );
     final tokens = decoded['tokens'];
     if (tokens is! List || tokens.any((t) => t is! int)) {
@@ -397,6 +472,7 @@ class DecisionClient {
     Map<String, Object?> body,
     _CallFacts facts, {
     bool tooLargeIsSignal = false,
+    bool tokenizeRequest = false,
   }) async {
     // A managed decision model the router is not serving (not installed):
     // refused before any request, so the pass parks on its own reason.
@@ -452,6 +528,13 @@ class DecisionClient {
           text.contains(_tooLargePhrase)) {
         throw const _TooLarge();
       }
+      // A server, or a proxy in front of one, with no `/tokenize` at all:
+      // every message would need it for the probe, so it is the server's
+      // fault and parks, rather than a 4xx charged to one message.
+      if (tokenizeRequest &&
+          (response.statusCode == 404 || response.statusCode == 405)) {
+        throw DecisionMisconfiguredException(noTokenizeText(_origin(url)));
+      }
       _throwForStatus(url, response.statusCode, text, bearer);
     }
 
@@ -496,6 +579,12 @@ class DecisionClient {
       '$snippet',
     );
   }
+
+  /// Scheme, host and any port [url] spells: where a sentence says the
+  /// server is, without the path. Built by hand because `Uri.origin` throws
+  /// on a scheme other than http or https.
+  static String _origin(Uri url) =>
+      '${url.scheme}://${url.host}${url.hasPort ? ':${url.port}' : ''}';
 
   String _unreachable(Uri url) =>
       'The decision model at $url is not answering — run: make decide';
@@ -563,6 +652,14 @@ class DecisionClient {
       _report(destination, sw, facts, 'ok', null);
       return result;
     } on LlmUnavailableException catch (e) {
+      // A server that went away, refused the key or answered wrongly may not
+      // be the server that passed the probe when it answers again (a restart
+      // can put another model behind the same address), so its pass is
+      // forgotten and the next call asks /tokenize again.
+      if (e is DecisionUnavailableException ||
+          e is DecisionUnauthorizedException) {
+        _verified.remove('${destination.baseUrl}|${destination.model}');
+      }
       _report(destination, sw, facts, 'unavailable', e.message);
       rethrow;
     } on LlmFormatException catch (e) {

@@ -1937,6 +1937,36 @@ card change ships; both stay as bench variants. Letting `possible` rows hold no 
 the bench (the harness dismisses them after every pass, so it shows only inside a pass: 15 then 0
 proposals instead of 11, 4, 0) and ships for what it does over days in the app.
 
+**The pipeline end to end** (`make bench-pipeline`, 2026-09-28, pre-PR, shape `lanes`, width 1,
+3 copies = 48 ungated messages, policy `all`, BOTH slots on the box 27B-FP8 with MTP, one pass
+each). `main` (41422f0) from a clean `git archive` copy is the baseline; the branch's bench stand-in
+decision model is instant (no live decision server; its real cost is the ~43 ms p50 above) and
+answers p(reply_expected) 0.9, so no draft is gated for want of a reply (the first branch pass,
+with the fixture's 0.2, gated all 49 and is not a row). `PIPE_NEEDS_YOU_P` sets its p(needs_you):
+0.5 is inside the band (every needs-you still asks the 27B, the old worst case), 0.9 is the default
+path (on the owner's inbox, 52 of 55 messages fell outside the band).
+
+| tree | needs-you | 27B calls per message | fast wall s | drafts wall s | fast msgs/min | drafts written / gated | late arrival s | result json |
+|---|---|---|---|---|---|---|---|---|
+| `main` | LLM | triage + needs-you + extraction (+ reply decision on 37) | 185.8 | 338.2 | 15.5 | 37 (34 drafted) / 12 | 13.2 | `pipeline-prpre-pipeline-main-27b-box-20260928-184341.json` |
+| branch | in the band, LLM | needs-you + message text | 123.6 | 281.6 | 23.3 | 49 / 0 | 11.4 | `pipeline-prpre-pipeline-27b-box-20260928-183645.json` |
+| branch | outside the band | message text | 78.9 | 257.6 | 36.5 | 49 / 0 | 9.6 | `pipeline-prpre-pipeline-27b-box-ny09-20260928-190948.json` |
+
+Reading it: the inbox is usable 2.35 times sooner on the default path (1.5 times at the worst
+case), and the drafts wall drops although the branch writes 15 more drafts than `main` does. The
+drafts walls are not a like-for-like comparison. On `main`, 12 messages never got a draft row
+(`_queueDraft`'s cue gate reads the 27B triage labels), and the 27B reply decision ran on the 37
+that did and skipped 3 of them (`draft_reply` n = 34; the bench counts those 3 as written, since the
+skip closes the row). On the branch the stand-in's reply probability lets all 49 through.
+
+**Against the owner's stored labels** (`make decision-agreement`, 2026-09-28, a copy of the app
+database: 55 triaged inbound messages, all mail, labelled by the old 4B pipeline; not gold, so this
+is how much changes, not accuracy). Agreement: urgency 34/55, category 26/55, needs_action 41/55,
+reply_expected 49/55, needs_you 42/55 (p ≥ 0.5). Of the 29 category disagreements, 26 are the 4B's
+`personal` read as `work` and 3 its `work` read as `notification`; of the 21 urgency disagreements,
+17 are the 4B's `normal` read as `low` and 4 its `normal` read as `high`. The learned gate would add 2 drops to the rules' 55 keeps. Needs-you:
+41 yes, 11 no and 3 in the band, the only 3 of 55 that still cost a generative call.
+
 ### Recommendations (decision-model round, 2026-09-28)
 
 What the round ships, and the rows that justify each. All numbers are keep-only
@@ -1957,7 +1987,10 @@ over the 76 gold-keep items unless a row says otherwise.
    extraction calls. On the box 27B the pipeline is 2.2× faster (346 s against
    771 s for 100 items), summaries rise from 68% to 74%, deadline holds at 89,
    project rises from 59 to 64 ("One text call per message" under the same
-   ledger).
+   ledger). On the local 4B, the first prompt measured project 66 → 56 (and
+   328 s against 718 s), and the shipped prompt, with its tightened deadline
+   rule, was not re-measured on the 4B, which is the default generative model
+   on Macs under 40 GiB.
 3. **The reply gate.** The decision model's `reply_expected` probability, read
    before any context is gathered, replaces the 27B `ReplyDecisionTask`: 84%
    against the 27B's 82% and the 4B's 64% on the same field and population
@@ -1990,10 +2023,6 @@ the thread's topics and project) and the untitled-subject rule
 one forbidden hit and loses one correct item. Shipping it is an owner call.
 
 **Owed measurements.**
-- `make bench-pipeline` before and after on the managed app pipeline: calls
-  per kept message, time to row state, time to text. Never taken this round.
-- `make decision-agreement DECISION_DB=<a copy of the app database>`: the
-  decision model against the stored 4B labels, counts only.
 - The box `decide` slot (`tools/inference.sh --decide-gguf`) run live: image,
   key, GPU memory beside prose, `/tokenize` through Caddy, `test --decide`.
 - The golden judge flow re-run on any future change to the `MessageTextTask`

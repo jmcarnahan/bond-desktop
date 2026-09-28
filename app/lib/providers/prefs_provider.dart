@@ -882,7 +882,8 @@ bool modelRolesPending(String? flag) =>
 
 /// Where the generative role lands after a third-party big address.
 enum GenerativeAfterVendor {
-  /// The owner's own stored small server becomes the generative remote.
+  /// The owner's own stored small server becomes the generative remote, or
+  /// the box's `/prose` slot beside it when it was the `/bulk` one.
   small,
 
   /// The small server followed the build: the generative remote follows the
@@ -905,10 +906,16 @@ class ModelRolesPlan {
   /// The keychain moves owed, in order.
   final List<String> moves;
 
+  /// The generative remote's address under [GenerativeAfterVendor.small]:
+  /// the stored small server's, or its `/prose` sibling when it was a box's
+  /// `/bulk` slot. Empty under the other two.
+  final String generativeUrl;
+
   const ModelRolesPlan({
     required this.adoptCloud,
     required this.generative,
     required this.moves,
+    this.generativeUrl = '',
   });
 }
 
@@ -920,9 +927,10 @@ class ModelRolesPlan {
 /// [placement] was the box, [consent] stood, and a model name had been
 /// discovered. Anything else is an address the owner walked away from, and
 /// it is dropped along with its key rather than turned into a live target.
-/// The generative role then goes to the owner's own stored small server,
-/// else follows the build when the small server did ([compiledBase] non-empty
-/// and no small address stored), else comes home to this Mac.
+/// The generative role then goes to the owner's own stored small server (its
+/// `/prose` sibling when that server was a box's `/bulk` slot), else follows
+/// the build when the small server did ([compiledBase] non-empty and no small
+/// address stored), else comes home to this Mac.
 ModelRolesPlan? planModelRoles({
   required String bigUrl,
   required String bigModel,
@@ -948,12 +956,26 @@ ModelRolesPlan? planModelRoles({
   return ModelRolesPlan(
     adoptCloud: adopt,
     generative: generative,
+    // Round H wrote a box's small server as its `/bulk` slot, which serves
+    // the 4B, and a stored address is one wide: the one generative model
+    // would be the box's smallest, one message at a time. The `/prose` slot
+    // beside it is the box's 27B, and the same key opens both.
+    generativeUrl: generative != GenerativeAfterVendor.small
+        ? ''
+        : small.endsWith(_bulkCompletions)
+            ? '${small.substring(0, small.length - _bulkCompletions.length)}'
+                '/prose/v1/chat/completions'
+            : small,
     moves: [
       adopt ? modelRolesMoveProseToCloud : modelRolesDropProse,
       if (generative != GenerativeAfterVendor.local) modelRolesMoveBulkToProse,
     ],
   );
 }
+
+/// The box's `/bulk` slot's completions path, which [planModelRoles] turns
+/// into its `/prose` sibling.
+const String _bulkCompletions = '/bulk/v1/chat/completions';
 
 /// Round H's small-model keychain id, which only `_deriveModelRoles` still
 /// names: it is where an existing install's small-server key lives.
@@ -1378,13 +1400,18 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       }
       switch (plan.generative) {
         case GenerativeAfterVendor.small:
-          await store.setPref(
-            boxBigUrlKey,
-            normalizeBoxBaseUrl(_slotValue(await store.getPref(boxSmallUrlKey))),
+          final small = normalizeBoxBaseUrl(
+            _slotValue(await store.getPref(boxSmallUrlKey)),
           );
+          await store.setPref(boxBigUrlKey, plan.generativeUrl);
+          // The small server's discovered name goes with its own address
+          // only: the `/prose` sibling serves another model, so its name is
+          // left to the build's constant until a Connect discovers it.
           await store.setPref(
             boxBigModelKey,
-            _slotValue(await store.getPref(boxSmallModelKey)),
+            plan.generativeUrl == small
+                ? _slotValue(await store.getPref(boxSmallModelKey))
+                : '',
           );
         case GenerativeAfterVendor.followBuild:
           await store.setPref(boxBigUrlKey, '');

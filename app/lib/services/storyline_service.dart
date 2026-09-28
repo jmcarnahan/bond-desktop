@@ -614,10 +614,9 @@ class StorylineService {
   final LlmClient _client;
 
   /// Where membership questions go. Deciding whether one thread belongs to a
-  /// group is a label under a tight schema, re-checked in Dart — the small
-  /// model answers it in a fraction of the time and the app is not measurably
-  /// worse for it. Naming stays on [_client] because a title and a summary are
-  /// prose a person reads, and there the bigger model shows.
+  /// group is a label under a tight schema, re-checked in Dart, and it was
+  /// the small model's while the app ran two; since the decision-model round
+  /// it resolves to the one generative model, like naming on [_client].
   ///
   /// Defaults to [_client], so a caller that passes one client gets the
   /// single-server behaviour this service had before there were two.
@@ -626,11 +625,10 @@ class StorylineService {
   /// Where the neighbourhood grouping questions go under
   /// [GroupingMode.model]: reading a neighbourhood and saying what is one
   /// project is prose work of the same kind naming is, so it defaults to
-  /// [_client] and not to [_confirmClient]. The split that matters stays the
-  /// one it always was — `storyline_name` on the prose slot,
-  /// `storyline_membership` on the bulk one — and this is a third handle so
-  /// Phase 3 can point the stage somewhere else without touching the other
-  /// two.
+  /// [_client] and not to [_confirmClient]. Since the decision-model round
+  /// every chat stage resolves to the one generative model, so the three
+  /// handles are the same server in the app; they stay three so a bench can
+  /// point one stage somewhere else without touching the other two.
   ///
   /// Never dialled while [StorylineTuning.groupingMode] reads
   /// [GroupingMode.cosine], which is what ships.

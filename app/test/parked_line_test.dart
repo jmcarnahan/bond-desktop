@@ -257,6 +257,27 @@ void main() {
       }
     });
 
+    test('a decision server of the wrong kind names both causes and fixes, '
+        'and promises no retry', () {
+      for (final onBox in [true, false]) {
+        final line = railProgressLine(
+          on: true,
+          remaining: 3,
+          reason: 'decision_misconfigured',
+          waiting: 3,
+          onBox: onBox,
+        );
+        expect(
+          line,
+          'The decision server is not the decision model, or its heads file '
+          'does not match · 3 waiting · check its address in Settings, or run '
+          'make decide-install',
+          reason: 'onBox: $onBox',
+        );
+        expect(line, isNot(contains('retrying')));
+      }
+    });
+
     test('a refused decision key names the decision server, whatever the '
         'generative placement', () {
       for (final onBox in [true, false]) {
@@ -315,6 +336,7 @@ void main() {
         'decision_unavailable',
         'not_installed',
         'decision_not_installed',
+        'decision_misconfigured',
         'decision_unauthorized',
       ]) {
         expect(
@@ -355,6 +377,7 @@ void main() {
         'decision_unavailable',
         'not_installed',
         'decision_not_installed',
+        'decision_misconfigured',
         'decision_unauthorized',
         'session',
       ]) {

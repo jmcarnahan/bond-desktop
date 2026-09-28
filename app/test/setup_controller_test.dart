@@ -150,7 +150,11 @@ void main() {
     return downloader;
   }
 
-  SetupController build({SetupStore? over, ModelDownloader? downloader}) {
+  SetupController build({
+    SetupStore? over,
+    ModelDownloader? downloader,
+    Future<void> Function(ModelServersPayload server)? checkDecision,
+  }) {
     final controller = SetupController(
       store: over ?? store,
       system: system,
@@ -197,6 +201,7 @@ void main() {
         decisionUses.add((placement: placement, url: url, model: model));
         prefs = prefs.copyWith(decisionPlacement: placement);
       },
+      checkDecision: checkDecision,
       auth: () => auth,
       notifier: notifier,
       seedAuthorization: seeded.add,
@@ -1018,6 +1023,30 @@ void main() {
       // Your server stays: no local decision write on the way forward.
       expect(decisionUses, hasLength(1));
       expect(controller.state.step, SetupStep.models);
+    });
+
+    test('a decision server that is not the decision model is refused before '
+        'anything is written', () async {
+      final checked = <ModelServersPayload>[];
+      final controller = build(checkDecision: (server) async {
+        checked.add(server);
+        throw ArgumentError('not the decision model');
+      });
+      await controller.init();
+      controller.chooseDecision(ModelPlacement.box);
+
+      await expectLater(
+        controller.connectDecision((
+          url: 'http://127.0.0.1:8081/v1/embeddings',
+          model: 'bond-embed',
+          key: null,
+          clearKey: false,
+        )),
+        throwsA(isA<ArgumentError>()
+            .having((e) => e.message, 'message', 'not the decision model')),
+      );
+      expect(checked.single.model, 'bond-embed');
+      expect(decisionUses, isEmpty);
     });
 
     test('Your server for the decision model, not yet connected, refuses the '

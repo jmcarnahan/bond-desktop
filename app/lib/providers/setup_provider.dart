@@ -317,6 +317,7 @@ class SetupController extends StateNotifier<SetupState> {
     this.storedBearer,
     required this.useGenerative,
     required this.useDecision,
+    this.checkDecision,
     required this.auth,
     required this.notifier,
     required this.seedAuthorization,
@@ -350,6 +351,12 @@ class SetupController extends StateNotifier<SetupState> {
 
   /// Points the DECISION role somewhere, on [useGenerative]'s terms.
   final DecisionWriter useDecision;
+
+  /// Asks the server a decision Connect names whether it IS the decision
+  /// model, before anything is written: throws the sentence as an
+  /// [ArgumentError] when it is not. Null asks nothing, which is a test's
+  /// controller.
+  final Future<void> Function(ModelServersPayload server)? checkDecision;
 
   /// Looks up one target's stored token for a probe made with the key field
   /// blank. Handed down to the same form. A LOOKUP by id, never the value;
@@ -489,15 +496,19 @@ class SetupController extends StateNotifier<SetupState> {
       'Connect the decision server first, or choose This Mac for it.';
 
   /// The decision form's Connect: writes the decision role to the owner's
-  /// server at once, and stays on the step. NOTHING is caught: a refused
-  /// write goes back to the form, which draws it under its field.
-  Future<void> connectDecision(ModelServersPayload server) => useDecision(
-        placement: ModelPlacement.box,
-        url: server.url,
-        model: server.model,
-        key: server.key,
-        clearKey: server.clearKey,
-      );
+  /// server at once, and stays on the step. NOTHING is caught: a server that
+  /// is not the decision model, or a refused write, goes back to the form,
+  /// which draws it under its field.
+  Future<void> connectDecision(ModelServersPayload server) async {
+    await checkDecision?.call(server);
+    await useDecision(
+      placement: ModelPlacement.box,
+      url: server.url,
+      model: server.model,
+      key: server.key,
+      clearKey: server.clearKey,
+    );
+  }
 
   /// The step's way forward, from either generative card.
   ///
@@ -1091,6 +1102,14 @@ final setupControllerProvider =
               key: key,
               clearKey: clearKey,
             ),
+    checkDecision: (server) => refuseWrongDecisionServer(
+          ref.read(decisionClientProvider),
+          ref.read(appPrefsProvider.notifier),
+          url: server.url,
+          model: server.model,
+          key: server.key,
+          clearKey: server.clearKey,
+        ),
     auth: () => ref.read(authSessionProvider),
     notifier: ref.watch(desktopNotifierProvider),
     // Late-bound: reading the service provider here would build the whole

@@ -21,7 +21,7 @@ import '../services/llm/model_probe.dart';
 // [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
 // re-exports them; the placement enum is not re-exported.
 import '../services/llm/model_slots.dart'
-    show MachineTier, managedGenerativeIdFor;
+    show MachineTier, ModelPlacement, managedGenerativeIdFor;
 import '../services/llm/needs_you_task.dart'
     show needsYouDefaultRules, needsYouOutputContract, needsYouRulesCap;
 import '../widgets/settings_screen.dart';
@@ -347,6 +347,7 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       serverState: serverState,
       parked: ref.watch(parkedProvider).valueOrNull,
       modelStatuses: statuses,
+      decideInstallDir: ref.watch(decideInstallDirProvider),
       onUseDecision: ({
         required placement,
         managedModel,
@@ -356,6 +357,17 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
         clearKey = false,
       }) async {
         if (!mounted) return;
+        if (placement == ModelPlacement.box && url != null && model != null) {
+          await refuseWrongDecisionServer(
+            ref.read(decisionClientProvider),
+            notifier,
+            url: url,
+            model: model,
+            key: key,
+            clearKey: clearKey,
+          );
+          if (!mounted) return;
+        }
         await notifier.useDecision(
           placement: placement,
           url: url,

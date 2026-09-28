@@ -9,12 +9,15 @@ import '../services/llm/model_slots.dart'
         LlmWire,
         accessKeyCharsText,
         boxDecideId,
+        boxDecideModel,
         boxProseId,
         cloudDraftsId,
         cloudDraftsName,
+        decideModelDefault,
         isBoxOrigin,
         isThirdPartyHost,
         isUsableAccessKey,
+        routerDecideId,
         wireForHost;
 import '../theme/tokens.dart';
 import 'inline_alert.dart';
@@ -63,7 +66,8 @@ typedef ServerConnect = Future<void> Function({
 /// The model NAME is never typed. Connect probes the address with the key,
 /// reads `/v1/models` and either uses the one id the server lists or puts a
 /// picker under the address and waits for a second press. A decision server
-/// may list any name and the first is taken: it serves one embedding model.
+/// is never asked to pick: the decision model's own name is taken when it is
+/// listed, and the first id otherwise.
 ///
 /// PROP-ONLY, like every other body in Settings: the host resolves the
 /// prefilled values, takes the write back through [onConnect] and owns the
@@ -603,8 +607,8 @@ class _ModelServersFormState extends State<ModelServersForm> {
   }
 
   /// The model name: the typed one for a Converse service, the one id a
-  /// server lists (the FIRST for a decision server), or the pick under a
-  /// server that lists several.
+  /// server lists (the decision model's own for a decision server), or the
+  /// pick under a server that lists several.
   _Discovered _name({
     required bool converse,
     required String typed,
@@ -617,11 +621,28 @@ class _ModelServersFormState extends State<ModelServersForm> {
           : _Name(typed);
     }
     if (ids.isEmpty) return const _Name('');
-    if (ids.length == 1 || _role == ServerFormRole.decision) {
-      return _Name(ids.first);
-    }
+    if (_role == ServerFormRole.decision) return _Name(_decisionId(ids));
+    if (ids.length == 1) return _Name(ids.first);
     if (pick == null || !ids.contains(pick)) return _NeedsPick(ids.first);
     return _Name(pick);
+  }
+
+  /// The decision model's name among [ids]. A router lists every model it
+  /// serves, and the embedding model's name first is as likely as not, so the
+  /// decision model's known names win: the router's id, the box's served name,
+  /// this build's hand-server name, and the name this install already uses.
+  /// The first id only when none of them is listed — a single-model server
+  /// that was started under some other name.
+  String _decisionId(List<String> ids) {
+    for (final known in [
+      routerDecideId,
+      boxDecideModel,
+      decideModelDefault,
+      widget.model,
+    ]) {
+      if (known.isNotEmpty && ids.contains(known)) return known;
+    }
+    return ids.first;
   }
 }
 

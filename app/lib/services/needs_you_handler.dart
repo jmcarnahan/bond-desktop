@@ -34,8 +34,10 @@ import 'pipeline_progress.dart';
 /// settled by the decision model's stored p(needs_you = yes) against
 /// [DecisionPolicy]'s bars (yes at 0.65, 0.85 for a cold approach; no below
 /// 0.35), with a templated reason; the band between, a message whose owner
-/// saved custom rules, one with an attachment digest and one decided before
-/// the decision model existed are read by [NeedsYouTask]. Those two are the
+/// saved custom rules, one with an attachment digest that carries an ask (a
+/// digest that asks nothing adds nothing), one decided with no owner line in
+/// its state and one decided before the decision model existed are read by
+/// [NeedsYouTask]. Those two are the
 /// only things here that can write a 0.
 ///
 /// The owner's `needs_you_rules` pref REPLACES the default body of the system

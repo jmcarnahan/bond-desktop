@@ -69,7 +69,11 @@ import 'fixtures/test_db.dart';
 ///   the bulk server. It replaced the two calls the old rows carry as
 ///   `triage` and `extraction`, so a row before the decision model and one
 ///   after are compared on the walls, not on those per-label lines;
-/// - `draft_reply` on the prose server, per [DraftPolicy].
+/// - `draft_reply` on the prose server, per [DraftPolicy]. The fake's
+///   p(reply_expected) is 0.9, so no draft is gated for want of a reply:
+///   rows before the decision model queued no draft for about 12 of 49 (the
+///   cue gate read the triage labels) and the 27B reply decision skipped a
+///   few more; rows after it draft every message the policy allows.
 ///
 /// Three honest limits, stated here because they bound every number below:
 ///
@@ -124,6 +128,15 @@ const bool pipeLate = bool.fromEnvironment('PIPE_LATE', defaultValue: true);
 /// and `needsYou` is how the shipped default is measured against them.
 const String pipePolicy =
     String.fromEnvironment('PIPE_POLICY', defaultValue: 'all');
+
+/// The p(needs_you) the stand-in decision model answers, as text because
+/// `double.fromEnvironment` does not exist. 0.5 is inside the band (every
+/// needs-you asks the bulk server, as every historical row did); 0.9 is the
+/// default path, where the decision model settles it with no call.
+final double pipeNeedsYouP = double.tryParse(
+      const String.fromEnvironment('PIPE_NEEDS_YOU_P', defaultValue: '0.5'),
+    ) ??
+    0.5;
 
 /// The id the late arrival is seeded under. Fixed, so a run file can be read
 /// against the rows afterwards.
@@ -325,9 +338,17 @@ void main() {
         // Instant and serverless — see the header: triage makes no
         // language-model call, and no live decision server is part of this
         // bench. needs_you 0.5 keeps every message's needs-you on the bulk
-        // server, as every historical row paid for it.
-        decisionClient: FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.5)),
+        // server, as every historical row paid for it. reply_expected 0.9
+        // because the reply gate reads it before any draft is gathered: the
+        // fake's default 0.2 gates every draft and leaves the drafts wall
+        // measuring nothing.
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(needsYou: pipeNeedsYouP, replyExpected: 0.9),
+        ),
         userAddress: userAddress,
+        // Owner-known decisions, as in the app: an ownerless one sends
+        // needs-you to the generative model whatever p(needs_you) says.
+        owner: () async => (name: 'Alex Rivera', address: userAddress),
         concurrency: 3,
         gate: fastGate,
         onDrained: (triaged) async =>

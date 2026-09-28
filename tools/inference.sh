@@ -581,7 +581,8 @@ ensure_eip() {  # ensure_eip REGION NAME → sets IP and ALLOC_ID
 
 # handle_path strips the prefix, so vLLM and llama-server see /v1/… (and the
 # decide slot's /tokenize). /decide is routed whether or not the slot runs; a
-# box without it answers 502 there. flush_interval -1 is load
+# box without it answers 502 there. A Caddyfile an older version wrote has no
+# /decide at all, and `restart --decide-gguf` writes this one over it. flush_interval -1 is load
 # bearing: drafts stream as server-sent events and a buffering proxy would hold
 # every token to the end. The email line is written only when --acme-email was
 # given, because an empty value is a Caddyfile parse error.
@@ -924,6 +925,12 @@ cmd_restart() {
       DECIDE_SERVED=$IDECIDE
     fi
   fi
+  # --decide-served renames a slot. With no --decide-gguf and no slot on the
+  # box to keep there is nothing to rename, and the flag would be dropped
+  # without a word.
+  if [ -n "$DECIDE_SERVED_SET" ] && [ -z "$DECIDE_SET" ] && [ "$decide_keep" = 0 ]; then
+    printf 'inference: --decide-served is ignored: %s runs no decide slot and --decide-gguf was not given\n' "$NAME" >&2
+  fi
   allow_my_ip "$REGION" "$INSTANCE_ID"
   log "restart $NAME ($INSTANCE_ID, $IP): $(describe_box)"
   if [ -n "$DECIDE_FILE" ]; then
@@ -945,6 +952,21 @@ cmd_restart() {
   if [ -n "$DECIDE_FILE" ]; then save_state DECIDE_SERVED_NAME "$DECIDE_SERVED"; else save_state DECIDE_SERVED_NAME ""; fi
   ITYPE=$ITYPE IMODEL=$MODEL IBULK=$BULK_MODEL IDECIDE=${DECIDE_FILE:+$DECIDE_SERVED} IDECIDEFILE=$DECIDE_FILE
   wait_serving
+  # A box persisted before the decide slot existed has a Caddyfile with no
+  # /decide route, so its hostname answers the catch-all there, and the
+  # tunnel test below cannot see that. install_caddy validates and then
+  # replaces the container, so writing the file again is harmless; the email
+  # the box was persisted with is read back rather than dropped.
+  if [ -n "$DECIDE_SET" ] && [ -n "$DECIDE_FILE" ]; then
+    local domain; domain=$(instance_tag domain)
+    if [ -n "$domain" ]; then
+      DOMAIN=$domain
+      [ -n "$ACME_EMAIL" ] || ACME_EMAIL=$(ssh_box "$IP" "sudo sed -n 's/^ACME_EMAIL=//p' /opt/bond/caddy.env 2>/dev/null" || :)
+      install_caddy "$IP"
+    else
+      log "decide: $NAME has no hostname, so there is no /decide route; 'persist' adds one"
+    fi
+  fi
   kill_tunnel; ensure_tunnel; test_slots && next_steps
 }
 

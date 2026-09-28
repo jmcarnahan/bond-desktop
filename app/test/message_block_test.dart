@@ -6,7 +6,8 @@ import 'package:flutter_test/flutter_test.dart';
 /// The two budget-and-render helpers every prompt builder shares.
 ///
 /// What `buildMessageBlock` RENDERS is pinned through the tasks that read it
-/// (`triage_task_test.dart`, `extract_task_test.dart`); what is here is the
+/// (`message_text_task_test.dart`, `needs_you_task_test.dart`,
+/// `draft_task_test.dart`); what is here is the
 /// pair that arrived with the thread digest — the fitter that decides which
 /// LINES of a digest a prompt reads, and the tail renderer three tasks now
 /// share — plus the one thing about the block that is a property of the block

@@ -268,6 +268,23 @@ server is a stock llama-server serving the encoder as a mean-pooled embedding
 model: the managed router's `bond-decide`, `make decide` on `:8083`, or a
 box's `/decide/` slot.
 
+- **The identity probe.** Before the first embedding a target gets, the
+  client `POST`s `<prefix>/tokenize {"model", "content": "a", "add_special":
+  true}` with the same key, and anything but a non-empty list starting with
+  `[CLS]` 50281 and ending with `[SEP]` 50282 is a server of the wrong kind
+  (`The server at <origin> is not the decision model: its tokenizer is not
+  ModernBERT's.`). The vector checks below cannot tell: the embedding model
+  also answers 1024 raw numbers, and llama-server echoes the request's
+  `model` back. A 404 or 405 from `/tokenize`, here or on the token path, is
+  the same park (`… does not offer /tokenize, which the decision model
+  needs`). Only a pass is cached, per client and per `baseUrl|model`, so a
+  failed probe is asked again on the next call; `decide`, `decideBatch` and
+  `decideStates` probe once each. A decision **Connect** in Settings or the
+  wizard asks the same probe (`DecisionClient.checkServer`, through
+  `refuseWrongDecisionServer`) before it writes, and draws the sentence under
+  the form instead of connecting; the form also takes the decision model's
+  own name from a router's `/v1/models` (`bond-decide`, the box's served
+  name, this build's, or the stored one) before the first id.
 - **The request.** `POST <url> {"model", "input", "embd_normalize": -1}` with
   `Authorization: Bearer` when the target has a key. `input` is a string for
   one state, an array for a batch, or a flat int array for a token path.
@@ -313,7 +330,7 @@ What goes wrong, and what the owner sees:
 | Failure | Exception | Park reason | Rail |
 |---------|-----------|-------------|------|
 | Connection refused, TLS failure, timeout, 5xx, 429 | `DecisionUnavailableException` | `decision_unavailable` | `Decision model unreachable · N waiting · retrying each minute` |
-| Heads file refused (not JSON, schema, question set); the server answers a normalised or wrong-width vector, the wrong vector count or index, no token list, non-JSON, or refuses even the truncated ids; the address is not an embeddings URL | `DecisionMisconfiguredException` (a `DecisionUnavailableException`; its sentence names the cause and carries no key) | `decision_unavailable` | `Decision model unreachable · N waiting · retrying each minute` |
+| Heads file refused (not JSON, schema, question set); the identity probe finds another tokenizer, or `/tokenize` answers 404 or 405; the server answers a normalised or wrong-width vector, the wrong vector count or index, no token list, non-JSON, or refuses even the truncated ids; the address is not an embeddings URL | `DecisionMisconfiguredException` (a `DecisionUnavailableException`; its sentence names the cause and carries no key) | `decision_misconfigured` | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
 | Heads file missing, or the managed decision model the router does not serve (`LlmTarget.unavailable`), refused before any request | `DecisionNotInstalledException` (a `DecisionUnavailableException`) | `decision_not_installed` | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
 | 401 / 403, or a key no header can carry (refused before sending) | `DecisionUnauthorizedException` (an `LlmUnauthorizedException`) | `decision_unauthorized` | `The decision server refused the access key · N waiting` |
 | Any other 4xx | `LlmFormatException` | none: counted against the item | none |
@@ -322,8 +339,9 @@ Every fault that would fail every message alike parks: counting it per
 message would error the backlog and let each row flow on to its text with no
 decision. The one per-message fault is a 4xx the server gives this request.
 The activity log's words for the reasons are in `activity_log_panel.dart`
-(`decision model unreachable`, `decision model not installed`, `the decision
-server refused the access key`), and the Models page
+(`decision model unreachable`, `decision model not installed`, `decision
+server misconfigured`, `the decision server refused the access key`), and the
+Models page
 carries the same park as one status line (`docs/settings.md`). The
 unreachable sentences name `make decide`, the hand-server fix; the URL in any
 of them is taken out by `redactEndpoints` wherever it is written.
@@ -354,8 +372,10 @@ use. `planModelRoles` decides, as a pure function:
   and a model name had been discovered. Anything else is an address the owner
   walked away from, and it is dropped with its key.
 - **The generative role then** goes to the owner's own stored small server
-  (its URL and model into `box_big_*`); else follows the build when the small
-  server did (`box_big_*` emptied, placement kept); else comes home
+  (its URL and model into `box_big_*`, except that a box's `/bulk` slot, the
+  4B, becomes its `/prose` sibling with `box_big_model` emptied so the build's
+  name is asked for); else follows the build when the small server did
+  (`box_big_*` emptied, placement kept); else comes home
   (`model_placement = local`).
 - **The keychain moves**, in order: the `box-prose` key moves to
   `cloud-drafts` (adopted) or is deleted (dropped); then, unless the role came
@@ -582,7 +602,10 @@ ledger.
   `LlmClient` for a managed generative target carrying
   `LlmTarget.unavailable`) is `not_installed`; the decision client's own
   `DecisionNotInstalledException` is `decision_not_installed`, because its fix
-  is a command rather than a download; `DecisionUnauthorizedException` is
+  is a command rather than a download; `DecisionMisconfiguredException` is
+  `decision_misconfigured`, because waiting fixes neither of its causes (the
+  address or the heads file), so its sentence claims no retry;
+  `DecisionUnauthorizedException` is
   `decision_unauthorized`, named for the decision server rather than worded by
   the generative placement. A failed TLS handshake (`TlsException`, e.g. an
   expired certificate) parks on both clients like a refused connection, at
@@ -611,6 +634,7 @@ ledger.
   | `decision_unavailable` | either | `Decision model unreachable · N waiting · retrying each minute` |
   | `not_installed` | either | `A model this Mac runs is not downloaded · N waiting · set up again in Settings` |
   | `decision_not_installed` | either | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
+  | `decision_misconfigured` | either | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
   | `decision_unauthorized` | either | `The decision server refused the access key · N waiting` |
   | `session` | either | `Triaging N remaining…` |
 
@@ -619,7 +643,9 @@ ledger.
   next pump**: the reason is dropped at the top of `pump()` and on the first
   item that gets through. Pumps come from the inbox's sixty-second poll and
   from `ModelServerSupervisor.onReady`, the only cadence the sentence claims.
-  A refused key claims no retry. `N` is the whole pipeline's backlog.
+  A refused key claims no retry, nor does a misconfigured decision server,
+  though the next pump still asks again, so a fixed address recovers without
+  a Check. `N` is the whole pipeline's backlog.
 
 ## Three drains
 

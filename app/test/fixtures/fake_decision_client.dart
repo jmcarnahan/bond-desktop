@@ -79,6 +79,13 @@ class FakeDecisionClient extends DecisionClient {
   /// order of calls here.
   final void Function()? onDecide;
 
+  /// What [checkServer] answers: null passes every server a Connect names,
+  /// a sentence refuses them all with it.
+  String? serverRefusal;
+
+  /// The `url|model` of every [checkServer] asked.
+  final List<String> checks = [];
+
   FakeDecisionClient(this.answer, {this.onDecide})
       : super(
           resolveTarget: () =>
@@ -101,6 +108,16 @@ class FakeDecisionClient extends DecisionClient {
     calls.add(input);
     onDecide?.call();
     return answer(input);
+  }
+
+  @override
+  Future<String?> checkServer({
+    required String url,
+    required String model,
+    String? bearer,
+  }) async {
+    checks.add('$url|$model');
+    return serverRefusal;
   }
 }
 

@@ -361,9 +361,10 @@ enforce the ones that are commands.
   server** (`settings-decision-mode`, `settings-generative-mode`);
   **Embeddings** is a status line (`settings-embed-status`). This Mac is a
   status block: `settings-decision-status` with **Check**
-  (`settings-role-check-decision`: invalidate the heads, `ensurePreset()`,
-  refresh the status, which is how a `make decide-install` done while the app
-  runs is picked up), and `settings-generative-status` with the 27B | 4B pick
+  (`settings-role-check-decision`: `ensurePreset()` and refresh the status,
+  which is how a `make decide-install` done while the app runs is picked up;
+  the heads are re-read by the client when the file's mtime moves), and
+  `settings-generative-status` with the 27B | 4B pick
   `settings-generative-managed` (the 27B disabled on the inbox tier). Also
   `settings-models-status`, `settings-models-progress`, `settings-show-log`,
   `settings-set-up-again` and `settings-idle-models`. Your server renders
@@ -516,11 +517,17 @@ enforce the ones that are commands.
   back to a language model: transport, timeout, 5xx and 429 →
   `DecisionUnavailableException` (an `LlmUnavailableException`, park reason
   `decision_unavailable`, its own rail sentence); 401/403 →
-  `LlmUnauthorizedException`; other 4xx, bad JSON, a width other than 1024, a
+  `LlmUnauthorizedException`; bad JSON, a width other than 1024, a
   NORMALIZED vector (norm within 1e-3 of 1.0: the server ignored
-  `embd_normalize: -1`, and the heads read the raw mean) and a qhash or model
-  mismatch → `LlmFormatException`. The one 500 it does NOT treat as unavailable
-  is llama-server's `too large to process`: that is the signal to `/tokenize`
+  `embd_normalize: -1`, and the heads read the raw mean), a refused heads
+  file, and a server whose `/tokenize` does not answer ModernBERT's `[50281 …
+  50282]` for `"a"` with the specials (the identity probe, once per client
+  and target, passes cached, which is what tells the embedding model's 1024
+  raw numbers apart) or has no `/tokenize` at all →
+  `DecisionMisconfiguredException`, park reason `decision_misconfigured`;
+  any other 4xx → `LlmFormatException`. A test that points a real
+  `DecisionClient` at a `MockClient` answers `/tokenize` too. The one 500 it
+  does NOT treat as unavailable is llama-server's `too large to process`: that is the signal to `/tokenize`
   (the router routes it by the body's `model` and requires it), keep the first
   2046 ids and send `[50281] + ids + [50282]`; it costs no attempt and never
   parks.

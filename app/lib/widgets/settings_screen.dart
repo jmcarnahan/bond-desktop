@@ -252,6 +252,11 @@ class SettingsScreen extends StatefulWidget {
   /// This Mac's role models, or null while they are being read.
   final List<ManagedModelStatus>? modelStatuses;
 
+  /// Where `make decide-install` must put the decision model when the models
+  /// folder is not the default one; null while it is. See
+  /// [SettingsModelsPage.decideInstallDir].
+  final String? decideInstallDir;
+
   /// The decision role's write. **Null hides the whole Models section**, the
   /// same discipline every other optional section follows: a host that
   /// cannot store a change must not offer the controls that make one. The
@@ -570,6 +575,7 @@ class SettingsScreen extends StatefulWidget {
     this.generativeModel = '',
     this.generativeKeyStored = false,
     this.modelStatuses,
+    this.decideInstallDir,
     this.onUseDecision,
     this.onUseGenerative,
     this.onCheckDecision,
@@ -1246,6 +1252,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     generativeModel: widget.generativeModel,
     generativeKeyStored: widget.generativeKeyStored,
     statuses: widget.modelStatuses,
+    decideInstallDir: widget.decideInstallDir,
     probe: widget.probeServer,
     storedBearer: widget.storedBearer,
     onUseDecision: widget.onUseDecision,

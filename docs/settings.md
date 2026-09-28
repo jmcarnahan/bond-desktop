@@ -290,18 +290,26 @@ two guesses:
   `decisionKeyStored` and `generativeKeyStored` (`prefs.boxBigKeyStored`).
   Never a key.
 - `onUseDecision` calls `notifier.useDecision(placement:, url:, model:, key:,
-  clearKey:)`; `onUseGenerative` reads this Mac's hardware tier AT THE PRESS
+  clearKey:)`, after, for Your server, `refuseWrongDecisionServer`: the
+  decision client's identity probe (`/tokenize` must answer ModernBERT's
+  `[CLS] … [SEP]`), whose sentence the form draws under its field with
+  nothing written; `onUseGenerative` reads this Mac's hardware tier AT THE PRESS
   and calls `notifier.useGenerative(placement:, managedModel:, url:, model:,
   key:, clearKey:, hardwareTier:)`. Both then fire
   `supervisor.ensurePreset()`, which restarts the router only when the preset
   hash moved. `onRemoveKey` is `notifier.clearRoleKey`, by target id
   (`box-decide`, `box-prose` or `cloud-drafts`).
-- `onCheckDecision` is the host's `_checkDecision`: it invalidates
-  `decisionHeadsProvider` (the heads file is cached), fires
+- `onCheckDecision` is the host's `_checkDecision`: it fires
   `supervisor.ensurePreset()` so a `make decide-install` that landed while the
   app runs is picked up (the preset left the decision model out while its
   files were missing, so the hash moves), and invalidates and re-reads
-  `managedModelsStatusProvider`.
+  `managedModelsStatusProvider`. It does NOT invalidate
+  `decisionHeadsProvider`: that would rebuild the decision client and the
+  triage queue under it mid-drain, and `DecisionHeadsFile` re-reads the heads
+  by itself when the file's mtime changes (and never caches a missing file).
+- `decideInstallDir` is `decideInstallDirProvider`: the `local_bond-decide`
+  folder inside the effective models folder, or null while that folder is the
+  default one `make decide-install` already writes to.
 - `serverState` is `ref.watch(serverStateProvider)` with the supervisor's own
   field as the fallback for the frame before the stream's first value lands,
   and `modelStatuses` is `managedModelsStatusProvider` watched ONCE. Both
@@ -398,9 +406,10 @@ weights are installed by hand this round and never downloaded. Under Your server
 decide-install` while the heads file is missing from this Mac: the heads run
 here whichever server embeds. A **Check**
 button keyed `settings-role-check-decision` sits beside it: it re-reads the
-heads file and the install state and asks the router for the placements'
-preset, which is how a `make decide-install` made while the app runs is picked
-up. The line reads `Checking…` while it is out.
+install state and asks the router for the placements' preset, which is how a
+`make decide-install` made while the app runs is picked up. The heads file is
+not re-read by the button: the decision client re-reads it on its next claim
+when the file's mtime has moved. The line reads `Checking…` while it is out.
 
 **Generative model on This Mac** adds a second control,
 `SettingsSegments<String>` keyed `settings-generative-managed`, choosing
@@ -449,9 +458,16 @@ address that is not on this machine (a loopback address needs none), and
 `/v1/models` with the key. One id: used. Several: a `DropdownButton` appears
 with the first id filled in, the caption says `This server lists several
 models. Choose one and press Connect again.`, and nothing is written until the
-second press. A decision server may list any name and the FIRST is taken: it
-serves one embedding model. None, or a server that did not answer: the
-`ProbeStatus` line says so and nothing is written.
+second press. A decision server is never asked to pick: the decision model's
+own name is taken where it is listed (`bond-decide`, the box's served
+`bond-decide-mbl-v2swap`, this build's `DECIDE_MODEL`, or the name already
+stored), and the first id only when none is, so a router that lists
+`bond-embed` first is not taken at its embedding model. Before it writes, the
+decision Connect asks the server's `/tokenize` whether it is the decision
+model at all (see the host's `onUseDecision` above); a server that is not is
+refused with that sentence under the form, and nothing is written. None, or a
+server that did not answer: the `ProbeStatus` line says so and nothing is
+written.
 
 **Refusals, under the address, before any request leaves:**
 
@@ -506,13 +522,22 @@ retry each minute.`) and `unauthorized` (`Your server refused the access key.
 Change it here.`) under the Generative model while it runs on your server.
 With the generative model on this Mac the server line above already says what
 the router is doing, and the rail says `Model server unreachable`.
-`decision_not_installed` (`Not installed · run make decide-install`) and
+`decision_not_installed` (`Not installed · run make decide-install`, which
+names the folder when the models folder is not the default one: `Not
+installed · run make decide-install DECIDE_DIR='<models
+folder>/local_bond-decide'`, because the command writes to the default folder
+otherwise), `decision_misconfigured` (`The decision server is not the
+decision model, or its heads file does not match this build. Check its
+address here, or run make decide-install.`, with no retry promised) and
 `decision_unauthorized` (`The decision server refused the access key. Change
 it here.`) are said under the Decision model whatever the generative
-placement. `not_installed` (the managed generative model, which the router
-does not serve because it is not on disk) is said on this Mac's server line
-instead of the router state: `A model this Mac runs is not downloaded. Open
-Settings, Models, and set up again.` A park word
+placement. A `decision_not_installed` park that the install has overtaken
+(on this Mac, the GGUF and the heads file both on disk) reads `Installed ·
+loading` until the router serves it, rather than Not installed, because the
+park clears only when triage next drains. `not_installed` (the managed
+generative model, which the router does not serve because it is not on disk)
+is said on this Mac's server line instead of the router state: `A model this
+Mac runs is not downloaded. Press Set up again to download it.` A park word
 this page cannot answer for, such as a sign-out, is left alone.
 
 **The server follows the placements.** Every placement write is followed by

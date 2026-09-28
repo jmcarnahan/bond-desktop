@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:bond_inbox/providers/app_providers.dart' show ParkedFact;
+import 'package:bond_inbox/services/decision/decision_client.dart'
+    show noTokenizeText, notDecisionModelText;
 import 'package:bond_inbox/services/llm/model_probe.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/models/managed_model_status.dart';
@@ -99,6 +101,7 @@ void main() {
     String generativeUrl = _generativeUrl,
     List<ManagedModelStatus>? statuses,
     ParkedFact? parked,
+    String? decideInstallDir,
     Future<ModelProbeResult> Function(String, {String? bearer})? probe,
     Future<void> Function()? onCheckDecision,
     VoidCallback? onShowLog,
@@ -126,6 +129,7 @@ void main() {
             generativeKeyStored: generativeKeyStored,
             statuses: statuses,
             parked: parked,
+            decideInstallDir: decideInstallDir,
             probe: probe ??
                 (url, {bearer}) async => const ModelProbeResult(
                       reachable: true,
@@ -215,6 +219,35 @@ void main() {
           'Not installed · run make decide-install');
       expect(find.byKey(ModelServersForm.urlKey(ServerFormRole.decision)),
           findsNothing);
+    });
+
+    testWidgets('a moved models folder is named in the command, park or not',
+        (tester) async {
+      const dir = '/Volumes/Models/bond/local_bond-decide';
+      const sentence =
+          "Not installed · run make decide-install DECIDE_DIR='$dir'";
+      await open(
+        tester,
+        decideInstallDir: dir,
+        statuses: [_row('decision', onDisk: false, local: true)],
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey), sentence);
+
+      await open(
+        tester,
+        decideInstallDir: dir,
+        parked: const ParkedFact(reason: 'decision_not_installed', waiting: 3),
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey), sentence);
+    });
+
+    test("a folder with an apostrophe is quoted the shell's way", () {
+      expect(
+        SettingsModelsPage.decisionNotInstalledIn(
+            "/Volumes/Sam's Models/local_bond-decide"),
+        'Not installed · run make decide-install '
+        "DECIDE_DIR='/Volumes/Sam'\\''s Models/local_bond-decide'",
+      );
     });
 
     testWidgets('installed reads loaded or not from the router',
@@ -369,6 +402,45 @@ void main() {
       );
       expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
           'Connected · bond-decide-fixture at box.example.com');
+    });
+  });
+
+  group('a not-installed park that the install has overtaken', () {
+    const park = ParkedFact(reason: 'decision_not_installed', waiting: 3);
+
+    testWidgets('says Installed · loading once both files are on disk',
+        (tester) async {
+      await open(
+        tester,
+        parked: park,
+        statuses: [_row('decision', local: true, inUse: false)],
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.installedLoadingText);
+    });
+
+    testWidgets('and Installed · loaded once the router serves it',
+        (tester) async {
+      await open(
+        tester,
+        parked: park,
+        serverState: const ServerReady(port: 8080, pid: 1),
+        statuses: [_row('decision', local: true)],
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.installedLoadedText);
+    });
+
+    testWidgets('keeps the park while either file is still missing',
+        (tester) async {
+      for (final row in [
+        _row('decision', local: true, onDisk: false),
+        _row('decision', local: true, headsOnDisk: false),
+      ]) {
+        await open(tester, parked: park, statuses: [row]);
+        expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+            SettingsModelsPage.decisionNotInstalledText);
+      }
     });
   });
 
@@ -528,6 +600,7 @@ void main() {
       // The managed generative model, said on this Mac's server line.
       'not_installed': SettingsModelsPage.statusKey,
       'decision_not_installed': SettingsModelsPage.decisionStatusKey,
+      'decision_misconfigured': SettingsModelsPage.decisionStatusKey,
       'decision_unauthorized': SettingsModelsPage.decisionStatusKey,
     };
     const sentence = {
@@ -537,6 +610,7 @@ void main() {
       'unauthorized': SettingsModelsPage.serverUnauthorizedText,
       'not_installed': SettingsModelsPage.notInstalledText,
       'decision_not_installed': SettingsModelsPage.decisionNotInstalledText,
+      'decision_misconfigured': SettingsModelsPage.decisionMisconfiguredText,
       'decision_unauthorized': SettingsModelsPage.decisionUnauthorizedText,
     };
 
@@ -698,7 +772,13 @@ void main() {
       SettingsModelsPage.managedCaption,
       SettingsModelsPage.inboxTierCaption,
       SettingsModelsPage.decisionNotInstalledText,
+      SettingsModelsPage.decisionNotInstalledIn('/Volumes/Models/x'),
+      SettingsModelsPage.decisionMisconfiguredText,
+      SettingsModelsPage.installedLoadingText,
+      SettingsModelsPage.notInstalledText,
       SettingsModelsPage.notDownloadedText,
+      notDecisionModelText('http://127.0.0.1:8081'),
+      noTokenizeText('http://127.0.0.1:8081'),
       ModelServersForm.generativeThirdPartyRefusalText,
       ModelServersForm.decisionThirdPartyRefusalText,
       ModelServersForm.otherHostHint,

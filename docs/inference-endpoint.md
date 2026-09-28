@@ -153,9 +153,13 @@ GGUF as mean-pooled embeddings with exactly the local arguments:
   never changes meaning.)
 - **`restart`** keeps the decide slot from the box when `--decide-gguf` is not
   given (the `decide-model` and `decide-file` tags say what it runs; nothing is
-  uploaded), and `--decide-gguf none` drops it. On the box,
-  `/opt/bond/serve.sh decide` restarts it by hand, with any extra llama-server
-  flags appended.
+  uploaded), and `--decide-gguf none` drops it. `--decide-gguf PATH` on a box
+  with a hostname also writes the Caddyfile again, so a box persisted before
+  the decide slot existed gains its `/decide/` route; on a box without one it
+  says that `persist` adds the route. `--decide-served` with no
+  `--decide-gguf`, on a box that runs no decide slot, names nothing and says
+  so on stderr. On the box, `/opt/bond/serve.sh decide` restarts it by hand,
+  with any extra llama-server flags appended.
 
 ## What the test checks
 
@@ -245,7 +249,10 @@ What that builds:
   :8000, requests under `/bulk/` to the 4B on :8001 and requests under
   `/decide/` to the decision model on :8002, with the prefix stripped, so
   vLLM and llama-server see the plain `/v1/…` (and `/tokenize`) paths they
-  expect. `/decide/` is routed whether or not the slot runs. Every proxy sets
+  expect. A Caddyfile written by this version routes `/decide/` whether or
+  not the slot runs; one written before the decide slot existed has no
+  `/decide/` route, and `restart --decide-gguf PATH` on a box with a hostname
+  writes the Caddyfile again so it gains one. Every proxy sets
   `flush_interval -1`, which turns response buffering off. Drafts stream as
   server-sent events, and a buffering proxy would hold every token back until
   the answer was finished. Any other path answers `bond inference` with a 200.

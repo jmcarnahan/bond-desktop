@@ -9,7 +9,9 @@ import 'package:bond_inbox/services/decision/decision_client.dart'
     show rawEmbeddingsText;
 import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/owner_lookup.dart' show OwnerIdentity;
 import 'package:bond_inbox/services/triage_queue.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/fake_decision_client.dart';
@@ -303,6 +305,123 @@ void main() {
       expect((await store.decisionFor('email', 'm1'))!.ownerKnown, isFalse);
     });
 
+    test('a claim waits a moment for an owner lookup still in flight',
+        () async {
+      await seedMessage(id: 'm1');
+      final decision = FakeDecisionClient.fixed(fakeAnswers());
+      await TriageQueue(
+        store,
+        decisionClient: decision,
+        // The keychain answering just after launch.
+        owner: () async {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          return (name: 'Ada Park', address: 'ada@example.com');
+        },
+      ).pump();
+
+      expect(decision.calls.single.owner, contains('ada@example.com'));
+      expect((await store.decisionFor('email', 'm1'))!.ownerKnown, isTrue);
+    });
+
+    test('a lookup that never answers is waited for once, then the drain '
+        'goes on ownerless', () async {
+      for (var i = 0; i < 3; i++) {
+        await seedMessage(
+          id: 'm$i',
+          conversationKey: 'conv-$i',
+          receivedAt: '2026-08-29T10:0$i:00Z',
+        );
+      }
+      final decision = FakeDecisionClient.fixed(fakeAnswers());
+      final sw = Stopwatch()..start();
+      await TriageQueue(
+        store,
+        concurrency: 1,
+        decisionClient: decision,
+        owner: () => Completer<OwnerIdentity?>().future,
+      ).pump();
+      sw.stop();
+
+      expect(decision.calls, hasLength(3));
+      expect(decision.calls.map((c) => c.owner), everyElement(isNull));
+      // One wait of 300 ms for the three, not one each.
+      expect(sw.elapsed, lessThan(const Duration(milliseconds: 850)));
+    });
+
+    test('a quiesce during an owner wait lets the claim go on ownerless, and '
+        'leaves no timer behind', () async {
+      await seedMessage(id: 'm1');
+      final decision = FakeDecisionClient.fixed(fakeAnswers());
+      final queue = TriageQueue(
+        store,
+        concurrency: 1,
+        decisionClient: decision,
+        owner: () => Completer<OwnerIdentity?>().future,
+      );
+      // Every timer the drain starts, with how long it was for, so the owner
+      // wait's own 300 ms timer can be found and asked whether it is gone.
+      final timers = <(Duration, Timer)>[];
+      final pumped = runZoned(
+        queue.pump,
+        zoneSpecification: ZoneSpecification(
+          createTimer: (self, parent, zone, duration, f) {
+            final timer = parent.createTimer(zone, duration, f);
+            timers.add((duration, timer));
+            return timer;
+          },
+        ),
+      );
+      Iterable<Timer> ownerTimers() => [
+            for (final (d, t) in timers)
+              if (d == const Duration(milliseconds: 300)) t,
+          ];
+      for (var i = 0; i < 50 && ownerTimers().isEmpty; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 2));
+      }
+      expect(ownerTimers(), hasLength(1), reason: 'the claim is waiting');
+      expect(decision.calls, isEmpty);
+
+      final sw = Stopwatch()..start();
+      await queue.quiesce();
+      await pumped;
+
+      expect(decision.calls.single.owner, isNull);
+      expect(ownerTimers().where((t) => t.isActive), isEmpty);
+      expect(sw.elapsed, lessThan(const Duration(milliseconds: 250)));
+    });
+
+    test('a lookup that answered null is asked again at the next pump, and '
+        'that claim waits for it', () async {
+      var asked = 0;
+      final decision = FakeDecisionClient.fixed(fakeAnswers());
+      final queue = TriageQueue(
+        store,
+        decisionClient: decision,
+        owner: () async {
+          asked++;
+          if (asked == 1) return null;
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          return (name: 'Ada Park', address: 'ada@example.com');
+        },
+      );
+
+      await seedMessage(id: 'm1');
+      await queue.pump();
+      expect(decision.calls.single.owner, isNull);
+
+      await seedMessage(
+        id: 'm2',
+        conversationKey: 'conv-2',
+        receivedAt: '2026-08-29T11:00:00Z',
+      );
+      await queue.pump();
+
+      expect(asked, 2);
+      expect(decision.calls, hasLength(2));
+      expect(decision.calls.last.owner, contains('ada@example.com'));
+      expect((await store.decisionFor('email', 'm2'))!.ownerKnown, isTrue);
+    });
+
     test("below the booleans' bar the answers are no", () async {
       await seedMessage(id: 'm1');
 
@@ -476,12 +595,12 @@ void main() {
       (
         'a heads file this build refuses',
         const DecisionMisconfiguredException('heads do not match'),
-        'decision_unavailable',
+        'decision_misconfigured',
       ),
       (
         'a server answering normalised or wrong-width vectors',
         const DecisionMisconfiguredException(rawEmbeddingsText),
-        'decision_unavailable',
+        'decision_misconfigured',
       ),
     ]) {
       test('${fault.$1} parks: pending, no attempt, and no text or needs-you '
@@ -511,6 +630,28 @@ void main() {
       });
     }
 
+    test('a misconfigured park is retried by the next pump, so a fixed '
+        'address recovers with nobody pressing Check', () async {
+      await seedMessage(id: 'm1');
+      var fixed = false;
+      final queue = TriageQueue(
+        store,
+        concurrency: 1,
+        decisionClient: FakeDecisionClient((_) {
+          if (!fixed) {
+            throw const DecisionMisconfiguredException('not the decision model');
+          }
+          return fakeDecision(fakeAnswers());
+        }),
+      );
+      await queue.pump();
+      expect((await messageRow('m1'))['triage_status'], 'pending');
+
+      fixed = true;
+      await queue.pump();
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+    });
+
     test('an unusable decision is a failure that spends an attempt', () async {
       await seedMessage(id: 'm1');
       await TriageQueue(
@@ -525,6 +666,87 @@ void main() {
       expect(row['triage_attempts'], greaterThanOrEqualTo(1));
       expect(row['triage_error'], contains('a normalised vector'));
       expect(await store.decisionFor('email', 'm1'), isNull);
+    });
+  });
+
+  group('text owed after triage', () {
+    Future<Map<String, Object?>> extractRow(String id) async => (await db
+            .customSelect(
+              'SELECT status, created_at FROM work_items '
+              "WHERE task_kind = 'extract' AND source = 'email' "
+              'AND entity_id = ?',
+              variables: [Variable.withString(id)],
+            )
+            .getSingle())
+        .data;
+
+    Future<void> closeExtract(String id) => db.customStatement(
+          "UPDATE work_items SET status = 'done' "
+          "WHERE task_kind = 'extract' AND entity_id = ?",
+          [id],
+        );
+
+    test('a revived message with no summary and a done extract row is owed '
+        'its text again', () async {
+      // A v19 triage that errored: its extract row was claimed and closed
+      // `done` without ever writing a summary.
+      await seedMessage(id: 'm1');
+      await store.enqueueWork('extract', 'email', 'm1');
+      await closeExtract('m1');
+
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(fakeAnswers()),
+      ).pump();
+
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+      expect((await extractRow('m1'))['status'], 'pending');
+    });
+
+    test('new mail keeps its pending extract row, stamp and all', () async {
+      await seedMessage(id: 'm1');
+      await store.enqueueWork('extract', 'email', 'm1');
+      final before = await extractRow('m1');
+
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(fakeAnswers()),
+      ).pump();
+
+      final after = await extractRow('m1');
+      expect(after['status'], 'pending');
+      expect(after['created_at'], before['created_at']);
+    });
+
+    test('a message the sync queued no text for gets none from triage',
+        () async {
+      await seedMessage(id: 'm1');
+
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(fakeAnswers()),
+      ).pump();
+
+      expect(await store.workStatusOf('extract', 'email', 'm1'), isNull);
+    });
+
+    test('a message whose text already landed is not asked for it again',
+        () async {
+      await seedMessage(id: 'm1');
+      await db.customStatement(
+        "UPDATE messages SET summary = 'Sarah asks about the launch date.' "
+        "WHERE source_message_id = 'm1'",
+      );
+      await store.enqueueWork('extract', 'email', 'm1');
+      await closeExtract('m1');
+
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(fakeAnswers()),
+      ).pump();
+
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+      expect((await extractRow('m1'))['status'], 'done');
     });
   });
 

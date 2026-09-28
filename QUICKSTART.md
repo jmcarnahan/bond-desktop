@@ -29,9 +29,11 @@ app's own server runs the 27B, or the 4B on a smaller Mac.
 
 **The decision model is not published yet.** `make decide-install` copies it,
 sha256-checked, from the export the training project writes (`DECIDE_SRC`),
-so it works only on a machine that has that export. Without it every other
-part of the app runs, and classification parks (the rail and Settings,
-Models say the decision model is not installed) until it is. The next round
+so it works only on a machine that has that export. Without it new mail
+parks at triage (the rail and Settings, Models say the decision model is not
+installed): no summary, no needs-you verdict and no suggested draft until it is
+installed, because the text and needs-you work waits behind triage. Sync,
+reading and search still work. The next round
 ships it as a model bundle from a registry (JFrog Artifactory; the design is
 `docs/DESIGN-model-bundles.md` in the training project), which retires
 `make decide-install`.

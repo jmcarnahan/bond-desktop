@@ -32,9 +32,28 @@ List<double> _vectorForText(String text) => syntheticVector({
 /// The vector for a token-array input: `intent: fyi`, which no text gets.
 List<double> _vectorForIds() => syntheticVector({axisOf('intent', 4): 3.0});
 
+/// What ModernBERT's `/tokenize` answers for `"a"` with the specials added.
+const List<int> _modernBertA = [DecisionClient.clsId, 64, DecisionClient.sepId];
+
 /// A decision server that records every request and answers on script.
+///
+/// The identity probe (`/tokenize` with `add_special: true`) is recorded in
+/// [probes] and NOT in [requests]: every client probes once before its first
+/// embedding, and the cases below are about the requests that follow it.
 class _FakeDecide {
   final List<http.Request> requests = [];
+
+  /// Every identity probe, in order.
+  final List<http.Request> probes = [];
+
+  /// What the probe answers: ModernBERT's ids by default.
+  List<int> probeTokens = _modernBertA;
+
+  /// The probe's HTTP status, when not 200.
+  int? probeStatus;
+
+  /// Thrown by the probe alone, when set.
+  Object? probeError;
 
   /// The embed endpoint's answer, given the decoded body. Null → the default:
   /// a raw vector per input.
@@ -87,11 +106,23 @@ class _FakeDecide {
     return list;
   }
 
+  static bool isProbe(http.Request r) =>
+      r.url.path.endsWith('/tokenize') && bodyOf(r)['add_special'] == true;
+
   MockClient get client => MockClient((request) async {
-        requests.add(request);
+        if (isProbe(request)) {
+          probes.add(request);
+          if (probeError != null) throw probeError!;
+        } else {
+          requests.add(request);
+        }
         if (transportError != null) throw transportError!;
         if (hang) return Completer<http.Response>().future;
         final body = bodyOf(request);
+        if (isProbe(request)) {
+          return http.Response(
+              jsonEncode({'tokens': probeTokens}), probeStatus ?? 200);
+        }
         if (request.url.path.endsWith('/tokenize')) {
           return http.Response(jsonEncode({'tokens': tokens}), 200);
         }
@@ -382,7 +413,9 @@ void main() {
       final e = await failure() as LlmException;
       expect(e.message, contains('not answering'));
       expect(e.message, contains('make decide'));
-      expect(e.message, contains(_url));
+      // The first request a fresh client makes is the identity probe, so a
+      // dead server is named at its /tokenize.
+      expect(e.message, contains(_tokenizeUrl));
       expect(records.single.error, isNot(contains('127.0.0.1')));
       expect(records.single.error, contains('<endpoint>'));
     });
@@ -451,9 +484,9 @@ void main() {
           'decision_not_installed');
       expect(parkReasonFor(const DecisionUnauthorizedException('k')),
           'decision_unauthorized');
-      // A misconfiguration is the decision server's park.
+      // A misconfiguration parks under its own word: waiting fixes nothing.
       expect(parkReasonFor(const DecisionMisconfiguredException('m')),
-          'decision_unavailable');
+          'decision_misconfigured');
       expect(const DecisionMisconfiguredException('m'),
           isA<DecisionUnavailableException>());
     });
@@ -462,6 +495,151 @@ void main() {
       final result = await client(onCall: (_) => throw StateError('observer'))
           .decide(_input('a'));
       expect(result.answers['gate'].choice, 'keep');
+    });
+  });
+
+  group('the identity probe', () {
+    test('asks /tokenize for "a" with the specials, once, before the first '
+        'embedding', () async {
+      target = const LlmTarget(
+          baseUrl: _url, model: 'bond-decide', bearer: _bearer);
+      final c = client();
+      await c.decide(_input('a'));
+      await c.decide(_input('b'));
+      await c.decideBatch([_input('c'), _input('d')]);
+
+      expect(server.probes, hasLength(1));
+      final probe = server.probes.single;
+      expect(probe.url.toString(), _tokenizeUrl);
+      expect(probe.headers['Authorization'], 'Bearer $_bearer');
+      expect(_FakeDecide.bodyOf(probe), {
+        'model': 'bond-decide',
+        'content': 'a',
+        'add_special': true,
+      });
+      expect(server.embeds, hasLength(3));
+      // One decision, one record: the probe rides the call it preceded.
+      expect(records, hasLength(3));
+    });
+
+    test('another model on the same address is probed again', () async {
+      final c = client();
+      await c.decide(_input('a'));
+      target = const LlmTarget(baseUrl: _url, model: 'bond-embed');
+      await c.decide(_input('a'));
+      expect(server.probes.map((r) => _FakeDecide.bodyOf(r)['model']),
+          ['bond-decide', 'bond-embed']);
+    });
+
+    test("a tokenizer that is not ModernBERT's is the wrong server, and "
+        'nothing is embedded', () async {
+      // Qwen3-Embedding: no [CLS], and 1024 raw numbers that would pass
+      // every vector check.
+      server.probeTokens = [64, 151643];
+      final c = client();
+      await expectLater(
+        c.decide(_input('a')),
+        throwsA(isA<DecisionMisconfiguredException>()
+            .having((e) => parkReasonFor(e), 'park word',
+                'decision_misconfigured')
+            .having((e) => e.message, 'message',
+                contains('is not the decision model'))
+            .having((e) => e.message, 'message',
+                contains('http://127.0.0.1:8083'))),
+      );
+      expect(server.embeds, isEmpty);
+      expect(records.single.outcome, 'unavailable');
+      // A failure is not cached: the next call asks again.
+      await expectLater(c.decideBatch([_input('a')]),
+          throwsA(isA<DecisionMisconfiguredException>()));
+      expect(server.probes, hasLength(2));
+
+      for (final tokens in [
+        <int>[],
+        [DecisionClient.clsId, 64],
+        [64, DecisionClient.sepId],
+      ]) {
+        server.probeTokens = tokens;
+        await expectLater(client().decide(_input('a')),
+            throwsA(isA<DecisionMisconfiguredException>()),
+            reason: '$tokens');
+      }
+    });
+
+    test('no /tokenize is the wrong server too', () async {
+      for (final status in [404, 405]) {
+        server.probeStatus = status;
+        await expectLater(
+          client().decide(_input('a')),
+          throwsA(isA<DecisionMisconfiguredException>().having(
+              (e) => e.message, 'message', contains('does not offer /tokenize'))),
+          reason: '$status',
+        );
+      }
+      expect(server.embeds, isEmpty);
+    });
+
+    test('a probe that cannot reach the server parks, and the next call '
+        'probes again', () async {
+      final c = client();
+      server.probeError = const SocketException('refused');
+      await expectLater(c.decide(_input('a')),
+          throwsA(isA<DecisionUnavailableException>()
+              .having((e) => parkReasonFor(e), 'park word',
+                  'decision_unavailable')));
+      expect(server.embeds, isEmpty);
+
+      server.probeError = null;
+      await c.decide(_input('a'));
+      expect(server.probes, hasLength(2));
+      expect(server.embeds, hasLength(1));
+    });
+
+    test('a pass is forgotten when the server stops answering, so the '
+        'server that comes back is probed again', () async {
+      final c = client();
+      await c.decide(_input('a'));
+      expect(server.probes, hasLength(1));
+
+      // The pass is cached, so the embedding is the request that fails.
+      server.transportError = const SocketException('refused');
+      await expectLater(c.decide(_input('a')),
+          throwsA(isA<DecisionUnavailableException>()));
+      expect(server.probes, hasLength(1));
+
+      server.transportError = null;
+      await c.decide(_input('a'));
+      expect(server.probes, hasLength(2));
+    });
+
+    test('a probe the key is refused on reads as the key', () async {
+      server.probeStatus = 401;
+      await expectLater(
+        client().decide(_input('a')),
+        throwsA(isA<DecisionUnauthorizedException>()),
+      );
+    });
+
+    test("checkServer is Connect's question: null for the decision model, "
+        'the sentence otherwise', () async {
+      final c = client();
+      expect(
+        await c.checkServer(url: _url, model: 'bond-decide', bearer: _bearer),
+        isNull,
+      );
+      expect(server.probes.single.headers['Authorization'], 'Bearer $_bearer');
+      // A pass spares the first decision its probe.
+      target = const LlmTarget(
+          baseUrl: _url, model: 'bond-decide', bearer: _bearer);
+      await c.decide(_input('a'));
+      expect(server.probes, hasLength(1));
+
+      server.probeTokens = [64];
+      final refusal =
+          await client().checkServer(url: _url, model: 'bond-embed');
+      expect(refusal, contains('is not the decision model'));
+      expect(refusal, isNot(contains(_bearer)));
+      expect(server.embeds, hasLength(1));
     });
   });
 
@@ -571,6 +749,9 @@ void main() {
           resolveTarget: () => target,
           heads: syntheticHeads,
           client: MockClient((request) async {
+            if (_FakeDecide.isProbe(request)) {
+              return http.Response(jsonEncode({'tokens': _modernBertA}), 200);
+            }
             fake.requests.add(request);
             if (request.url.path.endsWith('/tokenize')) {
               return http.Response(jsonEncode(body), 200);
@@ -586,17 +767,25 @@ void main() {
       }
     });
 
-    test('tokenize failures map like any other request', () async {
+    test('tokenize failures map like any other request, but a missing '
+        '/tokenize is the server', () async {
       for (final (status, matcher) in [
         (401, isA<LlmUnauthorizedException>()),
         (500, isA<DecisionUnavailableException>()),
-        (404, isA<LlmFormatException>()),
+        (400, isA<LlmFormatException>()),
+        (
+          404,
+          isA<DecisionMisconfiguredException>().having(
+              (e) => e.message, 'message', contains('does not offer /tokenize')),
+        ),
+        (405, isA<DecisionMisconfiguredException>()),
       ]) {
         final c = DecisionClient(
           resolveTarget: () => target,
           heads: syntheticHeads,
-          client: MockClient((request) async =>
-              request.url.path.endsWith('/tokenize')
+          client: MockClient((request) async => _FakeDecide.isProbe(request)
+              ? http.Response(jsonEncode({'tokens': _modernBertA}), 200)
+              : request.url.path.endsWith('/tokenize')
                   ? http.Response('nope', status)
                   : _FakeDecide.vectors(
                       _FakeDecide.inputsOf(_FakeDecide.bodyOf(request)))),
