@@ -20,6 +20,7 @@ import 'package:http/testing.dart';
 
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// A message that lands DURING a sync reaches the open transcript on the same
 /// tick.
@@ -139,6 +140,7 @@ void main() {
       'received_at': _at(9),
       'body_text': 'the message that was already there',
     });
+    await seedNeedsYou(store, 'email', 'in-1');
     await store.upsertConversation({
       'conversation_key': 'c1',
       'subject': 'Homepage copy',

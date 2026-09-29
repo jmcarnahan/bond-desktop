@@ -563,10 +563,11 @@ Needs You is the eighth. It stands FIRST, before a vertical rule, counts ALL
 TIME, and draws its count in the attention colour when there is one: it is a
 pile to burn down to zero rather than a reading of activity, and a week around
 it would hide the work owed longest. It also counts THREADS by the rail's own
-rule (`isNeedsYou`, spelled in SQL and bound to the same attention threshold),
+rule (`isNeedsYou`, spelled in SQL and bound to the same Needs You slider),
 and shows one row per thread under its filter; the rest count messages. That
-rule has three tests — not in Later, not done, and not under the attention
-threshold. There is no fourth, because the pipeline keeps the thread's own
+rule has three tests — not in Later, not done, and the thread's needs-you
+probability at or above the slider (see `docs/pipeline/11-needs-you.md`).
+There is no fourth, because the pipeline keeps the thread's own
 state honest: the fold reads only the messages the gate KEPT, and every later
 gate drop refolds the thread down (`MessageStore.refoldThreadState`, see
 `docs/pipeline/02-gates.md`), so a self-addressed test mail or an auto-reply

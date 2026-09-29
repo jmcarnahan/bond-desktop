@@ -186,9 +186,10 @@ class MessageHistory {
   /// reader has to be able to see both at once.
   final String? gateOverride;
 
-  /// Three-valued, like [HomeFeedRow.needsYouVerdict]: null is "nothing has
-  /// judged this yet", which sends a reader somewhere else entirely from "no".
-  final bool? needsYouVerdict;
+  /// The decision model's needs-you probability, like [HomeFeedRow.needsYouP]:
+  /// null is "nothing has decided this yet", which sends a reader somewhere
+  /// else entirely from "no".
+  final double? needsYouP;
 
   final String? needsYouReason;
   final String? urgency;
@@ -202,9 +203,9 @@ class MessageHistory {
   final String? lastOutboundAt;
   final double? attentionScore;
 
-  /// The bar [attentionScore] was measured against, read live rather than
-  /// stored: a score means nothing without the threshold in force, and the
-  /// owner can move it.
+  /// The owner's Needs You slider, the cut [needsYouP] is read against, read
+  /// live rather than stored: a probability means nothing without the cut in
+  /// force, and the owner can move it.
   final double threshold;
 
   /// Always five, in pipeline order, so the screen renders a fixed rail rather
@@ -233,7 +234,7 @@ class MessageHistory {
     this.triageError,
     this.gateReason,
     this.gateOverride,
-    this.needsYouVerdict,
+    this.needsYouP,
     this.needsYouReason,
     this.urgency,
     this.category,
@@ -332,11 +333,8 @@ class MessageHistory {
       triageError: message['triage_error'] as String?,
       gateReason: message['gate_reason'] as String?,
       gateOverride: message['gate_override'] as String?,
-      // Stored 0/1/null, and all three mean something different.
-      needsYouVerdict: switch (message['needs_you_verdict'] as num?) {
-        null => null,
-        final n => n.toInt() == 1,
-      },
+      // Null is undecided, which is not a low probability.
+      needsYouP: (message['needs_you_p'] as num?)?.toDouble(),
       needsYouReason: message['needs_you_reason'] as String?,
       urgency: message['urgency'] as String?,
       category: message['category'] as String?,

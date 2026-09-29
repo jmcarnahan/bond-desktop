@@ -33,7 +33,7 @@ double _score({
   bool? needsAction,
   String? deadline,
   bool addressedMe = false,
-  bool? needsYouVerdict,
+  bool needsYou = false,
 }) {
   return attentionScore(
     conversation: _conv(
@@ -49,7 +49,7 @@ double _score({
     latestNeedsAction: needsAction,
     latestDeadline: deadline,
     addressedMe: addressedMe,
-    needsYouVerdict: needsYouVerdict,
+    needsYou: needsYou,
     now: _now,
   );
 }
@@ -263,16 +263,15 @@ void main() {
 
     test('drops a needs-reply thread to the waiting base', () {
       expect(quiet(), closeTo(AttentionTuning.waitingBase, 1e-9));
-      expect(quiet(), lessThan(AttentionTuning.defaultThreshold),
-          reason: 'the whole point: it leaves Needs You');
+      expect(quiet(), lessThan(AttentionTuning.needsReplyBase),
+          reason: 'the whole point: it ranks below the replies owed');
     });
 
     test('the temper skips the reply-rate bonus', () {
       // The regression this exists for. 0.35 + 0.2 = 0.55 would put a
-      // well-answered sender's FYI straight back over the 0.5 threshold — the
+      // well-answered sender's FYI straight back up among the live asks — the
       // exact thread the temper is quieting.
       expect(quiet(replyRate: 1), closeTo(0.35, 1e-9));
-      expect(quiet(replyRate: 1), lessThan(AttentionTuning.defaultThreshold));
     });
 
     test('a never-judged thread is not tempered', () {
@@ -327,23 +326,15 @@ void main() {
 
     test('urgency still applies through the temper', () {
       // Deliberate, and the conservative failure: a thread triage rated urgent
-      // clears the threshold at 0.525 and stays in Needs You. Showing one
-      // quiet thread too many beats hiding an urgent one.
+      // scores 0.525 and stays up the order. Ranking one quiet thread too
+      // high beats burying an urgent one.
       expect(quiet(urgency: CtaUrgency.urgent), closeTo(0.525, 1e-9));
-      expect(
-        quiet(urgency: CtaUrgency.urgent),
-        greaterThan(AttentionTuning.defaultThreshold),
-      );
       // `high` does not rescue it.
       expect(quiet(urgency: CtaUrgency.high), closeTo(0.42, 1e-9));
     });
 
     test('a keep sender does not rescue a tempered thread either', () {
       expect(quiet(senderPref: 'keep'), closeTo(0.4375, 1e-9));
-      expect(
-        quiet(senderPref: 'keep'),
-        lessThan(AttentionTuning.defaultThreshold),
-      );
     });
 
     test('a waiting thread is unaffected — it was already at that base', () {
@@ -418,11 +409,10 @@ void main() {
     });
   });
 
-  group('the needs-you verdict', () {
-    /// The same call [_score] makes, with the verdict argument LEFT OFF
-    /// rather than passed as null — what every caller looked like before the
-    /// needs-you stage existed, and the baseline the two "moves nothing"
-    /// tests below compare against exactly.
+  group('needs you', () {
+    /// The same call [_score] makes, with the needs-you argument LEFT OFF —
+    /// what every caller looked like before the needs-you input existed, and
+    /// the baseline the "moves nothing" test below compares against exactly.
     double omitted({
       String? intent,
       double replyRate = 0,
@@ -440,26 +430,23 @@ void main() {
           now: _now,
         );
 
-    test('a judged yes breaks the quiet temper', () {
-      // The complaint this phase answers: a 1:1 message triage read as an FYI,
-      // which the needs-you stage then read whole and called the user's to
-      // answer. Tempered it sits at 0.35 and never reaches Needs You; judged it
-      // scores from the full needs-reply base and clears the default cut with
-      // no slider override.
+    test('a message that needs you breaks the quiet temper', () {
+      // A 1:1 message triage read as an FYI, which the decision model read
+      // whole and placed over the owner's slider. Tempered it sits at 0.35 at
+      // the foot of the order; needing the owner it scores from the full
+      // needs-reply base.
       final tempered =
           omitted(intent: 'fyi', replyExpected: false, needsAction: false);
       final judged = _score(
         intent: 'fyi',
         replyExpected: false,
         needsAction: false,
-        needsYouVerdict: true,
+        needsYou: true,
       );
 
       expect(tempered, closeTo(AttentionTuning.waitingBase, 1e-9));
-      expect(tempered, lessThan(AttentionTuning.defaultThreshold));
       expect(judged, greaterThan(tempered));
       expect(judged, closeTo(AttentionTuning.needsReplyBase, 1e-9));
-      expect(judged, greaterThan(AttentionTuning.defaultThreshold));
     });
 
     test('and the broken temper hands back the reply-rate nudge', () {
@@ -472,7 +459,7 @@ void main() {
           replyRate: 1,
           replyExpected: false,
           needsAction: false,
-          needsYouVerdict: true,
+          needsYou: true,
         ),
         closeTo(
           AttentionTuning.needsReplyBase + AttentionTuning.replyRateMax,
@@ -481,69 +468,50 @@ void main() {
       );
     });
 
-    test('a judged yes earns the direct boost without being addressed', () {
-      // Exactly the directBoost path and nothing else: the verdict scores the
-      // same as a message addressed to the user alone.
+    test('needing you earns the direct boost without being addressed', () {
+      // Exactly the directBoost path and nothing else: needing the owner
+      // scores the same as a message addressed to the user alone.
       expect(
-        _score(addressedMe: false, needsYouVerdict: true, replyExpected: null),
+        _score(addressedMe: false, needsYou: true, replyExpected: null),
         _score(addressedMe: true, replyExpected: null),
       );
       expect(
-        _score(addressedMe: false, needsYouVerdict: true),
+        _score(addressedMe: false, needsYou: true),
         closeTo(AttentionTuning.directBoost, 1e-9),
       );
     });
 
-    test('a judged NO moves nothing at all', () {
-      // The fence, on the side that matters most: the stage having looked and
-      // declined must score identically to the stage never having run.
+    test('not needing you moves nothing at all', () {
+      // The fence, on the side that matters most: a message below the slider,
+      // or one not decided yet, scores identically to no needs-you input.
       expect(
         _score(
           intent: 'fyi',
           replyExpected: false,
           needsAction: false,
-          needsYouVerdict: false,
+          needsYou: false,
         ),
         omitted(intent: 'fyi', replyExpected: false, needsAction: false),
         reason: 'temper-shaped',
       );
       expect(
-        _score(addressedMe: true, replyExpected: null, needsYouVerdict: false),
-        omitted(addressedMe: true, replyExpected: null),
-        reason: 'boost-shaped',
-      );
-    });
-
-    test('and neither does an explicit null', () {
-      // Null is "nothing judged this message" — the handler errored, or has
-      // not run. It reads as absence, never as a no.
-      expect(
-        _score(
-          intent: 'fyi',
-          replyExpected: false,
-          needsAction: false,
-          needsYouVerdict: null,
-        ),
-        omitted(intent: 'fyi', replyExpected: false, needsAction: false),
-        reason: 'temper-shaped',
-      );
-      expect(
-        _score(addressedMe: true, replyExpected: null, needsYouVerdict: null),
+        _score(addressedMe: true, replyExpected: null, needsYou: false),
         omitted(addressedMe: true, replyExpected: null),
         reason: 'boost-shaped',
       );
     });
 
     test('an explicit "no reply wanted" still declines the boost', () {
-      // The interaction between the two fences. The verdict breaks the temper
-      // — the score is the full base, not 0.35 — but the boost's `!= false`
-      // wins over both `addressedMe` and the verdict, so nothing multiplies.
+      // The interaction between the two fences. Needing the owner breaks the
+      // temper — the score is the full base, not 0.35 — but the boost's
+      // `!= false` wins over both `addressedMe` and needs-you, so nothing
+      // multiplies.
       final score = _score(
         intent: 'fyi',
         replyExpected: false,
         needsAction: false,
         addressedMe: true,
-        needsYouVerdict: true,
+        needsYou: true,
       );
 
       expect(score, closeTo(AttentionTuning.needsReplyBase, 1e-9));
@@ -651,7 +619,7 @@ void main() {
             intent: intent,
             importance: 'low',
             needsReply: false,
-            needsYouVerdict: true,
+            needsYou: true,
           ),
           isNull,
           reason: '$intent with an open ask should stay in the inbox',
@@ -668,25 +636,25 @@ void main() {
           intent: 'fyi',
           importance: 'low',
           needsReply: false,
-          needsYouVerdict: true,
+          needsYou: true,
         ),
         'later',
       );
     });
 
-    test('no open ask, judged or unjudged, changes nothing', () {
-      // The fence is `== true`: a thread the stage judged and declined and one
-      // it never judged both defer exactly as they did before this input.
+    test('no open ask changes nothing', () {
+      // A thread with nothing over the slider, decided or not, defers exactly
+      // as it would with no needs-you input.
       for (final intent in AttentionTuning.quietIntents) {
         expect(
           bucketFor(
             intent: intent,
             importance: 'low',
             needsReply: false,
-            needsYouVerdict: false,
+            needsYou: false,
           ),
           'later',
-          reason: '$intent judged no should still defer',
+          reason: '$intent with no open ask should still defer',
         );
         expect(
           bucketFor(
@@ -695,7 +663,7 @@ void main() {
             needsReply: false,
           ),
           'later',
-          reason: '$intent unjudged should still defer',
+          reason: '$intent by default should still defer',
         );
       }
     });

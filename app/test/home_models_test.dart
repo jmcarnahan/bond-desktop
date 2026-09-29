@@ -101,16 +101,10 @@ void main() {
           ...extra,
         };
 
-    test('the needs-you verdict keeps its third state', () {
-      expect(HomeFeedRow.fromRow(base({})).needsYouVerdict, isNull);
-      expect(
-        HomeFeedRow.fromRow(base({'needs_you_verdict': 1})).needsYouVerdict,
-        true,
-      );
-      expect(
-        HomeFeedRow.fromRow(base({'needs_you_verdict': 0})).needsYouVerdict,
-        false,
-      );
+    test('the needs-you probability keeps undecided apart from zero', () {
+      expect(HomeFeedRow.fromRow(base({})).needsYouP, isNull);
+      expect(HomeFeedRow.fromRow(base({'needs_you_p': 0.72})).needsYouP, 0.72);
+      expect(HomeFeedRow.fromRow(base({'needs_you_p': 0})).needsYouP, 0.0);
     });
 
     test('work_open reads as a flag', () {
@@ -353,7 +347,7 @@ void main() {
         'outcome': 'dropped',
         'dropped': 1,
         'updated_at': '2026-09-01T11:00:00Z',
-        'needs_you_verdict': 0,
+        'needs_you_p': 0.1,
         'needs_you_reason': 'nobody is waiting on you',
         'gate_reason': 'newsletter',
         'triage_status': 'skipped',
@@ -367,7 +361,7 @@ void main() {
       final restored = row.restored();
 
       expect(restored.updatedAt, '2026-09-01T11:00:00Z');
-      expect(restored.needsYouVerdict, false);
+      expect(restored.needsYouP, 0.1);
       expect(restored.needsYouReason, 'nobody is waiting on you');
       expect(restored.gateReason, 'newsletter');
       // The one field the twin does NOT carry over: `restoreMessage` writes

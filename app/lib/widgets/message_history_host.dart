@@ -38,8 +38,6 @@ class MessageHistoryHost extends ConsumerWidget {
   /// The host's own keep-in-inbox (it toasts an undo); null hides the lever.
   final Future<void> Function(String source, String threadKey)? onKeepInInbox;
 
-  final VoidCallback? onEditRules;
-
   /// False renders the story without its PaneSurface chrome, for a host that
   /// draws its own header around it.
   final bool chrome;
@@ -53,7 +51,6 @@ class MessageHistoryHost extends ConsumerWidget {
     required this.onOpenStoryline,
     this.onAddToStoryline,
     this.onKeepInInbox,
-    this.onEditRules,
     this.chrome = true,
   });
 
@@ -170,7 +167,6 @@ class MessageHistoryHost extends ConsumerWidget {
                     .then((_) => reload()),
               )
           : null,
-      onEditRules: onEditRules,
     );
   }
 }

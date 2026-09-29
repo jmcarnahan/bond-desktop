@@ -407,23 +407,14 @@ void main() {
       expect(Message.fromRow(const {}).deadline, isNull);
     });
 
-    test('the needs-you verdict stays tri-state, and its reason rides along',
-        () {
-      expect(
-        Message.fromRow(const {'needs_you_verdict': 1}).needsYouVerdict,
-        isTrue,
-      );
-      expect(
-        Message.fromRow(const {'needs_you_verdict': 0}).needsYouVerdict,
-        isFalse,
-      );
-      // Load-bearing: NULL is "the pass has never reached this row", which is
-      // the worklist itself. A false here would claim it had been judged.
-      expect(
-        Message.fromRow(const {'needs_you_verdict': null}).needsYouVerdict,
-        isNull,
-      );
-      expect(Message.fromRow(const {}).needsYouVerdict, isNull);
+    test('the needs-you probability keeps undecided apart from zero, and its '
+        'reason rides along', () {
+      expect(Message.fromRow(const {'needs_you_p': 0.72}).needsYouP, 0.72);
+      expect(Message.fromRow(const {'needs_you_p': 0}).needsYouP, 0.0);
+      // Load-bearing: NULL is "nothing has decided this row". A zero here
+      // would claim it had been decided.
+      expect(Message.fromRow(const {'needs_you_p': null}).needsYouP, isNull);
+      expect(Message.fromRow(const {}).needsYouP, isNull);
 
       expect(
         Message.fromRow(const {'needs_you_reason': 'teams_direct'})

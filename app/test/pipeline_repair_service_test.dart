@@ -7,6 +7,7 @@ import 'package:bond_inbox/services/progress_bus.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
 
 /// Retry: what it puts back on a queue, and what it refuses to touch.
@@ -44,7 +45,7 @@ void main() {
     String draftState = 'done',
     String outcome = 'pending',
     bool dropped = false,
-    int? needsYouVerdict,
+    double? needsYouP,
     String progressUpdatedAt = '2026-09-01T09:00:00Z',
   }) async {
     await store.upsertMessage({
@@ -59,11 +60,12 @@ void main() {
       'received_at': '2026-09-01T08:00:00Z',
       'triage_status': triageStatus,
     });
-    if (needsYouVerdict != null) {
-      await store.writeNeedsYouVerdict(
+    if (needsYouP != null) {
+      // The probability the repair keys on.
+      await store.writeNeedsYouP(
         source,
         id,
-        verdict: needsYouVerdict == 1,
+        p: needsYouP,
         reason: 'asks for the DPA by Friday',
       );
     }
@@ -127,11 +129,13 @@ void main() {
       // their turn.
       await Future<void>.delayed(Duration.zero);
 
-      expect(stages, ['triage', 'extract', 'needs_you', 'storyline', 'draft']);
+      // No needs-you: the triage pass writes the probability itself, so a
+      // message whose triage is owed does not owe the needs-you pass as well.
+      expect(stages, ['triage', 'extract', 'storyline', 'draft']);
       expect((await store.getMessageRow('email', 'm1'))!['triage_status'],
           'pending');
       expect(await workStatus('extract', 'm1'), 'pending');
-      expect(await workStatus('needs_you', 'm1'), 'pending');
+      expect(await workStatus('needs_you', 'm1'), isNull);
       // Storyline work is filed under the conversation key, never the message.
       expect(await workStatus('storyline', 'c1'), 'pending');
       expect(await workStatus('storyline', 'm1'), isNull);
@@ -141,6 +145,46 @@ void main() {
           isNot('2026-09-01T09:00:00Z'));
       // Triage before the worker, for the reason RestoreService chains them.
       expect(pumped, ['triage', 'work']);
+    });
+
+    test('a triaged message with no needs-you probability owes the pass',
+        () async {
+      await seed();
+      final service = PipelineRepairService(store);
+
+      expect(await service.retryOwed('email', 'm1'), ['needs_you']);
+      expect(await workStatus('needs_you', 'm1'), 'pending');
+    });
+
+    test('an ownerless decision owes the pass, though its p is shown',
+        () async {
+      await seed(needsYouP: 0.9);
+      await store.writeDecision(
+        'email',
+        'm1',
+        fakeDecision(fakeAnswers(needsYou: 0.9)),
+        qhash: 'test',
+        ownerKnown: false,
+      );
+      final service = PipelineRepairService(store);
+
+      expect(await service.retryOwed('email', 'm1'), ['needs_you']);
+      expect(await workStatus('needs_you', 'm1'), 'pending');
+    });
+
+    test('a decision made with the owner known owes nothing', () async {
+      await seed(needsYouP: 0.9);
+      await store.writeDecision(
+        'email',
+        'm1',
+        fakeDecision(fakeAnswers(needsYou: 0.9)),
+        qhash: 'test',
+        ownerKnown: true,
+      );
+      final service = PipelineRepairService(store);
+
+      expect(await service.retryOwed('email', 'm1'), isNot(contains('needs_you')));
+      expect(await workStatus('needs_you', 'm1'), isNull);
     });
 
     test('it says what it did, in the log as well as in the answer', () async {
@@ -166,7 +210,7 @@ void main() {
 
   group('what it refuses to touch', () {
     test('a finished row owes nothing, and the pumps still fire', () async {
-      await seed(outcome: 'done', needsYouVerdict: 1);
+      await seed(outcome: 'done', needsYouP: 1.0);
       final pumped = <String>[];
       final service = PipelineRepairService(
         store,
@@ -191,7 +235,7 @@ void main() {
     });
 
     test('a stage already in flight is left alone, and not claimed', () async {
-      await seed(extractState: 'pending', needsYouVerdict: 1);
+      await seed(extractState: 'pending', needsYouP: 1.0);
       await store.enqueueWork('extract', 'email', 'm1');
       await store.writeWork('extract', 'email', 'm1', status: 'processing');
       final service = PipelineRepairService(store);
@@ -232,7 +276,7 @@ void main() {
       // The message itself is triaged; what is left is the record of an
       // attempt that failed earlier. `reviveTriageFor` moves nothing there,
       // and a stage nothing moved must not be named.
-      await seed(triageState: 'error', needsYouVerdict: 1);
+      await seed(triageState: 'error', needsYouP: 1.0);
       final service =
           PipelineRepairService(store, activityLog: ActivityLog(store));
 
@@ -245,7 +289,7 @@ void main() {
       // Every stage terminal and the outcome still pending: the row is stuck
       // at the settle, which owns no queue, so nothing above can be owed. The
       // backstop sweep is the repair.
-      await seed(needsYouVerdict: 0);
+      await seed(needsYouP: 0.0);
       await store.writeAttentionScore('email', 'c1', 0.9);
       final service = PipelineRepairService(
         store,
@@ -261,7 +305,7 @@ void main() {
     });
 
     test('a service with no log and no pumps still works', () async {
-      await seed(extractState: 'pending', needsYouVerdict: 1);
+      await seed(extractState: 'pending', needsYouP: 1.0);
 
       expect(await PipelineRepairService(store).retryOwed('email', 'm1'),
           ['extract']);
@@ -270,7 +314,7 @@ void main() {
 
   group('ignore', () {
     test('the drop is written, announced, and written down', () async {
-      await seed(needsYouVerdict: 1);
+      await seed(needsYouP: 1.0);
       final bus = ProgressBus();
       final ticks = <ProgressTick>[];
       bus.ticks.listen(ticks.add);
@@ -368,7 +412,7 @@ void main() {
   group('rejudgeNeedsYou', () {
     test('a finished judgement goes back on the queue, and the queue turns',
         () async {
-      await seed(needsYouVerdict: 0);
+      await seed(needsYouP: 0.0);
       await store.enqueueWork('needs_you', 'email', 'm1');
       await store.writeWork('needs_you', 'email', 'm1', status: 'done');
       final pumped = <String>[];
@@ -395,7 +439,7 @@ void main() {
     });
 
     test('an item already in flight is never claimed', () async {
-      await seed(needsYouVerdict: 0);
+      await seed(needsYouP: 0.0);
       await store.enqueueWork('needs_you', 'email', 'm1');
       await store.writeWork('needs_you', 'email', 'm1', status: 'processing');
       final service =
@@ -482,7 +526,7 @@ void main() {
     });
 
     test('a row that owes nothing ticks nothing', () async {
-      await seed(outcome: 'done', needsYouVerdict: 1);
+      await seed(outcome: 'done', needsYouP: 1.0);
       final service = PipelineRepairService(
         store,
         progress: PipelineProgress(store, bus: bus),

@@ -81,7 +81,7 @@ page has the same shape in `settings_models_page.dart`.
 | Microsoft connection | any of `onBackendModeChanged`, `connectionStatus`, `hasScope`, `onSignIn` is wired | `MCP` or `This device`, then (MCP only) `Deployed` / `Local` / `Custom`, then `Checking…` / `Not signed in` / `Signed in as <label>` / `Signed in`, joined by ` · ` |
 | Models | `onUseDecision` wired | where each role runs, then the app's own server's state sentence, joined by ` · `: `Decision on this Mac` / `Decision on your server`, then `Generative on this Mac` / `Generative at <host>` / `Generative on your server` (no address yet), then e.g. `Running` |
 | Cloud drafts | `onUseCloudDrafts` wired (both scopes) | `Off`, or `<model> at <host>` for the target in force |
-| Needs You | always | the threshold wording, plus ` · custom rules` or ` · default rules` when `onNeedsYouRulesSaved` is wired, plus ` · judging N message(s)` while `needsYouRejudging` (the whole needs-you queue, from `needsYouPendingProvider`) is above zero — "judging", not "re-judging", because the count cannot tell a Save's rows from a sync's |
+| Needs You | always | `At 30% or more` — the slider's threshold as a percentage, `(threshold * 100).round()` |
 | Suggested replies | `onDraftPolicyChanged` wired (both scopes) | `For messages that need you` / `For every reply-worthy message` / `Only when asked` |
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
 | Activity log | `onShowActivityLogChanged` wired | `Shown in the sidebar` / `Hidden` |
@@ -104,11 +104,24 @@ same order, and drops the rest.
 `settings_sync_about_test.dart`). This table and those tests must agree; when
 one moves, move both.
 
-The Needs You wording is a five-step ladder on the stored threshold: `≥0.8`
-**Only the critical**, `≥0.6` **Close to critical**, `≥0.4` **A middle cut**,
-`≥0.2` **Leaning generous**, otherwise **Anything plausible**. Five words for
-ten stops, because the slider is a feel and a summary reading "0.7" would report
-an implementation detail at somebody who moved a slider.
+The Needs You slider is the owner's ONE control over what lands in Needs You:
+a threshold on the decision model's needs-you probability (`needs_you_threshold`,
+default **0.30**; see [pipeline/11-needs-you.md](pipeline/11-needs-you.md)). A
+message needs you when its probability is at or above it. The slider runs
+**right = more mail**, which is a LOWER threshold, so it is drawn over
+`[0.05, 0.95]` with `value = 0.95 + 0.05 − threshold` and **18 divisions**, one
+per 0.05 notch the stored pref can hold. Its ends read **Only the surest**
+(left) and **Anything plausible** (right). Under it, one line states the number,
+**Needs you at 30% or more** (keyed `settings-needs-you-threshold-line`), and a
+caption says what the number is: *The decision model's confidence that a message
+needs you. Each message shows its own percentage.* The percentage is the same
+one every message shows in its Why panel and history row and every thread shows
+beside its reason, so a row at 72% is in Needs You exactly when this line says
+70% or less. There is no editable Needs You text: no language model is asked
+about needs-you, so there is no prompt to edit. The old `attention_threshold`
+setting is not carried over: its scale was the 0..2 attention score, not a
+probability, so the Needs You slider starts at its default of 30% and the old
+value is simply never read again.
 
 The section's last control is a switch, **Sending a reply marks it done** — *A
 thread leaves Needs You as soon as you answer it, instead of waiting for you to
@@ -117,8 +130,8 @@ mark it done.* — keyed `settings-reply-send-marks-done` and wired by
 a cleared thread are two different claims: an answer that asks a question back is
 still the reader's to watch. It is last in the section because everything above
 it decides what ENTERS the pile and this one says when a thread leaves. It does
-not appear in the section summary: the summary already carries three clauses, and
-the threshold is the thing a reader scans that line for.
+not appear in the section summary: the threshold is the thing a reader scans that
+line for.
 
 With it on, a sent reply on a thread of the Needs You pile is marked done the
 way `e` does it, so the view lands on the next row and the progress count
@@ -138,11 +151,11 @@ be checked by the person who flipped it. The threshold slider writes on release
 (`onChangeEnd`), not per pixel — each write persists a preference and reloads
 the list.
 
-**The two free texts commit on their own Save and on nothing else.** About me
-and the Needs You rules each have a Cancel/Save footer. Cancel puts the last
-saved text back in the field and stays; Save writes and stays, and the saved
-text becomes the new baseline, so a second edit is dirty against the first save.
-Both buttons are disabled while the field is clean.
+**The free text commits on its own Save and on nothing else.** About me has a
+Cancel/Save footer. Cancel puts the last saved text back in the field and stays;
+Save writes and stays, and the saved text becomes the new baseline, so a second
+edit is dirty against the first save. Both buttons are disabled while the field
+is clean.
 
 **Each server form commits on Connect only.** One address, its discovered
 model name and its key travel together in one write, because an address sent
@@ -159,8 +172,8 @@ gone — and Cancel means cancel, leaving means leaving.
 
 **An identity wipe is adopted only by a clean field.** A sign-in from inside
 Settings can change the identity, which clears the previous person's about-me
-and rules to `''`. Both editors adopt the new prop in `didUpdateWidget` when —
-and only when — their field is not dirty. An unsaved edit is the user's and is
+to `''`. The editor adopts the new prop in `didUpdateWidget` when — and only
+when — its field is not dirty. An unsaved edit is the user's and is
 never overwritten.
 
 **The custom server URL is the exception**, because it has no Save of its own.
@@ -190,8 +203,8 @@ Read by exactly one step of the pipeline: draft generation
 same prompt), reached through `DraftHandler` and clamping the text to **600
 characters**. (The 27B reply decision read it too until the decision model's
 `reply_expected` replaced it.) Nothing else
-reads it — not triage, not storylines, and deliberately not the Needs You
-judgement, which excludes it on purpose (see
+reads it — not triage, not storylines, and not the Needs You probability,
+which is the decision model's (see
 [pipeline/11-needs-you.md](pipeline/11-needs-you.md)).
 
 The field enforces `maxLength: 600` so the cap the prompt applies is visible.
@@ -234,10 +247,10 @@ underneath and the section re-asks, so the user sees what their own click did.
 ## Host wiring
 
 `SettingsHost` in `app/lib/screens/settings_host.dart` builds it, and
-**`ref.watch(appPrefsProvider)`, not `ref.read`**. The Needs You summary reads
-the stored rules to say whether they are custom, so a Save inside the screen
-only moves that line because the host rebuilds. Optimising the watch back to a
-read would silently stop the summary following saves.
+**`ref.watch(appPrefsProvider)`, not `ref.read`**. A write from inside the
+screen (the About me Save, a role's Connect) only moves the summary lines
+because the host rebuilds. Optimising the watch back to a read would silently
+stop the summaries following saves.
 
 Every closure that touches `ref` keeps its `mounted` guard. The work behind them
 outlives the pane — a sign-in still out in the browser, a sign-out from the rail
@@ -245,8 +258,7 @@ outlives the pane — a sign-in still out in the browser, a sign-out from the ra
 dispose".
 
 **What the host owns, and the two seams it does not.** Everything only
-settings calls lives on `_SettingsHostState`: `_saveNeedsYouRules`,
-`_clearAiResults`, `_forgetAndResync`, `_resetPipeline`,
+settings calls lives on `_SettingsHostState`: `_clearAiResults`, `_forgetAndResync`, `_resetPipeline`,
 `_reloadAfterBackendChange`, `_connectionStatus` and `_connectMicrosoft`. A new
 settings-only writer goes here, not on the inbox. The three server mutators
 went with the Local server card in Round H: the managed-server switch became a
@@ -697,7 +709,7 @@ with it.
 |---|---|---|---|
 | **Stop sending drafts anywhere** | `settings-stop-cloud-drafts{,-confirm,-keep}` | the cloud-drafts target (its address, its model and its `cloud-drafts` key) and then `cloud_drafts_consent`, so both drafting stages resolve to the generative model again | every row, and the Decision and Generative models' own settings and keys |
 | **Clear AI results** | `settings-clear-ai-results{,-confirm,-keep}` | every triage verdict, summary, storyline, draft, digest and embedding — the sixteen `MessageStore.derivedTables`, the verdict columns on `messages` and `conversations`, and the stage markers on `attachments` and the library; the activity log is one of the sixteen, so today's **Cloud drafts** count starts again at zero, which the caption above the buttons says | mail, Teams messages, attachments, registered directories, the sign-in and every preference |
-| **Forget everything and re-sync** | `settings-forget-resync{,-confirm,-keep}` | everything above **and** the mailbox itself — `MessageStore.wipeAll(keepIdentity: true)`, cursors and bootstrap floors included | the sign-in, the about-me text, the Needs You rules, the sender rules, the registered directories and every setting |
+| **Forget everything and re-sync** | `settings-forget-resync{,-confirm,-keep}` | everything above **and** the mailbox itself — `MessageStore.wipeAll(keepIdentity: true)`, cursors and bootstrap floors included | the sign-in, the about-me text, the sender rules, the registered directories and every setting |
 
 **Stop sending drafts anywhere** is the one-button revoke, in the same
 two-step and above the two resets. It makes its writes in one order that

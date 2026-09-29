@@ -38,9 +38,9 @@ class MessageHistoryNotifier extends StateNotifier<AsyncValue<MessageHistory>> {
   final String source;
   final String sourceMessageId;
 
-  /// The attention bar, read live on every load rather than captured once: it
-  /// is a preference the owner can move, and a score shown against a stale
-  /// threshold explains the wrong decision.
+  /// The Needs You slider, read live on every load rather than captured once:
+  /// it is a preference the owner can move, and a probability read against a
+  /// stale threshold explains the wrong decision.
   final Future<double> Function() threshold;
 
   StreamSubscription<ProgressTick>? _ticks;
@@ -171,7 +171,7 @@ final messageHistoryProvider = StateNotifierProvider.autoDispose.family<
       source: key.source,
       sourceMessageId: key.id,
       bus: ref.watch(progressBusProvider),
-      threshold: attentionThresholdReader(store),
+      threshold: needsYouThresholdReader(store),
     );
     unawaited(notifier.load());
     return notifier;

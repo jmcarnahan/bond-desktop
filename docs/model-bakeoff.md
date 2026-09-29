@@ -281,15 +281,14 @@ of the set the rung actually touched.
 **What `make golden` runs since Phase 6.** Per item: the live decision model
 (`make decide`, `DECIDE_URL`; heads from `DECIDE_HEADS`) for gate, category,
 urgency, the booleans, intent and importance — the policy gate, the same
-answers `make golden-decision` scores; the app's needs-you ladder (the floor,
-then the decision's p(yes) against 0.65 / 0.35, and `NeedsYouTask` on the
-bulk slot only inside the band — the cold-outreach bar needs the owner's
-sender history, which a golden item does not carry, so the ordinary bar is
-used throughout); and ONE `MessageTextTask` call on the bulk slot for summary,
-action items, deadline, topics and project. One run file carries all of it,
-`label` and `evidence` absent. The per-item line prints `decision <ms>`,
-`needs_you <ms|floor|decided>`, `text <ms>` and counts; the summary line
-prints the decision p50/p95 and the band size. Rows before Phase 6 are the
+answers `make golden-decision` scores; the app's needs-you rule (the
+decision's p(yes) at or above the slider's default,
+`NeedsYouTuning.defaultThreshold`, with no floor and no language model; rows
+before 2026-09-29 ran the band on `NeedsYouTask`); and ONE `MessageTextTask`
+call on the bulk slot for summary, action items, deadline, topics and project.
+One run file carries all of it, `label` and `evidence` absent. The per-item
+line prints `decision <ms>`, `needs_you decided`, `text <ms>` and counts; the
+summary line prints the decision p50/p95. Rows before Phase 6 are the
 TriageTask + NeedsYouTask + ExtractTask pipeline on the bulk slot (the
 baseline for the Phase 6 comparison is `p6-baseline-4b`).
 
@@ -334,11 +333,11 @@ Bedrock price table in `app/test/fixtures/golden_prices.dart`: zero for a local
 server, and BLANK — never zero — for a remote model the table does not price,
 because an unpriced cloud call is unknown rather than free.
 
-Two things the needs-you replay leaves out, for the same reason the draft
-below leaves things out: the attachment digests the handler passes (the set
-carries none) and this machine's custom needs-you rules — the replay runs the
-default prompt, so a row measures the shipped prompt on the model rather than
-one machine's rules on it.
+The needs-you replay is the app's rule and nothing else: the decision model's
+p(needs_you = yes) at or above the slider's default. Since 2026-09-29 there is
+no needs-you prompt, so no attachment digests and no owner-written rules to
+leave out; rows before that date ran the band on the default `NeedsYouTask`
+prompt.
 
 One comparability caveat. The replay runs triage, needs-you and extraction on
 gold-DROP items too — the gate strata need reading — where the shipping app
@@ -1966,6 +1965,12 @@ reply_expected 49/55, needs_you 42/55 (p ≥ 0.5). Of the 29 category disagreeme
 `personal` read as `work` and 3 its `work` read as `notification`; of the 21 urgency disagreements,
 17 are the 4B's `normal` read as `low` and 4 its `normal` read as `high`. The learned gate would add 2 drops to the rules' 55 keeps. Needs-you:
 41 yes, 11 no and 3 in the band, the only 3 of 55 that still cost a generative call.
+
+**Needs-you threshold sweep** (2026-09-29, the stored golden decision run, keep-only 76 items,
+`needs_you` scored at each threshold): 0.20→66, 0.25→67, 0.30→69 (fp1 fn6), 0.35→68, 0.40→67,
+0.45→68, 0.50→67 (fp0 fn9), 0.55→67, 0.60–0.75→66, 0.80→65 of 76. Shipped default 0.30, the low
+end of the 0.30–0.55 plateau (`NeedsYouTuning.defaultThreshold`, the owner's Needs You slider);
+the band and the 27B needs-you call removed.
 
 ### Recommendations (decision-model round, 2026-09-28)
 

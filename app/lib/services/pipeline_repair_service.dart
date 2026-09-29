@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import '../data/message_store.dart';
 import 'activity_log.dart';
 import 'ai_workers.dart';
-import 'attention.dart';
+import 'decision/needs_you_predicate.dart';
 import 'pipeline_progress.dart';
 
 /// Every per-message lever that is not Restore: retry, ignore, re-judge.
@@ -37,7 +37,7 @@ class PipelineRepairService {
   final Future<void> Function()? _pumpWork;
   final ActivityLog _log;
 
-  /// The attention floor the settle backstop judges against, so a row this
+  /// The Needs You slider the settle backstop judges against, so a row this
   /// service closes out is closed on the same number the coordinator would
   /// have used.
   final Future<double> Function()? _threshold;
@@ -118,10 +118,19 @@ class PipelineRepairService {
       await _requeue('extract', source, sourceMessageId, stages);
     }
 
-    // The verdict and not the stage state, because needs-you has no column on
-    // `message_progress`: a null verdict IS the stage still being owed.
-    if (message['needs_you_verdict'] == null) {
-      await _requeue('needs_you', source, sourceMessageId, stages);
+    // The probability and not the stage state, because needs-you has no
+    // column on `message_progress`: a triaged, kept, inbound message with no
+    // `needs_you_p` IS the stage still being owed, and so is one whose
+    // decision was made without the owner line (shown, but untrusted until the
+    // pass decides it again with the owner). Only a triaged one, since the
+    // needs-you pass decides nothing triage has not finished with.
+    if (message['direction'] == 'inbound' &&
+        message['triage_status'] == 'triaged') {
+      final decision = await _store.decisionFor(source, sourceMessageId);
+      final ownerless = decision != null && !decision.ownerKnown;
+      if (message['needs_you_p'] == null || ownerless) {
+        await _requeue('needs_you', source, sourceMessageId, stages);
+      }
     }
 
     // Keyed by the CONVERSATION, because storyline assignment is a question
@@ -220,9 +229,8 @@ class PipelineRepairService {
   ///
   /// Distinct from [retryOwed], which only ever requeues a stage a row still
   /// OWES: this deliberately re-runs one that finished, because the owner has
-  /// seen the verdict and disagrees with the reasoning behind it — a rules
-  /// edit, a document that has landed since, a thread that reads differently
-  /// now. `requeueWork` revives a `done` or `error` row and leaves anything
+  /// seen the probability and wants it settled again — a decision made before
+  /// the owner was known, a thread that reads differently now. `requeueWork` revives a `done` or `error` row and leaves anything
   /// else alone, which is exactly the semantics wanted.
   ///
   /// False rather than a re-judge in three cases, each an honest "nothing to
@@ -293,16 +301,16 @@ class PipelineRepairService {
   }
 
   /// The settle machine's own reader, degraded the same way — see
-  /// `NotificationCoordinator._attentionThreshold`. A preference that cannot be
-  /// read is a default, never a failed repair.
+  /// `NotificationCoordinator._needsYouThreshold`. A preference that cannot
+  /// be read is a default, never a failed repair.
   Future<double> _thresholdOrDefault() async {
     final read = _threshold;
-    if (read == null) return AttentionTuning.defaultThreshold;
+    if (read == null) return NeedsYouTuning.defaultThreshold;
     try {
       return await read();
     } catch (e) {
-      debugPrint('retry: reading the attention threshold failed: $e');
-      return AttentionTuning.defaultThreshold;
+      debugPrint('retry: reading the needs-you threshold failed: $e');
+      return NeedsYouTuning.defaultThreshold;
     }
   }
 }

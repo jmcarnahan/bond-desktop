@@ -24,7 +24,6 @@ import '../services/attachments/attachment_digest_handler.dart';
 import '../services/attachments/attachment_retriever.dart';
 import '../services/attachments/attachment_text_handler.dart';
 import '../services/attachments/html_snapshot.dart' show htmlSnapshotPng;
-import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/attachment_backend.dart';
 import '../services/backend/auth_session.dart';
@@ -44,7 +43,6 @@ import '../services/draft_stream.dart';
 import '../services/drain_gate.dart';
 import '../services/embed_handler.dart';
 import '../services/extract_handler.dart';
-import '../services/external_sender.dart';
 import '../services/gate_repair_service.dart';
 import '../services/graph_attachment_backend.dart';
 import '../services/graph_auth.dart';
@@ -702,20 +700,20 @@ final pipelineProgressProvider = Provider<PipelineProgress>(
   ),
 );
 
-/// The user's attention floor, read fresh on every call.
+/// The Needs You slider, read fresh on every call: the store-level twin of
+/// [AppPrefs.needsYouThreshold] for the services that cannot import the
+/// providers.
 ///
-/// A shared closure rather than three copies of the same four lines, because
-/// three things now judge against this number and they have to judge against
-/// the SAME one: the settle machine deciding whether to interrupt, the
-/// needs-you handler moving a chip after a re-verdict, and the sync's one-shot
-/// backfill raising chips over history. A slider read differently by any of
-/// them is a tile disagreeing with the toast it came from.
-Future<double> Function() attentionThresholdReader(MessageStore store) =>
-    () async {
-      final raw = await store.getPref(attentionThresholdKey);
-      return (raw == null ? null : double.tryParse(raw)) ??
-          AttentionTuning.defaultThreshold;
-    };
+/// A shared closure rather than copies of the same lines, because several
+/// things judge against this number and they have to judge against the SAME
+/// one: the settle machine deciding whether to interrupt, the needs-you
+/// handler moving a chip after a re-decision, the sync's backfill raising
+/// chips over history, and the text and draft passes choosing what to do
+/// first. A slider read differently by any of them is a tile disagreeing with
+/// the toast it came from. Parsed the one way, by
+/// [MessageStore.needsYouThreshold].
+Future<double> Function() needsYouThresholdReader(MessageStore store) =>
+    store.needsYouThreshold;
 
 /// The settle machine. Watches ONLY the store and the log, so a backend
 /// switch — which rebuilds the session, both backends, the sync service and
@@ -727,7 +725,7 @@ final notificationCoordinatorProvider = Provider<NotificationCoordinator>((ref) 
     store,
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
-    attentionThreshold: attentionThresholdReader(store),
+    needsYouThreshold: needsYouThresholdReader(store),
   );
   unawaited(coordinator.start());
   ref.onDispose(coordinator.dispose);
@@ -888,8 +886,8 @@ final syncServiceProvider = Provider<MailSync>(
           (account) => account?.mail ?? account?.userPrincipalName,
         ),
     // For the one-shot needs-you backfill, which judges history against the
-    // same floor the settle machine judges live mail against.
-    attentionThreshold: attentionThresholdReader(ref.watch(messageStoreProvider)),
+    // same slider the settle machine judges live mail against.
+    needsYouThreshold: needsYouThresholdReader(ref.watch(messageStoreProvider)),
     // `ref.read` inside the closure, never `watch`: watching would rebuild
     // this provider — and abort the drain running on it — the moment someone
     // moved the setting, the same hazard [stageLlmClientProvider] documents
@@ -1304,7 +1302,7 @@ final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
     // stage on any of the three.
     pumpWork: () => ref.read(aiWorkersProvider).pumpAll(),
     // For the settle backstop a Retry runs when a row owes no stage at all.
-    threshold: attentionThresholdReader(ref.watch(messageStoreProvider)),
+    threshold: needsYouThresholdReader(ref.watch(messageStoreProvider)),
     // An Ignore is a gate arriving after the pipeline has already run.
     onGated: (source, id) => ref
         .read(gateRepairServiceProvider)
@@ -1334,16 +1332,7 @@ final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
 /// draft lanes are on gates of their own and dial the same generative model,
 /// so the SERVER queues whatever they add.
 final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
-  // Named before it is built, because one handler below has to reach it: the
-  // digest's requeue wakes the drain it is running inside, and a `ref.read` of
-  // THIS provider from inside its own body is what Riverpod's
-  // `_debugAssertCanDependOn` refuses — "A provider cannot depend on itself" —
-  // on a `read` as much as on a `watch`. Every debug build threw it out of the
-  // handler's `run` from the first digest that carried an ask. A late local is
-  // assigned by the time any handler runs and reads no provider at all; it is
-  // the same shape [_lane] uses for its own `onDrained`.
-  late final AiWorker worker;
-  worker = _lane(
+  final worker = _lane(
     ref,
     handlers: [
       // First, and it drains completely before extraction starts. The verdict
@@ -1354,22 +1343,17 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       // written yet.
       NeedsYouHandler(
         ref.watch(messageStoreProvider),
-        // The generative model, like every text stage. See
-        // [stageLlmClientProvider].
-        ref.watch(stageLlmClientProvider('needs_you')),
+        // The decision model, for a message whose decision is missing or was
+        // made without the owner known. The same client the triage pass uses.
+        decisionClient: ref.watch(decisionClientProvider),
         activityLog: ref.watch(activityLogProvider),
-        // A verdict this pass CHANGES has to move the chip beside it, and
+        // An answer this pass CHANGES has to move the chip beside it, and
         // moving it means re-asking `notifyWorthy` — which needs the recorder
-        // to write through and the same floor the settle machine used.
+        // to write through and the owner's slider.
         progress: ref.watch(pipelineProgressProvider),
-        attentionThreshold:
-            attentionThresholdReader(ref.watch(messageStoreProvider)),
+        needsYouThreshold:
+            needsYouThresholdReader(ref.watch(messageStoreProvider)),
         owner: _ownerLookup(ref),
-        // The owner's own organisation, so the handler can tell a stranger's
-        // first approach from a colleague's question. Same shape as `owner`
-        // above and for the same reason: the account is a keychain read, and
-        // most builds of this provider never drain.
-        ownerDomains: _ownerDomainsLookup(ref),
       ),
       // The message-text stage next (kind `extract`), and it drains completely
       // before either storyline handler starts. That order is the point: it is
@@ -1442,13 +1426,6 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(stageLlmClientProvider('attachment_digest')),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
-        // The worker this handler runs inside — the late local above, never a
-        // `ref.read` of this lane's own provider: Riverpod asserts
-        // self-dependency on a `read` too, and the note at the top of this
-        // body says what that cost. `pump` on a running drain only sets a
-        // flag and hands back that drain's future, which is why it is not
-        // awaited: see [AttachmentDigestHandler].
-        onRequeue: () => unawaited(worker.pump()),
       ),
       // The owner's own directories, read here and nowhere else in the drain.
       // It talks to no chat model — the embedding server is its only server —
@@ -1711,7 +1688,7 @@ final Provider<AiWorker> draftWorkerProvider = Provider<AiWorker>((ref) {
 ///
 /// A callback, not a value: the account is a keychain read, and both callers
 /// are built by plenty that never drains. Each caller asks once, on the first
-/// item that reaches a model. Until the answer arrives the needs-you prompt
+/// item that reaches a model. Until the answer arrives the needs-you decision
 /// names no owner and the storyline overlap rule counts everyone as not the
 /// owner, which is the stricter reading of both.
 OwnerLookup _ownerLookup(Ref ref) => () =>
@@ -1722,32 +1699,6 @@ OwnerLookup _ownerLookup(Ref ref) => () =>
                   name: account.displayName,
                   address: account.mail ?? account.userPrincipalName,
                 ),
-        );
-
-/// Which mail domains count as INSIDE the owner's organisation, from the same
-/// account [_ownerLookup] reads.
-///
-/// One domain, taken off the signed-in address, and no way yet for the owner to
-/// add a second. That is a deliberate floor rather than the finished feature:
-/// an owner with a parent company, an acquired brand or a personal address that
-/// is really theirs has more than one, and the list they would type belongs in
-/// Settings. Until it exists, the one domain the app can KNOW is better than
-/// none — see [isColdOutreach] for why a wrong answer here costs a ranking and
-/// never a message.
-///
-/// Normalised exactly the way `IdentityGuard` normalises the owner's address —
-/// `mail` first, `userPrincipalName` behind it, trimmed and lower-cased — so the
-/// two never disagree about who the owner is. An account that has not arrived,
-/// or one with no address at all, yields the EMPTY set, which
-/// [isExternalAddress] reads as "cannot tell" and answers false to: no account
-/// means no strangers, which is the reading that changes nothing.
-Future<Set<String>> Function() _ownerDomainsLookup(Ref ref) => () =>
-    ref.read(authSessionProvider).storedAccount.then(
-          (account) => ownerDomainsOf(
-            account == null
-                ? null
-                : account.mail ?? account.userPrincipalName,
-          ),
         );
 
 /// Reads the processing switch, for a drain that asks on every launch

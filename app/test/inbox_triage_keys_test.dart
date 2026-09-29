@@ -39,6 +39,7 @@ import 'package:http/testing.dart';
 
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// Keyboard triage over a real store: the keys, the auto-advance, the undo.
 ///
@@ -290,6 +291,7 @@ void main() {
       'received_at': received,
       'body_text': 'the hero paragraph',
     });
+    await seedNeedsYou(store, 'email', '$key-m1');
     await store.upsertConversation({
       'source': 'email',
       'conversation_key': key,
@@ -344,9 +346,6 @@ void main() {
       await store.setPref(backendModeKey, backendModeSdk);
     }
 
-    // Everything eligible reaches Needs You: the scoring pass lands a few pumps
-    // in, and the default slider would cut rows this file walks with.
-    await store.setPref(attentionThresholdKey, '0');
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),

@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/message_store.dart';
 import '../models/home_models.dart';
+import '../services/decision/needs_you_predicate.dart';
 import '../services/message_search.dart';
 import '../services/progress_bus.dart';
 import '../services/search_grammar.dart';
@@ -136,7 +137,7 @@ class HomeFeedState {
   /// feature is off.
   final String? searchNotice;
 
-  /// The attention slider's setting, as the feed reads it.
+  /// The Needs You slider's setting, as the feed reads it.
   ///
   /// Only [HomeFilter.needsYou] uses it, and it is here rather than read from
   /// the prefs at the call site because the page read and the live patch both
@@ -160,7 +161,7 @@ class HomeFeedState {
     this.search,
     this.searching = false,
     this.searchNotice,
-    this.threshold = 0,
+    this.threshold = NeedsYouTuning.defaultThreshold,
   });
 
   /// Whether dropped rows can be in this answer — DERIVED from [filter] rather
@@ -322,7 +323,7 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
     this._store, {
     HomeSort sort = HomeSort.newest,
     List<String> sources = const ['email', 'teams'],
-    double threshold = 0,
+    double threshold = NeedsYouTuning.defaultThreshold,
     Future<void> Function(HomeSort value)? persistSort,
     this._searchRunner,
     ProgressBus? bus,
@@ -478,7 +479,7 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
     await _reaskStandingSearch();
   }
 
-  /// Follows the attention slider.
+  /// Follows the Needs You slider.
   ///
   /// The rows on screen were read against the old number, so this goes back to
   /// page one exactly as a filter change does — under Needs You a thread that
@@ -1017,7 +1018,7 @@ final homeFeedProvider =
     // Read for the same reason, and followed below rather than watched: the
     // slider is the rail's, and moving it must narrow the Needs You tile and
     // the rows under it without throwing away the pages already walked.
-    threshold: ref.read(appPrefsProvider).attentionThreshold,
+    threshold: ref.read(appPrefsProvider).needsYouThreshold,
     persistSort: (value) =>
         ref.read(appPrefsProvider.notifier).setHomeSort(value),
     // Read inside the closure, so the search stack — the embedding client and
@@ -1039,7 +1040,7 @@ final homeFeedProvider =
   // watched so the slider reloads page one instead of rebuilding the notifier,
   // and so the tile and the table are counting against the same bar.
   ref.listen<double>(
-    appPrefsProvider.select((p) => p.attentionThreshold),
+    appPrefsProvider.select((p) => p.needsYouThreshold),
     (_, value) => notifier.setThreshold(value),
   );
   return notifier;
@@ -1065,7 +1066,7 @@ final homeMetricsProvider = FutureProvider.autoDispose<HomeMetrics>((ref) {
         // one number. Watched rather than read: moving the slider has to move
         // the tile, and the feed is following the same pref beside it.
         threshold:
-            ref.watch(appPrefsProvider.select((p) => p.attentionThreshold)),
+            ref.watch(appPrefsProvider.select((p) => p.needsYouThreshold)),
         // Computed here and bound once, so every row the tile is counting is
         // measured against the same instant the rows themselves are. Through
         // `isoStamp` because it is compared against a stored stamp — see

@@ -3,6 +3,7 @@ import 'dart:convert';
 import '../data/message_store.dart';
 import '../models/message_models.dart';
 import 'attention.dart';
+import 'decision/needs_you_predicate.dart';
 import '../models/extraction_models.dart';
 
 /// Scores and files the whole mailbox in one pass.
@@ -46,7 +47,12 @@ class AttentionService {
     // One set for the whole mailbox rather than a query per thread: this pass
     // runs on every list load, and the open-ask question would otherwise be
     // hundreds of round trips behind each one.
-    final openAsks = await _store.openAskThreads(sources: sources);
+    //
+    // The owner's slider is read once for the pass, so every thread's ask is
+    // judged against the same number the rail and the tile read.
+    final threshold = await _store.needsYouThreshold();
+    final openAsks =
+        await _store.openAskThreads(sources: sources, threshold: threshold);
     // One rate map, built from a call per source rather than one merged query:
     // each source's denominator stays its own, so a mailbox the user answers
     // and a chat backlog they do not cannot average into a middling nudge for
@@ -79,7 +85,10 @@ class AttentionService {
             latestNeedsAction: _tristate(latest?['needs_action']),
             latestDeadline: latest?['deadline'] as String?,
             addressedMe: ((latest?['addressed_me'] as num?) ?? 0) != 0,
-            needsYouVerdict: _tristate(latest?['needs_you_verdict']),
+            needsYou: needsYouAt(
+              (latest?['needs_you_p'] as num?)?.toDouble(),
+              threshold,
+            ),
             now: at,
           ),
         );
@@ -143,7 +152,7 @@ class AttentionService {
             intent: extraction.intent,
             importance: extraction.importance,
             needsReply: conversation.state == ConversationState.needsReply,
-            needsYouVerdict: hasOpenAsk,
+            needsYou: hasOpenAsk,
           );
 
     if (bucket != null) {
@@ -166,8 +175,7 @@ class AttentionService {
     );
   }
 
-  /// One of the 0/1/NULL judgment columns — triage's, or the needs-you
-  /// stage's — as a nullable bool.
+  /// One of triage's 0/1/NULL judgment columns as a nullable bool.
   ///
   /// The null has to survive the trip intact: it means nothing ever judged this
   /// message, which the scorer treats as a different thing from a stage having

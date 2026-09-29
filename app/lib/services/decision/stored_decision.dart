@@ -31,8 +31,9 @@ class StoredDecision {
   final bool truncated;
 
   /// Whether the state the model read carried an owner line. False for an
-  /// ownerless decision AND for a row written without the key, which the
-  /// needs-you pass treats like no decision at all.
+  /// ownerless decision AND for a row written without the key. Its needs-you
+  /// probability is shown but untrusted: the needs-you pass decides the
+  /// message again once the owner is known.
   final bool ownerKnown;
 
   const StoredDecision({

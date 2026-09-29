@@ -16,6 +16,9 @@ import 'package:flutter_test/flutter_test.dart';
 
 const Owner _owner = (name: 'Dana Whitfield', address: 'dana@example.com');
 
+/// [_conv]'s needs-you probability: over the slider for a thread awaiting a
+/// reply or carrying an ask, undecided otherwise — what these tests mean by a
+/// thread "in Needs You".
 Conversation _conv({
   required String id,
   String? who,
@@ -39,6 +42,8 @@ Conversation _conv({
       unreadCount: unread,
       lastMessageAt: lastMessageAt,
       attachmentCount: attachments,
+      needsYouP:
+          state == ConversationState.needsReply || cta != null ? 0.9 : null,
       labels: [
         for (final name in labels)
           Label(id: name.toLowerCase().replaceAll(' ', '-'), name: name),

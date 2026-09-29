@@ -7,7 +7,7 @@ rather than a stored map:
 | Role | What it does | Where it can run |
 |------|--------------|------------------|
 | **Decision** | The fine-tuned ModernBERT classifier: one embedding call per message, nine heads applied in Dart | this Mac (Managed) or Your server |
-| **Generative** | Every piece of text: summaries, digests, briefs, storyline names and recaps, needs-you in the band, drafts | this Mac (Managed: the 27B or the 4B) or Your server |
+| **Generative** | Every piece of text: summaries, digests, briefs, storyline names and recaps, drafts | this Mac (Managed: the 27B or the 4B) or Your server |
 | **Embeddings** | Clustering and search vectors | this Mac, always; not a choice |
 
 Plus one optional target that is not a role: **cloud drafts**, the one place a
@@ -26,7 +26,7 @@ Every stage that dials a model has a row in `pipelineStages`, and the row's
 | Stage | Role |
 |-------|------|
 | `decision` | Decision |
-| `needs_you`, `message_text`, `attachment_digest`, `context_file_digest`, `context_brief`, `context_select` | Generative |
+| `message_text`, `attachment_digest`, `context_file_digest`, `context_brief`, `context_select` | Generative |
 | `storyline_membership`, `storyline_group`, `storyline_name`, `storyline_refresh`, `storyline_recap` | Generative |
 | `draft_reply`, `draft_improve` | Generative, or cloud drafts (below) |
 | `embeddings` | Embeddings, not routed |
@@ -55,18 +55,19 @@ row).
 **Classification is the decision model's; text is one generative call
 (Phases 5–6).** The triage queue runs one decision pass per kept inbound
 message and makes NO language-model call: the learned gate, urgency,
-category, the two booleans, the needs-you verdict outside its band and the
+category, the two booleans, the needs-you probability and the
 intent/importance filed into the extraction blob come from it (see
 [03-triage.md](03-triage.md) and [11-needs-you.md](11-needs-you.md)). The
 message's text is ONE generative call, the `message_text` stage
 (`MessageTextTask`, run by `ExtractHandler` under work kind `extract`: summary,
 action items, deadline, topics, project — see
 [04-extraction.md](04-extraction.md)). The retired `triage` and `extraction`
-stage rows are gone from `pipelineStages`; a per-message pipeline now costs
-the decision pass, the needs-you band when the decision is unsure, and one
-`message_text` call (plus the draft, when one is written). The label a call
-records (`LlmCallRecord.label`) is its schema: `decision`, `message_text`,
-`needs_you`, …
+stage rows are gone from `pipelineStages`, and so is `needs_you`: no
+language model is asked about needs-you at all (the owner's slider over the
+decision model's probability is the one rule). A per-message pipeline costs the
+decision pass and one `message_text` call (plus the draft, when one is
+written). The label a call records (`LlmCallRecord.label`) is its schema:
+`decision`, `message_text`, `attachment_digest`, …
 
 Why one generative model: the decision model answers every classification
 field in one forward pass of tens of milliseconds, so what is left for a chat
@@ -654,7 +655,7 @@ behind a recap and a new message never waits behind either:
 
 | Lane | Kinds, in drain order | Server(s) | Gate | Provider |
 |---|---|---|---|---|
-| Fast | `needs_you`, `extract`, `embed_message`, `attachment_text`, `attachment_digest`, `context_reconcile`, `context_digest`, `context_brief` | generative + embeddings | `fastDrainGateProvider`, shared with `TriageQueue` | `aiWorkerProvider` |
+| Fast | `needs_you`, `extract`, `embed_message`, `attachment_text`, `attachment_digest`, `context_reconcile`, `context_digest`, `context_brief` | decision (`needs_you` re-decides), generative + embeddings | `fastDrainGateProvider`, shared with `TriageQueue` | `aiWorkerProvider` |
 | Storyline | `storyline`, `storyline_sweep`, `storyline_refresh`, `storyline_audit`, `storyline_recruit`, `storyline_recap` | generative | `storylineDrainGateProvider` | `storylineWorkerProvider` |
 | Draft | `draft` | generative, or cloud drafts | `draftDrainGateProvider` | `draftWorkerProvider` |
 

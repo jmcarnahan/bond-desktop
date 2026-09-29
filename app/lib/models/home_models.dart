@@ -176,12 +176,12 @@ class HomeFeedRow {
   /// clock's zero, and empty only on a path that predates the column.
   final String updatedAt;
 
-  /// The needs-you judgement as it stands on the message. Null is its own
-  /// answer — nothing has judged this one yet — and is why it is not a plain
-  /// bool: "no" and "not asked" send a reader to different places.
-  final bool? needsYouVerdict;
+  /// The decision model's needs-you probability for the message, 0..1. Null
+  /// is its own answer — nothing has decided this one yet — and is not a low
+  /// probability: "no" and "not asked" send a reader to different places.
+  final double? needsYouP;
 
-  /// Why the verdict went that way, in the judge's own words.
+  /// What the probability rests on, in the decision's own words.
   final String? needsYouReason;
 
   /// Why triage let the message through, or did not. Distinct from
@@ -246,7 +246,7 @@ class HomeFeedRow {
     this.threadState,
     this.hasFile = false,
     this.updatedAt = '',
-    this.needsYouVerdict,
+    this.needsYouP,
     this.needsYouReason,
     this.gateReason,
     this.triageStatus = 'pending',
@@ -283,15 +283,8 @@ class HomeFeedRow {
         threadState: row['thread_state'] as String?,
         hasFile: (row['has_file'] as num?)?.toInt() == 1,
         updatedAt: row['updated_at'] as String? ?? '',
-        // Three-valued on purpose: null stays null, and only a stored 1 is a
-        // yes. Anything else the column could hold is a no. `Message.fromRow`
-        // reads the same column through its `_boolFromInt` (non-zero is a
-        // yes); the store normalises the column to 0/1/NULL, so the two agree
-        // on every value it can hold — keep them agreeing if either moves.
-        needsYouVerdict: switch (row['needs_you_verdict'] as num?) {
-          null => null,
-          final n => n.toInt() == 1,
-        },
+        // Null stays null: an undecided message is not a low one.
+        needsYouP: (row['needs_you_p'] as num?)?.toDouble(),
         needsYouReason: row['needs_you_reason'] as String?,
         gateReason: row['gate_reason'] as String?,
         triageStatus: row['triage_status'] as String? ?? 'pending',
@@ -351,7 +344,7 @@ class HomeFeedRow {
         threadState: threadState,
         hasFile: hasFile,
         updatedAt: updatedAt,
-        needsYouVerdict: needsYouVerdict,
+        needsYouP: needsYouP,
         needsYouReason: needsYouReason,
         gateReason: gateReason,
         // Not carried over, unlike the reason beside it: `restoreMessage`

@@ -291,6 +291,67 @@ void main() {
       expect(detail.containsKey('deadline'), isFalse);
     });
 
+    test('a kept message carries its needs-you probability and reason',
+        () async {
+      await seedMessage(id: 'm1', bodyText: 'Can you approve the quote?');
+      await seedConversation();
+
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(needsYou: 0.41, intent: 'approval'),
+        ),
+        owner: () async => (name: 'Ada Park', address: 'ada@example.com'),
+      ).pump();
+
+      final row = await messageRow('m1');
+      expect(row['needs_you_p'], closeTo(0.41, 1e-9));
+      expect(row['needs_you_reason'], 'Asks you to approve something.');
+      // The same number the decision row stores.
+      expect((await store.decisionFor('email', 'm1'))!.needsYouP,
+          closeTo(0.41, 1e-9));
+    });
+
+    test('a learned-gate drop carries no needs-you probability', () async {
+      await seedMessage(id: 'm1', from: 'helpdesk@example.com');
+      await seedConversation();
+
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(gateDrop: 0.93, dropReason: 'ticket_system', needsYou: 0.9),
+        ),
+        owner: () async => (name: 'Ada Park', address: 'ada@example.com'),
+      ).pump();
+
+      final row = await messageRow('m1');
+      expect(row['triage_status'], 'skipped');
+      expect(row['needs_you_p'], isNull);
+      expect(row['needs_you_reason'], isNull);
+    });
+
+    test('an ownerless decision is shown, and recorded as ownerless',
+        () async {
+      // ONE policy: an ownerless probability is written and shown, untrusted,
+      // and the needs-you pass decides the message again once the owner is
+      // known (`message_decisions.owner_known` is what says it is owed).
+      await seedMessage(id: 'm1');
+      await seedConversation();
+
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(
+            fakeAnswers(needsYou: 0.9, intent: 'question')),
+        owner: () async => null,
+      ).pump();
+
+      final row = await messageRow('m1');
+      expect(row['triage_status'], 'triaged');
+      expect(row['needs_you_p'], closeTo(0.9, 1e-9));
+      expect(row['needs_you_reason'], 'Asks you a question.');
+      expect((await store.decisionFor('email', 'm1'))!.ownerKnown, isFalse);
+    });
+
     test('a decision made before the owner is known says so', () async {
       await seedMessage(id: 'm1');
       final decision = FakeDecisionClient.fixed(fakeAnswers());

@@ -4,12 +4,13 @@ import 'dart:typed_data';
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/activity_log.dart';
+import 'package:bond_inbox/services/graph_auth.dart';
+import 'package:bond_inbox/services/graph_mail.dart';
 // `show`: the one thing this file wants from the embedding client is the pair
 // of tags the clustering one-shot moves between.
 import 'package:bond_inbox/services/llm/embeddings_client.dart'
     show EmbeddingsClient;
-import 'package:bond_inbox/services/graph_auth.dart';
-import 'package:bond_inbox/services/graph_mail.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:drift/drift.dart' show Variable;
@@ -17,6 +18,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
 
 /// Thread state at INGEST: the fold reads only the messages the gate kept.
@@ -189,6 +191,8 @@ void main() {
     int lookbackDays, {
     Future<({int repaired, bool complete})> Function()?
         repairGatedConversations,
+    PipelineProgress? progress,
+    String? userAddress,
   }) {
     final tokens = InMemoryTokenStore();
     tokens.values['refresh_token'] = 'rt-initial';
@@ -202,6 +206,8 @@ void main() {
       activityLog: ActivityLog(store),
       repairGatedConversations: repairGatedConversations,
       lookbackDays: () => lookbackDays,
+      progress: progress,
+      userAddress: userAddress == null ? null : () async => userAddress,
     );
   }
 
@@ -439,15 +445,163 @@ void main() {
       expect((await syncMailDetail())['regated_meeting_responses'], 2);
     });
 
-    test('the hedge re-judge re-queues in-window verdict-0 inbound once',
+    test('the chips are reconciled under the probability rule, even where '
+        'the verdict-era one-shots already ran', () async {
+      // Every machine that ran an earlier build has the OLD pair set, so the
+      // probability rule reconciles under keys of its own.
+      await store.setPref('needs_you_flag_backfill', '1');
+      await store.setPref('needs_you_flag_veto', '1');
+      await store.setPref('needs_you_model_revive', '1');
+      await store.setPref('needs_you_hedge_rejudge', '1');
+
+      /// A settled inbound with a stale snapshot [chip] and probability [p].
+      Future<void> settled(String id, {required double p, required int chip}) async {
+        final at = isoAgo(const Duration(hours: 6));
+        await store.upsertMessage({
+          'source': 'email',
+          'source_message_id': id,
+          'conversation_key': 'k-$id',
+          'direction': 'inbound',
+          'from_address': 'sam@example.com',
+          'subject': 'Numbers',
+          'received_at': at,
+          'triage_status': 'triaged',
+        });
+        await store.upsertConversation({
+          'source': 'email',
+          'conversation_key': 'k-$id',
+          'subject': 'Numbers',
+          'state': 'needs_reply',
+          'last_inbound_at': at,
+        });
+        await store.writeNeedsYouP('email', id, p: p, reason: 'Judged.');
+        await db.customUpdate(
+          "UPDATE message_progress SET settle_state = 'done', needs_you = ? "
+          'WHERE source_message_id = ?',
+          variables: [Variable<int>(chip), Variable<String>(id)],
+        );
+      }
+
+      await settled('owed-unchipped', p: 0.9, chip: 0);
+      await settled('below-chipped', p: 0.1, chip: 1);
+
+      await syncReaching(14, progress: PipelineProgress(store)).syncNow();
+
+      Future<int?> chip(String id) async => ((await db
+              .customSelect(
+                'SELECT needs_you FROM message_progress '
+                'WHERE source_message_id = ?',
+                variables: [Variable<String>(id)],
+              )
+              .getSingle())
+          .data['needs_you'] as num?)
+          ?.toInt();
+      // Each snapshot now says what the predicate says.
+      expect(await chip('owed-unchipped'), 1);
+      expect(await chip('below-chipped'), 0);
+      expect(await store.getPref('needs_you_flag_backfill_p'), '1');
+      expect(await store.getPref('needs_you_flag_veto_p'), '1');
+      expect(MessageStore.derivedOneShotPrefs,
+          containsAll(['needs_you_flag_backfill_p', 'needs_you_flag_veto_p']));
+    });
+
+    /// A triaged inbound with a stored decision, its probability on the row,
+    /// and a `needs_you` work row that ended [status].
+    Future<void> decided(
+      String id, {
+      required bool ownerKnown,
+      String status = 'done',
+    }) async {
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': id,
+        'conversation_key': 'k-$id',
+        'direction': 'inbound',
+        'from_address': 'sam@example.com',
+        'subject': 'Numbers',
+        'received_at': isoAgo(const Duration(hours: 5)),
+        'triage_status': 'triaged',
+      });
+      await store.writeDecision(
+        'email',
+        id,
+        fakeDecision(fakeAnswers(needsYou: 0.7)),
+        qhash: 'test',
+        ownerKnown: ownerKnown,
+      );
+      await store.writeNeedsYouP('email', id, p: 0.7, reason: 'Judged.');
+      // Answered, so the stale-triage re-pend leaves the row triaged.
+      await db.customUpdate(
+        'UPDATE messages SET reply_expected = 0 WHERE source_message_id = ?',
+        variables: [Variable<String>(id)],
+      );
+      await store.enqueueWork('needs_you', 'email', id);
+      await db.customUpdate(
+        'UPDATE work_items SET status = ? WHERE entity_id = ?',
+        variables: [Variable<String>(status), Variable<String>(id)],
+      );
+    }
+
+    test('an ownerless decision puts the needs-you pass back on the queue',
         () async {
-      // Old hedges were stored 0 and cannot be told from a real no, so every
-      // in-window 0 is asked again. Mail and chat alike; a yes, an unjudged
+      await store.setPref('needs_you_model_revive', '1');
+      await store.setPref('needs_you_hedge_rejudge', '1');
+      await decided('ownerless', ownerKnown: false);
+      await decided('owned', ownerKnown: true);
+
+      await syncReaching(14, userAddress: 'owner@example.com').syncNow();
+
+      expect(await store.workStatusOf('needs_you', 'email', 'ownerless'),
+          'pending');
+      expect(await store.workStatusOf('needs_you', 'email', 'owned'), 'done');
+      expect((await syncMailDetail())['requeued_needs_you_ownerless'], 1);
+    });
+
+    test('the ownerless requeue revives only a finished work row', () async {
+      // One the decision server keeps refusing is left in `error`: reviving
+      // it here would cost a call per sync, forever, with its attempts reset
+      // each time. Asked of the store directly, because the sync's own
+      // interrupted-work revive has its own rules for errored rows.
+      await decided('finished', ownerKnown: false);
+      await decided('refused', ownerKnown: false, status: 'error');
+      await decided('queued', ownerKnown: false, status: 'pending');
+
+      expect(await store.requeueOwnerlessNeedsYou(), 1);
+      expect(await store.workStatusOf('needs_you', 'email', 'finished'),
+          'pending');
+      expect(
+          await store.workStatusOf('needs_you', 'email', 'refused'), 'error');
+      expect(
+          await store.workStatusOf('needs_you', 'email', 'queued'), 'pending');
+    });
+
+    test('and nothing is swept while the owner is still unknown', () async {
+      // The pass would only keep each probability as it is: a whole queue
+      // of no-ops on every sync.
+      await store.setPref('needs_you_model_revive', '1');
+      await store.setPref('needs_you_hedge_rejudge', '1');
+      await decided('ownerless', ownerKnown: false);
+
+      await syncReaching(14).syncNow();
+
+      expect(await store.workStatusOf('needs_you', 'email', 'ownerless'),
+          'done');
+      expect(
+        (await syncMailDetail()).containsKey('requeued_needs_you_ownerless'),
+        isFalse,
+      );
+    });
+
+    test('the hedge re-judge re-queues in-window 0.0 inbound once',
+        () async {
+      // Old hedges were stored as a verdict of 0, carried across as a
+      // probability of 0.0, and cannot be told from a real no, so every
+      // in-window 0.0 is asked again. Mail and chat alike; a yes, an undecided
       // row, an outbound and a row behind the floor are left alone.
       Future<void> judged(
         String id, {
         String source = 'email',
-        int? verdict = 0,
+        double? p = 0.0,
         String direction = 'inbound',
         Duration ago = const Duration(hours: 20),
       }) async {
@@ -461,9 +615,8 @@ void main() {
           'received_at': isoAgo(ago),
           'triage_status': 'triaged',
         });
-        if (verdict != null) {
-          await store.writeNeedsYouVerdict(source, id,
-              verdict: verdict == 1, reason: 'Judged.');
+        if (p != null) {
+          await store.writeNeedsYouP(source, id, p: p, reason: 'Judged.');
         }
         // Finished once already, which is the row the enqueue will never
         // offer again.
@@ -474,14 +627,14 @@ void main() {
         );
       }
 
-      // The older revive one-shot re-asks every done row with a NULL verdict,
+      // The older revive one-shot re-asks every done row with no probability,
       // and it has closed on every installed machine. Closed here too, so the
-      // unjudged row below says what THIS one-shot leaves alone.
+      // undecided row below says what THIS one-shot leaves alone.
       await store.setPref('needs_you_model_revive', '1');
       await judged('mail-no');
       await judged('chat-no', source: 'teams');
-      await judged('mail-yes', verdict: 1);
-      await judged('mail-unjudged', verdict: null);
+      await judged('mail-yes', p: 0.9);
+      await judged('mail-unjudged', p: null);
       await judged('sent-no', direction: 'outbound');
       await judged('old-no', ago: const Duration(days: 40));
 

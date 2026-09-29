@@ -2,8 +2,6 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/providers/conversations_provider.dart';
-import 'package:bond_inbox/providers/prefs_provider.dart'
-    show attentionThresholdKey;
 import 'package:bond_inbox/services/attention_service.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/sync_service.dart';
@@ -99,13 +97,13 @@ void main() {
     return rows.isEmpty ? null : rows.single.data['needs_you'] as int?;
   }
 
-  /// A message judged a yes that settled WHILE its thread sat in Later, and
-  /// so took a chip of 0 on the strength of the bucket alone.
+  /// A message that needs the owner and settled WHILE its thread sat in
+  /// Later, and so took a chip of 0 on the strength of the bucket alone.
   Future<void> settleJudgedInLater(String key) async {
-    await store.writeNeedsYouVerdict(
+    await store.writeNeedsYouP(
       'email',
       '$key-m1',
-      verdict: true,
+      p: 0.9,
       reason: 'asks the owner to confirm',
     );
     await PipelineProgress(store).noteSettled(
@@ -231,10 +229,9 @@ void main() {
 
   test('a thread that comes back on its date gets its chips back too',
       () async {
-    // The snapshot follows the verdict, and no verdict moves when a bucket
-    // lifts: without the raise the message would be back in the inbox with a
-    // judged yes one table over and no chip, for good.
-    await store.setPref(attentionThresholdKey, '0');
+    // The snapshot follows the probability, and no probability moves when a
+    // bucket lifts: without the raise the message would be back in the inbox
+    // needing the owner and with no chip, for good.
     await seed('c1');
     final n = ConversationsNotifier(
       store,
@@ -254,7 +251,6 @@ void main() {
   });
 
   test('Keep in inbox gives the chips back the same way', () async {
-    await store.setPref(attentionThresholdKey, '0');
     await seed('c1');
     final n = ConversationsNotifier(
       store,

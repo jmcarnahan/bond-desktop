@@ -12,19 +12,21 @@ import 'time_format.dart';
 /// second copy of the token map is how the two start disagreeing about what
 /// `teams_direct` means.
 ///
-/// The reason arrives on [Conversation] off the newest kept inbound whose
-/// verdict was YES (`message_store.dart`'s `loadConversations`), so anything
-/// drawn here is an answer to "why does this want you", never to the opposite
-/// question.
+/// The reason arrives on [Conversation] off the kept inbound message, since the
+/// owner's last reply, with the HIGHEST needs-you probability
+/// (`message_store.dart`'s `loadConversations`), and that probability is
+/// [Conversation.needsYouP]. So the percentage drawn beside the reason is the
+/// number the owner's slider was compared against, from the message the reason
+/// names.
 
 /// The reason slug as words, or null when there is nothing honest to say.
 ///
 /// Two kinds of value reach here and each is treated differently:
 ///
-///  * `teams_direct` — the deterministic floor's token, and the one token the
-///    needs-you pass writes instead of a sentence. Translated.
-///  * anything else — the model's `evidence` line, already a sentence in the
-///    judge's own words. Passed through with its whitespace collapsed and
+///  * `teams_direct` — the old deterministic floor's token, which rows written
+///    before the decision model may still carry. Translated.
+///  * anything else — a sentence: the decision model's templated reason, or
+///    the evidence line an older build wrote. Passed through with its whitespace collapsed and
 ///    clamped to [maxChars]; paraphrasing it would be the app putting words in
 ///    its own mouth, and the same rule holds in `why_panel.dart`.
 ///
@@ -37,6 +39,19 @@ String? needsYouReasonWords(String? reason, {int maxChars = 120}) {
   final collapsed = text.replaceAll(RegExp(r'\s+'), ' ');
   if (collapsed.length <= maxChars) return collapsed;
   return '${collapsed.substring(0, maxChars).trimRight()}…';
+}
+
+/// [p] as the whole percentage every needs-you surface shows, or null when the
+/// message has not been decided. The Settings slider is set in the same unit,
+/// so the two read as one number.
+String? needsYouPercentWords(double? p) =>
+    p == null ? null : '${(p * 100).round()}%';
+
+/// [words] with the thread's probability after it, `<words> · 72%`, or
+/// [words] alone when there is no probability to show.
+String _withPercent(String words, double? p) {
+  final percent = needsYouPercentWords(p);
+  return percent == null ? words : '$words · $percent';
 }
 
 /// Whether [c] has a reason worth drawing: it is asking for a reply AND the
@@ -57,16 +72,22 @@ const Key needsYouWhyLineKey = ValueKey('needs-you-why-line');
 ///
 /// Clamped far shorter than the panel's line ([maxChars]): this sits on one
 /// line of metadata beside the label chips and the message count, and the full
-/// sentence is a click away in the thread.
+/// sentence is a click away in the thread. The clamp is on the reason alone;
+/// the thread's percentage ([Conversation.needsYouP]) is appended after it
+/// and never cut.
 List<Widget> needsYouReasonChips(Conversation c, {int maxChars = 36}) {
   if (c.state != ConversationState.needsReply) return const [];
   final words = needsYouReasonWords(c.needsYouReason, maxChars: maxChars);
   if (words == null) return const [];
-  return [BondChip.metric(words, key: needsYouReasonChipKey)];
+  return [
+    BondChip.metric(_withPercent(words, c.needsYouP),
+        key: needsYouReasonChipKey),
+  ];
 }
 
-/// `Why: <reason> · <when>` — the line under a thread's header that says which
-/// message made it ask for you, and when that message arrived.
+/// `Why: <reason> · 72% · <when>` — the line under a thread's header that says
+/// which message made it ask for you, how sure the decision model was of it,
+/// and when that message arrived.
 ///
 /// With [onTap] wired the line is also the way THERE: it scrolls the transcript
 /// to that message and flashes it, which is the half of entry 8a naming the
@@ -83,6 +104,10 @@ class NeedsYouWhyLine extends StatelessWidget {
   /// read that did not ask for it — drops the stamp and keeps the reason.
   final String? at;
 
+  /// The thread's needs-you probability ([Conversation.needsYouP]), drawn as
+  /// a percentage after the reason. Null draws no percentage.
+  final double? p;
+
   /// Jump to the message the reason came from. Resolved by the host from
   /// `needs_you_reason_message_id`, so this widget never learns which message
   /// that is. Null leaves the line inert.
@@ -92,13 +117,15 @@ class NeedsYouWhyLine extends StatelessWidget {
     super.key,
     required this.reason,
     this.at,
+    this.p,
     this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    final words = needsYouReasonWords(reason);
-    if (words == null) return const SizedBox.shrink();
+    final reasonWords = needsYouReasonWords(reason);
+    if (reasonWords == null) return const SizedBox.shrink();
+    final words = _withPercent(reasonWords, p);
     final stamp = formatTimestamp(at);
     final line = Text(
       stamp == null ? 'Why: $words' : 'Why: $words · $stamp',

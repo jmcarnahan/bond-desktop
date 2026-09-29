@@ -48,8 +48,9 @@ import 'fixtures/test_db.dart';
 /// the point of it. In `single` the one worker is mid-pass when the message
 /// lands, so the number INCLUDES waiting for that pass — every draft in it —
 /// before the extract handler comes round again. In `lanes` the drafts are on
-/// another gate, so it should be one triage plus one needs-you plus one
-/// message text call. The gap between the two is what T1 is about.
+/// another gate, so it should be one triage plus one message text call
+/// (needs-you makes no model call on the default prompt). The gap between the
+/// two is what T1 is about.
 ///
 /// What each message costs the servers, since the decision model:
 ///
@@ -59,11 +60,12 @@ import 'fixtures/test_db.dart';
 ///   answers instantly — keep, `normal`, `work` — so triage costs ~nothing
 ///   here and its real cost (one embedding call per message on :8083) is NOT
 ///   in any wall below. `make golden-decision` is where that is measured;
-/// - its p(needs_you) is 0.5, INSIDE the band, so every message's needs-you
-///   still asks the bulk server (`NeedsYouTask`, `needs_you` in the table).
-///   That is the worst case — the app settles a message outside the band
-///   without a call — and it is what every historical row paid, so the walls
-///   stay comparable;
+/// - needs-you is the decision model's p(needs_you) against the owner's
+///   slider, read with no language-model call on the default prompt, so no
+///   `needs_you` line appears in the table. Rows taken before this carried a
+///   `needs_you` bulk call per message (the fake's 0.5 sat inside the old
+///   band), so their walls include a cost these rows no longer pay; compare
+///   across that line with it in mind;
 /// - `message_text` ([MessageTextTask], run by [ExtractHandler] under the
 ///   work kind `extract`) is the ONE generative call per kept message, on
 ///   the bulk server. It replaced the two calls the old rows carry as
@@ -130,9 +132,10 @@ const String pipePolicy =
     String.fromEnvironment('PIPE_POLICY', defaultValue: 'all');
 
 /// The p(needs_you) the stand-in decision model answers, as text because
-/// `double.fromEnvironment` does not exist. 0.5 is inside the band (every
-/// needs-you asks the bulk server, as every historical row did); 0.9 is the
-/// default path, where the decision model settles it with no call.
+/// `double.fromEnvironment` does not exist. It moves which messages Needs You
+/// claims (and so which the `needsYou` draft policy prefetches), never a model
+/// call: needs-you is the probability against the slider at any value. 0.5
+/// stays the default so a row is comparable with the ones before it.
 final double pipeNeedsYouP = double.tryParse(
       const String.fromEnvironment('PIPE_NEEDS_YOU_P', defaultValue: '0.5'),
     ) ??
@@ -304,7 +307,13 @@ void main() {
         return future.whenComplete(() => pumps[name] = pumps[name]! - 1);
       }
 
-      final needsYou = NeedsYouHandler(store, bulkClient);
+      // Instant and serverless — see the header. Shared by triage and the
+      // needs-you pass, as the app shares `decisionClientProvider`.
+      final decision = FakeDecisionClient.fixed(
+        fakeAnswers(needsYou: pipeNeedsYouP, replyExpected: 0.9),
+      );
+      final needsYou =
+          NeedsYouHandler(store, decisionClient: decision);
       final extract = ExtractHandler(
         store,
         bulkClient,
@@ -337,17 +346,15 @@ void main() {
         store,
         // Instant and serverless — see the header: triage makes no
         // language-model call, and no live decision server is part of this
-        // bench. needs_you 0.5 keeps every message's needs-you on the bulk
-        // server, as every historical row paid for it. reply_expected 0.9
+        // bench. needs_you 0.5 sits over the slider's default, so every kept
+        // message needs the owner; it asks no model. reply_expected 0.9
         // because the reply gate reads it before any draft is gathered: the
         // fake's default 0.2 gates every draft and leaves the drafts wall
         // measuring nothing.
-        decisionClient: FakeDecisionClient.fixed(
-          fakeAnswers(needsYou: pipeNeedsYouP, replyExpected: 0.9),
-        ),
+        decisionClient: decision,
         userAddress: userAddress,
-        // Owner-known decisions, as in the app: an ownerless one sends
-        // needs-you to the generative model whatever p(needs_you) says.
+        // Owner-known decisions, as in the app: an ownerless one's
+        // probability is cleared rather than trusted.
         owner: () async => (name: 'Alex Rivera', address: userAddress),
         concurrency: 3,
         gate: fastGate,
@@ -515,7 +522,7 @@ void main() {
       // One more message, upserted at the moment the prose server starts its
       // first draft, and timed to its message text being done. In `single` it
       // waits for the pass to come round behind every draft; in `lanes` it
-      // should cost one triage plus one needs-you plus one message text call.
+      // should cost one triage plus one message text call.
       var lateMs = <String, Object?>{};
       Future<void> lateArrival() async {
         await drafts.firstItem.future;

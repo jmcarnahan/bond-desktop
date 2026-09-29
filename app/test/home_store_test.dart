@@ -2,6 +2,7 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/home_models.dart';
 import 'package:bond_inbox/models/home_sort.dart';
+import 'package:bond_inbox/services/decision/needs_you_predicate.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show isNeedsYou, needsYouRows;
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
@@ -28,6 +29,12 @@ void main() {
 
   tearDown(() async => db.close());
 
+  /// [seed]'s default needs-you probability: over the slider on a thread
+  /// that owes a reply, undecided otherwise — what the feed tests below mean
+  /// by a thread "in Needs You". The needs-you tests pass it explicitly,
+  /// `null` included.
+  const double pFromThread = -1;
+
   /// One message, plus the `message_progress` row `upsertMessage` writes with
   /// it, then whatever this test wants that row to say.
   Future<void> seed(
@@ -49,9 +56,10 @@ void main() {
     String? updatedAt,
     String? summary,
     String? ctaText,
-    // The THREAD's live state and score, which is what the rail's Needs You
-    // rule reads — `message_progress.needs_you` is the settle pass's snapshot
-    // of one message and the rule deliberately ignores it.
+    // The THREAD's live state and score. The rail's Needs You rule reads the
+    // thread's state and its messages' probabilities —
+    // `message_progress.needs_you` is the settle pass's snapshot of one
+    // message and the rule deliberately ignores it.
     String? threadState,
     double? attentionScore,
     String? bucket,
@@ -65,6 +73,9 @@ void main() {
     // judged, not about the progress row that recorded the judgement.
     String triageStatus = 'triaged',
     String? gateReason,
+    // The message's needs-you probability, the one thing the Needs You rule
+    // reads off the message; see [pFromThread].
+    double? needsYouP = pFromThread,
   }) async {
     await store.upsertMessage({
       'source': source,
@@ -81,6 +92,12 @@ void main() {
       'triage_status': triageStatus,
       'gate_reason': gateReason,
     });
+    final p = needsYouP != pFromThread
+        ? needsYouP
+        : (threadState == 'needs_reply' ? 0.9 : null);
+    if (p != null) {
+      await store.writeNeedsYouP(source, id, p: p);
+    }
     // Written straight onto the row: `upsertMessage` never touches the triage
     // columns — that belongs to `writeTriage`, which wants a whole
     // `TriageResult` to say one sentence.
@@ -176,9 +193,10 @@ void main() {
         await seed('yes');
         await seed('no', dropped: true, conversationKey: 'c2');
       case HomeFilter.needsYou:
-        // The THREAD owes a reply, which is the rail's rule; the other
-        // thread carries the message-level snapshot and nothing else, so a
-        // filter still reading that column would fail here.
+        // The THREAD needs the owner by its probability, which is the rail's
+        // rule; the other thread carries the message-level snapshot and
+        // nothing else, so a filter still reading that column would fail
+        // here.
         await seed('yes', threadState: 'needs_reply');
         await seed('no', needsYou: true, conversationKey: 'c2');
       case HomeFilter.urgent:
@@ -211,7 +229,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.total, 6);
@@ -219,7 +237,7 @@ void main() {
       expect(metrics.teams, 1);
       expect(metrics.urgent, 1);
       expect(metrics.dropped, 1);
-      // The thread owing a reply, counted once — the rail's rule, not the
+      // The thread needing the owner, counted once — the rail's rule, not the
       // message-level snapshot.
       expect(metrics.needsYou, 1);
       expect(metrics.storylined, 1);
@@ -227,20 +245,17 @@ void main() {
       expect(metrics.errored, 1);
     });
 
-    test('the judge saying no takes a thread off the tile and the filter',
-        () async {
+    test('a probability below the slider takes a thread off the tile and the '
+        'filter', () async {
       // Both threads owe a reply by state; only one of them is the owner's.
-      await seed('mine', threadState: 'needs_reply');
-      await seed('broadcast', threadState: 'needs_reply', conversationKey: 'c2');
-      await db.customUpdate(
-        'UPDATE messages SET needs_you_verdict = 0 '
-        "WHERE source_message_id = 'broadcast'",
-      );
+      await seed('mine', threadState: 'needs_reply', needsYouP: 0.9);
+      await seed('broadcast',
+          threadState: 'needs_reply', conversationKey: 'c2', needsYouP: 0.1);
 
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
       final rows = await store.pageHomeFeed(
         filter: HomeFilter.needsYou,
@@ -251,88 +266,113 @@ void main() {
       expect(rows.map((r) => r.sourceMessageId), ['mine']);
     });
 
-    test('the verdict read is the newest KEPT inbound, on the rail, the tile '
-        'and the filter alike', () async {
-      // A: judged no once, then a newer message the gate kept and nobody has
-      // judged yet — the no is about an older message, so the thread stays.
-      await seed('a-old',
-          conversationKey: 'a',
-          receivedAt: '2026-09-01T09:00:00Z',
-          threadState: 'needs_reply');
-      await seed('a-new',
-          conversationKey: 'a',
-          receivedAt: '2026-09-01T10:00:00Z',
-          threadState: 'needs_reply');
-      // B: judged no, then a newer message the gate threw out. The newest
-      // message the app KEPT is still the judged no, so the thread goes.
-      await seed('b-old',
-          conversationKey: 'b',
-          receivedAt: '2026-09-01T09:00:00Z',
-          threadState: 'needs_reply');
-      await seed('b-new',
-          conversationKey: 'b',
-          receivedAt: '2026-09-01T10:00:00Z',
-          triageStatus: 'skipped',
-          gateReason: 'newsletter',
-          threadState: 'needs_reply');
-      await db.customUpdate(
-        'UPDATE messages SET needs_you_verdict = 0 '
-        "WHERE source_message_id IN ('a-old', 'b-old')",
-      );
+    // The Dart rule (`isNeedsYou` over `loadConversations`) and the SQL rule
+    // (`_liveNeedsYouThread` under the tile and the filter) on ONE fixture,
+    // at two slider settings: the rail's count and the tile's count are the
+    // same promise.
+    group('the rail, the tile and the filter agree', () {
+      Future<void> seedMixed() async {
+        // a: an older ask over the slider, a newer kept message not decided
+        // yet. The ask is unanswered, so the thread is in.
+        await seed('a-old',
+            conversationKey: 'a',
+            receivedAt: '2026-09-01T09:00:00Z',
+            threadState: 'needs_reply',
+            needsYouP: 0.8);
+        await seed('a-new',
+            conversationKey: 'a',
+            receivedAt: '2026-09-01T10:00:00Z',
+            threadState: 'needs_reply',
+            needsYouP: null);
+        // b: a low probability, then a newer message the gate threw out
+        // carrying a high one. The gated message counts for nothing.
+        await seed('b-old',
+            conversationKey: 'b',
+            receivedAt: '2026-09-01T09:00:00Z',
+            threadState: 'needs_reply',
+            needsYouP: 0.1);
+        await seed('b-new',
+            conversationKey: 'b',
+            receivedAt: '2026-09-01T10:00:00Z',
+            triageStatus: 'skipped',
+            gateReason: 'newsletter',
+            threadState: 'needs_reply',
+            needsYouP: 0.9);
+        // c: waiting on somebody else by state, and still the owner's by
+        // probability — the state is no part of the rule.
+        await seed('c-1',
+            conversationKey: 'c',
+            threadState: 'waiting',
+            needsYouP: 0.4);
+        // d: over the slider, filed Later.
+        await seed('d-1',
+            conversationKey: 'd',
+            threadState: 'needs_reply',
+            bucket: 'later',
+            needsYouP: 0.9);
+        // e: over the slider, and done.
+        await seed('e-1',
+            conversationKey: 'e',
+            threadState: 'done',
+            needsYouP: 0.9);
+      }
 
-      // The rail's read: `loadConversations`' `nk` row and `isNeedsYou`.
-      final threads = {
-        for (final c in await store.loadConversations()) c.id: c,
-      };
-      expect(threads['a']!.needsYouVetoed, isFalse);
-      expect(threads['b']!.needsYouVetoed, isTrue);
-      expect(isNeedsYou(threads['a']!), isTrue);
-      expect(isNeedsYou(threads['b']!), isFalse);
-      expect(
-        [for (final c in needsYouRows(threads.values.toList())) c.id],
-        ['a'],
-      );
+      for (final (threshold, expected) in [
+        (0.3, ['a', 'c']),
+        (0.5, ['a']),
+      ]) {
+        test('at $threshold', () async {
+          await seedMixed();
 
-      // The tile and the filter: `_liveNeedsYouThread`, the same row.
-      final metrics = await store.homeMetrics(
-        sinceIso: '2026-09-01T00:00:00Z',
-        stalledBeforeIso: stalledCutoff,
-        threshold: 0,
-      );
-      final rows = await store.pageHomeFeed(
-        filter: HomeFilter.needsYou,
-        sinceIso: '2026-09-01T00:00:00Z',
-      );
-      expect(metrics.needsYou, 1);
-      expect(rows.map((r) => r.sourceMessageId), ['a-new']);
+          final threads = await store.loadConversations();
+          final rail = [
+            for (final c in threads)
+              if (isNeedsYou(c, threshold: threshold)) c.id,
+          ]..sort();
+          final metrics = await store.homeMetrics(
+            sinceIso: '2026-09-01T00:00:00Z',
+            stalledBeforeIso: stalledCutoff,
+            threshold: threshold,
+          );
+          final filtered = [
+            for (final r in await store.pageHomeFeed(
+              filter: HomeFilter.needsYou,
+              threshold: threshold,
+            ))
+              r.conversationKey,
+          ]..sort();
+
+          expect(rail, expected);
+          expect(metrics.needsYou, expected.length);
+          expect(filtered, expected);
+        });
+      }
     });
 
-    group('an older yes under a newer no', () {
+    group('an older ask under a newer message', () {
       /// The owner's own reply on a thread, which answers every inbound older
       /// than it.
-      Future<void> reply(String id, String conversationKey, String at) =>
-          store.upsertMessage({
-            'source': 'email',
-            'source_message_id': id,
-            'conversation_key': conversationKey,
-            'direction': 'outbound',
-            'subject': 'Launch date',
-            'from_address': 'dana@example.com',
-            'received_at': at,
-            'created_at': at,
-            'updated_at': at,
-            'triage_status': 'skipped',
-            'gate_reason': 'outbound',
-          });
-
-      Future<void> verdicts(Map<String, int> byId) async {
-        for (final entry in byId.entries) {
-          await db.customUpdate(
-            'UPDATE messages SET needs_you_verdict = ? '
-            'WHERE source_message_id = ?',
-            variables: [Variable(entry.value), Variable(entry.key)],
-          );
-        }
+      Future<void> reply(String id, String conversationKey, String at) async {
+        await store.upsertMessage({
+          'source': 'email',
+          'source_message_id': id,
+          'conversation_key': conversationKey,
+          'direction': 'outbound',
+          'subject': 'Launch date',
+          'from_address': 'dana@example.com',
+          'received_at': at,
+          'created_at': at,
+          'updated_at': at,
+          'triage_status': 'skipped',
+          'gate_reason': 'outbound',
+        });
+        // The thread's outbound watermark, which the folded conversation row
+        // carries and `upsertMessage` does not stamp.
+        await store.upsertConversation({
+          'source': 'email',
+          'conversation_key': conversationKey,
+          'last_outbound_at': at,
+        });
       }
 
       Future<List<String>> railIds() async => [
@@ -343,7 +383,7 @@ void main() {
       Future<int> tile() async => (await store.homeMetrics(
             sinceIso: '2026-09-01T00:00:00Z',
             stalledBeforeIso: stalledCutoff,
-            threshold: 0,
+            threshold: NeedsYouTuning.defaultThreshold,
           ))
               .needsYou;
 
@@ -355,96 +395,167 @@ void main() {
               r.sourceMessageId,
           ];
 
-      test('an unanswered yes keeps the thread on the rail, tile and filter',
+      test('an unanswered ask keeps the thread on the rail, tile and filter',
           () async {
-        // Alex asks the owner to approve the budget, judged yes; Sam's
-        // reply-all "adding Jordan for visibility" is judged no, because the
-        // owner is a bystander on THAT message. The ask is still open.
+        // Alex asks the owner to approve the budget; Sam's reply-all "adding
+        // Jordan for visibility" is well under the slider, because the owner
+        // is a bystander on THAT message. The ask is still open.
         await seed('ask',
             conversationKey: 'budget',
             receivedAt: '2026-09-01T09:00:00Z',
-            threadState: 'needs_reply');
+            threadState: 'needs_reply',
+            needsYouP: 0.9);
         await seed('fyi',
             conversationKey: 'budget',
             receivedAt: '2026-09-01T10:00:00Z',
-            threadState: 'needs_reply');
-        await verdicts({'ask': 1, 'fyi': 0});
+            threadState: 'needs_reply',
+            needsYouP: 0.1);
 
         final thread = (await store.loadConversations()).single;
-        expect(thread.needsYouVetoed, isFalse);
+        expect(thread.needsYouP, 0.9);
+        expect(thread.needsYouReasonMessageId, 'ask');
         expect(await railIds(), ['budget']);
         expect(await tile(), 1);
         expect(await filterIds(), ['fyi']);
       });
 
-      test('a no with no open yes still drops', () async {
+      test('nothing over the slider drops the thread', () async {
         await seed('fyi',
             conversationKey: 'budget',
             receivedAt: '2026-09-01T10:00:00Z',
-            threadState: 'needs_reply');
+            threadState: 'needs_reply',
+            needsYouP: 0.1);
+        // Undecided is not a yes: only a probability over the slider holds a
+        // thread open.
         await seed('older',
             conversationKey: 'budget',
             receivedAt: '2026-09-01T09:00:00Z',
-            threadState: 'needs_reply');
-        // Unjudged is not a yes: only a verdict of 1 holds a thread open.
-        await verdicts({'fyi': 0});
+            threadState: 'needs_reply',
+            needsYouP: null);
 
-        expect((await store.loadConversations()).single.needsYouVetoed, isTrue);
+        expect((await store.loadConversations()).single.needsYouP, 0.1);
         expect(await railIds(), isEmpty);
         expect(await tile(), 0);
         expect(await filterIds(), isEmpty);
       });
 
-      test('a yes the owner answered does not hold off a newer no', () async {
+      test('an ask the owner answered does not hold the thread open',
+          () async {
         await seed('ask',
             conversationKey: 'budget',
             receivedAt: '2026-09-01T09:00:00Z',
-            threadState: 'needs_reply');
+            threadState: 'needs_reply',
+            needsYouP: 0.9);
         await reply('sent', 'budget', '2026-09-01T09:30:00Z');
         await seed('fyi',
             conversationKey: 'budget',
             receivedAt: '2026-09-01T10:00:00Z',
-            threadState: 'needs_reply');
-        await verdicts({'ask': 1, 'fyi': 0});
+            threadState: 'needs_reply',
+            needsYouP: 0.1);
 
-        expect((await store.loadConversations()).single.needsYouVetoed, isTrue);
+        final thread = (await store.loadConversations()).single;
+        expect(thread.needsYouP, 0.1);
+        expect(thread.needsYouReasonMessageId, 'fyi');
         expect(await railIds(), isEmpty);
         expect(await tile(), 0);
         expect(await filterIds(), isEmpty);
       });
 
-      test('a gated yes holds nothing open', () async {
-        // "Kept" means what it means everywhere: a yes on a message the gate
-        // threw out is not an open ask.
+      test('a gated ask holds nothing open', () async {
+        // "Kept" means what it means everywhere: a probability on a message
+        // the gate threw out is not an open ask.
         await seed('ask',
             conversationKey: 'budget',
             receivedAt: '2026-09-01T09:00:00Z',
             triageStatus: 'skipped',
             gateReason: 'newsletter',
-            threadState: 'needs_reply');
+            threadState: 'needs_reply',
+            needsYouP: 0.9);
         await seed('fyi',
             conversationKey: 'budget',
             receivedAt: '2026-09-01T10:00:00Z',
-            threadState: 'needs_reply');
-        await verdicts({'ask': 1, 'fyi': 0});
+            threadState: 'needs_reply',
+            needsYouP: 0.1);
 
-        expect((await store.loadConversations()).single.needsYouVetoed, isTrue);
+        expect((await store.loadConversations()).single.needsYouP, 0.1);
         expect(await tile(), 0);
+      });
+
+      test('a chat whose only kept message is a teams_source row needs you',
+          () async {
+        // Born `skipped` before chats were triaged, and still KEPT
+        // (`keptMessageSql`): its probability counts, in Dart and in SQL.
+        await seed('chat',
+            source: 'teams',
+            conversationKey: 'chat-1',
+            receivedAt: '2026-09-01T09:00:00Z',
+            triageStatus: 'skipped',
+            gateReason: 'teams_source',
+            threadState: 'needs_reply',
+            needsYouP: 0.9);
+
+        final thread = (await store.loadConversations(
+                sources: const ['email', 'teams']))
+            .single;
+        expect(thread.needsYouP, 0.9);
+        expect(isNeedsYou(thread, threshold: NeedsYouTuning.defaultThreshold),
+            isTrue);
+        expect(await tile(), 1);
+        expect(await filterIds(), ['chat']);
+      });
+
+      test('an inbound stamped the same instant as the reply counts as '
+          'answered', () async {
+        // Pinned, not argued: the window is `received_at > last_outbound_at`,
+        // strictly, so an ask that arrived in the same second as the owner's
+        // reply reads as one the reply answered. Graph stamps to the second,
+        // so a tie is rare but possible; change the comparison deliberately
+        // or not at all.
+        await seed('ask',
+            conversationKey: 'budget',
+            receivedAt: '2026-09-01T09:00:00Z',
+            threadState: 'needs_reply',
+            needsYouP: 0.9);
+        await reply('sent', 'budget', '2026-09-01T09:00:00Z');
+
+        final thread = (await store.loadConversations()).single;
+        expect(thread.needsYouP, isNull);
+        expect(await railIds(), isEmpty);
+        expect(await tile(), 0);
+        expect(await filterIds(), isEmpty);
       });
     });
 
-    test('the veto one-shot clears chips a judged no no longer earns',
+    test('the lowering one-shot clears chips the probability no longer earns',
         () async {
-      await seed('vetoed', needsYou: true);
-      await seed('kept', needsYou: true, conversationKey: 'c2');
-      await seed('unjudged', needsYou: true, conversationKey: 'c3');
-      await db.customUpdate(
-        "UPDATE messages SET needs_you_verdict = CASE source_message_id "
-        "WHEN 'vetoed' THEN 0 WHEN 'kept' THEN 1 END",
-      );
+      await seed('vetoed', needsYou: true, needsYouP: 0.1);
+      await seed('kept',
+          needsYou: true,
+          conversationKey: 'c2',
+          threadState: 'needs_reply',
+          needsYouP: 0.9);
+      // Undecided needs nobody (`notifyWorthy`); the needs-you pass raises
+      // the chip through `refreshNeedsYou` if the decision crosses the slider.
+      await seed('unjudged',
+          needsYou: true, conversationKey: 'c3', needsYouP: null);
+      // Over the slider, but the thread is closed: the predicate says no.
+      await seed('closed',
+          needsYou: true,
+          conversationKey: 'c4',
+          threadState: 'done',
+          needsYouP: 0.9);
+      await seed('deferred',
+          needsYou: true,
+          conversationKey: 'c5',
+          threadState: 'needs_reply',
+          bucket: 'later',
+          needsYouP: 0.9);
 
-      final lowered = await store.lowerNeedsYouFromVerdicts();
-      expect(lowered.map((r) => r.sourceMessageId), ['vetoed']);
+      final lowered = await store.lowerNeedsYouBelow(
+        threshold: NeedsYouTuning.defaultThreshold,
+      );
+      expect(lowered.map((r) => r.sourceMessageId).toSet(),
+          {'vetoed', 'unjudged', 'closed', 'deferred'});
 
       final chips = await db
           .customSelect(
@@ -454,9 +565,14 @@ void main() {
           .get();
       expect(
         {for (final r in chips) r.data['source_message_id']: r.data['needs_you']},
-        {'kept': 1, 'unjudged': 1, 'vetoed': 0},
+        {'closed': 0, 'deferred': 0, 'kept': 1, 'unjudged': 0, 'vetoed': 0},
       );
-      expect(await store.lowerNeedsYouFromVerdicts(), isEmpty);
+      expect(
+        await store.lowerNeedsYouBelow(
+          threshold: NeedsYouTuning.defaultThreshold,
+        ),
+        isEmpty,
+      );
     });
 
     test('a message counts as urgent on either of the two loud words',
@@ -468,7 +584,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.urgent, 2);
@@ -491,7 +607,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
       final rows = await store.pageHomeFeed(
         filter: HomeFilter.urgent,
@@ -516,7 +632,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.errored, 1);
@@ -529,7 +645,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.total, 1);
@@ -547,7 +663,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.needsYou, 1);
@@ -561,7 +677,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.total, 0);
@@ -576,7 +692,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.inFlight, 1);
@@ -590,7 +706,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.inFlight, 1);
@@ -603,7 +719,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.stalled, 0);
@@ -615,7 +731,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.inFlight, 1);
@@ -991,16 +1107,16 @@ void main() {
 
     test('under Needs You the threshold binds, and binds where it should',
         () async {
-      // The one filter that carries an argument. A thread scoring 0.3 is
-      // admitted under a bar of 0.3 and refused under 0.5 — and a mis-bind of
-      // the number into the source list would fail this loudly rather than
-      // quietly admit everything.
+      // The one filter that carries an argument. A thread at a needs-you
+      // probability of 0.3 is admitted under a bar of 0.3 and refused under
+      // 0.5 — and a mis-bind of the number into the source list would fail
+      // this loudly rather than quietly admit everything.
       await seed(
         'scored',
         conversationKey: 'scored',
         receivedAt: '2026-09-01T09:00:00Z',
         threadState: 'needs_reply',
-        attentionScore: 0.3,
+        needsYouP: 0.3,
       );
       final keys = [(source: 'email', id: 'scored')];
 
@@ -1068,10 +1184,10 @@ void main() {
     /// four readers can be asked the same question.
     Future<void> seedExplained() async {
       await seed('m1', storylineId: 'sl-1');
-      await store.writeNeedsYouVerdict(
+      await store.writeNeedsYouP(
         'email',
         'm1',
-        verdict: true,
+        p: 0.9,
         reason: 'asks for the DPA by Friday',
       );
       await db.customUpdate(
@@ -1097,7 +1213,7 @@ void main() {
     }
 
     void expectExplained(HomeFeedRow row) {
-      expect(row.needsYouVerdict, true);
+      expect(row.needsYouP, 0.9);
       expect(row.needsYouReason, 'asks for the DPA by Friday');
       expect(row.gateReason, 'addressed_me');
       expect(row.bucket, 'later');
@@ -1139,7 +1255,7 @@ void main() {
 
       // Null and false are different answers — "nobody has looked" sends a
       // reader somewhere else entirely from "we looked and it is fine".
-      expect(row.needsYouVerdict, isNull);
+      expect(row.needsYouP, isNull);
       expect(row.needsYouReason, isNull);
       expect(row.bucket, isNull);
       expect(row.attentionScore, isNull);
@@ -1282,7 +1398,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: '2026-09-01T09:45:00Z',
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.inFlight, 1);
@@ -1585,7 +1701,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       // The rail's own rule: the closed thread is out however loud its ask is,
@@ -1616,7 +1732,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.needsYou, 0);
@@ -1625,7 +1741,12 @@ void main() {
 
     test('a thread under the bar is out, and in when the bar drops', () async {
       await seedTwoThreads();
-      await store.writeAttentionScore('email', 'live', 0.3);
+      // Every message of the live thread at 0.3; the score is near zero and
+      // decides nothing.
+      await db.customUpdate(
+        "UPDATE messages SET needs_you_p = 0.3 WHERE conversation_key = 'live'",
+      );
+      await store.writeAttentionScore('email', 'live', 0.01);
 
       Future<int> counted(double threshold) async =>
           (await store.homeMetrics(
@@ -1668,7 +1789,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.needsYou, 1);
@@ -1695,7 +1816,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.needsYou, 1);
@@ -1719,7 +1840,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.needsYou, 0);
@@ -1734,7 +1855,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
       );
 
       expect(metrics.needsYou, 0);
@@ -1812,7 +1933,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
         sources: const ['teams'],
       );
 
@@ -1826,7 +1947,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
         sources: const ['email'],
       );
 
@@ -1863,7 +1984,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
-        threshold: 0,
+        threshold: NeedsYouTuning.defaultThreshold,
         sources: const [],
       );
 

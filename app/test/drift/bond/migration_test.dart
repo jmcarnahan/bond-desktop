@@ -1241,6 +1241,49 @@ void main() {
     expect([for (final r in messages) r.data['triage_status']], ['triaged']);
   });
 
+  test('v20 to v21 backfills needs_you_p from the decision, else the verdict',
+      () async {
+    // Four messages: one with a decision row (its p wins over the verdict it
+    // also carries), a yes and a no with only the old verdict (1.0 and 0.0),
+    // and one with neither (still undecided, NULL).
+    final schema = await verifier.schemaAt(20);
+    schema.rawDatabase.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, created_at, updated_at, triage_status, needs_you_verdict)
+      VALUES
+        ('email', 'm-decided', 'c1', 'inbound', 't', 't', 'triaged', 0),
+        ('email', 'm-yes', 'c2', 'inbound', 't', 't', 'triaged', 1),
+        ('email', 'm-no', 'c3', 'inbound', 't', 't', 'triaged', 0),
+        ('email', 'm-none', 'c4', 'inbound', 't', 't', 'triaged', NULL);
+      INSERT INTO message_decisions (source, source_message_id, model, qhash,
+        answers_json, needs_you_p, decided_at) VALUES
+        ('email', 'm-decided', 'bond-decide', 'q', '{}', 0.42, 't');
+    """);
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 21);
+    addTearDown(db.close);
+
+    Future<Object?> pOf(String id) async => (await db
+            .customSelect(
+                'SELECT needs_you_p FROM messages WHERE source_message_id = ?',
+                variables: [Variable(id)])
+            .getSingle())
+        .data['needs_you_p'];
+
+    expect(await pOf('m-decided'), 0.42);
+    expect(await pOf('m-yes'), 1.0);
+    expect(await pOf('m-no'), 0.0);
+    expect(await pOf('m-none'), null);
+
+    // The verdict is inert from v21: every one is cleared once carried
+    // across, so a replay of the step cannot resurrect an old answer.
+    final verdicts = await db
+        .customSelect('SELECT COUNT(*) AS n FROM messages '
+            'WHERE needs_you_verdict IS NOT NULL')
+        .getSingle();
+    expect(verdicts.data['n'], 0);
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

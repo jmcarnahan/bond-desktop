@@ -42,6 +42,10 @@ import '../services/deadline_parse.dart';
 import '../services/decision/decision_client.dart' show DecisionResult;
 import '../services/decision/decision_heads.dart' show DecisionAnswers;
 import '../services/decision/stored_decision.dart';
+// The one needs-you rule (`needsYouAtSql`) and the slider's parse, so every
+// query here compares a probability against the threshold the same way the
+// Dart readers do.
+import '../services/decision/needs_you_predicate.dart';
 // [extractionFor] needs `ExtractionResult.fromJson` to be the same decoder the
 // text handler wrote through — a second copy of it here is how a stored blob
 // and its reader come to disagree about a field name. It lives in `models/`
@@ -82,13 +86,19 @@ const String dbOwnerKey = 'db_owner';
 /// the setting normally.
 const String aboutMeKey = 'about_me';
 
-/// The owner's own criteria for the needs-you judgement, added to the rules
-/// the prompt already carries. One person's text like [aboutMeKey], and
-/// cleared by [wipeAll] for the same reason: inherited by the next identity it
-/// would decide what THEIR inbox interrupts them about. Declared here beside
-/// [aboutMeKey] because the wipe is what has to name it, and re-exported by
-/// `prefs_provider.dart` for everything that reads or writes the setting.
+/// The owner's own needs-you text, from the builds that let them write one.
+/// INERT: nothing reads it (the Needs You slider over the decision model's
+/// probability is the one control), and nothing wipes the stored value on
+/// purpose. [wipeAll] still names it because it is one person's text like
+/// [aboutMeKey], and a stale copy has no business surviving a sign-out.
 const String needsYouRulesKey = 'needs_you_rules';
+
+/// The owner's Needs You slider: the needs-you probability at or above which
+/// a message needs them (`needsYouAt`). Declared here because the store reads
+/// it itself ([MessageStore.needsYouThreshold]) for the extraction claim's
+/// order, and this layer imports nothing above itself; `prefs_provider.dart`
+/// re-exports it for everything that reads or writes the setting.
+const String needsYouThresholdKey = 'needs_you_threshold';
 
 /// The oldest floor a bootstrap ever deliberately drained this source back to,
 /// one key per connector, ISO-8601 UTC.
@@ -986,19 +996,20 @@ WHERE source = ? AND conversation_key = ?
           // [listLabels] and [labelsForConversation] use, so a row and the
           // thread it opens draw their chips alike.
           '  ${_labelsConcatSql()} AS labels, '
-          // WHY the thread wants the owner, and off WHICH message: the newest
-          // KEPT inbound one the needs-you pass judged YES with a reason — the
-          // `nr` join below. Three columns off ONE joined row, so the three
-          // cannot name different messages.
+          // WHY the thread wants the owner, and off WHICH message: the kept
+          // inbound after the owner's last reply with the HIGHEST needs-you
+          // probability — the `nr` join below, so the reason names the
+          // message whose probability `needs_you_p` shows. Three columns off
+          // ONE joined row, so the three cannot name different messages.
           '  nr.needs_you_reason AS needs_you_reason, '
           '  nr.source_message_id AS needs_you_reason_message_id, '
           '  nr.received_at AS needs_you_reason_at, '
           // Whether the sender of the message the thread is WAITING ON expects
           // an answer, and WHO that sender is — both off the `nk` join, the
-          // newest kept inbound with no verdict clause, because `reply_expected`
-          // is triage v2's column and not the needs-you pass's. Tri-state all
-          // the way through: NULL means nothing has judged that message, and
-          // `isNeedsYou` reads the three values apart.
+          // newest kept inbound with no probability clause, because
+          // `reply_expected` is triage's column and not the needs-you pass's.
+          // Tri-state all the way through: NULL means nothing has judged that
+          // message.
           //
           // `latest_inbound_from` is an envelope address and nothing else — the
           // one fact `Conversation.isExternalTo` needs — and it comes off the
@@ -1007,10 +1018,11 @@ WHERE source = ? AND conversation_key = ?
           // reads on different rules would let the chip and the ask describe
           // different people.
           '  nk.reply_expected AS reply_expected, '
-          // And the needs-you pass's veto on the THREAD, off the one fragment
-          // the tile and the filter read too — `isNeedsYou` lets it outrank
-          // the ask triage folded up. See [needsYouVetoedSql].
-          '  ${needsYouVetoedSql('c')} AS needs_you_vetoed, '
+          // The THREAD's needs-you probability, off the one expression the
+          // tile and the filter read too, so the rail's `isNeedsYou` and the
+          // tile compare the same number against the same slider. See
+          // [threadNeedsYouPSql].
+          '  ${threadNeedsYouPSql('c')} AS needs_you_p, '
           '  nk.from_address AS latest_inbound_from '
           'FROM conversations c '
           'LEFT JOIN conversation_ai ai '
@@ -1038,15 +1050,14 @@ WHERE source = ? AND conversation_key = ?
           '       AND m3.conversation_key = c.conversation_key '
           "       AND m3.direction = 'inbound' "
           '     ORDER BY m3.received_at DESC, m3.source_message_id DESC LIMIT 1) '
-          // `nr` — the newest KEPT inbound the needs-you pass judged yes with a
-          // reason. `needs_you_verdict = 1` is load-bearing, not tidiness: a
-          // reason on a `0` verdict explains why a message does NOT want the
-          // owner (the model read it and said no), and
-          // printing that under "Why does this need a reply" would answer the
-          // opposite question. `keptMessageSql` is the other half: a bot post
-          // the gate threw out is never "the latest inbound awaiting you"
-          // (requirement 8a), and the clause is what makes that true here as
-          // everywhere else.
+          // `nr` — among the KEPT inbound received after the owner's last
+          // reply, the one with the HIGHEST needs-you probability (ties to
+          // the newest): the message [threadNeedsYouPSql] takes its maximum
+          // from, so the reason printed beside the percentage explains that
+          // percentage and not another message's. The window is the same one
+          // the expression reads. `keptMessageSql` keeps a bot post the gate
+          // threw out from ever being "the latest inbound awaiting you"
+          // (requirement 8a), here as everywhere else.
           'LEFT JOIN messages nr '
           '  ON nr.source = c.source '
           '  AND nr.conversation_key = c.conversation_key '
@@ -1055,9 +1066,10 @@ WHERE source = ? AND conversation_key = ?
           '     WHERE m5.source = c.source '
           '       AND m5.conversation_key = c.conversation_key '
           "       AND m5.direction = 'inbound' AND ${keptMessageSql('m5')} "
-          '       AND m5.needs_you_verdict = 1 '
-          '       AND m5.needs_you_reason IS NOT NULL '
-          '     ORDER BY m5.received_at DESC, m5.source_message_id DESC LIMIT 1) '
+          '       AND m5.needs_you_p IS NOT NULL '
+          "       AND m5.received_at > COALESCE(c.last_outbound_at, '') "
+          '     ORDER BY m5.needs_you_p DESC, m5.received_at DESC, '
+          '       m5.source_message_id DESC LIMIT 1) '
           // `nk` — the newest KEPT inbound, judged or not: the message the
           // thread is waiting on.
           'LEFT JOIN messages nk '
@@ -2150,12 +2162,12 @@ RETURNING conversation_key
       // still says `needs_reply` is exactly the disagreement this fixes.
       await refoldThreadState(source, sourceMessageId, restored: false);
 
-      // The chips go and the VERDICT stays. `needs_you` is the snapshot the
-      // rails and the digest read; `needs_you_verdict` is what the judge
-      // decided about the words, and an Ignore is not the owner saying the
-      // judge misread them. The open-ask predicate excludes gated rows on its
+      // The chips go and the PROBABILITY stays. `needs_you` is the snapshot
+      // the rails and the digest read; `needs_you_p` is what the decision
+      // model read in the words, and an Ignore is not the owner saying the
+      // model misread them. The open-ask predicate excludes gated rows on its
       // own, so the thread stops holding an ask on the strength of the write
-      // above rather than of a verdict rewritten here.
+      // above rather than of a probability rewritten here.
       await clearNeedsYou(source, conversationKey);
 
       // `explicit`, because a button is exactly that. Anything that learns
@@ -2584,29 +2596,30 @@ WHERE COALESCE(cta_text, '') <> ''
     );
   }
 
-  /// Records what the needs-you pass decided about one message.
+  /// Records the needs-you probability of one message and the sentence that
+  /// explains it.
   ///
-  /// Targeted like [writeTriage], and for the same reason: this stage owns
-  /// exactly two columns, and a write that carried the rest of the row would
-  /// be free to undo a triage that finished while the pass was thinking.
+  /// [p] is the decision model's p(needs_you = yes), the ONE number Needs You
+  /// reads against the owner's slider (`needsYouAt`). The triage pass writes
+  /// it for every kept message it decides, an ownerless decision's included
+  /// (shown, but untrusted: `message_decisions` records `owner_known`), and
+  /// the needs-you handler writes it when it copies or re-decides. Null puts
+  /// the message back to undecided.
   ///
-  /// [verdict] is tri-state, and the null arm is a real answer rather than a
-  /// missing argument: it puts the row back on the worklist. `false` is a
-  /// judgement that the message does not need the owner, which is a different
-  /// fact from never having been judged, and nothing may read the two as one.
-  Future<void> writeNeedsYouVerdict(
+  /// Targeted like [writeTriage], for the same reason: two columns, and a
+  /// write carrying the rest of the row could undo a triage that finished
+  /// meanwhile.
+  Future<void> writeNeedsYouP(
     String source,
     String sourceMessageId, {
-    required bool? verdict,
+    required double? p,
     String? reason,
   }) async {
     await db.customUpdate(
-      'UPDATE messages SET needs_you_verdict = ?, needs_you_reason = ?, '
+      'UPDATE messages SET needs_you_p = ?, needs_you_reason = ?, '
       'updated_at = ? WHERE source = ? AND source_message_id = ?',
       variables: _args([
-        verdict == null ? null : (verdict ? 1 : 0),
-        // NULL, not '': the same rule `label` takes in [writeTriage] — an
-        // empty reason is no reason, and it should read like one.
+        p,
         (reason == null || reason.isEmpty) ? null : reason,
         _nowIso(),
         source,
@@ -2866,8 +2879,10 @@ RETURNING *
         kind,
         ...sources,
         kind,
-        if (kind == 'extract')
+        if (kind == 'extract') ...[
           isoStamp(now.subtract(textClaimRequestedWithin)),
+          await needsYouThreshold(),
+        ],
       ]),
     );
     if (claimed.isEmpty) return null;
@@ -2897,17 +2912,19 @@ RETURNING *
   /// The text is the one per-message generative call left, so what reaches
   /// the model first is what the owner most wants to read:
   /// 1. an item requested in the last [textClaimRequestedWithin] (an
-  ///    owner-asked requeue refreshes `created_at`; the cutoff is the last
-  ///    bound parameter);
-  /// 2. a message the needs-you pass called theirs;
+  ///    owner-asked requeue refreshes `created_at`; the cutoff is the
+  ///    second-to-last bound parameter);
+  /// 2. a message that needs the owner at their slider (`needsYouAtSql`; the
+  ///    threshold is the last bound parameter, read by [needsYouThreshold] at
+  ///    the claim so a slider move reorders the next one);
   /// 3. anything NOT filed Later before anything that is;
   /// 4. the decision's importance, high > normal > low (the stored decision,
   ///    else an older build's extraction; neither reads as normal);
   /// 5. the queue's own newest first.
   /// A missing message row reads as neither needs-you nor Later.
-  static const String _textClaimOrder = '''
+  static final String _textClaimOrder = '''
 (w.created_at > ?) DESC,
-  COALESCE((SELECT m.needs_you_verdict = 1 FROM messages m
+  COALESCE((SELECT ${needsYouAtSql('m.needs_you_p', '?')} FROM messages m
     WHERE m.source = w.source
       AND m.source_message_id = w.entity_id), 0) DESC,
   COALESCE((SELECT c.bucket = 'later' FROM messages m
@@ -3415,8 +3432,12 @@ RETURNING *
   /// the pref describes rows, and the rows are gone.
   static const List<String> derivedOneShotPrefs = [
     'needs_you_model_revive',
-    'needs_you_flag_backfill',
-    'needs_you_flag_veto',
+    // The p-based pair (v21). The older `needs_you_flag_backfill` and
+    // `needs_you_flag_veto` ran under the verdict rule and have closed on
+    // every installed machine, so the chips were re-reconciled under new keys
+    // rather than by reopening those.
+    'needs_you_flag_backfill_p',
+    'needs_you_flag_veto_p',
     'thread_state_refold',
     'gated_conversation_repair',
     'clustering_card_v2',
@@ -3555,6 +3576,7 @@ RETURNING *
         '  deadline = NULL, '
         '  needs_you_verdict = NULL, '
         '  needs_you_reason = NULL, '
+        '  needs_you_p = NULL, '
         '  updated_at = ?',
         variables: _args([now]),
       );
@@ -3769,8 +3791,8 @@ FROM messages
   /// describes, or the next sign-in would read the wiped mailbox as still
   /// owned — and the two texts one person wrote about themselves and their
   /// inbox ([aboutMeKey], which would otherwise be inherited by the next
-  /// identity and steer THEIR triage, and [needsYouRulesKey], which would
-  /// decide what interrupts them).
+  /// identity and steer THEIR triage, and [needsYouRulesKey], the inert
+  /// needs-you text an older build may have stored).
   ///
   /// The sync's own bookkeeping: `mail_last_reconcile`, and the two
   /// bootstrap-floor markers through [clearSyncCursors] below, which describe
@@ -4609,9 +4631,8 @@ FROM messages
   /// lookup would be a query per row.
   ///
   /// The triage judgment columns ride along on the same row — `needs_action`,
-  /// `reply_expected`, `deadline`, `addressed_me`, `needs_you_verdict` —
-  /// because the scorer reads them about exactly this message, the newest
-  /// inbound one.
+  /// `reply_expected`, `deadline`, `addressed_me`, `needs_you_p` — because the
+  /// scorer reads them about exactly this message, the newest inbound one.
   Future<Map<String, Map<String, Object?>>> latestInboundMeta({
     List<String> sources = const ['email'],
   }) async {
@@ -4620,7 +4641,7 @@ FROM messages
         .customSelect(
           'SELECT conversation_key, source, source_message_id, from_address, '
           '  received_at, extraction_json, needs_action, reply_expected, '
-          '  deadline, addressed_me, needs_you_verdict FROM ('
+          '  deadline, addressed_me, needs_you_p FROM ('
           '  SELECT m.conversation_key AS conversation_key, m.source AS source, '
           '    m.source_message_id AS source_message_id, '
           '    m.from_address AS from_address, m.received_at AS received_at, '
@@ -4628,7 +4649,7 @@ FROM messages
           '    m.needs_action AS needs_action, '
           '    m.reply_expected AS reply_expected, '
           '    m.deadline AS deadline, m.addressed_me AS addressed_me, '
-          '    m.needs_you_verdict AS needs_you_verdict, '
+          '    m.needs_you_p AS needs_you_p, '
           '    ROW_NUMBER() OVER ('
           '      PARTITION BY m.source, m.conversation_key '
           '      ORDER BY m.received_at DESC, m.source_message_id DESC'
@@ -4663,12 +4684,17 @@ FROM messages
   /// written on as one whose asks are all still open, which is the whole
   /// shape this exists to catch.
   ///
+  /// "An ask" is the one needs-you rule on the message: its `needs_you_p` at
+  /// or above the owner's slider (`needsYouAtSql`), bound as a `?` — the
+  /// FIRST placeholder in every statement that splices this fragment, since
+  /// it opens their WHERE.
+  ///
   /// The triage clause is the same admission every other reader of a kept
-  /// message uses: a gated row is not an ask, whatever verdict it carries. No
-  /// gate writes a verdict today, but a message the owner throws out by hand
-  /// keeps the one it had — and a thread must not be held out of Later by a
-  /// question its owner has already dismissed. The `teams_source` tolerance
-  /// is the usual one for chats stored before chats were triaged.
+  /// message uses: a gated row is not an ask, whatever probability it
+  /// carries. No gate writes one today, but a message the owner throws out by
+  /// hand keeps the one it had — and a thread must not be held out of Later
+  /// by a question its owner has already dismissed. The `teams_source`
+  /// tolerance is the usual one for chats stored before chats were triaged.
   ///
   /// Deliberately unbounded in time: an unanswered ask holds its thread out of
   /// automatic Later for as long as it stays unanswered. The exits are a reply,
@@ -4683,13 +4709,13 @@ FROM messages
   /// `final` rather than `const` only because a const cannot call a method.
   static final String _openAskWhere = """
   m.direction = 'inbound'
-  AND m.needs_you_verdict = 1
+  AND ${needsYouAtSql('m.needs_you_p', '?')}
   AND ${keptMessageSql('m')}
   AND m.received_at > COALESCE(c.last_outbound_at, '')""";
 
-  /// Every thread holding an open ask: an inbound message the needs-you stage
-  /// judged yes, received after the thread's last outbound message (or with no
-  /// outbound at all). Keys are `'$source\n$conversationKey'`.
+  /// Every thread holding an open ask: an inbound message that needs the
+  /// owner at [threshold], received after the thread's last outbound message
+  /// (or with no outbound at all). Keys are `'$source\n$conversationKey'`.
   ///
   /// The newline separator is spelled here rather than by the caller because
   /// every caller has to build the same key to look one up — a source and a
@@ -4700,6 +4726,7 @@ FROM messages
   /// keystroke.
   Future<Set<String>> openAskThreads({
     List<String> sources = const ['email'],
+    required double threshold,
   }) async {
     if (sources.isEmpty) return const {};
     final result = await db
@@ -4711,7 +4738,7 @@ FROM messages
           '  ON c.source = m.source AND c.conversation_key = m.conversation_key '
           'WHERE $_openAskWhere '
           '  AND m.source IN (${_placeholders(sources.length)})',
-          variables: _args([...sources]),
+          variables: _args([threshold, ...sources]),
         )
         .get();
     return {
@@ -4731,7 +4758,11 @@ FROM messages
   ///
   /// The single-thread path, for the extraction handler, which is filing one
   /// thread and has no use for the whole mailbox's set.
-  Future<bool> hasOpenAsk(String source, String conversationKey) async {
+  Future<bool> hasOpenAsk(
+    String source,
+    String conversationKey, {
+    required double threshold,
+  }) async {
     final result = await db
         .customSelect(
           'SELECT 1 FROM messages m '
@@ -4740,7 +4771,7 @@ FROM messages
           'WHERE $_openAskWhere '
           '  AND m.source = ? AND m.conversation_key = ? '
           'LIMIT 1',
-          variables: _args([source, conversationKey]),
+          variables: _args([threshold, source, conversationKey]),
         )
         .get();
     return result.isNotEmpty;
@@ -5204,6 +5235,13 @@ SELECT conversation_key FROM (
     if (result.isEmpty) return null;
     return result.first.data['value'] as String?;
   }
+
+  /// The owner's Needs You slider as it stands in `app_prefs`, parsed the
+  /// one way ([parseNeedsYouThreshold]): absent or unreadable is the default.
+  /// The store-level reader every service and query judges against, so a
+  /// slider move is read by all of them at once.
+  Future<double> needsYouThreshold() async =>
+      parseNeedsYouThreshold(await getPref(needsYouThresholdKey));
 
   Future<void> setPref(String key, String value) async {
     await db.customUpdate(
@@ -6646,9 +6684,9 @@ FROM storylines s''';
   /// the two Retries, Restore, a storyline action, and a context directory's
   /// re-read, re-index and digest toggle.
   ///
-  /// Not the default, because [requeueNeedsYouRejudge] revives up to two
-  /// hundred rows in one transaction ordered `received_at DESC`: stamping them
-  /// all with one wall-clock `now` would collapse their drain order to
+  /// Not the default, because [requeueZeroNeedsYouVerdicts] revives a whole
+  /// window of rows in one transaction ordered `received_at DESC`: stamping
+  /// them all with one wall-clock `now` would collapse their drain order to
   /// `entity_id DESC` and jump the whole batch in front of new mail.
   Future<void> requeueWork(
     String kind,
@@ -6743,12 +6781,14 @@ FROM storylines s''';
   ///
   /// The one-shot catch-up for a real state on disk: the first build of this
   /// pass had only the deterministic floor, so every message below the floor
-  /// came back `done` with a NULL verdict — and `INSERT OR IGNORE` will never
-  /// offer those rows again. Its caller runs it once behind a pref, because
-  /// what it is catching up on happened once.
+  /// came back `done` with no answer — and `INSERT OR IGNORE` will never offer
+  /// those rows again. Its caller runs it once behind a pref, because what it
+  /// is catching up on happened once. "No answer" is a NULL `needs_you_p`:
+  /// the v21 step filled it from the stored decision, else from the older
+  /// verdict, so a NULL here is exactly a message nothing decided.
   ///
   /// The predicate is deliberately simple, and the price of that is precision:
-  /// gated and outbound rows whose verdict is NULL are revived too, and leave
+  /// gated and outbound rows with no probability are revived too, and leave
   /// again through the handler's own guards. That costs one queue row each,
   /// once, against a predicate that would otherwise have to restate every
   /// guard the handler already owns.
@@ -6761,55 +6801,44 @@ FROM storylines s''';
       'WHERE m.source = work_items.source '
       'AND m.source_message_id = work_items.entity_id '
       "AND m.direction = 'inbound' "
-      'AND m.needs_you_verdict IS NULL)',
+      'AND m.needs_you_p IS NULL)',
       variables: _args([_nowIso()]),
     );
   }
 
-  /// Puts the needs-you verdict of every recent inbound message back on the
-  /// queue, newest first, and returns how many rows that touched.
+  /// Puts the needs-you pass back on the queue for every triaged inbound
+  /// message whose decision was made WITHOUT the owner line, and returns how
+  /// many that was.
   ///
-  /// The rules-save trigger: the owner has just rewritten the prompt every
-  /// below-the-floor judgement reads, so the verdicts that prompt produced in
-  /// the recent window are re-asked against the new one. Older verdicts are
-  /// history rather than mistakes — the rules were what they were when those
-  /// messages landed — so [sinceIso] bounds what is re-asked, and [cap] bounds
-  /// the model bill a single Save can run up. The chip and the tile follow
-  /// each new verdict through `NeedsYouHandler`'s own tail, so nothing here
-  /// touches `message_progress`.
+  /// Such a probability is shown but untrusted: the head was trained with the
+  /// owner line. The pass decides the message again once the owner is known,
+  /// and keeps the probability as it is while the owner is still unknown, so
+  /// a row requeued before the keychain answers costs a no-op and no model
+  /// call. Called on every mail sync where the owner is known, both sources,
+  /// and self-exhausting: a re-decision writes `owner_known`, and the row no
+  /// longer matches. `owner_known` rides inside `answers_json`
+  /// ([writeDecision]); absent reads as ownerless, as it does in
+  /// [decisionFor].
   ///
-  /// The triage filter is the same admission the first judgement had:
-  /// `triaged` is the status of a message the pipeline kept, and the
-  /// `teams_source` tolerance carries the chat rows stored `skipped` before
-  /// chats were triaged at all — re-judging on a rules change must not be the
-  /// one pass that decides they never existed.
-  ///
-  /// The count is of rows SELECTED, not of work rows written, and that is the
-  /// number the owner is shown: [requeueWork] inserts when a message has never
-  /// been judged and revives a `done` or `error` row, but leaves a row already
-  /// `pending` or `processing` in its place in the queue. Such a message is
-  /// still going to be judged under the new rules, so counting it is honest.
-  Future<int> requeueNeedsYouRejudge({
-    required String sinceIso,
-    List<String> sources = const ['email', 'teams'],
-    int cap = 200,
-  }) async {
-    if (sources.isEmpty) return 0;
+  /// Only a `needs_you` work row that finished `done` is revived. One in
+  /// `error` is left where it is: a message the decision server keeps
+  /// refusing would otherwise cost one call per sync, forever, with its
+  /// attempts reset each time. One still queued is already going to run, and
+  /// a message with no row at all is the backlog enqueue's business.
+  Future<int> requeueOwnerlessNeedsYou() async {
     final rows = await db
         .customSelect(
-          'SELECT source, source_message_id FROM messages '
-          "WHERE direction = 'inbound' "
-          '  AND received_at >= ? '
-          '  AND source IN (${_placeholders(sources.length)}) '
-          "  AND (triage_status = 'triaged' OR gate_reason = 'teams_source') "
-          'ORDER BY received_at DESC, source_message_id DESC '
-          'LIMIT ?',
-          variables: _args([sinceIso, ...sources, cap]),
+          'SELECT m.source, m.source_message_id FROM messages m '
+          'JOIN message_decisions d ON d.source = m.source '
+          '  AND d.source_message_id = m.source_message_id '
+          "JOIN work_items w ON w.task_kind = 'needs_you' "
+          '  AND w.source = m.source AND w.entity_id = m.source_message_id '
+          "WHERE m.direction = 'inbound' AND m.triage_status = 'triaged' "
+          "  AND w.status = 'done' "
+          "  AND COALESCE(json_extract(d.answers_json, "
+          "'\$.$decisionOwnerKnownKey'), 0) = 0",
         )
         .get();
-    // One transaction for the whole batch: two hundred separate writes on a
-    // Save is two hundred fsyncs, and the queue is only meaningful once every
-    // row in the window is on it.
     await db.transaction(() async {
       for (final row in rows) {
         await requeueWork(
@@ -6822,19 +6851,19 @@ FROM storylines s''';
     return rows.length;
   }
 
-  /// Puts the needs-you verdict of every in-window inbound message judged NO
-  /// back on the queue, and returns how many messages that was.
+  /// Puts every in-window inbound message whose stored needs-you answer is a
+  /// flat NO back on the queue, and returns how many messages that was.
   ///
   /// The one-shot behind `needs_you_hedge_rejudge`. A hedge, a yes below the
-  /// confidence bar, used to be written as 0, and 0 is a veto over triage's
-  /// ask on the chip, the toast, the rail and the tile. A hedge is now written
-  /// NULL, but the old ones cannot be told apart from a real no, so every 0 in
-  /// the window is asked again and the handler writes each one the way it now
-  /// answers. The chip follows through the handler's own tail when the stored
-  /// answer moves.
+  /// confidence bar, used to be written as a verdict of 0, which the v21 step
+  /// carried across as `needs_you_p = 0.0` wherever no stored decision had a
+  /// probability to offer instead. The old hedges cannot be told
+  /// apart from a real no, so every 0.0 in the window is asked again and the
+  /// handler writes each one the way it now answers. The chip follows through
+  /// the handler's own tail when the stored answer moves.
   ///
-  /// Both connectors, bounded by [sinceIso] like [requeueNeedsYouRejudge], and
-  /// on [requeueWork], which revives a `done` or `error` row and leaves one
+  /// Both connectors, bounded by [sinceIso], and on [requeueWork], which
+  /// revives a `done` or `error` row and leaves one
   /// already queued where it is. Uncapped, because what it re-asks is a set
   /// that happened once and the window bounds it.
   Future<int> requeueZeroNeedsYouVerdicts({required String sinceIso}) async {
@@ -6843,14 +6872,15 @@ FROM storylines s''';
           'SELECT source, source_message_id FROM messages '
           "WHERE direction = 'inbound' "
           "  AND source IN ('email', 'teams') "
-          '  AND needs_you_verdict = 0 '
+          '  AND needs_you_p = 0 '
           '  AND received_at >= ? '
           'ORDER BY received_at DESC, source_message_id DESC',
           variables: _args([sinceIso]),
         )
         .get();
-    // One transaction for the whole batch, for [requeueNeedsYouRejudge]'s
-    // reason: separate writes are separate fsyncs.
+    // One transaction for the whole batch: separate writes are separate
+    // fsyncs, and the queue is only meaningful once every row in the window
+    // is on it.
     await db.transaction(() async {
       for (final row in rows) {
         await requeueWork(
@@ -7612,9 +7642,9 @@ RETURNING source_message_id
   ///
   /// Needs-you has no stage column by design — its handler writes two columns
   /// on `messages` and no progress stage — so "judged" is spelled out here
-  /// instead: a verdict actually written, or a `needs_you` work row that
+  /// instead: a probability actually written, or a `needs_you` work row that
   /// reached `done` or `error`. The second arm is not redundant. The handler
-  /// finishes an item `done` WITHOUT a verdict on every one of its guards
+  /// finishes an item `done` WITHOUT a probability on every one of its guards
   /// (deleted, outbound, gated), and waiting past that would be waiting on
   /// nobody.
   ///
@@ -7631,13 +7661,13 @@ RETURNING source_message_id
           '''
 SELECT n.source, n.source_message_id, n.conversation_key, n.deadline_at,
   m.subject, m.from_name, m.summary, m.body_preview, m.urgency, m.deadline,
-  m.needs_action, m.reply_expected, m.needs_you_verdict, m.is_read,
+  m.needs_action, m.reply_expected, m.needs_you_p, m.is_read,
   m.triage_status, m.received_at,
   m.updated_at AS message_updated_at,
   c.cta_text, c.cta_urgency, c.state AS conversation_state,
   ai.attention_score, ai.bucket, ai.updated_at AS ai_updated_at,
   p.extract_state, p.storyline_state,
-  CASE WHEN m.needs_you_verdict IS NOT NULL THEN 1
+  CASE WHEN m.needs_you_p IS NOT NULL THEN 1
        WHEN EXISTS (SELECT 1 FROM work_items w
                     WHERE w.task_kind = 'needs_you' AND w.source = n.source
                       AND w.entity_id = n.source_message_id
@@ -7682,7 +7712,7 @@ LIMIT ?
         .customSelect(
           '''
 SELECT m.subject, m.from_name, m.summary, m.body_preview, m.urgency,
-  m.deadline, m.needs_action, m.reply_expected, m.needs_you_verdict, m.is_read,
+  m.deadline, m.needs_action, m.reply_expected, m.needs_you_p, m.is_read,
   m.triage_status, m.received_at,
   c.cta_text, c.cta_urgency, c.state AS conversation_state,
   c.last_outbound_at,
@@ -7883,7 +7913,7 @@ p.source, p.source_message_id, p.conversation_key, p.received_at,
   $_effectiveStorylineId AS storyline_id,
   m.subject, m.from_name, m.from_address, m.summary,
   $_hasFileExists AS has_file,
-  m.needs_you_verdict, m.needs_you_reason, m.gate_reason, m.triage_status,
+  m.needs_you_p, m.needs_you_reason, m.gate_reason, m.triage_status,
   c.cta_text, c.state AS thread_state,
   s.title AS storyline_title,
   ai.bucket, ai.bucket_reason, ai.attention_score,
@@ -8312,9 +8342,9 @@ RETURNING received_at
   /// waiting for it is what stops this from closing a row the coordinator was
   /// still going to have an opinion about.
   ///
-  /// [threshold] is the user's own attention floor, so the `needs_you` this
-  /// writes means what the tiles elsewhere mean. It is the only place a
-  /// verdict is reached in SQL rather than by `notifyWorthy` — see
+  /// [threshold] is the owner's Needs You slider, so the `needs_you` this
+  /// writes means what the tiles elsewhere mean. It is the only place the
+  /// snapshot is reached in SQL rather than by `notifyWorthy` — see
   /// [needsYouSql] for why that is, and for the one clause that differs.
   ///
   /// It closes two shapes of row, which is what the WHERE says: one nothing
@@ -8443,39 +8473,39 @@ RETURNING received_at
     return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
   }
 
-  /// The one-shot catch-up for rows that settled before there was a verdict to
-  /// read, and returns the ones it flagged.
+  /// The one-shot catch-up for settled rows whose message needs the owner
+  /// but whose chip says otherwise, and returns the ones it flagged.
   ///
-  /// The `needs_you_verdict` column arrived in schema v10 and the settle
-  /// snapshot predates it, so every row settled before then took its snapshot
-  /// from asks that did not include the verdict — a message the needs-you pass
-  /// later judged yes has `needs_you_verdict = 1` and `needs_you = 0`, and
-  /// nothing in the app would ever reconcile them. Raise-only: this never
+  /// The settle snapshot is taken once, and the rule it was taken under has
+  /// moved more than once — most recently to the decision model's probability
+  /// against the owner's slider. A message that needs the owner today can
+  /// carry `needs_you = 0` from a snapshot taken under an older rule, and
+  /// nothing else in the app would ever reconcile them. Raise-only: this never
   /// clears a chip, because a 0 here can mean the coordinator decided against
   /// it on grounds this statement cannot see.
   ///
-  /// The guards past the verdict are the ones `notifyWorthy` carries plus one
-  /// it does not. Thread `done`, the `later` bucket and the attention floor are
-  /// the user's loudness control and gate a judged yes like any other ask. The
-  /// extra one is the outbound clause: the coordinator settles before any reply
-  /// can exist, so `notifyWorthy` never needed it — but a chip raised months
-  /// after the fact must not land on a thread the user already answered.
-  /// `dropped = 0` keeps a gate cascade out of it: a gated row also carries
-  /// `settle_state = 'done'`, and it is dropped, not owed.
+  /// The guards past the probability are the ones `notifyWorthy` carries plus
+  /// one it does not. Thread `done` and the `later` bucket gate a needs-you
+  /// message as they do everywhere. The extra one is the outbound clause: the
+  /// coordinator settles before any reply can exist, so `notifyWorthy` never
+  /// needed it — but a chip raised long after the fact must not land on a
+  /// thread the user already answered. `dropped = 0` keeps a gate cascade out
+  /// of it: a gated row also carries `settle_state = 'done'`, and it is
+  /// dropped, not owed.
   Future<List<({String source, String sourceMessageId, String receivedAt})>>
-      backfillNeedsYouFromVerdicts({required double threshold}) =>
-          _raiseNeedsYouFromVerdicts(threshold: threshold);
+      backfillNeedsYouFlags({required double threshold}) =>
+          _raiseNeedsYou(threshold: threshold);
 
-  /// The same raise as [backfillNeedsYouFromVerdicts], for ONE thread — the
+  /// The same raise as [backfillNeedsYouFlags], for ONE thread — the
   /// thread that has just come out of Later.
   ///
   /// A message that settles while its thread is deferred takes a snapshot of
   /// 0 on the strength of the bucket alone (`notifyWorthy`'s Later clause),
-  /// and the snapshot moves afterwards only when the VERDICT moves. Lifting
-  /// the bucket moves no verdict, so without this the message comes back to
-  /// the inbox with a judged yes one table over and no chip, for good. Same
-  /// statement and same guards as the backfill — the thread's own `done`,
-  /// its last reply, the floor — so the two paths cannot disagree about what
+  /// and the snapshot moves afterwards only when the PROBABILITY moves.
+  /// Lifting the bucket moves no probability, so without this the message
+  /// comes back to the inbox needing the owner and with no chip, for good.
+  /// Same statement and same guards as the backfill — the thread's own
+  /// `done`, its last reply — so the two paths cannot disagree about what
   /// earns a chip; the `later` clause is still in it and is simply true now.
   Future<List<({String source, String sourceMessageId, String receivedAt})>>
       raiseNeedsYouForThread(
@@ -8483,14 +8513,14 @@ RETURNING received_at
     String conversationKey, {
     required double threshold,
   }) =>
-          _raiseNeedsYouFromVerdicts(
+          _raiseNeedsYou(
             threshold: threshold,
             source: source,
             conversationKey: conversationKey,
           );
 
   Future<List<({String source, String sourceMessageId, String receivedAt})>>
-      _raiseNeedsYouFromVerdicts({
+      _raiseNeedsYou({
     required double threshold,
     String? source,
     String? conversationKey,
@@ -8504,7 +8534,8 @@ WHERE settle_state = 'done' AND needs_you = 0 AND dropped = 0
   AND EXISTS (SELECT 1 FROM messages m
               WHERE m.source = message_progress.source
                 AND m.source_message_id = message_progress.source_message_id
-                AND m.direction = 'inbound' AND m.needs_you_verdict = 1)
+                AND m.direction = 'inbound'
+                AND ${needsYouAtSql('m.needs_you_p', '?2')})
   AND COALESCE((SELECT c.state FROM conversations c
                 WHERE c.source = message_progress.source
                   AND c.conversation_key = message_progress.conversation_key),
@@ -8517,10 +8548,6 @@ WHERE settle_state = 'done' AND needs_you = 0 AND dropped = 0
                 WHERE ai.source = message_progress.source
                   AND ai.conversation_key = message_progress.conversation_key),
                '') <> 'later'
-  AND COALESCE((SELECT ai.attention_score FROM conversation_ai ai
-                WHERE ai.source = message_progress.source
-                  AND ai.conversation_key = message_progress.conversation_key),
-               0) >= ?2
 RETURNING source, source_message_id, received_at
 ''',
       variables: _args([
@@ -8540,30 +8567,40 @@ RETURNING source, source_message_id, received_at
     ];
   }
 
-  /// The lowering twin of [backfillNeedsYouFromVerdicts]: every settled chip
-  /// whose message the needs-you pass judged NO, cleared, and the rows it
-  /// cleared returned so the caller can tick each one.
+  /// The lowering twin of [backfillNeedsYouFlags]: every settled chip the
+  /// rule no longer grants, cleared, and the rows it cleared returned so the
+  /// caller can tick each one.
   ///
-  /// For the rows that settled before `notifyWorthy` learned that a judged no
-  /// outranks triage's `reply_expected` and ask. A deadline settle routinely
-  /// lands before the judge answers, so those rows took a chip from triage
-  /// alone, and the refresh that followed the verdict recomputed it through
-  /// the old rule and kept it. `needs_you = 1` is the whole guard past the
-  /// verdict: lowering a chip the rule no longer grants needs none of the
-  /// raise's volume checks.
+  /// For the rows that settled under an older rule — triage's own asks, an
+  /// urgency word, a deadline, a verdict — which granted chips the probability
+  /// does not. A chip is lowered exactly where `notifyWorthy` would say no
+  /// today: the message is below the owner's slider or not decided at all
+  /// (NULL needs nobody, and when it IS decided the needs-you pass's
+  /// `refreshNeedsYou` raises it if it crosses), or its thread is `done` or
+  /// filed `later`. `needs_you = 1` is the whole guard past that.
   Future<List<({String source, String sourceMessageId, String receivedAt})>>
-      lowerNeedsYouFromVerdicts() async {
+      lowerNeedsYouBelow({required double threshold}) async {
     final rows = await db.customWriteReturning(
       '''
 UPDATE message_progress SET needs_you = 0, updated_at = ?1
 WHERE needs_you = 1
-  AND EXISTS (SELECT 1 FROM messages m
-              WHERE m.source = message_progress.source
-                AND m.source_message_id = message_progress.source_message_id
-                AND m.needs_you_verdict = 0)
+  AND (
+    NOT EXISTS (SELECT 1 FROM messages m
+                WHERE m.source = message_progress.source
+                  AND m.source_message_id = message_progress.source_message_id
+                  AND ${needsYouAtSql('m.needs_you_p', '?2')})
+    OR COALESCE((SELECT c.state FROM conversations c
+                 WHERE c.source = message_progress.source
+                   AND c.conversation_key = message_progress.conversation_key),
+                '') = 'done'
+    OR COALESCE((SELECT ai.bucket FROM conversation_ai ai
+                 WHERE ai.source = message_progress.source
+                   AND ai.conversation_key = message_progress.conversation_key),
+                '') = 'later'
+  )
 RETURNING source, source_message_id, received_at
 ''',
-      variables: _args([_nowIso()]),
+      variables: _args([_nowIso(), threshold]),
     );
     return [
       for (final row in rows)
@@ -8715,84 +8752,48 @@ WHERE p.received_at >= ? AND p.source IN ($places)
   /// `isNeedsYou` spelled in SQL, over the `conversations c` and
   /// `conversation_ai ai` joins [_homeFeedJoins] already carries.
   ///
-  /// Term for term with the Dart predicate the rail partitions on — nothing
-  /// deferred to Later, nothing already closed, nothing scoring below the
-  /// threshold the volume slider moves, and then a reply owed or an ask
-  /// written. Two spellings of one rule, because the rail's count and the
-  /// tile's count are the same promise and a reader who sees them disagree
-  /// has no way to tell which one lied.
+  /// Term for term with the Dart predicate the rail partitions on: nothing
+  /// deferred to Later, nothing already closed, and the thread's needs-you
+  /// probability ([threadNeedsYouPSql]) at or above the owner's slider
+  /// (`needsYouAtSql`, the SQL spelling of `needsYouAt`). Two spellings of one
+  /// rule, because the rail's count and the tile's count are the same promise
+  /// and a reader who sees them disagree has no way to tell which one lied.
+  /// The Dart side reads the same expression through
+  /// `Conversation.needsYouP`, so the two agree exactly.
   ///
-  /// It is about the THREAD, not the message: every column it reads is on
-  /// `conversations` or `conversation_ai`, and `message_progress.needs_you` —
-  /// the settle pass's snapshot — is deliberately not among them. The
-  /// snapshot is what the row was told at the time; this is what is true now.
+  /// It is about the THREAD, not the message: `message_progress.needs_you` —
+  /// the settle pass's snapshot — is deliberately not read. The snapshot is
+  /// what the row was told at the time; this is what is true now.
   ///
-  /// The one `?` is the threshold, and it is the reason every caller returns
-  /// its arguments beside its SQL.
-  ///
-  /// ONE TERM APART, deliberately and as of this round: the Dart predicate also
-  /// drops a `needs_reply` thread that can explain nothing — no reason on its
-  /// newest kept inbound, no ask, and an explicit "no reply expected" — and
-  /// this fragment does not. The rail is a claim about a handful of threads a
-  /// person is about to work, and a claim it cannot justify is worse than a
-  /// missing one; the tile is a count of what the pipeline holds, and a
-  /// thread's own `state` is what it holds. Spelling the extra term here means
-  /// a correlated read of `messages` inside the feed's page query, so it waits
-  /// for whoever wants the tile narrowed rather than riding along with the
-  /// rail's honesty fix. Until then the tile can read HIGHER than the rail.
-  ///
-  /// The judge's veto IS spelled here, and ahead of the ask, because it is the
-  /// term that moves the most threads: triage folds an ask out of any Jira
-  /// broadcast, and a tile still counting those would read dozens above the
-  /// rail rather than a handful. It is [needsYouVetoedSql], the same fragment
-  /// `loadConversations` loads as `needs_you_vetoed` for the rail, so the Dart
-  /// and SQL readers cannot name different rules.
-  static final String _liveNeedsYouThread = '''
+  /// The one `?` is the needs-you threshold, and it is the reason every caller
+  /// returns its arguments beside its SQL. The attention score is not here: it
+  /// orders Needs You and never gates it.
+  static final String _liveNeedsYouThread = """
 COALESCE(ai.bucket, '') <> 'later'
 AND c.state <> 'done'
-AND COALESCE(ai.attention_score, 0) >= ?
-AND NOT ${needsYouVetoedSql('c')}
-AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
+AND ${needsYouAtSql(threadNeedsYouPSql('c'), '?')}""";
 
-  /// Whether the needs-you pass has vetoed the thread behind the
-  /// `conversations` alias [c], as a boolean SQL expression with no
-  /// placeholders. The ONE spelling of the rule: the rail reads it through
-  /// `Conversation.needsYouVetoed`, and the Needs You tile and filter read it
-  /// inside [_liveNeedsYouThread].
+  /// The needs-you probability of the thread behind the `conversations` alias
+  /// [c], as a SQL expression with no placeholders: the HIGHEST `needs_you_p`
+  /// over its KEPT inbound messages received after the thread's last outbound
+  /// (`COALESCE(c.last_outbound_at, '')`, the comparison [_openAskWhere]
+  /// makes, so a thread the owner never wrote on counts every kept inbound).
   ///
-  /// Vetoed only when BOTH hold:
-  /// - the newest KEPT inbound was judged an explicit no (`0`). NULL, never
-  ///   judged or a hedged yes, is no veto, which is what `-1` stands in for;
-  /// - no kept inbound NEWER than the thread's last outbound carries a yes. A
-  ///   thread with no outbound compares against `''`, so every kept inbound
-  ///   counts.
+  /// An older ask still unanswered keeps counting: Alex's "approve the budget
+  /// by Friday" followed by a reply-all "adding Jordan for visibility" keeps
+  /// the thread at Alex's probability, because the ask is still open. Once the
+  /// owner replies, only newer messages count. NULL when no message in that
+  /// window has been decided, which `needsYouAt` reads as needing nobody.
   ///
-  /// The second clause is why this is a fragment and not the newest verdict.
-  /// The judge rates ONE message, and its own rule lets an earlier open ask
-  /// count only when this message pushes on it. So Alex's "approve the budget
-  /// by Friday", judged yes and unanswered, followed by Sam's reply-all
-  /// "adding Jordan for visibility", judged no because the owner is a
-  /// bystander on it, must keep the thread on the rail: the ask is still open.
-  /// Once the owner replies, an older yes is answered and a newer no vetoes.
-  ///
-  /// `ix_messages_conv` makes each seek an index walk per thread.
-  static String needsYouVetoedSql(String c) => '''
-(COALESCE((SELECT nv.needs_you_verdict FROM messages nv
-            WHERE nv.source = $c.source
-              AND nv.conversation_key = $c.conversation_key
-              AND nv.direction = 'inbound' AND ${keptMessageSql('nv')}
-            ORDER BY nv.received_at DESC, nv.source_message_id DESC
-            LIMIT 1), -1) = 0
- AND NOT EXISTS (SELECT 1 FROM messages ny
-            WHERE ny.source = $c.source
-              AND ny.conversation_key = $c.conversation_key
-              AND ny.direction = 'inbound' AND ${keptMessageSql('ny')}
-              AND ny.needs_you_verdict = 1
-              AND ny.received_at > COALESCE(
-                (SELECT MAX(ob.received_at) FROM messages ob
-                  WHERE ob.source = $c.source
-                    AND ob.conversation_key = $c.conversation_key
-                    AND ob.direction = 'outbound'), '')))''';
+  /// The ONE spelling: the rail reads it through `Conversation.needsYouP`, and
+  /// the Needs You tile and filter read it inside [_liveNeedsYouThread].
+  /// `ix_messages_conv` makes it an index walk per thread.
+  static String threadNeedsYouPSql(String c) => """
+(SELECT MAX(np.needs_you_p) FROM messages np
+  WHERE np.source = $c.source
+    AND np.conversation_key = $c.conversation_key
+    AND np.direction = 'inbound' AND ${keptMessageSql('np')}
+    AND np.received_at > COALESCE($c.last_outbound_at, ''))""";
 
   /// The WHERE fragment one [HomeFilter] stands for, with no leading `AND`
   /// and never empty — every filter narrows something, so a caller can always
@@ -8810,8 +8811,9 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
   /// fragment through [_feedNarrowing], so the two cannot drift; the tiles
   /// ([homeMetrics]) mirror it by hand, column by column, and one test walks
   /// every filter to hold them to it. The rail's own copy of the Needs You
-  /// rule (`isNeedsYou`, in Dart over a `Conversation`) is the one spelling
-  /// that has to stay — see the doc on [_liveNeedsYouThread].
+  /// rule (`isNeedsYou`, in Dart over a `Conversation`) reads the same
+  /// [threadNeedsYouPSql] through `Conversation.needsYouP` — see the doc on
+  /// [_liveNeedsYouThread].
   ///
   /// [HomeFilter.needsYou] is the one filter that counts THREADS. The rail
   /// counts threads, the tile above the table is the same number, and so the
@@ -8930,10 +8932,10 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
   /// both are measured over the same week. Needs You passes none, because the
   /// pile it counts is all time — see [HomeFilterLabel.windowed].
   ///
-  /// [threshold] is the attention slider's, and only [HomeFilter.needsYou]
-  /// reads it. It defaults to 0 rather than being required because every other
-  /// caller — the archive's Dropped tab, a test paging the feed — has no
-  /// business knowing the rail's rule exists.
+  /// [threshold] is the Needs You slider's, and only [HomeFilter.needsYou]
+  /// reads it. It defaults to the slider's default rather than being required
+  /// because every other caller — the archive's Dropped tab, a test paging the
+  /// feed — has no business knowing the rail's rule exists.
   Future<List<HomeFeedRow>> pageHomeFeed({
     String? beforeReceivedAt,
     String? beforeSourceMessageId,
@@ -8941,7 +8943,7 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
     HomeFilter filter = HomeFilter.fromOthers,
     String? sinceIso,
     bool ascending = false,
-    double threshold = 0,
+    double threshold = NeedsYouTuning.defaultThreshold,
     List<String> sources = const ['email', 'teams'],
   }) async {
     if (sources.isEmpty) return const [];
@@ -9036,7 +9038,7 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
   Future<List<({HomeFeedRow row, bool admitted})>> progressPatchFor(
     List<({String source, String id})> keys, {
     required HomeFilter filter,
-    double threshold = 0,
+    double threshold = NeedsYouTuning.defaultThreshold,
     String? sinceIso,
     List<String> sources = const ['email', 'teams'],
   }) async {

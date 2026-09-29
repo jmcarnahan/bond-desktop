@@ -21,6 +21,7 @@ Conversation _conv({
   String? cta,
   String? bucket,
   double? score,
+  double? p,
   String? lastMessageAt = '2026-09-01T09:00:00Z',
   int unread = 0,
 }) =>
@@ -32,6 +33,7 @@ Conversation _conv({
       ctaText: cta,
       bucket: bucket,
       attentionScore: score,
+      needsYouP: p,
       lastMessageAt: lastMessageAt,
       unreadCount: unread,
     );
@@ -346,12 +348,14 @@ void main() {
             id: 'a',
             people: const [Participant(name: 'Eric Nolan')],
             state: ConversationState.needsReply,
+            p: 0.9,
             unread: 2,
           ),
           _conv(
             id: 'b',
             people: const [Participant(name: 'Eric Nolan')],
             cta: 'Send the rate sheet',
+            p: 0.9,
             unread: 3,
           ),
           _conv(id: 'c', people: const [Participant(name: 'Eric Nolan')]),
@@ -359,6 +363,7 @@ void main() {
             id: 'shut',
             people: const [Participant(name: 'Eric Nolan')],
             state: ConversationState.done,
+            p: 0.9,
             unread: 9,
           ),
         ],
@@ -398,7 +403,7 @@ void main() {
           id: 'quiet',
           people: const [Participant(name: 'Eric Nolan')],
           state: ConversationState.needsReply,
-          score: 0.1,
+          p: 0.4,
         ),
       ];
 

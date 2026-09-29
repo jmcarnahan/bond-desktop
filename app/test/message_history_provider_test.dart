@@ -286,7 +286,7 @@ void main() {
           'conversation_key': 'c1',
           'subject': 'Renewal paperwork',
           'triage_status': 'pending',
-          'needs_you_verdict': null,
+          'needs_you_p': null,
         },
         conversation: null,
         conversationAi: null,
@@ -310,9 +310,9 @@ void main() {
         [for (final stage in story.stages) stage.at],
         everyElement(isNull),
       );
-      // Three-valued: nothing has judged this one, which is a different
-      // sentence from "no".
-      expect(story.needsYouVerdict, isNull);
+      // Nothing has decided this one, which is a different sentence from
+      // "no".
+      expect(story.needsYouP, isNull);
     });
 
     test('the thread key falls back to the progress row', () {

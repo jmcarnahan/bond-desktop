@@ -1,5 +1,6 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/services/decision/needs_you_predicate.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -19,6 +20,9 @@ import 'fixtures/triage_seed.dart';
 /// [MessageStore.dropMessage] is the write, and what it does NOT touch is the
 /// point: the verdict stays, the override stays, the finished stages stay, and
 /// Restore has to be able to undo the whole thing.
+/// The slider every open-ask read here is asked against: its default.
+const double _t = NeedsYouTuning.defaultThreshold;
+
 void main() {
   late BondDatabase db;
   late MessageStore store;
@@ -386,16 +390,19 @@ void main() {
         triageStatus: 'skipped',
         gateReason: 'teams_source',
       );
-      await store.writeNeedsYouVerdict(
+      await store.writeNeedsYouP(
         'teams',
         'chat-1',
-        verdict: true,
+        p: 0.9,
         reason: 'asks for the DPA by Friday',
       );
 
-      expect(await store.hasOpenAsk('teams', 'chat'), isTrue);
+      expect(await store.hasOpenAsk('teams', 'chat', threshold: _t), isTrue);
       expect(
-        await store.openAskThreads(sources: const ['teams']),
+        await store.openAskThreads(
+          sources: const ['teams'],
+          threshold: _t,
+        ),
         contains(MessageStore.openAskKey('teams', 'chat')),
       );
     });
@@ -406,15 +413,24 @@ void main() {
         triageStatus: 'skipped',
         gateReason: 'newsletter',
       );
-      await store.writeNeedsYouVerdict(
+      await store.writeNeedsYouP(
         'email',
         'news',
-        verdict: true,
+        p: 0.9,
         reason: 'asks for the DPA by Friday',
       );
 
-      expect(await store.hasOpenAsk('email', 'c1'), isFalse);
-      expect(await store.openAskThreads(), isEmpty);
+      expect(await store.hasOpenAsk('email', 'c1', threshold: _t), isFalse);
+      expect(await store.openAskThreads(threshold: _t), isEmpty);
+    });
+
+    test("an ask is a probability at or above the owner's slider", () async {
+      await seed('m1');
+      await store.writeNeedsYouP('email', 'm1', p: 0.4);
+
+      expect(await store.hasOpenAsk('email', 'c1', threshold: 0.4), isTrue);
+      expect(await store.hasOpenAsk('email', 'c1', threshold: 0.5), isFalse);
+      expect(await store.openAskThreads(threshold: 0.5), isEmpty);
     });
   });
 
@@ -462,15 +478,15 @@ void main() {
       expect(progress['settle_state'], 'done');
     });
 
-    test('the whole thread\'s chips go, and no verdict is rewritten',
+    test('the whole thread\'s chips go, and no probability is rewritten',
         () async {
       await seed('m1');
       await seed('m2', receivedAt: '2026-09-01T09:00:00Z');
       for (final id in const ['m1', 'm2']) {
-        await store.writeNeedsYouVerdict(
+        await store.writeNeedsYouP(
           'email',
           id,
-          verdict: true,
+          p: 0.9,
           reason: 'asks for the DPA by Friday',
         );
         await store.writeSettledProgress(
@@ -487,28 +503,28 @@ void main() {
       // The snapshot the rails read clears for every message of the thread…
       expect((await progressRow('m1'))['needs_you'], 0);
       expect((await progressRow('m2'))['needs_you'], 0);
-      // …and the judge's own answer is left exactly where it was. An Ignore is
-      // the owner saying they do not want this message, not that the judge
-      // misread it.
-      expect((await messageRow('m1'))['needs_you_verdict'], 1);
-      expect((await messageRow('m2'))['needs_you_verdict'], 1);
+      // …and the decision model's own answer is left exactly where it was. An
+      // Ignore is the owner saying they do not want this message, not that
+      // the model misread it.
+      expect((await messageRow('m1'))['needs_you_p'], 0.9);
+      expect((await messageRow('m2'))['needs_you_p'], 0.9);
     });
 
     test('the thread stops holding an open ask', () async {
       await seed('m1');
-      await store.writeNeedsYouVerdict(
+      await store.writeNeedsYouP(
         'email',
         'm1',
-        verdict: true,
+        p: 0.9,
         reason: 'asks for the DPA by Friday',
       );
-      expect(await store.hasOpenAsk('email', 'c1'), isTrue);
+      expect(await store.hasOpenAsk('email', 'c1', threshold: _t), isTrue);
 
       await store.dropMessage('email', 'm1');
 
       // Through the gate clause of the open-ask predicate rather than through
-      // the verdict, which is why the verdict never had to move.
-      expect(await store.hasOpenAsk('email', 'c1'), isFalse);
+      // the probability, which is why the probability never had to move.
+      expect(await store.hasOpenAsk('email', 'c1', threshold: _t), isFalse);
     });
 
     test('it is written down as the owner\'s own thumbs-down', () async {
@@ -583,7 +599,7 @@ void main() {
       final message = await messageRow('m1');
       expect(message['triage_status'], 'skipped');
       expect(message['gate_reason'], 'user');
-      expect(await store.hasOpenAsk('email', 'c1'), isFalse);
+      expect(await store.hasOpenAsk('email', 'c1', threshold: _t), isFalse);
     });
 
     test('Ignore of the only kept inbound folds the thread to waiting and '
@@ -610,7 +626,7 @@ void main() {
       expect(thread['state'], 'waiting');
       expect(thread['cta_text'], isNull);
       expect(thread['cta_urgency'], 'normal');
-      expect(await store.hasOpenAsk('email', 'c1'), isFalse);
+      expect(await store.hasOpenAsk('email', 'c1', threshold: _t), isFalse);
     });
 
     test('an Ignore leaves a thread with a kept newer inbound asking',

@@ -699,37 +699,19 @@ class TriageQueue {
       return true;
     }
 
-    // The decision state's inputs. The attachment rows are metadata the
-    // connector already wrote — a local query, no network: here by now for
-    // mail because the detail fetch above wrote them, and for chat because
-    // the ingest loop did; a failed fetch leaves the list empty. They are
-    // hydrated onto the message because the state renders an empty body as
-    // "Shared a file: …" from them, so a chat message that is nothing but a
-    // dropped contract is not judged as blank.
-    final attachments = await _store.attachmentsForMessage(source, id);
-    final key = current['conversation_key'] as String?;
-    if (attachments.isNotEmpty) {
-      message = message.withAttachments([
-        for (final row in attachments)
-          AttachmentRef.fromRow(row, conversationKey: key),
-      ]);
-    }
-
-    // The thread is context for `reply_expected` and needs-you: an unanswered
-    // question a few messages back still expects an answer. Only what came
-    // BEFORE this message — a later one is not context for a judgement about
-    // it. The decision state takes the last three.
-    var thread = const <Message>[];
-    if (key != null && key.isNotEmpty) {
-      final loaded = await _store.loadThread(key, sources: [source]);
-      final receivedAt = message.receivedAt ?? '';
-      thread = [
-        for (final m in loaded)
-          if (m.id != message.id &&
-              (m.receivedAt ?? '').compareTo(receivedAt) <= 0)
-            m,
-      ];
-    }
+    // The owner line, then the decision state's inputs. Waiting on the owner
+    // first (see [_owner]) costs at most [_ownerWait], and a lookup that has
+    // not answered by then leaves the state ownerless, which the needs-you
+    // pass reads as a probability to decide again rather than to trust.
+    await _awaitOwner();
+    final owner = decisionOwnerString(_ownerKnown);
+    final input = await decisionInputFor(
+      _store,
+      source,
+      message,
+      conversationKey: current['conversation_key'] as String?,
+      owner: owner,
+    );
 
     try {
       // The decision pass: one forward pass of the decision model answers
@@ -745,14 +727,7 @@ class TriageQueue {
       // the next pump, so a fixed address or a fresh install recovers with
       // nobody pressing anything. Only a 4xx the server gives this one
       // request is a failure that spends an attempt.
-      await _awaitOwner();
-      final owner = decisionOwnerString(_ownerKnown);
-      final decided = await _decisionClient.decide(DecisionInput.fromRows(
-        message: message,
-        thread: thread,
-        attachments: message.attachments,
-        owner: owner,
-      ));
+      final decided = await _decisionClient.decide(input);
       await _store.writeDecision(
         source,
         id,
@@ -808,6 +783,19 @@ class TriageQueue {
         id,
         status: 'triaged',
         result: result,
+      );
+      // The needs-you probability onto the row every Needs You query reads,
+      // with the templated sentence the Why panel shows. An ownerless
+      // decision's number is written too, and SHOWN, but it is untrusted (the
+      // head was trained with the owner line): `message_decisions.owner_known`
+      // records that, and the needs-you pass decides the message again once
+      // the owner is known.
+      final p = needsYouP(decided.answers);
+      await _store.writeNeedsYouP(
+        source,
+        id,
+        p: p,
+        reason: p == null ? null : needsYouYesReason(decided.answers),
       );
       // The decision's urgency and category onto the thread now. The ask is
       // the text's: on a new message (no summary yet) the thread's current
@@ -1154,4 +1142,54 @@ class TriageQueue {
     _progress.add(TriageProgress(counts, parkedReason: _parkedReason));
     return counts;
   }
+}
+
+/// The decision model's input for one message: the message with its
+/// attachment rows hydrated, and the thread as it stood when it landed.
+///
+/// The ONE builder, shared by the triage pass and by the needs-you pass when
+/// it decides a message again, so the two cannot render different states for
+/// the same message. The attachment rows are metadata the connector already
+/// wrote — a local query, no network: for mail the detail fetch wrote them,
+/// for chat the ingest loop did, and a failed fetch leaves the list empty.
+/// They are hydrated because the state renders an empty body as "Shared a
+/// file: …" from them, so a chat message that is nothing but a dropped
+/// contract is not judged as blank.
+///
+/// The thread is context for `reply_expected` and needs-you: an unanswered
+/// question a few messages back still expects an answer. Only what came
+/// BEFORE this message — a later one is not context for a judgement about it.
+/// The decision state takes the last three.
+Future<DecisionInput> decisionInputFor(
+  MessageStore store,
+  String source,
+  Message message, {
+  required String? conversationKey,
+  String? owner,
+}) async {
+  final attachments = await store.attachmentsForMessage(source, message.id);
+  final key = conversationKey ?? '';
+  if (attachments.isNotEmpty) {
+    message = message.withAttachments([
+      for (final row in attachments)
+        AttachmentRef.fromRow(row, conversationKey: key),
+    ]);
+  }
+  var thread = const <Message>[];
+  if (key.isNotEmpty) {
+    final loaded = await store.loadThread(key, sources: [source]);
+    final receivedAt = message.receivedAt ?? '';
+    thread = [
+      for (final m in loaded)
+        if (m.id != message.id &&
+            (m.receivedAt ?? '').compareTo(receivedAt) <= 0)
+          m,
+    ];
+  }
+  return DecisionInput.fromRows(
+    message: message,
+    thread: thread,
+    attachments: message.attachments,
+    owner: owner,
+  );
 }

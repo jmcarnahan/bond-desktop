@@ -117,16 +117,20 @@ Both syncs call it after their embed backlog, and it reports `revived_owed_work`
 twins ride along) only when it queued any. See
 [04-extraction.md](04-extraction.md) and [11-needs-you.md](11-needs-you.md).
 
-The one-shot `needs_you_flag_backfill` runs once, beside the other one-shots,
-raising the Needs You chip on rows that settled before the verdict column
-existed. It reports `backfilled_needs_you` (see
-[11-needs-you.md](11-needs-you.md)). Its lowering twin, `needs_you_flag_veto`,
-runs once beside it and clears the settled chips that stood on triage's ask
-before a judged no was allowed to outrank it (`lowerVetoedNeedsYou`, ticking
-each row), reported as `vetoed_needs_you`. After them, `needs_you_hedge_rejudge`
-re-queues needs-you work once for every in-window inbound mail and chat
-message whose verdict is 0 (`requeueZeroNeedsYouVerdicts`), because earlier
-builds stored a hedge as 0 and a hedge is NULL now; it reports
+The one-shot `needs_you_flag_backfill_p` runs once, beside the other
+one-shots, raising the Needs You chip on settled rows whose message now clears
+the owner's slider. It reports `backfilled_needs_you` (see
+[11-needs-you.md](11-needs-you.md)). Its lowering twin,
+`needs_you_flag_veto_p`, runs once beside it and clears the settled chips
+`notifyWorthy` would not grant today (`lowerVetoedNeedsYou`, ticking each row),
+reported as `vetoed_needs_you`. The `_p` pair replaced the verdict-era
+`needs_you_flag_backfill` / `needs_you_flag_veto`, which had already closed on
+every installed machine. Every pass also requeues the needs-you pass for
+messages whose decision was made without the owner
+(`requeueOwnerlessNeedsYou`, reported as `requeued_needs_you_ownerless`). After them, `needs_you_hedge_rejudge` re-queues needs-you
+work once for every in-window inbound mail and chat message whose
+`needs_you_p` is 0.0 (`requeueZeroNeedsYouVerdicts`), because an older build's
+hedge could have become one; it reports
 `requeued_needs_you_hedges` and Clear AI results does not reset it. Every one-shot marker is deleted by
 `wipeAll`, so a sign-out-and-wipe lets them run again on the next account.
 

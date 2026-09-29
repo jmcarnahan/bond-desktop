@@ -120,13 +120,15 @@ void main() {
       'body_text': 'Does Thursday still work for the review?',
       'triage_status': 'pending',
     });
-    // The needs-you pass writes these, not the ingest — so they are set the
-    // way the pass sets them rather than squeezed into the upsert.
+    // The decision pass writes these, not the ingest — so they are set the
+    // way the pass sets them rather than squeezed into the upsert. Needing
+    // the owner is a probability over the default slider; not needing them,
+    // one under it.
     await db.customUpdate(
-      'UPDATE messages SET needs_you_verdict = ?, urgency = ? '
+      'UPDATE messages SET needs_you_p = ?, urgency = ? '
       'WHERE source = ? AND source_message_id = ?',
       variables: [
-        Variable(needsYou ? 1 : 0),
+        Variable(needsYou ? 0.9 : 0.1),
         Variable(urgency),
         Variable('email'),
         Variable(id),

@@ -7,6 +7,7 @@ import '../models/attachment_models.dart';
 import '../models/label_models.dart';
 import '../models/message_models.dart';
 import '../models/open_asks.dart';
+import '../services/decision/needs_you_predicate.dart';
 import '../services/external_sender.dart';
 import '../services/mention_index.dart';
 import '../services/profile_photos.dart';
@@ -335,6 +336,11 @@ class ThreadDetailPanel extends StatefulWidget {
   /// [Conversation.isExternalTo] for what it is and why nothing stores it.
   final Set<String> ownerDomains;
 
+  /// The owner's Needs You slider, for the mention navigator: an action item
+  /// on a message the decision model placed below it names nobody
+  /// ([namesOwner]). A host with no slider gets the default.
+  final double needsYouThreshold;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -343,6 +349,7 @@ class ThreadDetailPanel extends StatefulWidget {
     this.onReopen,
     this.onBack,
     this.onAddToStoryline,
+    this.needsYouThreshold = NeedsYouTuning.defaultThreshold,
     this.onSendToLater,
     this.onDropSender,
     this.onKeepInInbox,
@@ -529,7 +536,10 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       _rowKeys.putIfAbsent(messageId, GlobalKey.new);
 
   /// The ids of the messages that name the owner, in transcript order.
-  List<String> get _mentions => mentionIndexOf(widget.messages);
+  List<String> get _mentions => mentionIndexOf(
+        widget.messages,
+        threshold: widget.needsYouThreshold,
+      );
 
   /// One step along that index, and the jump that follows it.
   ///
@@ -1060,6 +1070,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
             NeedsYouWhyLine(
               reason: widget.conversation.needsYouReason,
               at: widget.conversation.needsYouReasonAt,
+              p: widget.conversation.needsYouP,
               onTap: _toReasonMessage,
             ),
           Expanded(

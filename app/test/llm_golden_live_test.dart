@@ -14,6 +14,7 @@ import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/decision/decision_client.dart';
 import 'package:bond_inbox/services/decision/decision_heads.dart';
+import 'package:bond_inbox/services/decision/needs_you_predicate.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -23,7 +24,6 @@ import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/message_block.dart'
     show threadDigestCap;
 import 'package:bond_inbox/services/llm/model_slots.dart' show LlmTarget;
-import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -101,16 +101,16 @@ const String _converseCaveat =
 
 void main() {
   /// `make golden`: the golden set through the app's per-message pipeline as
-  /// it now runs — the decision pass for every classification field, the
-  /// needs-you ladder, and ONE message-text call for the text.
+  /// it now runs — the decision pass for every classification field and for
+  /// needs-you, and ONE message-text call for the text.
   ///
   /// Per item: the live decision model (`DECIDE_URL`, heads from
   /// `DECIDE_HEADS`; the state rendered from the packer's parts exactly as
   /// the decision leg renders it) answers gate, category, urgency, the two
-  /// booleans, intent and importance; needs-you is the app's ladder (the
-  /// deterministic floor, then the decision's p(yes) against the policy bars,
-  /// and `NeedsYouTask` on the bulk slot only inside the band — the app's own
-  /// rule, minus the cold-outreach bar a golden item cannot evaluate); and
+  /// booleans, intent and importance; needs-you is the app's one rule, the
+  /// decision's p(yes) at or above the slider's default ([needsYouAt] at
+  /// [NeedsYouTuning.defaultThreshold]), with no floor and no language model;
+  /// an item with no decision answer records no needs-you at all; and
   /// `MessageTextTask` on the bulk slot writes summary, action items,
   /// deadline, topics and project. ONE run file in the scorer's shape carries
   /// all of it — `label` and `evidence` are absent (neither exists any more)
@@ -226,7 +226,6 @@ void main() {
       final master = target.collector();
       var retries = 0;
       final decisionMs = <int>[];
-      var band = 0;
       final startedAt = DateTime.now();
 
       try {
@@ -243,8 +242,8 @@ void main() {
           )..onReasoningLeak = master.noteLeak;
 
           // The decision pass. A decision that fails costs the item its
-          // classification and its ladder; the text still runs, as the app's
-          // text stage would for a message whose triage errored.
+          // classification and its needs-you; the text still runs, as the
+          // app's text stage would for a message whose triage errored.
           DecisionAnswers? decidedAnswers;
           try {
             final sw = Stopwatch()..start();
@@ -258,7 +257,8 @@ void main() {
               truncated: decided.truncated,
             );
             // An ownerless decision's needs-you head is never used by the app
-            // (`message_decisions.owner_known`): the ladder goes to the LLM.
+            // (`message_decisions.owner_known`): it clears the probability,
+            // so the item records no needs-you.
             if (owner != null) decidedAnswers = decided.answers;
           } on LlmException catch (e) {
             entry.calls['decision'] = GoldenCall(
@@ -267,43 +267,10 @@ void main() {
             );
           }
 
-          // The needs-you ladder: floor, then the decision's probability,
-          // then the language model inside the band.
-          if (item.floorSaysYes) {
-            entry.needsYou = floorOut();
-          } else {
-            final settled = decidedAnswers == null
-                ? null
-                : decidedNeedsYouOut(decidedAnswers);
-            if (settled != null) {
-              entry.needsYou = settled;
-            } else {
-              if (decidedAnswers != null) band++;
-              try {
-                final needsYou = await retryingUnavailable(
-                  () => runTask(
-                    client,
-                    const NeedsYouTask(),
-                    NeedsYouInput(
-                      message: item.message,
-                      thread: item.threadFor(ctx),
-                      threadDigest: item.digestFor(ctx),
-                      ownerName: GoldenDefines.ownerName,
-                      ownerAddress: GoldenDefines.ownerAddress,
-                      now: item.now,
-                    ),
-                    // The handler's own parameters, both of them.
-                    temperature: 0,
-                    maxTokens: 256,
-                    think: BenchTarget.allowReasoning,
-                  ),
-                  onRetry: () => retries++,
-                );
-                entry.needsYou = needsYouOut(needsYou);
-              } on LlmException catch (_) {
-                // Recorded by the observer, with its outcome.
-              }
-            }
+          // Needs-you: the app's one rule over the decision's probability.
+          // No decision answer, no needs-you — never a language model.
+          if (decidedAnswers != null) {
+            entry.needsYou = decidedNeedsYouOut(decidedAnswers);
           }
 
           // The message text: the one generative call per kept message, with
@@ -338,11 +305,7 @@ void main() {
           final out = entry.classifier;
           final needsYou = entry.needsYou;
           final text = entry.text;
-          final needsYouMs = (needsYou?.floor ?? false)
-              ? 'floor'
-              : itemCalls['needs_you'] == null
-                  ? 'decided'
-                  : _ms(itemCalls['needs_you']);
+          final needsYouMs = needsYou == null ? '—' : 'decided';
           lines[index] = '${item.id.padRight(40)} '
               'decision ${entry.calls['decision']?.ms ?? '—'}ms  '
               'needs_you $needsYouMs  '
@@ -353,7 +316,7 @@ void main() {
                   '/reply_expected=${out.replyExpected} '
                   '${out.intent}/${out.importance}'}  '
               'ny=${needsYou == null ? '—' : '${needsYou.verdict}'
-                  '(${needsYou.confidence ?? 'floor'})'}  '
+                  '(${needsYou.confidence ?? '—'})'}  '
               '${text == null ? '—' : 'items=${text.actionItems.length} '
                   'topics=${text.topics.length} '
                   'deadline=${text.deadline.isNotEmpty}'}';
@@ -384,7 +347,8 @@ void main() {
           '${decisionMs.isEmpty ? '—' : percentile(sortedDecision, 0.5)} ms, '
           'p95 ${decisionMs.isEmpty ? '—' : percentile(sortedDecision, 0.95)} '
           'ms, owner ${owner == null ? 'NOT set' : 'set'}, model '
-          '${heads.model}; needs-you band (asked the model): $band\n'
+          '${heads.model}; needs-you at p(yes) >= '
+          '${NeedsYouTuning.defaultThreshold}\n'
           '${_ctxLine(ctx, k, items, wall)}\n'
           '${carried == null ? '' : 'digests: $carried items carry one, '
               '$trimmed trimmed to $threadDigestCap\n'}'
@@ -422,7 +386,7 @@ void main() {
               'p95_ms': decisionMs.isEmpty
                   ? null
                   : percentile(sortedDecision, 0.95),
-              'needs_you_band': band,
+              'needs_you_threshold': NeedsYouTuning.defaultThreshold,
             },
             'golden': {
               'path': GoldenDefines.setPath,
@@ -2186,10 +2150,11 @@ void main() {
         '$truncated truncated to ${heads.maxTokens} tokens\n'
         'gate drops: policy ${drops(policy)}, argmax ${drops(argmax)}, '
         'differ on $differ items\n'
-        'needs_you in the app band [0.35, 0.65): '
+        'needs_you at the app\'s slider '
+        '(p(yes) >= ${NeedsYouTuning.defaultThreshold}): '
         '${policy.where((e) {
           final p = e.classifier!.probabilities['needs_you_yes']! as double;
-          return p >= 0.35 && p < 0.65;
+          return needsYouAt(p, NeedsYouTuning.defaultThreshold);
         }).length} items (the run files score p(yes) >= 0.5)\n',
       );
 

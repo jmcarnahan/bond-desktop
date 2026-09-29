@@ -8,10 +8,10 @@ import '../models/message_models.dart' show localEchoPrefix;
 import 'activity_log.dart';
 import 'attachments/attachment_policy.dart';
 import 'attachments/owa_links.dart';
-import 'attention.dart';
 import 'backend/backend_types.dart';
 import 'backend/mail_backend.dart';
 import 'conversation_state.dart';
+import 'decision/needs_you_predicate.dart';
 import 'gates.dart';
 import 'graph_mail.dart';
 // `show`: the one thing the sync wants from the embedding client is the tag
@@ -213,10 +213,11 @@ class SyncService implements MailSync {
   /// and answers [syncFloorDays].
   final int Function()? _lookbackDays;
 
-  /// The user's attention floor, for the one-shot backfill below. A callback
-  /// for [_lookbackDays]'s reason — the slider moves under a service built
-  /// once — and null for every caller that predates the backfill, which then
-  /// judges history against [AttentionTuning.defaultThreshold].
+  /// The owner's Needs You slider, for the one-shot chip backfill and its
+  /// lowering twin below. A callback for [_lookbackDays]'s reason — the slider
+  /// moves under a service built once — and null for every caller that
+  /// predates the backfill, which then judges history against
+  /// [NeedsYouTuning.defaultThreshold].
   final Future<double> Function()? _threshold;
 
   /// The registered local directories, or null for every caller that does not
@@ -235,7 +236,7 @@ class SyncService implements MailSync {
     ActivityLog? activityLog,
     PipelineProgress? progress,
     Future<String?> Function()? userAddress,
-    Future<double> Function()? attentionThreshold,
+    Future<double> Function()? needsYouThreshold,
     ContextStore? contextStore,
     Future<({int repaired, bool complete})> Function()? repairGatedConversations,
     this._lookbackDays,
@@ -244,19 +245,19 @@ class SyncService implements MailSync {
         _context = contextStore,
         _progress = progress ?? const PipelineProgress.disabled(),
         _userAddressReader = userAddress,
-        _threshold = attentionThreshold;
+        _threshold = needsYouThreshold;
 
   /// The settle machine's reader, degraded its way — see
-  /// `NotificationCoordinator._attentionThreshold`. A preference that cannot
+  /// `NotificationCoordinator._needsYouThreshold`. A preference that cannot
   /// be read is a default, never a failed sync.
   Future<double> _thresholdOrDefault() async {
     final read = _threshold;
-    if (read == null) return AttentionTuning.defaultThreshold;
+    if (read == null) return NeedsYouTuning.defaultThreshold;
     try {
       return await read();
     } catch (e) {
-      debugPrint('sync: reading the attention threshold failed: $e');
-      return AttentionTuning.defaultThreshold;
+      debugPrint('sync: reading the needs-you threshold failed: $e');
+      return NeedsYouTuning.defaultThreshold;
     }
   }
 
@@ -460,36 +461,43 @@ class SyncService implements MailSync {
         await _store.setPref('needs_you_model_revive', '1');
       }
 
-      // The other half of that catch-up, on the home screen's side. The v10
-      // verdict column arrived AFTER these rows settled, so the `needs_you`
-      // snapshot each of them took never saw it: a message the pass later
-      // judged yes carries `needs_you_verdict = 1` beside `needs_you = 0`, and
-      // nothing else in the app would ever reconcile the two. Raise-only, and
+      // The other half of that catch-up, on the home screen's side. The
+      // `needs_you` snapshot each settled row took was taken under the rule of
+      // its day, so a message that needs the owner by its probability now can
+      // carry `needs_you = 0`, and nothing else in the app would ever
+      // reconcile the two. Raise-only, and
       // guarded on the thread not being done and having no reply newer than
       // the message — a chip raised months late must not land on something the
       // user has already answered. Null until it runs, like the revive above.
+      //
+      // The `_p` keys are the v21 pair. The older `needs_you_flag_backfill`
+      // and `needs_you_flag_veto` ran under the verdict rule and are set on
+      // every machine that ran an earlier build, so the probability rule
+      // reconciles under keys of its own, once.
       int? backfilledNeedsYou;
-      if (await _store.getPref('needs_you_flag_backfill') == null) {
+      if (await _store.getPref('needs_you_flag_backfill_p') == null) {
         backfilledNeedsYou = await _progress.backfillNeedsYou(
           threshold: await _thresholdOrDefault(),
         );
-        await _store.setPref('needs_you_flag_backfill', '1');
+        await _store.setPref('needs_you_flag_backfill_p', '1');
       }
 
-      // And its lowering twin: the chips that settled on triage's ask before
-      // the judge's no was allowed to outrank it (`notifyWorthy`). Once, on
-      // the same idiom, and null until it runs.
+      // And its lowering twin: the chips `notifyWorthy` would not grant today
+      // (below the slider or undecided, or a thread done or in Later). Once,
+      // on the same idiom, and null until it runs.
       int? vetoedNeedsYou;
-      if (await _store.getPref('needs_you_flag_veto') == null) {
-        vetoedNeedsYou = await _progress.lowerVetoedNeedsYou();
-        await _store.setPref('needs_you_flag_veto', '1');
+      if (await _store.getPref('needs_you_flag_veto_p') == null) {
+        vetoedNeedsYou = await _progress.lowerVetoedNeedsYou(
+          threshold: await _thresholdOrDefault(),
+        );
+        await _store.setPref('needs_you_flag_veto_p', '1');
       }
 
       // The hedges an older build stored as a no. A yes below the confidence
-      // bar is written NULL now, which buys no interruption and no veto, but
-      // it used to be written 0, and 0 outranks triage's ask everywhere. The
-      // old ones cannot be told from a real no, so every in-window verdict-0
-      // inbound, mail and chat, is judged again. After the needs-you one-shots
+      // bar used to be written as a verdict of 0, which the v21 step carried
+      // across as a probability of 0.0. The old ones cannot be told from a
+      // real no, so every in-window 0.0 inbound, mail and chat, is judged
+      // again. After the needs-you one-shots
       // above; the extract and needs-you backlog enqueues ran earlier in this
       // pass, which does not matter here, because the requeue revives the
       // existing work rows rather than waiting for an enqueue. Bounded by this
@@ -505,6 +513,21 @@ class SyncService implements MailSync {
             await _store.requeueZeroNeedsYouVerdicts(sinceIso: floor);
         await _store.setPref('needs_you_hedge_rejudge', '1');
       }
+
+      // Every pass, not once: the triage pass writes an ownerless decision's
+      // probability when the keychain has not answered yet, and it is untrusted
+      // until the needs-you pass decides the message again with the owner
+      // (`MessageStore.requeueOwnerlessNeedsYou`). Self-exhausting: a
+      // re-decision records the owner, and the row stops matching. Both
+      // sources in one statement, which is why `teams_sync.dart` does not
+      // repeat it. Reported only when it found something. Skipped while the
+      // owner is unknown (this pass could not resolve the signed-in address):
+      // the pass would only keep each probability as it is, so the sweep
+      // would be a whole queue of no-ops on every sync.
+      final ownerless = _userAddress == null
+          ? 0
+          : await _store.requeueOwnerlessNeedsYou();
+      final int? requeuedOwnerless = ownerless > 0 ? ownerless : null;
 
       // Exchange's first-contact tip, off the rows stored before the ingest
       // learned to strip it. Once, on the same one-shot idiom as the two
@@ -952,6 +975,7 @@ class SyncService implements MailSync {
           'backfilled_needs_you': ?backfilledNeedsYou,
           'vetoed_needs_you': ?vetoedNeedsYou,
           'requeued_needs_you_hedges': ?requeuedNeedsYouHedges,
+          'requeued_needs_you_ownerless': ?requeuedOwnerless,
           'stripped_sender_tips': ?strippedSenderTips,
           'stale_mail_bodies': ?staleMailBodies,
           'tidied_mail_previews': ?tidiedMailPreviews,

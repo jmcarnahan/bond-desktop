@@ -46,17 +46,17 @@ void main() {
     await db.close();
   });
 
-  /// A thread and one unread inbound message on it: triaged, scored above the
-  /// threshold, and expecting a reply — the shape of a candidate the pipeline
+  /// A thread and one unread inbound message on it: triaged, scored, and
+  /// needing the owner above the slider — the shape of a candidate the pipeline
   /// has finished with AND that is worth announcing. Each argument below turns
   /// exactly one of those facts off, so a test names the single thing it is
   /// about and inherits the rest.
   ///
   /// The three pipeline arguments say what the RECORD says, not what the queue
   /// holds: completeness now reads `message_progress` stages and a written
-  /// verdict, so a candidate the pipeline has finished with is one whose
-  /// stages are terminal and whose verdict exists — which is what the defaults
-  /// here spell out.
+  /// probability, so a candidate the pipeline has finished with is one whose
+  /// stages are terminal and whose probability exists — which is what the
+  /// defaults here spell out.
   Future<void> seedCandidate({
     String id = 'm-1',
     String key = 'conv-1',
@@ -72,7 +72,7 @@ void main() {
     bool replyExpected = true,
     String urgency = 'normal',
     String deadline = '',
-    bool? needsYouVerdict = true,
+    double? needsYouP = 0.9,
     String extractState = 'done',
     String storylineState = 'done',
     // False: triage wrote the row from the decision model and the
@@ -99,17 +99,12 @@ void main() {
       'is_read': isRead,
       'created_at': '2026-09-02T12:01:00.000Z',
     });
-    // The verdict before triage, because writing one stamps the message's
-    // `updated_at` too and the score has to end up newer than every write to
-    // the row. `null` leaves the message unjudged, which under the new
+    // The probability before triage, because writing one stamps the
+    // message's `updated_at` too and the score has to end up newer than every
+    // write to the row. `null` leaves the message undecided, which under the
     // completeness rule holds the candidate open.
-    if (needsYouVerdict != null) {
-      await store.writeNeedsYouVerdict(
-        source,
-        id,
-        verdict: needsYouVerdict,
-        reason: 'seeded',
-      );
+    if (needsYouP != null) {
+      await store.writeNeedsYouP(source, id, p: needsYouP, reason: 'seeded');
     }
     // Triage second, so the message's `updated_at` is the newer of the two by
     // the time the score is written — the order the completeness check wants.
@@ -197,7 +192,7 @@ void main() {
     });
 
     test('a complete but unremarkable message settles not_worthy', () async {
-      await seedCandidate(attentionScore: 0.1);
+      await seedCandidate(needsYouP: 0.1);
       await sweep();
 
       final row = await notifyRow('m-1');
@@ -304,34 +299,38 @@ void main() {
       expect(await notifyRow('m-1'), containsPair('state', 'notified'));
     });
 
-    test('an unjudged message holds the row open until a verdict is written',
-        () async {
-      // Needs-you has no stage column, so the verdict itself is the record.
+    test('an undecided message holds the row open until a probability is '
+        'written', () async {
+      // Needs-you has no stage column, so the probability itself is the
+      // record.
       // Settling before it lands would announce — or stay silent about — a
       // message on an answer that had not arrived.
-      await seedCandidate(needsYouVerdict: null);
+      await seedCandidate(needsYouP: null);
       await sweep();
 
       expect(await notifyRow('m-1'), containsPair('state', 'pending'));
 
-      await store.writeNeedsYouVerdict('email', 'm-1',
-          verdict: true, reason: 'model says so');
+      await store.writeNeedsYouP('email', 'm-1',
+          p: 0.9, reason: 'model says so');
       await store.writeAttentionScore('email', 'conv-1', 0.9);
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'notified'));
     });
 
-    test('a finished needs-you work row counts as judged with no verdict',
+    test('a finished needs-you work row counts as judged with no probability',
         () async {
       // The handler ends an item `done` on every one of its own guards —
-      // deleted, outbound, gated — without writing a verdict. Waiting past
-      // that would be waiting on nobody.
-      await seedCandidate(needsYouVerdict: null);
+      // deleted, outbound, gated — without writing a probability. Waiting past
+      // that would be waiting on nobody, so the row settles at once — and an
+      // undecided message needs nobody, so it settles quietly.
+      await seedCandidate(needsYouP: null);
       await store.enqueueWork('needs_you', 'email', 'm-1');
       await store.writeWork('needs_you', 'email', 'm-1', status: 'done');
       await sweep();
 
-      expect(await notifyRow('m-1'), containsPair('state', 'notified'));
+      final row = await notifyRow('m-1');
+      expect(row['state'], 'suppressed');
+      expect(row['reason'], 'not_worthy');
     });
 
     test('an unjudged message with no work row settles on the deadline',
@@ -340,7 +339,7 @@ void main() {
       // message past the 150-per-pass backlog cap has nothing enqueued for it
       // yet, so it waits out the deadline rather than settling at once. A
       // re-drain is not news.
-      await seedCandidate(needsYouVerdict: null);
+      await seedCandidate(needsYouP: null);
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'pending'));
 
@@ -349,33 +348,33 @@ void main() {
           .add(const Duration(seconds: 1));
       await sweep();
 
+      // Settled on the deadline, and quietly: undecided needs nobody.
       final row = await notifyRow('m-1');
-      expect(row['state'], 'notified');
+      expect(row['state'], 'suppressed');
       expect(row['reason'], 'deadline');
     });
   });
 
-  // Worthiness is an AND: the message must ask something of the reader, AND
-  // the thread must be loud enough to be worth hearing about. Each test below
-  // takes away exactly one of those halves and expects silence.
+  // Worthiness is ONE predicate: the message's needs-you probability at or
+  // above the slider, on a thread that is neither done nor filed Later.
+  // Triage's asks and the attention score are no part of it.
   group('worthiness', () {
-    test('a quiet thread stays quiet even when the message asks', () async {
-      // The threshold and the `later` bucket are the user's ONE loudness
-      // control. An ask that could bypass them would take the control away in
-      // exactly the case it exists for.
+    test('the attention score gates nothing', () async {
+      // The score ORDERS Needs You. A message that needs the owner is
+      // announced on a thread scoring near zero.
       await seedCandidate(attentionScore: 0.1);
       await sweep();
 
-      expect(await notifyRow('m-1'), containsPair('state', 'suppressed'));
-      expect(await notifyRow('m-1'), containsPair('reason', 'not_worthy'));
-      expect(emitted, isEmpty);
+      expect(await notifyRow('m-1'), containsPair('state', 'notified'));
+      expect(emitted.single.sourceMessageId, 'm-1');
     });
 
-    test('a loud thread stays quiet when the message asks nothing', () async {
+    test('a loud thread stays quiet when the message is below the slider',
+        () async {
       // Volume alone is a ranking, not a request. Firing on it would announce
       // every unread message of every decent-scoring thread — the notification
       // stream this app exists to replace.
-      await seedCandidate(replyExpected: false, needsYouVerdict: false);
+      await seedCandidate(replyExpected: false, needsYouP: 0.1);
       await sweep();
 
       expect(await notifyRow('m-1'), containsPair('state', 'suppressed'));
@@ -383,51 +382,50 @@ void main() {
       expect(emitted, isEmpty);
     });
 
-    test('needs_action, urgency and a named deadline are each an ask on their '
-        'own', () async {
-      // While nothing has judged the message — the deadline path — triage's
-      // asks are the whole question. Once the needs-you pass has spoken its
-      // verdict decides; the veto test below is the other half.
+    test("triage's asks are no ask of their own", () async {
+      // needs_action, an urgency word and a named deadline, on messages
+      // nothing has decided yet, walked to the deadline: none of them asks.
       await seedCandidate(
           id: 'm-act',
           key: 'c-act',
           replyExpected: false,
           needsAction: true,
-          needsYouVerdict: null,
+          needsYouP: null,
           storylineState: 'pending');
       await seedCandidate(
           id: 'm-urg',
           key: 'c-urg',
           replyExpected: false,
           urgency: 'urgent',
-          needsYouVerdict: null,
+          needsYouP: null,
           storylineState: 'pending');
       await seedCandidate(
           id: 'm-due',
           key: 'c-due',
           replyExpected: false,
           deadline: 'Friday',
-          needsYouVerdict: null,
+          needsYouP: null,
           storylineState: 'pending');
       await sweep();
       now = armedAt.add(const Duration(minutes: 7));
       await sweep();
 
       for (final id in ['m-act', 'm-urg', 'm-due']) {
-        expect(await notifyRow(id), containsPair('state', 'notified'),
+        expect(await notifyRow(id), containsPair('state', 'suppressed'),
             reason: id);
       }
+      expect(emitted, isEmpty);
     });
 
-    test('a judged no outranks every ask triage wrote', () async {
+    test('a probability below the slider outranks every ask triage wrote',
+        () async {
       // The Jira broadcast: a reply expected, an action, an urgency and a
-      // thread ask, on a message the needs-you pass read and said is
-      // somebody else's.
+      // thread ask, on a message the decision model placed low.
       await seedCandidate(
         needsAction: true,
         urgency: 'high',
         ctaText: 'Review the issue',
-        needsYouVerdict: false,
+        needsYouP: 0.1,
       );
       await sweep();
 
@@ -436,61 +434,43 @@ void main() {
       expect(emitted, isEmpty);
     });
 
-    test("a thread's CTA is an ask when the message carries none", () async {
+    test("a worthy message's toast quotes the thread's CTA it owns", () async {
       await seedCandidate(
         replyExpected: false,
         ctaText: 'Send the appraisal',
-        needsYouVerdict: null,
-        storylineState: 'pending',
       );
-      await sweep();
-      now = armedAt.add(const Duration(minutes: 7));
       await sweep();
 
       expect(await notifyRow('m-1'), containsPair('state', 'notified'));
       expect(emitted.single.ctaText, 'Send the appraisal');
     });
 
-    test("a thread's CTA is not this message's ask when its own triage failed",
+    test("a thread's CTA is not quoted when this message's own triage failed",
         () async {
       // The CTA on a conversation belongs to its newest TRIAGED message. This
       // one's triage spent its attempts and ended in `error`, so the ask
-      // sitting on the thread is somebody else's — and counting it would
-      // announce THIS message while quoting THAT one.
-      //
-      // Unjudged, and walked to the deadline, on the CTA test's shape above: a
-      // judged no would veto before the CTA rule is ever read, and this test
-      // would pass with that rule deleted.
+      // sitting on the thread is somebody else's — and quoting it would
+      // announce THIS message with THAT one's request.
       await seedCandidate(
         triageStatus: 'error',
         triageVerdict: false,
         ctaText: 'Send the appraisal',
-        needsYouVerdict: null,
-        storylineState: 'pending',
       );
       await sweep();
-      now = armedAt.add(const Duration(minutes: 7));
-      await sweep();
 
-      // Settled on the deadline, so `deadline` is the reason either way; the
-      // state is what says the CTA did not count.
-      final row = await notifyRow('m-1');
-      expect(row['state'], 'suppressed');
-      expect(row['reason'], 'deadline');
-      expect(emitted, isEmpty);
+      expect(await notifyRow('m-1'), containsPair('state', 'notified'));
+      expect(emitted.single.ctaText, isNull);
     });
 
     test('an unjudged reply_expected is not an ask', () async {
       // NULL means no v2 pass has judged this message, which is NOT a decided
-      // "no reply expected" — but it is not a "yes" either. The score is well
-      // over the threshold here, so the NULL is the only thing that can be
-      // keeping this quiet. The needs-you verdict is left unjudged too, and
-      // the candidate walked to its deadline: a judged no would veto first
-      // and hide whether the NULL rule holds at all.
+      // "no reply expected" — but it is not a "yes" either, and it is no part
+      // of the ask. The needs-you probability is left undecided too, and the
+      // candidate walked to its deadline.
       await seedCandidate(
         triageVerdict: false,
         attentionScore: 0.9,
-        needsYouVerdict: null,
+        needsYouP: null,
         storylineState: 'pending',
       );
       final stored = await store.getMessageRow('email', 'm-1');
@@ -506,12 +486,12 @@ void main() {
       expect(emitted, isEmpty);
     });
 
-    test('the attention threshold gates an ask like anything else', () async {
-      await seedCandidate(attentionScore: 0.6);
+    test("the owner's slider is the cut on the probability", () async {
+      await seedCandidate(needsYouP: 0.6);
       final quiet = NotificationCoordinator(
         store,
         clock: () => now,
-        attentionThreshold: () async => 0.8,
+        needsYouThreshold: () async => 0.8,
       );
       addTearDown(quiet.dispose);
       quiet.noteSyncCompleted();
@@ -519,6 +499,20 @@ void main() {
 
       expect(await notifyRow('m-1'), containsPair('state', 'suppressed'));
       expect(await notifyRow('m-1'), containsPair('reason', 'not_worthy'));
+    });
+
+    test('a probability exactly at the slider needs the owner', () async {
+      await seedCandidate(needsYouP: 0.6);
+      final loud = NotificationCoordinator(
+        store,
+        clock: () => now,
+        needsYouThreshold: () async => 0.6,
+      );
+      addTearDown(loud.dispose);
+      loud.noteSyncCompleted();
+      await loud.sweep();
+
+      expect(await notifyRow('m-1'), containsPair('state', 'notified'));
     });
 
     test('even an ask stays quiet on a thread the user deferred', () async {
@@ -530,24 +524,23 @@ void main() {
     });
   });
 
-  // The needs-you stage's verdict, read as an ask alongside triage's. Every
-  // candidate below is NARROW — triage found nothing to ask about — so the
-  // verdict column is the only thing that can speak, and the tri-state is
-  // tested one value at a time: yes, judged no, and never judged.
-  group('the needs-you verdict', () {
-    /// A candidate whose triage asks nothing, with [verdict] written onto it.
+  // The needs-you probability, the one ask. Every candidate below is NARROW —
+  // triage found nothing to ask about — and the probability is tested one
+  // shape at a time: above the slider, below it, and never decided.
+  group('the needs-you probability', () {
+    /// A candidate whose triage asks nothing, with [p] written onto it.
     ///
-    /// The score is rewritten AFTER the verdict on purpose: writing a verdict
+    /// The score is rewritten AFTER the probability on purpose: writing one
     /// bumps the message's `updated_at`, which correctly makes the existing
     /// score a verdict about an older version of the row. Restamping it is what
     /// the pipeline does in real life, and here it keeps these tests about
     /// worthiness rather than about completeness.
-    Future<void> seedJudged(bool? verdict) async {
-      await seedCandidate(replyExpected: false, needsYouVerdict: verdict);
-      if (verdict == null) {
-        // Unjudged is not a settled row on its own any more — completeness
-        // holds it open for the verdict. A finished work row is the other way
-        // a message counts as judged, and it is what the handler leaves behind
+    Future<void> seedJudged(double? p) async {
+      await seedCandidate(replyExpected: false, needsYouP: p);
+      if (p == null) {
+        // Undecided is not a settled row on its own — completeness holds it
+        // open for the probability. A finished work row is the other way a
+        // message counts as judged, and it is what the handler leaves behind
         // when its own guards end the item without writing one, so these
         // worthiness tests stay about worthiness.
         await store.enqueueWork('needs_you', 'email', 'm-1');
@@ -556,10 +549,10 @@ void main() {
       await store.writeAttentionScore('email', 'conv-1', 0.9);
     }
 
-    test('a judged yes is an ask on its own', () async {
+    test('a probability at or above the slider is the ask', () async {
       // Nothing triage wrote asks anything here, so this announcement exists
-      // entirely because the needs-you pass said the message wants the owner.
-      await seedJudged(true);
+      // entirely because the decision model said the message wants the owner.
+      await seedJudged(0.9);
       await sweep();
 
       final row = await notifyRow('m-1');
@@ -568,8 +561,8 @@ void main() {
       expect(emitted.single.sourceMessageId, 'm-1');
     });
 
-    test('a judged no adds nothing', () async {
-      await seedJudged(false);
+    test('a probability below the slider adds nothing', () async {
+      await seedJudged(0.1);
       await sweep();
 
       expect(await notifyRow('m-1'), containsPair('state', 'suppressed'));
@@ -577,36 +570,33 @@ void main() {
       expect(emitted, isEmpty);
     });
 
-    test('an unjudged message adds nothing either', () async {
-      // NULL is "no pass has looked at this", which is not a yes — the same
-      // rule `reply_expected` takes, and the reason both are read with `== 1`.
+    test('an undecided message adds nothing either', () async {
+      // NULL is "nothing has decided this", which is not a yes.
       await seedJudged(null);
       final stored = await store.getMessageRow('email', 'm-1');
-      expect(stored!['needs_you_verdict'], isNull);
+      expect(stored!['needs_you_p'], isNull);
 
       await sweep();
       expect(await notifyRow('m-1'), containsPair('reason', 'not_worthy'));
       expect(emitted, isEmpty);
     });
 
-    test('a judged yes is still gated by the attention threshold', () async {
-      // The recorded decision: the verdict is the ask half only. It buys no
-      // exemption from the user's one loudness control.
+    test('a needs-you message is announced whatever its attention score',
+        () async {
+      // The attention score orders Needs You; it never gates it.
       await seedCandidate(replyExpected: false);
-      await store.writeNeedsYouVerdict('email', 'm-1',
-          verdict: true, reason: 'model says so');
+      await store.writeNeedsYouP('email', 'm-1',
+          p: 0.9, reason: 'model says so');
       await store.writeAttentionScore('email', 'conv-1', 0.1);
       await sweep();
 
-      expect(await notifyRow('m-1'), containsPair('state', 'suppressed'));
-      expect(await notifyRow('m-1'), containsPair('reason', 'not_worthy'));
-      expect(emitted, isEmpty);
+      expect(await notifyRow('m-1'), containsPair('state', 'notified'));
     });
 
-    test('a judged yes is still gated by the Later bucket', () async {
+    test('a needs-you message is still gated by the Later bucket', () async {
       await seedCandidate(replyExpected: false, bucket: 'later');
-      await store.writeNeedsYouVerdict('email', 'm-1',
-          verdict: true, reason: 'model says so');
+      await store.writeNeedsYouP('email', 'm-1',
+          p: 0.9, reason: 'model says so');
       await store.writeAttentionScore('email', 'conv-1', 0.9);
       await sweep();
 
@@ -642,7 +632,7 @@ void main() {
       expect(event.storylineTitle, isNull);
     });
 
-    test("a CTA this message's own triage wrote is still an ask at the deadline",
+    test("a CTA this message's own triage wrote is quoted at the deadline",
         () async {
       // Triaged, so the thread's CTA is this message's own words. What holds
       // it open is the storyline stage, and the deadline settle quotes the ask
@@ -668,13 +658,12 @@ void main() {
         () async {
       // The deadline forces a verdict on a message whose own triage never
       // finished, so the CTA on its thread was written by a different message
-      // — and the score alone is not an ask. Before this it was: the toast
-      // named this message and quoted the other one's request.
+      // — and neither it nor the score is an ask.
       await seedCandidate(
         triageStatus: 'pending',
         replyExpected: false,
         ctaText: 'Send the appraisal',
-        needsYouVerdict: null,
+        needsYouP: null,
       );
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'pending'));
@@ -696,7 +685,7 @@ void main() {
       await seedCandidate(
         replyExpected: false,
         ctaText: 'Send the appraisal',
-        needsYouVerdict: null,
+        needsYouP: null,
         textLanded: false,
         extractState: 'pending',
       );
@@ -730,10 +719,10 @@ void main() {
 
     test('an unfinished, unremarkable message is dropped when time runs out',
         () async {
-      // Unfinished on the storyline stage and scored below the threshold. The
-      // score has to exist: a candidate with none at all is given one more
-      // deadline's grace, which is the case below this one.
-      await seedCandidate(attentionScore: 0.1, storylineState: 'pending');
+      // Unfinished on the storyline stage and below the slider. The score has
+      // to exist: a candidate with none at all is given one more deadline's
+      // grace, which is the case below this one.
+      await seedCandidate(needsYouP: 0.1, storylineState: 'pending');
       await sweep();
       now = armedAt.add(const Duration(minutes: 7));
       await sweep();
@@ -745,9 +734,9 @@ void main() {
     });
 
     test('a candidate with no score waits out one more deadline', () async {
-      // Settling a scoreless candidate scores it zero and writes the chip off,
-      // and nothing revisits it. The attention sweep runs on every list load,
-      // so one more deadline's grace is a cheap way to let the score land.
+      // A scoreless candidate has not been filed yet, so a Later its sweep
+      // would write is not known. The attention sweep runs on every list
+      // load, so one more deadline's grace is a cheap way to let it land.
       await seedCandidate(attentionScore: null);
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'pending'));
@@ -756,11 +745,13 @@ void main() {
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'pending'));
 
+      // Past the grace it settles on what it has, and the probability is
+      // what decides: this one needs the owner.
       now = armedAt.add(const Duration(minutes: 13));
       await sweep();
 
       final row = await notifyRow('m-1');
-      expect(row['state'], 'suppressed');
+      expect(row['state'], 'notified');
       expect(row['reason'], 'deadline');
     });
   });
@@ -862,8 +853,8 @@ void main() {
         'received_at': '2026-09-02T11:55:00.000Z',
         'created_at': '2026-09-02T12:01:00.000Z',
       });
-      await store.writeNeedsYouVerdict('email', 'm-1',
-          verdict: true, reason: 'seeded');
+      await store.writeNeedsYouP('email', 'm-1',
+          p: 0.9, reason: 'seeded');
       await writeTriaged(
         store,
         'email',
@@ -920,20 +911,20 @@ void main() {
       return made;
     }
 
-    test('a verdict that lands mid-sweep is the one the snapshot takes',
+    test('a probability that lands mid-sweep is the one the snapshot takes',
         () async {
       // The candidates are captured at the top of the sweep and settled at the
-      // bottom of it. A verdict written in between used to be lost for good:
-      // the settle snapshotted the stale answer, and the correction refuses a
-      // row that was not settled yet when it ran.
+      // bottom of it. A probability written in between used to be lost for
+      // good: the settle snapshotted the stale answer, and the correction
+      // refuses a row that was not settled yet when it ran.
       final racing = _RacingStore(db);
       final coordinator = recording(racing);
 
-      await seedCandidate(needsYouVerdict: false, replyExpected: false);
-      racing.onCandidatesRead = () => store.writeNeedsYouVerdict(
+      await seedCandidate(needsYouP: 0.1, replyExpected: false);
+      racing.onCandidatesRead = () => store.writeNeedsYouP(
             'email',
             'm-1',
-            verdict: true,
+            p: 0.9,
             reason: 'raced',
           );
 
@@ -945,10 +936,10 @@ void main() {
     });
 
     test('a gated settle never carries a chip', () async {
-      // The gate's answer beats the verdict: a dropped row is hidden from the
-      // feed, so a chip on it would only be a number nobody can open.
+      // The gate's answer beats the probability: a dropped row is hidden from
+      // the feed, so a chip on it would only be a number nobody can open.
       final coordinator = recording(store);
-      await seedCandidate(needsYouVerdict: true, triageStatus: 'pending');
+      await seedCandidate(triageStatus: 'pending');
       await coordinator.sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'pending'));
 

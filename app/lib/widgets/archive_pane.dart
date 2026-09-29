@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/home_models.dart';
 import '../models/message_models.dart';
+import '../services/decision/needs_you_predicate.dart' show NeedsYouTuning;
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'conversation_list_pane.dart';
@@ -142,6 +143,10 @@ class ArchivePane extends StatefulWidget {
   /// — nobody external — exactly as the pane itself does.
   final Set<String> ownerDomains;
 
+  /// The owner's Needs You slider, handed to every row's Result cell. See
+  /// [HomeFeedRowTile.needsYouThreshold].
+  final double needsYouThreshold;
+
   const ArchivePane({
     super.key,
     required this.conversations,
@@ -169,6 +174,7 @@ class ArchivePane extends StatefulWidget {
     required this.now,
     required this.onSnooze,
     this.ownerDomains = const {},
+    this.needsYouThreshold = NeedsYouTuning.defaultThreshold,
   });
 
   @override
@@ -338,6 +344,7 @@ class _ArchivePaneState extends State<ArchivePane> {
                   row: row,
                   now: widget.now,
                   muteBar: true,
+                  needsYouThreshold: widget.needsYouThreshold,
                   onOpenThread: widget.onOpen,
                   onOpenStoryline: widget.onOpenStoryline,
                   onOpenHistory: widget.onOpenHistory,
@@ -385,6 +392,7 @@ class _ArchivePaneState extends State<ArchivePane> {
             onOpenStoryline: widget.onOpenStoryline,
             onRestore: widget.onRestore,
             onOpenHistory: widget.onOpenHistory,
+            needsYouThreshold: widget.needsYouThreshold,
           ),
       };
 }
@@ -435,6 +443,7 @@ class _DroppedList extends StatefulWidget {
   final void Function(String storylineId) onOpenStoryline;
   final void Function(String source, String sourceMessageId) onRestore;
   final void Function(String source, String sourceMessageId)? onOpenHistory;
+  final double needsYouThreshold;
 
   const _DroppedList({
     required this.rows,
@@ -447,6 +456,7 @@ class _DroppedList extends StatefulWidget {
     required this.onOpenStoryline,
     required this.onRestore,
     required this.onOpenHistory,
+    required this.needsYouThreshold,
   });
 
   /// How close to the bottom the viewport has to get before the next page is
@@ -547,6 +557,7 @@ class _DroppedListState extends State<_DroppedList> {
                   // These bars are context for mail that was filtered, not
                   // progress anybody is watching.
                   muteBar: true,
+                  needsYouThreshold: widget.needsYouThreshold,
                   onOpenThread: widget.onOpenThread,
                   onOpenStoryline: widget.onOpenStoryline,
                   onOpenHistory: widget.onOpenHistory,

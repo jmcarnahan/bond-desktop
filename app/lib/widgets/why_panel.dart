@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
 import '../services/deadline_parse.dart' show showableDeadline;
+import '../services/decision/needs_you_predicate.dart';
 import '../services/decision/stored_decision.dart';
 import '../services/decision/decision_policy.dart'
     show DecisionPolicy, learnedGateReasons;
 import '../models/extraction_models.dart';
 import '../theme/tokens.dart';
 import 'home_result.dart' show homeDropLabels;
+import 'needs_you_reason.dart' show needsYouPercentWords;
 import 'time_format.dart';
 
 /// Why one message got the verdict it did, in plain words.
@@ -50,8 +52,8 @@ class WhyPanelBody extends StatelessWidget {
   /// message. One line under the verdict when present.
   final StoredDecision? decision;
 
-  /// The reader's own needs-you threshold, so the score is reported against
-  /// the line they actually set rather than against a default.
+  /// The reader's own needs-you threshold, so the message's probability is
+  /// judged against the line they actually set rather than against a default.
   final double threshold;
 
   final DateTime now;
@@ -167,41 +169,31 @@ class WhyPanelBody extends StatelessWidget {
     );
   }
 
-  /// The verdict in three words, tri-state preserved. "Not judged yet" is a
-  /// different answer from "Not flagged" and the panel never collapses them:
-  /// the unjudged rows are the pass's own worklist.
-  ///
-  /// A NULL verdict WITH a reason is a fourth reading: a hedge, a yes the
-  /// pass was not sure enough of to raise. It is neither a no nor unjudged,
-  /// and the panel says so rather than claiming either.
-  String _headline(Message m) => switch (m.needsYouVerdict) {
-        true => 'Needs you',
-        false => 'Not flagged',
-        null when _hedged(m) => 'Not sure',
-        null => 'Not judged yet',
-      };
-
-  /// Whether the pass judged this message a hedge: NULL verdict, reason kept.
-  static bool _hedged(Message m) =>
-      m.needsYouVerdict == null && (m.needsYouReason?.trim() ?? '').isNotEmpty;
+  /// The message's needs-you probability as the percentage the Settings
+  /// slider is set in, so the two read as one number: `Needs you: 72%`. A
+  /// dash when the decision model has not read it: an undecided message is
+  /// not a low one, and the panel never shows it as 0%.
+  String _headline(Message m) =>
+      'Needs you: ${needsYouPercentWords(m.needsYouP) ?? '—'}';
 
   List<String> _verdictLines(Message m) {
     final lines = <String>[];
     final reason = m.needsYouReason?.trim() ?? '';
-    switch (m.needsYouVerdict) {
-      case null when _hedged(m):
-        lines.add('The pass leaned yes but was not sure, so triage decides. '
-            '${_reasonSentence(reason)}');
-      case null:
-        lines.add('The needs-you pass has not reached this message.');
-      case true:
-        lines.add(reason.isEmpty
-            ? 'The pass judged it wants you.'
-            : _reasonSentence(reason));
-      case false:
-        lines.add(reason.isEmpty
-            ? 'The pass judged it does not need you.'
-            : _reasonSentence(reason));
+    if (m.needsYouP == null) {
+      lines.add('The needs-you pass has not reached this message.');
+    } else {
+      // The answer the rail acts on, against the reader's own line. The
+      // reason is templated from the decision whatever its probability, so it
+      // is shown only where it is an answer: under the line it would say
+      // "asks you a question" about a message the reader was told needs
+      // nothing (`home_result.dart` keeps the same rule).
+      final line = needsYouPercentWords(threshold);
+      if (needsYouAt(m.needsYouP, threshold)) {
+        if (reason.isNotEmpty) lines.add(_reasonSentence(reason));
+        lines.add('In Needs You: at or above your $line line.');
+      } else {
+        lines.add('Not in Needs You: below your $line line.');
+      }
     }
     final gate = m.gateReason?.trim() ?? '';
     if (gate.isNotEmpty) {
@@ -317,11 +309,10 @@ class WhyPanelBody extends StatelessWidget {
     if (score == null) {
       lines.add('Not scored yet.');
     } else {
-      // `>=` counts as above, exactly as the rail's own partition does: a
-      // thread sitting on the line is one the reader asked to see.
-      final side = score >= threshold ? 'above' : 'below';
-      lines.add('Attention ${score.toStringAsFixed(1)} — $side your '
-          'threshold of ${threshold.toStringAsFixed(1)}.');
+      // The score orders Needs You and gates nothing, so it is reported on
+      // its own rather than against the slider, which cuts the needs-you
+      // probability.
+      lines.add('Attention ${score.toStringAsFixed(1)}.');
     }
 
     final row = ai;

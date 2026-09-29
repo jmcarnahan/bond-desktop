@@ -16,7 +16,7 @@ server you have not named:
 | Role | Hand-started server | Port | Model | Size |
 |---|---|---|---|---|
 | **Decision** (sorts and flags every message: the learned gate, urgency, category, the asks, needs-you, intent, importance, whether a reply is expected) | `make decide` | 8083 | bond-decide, a fine-tuned ModernBERT-large, F16 GGUF + heads file | ~0.8 GB, installed by `make decide-install`, never downloaded |
-| **Generative** (message summaries, the needs-you band, storylines, drafts) | `make model` | 8080 | Qwen3.8-27B Q4_K_M | ~19 GB + 0.6 GB vision projector |
+| **Generative** (message summaries, storylines, drafts) | `make model` | 8080 | Qwen3.8-27B Q4_K_M | ~19 GB + 0.6 GB vision projector |
 | **Embeddings** (clustering, search) | `make embed` | 8081 | Qwen3-Embedding-0.6B Q8_0 | ~0.7 GB |
 
 `make setup` also starts `make fast` on :8082 (Qwen3-4B-Instruct Q8_0,

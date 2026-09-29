@@ -10,6 +10,7 @@ import 'attention.dart';
 import 'clustering_card.dart';
 import 'conversation_cta.dart';
 import 'conversation_state.dart';
+import 'decision/needs_you_predicate.dart';
 import 'embed_handler.dart';
 import 'llm/embeddings_client.dart';
 import 'llm/json_task.dart';
@@ -74,11 +75,10 @@ class ExtractHandler extends WorkHandler {
 
   /// Told the moment a `draft` row is written, so the draft lane can walk.
   ///
-  /// `AttachmentDigestHandler.onRequeue`'s shape, and the same reason in a
-  /// different lane: since the drains were split, the draft this handler
-  /// queues is drained by a worker that has no idea it was queued. Without
-  /// this the prefetch would wait for the fast drain to end — which, on a
-  /// sixty-message backlog, is minutes after the extraction that asked for it.
+  /// Since the drains were split, the draft this handler queues is drained by
+  /// a worker that has no idea it was queued. Without this the prefetch would
+  /// wait for the fast drain to end — which, on a sixty-message backlog, is
+  /// minutes after the extraction that asked for it.
   ///
   /// Null in tests and in the benches that measure the fast lane alone.
   final void Function()? onDraftQueued;
@@ -379,14 +379,22 @@ class ExtractHandler extends WorkHandler {
       return _skipDraft(source, id, 'no_reply_needed');
     }
 
+    // The owner's slider, read at this moment like the policy above, so the
+    // draft gates judge a message against the number the rail reads.
+    final threshold = await _store.needsYouThreshold();
+
     if (policy == DraftPolicy.all) {
-      if (!asksForAReply(row)) return _skipDraft(source, id, 'no_cue');
+      if (!asksForAReply(row, threshold: threshold)) {
+        return _skipDraft(source, id, 'no_cue');
+      }
       return _enqueueDraft(source, id);
     }
 
     // [DraftPolicy.needsYou]: the narrow pre-gate first, because it is free,
     // and the count only for the messages that passed it.
-    if (!prefetchWorthy(row)) return _skipDraft(source, id, 'not_prefetched');
+    if (!prefetchWorthy(row, threshold: threshold)) {
+      return _skipDraft(source, id, 'not_prefetched');
+    }
 
     // Every source the draft lane drains, not `workCounts`' `['email']`
     // default: a chat is drafted for exactly as mail is, and counting only
@@ -500,24 +508,26 @@ class ExtractHandler extends WorkHandler {
 
     final senderPref =
         await _store.getSenderPref(row['from_address'] as String? ?? '');
-    // Asked about the THREAD, not about this row's own verdict: the message
-    // being filed on can be a quiet FYI while an older message in the same
-    // thread is still an unanswered ask, and the thread is the unit being
+    // Asked about the THREAD, not about this row's own probability: the
+    // message being filed on can be a quiet FYI while an older message in the
+    // same thread is still an unanswered ask, and the thread is the unit being
     // filed.
     //
-    // Needs-you drains ahead of extract in the same pass (see the handler
-    // order in `app_providers.dart`), so this message's own verdict is
-    // normally already written by the time this runs. When it is not — a
-    // needs-you row that parked on an unreachable server, say — the attention
-    // sweep on the next list load asks the same question again and corrects
-    // the bucket.
-    final openAsk = await _store.hasOpenAsk(source, key);
+    // Triage writes this message's probability before extraction can claim
+    // it, so it is normally on the row by the time this runs. When it is not,
+    // the attention sweep on the next list load asks the same question again
+    // and corrects the bucket.
+    final openAsk = await _store.hasOpenAsk(
+      source,
+      key,
+      threshold: await _store.needsYouThreshold(),
+    );
     final bucket = bucketFor(
       senderPref: senderPref,
       intent: result.intent,
       importance: result.importance,
       needsReply: (conversation['state'] as String?) == 'needs_reply',
-      needsYouVerdict: openAsk,
+      needsYou: openAsk,
     );
 
     if (bucket != null) {
@@ -664,20 +674,17 @@ class ExtractHandler extends WorkHandler {
 /// to widen: the false negatives are silent, and a message it drops is never
 /// drafted for at all.
 ///
-/// Five signals, and any one of them is enough: the needs-you stage read the
-/// message and called it the user's to answer, the sender is waiting, the
-/// reader has to do something, the message is loud, or it names a date. Read
-/// off the row rather than re-judged, because the point is to be cheap — the
-/// expensive work is the draft this gate decides whether to spend.
+/// Five signals, and any one of them is enough: the message needs the owner
+/// at [threshold] ([needsYouAt] over its `needs_you_p`), the sender is
+/// waiting, the reader has to do something, the message is loud, or it names a
+/// date. Read off the row rather than re-judged, because the point is to be
+/// cheap — the expensive work is the draft this gate decides whether to spend.
 ///
 /// The first is the odd one out: the other four are the fast triage's fields
-/// ABOUT the message, while `needs_you_verdict` is the needs-you stage's answer
-/// about the message as a whole. It is on the row here because NeedsYouHandler
-/// is registered ahead of ExtractHandler in the worker precisely so its verdict
-/// is written before this reads it, and it is what puts a message in front of
-/// the drafting model when triage saw no reply cue at all. NULL — the handler
-/// errored, or never ran — and 0 change nothing, and the gate degrades to
-/// exactly the four-signal shape it had.
+/// ABOUT the message, while `needs_you_p` is the decision model's answer about
+/// the message as a whole, and it is what puts a message in front of the
+/// drafting model when triage saw no reply cue at all. An undecided message
+/// (NULL) adds nothing, and the gate degrades to the four-signal shape.
 ///
 /// Outbound mail answers false. The user's own message needs no reply from
 /// them, and extraction only ever sees inbound rows anyway, so this is a guard
@@ -686,9 +693,9 @@ class ExtractHandler extends WorkHandler {
 /// The flags come back as INTEGERs — sqlite has no bool, and a STRICT column
 /// holds 0 or 1 — so each is compared against 1 rather than trusted to be
 /// truthy.
-bool asksForAReply(Map<String, Object?> row) {
+bool asksForAReply(Map<String, Object?> row, {required double threshold}) {
   if (row['direction'] != 'inbound') return false;
-  return row['needs_you_verdict'] == 1 ||
+  return needsYouAt((row['needs_you_p'] as num?)?.toDouble(), threshold) ||
       row['reply_expected'] == 1 ||
       row['needs_action'] == 1 ||
       row['urgency'] == 'urgent' ||
@@ -699,15 +706,15 @@ bool asksForAReply(Map<String, Object?> row) {
 /// Whether a stored message is worth the drafting model's IDLE time — the
 /// narrower pre-gate [DraftPolicy.needsYou] uses.
 ///
-/// Two signals where [asksForAReply] takes five, and the three it drops are
-/// the ones that fire on ordinary mail: `reply_expected` is triage's guess from
-/// one message in isolation, `needs_action` is its guess that something is to
-/// be done, which a receipt and a reminder both trip, and a `deadline` is a
+/// ONE signal where [asksForAReply] takes five: the message needs the owner at
+/// [threshold] ([needsYouAt]), the same predicate Needs You itself is. The
+/// four it drops fire on ordinary mail: `reply_expected` is triage's guess
+/// from one message in isolation, `needs_action` is its guess that something
+/// is to be done, which a receipt and a reminder both trip, a `deadline` is a
 /// date the message mentions, which a calendar invitation and a newsletter
-/// both carry. What is left is
-/// the needs-you stage's whole-message verdict and triage's loudness — the
-/// messages a person would have opened first anyway, which is exactly the set
-/// worth having an answer ready for before they ask.
+/// both carry, and an urgency word is triage's loudness, which the needs-you
+/// probability already reads. What is left is exactly the Needs You pile,
+/// which is the set worth having an answer ready for before they ask.
 ///
 /// It is not a second opinion about whether a reply is warranted; the decision
 /// model's reply probability decides that ([replyVerdict]). It decides which
@@ -715,11 +722,9 @@ bool asksForAReply(Map<String, Object?> row) {
 ///
 /// [asksForAReply]'s disciplines, for its reasons: outbound answers false, and
 /// the flags are INTEGERs compared against 1 rather than trusted to be truthy.
-bool prefetchWorthy(Map<String, Object?> row) {
+bool prefetchWorthy(Map<String, Object?> row, {required double threshold}) {
   if (row['direction'] != 'inbound') return false;
-  return row['needs_you_verdict'] == 1 ||
-      row['urgency'] == 'urgent' ||
-      row['urgency'] == 'high';
+  return needsYouAt((row['needs_you_p'] as num?)?.toDouble(), threshold);
 }
 
 /// How much of a message body reaches its embedding.

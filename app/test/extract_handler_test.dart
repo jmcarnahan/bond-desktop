@@ -9,6 +9,7 @@ import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/clustering_card.dart';
+import 'package:bond_inbox/services/decision/needs_you_predicate.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -1221,8 +1222,8 @@ void main() {
         'from_address': 'sarah@x.com',
         'received_at': '2026-08-28T09:00:00Z',
       });
-      await store.writeNeedsYouVerdict('email', 'm-ask',
-          verdict: true, reason: 'asks whether Thursday still holds');
+      await store.writeNeedsYouP('email', 'm-ask',
+          p: 0.9, reason: 'asks whether Thursday still holds');
 
       await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
 
@@ -1240,8 +1241,8 @@ void main() {
         'from_address': 'sarah@x.com',
         'received_at': '2026-08-28T09:00:00Z',
       });
-      await store.writeNeedsYouVerdict('email', 'm-ask',
-          verdict: true, reason: 'asks whether Thursday still holds');
+      await store.writeNeedsYouP('email', 'm-ask',
+          p: 0.9, reason: 'asks whether Thursday still holds');
       // The outbound watermark lives on the conversation row, and it is what
       // closes the ask.
       await store.upsertConversation({
@@ -1436,8 +1437,8 @@ void main() {
       await seedMessage();
       await seedConversation();
       await triageSaid();
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: true, reason: 'Priya is waiting on your number');
+      await store.writeNeedsYouP('email', 'm1',
+          p: 0.9, reason: 'Priya is waiting on your number');
 
       await extract();
 
@@ -1459,8 +1460,8 @@ void main() {
           urgency: 'urgent',
           replyP: 0.2,
         );
-        await store.writeNeedsYouVerdict('email', id,
-            verdict: true, reason: 'Priya is waiting on your number');
+        await store.writeNeedsYouP('email', id,
+            p: 0.9, reason: 'Priya is waiting on your number');
         final log = _Recorder();
         var woken = 0;
 
@@ -1493,6 +1494,7 @@ void main() {
     test('and a stored reply_expected of 1 goes on to the pre-gate', () async {
       await seedMessage();
       await triageSaid(replyExpected: true, urgency: 'urgent', replyP: null);
+      await store.writeNeedsYouP('email', 'm1', p: 0.9);
 
       await extract(policy: DraftPolicy.needsYou);
 
@@ -1513,8 +1515,8 @@ void main() {
       await seedMessage();
       await seedConversation();
       await triageSaid();
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: false, reason: 'a heads-up, nothing to answer');
+      await store.writeNeedsYouP('email', 'm1',
+          p: 0.1, reason: 'a heads-up, nothing to answer');
 
       await extract();
 
@@ -1528,7 +1530,7 @@ void main() {
       await seedMessage();
       await seedConversation();
       await triageSaid();
-      await store.writeNeedsYouVerdict('email', 'm1', verdict: null);
+      await store.writeNeedsYouP('email', 'm1', p: null);
 
       await extract();
 
@@ -1549,7 +1551,7 @@ void main() {
         'body_text': 'Sent it over. — Jo',
       });
       await triageSaid(id: 'o1');
-      await store.writeNeedsYouVerdict('email', 'o1', verdict: true);
+      await store.writeNeedsYouP('email', 'o1', p: 0.9);
 
       await extract(id: 'o1');
 
@@ -1668,8 +1670,8 @@ void main() {
       await seedMessage(headers: {'List-Id': 'news.x.example.com'});
       await seedConversation();
       await triageSaid();
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: true, reason: 'it asks the reader to approve the invoice');
+      await store.writeNeedsYouP('email', 'm1',
+          p: 0.9, reason: 'it asks the reader to approve the invoice');
       final log = _Recorder();
 
       await extract(policy: DraftPolicy.needsYou, activityLog: log);
@@ -1702,11 +1704,13 @@ void main() {
   });
 
   group('suggested replies: the three policies', () {
-    /// A message with every signal `asksForAReply` reads, so the only thing
-    /// separating the policies in a test is the policy.
+    /// A message with every signal `asksForAReply` reads, the needs-you
+    /// probability included, so the only thing separating the policies in a
+    /// test is the policy.
     Future<void> seedLoud({String id = 'm1'}) async {
       await seedMessage(id: id);
       await triageSaid(id: id, replyExpected: true, urgency: 'urgent');
+      await store.writeNeedsYouP('email', id, p: 0.9);
     }
 
     /// A message that asks for a reply but is not worth the big model's idle
@@ -1753,8 +1757,8 @@ void main() {
     group('onDemand', () {
       test('queues nothing, however loud the message', () async {
         await seedLoud();
-        await store.writeNeedsYouVerdict('email', 'm1',
-            verdict: true, reason: 'Priya is waiting on your number');
+        await store.writeNeedsYouP('email', 'm1',
+            p: 0.9, reason: 'Priya is waiting on your number');
         final log = _Recorder();
 
         await extract(policy: DraftPolicy.onDemand, activityLog: log);
@@ -1780,14 +1784,13 @@ void main() {
     });
 
     group('needsYou', () {
-      test('queues a message the needs-you stage called the owner\'s',
-          () async {
-        // Nothing triage wrote is loud. The whole-message verdict is the
+      test('queues a message whose probability clears the slider', () async {
+        // Nothing triage wrote is loud. The needs-you probability is the
         // signal.
         await seedMessage();
         await triageSaid();
-        await store.writeNeedsYouVerdict('email', 'm1',
-            verdict: true, reason: 'Priya is waiting on your number');
+        await store.writeNeedsYouP('email', 'm1',
+            p: 0.9, reason: 'Priya is waiting on your number');
         var woken = 0;
 
         await extract(
@@ -1800,7 +1803,10 @@ void main() {
         expect(woken, 1);
       });
 
-      test('and an urgent one, and a high one', () async {
+      test('but not an urgent one, nor a high one, on loudness alone',
+          () async {
+        // One predicate: the needs-you probability. Triage's urgency word is
+        // no ask of its own.
         await seedMessage(id: 'm1');
         await triageSaid(id: 'm1', urgency: 'urgent');
         await seedMessage(id: 'm2', conversationKey: 'conv-2');
@@ -1809,7 +1815,19 @@ void main() {
         await extract(policy: DraftPolicy.needsYou, id: 'm1');
         await extract(policy: DraftPolicy.needsYou, id: 'm2');
 
-        expect(await queuedDrafts(), ['m1', 'm2']);
+        expect(await queuedDrafts(), isEmpty);
+      });
+
+      test("the owner's slider is the cut it reads", () async {
+        await seedMessage();
+        await triageSaid();
+        await store.writeNeedsYouP('email', 'm1', p: 0.4);
+        await store.setPref(needsYouThresholdKey, '0.5');
+
+        await extract(policy: DraftPolicy.needsYou);
+
+        expect(await queuedDrafts(), isEmpty);
+        expect(await draftStateOf('m1'), 'skipped');
       });
 
       test('but not a message whose only cue is that a reply is expected',
@@ -1825,8 +1843,13 @@ void main() {
         );
 
         // The wide gate would have taken it — this is the narrowing.
-        expect(asksForAReply(await store.getMessageRow('email', 'm1') ?? {}),
-            isTrue);
+        expect(
+          asksForAReply(
+            await store.getMessageRow('email', 'm1') ?? {},
+            threshold: NeedsYouTuning.defaultThreshold,
+          ),
+          isTrue,
+        );
         expect(await queuedDrafts(), isEmpty);
         expect(await draftStateOf('m1'), 'skipped');
         // Its OWN reason, not the mode's: a person reading the activity row
@@ -1854,14 +1877,15 @@ void main() {
         expect(await queuedDrafts(), isEmpty);
       });
 
-      test('a judged no is a no, and so is a verdict nothing wrote', () async {
+      test('a probability below the slider is a no, and so is none at all',
+          () async {
         await seedMessage(id: 'm1');
         await triageSaid(id: 'm1');
-        await store.writeNeedsYouVerdict('email', 'm1',
-            verdict: false, reason: 'a heads-up, nothing to answer');
+        await store.writeNeedsYouP('email', 'm1',
+            p: 0.1, reason: 'a heads-up, nothing to answer');
         await seedMessage(id: 'm2', conversationKey: 'conv-2');
         await triageSaid(id: 'm2');
-        await store.writeNeedsYouVerdict('email', 'm2', verdict: null);
+        await store.writeNeedsYouP('email', 'm2', p: null);
 
         await extract(policy: DraftPolicy.needsYou, id: 'm1');
         await extract(policy: DraftPolicy.needsYou, id: 'm2');
@@ -1880,7 +1904,7 @@ void main() {
           'body_text': 'Sent it over. — Jo',
         });
         await triageSaid(id: 'o1', urgency: 'urgent');
-        await store.writeNeedsYouVerdict('email', 'o1', verdict: true);
+        await store.writeNeedsYouP('email', 'o1', p: 0.9);
 
         await extract(policy: DraftPolicy.needsYou, id: 'o1');
 
@@ -2085,8 +2109,8 @@ void main() {
         replyExpected: false,
         deadline: '',
       );
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: true, reason: 'Priya is waiting on your number');
+      await store.writeNeedsYouP('email', 'm1',
+          p: 0.9, reason: 'Priya is waiting on your number');
       await store.enqueueWork('extract', 'email', 'm1');
       final drafting = scripted([answer()], schemaName: 'draft_reply');
       final worker = AiWorker(

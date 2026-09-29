@@ -36,7 +36,7 @@ HomeFeedRow _row({
   bool needsYou = false,
   String? urgency,
   String? updatedAt,
-  bool? needsYouVerdict,
+  double? needsYouP,
   String? needsYouReason,
   String? gateReason,
   String? bucket,
@@ -65,7 +65,7 @@ HomeFeedRow _row({
       needsYou: needsYou,
       urgency: urgency,
       updatedAt: updatedAt ?? _minutesAgo(1),
-      needsYouVerdict: needsYouVerdict,
+      needsYouP: needsYouP,
       needsYouReason: needsYouReason,
       gateReason: gateReason,
       bucket: bucket,
@@ -236,7 +236,7 @@ void main() {
         _line(_row(
           dropped: true,
           dropReason: 'not_worthy',
-          needsYouVerdict: false,
+          needsYouP: 0.1,
           needsYouReason: 'a receipt, nobody is asked for anything',
         )).detail,
         'a receipt, nobody is asked for anything',
@@ -253,23 +253,23 @@ void main() {
         _line(_row(
           dropped: true,
           dropReason: 'not_worthy',
-          needsYouVerdict: false,
+          needsYouP: 0.1,
           needsYouReason: '   ',
         )).detail,
         'no ask found',
       );
     });
 
-    test('not_worthy under a YES verdict names the clause that said no, '
+    test('not_worthy over the slider names the clause that said no, '
         'never the reason that said yes', () {
-      // The judge said this wants the owner; the sweep set it aside anyway.
+      // The model said this wants the owner; the sweep set it aside anyway.
       // Quoting "asks for the DPA" under "Nothing to do" would be the app
       // contradicting itself in one line.
       expect(
         _line(_row(
           dropped: true,
           dropReason: 'not_worthy',
-          needsYouVerdict: true,
+          needsYouP: 0.9,
           needsYouReason: 'asks for the DPA by Friday',
           bucket: 'later',
           bucketReason: 'user',
@@ -280,10 +280,10 @@ void main() {
         _line(_row(
           dropped: true,
           dropReason: 'not_worthy',
-          needsYouVerdict: true,
+          needsYouP: 0.9,
           needsYouReason: 'asks for the DPA by Friday',
         )).detail,
-        'below the attention threshold',
+        'below the Needs You slider when it settled',
       );
     });
 
@@ -433,7 +433,7 @@ void main() {
       final result = _underNeedsYou(_row(
         dropped: true,
         dropReason: 'not_worthy',
-        needsYouVerdict: false,
+        needsYouP: 0.1,
         needsYouReason: 'nothing here is addressed to you',
       ));
 
@@ -453,7 +453,7 @@ void main() {
     test('the judge\'s own words are the clause when the verdict was a yes',
         () {
       final result = _underNeedsYou(_row(
-        needsYouVerdict: true,
+        needsYouP: 0.9,
         needsYouReason: 'asks you to confirm Thursday',
       ));
 
@@ -462,7 +462,7 @@ void main() {
       // — so its sentence is not borrowed.
       expect(
         _underNeedsYou(_row(
-          needsYouVerdict: false,
+          needsYouP: 0.1,
           needsYouReason: 'nothing addressed to you',
         )).detail,
         'the thread is still owed an answer',
@@ -647,7 +647,7 @@ void main() {
     test('a recorded NO carries its reason into the tooltip', () {
       expect(
         _line(_row(
-          needsYouVerdict: false,
+          needsYouP: 0.1,
           needsYouReason: 'a calendar invite you already accepted',
         )).tooltip,
         'Nothing to do — a calendar invite you already accepted',

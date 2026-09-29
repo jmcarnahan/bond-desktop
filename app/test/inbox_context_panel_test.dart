@@ -108,10 +108,10 @@ void main() {
       'received_at': '2026-08-28T09:00:00Z',
       'body_text': 'The hero paragraph.',
     });
-    await store.writeNeedsYouVerdict(
+    await store.writeNeedsYouP(
       'email',
       '$key-m1',
-      verdict: true,
+      p: 0.9,
       reason: 'She asked you to confirm the closing date.',
     );
     await store.upsertConversation({
@@ -135,7 +135,6 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
-    await store.setPref(attentionThresholdKey, '0');
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),

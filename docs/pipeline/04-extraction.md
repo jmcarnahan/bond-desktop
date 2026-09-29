@@ -57,7 +57,8 @@ sorted per claim inside the write transaction:
    an owner-asked requeue (`requeueWork(refreshCreatedAt: true)`: Retry,
    Restore) looks like; mail that arrived in the last few minutes rides with
    it;
-2. a message the needs-you pass called theirs (`needs_you_verdict = 1`);
+2. a message that needs the owner (`needs_you_p` at or above their Needs You
+   slider, `needsYouAtSql`);
 3. everything not filed Later before what is;
 4. the decision's importance, high > normal > low (from
    `message_decisions.answers_json`, else an older build's `extraction_json`;
@@ -154,21 +155,22 @@ flow on this call (the Phase 6 measurement in `docs/model-bakeoff.md`).
    the composer ask, so the three cannot disagree (see
    [07-replies.md](07-replies.md)).
 
-   `asksForAReply` takes five signals off the row, any one enough:
-   `needs_you_verdict = 1`, `reply_expected`, `needs_action`, an urgent/high
+   `asksForAReply` takes five signals off the row, any one enough: the
+   message needs the owner (`needsYouAt(needs_you_p, threshold)` at their
+   Needs You slider), `reply_expected`, `needs_action`, an urgent/high
    urgency, or a named deadline (the deadline this call just wrote — the row
    is read back first). The deadline arm still admits any non-empty
    `deadline`, a plan-relative "Day 1" included (it does not go through
-   `showableDeadline`); that is a recorded follow-up. `prefetchWorthy` keeps the two that do not
-   fire on ordinary mail — `needs_you_verdict = 1` or an urgent/high urgency —
-   and drops `reply_expected`, `needs_action` and the deadline, which a
-   receipt, a reminder and a calendar invitation trip between them.
-   The verdict is the needs-you stage's whole-message read (see
-   [11-needs-you.md](11-needs-you.md)) rather than one of triage's fields, and
-   it is on the row because `NeedsYouHandler` drains ahead of this handler in
-   the worker. A judged yes puts a message in front of the drafting model even
-   when triage saw no reply cue at all; NULL and 0 change nothing, and each
-   gate degrades to the triage-only shape it had.
+   `showableDeadline`); that is a recorded follow-up. `prefetchWorthy` is ONE
+   signal, the needs-you predicate itself, and drops the four that fire on
+   ordinary mail, which a receipt, a reminder and a calendar invitation trip
+   between them. The probability is the decision model's whole-message read
+   (see [11-needs-you.md](11-needs-you.md)) rather than one of triage's
+   fields; triage writes it, and `NeedsYouHandler` drains ahead of this
+   handler to settle any it left missing. A message over the slider is put in
+   front of the drafting model even when triage saw no reply cue at all; an
+   undecided one (NULL) adds nothing, and each gate degrades to the
+   triage-only shape it had.
 
 It also embeds the message's own document vector on the fast path
 (`_embedMessage`) — see [05-embeddings.md](05-embeddings.md).

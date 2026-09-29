@@ -18,10 +18,12 @@ import 'deadline_parse.dart' show showableDeadline;
 
 /// Every number the scorer uses, in one place.
 ///
-/// They are constants rather than settings on purpose. The one thing the user
-/// tunes is the THRESHOLD — how much reaches Needs You — and leaving the
-/// weights fixed means the ordering the user learns to trust does not change
-/// under them when they move that slider.
+/// They are constants rather than settings on purpose. The score ORDERS Needs
+/// You and the rail; it never decides what is in Needs You. That is the one
+/// thing the user tunes — the slider, a cut on the decision model's needs-you
+/// probability (`needsYouAt`) — and leaving the weights fixed means the
+/// ordering the user learns to trust does not change under them when they move
+/// it.
 class AttentionTuning {
   /// A thread awaiting the user's reply. The unit everything else is relative to.
   static const double needsReplyBase = 1.0;
@@ -50,17 +52,14 @@ class AttentionTuning {
   /// month-old thread stops crowding out this morning's.
   static const double recencyHalfLifeDays = 7;
 
-  /// The default cut for Needs You, when the user has not moved the slider.
-  static const double defaultThreshold = 0.5;
-
   /// The most rows Needs You shows at once. A ranked list only helps if it is
   /// short enough to read in one glance; past this the rail offers a "+N more"
   /// into the full section rather than growing.
   static const int topCount = 7;
 
   /// Ceiling for [attentionScore]. Nothing needs to be more than twice as loud
-  /// as a plain needs-reply thread, and a bounded range is what lets the
-  /// threshold slider mean the same thing from one mailbox to the next.
+  /// as a plain needs-reply thread, and a bounded range keeps one runaway
+  /// thread from pinning itself above every other row for good.
   static const double maxScore = 2.0;
 
   /// What a `keep` sender's mail is multiplied by. A boost rather than a floor:
@@ -103,8 +102,8 @@ class AttentionTuning {
 ///    [AttentionTuning.recencyHalfLifeDays].
 /// 7. Multiplied by [AttentionTuning.keepBoost] for a `keep` sender.
 /// 8. Multiplied by [AttentionTuning.directBoost] when the message was
-///    addressed to the user singularly — or the needs-you stage judged it a
-///    real ask — and nothing said no reply is wanted.
+///    addressed to the user singularly — or it needs the owner at their
+///    slider — and nothing said no reply is wanted.
 /// 9. Clamped.
 ///
 /// **The quiet temper (steps 2 and 5).** A thread can sit in `needsReply`
@@ -114,47 +113,43 @@ class AttentionTuning {
 /// [AttentionTuning.waitingBase] instead, and skips the reply-rate bonus. The
 /// skip is the load-bearing half: the answer-rate nudge exists to ORDER live
 /// asks against each other, and 0.35 + 0.2 = 0.55 would carry a well-answered
-/// sender's quiet FYI straight back over the 0.5 threshold — the exact thread
+/// sender's quiet FYI straight back up among the live asks — the exact thread
 /// the temper exists to quiet. The question bonus needs no such guard, because
 /// [AttentionTuning.askingIntents] and [AttentionTuning.quietIntents] are
 /// disjoint: an intent that tempers can never be an intent that earns it.
 ///
 /// The urgency multiplier still applies through the temper, deliberately. A
-/// thread triage rated urgent survives it (0.35 × 1.5 = 0.525) and stays in
-/// Needs You — showing one quiet thread too many is the failure this is willing
-/// to have.
+/// thread triage rated urgent survives it (0.35 × 1.5 = 0.525) and stays up
+/// the order — ranking one quiet thread too high is the failure this is
+/// willing to have.
 ///
 /// [latestReplyExpected] false is a POSITIVE judgment and the only thing that
 /// tempers. Null means triage v2 never looked at this message, which is not the
 /// same as it having looked and said no — an unjudged thread scores exactly as
 /// it did before any of this existed.
 ///
-/// **The needs-you verdict.** [needsYouVerdict] is the needs-you stage's
-/// whole-message answer about that same newest inbound message, and it is the
-/// one input here that reads the message rather than triage's fields about it.
-/// It moves the score in exactly two places, both above: a judged YES breaks
-/// the quiet temper (step 2, so the thread scores from
-/// [AttentionTuning.needsReplyBase] and keeps its reply-rate nudge) and earns
-/// the direct boost (step 8) on its own, without [addressedMe]. That pairing is
-/// what lets a 1:1 Teams FYI the stage judged a real ask clear the default
-/// threshold with no slider override.
+/// **Needs you.** [needsYou] is whether that same newest inbound message needs
+/// the owner — the caller's `needsYouAt(needs_you_p, threshold)`, the decision
+/// model's probability against the owner's slider — and it is the one input
+/// here that reads the message rather than triage's fields about it. It moves
+/// the score in exactly two places, both above: a yes breaks the quiet temper
+/// (step 2, so the thread scores from [AttentionTuning.needsReplyBase] and
+/// keeps its reply-rate nudge) and earns the direct boost (step 8) on its own,
+/// without [addressedMe]. That pairing is what puts a 1:1 Teams FYI that needs
+/// the owner up among the replies they owe.
 ///
-/// Null and false move NOTHING. The fences are written to be asymmetric on
-/// purpose — `!= true` on the temper, `== true` on the boost — so that a
-/// message the stage never judged (null) and one it judged and declined (false)
-/// both score exactly as they did before this input existed.
+/// A no moves NOTHING: a message not decided yet and one below the slider both
+/// score exactly as they would with no needs-you input at all.
 ///
-/// And it deliberately does not touch the THRESHOLD. A judged yes raises the
-/// score through the same arithmetic every other signal uses and then takes its
-/// chances against the user's slider like everything else; nothing here gets a
-/// bypass into Needs You.
+/// And it decides nothing about Needs You itself. The score only ORDERS the
+/// rows the needs-you rule already let in.
 ///
 /// [latestIntent] is the intent from the newest inbound message's extraction,
 /// null when nothing has extracted it yet. [senderReplyRate] is a 0..1 fraction
 /// and is clamped, so a caller cannot push a thread up by handing over a rate
 /// of 40. [senderPref] is `'keep'`, `'later'`, `'drop'` or null.
-/// [latestNeedsAction], [latestDeadline], [addressedMe] and [needsYouVerdict]
-/// all describe that same newest inbound message.
+/// [latestNeedsAction], [latestDeadline], [addressedMe] and [needsYou] all
+/// describe that same newest inbound message.
 /// Whether a sender disposition quiets the sender's existing threads: `later`
 /// and `drop` both do, and everything in this file that asks the question
 /// asks it here. What `drop` adds — the gate at triage — is not this file's.
@@ -170,7 +165,7 @@ double attentionScore({
   bool? latestNeedsAction,
   String? latestDeadline,
   bool addressedMe = false,
-  bool? needsYouVerdict,
+  bool needsYou = false,
   required DateTime now,
 }) {
   // Both hard zeros, checked before anything else: a thread the user has
@@ -179,14 +174,10 @@ double attentionScore({
   if (conversation.state == ConversationState.done) return 0;
 
   // Every clause is a separate reason to leave the thread alone, so every one
-  // of them has to agree before the temper fires: the needs-you stage did not
-  // call it a real ask, triage said no reply is wanted, it named no action and
-  // no date, and the extraction read the message as an FYI rather than an ask.
-  //
-  // `!= true` on the first clause: a verdict nobody wrote (null) and one the
-  // stage declined (false) leave the temper exactly as it was, and only a
-  // judged yes breaks it.
-  final quietFyi = needsYouVerdict != true &&
+  // of them has to agree before the temper fires: the message does not need
+  // the owner, triage said no reply is wanted, it named no action and no
+  // date, and the extraction read the message as an FYI rather than an ask.
+  final quietFyi = !needsYou &&
       conversation.state == ConversationState.needsReply &&
       latestReplyExpected == false &&
       latestNeedsAction != true &&
@@ -231,11 +222,10 @@ double attentionScore({
   // temper by construction, which requires the explicit false — still true of
   // the widened condition, since the temper's clauses are unchanged.
   //
-  // The verdict earns the boost on `== true` alone, the opposite fence from
-  // the temper's: being addressed is a fact about the header and reads as a
-  // signal even unjudged, while a needs-you verdict IS a judgment, so its
-  // absence says nothing to boost on.
-  if ((addressedMe || needsYouVerdict == true) &&
+  // Needs-you earns the boost on a yes alone: being addressed is a fact about
+  // the header and reads as a signal even unjudged, while needs-you IS a
+  // judgment, so an undecided message says nothing to boost on.
+  if ((addressedMe || needsYou) &&
       latestReplyExpected != false) {
     score *= AttentionTuning.directBoost;
   }
@@ -278,8 +268,9 @@ double _recencyFactor(String? lastMessageAt, DateTime now) {
 ///   confident. A DROPPED sender's existing threads go quiet exactly as a
 ///   deferred one's do — what the third disposition changes is the gate at
 ///   triage, which is that file's business and not this one's.
-/// - A thread holding an OPEN ASK — a message the needs-you stage judged yes
-///   that the user has not answered — is never deferred by the automatic rule.
+/// - A thread holding an OPEN ASK — a message that needs the owner at their
+///   slider ([needsYou]) that the user has not answered — is never deferred
+///   by the automatic rule.
 ///   Later is where quiet mail goes, and an ask the owner has not answered is
 ///   not quiet. A person's standing rule still wins over it: someone who asked
 ///   for a sender to be deferred asked for that sender's questions too.
@@ -293,11 +284,11 @@ String? bucketFor({
   required String intent,
   required String importance,
   required bool needsReply,
-  bool? needsYouVerdict,
+  bool needsYou = false,
 }) {
   if (quietsSender(senderPref)) return 'later';
   if (senderPref == 'keep') return null;
-  if (needsYouVerdict == true) return null;
+  if (needsYou) return null;
   if (needsReply) return null;
   if (importance == 'low' && AttentionTuning.quietIntents.contains(intent)) {
     return 'later';

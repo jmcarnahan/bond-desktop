@@ -199,7 +199,7 @@ enforce the ones that are commands.
   all three together; a new segmented control is `SettingsSegments<T>`.
 - The settings SURFACE is `SettingsHost` (`screens/settings_host.dart`), not
   the inbox: it owns the probe and every writer only settings calls
-  (`_saveNeedsYouRules`, the two resets and `_resetPipeline`,
+  (the two resets and `_resetPipeline`,
   `_reloadAfterBackendChange`, `_connectionStatus`, `_connectMicrosoft`), and
   the inbox binds it once for both rungs in
   `_settingsHost`. A new settings-only mutator goes on the host. Two methods
@@ -552,23 +552,31 @@ enforce the ones that are commands.
   moves and refuses a file whose `qhash` differs from
   `DecisionHeads.expectedQhash`; a missing file parks the decision pass.
 - The `DecisionPolicy` constants (`services/decision/decision_policy.dart`:
-  `gateDrop`, `needsYouYes`, `needsYouYesCold`, `needsYouNo`, `booleanYes`,
-  `replyYes`) were fitted on the golden set and move only with a golden row
-  on each side (`make golden-decision`, plus `make golden-prose` for
-  `replyYes`), the `StorylineTuning` rule.
+  `gateDrop`, `booleanYes`, `replyYes`) were fitted on the golden set and move
+  only with a golden row on each side (`make golden-decision`, plus `make
+  golden-prose` for `replyYes`), the `StorylineTuning` rule.
+- Needs You is ONE predicate: `needsYouAt(p, threshold)` / `needsYouAtSql` /
+  `MessageStore.threadNeedsYouPSql`; the slider (`needs_you_threshold`,
+  default 0.30) is the only control; every reader goes through it; no
+  language model is asked about needs-you.
 - `message_decisions` is DERIVED (Clear AI results empties it; the triage
   pass writes it again), keyed by `(source, source_message_id)`. The four
   `*_p` columns are the probabilities read by hand; `answers_json` is every
   option's calibrated probability plus `owner_known`. A row decided WITHOUT an
-  owner line (the keychain had not answered yet) has an untrusted `needs_you_p`,
-  so that message's needs-you goes to the language model. A learned drop can
+  owner line (the keychain had not answered yet) has an untrusted
+  `needs_you_p`: triage still writes it to `messages.needs_you_p` and it is
+  SHOWN, every mail sync (and Retry owed stages) requeues the needs-you pass
+  for it (`requeueOwnerlessNeedsYou`), and the pass decides the message again
+  once the owner is known, keeping the p as it is while the owner is still
+  unknown. A learned drop can
   carry an ingest word (`outbound`, a chat's `auto_generated`), so Clear AI
   results tells it from an ingest verdict by the `message_decisions` row
   (`clearDerived`'s `keptGate`, read before that table is emptied).
 - An inbox-level widget test that builds a triage queue overrides
   `decisionClientProvider` with `keepingDecisionClient()`
-  (`test/fixtures/fake_decision_client.dart`: keep, needs-you 0.5 so the band
-  still asks the scripted model). Without it the real client finds no heads
+  (`test/fixtures/fake_decision_client.dart`: keep, needs-you 0.5, over the
+  slider's 0.30 default so a kept message reads as needing the owner). Without
+  it the real client finds no heads
   file under `flutter test` and parks every message, which shows up as rows
   stuck at "triaging" or as RenderFlex overflows, not as a clear failure.
 - Generated drift schema files (`drift_schemas/bond/drift_schema_vN.json`,

@@ -17,7 +17,7 @@ void main() {
   final now = DateTime(2026, 9, 8, 10);
 
   Message msg({
-    bool? needsYouVerdict,
+    double? needsYouP,
     String? needsYouReason,
     String? gateReason,
     String triageStatus = 'triaged',
@@ -39,7 +39,7 @@ void main() {
         receivedAt: '2026-09-07T10:00:00Z',
         subject: 'The survey',
         bodyText: 'Body.',
-        needsYouVerdict: needsYouVerdict,
+        needsYouP: needsYouP,
         needsYouReason: needsYouReason,
         gateReason: gateReason,
         triageStatus: triageStatus,
@@ -60,7 +60,7 @@ void main() {
     Conversation? conversation,
     ExtractionResult? extraction,
     Map<String, Object?>? ai,
-    double threshold = 1.0,
+    double threshold = 0.3,
     VoidCallback? onWhatHappened,
     StoredDecision? decision,
   }) async {
@@ -89,14 +89,16 @@ void main() {
       ];
 
   group('the verdict', () {
-    testWidgets('true is Needs you, with the reason spelled out',
+    testWidgets('the probability is a percentage, with the reason spelled out',
         (tester) async {
       await pump(
         tester,
-        message: msg(needsYouVerdict: true, needsYouReason: 'teams_direct'),
+        message: msg(needsYouP: 0.9, needsYouReason: 'teams_direct'),
       );
 
-      expect(find.text('Needs you'), findsOneWidget);
+      expect(find.text('Needs you: 90%'), findsOneWidget);
+      expect(find.text('In Needs You: at or above your 30% line.'),
+          findsOneWidget);
       // The stored token is a token; the reader gets the sentence.
       expect(find.text('A direct message to you on Teams.'), findsOneWidget);
       expect(find.text('teams_direct'), findsNothing);
@@ -107,7 +109,7 @@ void main() {
       await pump(
         tester,
         message: msg(
-          needsYouVerdict: true,
+          needsYouP: 0.9,
           needsYouReason: 'She asked you to confirm the closing date.',
         ),
       );
@@ -118,43 +120,49 @@ void main() {
       );
     });
 
-    testWidgets('false is Not flagged', (tester) async {
-      await pump(tester, message: msg(needsYouVerdict: false));
-
-      expect(find.text('Not flagged'), findsOneWidget);
-      expect(
-        find.text('The pass judged it does not need you.'),
-        findsOneWidget,
+    testWidgets('below the slider shows its number and says so, without '
+        'the reason', (tester) async {
+      // The reason is templated whatever the probability; under the line it
+      // would claim an ask about a message the reader was told needs nothing.
+      await pump(
+        tester,
+        message: msg(needsYouP: 0.1, needsYouReason: 'Asks you a question.'),
       );
+
+      expect(find.text('Needs you: 10%'), findsOneWidget);
+      expect(find.text('Not in Needs You: below your 30% line.'),
+          findsOneWidget);
+      expect(find.text('Asks you a question.'), findsNothing);
     });
 
-    testWidgets('null is Not judged yet, which is not the same as no',
+    testWidgets('the percentage is rounded, never truncated', (tester) async {
+      await pump(tester, message: msg(needsYouP: 0.716));
+      expect(find.text('Needs you: 72%'), findsOneWidget);
+    });
+
+    testWidgets("the reader's own slider is the cut", (tester) async {
+      await pump(tester, message: msg(needsYouP: 0.4), threshold: 0.3);
+      expect(find.text('Needs you: 40%'), findsOneWidget);
+      expect(find.text('In Needs You: at or above your 30% line.'),
+          findsOneWidget);
+
+      await pump(tester, message: msg(needsYouP: 0.4), threshold: 0.5);
+      expect(find.text('Needs you: 40%'), findsOneWidget);
+      expect(find.text('Not in Needs You: below your 50% line.'),
+          findsOneWidget);
+    });
+
+    testWidgets('undecided is a dash, which is not the same as 0%',
         (tester) async {
       await pump(tester, message: msg());
 
-      expect(find.text('Not judged yet'), findsOneWidget);
+      expect(find.text('Needs you: —'), findsOneWidget);
       expect(
         find.text('The needs-you pass has not reached this message.'),
         findsOneWidget,
       );
-      expect(find.text('Not flagged'), findsNothing);
-    });
-
-    testWidgets('null with a reason is a hedge, neither a no nor unjudged',
-        (tester) async {
-      await pump(
-        tester,
-        message: msg(needsYouReason: 'It might be asking for the numbers.'),
-      );
-
-      expect(find.text('Not sure'), findsOneWidget);
-      expect(
-        find.text('The pass leaned yes but was not sure, so triage decides. '
-            'It might be asking for the numbers.'),
-        findsOneWidget,
-      );
-      expect(find.text('Not flagged'), findsNothing);
-      expect(find.text('Not judged yet'), findsNothing);
+      expect(find.textContaining('Needs You:'), findsNothing);
+      expect(find.text('Needs you: 0%'), findsNothing);
     });
 
     testWidgets('a gated message says which gate took it, in words',
@@ -396,31 +404,16 @@ void main() {
       expect(find.text('Not scored yet.'), findsOneWidget);
     });
 
-    testWidgets('the score is reported against the reader\'s own threshold',
+    testWidgets('the score is reported on its own, not against the slider',
         (tester) async {
+      // The score orders Needs You; the slider cuts the needs-you
+      // probability. Setting one against the other would explain nothing.
       await pump(
         tester,
         conversation: const Conversation(id: 'c1', attentionScore: 1.4),
-        threshold: 1.0,
       );
 
-      expect(
-        find.text('Attention 1.4 — above your threshold of 1.0.'),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('a score under the line reads as below', (tester) async {
-      await pump(
-        tester,
-        conversation: const Conversation(id: 'c1', attentionScore: 0.4),
-        threshold: 1.0,
-      );
-
-      expect(
-        find.text('Attention 0.4 — below your threshold of 1.0.'),
-        findsOneWidget,
-      );
+      expect(find.text('Attention 1.4.'), findsOneWidget);
     });
 
     testWidgets('each way a thread reaches Later is named in words',
@@ -542,7 +535,7 @@ void main() {
     await pump(
       tester,
       message: msg(
-        needsYouVerdict: true,
+        needsYouP: 0.9,
         needsYouReason: 'teams_direct',
         needsAction: true,
         replyExpected: false,

@@ -55,7 +55,9 @@ placed on its own (Settings → Models, or the first-run wizard):
   the app's models folder, where the app's own server (the managed router)
   picks it up; `make decide` serves it by hand on `:8083`.
 - **Generative** — ONE chat model for every piece of text: each message's
-  summary, action items and deadline, the needs-you band, storylines, drafts.
+  summary, action items and deadline, storylines, drafts. Whether a message
+  needs you is the decision model's probability against your Needs You slider,
+  never a chat model's call.
   By default the 27B on your box when the build names one (`BOND_BOX_URL`);
   otherwise the 27B above on this Mac, or Qwen3-4B on a Mac under 40 GiB.
 - **Embeddings** — Qwen3-Embedding-0.6B, always on this Mac.
@@ -199,7 +201,7 @@ generative model (see [The app's models](#the-apps-models)). A developer who
 would rather start them by hand sets `BOND_DEV_HAND_SERVERS = 1` in `local.mk`
 and runs three servers, all optional: `make decide` on `:8083` (the decision
 model, after `make decide-install`), `make model` on `:8080` (the generative
-model: the message text, the needs-you band, storylines and drafts) and
+model: the message text, storylines and drafts) and
 `make embed` on `:8081` (`Qwen3-Embedding-0.6B`, which turns conversations
 into vectors so they can be clustered and searched). `make fast` on `:8082` is
 the benches' bulk slot; the app does not use it. With none of them running the
@@ -453,8 +455,8 @@ nuance, because the queues treat an HTTP 400 as fatal and drop the message.
 `BENCH_VERIFY=0` skips it.
 
 A bench points wherever you tell it, so trying a candidate runtime is one
-command and no code edit. `BENCH_*` is the bulk slot (the message text, the
-needs-you band, membership); `PROSE_*` is the drafting slot `make bench-prose`
+command and no code edit. `BENCH_*` is the bulk slot (the message text,
+membership); `PROSE_*` is the drafting slot `make bench-prose`
 and the A/B use; the decision model is benched by `make golden-decision`
 against `make decide` (`DECIDE_URL`):
 

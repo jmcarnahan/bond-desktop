@@ -4,12 +4,12 @@ import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/decision/decision_input.dart';
 import 'package:bond_inbox/services/decision/decision_policy.dart';
+import 'package:bond_inbox/services/decision/needs_you_predicate.dart';
 import 'package:bond_inbox/services/decision/decision_state.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/message_text_task.dart';
-import 'package:bond_inbox/services/llm/needs_you_task.dart';
 // `show`: the two things this file wants from the storyline service are the
 // charter clamp the app ships and the grouping mode a define can pick, so a
 // harness default cannot drift from either.
@@ -140,9 +140,9 @@ class GoldenDefines {
       resolveEmbedPrefix(sweepEmbedPrefixRaw);
 
   /// The owner's name, or null when the define is empty or only whitespace.
-  /// Null and not the empty string: `NeedsYouInput` takes a `String?` and
-  /// omits the owner line entirely for null, which is the honest rendering of
-  /// "this machine did not say who the owner is".
+  /// Null and not the empty string: a null owner is omitted from every input
+  /// that names one, which is the honest rendering of "this machine did not
+  /// say who the owner is".
   static String? get ownerName =>
       ownerNameRaw.trim().isEmpty ? null : ownerNameRaw.trim();
 
@@ -231,10 +231,8 @@ String decisionConfidenceWord(double pYes) {
 
 /// One item's decision answers, as the run file records them.
 ///
-/// needs_you is `p(yes) >= 0.5` in BOTH rules: that is the row of record's
-/// verdict. The app's own reading is banded (yes at 0.65, no below 0.35,
-/// the generative model in between — D6), which a run file of one model's
-/// answers cannot express; the band's size is what the agreement leg counts.
+/// needs_you is the app's own rule in BOTH gate rules: [needsYouAt] at the
+/// slider's shipped default ([NeedsYouTuning.defaultThreshold]).
 GoldenClassifierOut classifierOut(
   DecisionAnswers a, {
   required DecisionGateRule rule,
@@ -261,7 +259,7 @@ GoldenClassifierOut classifierOut(
     urgency: a['urgency'].choice,
     needsAction: a.p('needs_action', 'yes') >= DecisionPolicy.booleanYes,
     replyExpected: a.p('reply_expected', 'yes') >= DecisionPolicy.replyYes,
-    needsYouVerdict: pNeedsYou >= 0.5,
+    needsYouVerdict: needsYouAt(pNeedsYou, NeedsYouTuning.defaultThreshold),
     needsYouConfidence: decisionConfidenceWord(pNeedsYou),
     intent: a['intent'].choice,
     importance: a['importance'].choice,
@@ -409,59 +407,24 @@ GoldenTextOut textOut(MessageTextResult r) => GoldenTextOut(
       project: r.project,
     );
 
-/// The needs-you answer the app's ladder settles from the decision model
-/// alone, or null when p(yes) sits in the band and the generative model is
-/// asked (`NeedsYouHandler`, D6): yes at [DecisionPolicy.needsYouYes] and
-/// above, no below [DecisionPolicy.needsYouNo]. The confidence word is the
-/// head's, as the decision leg records it, and the evidence is the app's own
-/// TEMPLATED `needs_you_reason` ([needsYouYesReason] / [needsYouNoReason]),
-/// so a decided item carries evidence the way the app's row does.
-///
-/// The ONE bar the replay cannot reproduce is the cold-outreach one
-/// ([DecisionPolicy.needsYouYesCold]): the app decides "cold" from the
-/// owner's own sender history, which a golden item does not carry, so the
-/// replay uses the ordinary bar throughout.
-GoldenNeedsYouOut? decidedNeedsYouOut(DecisionAnswers a) {
+/// The needs-you answer the app reads off the decision model: yes when
+/// p(needs_you = yes) is at or above the owner's slider ([needsYouAt], at
+/// [threshold], the shipped default unless a sweep says otherwise), no below
+/// it. Never null: there is no band and no language model. The confidence
+/// word is the head's, as the decision leg records it, and the evidence is the
+/// app's own TEMPLATED `needs_you_reason` ([needsYouYesReason]), which the app
+/// writes beside the probability whatever its value.
+GoldenNeedsYouOut decidedNeedsYouOut(
+  DecisionAnswers a, {
+  double threshold = NeedsYouTuning.defaultThreshold,
+}) {
   final pYes = a.p('needs_you', 'yes');
-  if (pYes >= DecisionPolicy.needsYouYes) {
-    return GoldenNeedsYouOut(
-      verdict: true,
-      confidence: decisionConfidenceWord(pYes),
-      evidence: needsYouYesReason(a),
-    );
-  }
-  if (pYes < DecisionPolicy.needsYouNo) {
-    return GoldenNeedsYouOut(
-      verdict: false,
-      confidence: decisionConfidenceWord(pYes),
-      evidence: needsYouNoReason,
-    );
-  }
-  return null;
+  return GoldenNeedsYouOut(
+    verdict: needsYouAt(pYes, threshold),
+    confidence: decisionConfidenceWord(pYes),
+    evidence: needsYouYesReason(a),
+  );
 }
-
-/// The needs-you answer, as the HANDLER would have written it down.
-///
-/// Not a straight copy, and deliberately so: the shipping verdict is
-/// `needsYou && confidence != 'low'` (`lib/services/needs_you_handler.dart`,
-/// the `verdict` local), because a low-confidence yes is a no in this app. A
-/// replay that recorded the model's raw boolean would score a pipeline that
-/// does not exist. The raw confidence rides along beside the derived verdict
-/// so a reader can still see which of the two the model actually said.
-GoldenNeedsYouOut needsYouOut(NeedsYouResult r) => GoldenNeedsYouOut(
-      verdict: r.needsYou && r.confidence != 'low',
-      confidence: r.confidence,
-      evidence: r.evidence,
-    );
-
-/// The needs-you answer for an item the deterministic floor already settles.
-///
-/// No confidence, because the floor states none — it is a rule about how a
-/// message was addressed, not a judgement — and `floor: true` so a reader can
-/// tell the model's recall from the floor's rather than reading one number
-/// that mixes them.
-GoldenNeedsYouOut floorOut() =>
-    const GoldenNeedsYouOut(verdict: true, floor: true);
 
 /// The reply decision, as the run file records it: the decision model's
 /// p(reply_expected = yes) against [DecisionPolicy.replyYes] — the bar the

@@ -2,6 +2,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/label_models.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
+import 'package:bond_inbox/services/decision/needs_you_predicate.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart' show ModelPlacement;
 import 'package:bond_inbox/services/server/server_state.dart';
 import 'package:bond_inbox/theme/tokens.dart';
@@ -24,7 +25,7 @@ import 'fixtures/test_db.dart';
 void main() {
   Future<void> open(
     WidgetTester tester, {
-    double threshold = 0.5,
+    double threshold = 0.3,
     String aboutMe = '',
     required void Function(double) onThresholdChanged,
     required void Function(String) onAboutMeChanged,
@@ -39,7 +40,6 @@ void main() {
     SettingsScope scope = SettingsScope.all,
     VoidCallback? onBack,
     VoidCallback? onHome,
-    int needsYouRejudging = 0,
     ValueChanged<bool>? onProcessingChanged,
     Future<void> Function()? onClearAiResults,
     List<Label>? labels,
@@ -71,7 +71,6 @@ void main() {
           onDraftPolicyChanged: onDraftPolicyChanged,
           hasScope: hasScope,
           onSignInAgain: onSignInAgain,
-          needsYouRejudging: needsYouRejudging,
           onProcessingChanged: onProcessingChanged,
           onClearAiResults: onClearAiResults,
           labels: labels,
@@ -117,44 +116,33 @@ void main() {
     await expand(tester, 'Needs You');
 
     expect(find.text('How much lands in Needs You'), findsOneWidget);
-    expect(find.text('Only the critical'), findsWidgets);
+    expect(find.text('Only the surest'), findsWidgets);
     expect(find.text('Anything plausible'), findsWidgets);
     expect(find.byType(Slider), findsOneWidget);
-  });
-
-  testWidgets('the Needs You summary says how much is being re-judged',
-      (tester) async {
-    // The only feedback a rules save gives: the verdicts themselves move
-    // minutes later, on a queue this screen does not show.
-    await open(
-      tester,
-      onThresholdChanged: (_) {},
-      onAboutMeChanged: (_) {},
-      needsYouRejudging: 3,
+    expect(
+      tester.widget<Text>(find.byKey(SettingsScreen.needsYouThresholdLineKey))
+          .data,
+      'Needs you at 30% or more',
     );
-
-    expect(find.textContaining('judging 3 messages'), findsOneWidget);
-  });
-
-  testWidgets('and says it in the singular for one', (tester) async {
-    await open(
-      tester,
-      onThresholdChanged: (_) {},
-      onAboutMeChanged: (_) {},
-      needsYouRejudging: 1,
+    expect(
+      find.text("The decision model's confidence that a message needs you. "
+          'Each message shows its own percentage.'),
+      findsOneWidget,
     );
-
-    expect(find.textContaining('judging 1 message'), findsOneWidget);
   });
 
-  testWidgets('and says nothing at all when the queue is empty',
+  testWidgets('the Needs You summary is the threshold as a percentage',
       (tester) async {
     await open(
       tester,
+      threshold: 0.45,
       onThresholdChanged: (_) {},
       onAboutMeChanged: (_) {},
     );
 
+    expect(find.text('At 45% or more'), findsOneWidget);
+    // No rules clause and no queue clause: the slider is the one control.
+    expect(find.textContaining('rules'), findsNothing);
     expect(find.textContaining('judging'), findsNothing);
   });
 
@@ -240,8 +228,8 @@ void main() {
     });
   });
 
-  testWidgets('the rules editor is absent when no save is wired',
-      (tester) async {
+  testWidgets('the Needs You section has no text to edit', (tester) async {
+    // No language model is asked about needs-you, so there is no prompt.
     await open(
       tester,
       onThresholdChanged: (_) {},
@@ -250,12 +238,13 @@ void main() {
     await expand(tester, 'Needs You');
 
     expect(find.byType(Slider), findsOneWidget);
+    expect(find.byType(TextField), findsNothing);
     expect(find.text('Save'), findsNothing);
   });
 
   testWidgets('the slider reads right-is-more, so it renders inverted',
       (tester) async {
-    // A threshold of 0.8 means "only the critical", which is the LEFT end.
+    // A threshold of 0.8 means "only the surest", towards the LEFT end.
     await open(
       tester,
       threshold: 0.8,
@@ -264,7 +253,12 @@ void main() {
     );
     await expand(tester, 'Needs You');
 
-    expect(tester.widget<Slider>(find.byType(Slider)).value, closeTo(0.2, 1e-9));
+    final slider = tester.widget<Slider>(find.byType(Slider));
+    expect(slider.min, 0.05);
+    expect(slider.max, 0.95);
+    expect(slider.divisions, 18);
+    expect(slider.value, closeTo(0.2, 1e-9));
+    expect(find.text('Needs you at 80% or more'), findsOneWidget);
   });
 
   testWidgets('dragging right lowers the threshold, and only on release',
@@ -272,7 +266,7 @@ void main() {
     final written = <double>[];
     await open(
       tester,
-      threshold: 1,
+      threshold: 0.95,
       onThresholdChanged: written.add,
       onAboutMeChanged: (_) {},
     );
@@ -283,7 +277,40 @@ void main() {
 
     expect(written, hasLength(1),
         reason: 'each write reloads the list; one per drag, not one per pixel');
-    expect(written.single, lessThan(1));
+    expect(written.single, lessThan(0.95));
+    // Every write is a notch the stored pref can hold, and the line under
+    // the slider says the number that was written.
+    expect(written.single, NeedsYouTuning.minThreshold);
+    expect(find.text('Needs you at 5% or more'), findsOneWidget);
+  });
+
+  testWidgets('a drag to the middle writes the notch it landed on',
+      (tester) async {
+    final written = <double>[];
+    await open(
+      tester,
+      threshold: 0.95,
+      onThresholdChanged: written.add,
+      onAboutMeChanged: (_) {},
+    );
+    await expand(tester, 'Needs You');
+
+    // From the left end to the centre of the track: position 0.5, the
+    // threshold 0.95 + 0.05 − 0.5.
+    final slider = find.byType(Slider);
+    final box = tester.getRect(slider);
+    await tester.dragFrom(
+      Offset(box.left + 24, box.center.dy),
+      Offset(box.width / 2 - 24, 0),
+    );
+    await tester.pumpAndSettle();
+
+    expect(written, hasLength(1));
+    expect(written.single, isIn(const [0.45, 0.5, 0.55]));
+    expect(
+      find.text('Needs you at ${(written.single * 100).round()}% or more'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('Save commits the text', (tester) async {
@@ -464,9 +491,9 @@ void main() {
 
     await open(
       tester,
-      threshold: container.read(appPrefsProvider).attentionThreshold,
+      threshold: container.read(appPrefsProvider).needsYouThreshold,
       aboutMe: container.read(appPrefsProvider).aboutMe,
-      onThresholdChanged: prefs.setAttentionThreshold,
+      onThresholdChanged: prefs.setNeedsYouThreshold,
       onAboutMeChanged: prefs.setAboutMe,
     );
 
@@ -484,8 +511,15 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(await store.getPref(aboutMeKey), 'I run a small design studio.');
-    expect(double.parse((await store.getPref(attentionThresholdKey))!), 1.0);
-    expect(container.read(appPrefsProvider).attentionThreshold, 1.0);
+    // The slider's far end, clamped to the Needs You range by the writer.
+    expect(
+      double.parse((await store.getPref(needsYouThresholdKey))!),
+      NeedsYouTuning.maxThreshold,
+    );
+    expect(
+      container.read(appPrefsProvider).needsYouThreshold,
+      NeedsYouTuning.maxThreshold,
+    );
   });
 
   testWidgets('the home link is absent unless the host wires one',

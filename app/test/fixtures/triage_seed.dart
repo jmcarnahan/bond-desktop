@@ -60,3 +60,22 @@ Future<void> writeTriaged(
     );
   }
 }
+
+/// A kept message the decision model says needs the owner: `triaged`, with
+/// [p] in `needs_you_p` — over the slider's default unless a test says
+/// otherwise.
+///
+/// Triaged as well as decided, because a widget test's triage queue decides a
+/// `pending` message with no owner line, and a probability decided without
+/// the owner is cleared rather than trusted: a seed that left the row pending
+/// would watch its thread leave Needs You a few pumps in.
+Future<void> seedNeedsYou(
+  MessageStore store,
+  String source,
+  String sourceMessageId, {
+  double p = 0.9,
+  String? reason,
+}) async {
+  await store.writeTriage(source, sourceMessageId, status: 'triaged');
+  await store.writeNeedsYouP(source, sourceMessageId, p: p, reason: reason);
+}

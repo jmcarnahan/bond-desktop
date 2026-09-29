@@ -6,7 +6,6 @@ import 'package:bond_inbox/services/decision/decision_policy.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/message_text_task.dart';
-import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/storyline_service.dart'
     show StorylineTuning;
 import 'package:flutter_test/flutter_test.dart';
@@ -251,24 +250,28 @@ void main() {
       expect((json['extract']! as Map).containsKey('topics'), isFalse);
     });
 
-    test("the ladder settles outside the band and asks inside it", () {
-      GoldenNeedsYouOut? at(double p) =>
-          decidedNeedsYouOut(fakeAnswers(needsYou: p));
-      expect(at(0.65)!.verdict, isTrue);
-      expect(at(0.97)!.confidence, 'high');
-      expect(at(0.34)!.verdict, isFalse);
-      expect(at(0.05)!.confidence, 'high');
-      // The band: the generative model is asked, so the ladder says nothing.
-      expect(at(0.35), isNull);
-      expect(at(0.5), isNull);
-      expect(at(0.649), isNull);
+    test('the verdict is the probability against the slider, never null', () {
+      GoldenNeedsYouOut at(double p, {double? threshold}) => threshold == null
+          ? decidedNeedsYouOut(fakeAnswers(needsYou: p))
+          : decidedNeedsYouOut(fakeAnswers(needsYou: p), threshold: threshold);
+      // At the shipped default, 0.30.
+      expect(at(0.30).verdict, isTrue);
+      expect(at(0.29).verdict, isFalse);
+      expect(at(0.5).verdict, isTrue);
+      expect(at(0.97).confidence, 'high');
+      expect(at(0.05).confidence, 'high');
+      // A sweep moves the cut.
+      expect(at(0.5, threshold: 0.55).verdict, isFalse);
+      expect(at(0.55, threshold: 0.55).verdict, isTrue);
     });
 
     test("a decided item carries the app's templated reason as evidence", () {
       final yes = fakeAnswers(needsYou: 0.9, intent: 'approval');
-      expect(decidedNeedsYouOut(yes)!.evidence, needsYouYesReason(yes));
-      expect(decidedNeedsYouOut(fakeAnswers(needsYou: 0.1))!.evidence,
-          needsYouNoReason);
+      expect(decidedNeedsYouOut(yes).evidence, needsYouYesReason(yes));
+      // A no carries the same template: the app writes it beside the
+      // probability whatever its value.
+      final no = fakeAnswers(needsYou: 0.1, intent: 'approval');
+      expect(decidedNeedsYouOut(no).evidence, needsYouYesReason(no));
       expect(
         (GoldenRunEntry(id: 'g', stratum: 's', difficulty: 'd')
               ..needsYou = decidedNeedsYouOut(yes))
@@ -334,64 +337,6 @@ void main() {
     });
   });
 
-  // ── the verdict the handler would have written ────────────────────────
-  group('needs-you records the handler’s verdict, not the model’s boolean', () {
-    test('a confident yes is a yes', () {
-      final out = needsYouOut(const NeedsYouResult(
-        evidence: 'A direct question.',
-        needsYou: true,
-        confidence: 'high',
-      ));
-      expect(out.verdict, isTrue);
-      expect(out.confidence, 'high');
-      expect(out.evidence, 'A direct question.');
-      expect(out.floor, isFalse);
-    });
-
-    test('a low-confidence yes is a no, with the confidence kept', () {
-      final out = needsYouOut(const NeedsYouResult(
-        evidence: 'Possibly about the owner.',
-        needsYou: true,
-        confidence: 'low',
-      ));
-      expect(out.verdict, isFalse);
-      expect(out.confidence, 'low');
-    });
-
-    test('a no stays a no however confident', () {
-      final out = needsYouOut(const NeedsYouResult(
-        evidence: 'A broadcast.',
-        needsYou: false,
-        confidence: 'high',
-      ));
-      expect(out.verdict, isFalse);
-    });
-
-    test('the floor answers yes and claims no confidence at all', () {
-      final out = floorOut();
-      expect(out.verdict, isTrue);
-      expect(out.confidence, isNull);
-      expect(out.floor, isTrue);
-
-      final json = (GoldenRunEntry(
-        id: 'teams:fx-floor',
-        stratum: 'needsyou-hard',
-        difficulty: 'medium',
-      )..needsYou = out)
-          .toScoreRunJson()['needs_you'] as Map<String, Object?>;
-      expect(json.containsKey('confidence'), isFalse);
-      expect(json['floor'], isTrue);
-      expect(json['verdict'], isTrue);
-    });
-
-    test('an item the floor settles is one the fixture can point at', () {
-      // The live replay branches on exactly this, so the mapping is only
-      // meaningful if the flag it reads means what it claims.
-      expect(set.byId['teams:fx-floor']!.floorSaysYes, isTrue);
-      expect(set.byId['email:fx-reply']!.floorSaysYes, isFalse);
-    });
-  });
-
   // ── which rows a run file carries ─────────────────────────────────────
   group('a row is written when anything was attempted', () {
     GoldenRunEntry entry() =>
@@ -407,8 +352,12 @@ void main() {
       expect(e.attempted, isTrue);
     });
 
-    test('a floor answer with no call is still a row', () {
-      expect((entry()..needsYou = floorOut()).attempted, isTrue);
+    test('a needs-you answer with no call is still a row', () {
+      expect(
+        (entry()..needsYou = decidedNeedsYouOut(fakeAnswers(needsYou: 0.9)))
+            .attempted,
+        isTrue,
+      );
     });
   });
 
@@ -824,7 +773,8 @@ void main() {
           'drop');
     });
 
-    test('booleans at 0.5, needs-you confidence off the top probability', () {
+    test('booleans at 0.5, needs-you at the slider default, its confidence '
+        'off the top probability', () {
       final a = answers({
         'needs_action': {'yes': 0.5, 'no': 0.5},
         'reply_expected': {'yes': 0.49, 'no': 0.51},
@@ -837,8 +787,19 @@ void main() {
       final out = classifierOut(a, rule: DecisionGateRule.policy);
       expect(out.needsAction, isTrue);
       expect(out.replyExpected, isFalse);
-      expect(out.needsYouVerdict, isFalse);
+      // The app's own rule: 0.3 is the slider's default, and a message at
+      // the line needs you.
+      expect(out.needsYouVerdict, isTrue);
       expect(out.needsYouConfidence, 'medium');
+      expect(
+        classifierOut(
+          answers({
+            'needs_you': {'yes': 0.29, 'no': 0.71},
+          }),
+          rule: DecisionGateRule.policy,
+        ).needsYouVerdict,
+        isFalse,
+      );
       expect(decisionConfidenceWord(0.9), 'high');
       expect(decisionConfidenceWord(0.1), 'high');
       expect(decisionConfidenceWord(0.6), 'low');

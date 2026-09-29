@@ -373,6 +373,17 @@ class Messages extends Table with TableInfo<Messages, Message> {
     requiredDuringInsert: false,
     $customConstraints: '',
   );
+  static const VerificationMeta _needsYouPMeta = const VerificationMeta(
+    'needsYouP',
+  );
+  late final GeneratedColumn<double> needsYouP = GeneratedColumn<double>(
+    'needs_you_p',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
   @override
   List<GeneratedColumn> get $columns => [
     source,
@@ -408,6 +419,7 @@ class Messages extends Table with TableInfo<Messages, Message> {
     needsYouVerdict,
     needsYouReason,
     gateOverride,
+    needsYouP,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -683,6 +695,12 @@ class Messages extends Table with TableInfo<Messages, Message> {
         ),
       );
     }
+    if (data.containsKey('needs_you_p')) {
+      context.handle(
+        _needsYouPMeta,
+        needsYouP.isAcceptableOrUnknown(data['needs_you_p']!, _needsYouPMeta),
+      );
+    }
     return context;
   }
 
@@ -824,6 +842,10 @@ class Messages extends Table with TableInfo<Messages, Message> {
         DriftSqlType.string,
         data['${effectivePrefix}gate_override'],
       ),
+      needsYouP: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}needs_you_p'],
+      ),
     );
   }
 
@@ -897,19 +919,14 @@ class Message extends DataClass implements Insertable<Message> {
   final int? replyExpected;
   final String? deadline;
 
-  /// `needs_you_verdict` is the needs-you pass's answer to the only question
-  /// the rail exists to ask: does this one want the owner? NULL means the pass
-  /// has never judged this row, which is NOT the same as "no" — the unjudged
-  /// rows ARE the worklist, so nothing may read NULL as 0. 0 is a judgement
-  /// that the message does not need the owner; 1 is a judgement that it does.
+  /// `needs_you_verdict` is INERT since v21: the pre-probability needs-you
+  /// verdict (NULL never judged, 0 no, 1 yes). Nothing writes it any more;
+  /// v21 mapped it into `needs_you_p` below, which is what Needs You reads.
   ///
-  /// Written by the `needs_you` work handler and by nobody else — the
-  /// deterministic floor or, later, the model. Ingest never touches it: what a
-  /// connector knows lands in `addressed_me`, which is a fact about the
-  /// message, while this is a verdict about it.
-  ///
-  /// `needs_you_reason` says why: 'teams_direct' from the floor, or the
-  /// model's own evidence sentence.
+  /// `needs_you_reason` says why the message's probability is what it is: the
+  /// decision model's templated sentence. Rows from before v21 may still carry
+  /// 'teams_direct', the retired Teams floor's token, or a language model's
+  /// evidence line from the builds that asked one.
   final int? needsYouVerdict;
   final String? needsYouReason;
 
@@ -925,6 +942,13 @@ class Message extends DataClass implements Insertable<Message> {
   /// `MessageStore.stampStorylineId`): the user is telling the app what the
   /// old messages were always about, and that word outlives the passes.
   final String? gateOverride;
+
+  /// `needs_you_p` is the decision model's calibrated p(needs_you = yes) for
+  /// this message, written by the triage pass (and by the needs-you handler
+  /// when it re-decides). It is the ONE number Needs You reads, against the
+  /// owner's slider (`needs_you_threshold`). NULL means not decided yet, which
+  /// is NOT a low probability: an undecided message needs nobody until it is.
+  final double? needsYouP;
   const Message({
     required this.source,
     required this.sourceMessageId,
@@ -959,6 +983,7 @@ class Message extends DataClass implements Insertable<Message> {
     this.needsYouVerdict,
     this.needsYouReason,
     this.gateOverride,
+    this.needsYouP,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1037,6 +1062,9 @@ class Message extends DataClass implements Insertable<Message> {
     }
     if (!nullToAbsent || gateOverride != null) {
       map['gate_override'] = Variable<String>(gateOverride);
+    }
+    if (!nullToAbsent || needsYouP != null) {
+      map['needs_you_p'] = Variable<double>(needsYouP);
     }
     return map;
   }
@@ -1118,6 +1146,9 @@ class Message extends DataClass implements Insertable<Message> {
       gateOverride: gateOverride == null && nullToAbsent
           ? const Value.absent()
           : Value(gateOverride),
+      needsYouP: needsYouP == null && nullToAbsent
+          ? const Value.absent()
+          : Value(needsYouP),
     );
   }
 
@@ -1162,6 +1193,7 @@ class Message extends DataClass implements Insertable<Message> {
       needsYouVerdict: serializer.fromJson<int?>(json['needs_you_verdict']),
       needsYouReason: serializer.fromJson<String?>(json['needs_you_reason']),
       gateOverride: serializer.fromJson<String?>(json['gate_override']),
+      needsYouP: serializer.fromJson<double?>(json['needs_you_p']),
     );
   }
   @override
@@ -1201,6 +1233,7 @@ class Message extends DataClass implements Insertable<Message> {
       'needs_you_verdict': serializer.toJson<int?>(needsYouVerdict),
       'needs_you_reason': serializer.toJson<String?>(needsYouReason),
       'gate_override': serializer.toJson<String?>(gateOverride),
+      'needs_you_p': serializer.toJson<double?>(needsYouP),
     };
   }
 
@@ -1238,6 +1271,7 @@ class Message extends DataClass implements Insertable<Message> {
     Value<int?> needsYouVerdict = const Value.absent(),
     Value<String?> needsYouReason = const Value.absent(),
     Value<String?> gateOverride = const Value.absent(),
+    Value<double?> needsYouP = const Value.absent(),
   }) => Message(
     source: source ?? this.source,
     sourceMessageId: sourceMessageId ?? this.sourceMessageId,
@@ -1284,6 +1318,7 @@ class Message extends DataClass implements Insertable<Message> {
         ? needsYouReason.value
         : this.needsYouReason,
     gateOverride: gateOverride.present ? gateOverride.value : this.gateOverride,
+    needsYouP: needsYouP.present ? needsYouP.value : this.needsYouP,
   );
   Message copyWithCompanion(MessagesCompanion data) {
     return Message(
@@ -1360,6 +1395,7 @@ class Message extends DataClass implements Insertable<Message> {
       gateOverride: data.gateOverride.present
           ? data.gateOverride.value
           : this.gateOverride,
+      needsYouP: data.needsYouP.present ? data.needsYouP.value : this.needsYouP,
     );
   }
 
@@ -1398,7 +1434,8 @@ class Message extends DataClass implements Insertable<Message> {
           ..write('deadline: $deadline, ')
           ..write('needsYouVerdict: $needsYouVerdict, ')
           ..write('needsYouReason: $needsYouReason, ')
-          ..write('gateOverride: $gateOverride')
+          ..write('gateOverride: $gateOverride, ')
+          ..write('needsYouP: $needsYouP')
           ..write(')'))
         .toString();
   }
@@ -1438,6 +1475,7 @@ class Message extends DataClass implements Insertable<Message> {
     needsYouVerdict,
     needsYouReason,
     gateOverride,
+    needsYouP,
   ]);
   @override
   bool operator ==(Object other) =>
@@ -1475,7 +1513,8 @@ class Message extends DataClass implements Insertable<Message> {
           other.deadline == this.deadline &&
           other.needsYouVerdict == this.needsYouVerdict &&
           other.needsYouReason == this.needsYouReason &&
-          other.gateOverride == this.gateOverride);
+          other.gateOverride == this.gateOverride &&
+          other.needsYouP == this.needsYouP);
 }
 
 class MessagesCompanion extends UpdateCompanion<Message> {
@@ -1512,6 +1551,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
   final Value<int?> needsYouVerdict;
   final Value<String?> needsYouReason;
   final Value<String?> gateOverride;
+  final Value<double?> needsYouP;
   final Value<int> rowid;
   const MessagesCompanion({
     this.source = const Value.absent(),
@@ -1547,6 +1587,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     this.needsYouVerdict = const Value.absent(),
     this.needsYouReason = const Value.absent(),
     this.gateOverride = const Value.absent(),
+    this.needsYouP = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   MessagesCompanion.insert({
@@ -1583,6 +1624,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     this.needsYouVerdict = const Value.absent(),
     this.needsYouReason = const Value.absent(),
     this.gateOverride = const Value.absent(),
+    this.needsYouP = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : sourceMessageId = Value(sourceMessageId),
        conversationKey = Value(conversationKey),
@@ -1623,6 +1665,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     Expression<int>? needsYouVerdict,
     Expression<String>? needsYouReason,
     Expression<String>? gateOverride,
+    Expression<double>? needsYouP,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1659,6 +1702,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
       if (needsYouVerdict != null) 'needs_you_verdict': needsYouVerdict,
       if (needsYouReason != null) 'needs_you_reason': needsYouReason,
       if (gateOverride != null) 'gate_override': gateOverride,
+      if (needsYouP != null) 'needs_you_p': needsYouP,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1697,6 +1741,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     Value<int?>? needsYouVerdict,
     Value<String?>? needsYouReason,
     Value<String?>? gateOverride,
+    Value<double?>? needsYouP,
     Value<int>? rowid,
   }) {
     return MessagesCompanion(
@@ -1733,6 +1778,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
       needsYouVerdict: needsYouVerdict ?? this.needsYouVerdict,
       needsYouReason: needsYouReason ?? this.needsYouReason,
       gateOverride: gateOverride ?? this.gateOverride,
+      needsYouP: needsYouP ?? this.needsYouP,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1839,6 +1885,9 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     if (gateOverride.present) {
       map['gate_override'] = Variable<String>(gateOverride.value);
     }
+    if (needsYouP.present) {
+      map['needs_you_p'] = Variable<double>(needsYouP.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1881,6 +1930,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
           ..write('needsYouVerdict: $needsYouVerdict, ')
           ..write('needsYouReason: $needsYouReason, ')
           ..write('gateOverride: $gateOverride, ')
+          ..write('needsYouP: $needsYouP, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -19773,6 +19823,7 @@ typedef $MessagesCreateCompanionBuilder =
       Value<int?> needsYouVerdict,
       Value<String?> needsYouReason,
       Value<String?> gateOverride,
+      Value<double?> needsYouP,
       Value<int> rowid,
     });
 typedef $MessagesUpdateCompanionBuilder =
@@ -19810,6 +19861,7 @@ typedef $MessagesUpdateCompanionBuilder =
       Value<int?> needsYouVerdict,
       Value<String?> needsYouReason,
       Value<String?> gateOverride,
+      Value<double?> needsYouP,
       Value<int> rowid,
     });
 
@@ -19983,6 +20035,11 @@ class $MessagesFilterComposer extends Composer<_$BondDatabase, Messages> {
 
   ColumnFilters<String> get gateOverride => $composableBuilder(
     column: $table.gateOverride,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get needsYouP => $composableBuilder(
+    column: $table.needsYouP,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -20159,6 +20216,11 @@ class $MessagesOrderingComposer extends Composer<_$BondDatabase, Messages> {
     column: $table.gateOverride,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<double> get needsYouP => $composableBuilder(
+    column: $table.needsYouP,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $MessagesAnnotationComposer extends Composer<_$BondDatabase, Messages> {
@@ -20307,6 +20369,9 @@ class $MessagesAnnotationComposer extends Composer<_$BondDatabase, Messages> {
     column: $table.gateOverride,
     builder: (column) => column,
   );
+
+  GeneratedColumn<double> get needsYouP =>
+      $composableBuilder(column: $table.needsYouP, builder: (column) => column);
 }
 
 class $MessagesTableManager
@@ -20370,6 +20435,7 @@ class $MessagesTableManager
                 Value<int?> needsYouVerdict = const Value.absent(),
                 Value<String?> needsYouReason = const Value.absent(),
                 Value<String?> gateOverride = const Value.absent(),
+                Value<double?> needsYouP = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessagesCompanion(
                 source: source,
@@ -20405,6 +20471,7 @@ class $MessagesTableManager
                 needsYouVerdict: needsYouVerdict,
                 needsYouReason: needsYouReason,
                 gateOverride: gateOverride,
+                needsYouP: needsYouP,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -20442,6 +20509,7 @@ class $MessagesTableManager
                 Value<int?> needsYouVerdict = const Value.absent(),
                 Value<String?> needsYouReason = const Value.absent(),
                 Value<String?> gateOverride = const Value.absent(),
+                Value<double?> needsYouP = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessagesCompanion.insert(
                 source: source,
@@ -20477,6 +20545,7 @@ class $MessagesTableManager
                 needsYouVerdict: needsYouVerdict,
                 needsYouReason: needsYouReason,
                 gateOverride: gateOverride,
+                needsYouP: needsYouP,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

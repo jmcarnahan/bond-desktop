@@ -747,7 +747,8 @@ void main() {
         "summary = 'An old summary', needs_action = 1, "
         "action_items_json = '[]', label = 'work', reply_expected = 1, "
         "deadline = 'Friday', needs_you_verdict = 1, "
-        "needs_you_reason = 'addressed you', addressed_me = 1",
+        "needs_you_reason = 'addressed you', needs_you_p = 0.8, "
+        'addressed_me = 1',
       );
 
       await store.clearDerived();
@@ -773,6 +774,7 @@ void main() {
         'deadline',
         'needs_you_verdict',
         'needs_you_reason',
+        'needs_you_p',
       ]) {
         expect(row[column], isNull, reason: column);
       }

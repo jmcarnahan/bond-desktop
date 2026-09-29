@@ -22,8 +22,6 @@ import '../services/llm/model_probe.dart';
 // re-exports them; the placement enum is not re-exported.
 import '../services/llm/model_slots.dart'
     show MachineTier, ModelPlacement, managedGenerativeIdFor;
-import '../services/llm/needs_you_task.dart'
-    show needsYouDefaultRules, needsYouOutputContract, needsYouRulesCap;
 import '../widgets/settings_screen.dart';
 
 /// The settings surface, and every mutator only settings calls.
@@ -125,10 +123,10 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     super.dispose();
   }
 
-  /// The tuning controls, the two owner texts, and what Microsoft granted. The
-  /// threshold reloads the list as it changes — the whole point of the slider
-  /// is watching Needs You grow and shrink under it — while about me and the
-  /// Needs You rules are each saved by their own Save.
+  /// The tuning controls, the owner's about-me text, and what Microsoft
+  /// granted. The threshold reloads the list as it changes — the whole point
+  /// of the slider is watching Needs You grow and shrink under it — while
+  /// about me is saved by its own Save.
   ///
   /// It is also where SESSIONS are managed. The screen shows whether the
   /// backend it is currently pointing at is signed in, and signs in and out of
@@ -141,9 +139,10 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
   /// beside the state it fixes.
   ///
   /// `ref.watch` rather than the `ref.read` the dialog used: this is a build
-  /// method now, and the Needs You summary reads the STORED rules to say
-  /// whether they are custom — a Save from inside the screen only moves that
-  /// line because this host rebuilds. Do not "optimise" it to `ref.read`.
+  /// method now, and the section summaries read the STORED prefs — the Needs
+  /// You threshold, the about-me text — so a write from inside the screen
+  /// only moves those lines because this host rebuilds. Do not "optimise" it
+  /// to `ref.read`.
   ///
   /// [scope] is what tells the two rungs apart: the avatar menu's Settings
   /// opens all of it, the AI stop opens the model half under the title 'AI'.
@@ -194,23 +193,17 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       scope: widget.scope,
       onBack: widget.onBack,
       onHome: widget.onHome,
-      threshold: prefs.attentionThreshold,
+      threshold: prefs.needsYouThreshold,
       aboutMe: prefs.aboutMe,
       // The prefs setters update state first and persist behind the caller's
       // back on purpose (see AppPrefsNotifier) — `unawaited` says the discard
       // is that contract, not an oversight.
       onThresholdChanged: (value) {
-        unawaited(notifier.setAttentionThreshold(value));
+        unawaited(notifier.setNeedsYouThreshold(value));
         if (!mounted) return;
         ref.read(conversationsProvider.notifier).load(syncFirst: false);
       },
       onAboutMeChanged: (text) => unawaited(notifier.setAboutMe(text)),
-      needsYouRules: prefs.needsYouRules,
-      needsYouDefaultRules: needsYouDefaultRules,
-      needsYouFixedTail: needsYouOutputContract,
-      needsYouRulesMaxLength: needsYouRulesCap,
-      onNeedsYouRulesSaved: (text) => unawaited(_saveNeedsYouRules(text)),
-      needsYouRejudging: ref.watch(needsYouPendingProvider).valueOrNull ?? 0,
       showActivityLog: prefs.showActivityLog,
       onShowActivityLogChanged: (on) =>
           unawaited(notifier.setShowActivityLog(on)),
@@ -299,12 +292,11 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
           ref.invalidate(threadProvider);
           ref.invalidate(draftProvider);
           ref.invalidate(storylineTimelineProvider);
-          // And the previous person's about-me text and needs-you rules,
-          // which the notifier still holds in memory — same reason
-          // SignInScreen clears them. Both editors adopt the wipe only if
-          // their own field is clean, so an unsaved edit survives it.
+          // And the previous person's about-me text, which the notifier
+          // still holds in memory — same reason SignInScreen clears it. The
+          // editor adopts the wipe only if its own field is clean, so an
+          // unsaved edit survives it.
           unawaited(ref.read(appPrefsProvider.notifier).setAboutMe(''));
-          unawaited(ref.read(appPrefsProvider.notifier).setNeedsYouRules(''));
         }
         _reloadAfterBackendChange();
       },
@@ -581,55 +573,6 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     await ref.read(managedModelsStatusProvider.future);
   }
 
-  /// Saves the Needs You rules and re-asks the recent window under them.
-  ///
-  /// The editor replaces the WHOLE prompt body, so a Save changes how every
-  /// message is judged — and every verdict already on disk was written under
-  /// the words the owner has just replaced. The last week is re-asked so the
-  /// chip and the tile follow what the new rules say (the needs-you handler's
-  /// tail rewrites the flag when a verdict moves); anything older is history
-  /// rather than a mistake, because those rules were the rules at the time.
-  ///
-  /// It lives here rather than on [AppPrefsNotifier] because the notifier
-  /// holds a store and nothing else: the activity log and the worker pump are
-  /// this host's, and a pref writer that reached for them would be a pref
-  /// writer that could not be tested without them.
-  Future<void> _saveNeedsYouRules(String text) async {
-    // The editor already stores default-equal text as the empty string, so the
-    // two strings compared here are in the same normal form and an unchanged
-    // Save re-judges nothing.
-    final before = ref.read(appPrefsProvider).needsYouRules;
-    final notifier = ref.read(appPrefsProvider.notifier);
-    unawaited(notifier.setNeedsYouRules(text));
-    if (text == before) return;
-
-    // Everything the rest of this needs is read BEFORE the first await, so a
-    // Settings pane closed while the requeue is on disk still gets its log
-    // row and its wake — the work is queued by then, and a queue nobody
-    // pumped would sit until the next sync. Nothing below touches `ref`.
-    final store = ref.read(messageStoreProvider);
-    final log = ref.read(activityLogProvider);
-    final worker = ref.read(aiWorkerProvider);
-    final since = DateTime.now()
-        .toUtc()
-        .subtract(const Duration(days: 7))
-        .toIso8601String();
-    final queued = await store.requeueNeedsYouRejudge(
-      sinceIso: since,
-      sources: inboxSources,
-    );
-    if (queued == 0) return;
-    await log.record(
-      'needs_you_rejudge',
-      count: queued,
-      detail: {'since': since},
-    );
-    // The same wake the attachment digest's requeue relies on: on a running
-    // drain this only sets the re-pump flag, and the future it returns is that
-    // drain's.
-    unawaited(worker.pump());
-  }
-
   /// Settings' **Clear AI results**: every verdict, summary, storyline, draft
   /// and vector goes, and the mail it was written about stays.
   Future<void> _clearAiResults() {
@@ -692,8 +635,9 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
   /// millisecond after the delete is simply `pending`, which is where the
   /// next drain wants it anyway.
   ///
-  /// Everything below the switch check is read BEFORE the first await, on
-  /// [_saveNeedsYouRules]'s rule: this runs off a button press, a reset takes
+  /// Everything below the switch check is read BEFORE the first await, and
+  /// nothing after it touches `ref` but the invalidates: this runs off a
+  /// button press, a reset takes
   /// as long as the item at the server does, and a Settings pane closed in
   /// the middle of it must still get the delete it asked for. Only the
   /// invalidates need a live host, and they check for one.
@@ -762,7 +706,6 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       // Settings line keeps the pre-clear count until the next recorded event.
       cloudDraftsTodayProvider,
       syncStampsProvider,
-      needsYouPendingProvider,
       contextDirectoriesProvider,
       homeMetricsProvider,
       pipelinePulseProvider,

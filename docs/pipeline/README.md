@@ -2,7 +2,8 @@
 
 Every synced message moves through the same ordered pipeline: cheap gates
 first, then ONE pass of the decision model that classifies it (the learned
-gate, urgency, category, the asks, needs-you, intent, importance and whether a
+gate, urgency, category, the asks, the needs-you probability, intent,
+importance and whether a
 reply is expected), then ONE generative call that writes its text, then the
 storylines its conversation joins and, when a reply is expected, a drafted
 answer. This directory documents each section — what happens, what the prompt
@@ -15,8 +16,8 @@ says, and which model serves it.
   in Dart. It answers every classification-shaped question, one forward pass
   per kept message, and no chat model is asked any of them.
 - **Generative** — ONE chat model for every piece of text: the message text,
-  the needs-you band, attachment and directory digests, every storyline call,
-  drafts and Improve. The box 27B by default when the build names one, else the
+  attachment and directory digests, every storyline call, drafts and Improve.
+  It is never asked about needs-you. The box 27B by default when the build names one, else the
   27B or the 4B the app's own router serves.
 - **Embeddings** — always on this Mac; search, clustering and retrieval.
 
@@ -39,7 +40,7 @@ is always the authority when they disagree.
 | 3 | Detail fetch (mail) — full body + headers | no | [02-gates.md](02-gates.md) |
 | 4 | Tier-2 gates — list/auto-generated header checks | no | [02-gates.md](02-gates.md) |
 | 5 | **Triage** — the decision model: learned gate, urgency, category, needs_action, reply_expected (no text) | decision model§ | [03-triage.md](03-triage.md) |
-| 6 | **Needs-you verdict** — does this message want the owner: the floor, then the decision model's probability, the generative model only inside the band | band only† | [11-needs-you.md](11-needs-you.md) |
+| 6 | **Needs You** — the decision model's needs-you probability against the owner's slider; this pass only settles the probability (copies the stored decision's, or re-decides a missing or ownerless one) | decision model† | [11-needs-you.md](11-needs-you.md) |
 | 7 | **Message text** (work kind `extract`, stage `message_text`) — ONE generative call: summary, action items, deadline, topics, project; the ask onto the thread | **yes** | [04-extraction.md](04-extraction.md) |
 | 8 | Bucket filing — low-value mail to Later, unless the thread holds an open ask | no | [04-extraction.md](04-extraction.md) |
 | 9 | Embeddings — clustering + per-message search vectors | no* | [05-embeddings.md](05-embeddings.md) |
@@ -66,7 +67,7 @@ the same gate), a storyline lane (stage 11) and a draft lane (stages 12–13).
 Within a lane the order above is exactly the order the work happens in; ACROSS
 lanes, a stage reaches the next one by enqueuing a row and waking the lane that
 owns it. What that buys is stage 5's seconds: a new message's triage,
-needs-you verdict and text no longer wait behind a storyline recap or a
+needs-you probability and text no longer wait behind a storyline recap or a
 draft. The lanes, their gates and the two writers that ride the storyline gate
 are in [10-model-routing.md](10-model-routing.md); `make bench-pipeline`
 measures the whole thing end to end.
@@ -100,12 +101,7 @@ model, so a park there is a park on the embedding model. `attachment_digest` is
 the one generative call: one record per document, queued by the text handler
 and only once there are words.
 
-The arrow also runs backwards, once. A digest that records something the
-document ASKS for sends its message back to stage 6 — a file saying "sign by
-Thursday" can change whether the owner is needed, and the first verdict was
-written before anything had read it. One requeue per message, and the drain
-makes one more pass so it lands before the settle asks. Stages 12 and 13 read
-documents too: the passages nearest the message being answered, scoped to its
+Stages 12 and 13 read documents: the passages nearest the message being answered, scoped to its
 own thread and its storyline's pinned files. See
 [12-attachments.md](12-attachments.md) and [07-replies.md](07-replies.md).
 
@@ -117,13 +113,11 @@ generative call per directory whose notes or digest map have moved. Both run
 on the fast lane, and both are skipped before they spend anything when
 nothing they read has changed.
 
-† a deterministic floor (an inbound Teams @mention or 1:1) answers without any
-model call; below it the decision model's stored probability answers yes at
-`p >= 0.65` (0.85 for cold outreach) and no under 0.35, and only the band
-between them — plus every message when the owner saved custom Needs You rules,
-any message whose attachment digest carries an ask (a digest that asks nothing
-leaves it to the decision model), and any message decided before the owner
-was known or before the decision model existed — asks the generative model. See
+† no chat model at all. Triage writes the probability; this pass copies it
+from the stored decision, or decides the message again with the decision model
+when it was decided before the owner was known or before the decision model
+existed. A message needs the owner when the probability is at or above their
+Needs You slider (default 0.30), and nothing else decides it. See
 [11-needs-you.md](11-needs-you.md).
 
 Cross-cutting concerns — which client serves which task, ports and defaults,
@@ -139,7 +133,6 @@ labels, the scorer and the populations a number is quoted on — is described in
 | Task | Role | Stage id | Hand-servers default (`BOND_DEV_HAND_SERVERS`) |
 |------|------|----------|----------------|
 | Triage: gate, urgency, category, needs_action, reply_expected, needs-you p, intent, importance | Decision | `decision` | `:8083` (`make decide`) |
-| Needs-you verdict (the band only) | Generative | `needs_you` | `:8080` (`make model`) |
 | Message text | Generative | `message_text` | `:8080` |
 | Attachment digest | Generative | `attachment_digest` | `:8080` |
 | Directory file digest | Generative | `context_file_digest` | `:8080` |
@@ -182,7 +175,7 @@ sentence, both halves joined, is the tooltip.
 
 | Result | Detail / Ask | Columns behind it |
 |--------|--------------|-------------------|
-| `Filtered`, `Newsletter`, `Nothing to do` (dropped) | the gate words, or the not-worthy reason | `message_progress.drop_reason`, plus `messages.gate_reason` for a gated drop; for `not_worthy` the judge's `needs_you_reason` when the verdict was a no, or "the thread is in Later" / "below the attention threshold" when it was a yes |
+| `Filtered`, `Newsletter`, `Nothing to do` (dropped) | the gate words, or the not-worthy reason | `message_progress.drop_reason`, plus `messages.gate_reason` for a gated drop; for `not_worthy` the `needs_you_reason` when the probability is below the slider, or "the thread is in Later" / "below the Needs You slider when it settled" when it clears it |
 | `Failed at <stage>` | `The <stage> stage ended in an error.` | the first `message_progress.<stage>_state` that is `error` |
 | `Stalled` | `No progress for 15 minutes and nothing is queued — waiting on <stage>.` | `message_progress.outcome = 'pending'`, no open `work_items` for the message, its thread or its documents, `messages.triage_status` neither pending nor processing, and `message_progress.updated_at` older than 15 minutes |
 | `Triaging…` / `Waiting on <stage>` | `Not queued yet` when nothing is | the five stage states, and whether any `work_items` row is open |
@@ -190,7 +183,7 @@ sentence, both halves joined, is the tooltip.
 | `Filed in <storyline>` | the membership's `evidence`, or "filed by you" | the row's storyline pointer, or the thread's newest `storyline_members` row |
 | `Later` | the bucket reason in words | `conversation_ai.bucket` with `conversation_ai.bucket_reason` |
 | `Draft ready` | — | `message_progress.draft_state = 'done'` |
-| `Nothing to do` | `needs_you_reason` when the verdict was a no | nothing above matched |
+| `Nothing to do` | `needs_you_reason` when the probability is below the slider | nothing above matched |
 
 The Ask · Summary cell prefers the THREAD's ask on a needs-you row and the
 MESSAGE's `messages.summary` everywhere else — an ask is per thread and a
@@ -232,11 +225,10 @@ week would hide. In `homeMetrics` it is a scalar subquery with no window in it,
 inside the one statement that answers everything else, so a thread settling
 between two reads cannot land in one number and not another. It is also the one
 tile that counts THREADS: the rail's own rule — `isNeedsYou` spelled in SQL as
-`_liveNeedsYouThread` over the thread's live state, bucket, score and ask,
-and the judge's no on its newest kept inbound as a veto unless a kept
-inbound newer than the last outbound was judged yes (`needsYouVetoedSql`,
-[11-needs-you.md](11-needs-you.md)), bound to the same attention threshold
-the rail reads — and under that filter
+`_liveNeedsYouThread`: not `done`, not `later`, and the thread's needs-you
+probability (`threadNeedsYouPSql`, the highest over its kept inbound since the
+owner's last reply) at or above the owner's slider, bound to the same
+threshold the rail reads ([11-needs-you.md](11-needs-you.md)) — and under that filter
 the table shows one row per thread, its newest kept message. "Kept" is
 `MessageStore.keptMessageSql` on `messages` (`triage_status <> 'skipped' OR
 gate_reason = 'teams_source'`), a fact about the message the gate judged rather
@@ -327,8 +319,8 @@ the header (subject, sender, source, age, and a link into the thread); the
 **outcome**, which is `resultLine`'s own sentence with its explanation under
 it; the five **stages**, each with what it did, when, and what that means, in
 `HomeStageBar`'s own words so the rail and the tooltip cannot disagree; the
-**judgements** (needs-you verdict and reason, attention bucket with its score
-against the threshold in force, triage urgency/category/summary, the gate and
+**judgements** (the needs-you probability as a percentage and its reason,
+attention bucket with its score, triage urgency/category/summary, the gate and
 whether the owner has overridden it, and the triage status with its error);
 the **storylines** the thread is in and the ones it was kept out of; the
 **work** still queued with its attempts and errors; and every **activity** row
@@ -342,10 +334,9 @@ The levers come last, and each one is a write with a way back:
 | Restore (dropped rows only) | `RestoreService` — `messages.gate_override = 'user'`, the progress cascade reset, the stages requeued | Ignore |
 | Ignore this message (kept rows, two taps) | `MessageStore.dropMessage` — a `user` gate, see [02-gates.md](02-gates.md#ignoring-a-kept-message) | Restore |
 | Retry owed stages (stalled or failed rows) | `PipelineRepairService.retryOwed` — exactly the stages still owed, never a terminal one; when nothing at all is owed it runs the settle sweep, which is what a row stuck with every stage terminal and `outcome = 'pending'` is waiting for | nothing to undo; it re-runs work that was owed |
-| Re-judge Needs You (kept rows) | `PipelineRepairService.rejudgeNeedsYou` — requeues `needs_you` on a row that was already judged | press it again after changing the rules |
+| Re-judge Needs You (kept rows) | `PipelineRepairService.rejudgeNeedsYou` — requeues `needs_you` on a row that was already judged, which copies the trusted decision's probability or decides it again | nothing to undo; it settles the same probability again |
 | Add to storyline… / Remove (two taps) / Allow again / Add back | `StorylinesNotifier.addThread` / `removeThread` / `unblockThread` — the same methods the storyline's own About block calls | each other; a removal is a block, and Allow again lifts it |
 | Keep in inbox / Send to Later | `ConversationsNotifier.keepThreadInInbox` / `sendThreadToLater` | each other |
-| Edit Needs You rules | nothing — it opens Settings, where the rules live | the editor's own Save |
 | The storyline link | nothing — it opens the storyline, where the charter is edited | the charter editor's own Save |
 
 Every write is followed by a re-read of the screen, because a thread-level

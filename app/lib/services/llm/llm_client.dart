@@ -203,7 +203,7 @@ class LlmCallRecord {
   /// Which task asked — a [completeJson] caller's `schemaName`, `'complete'`
   /// for free text, or `'decision'` for the decision model's embedding call
   /// (`DecisionClient`). The task names in the app today: `message_text`,
-  /// `needs_you`, `attachment_digest`, `context_file_digest`,
+  /// `attachment_digest`, `context_file_digest`,
   /// `context_brief`, `context_select`, `draft_reply`
   /// (Improve a draft reuses it), `storyline_membership`, `storyline_name`,
   /// `storyline_group`, `storyline_refresh` and `storyline_recap`.

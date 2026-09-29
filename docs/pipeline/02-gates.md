@@ -283,9 +283,9 @@ the new `triage_status` and declines. The exception is the thread's own pending
 `storyline` row, which the late-verdict repair below deletes when the Ignore
 leaves the thread with nothing kept in it. The thread stops holding an open
 ask for the same reason — the open-ask predicate excludes gated rows — which
-is why the verdict itself is deliberately left alone. `needs_you_verdict` is what the
-judge decided about the words, and an Ignore is the owner saying they do not
-want the message, not that the judge misread it.
+is why the probability itself is deliberately left alone. `needs_you_p` is
+what the decision model read in the words, and an Ignore is the owner saying
+they do not want the message, not that the model misread it.
 
 `gate_override` is not cleared either, so a message that was restored and then
 ignored carries both facts, and the history screen shows both. Restore

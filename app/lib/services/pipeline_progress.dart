@@ -322,9 +322,9 @@ class PipelineProgress {
   /// The snapshot in `message_progress.needs_you` is taken once, at settle
   /// time, from the same [notifyWorthy] call that decided whether to interrupt
   /// the user. That is right for the moment it is taken and wrong afterwards:
-  /// a re-judge — a document that landed an ask, the owner editing their Needs
-  /// You rules — writes a new verdict onto `messages` and the chip beside it
-  /// goes on showing the old one.
+  /// a re-decision — an ownerless decision decided again, a probability
+  /// written after the settle — writes a new `needs_you_p` onto `messages` and
+  /// the chip beside it goes on showing the old answer.
   ///
   /// Two things make this safe to run after the fact. The first is that the
   /// store refuses to write unless the value actually differs, so a re-verdict
@@ -370,14 +370,15 @@ class PipelineProgress {
     );
   }
 
-  /// The one-shot catch-up for rows that settled before the verdict column
-  /// existed. Returns how many chips it raised.
+  /// The one-shot catch-up for settled rows whose message needs the owner
+  /// under the current rule and whose chip says otherwise. Returns how many
+  /// chips it raised.
   Future<int> backfillNeedsYou({required double threshold}) async {
     final store = _store;
     if (store == null) return 0;
     try {
       return _tickRaised(
-        await store.backfillNeedsYouFromVerdicts(threshold: threshold),
+        await store.backfillNeedsYouFlags(threshold: threshold),
       );
     } catch (e) {
       debugPrint('progress: needs-you backfill failed: $e');
@@ -385,13 +386,17 @@ class PipelineProgress {
     }
   }
 
-  /// The one-shot that clears chips a judged no no longer earns, ticking each
-  /// row so the live screen re-reads it. Returns how many.
-  Future<int> lowerVetoedNeedsYou() async {
+  /// The one-shot that clears the chips `notifyWorthy` would not grant today
+  /// (a message below the owner's slider or not decided, or a thread done or
+  /// in Later), ticking each row so the live screen re-reads it. Returns how
+  /// many.
+  Future<int> lowerVetoedNeedsYou({required double threshold}) async {
     final store = _store;
     if (store == null) return 0;
     try {
-      return _tickRaised(await store.lowerNeedsYouFromVerdicts());
+      return _tickRaised(
+        await store.lowerNeedsYouBelow(threshold: threshold),
+      );
     } catch (e) {
       debugPrint('progress: needs-you veto failed: $e');
       return 0;
@@ -403,7 +408,7 @@ class PipelineProgress {
   ///
   /// Called by whatever lifts the bucket — the user's Keep in inbox, a
   /// deferral whose date arrived — because the chip otherwise follows the
-  /// verdict only, and no verdict moves when a thread comes back.
+  /// probability only, and no probability moves when a thread comes back.
   Future<int> raiseNeedsYouForThread(
     String source,
     String conversationKey, {

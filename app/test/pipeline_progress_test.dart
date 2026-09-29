@@ -488,11 +488,11 @@ void main() {
         'created_at': '2026-09-02T12:01:00.000Z',
       });
       // Before triage, so the score written below is newer than every write to
-      // the message row. Completeness reads a written verdict, not a work row.
-      // It follows [replyExpected]: once judged, the verdict is the ask, so
-      // "nothing was asking" means the judge said no as well.
-      await store.writeNeedsYouVerdict('email', 'm1', verdict: replyExpected,
-          reason: 'seeded');
+      // the message row. Completeness reads a written probability, not a work
+      // row. It follows [replyExpected]: the probability is the ask, so
+      // "nothing was asking" means it sits below the slider as well.
+      await store.writeNeedsYouP('email', 'm1',
+          p: replyExpected ? 0.9 : 0.1, reason: 'seeded');
       await store.writeTriage(
         'email',
         'm1',

@@ -90,20 +90,23 @@ void main() {
       'received_at': receivedAt,
       'body_text': 'the hero paragraph',
     });
-    if (deadline != null) {
-      await writeTriaged(
-        store,
-        'email',
-        '$key-m1',
-        status: 'triaged',
-        urgency: 'normal',
-        category: 'work',
-        summary: subject,
-        needsAction: true,
-        actionItems: const [],
-        deadline: deadline,
-      );
-    }
+    // Triaged already, with a needs-you probability over the slider, so the
+    // thread is in Needs You from the first frame. A message triage reached
+    // in a test would be decided with no owner line, whose probability is
+    // cleared rather than trusted.
+    await writeTriaged(
+      store,
+      'email',
+      '$key-m1',
+      status: 'triaged',
+      urgency: 'normal',
+      category: 'work',
+      summary: subject,
+      needsAction: deadline != null,
+      actionItems: const [],
+      deadline: deadline ?? '',
+    );
+    await store.writeNeedsYouP('email', '$key-m1', p: 0.9);
     await store.upsertConversation({
       'source': 'email',
       'conversation_key': key,
@@ -128,11 +131,6 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
-    // Everything eligible reaches Needs You. The scoring pass lands a few
-    // pumps in and a thread waiting on somebody else scores quietly, so the
-    // default slider would cut a row this file is about — and the slider has
-    // its own tests.
-    await store.setPref(attentionThresholdKey, '0');
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),

@@ -11,6 +11,7 @@ import 'attachments/attachment_markers.dart';
 import 'attachments/attachment_retriever.dart';
 import 'cloud_drafts.dart';
 import 'context/context_retriever.dart';
+import 'decision/needs_you_predicate.dart';
 import 'draft_stream.dart';
 import 'llm/draft_task.dart';
 import 'llm/embeddings_client.dart';
@@ -329,7 +330,9 @@ class DraftHandler extends WorkHandler {
     // improve target drops the STANDING RULE for this item, noted on the row,
     // and the local draft is still written: the local draft owes nothing to
     // the improve wiring.
-    var standing = !request.asked && _routes.standing() && _urgentNeedsYou(row);
+    var standing = !request.asked &&
+        _routes.standing() &&
+        _urgentNeedsYou(row, threshold: await _store.needsYouThreshold());
     if (standing) {
       final improveTarget = _routes.improveTarget();
       if (improveTarget != null && !_wired(improveTarget)) {
@@ -740,11 +743,15 @@ class DraftHandler extends WorkHandler {
       _improveClient != null && (!target.isThirdParty || _routes.ledger != null);
 
   /// Whether this message is one the standing rule is about: the owner is
-  /// actually needed, and soon. The two urgency words are the ones
+  /// actually needed — the one needs-you rule, its probability at the owner's
+  /// [threshold] ([needsYouAt]) — and soon. The two urgency words are the ones
   /// `extract_handler.dart`'s `asksForAReply` reads, so "urgent" means the
   /// same thing here as it does on the card.
-  static bool _urgentNeedsYou(Map<String, Object?> row) =>
-      row['needs_you_verdict'] == 1 &&
+  static bool _urgentNeedsYou(
+    Map<String, Object?> row, {
+    required double threshold,
+  }) =>
+      needsYouAt((row['needs_you_p'] as num?)?.toDouble(), threshold) &&
       (row['urgency'] == 'urgent' || row['urgency'] == 'high');
 
   /// The short ready-to-send replies as the column stores them, or null.

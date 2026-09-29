@@ -223,24 +223,12 @@ void main() {
     expect(byId['email:fx-keep-tail']!.attachmentRows, isEmpty);
   });
 
-  // ── the needs-you floor ───────────────────────────────────────────────
+  // ── a chat item ───────────────────────────────────────────────────────
   test('a chat sender is a name and no address', () {
     final item = byId['teams:fx-floor']!;
     expect(item.message.fromAddress, isNull);
     expect(item.message.fromName, 'Noor Haddad');
     expect(item.message.subject, isNull);
-  });
-
-  test('an inbound chat that names the owner reaches the floor', () {
-    final item = byId['teams:fx-floor']!;
-    expect(item.addressedMe, isTrue);
-    expect(item.floorSaysYes, isTrue);
-  });
-
-  test('mail addressed only to the owner does not reach the floor', () {
-    final item = byId['email:fx-reply']!;
-    expect(item.addressedMe, isTrue);
-    expect(item.floorSaysYes, isFalse);
   });
 
   // ── direction, recipients, read state ─────────────────────────────────

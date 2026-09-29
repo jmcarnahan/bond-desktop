@@ -132,8 +132,8 @@ class FakeDecisionClient extends DecisionClient {
 ///
 /// What it answers, and what that means for a screen test:
 /// - gate: keep (p(drop) 0.05), so nothing is learned-gated;
-/// - needs_you: 0.5, INSIDE the band, so the needs-you pass still asks the
-///   language model and a scripted needs-you answer decides as before;
+/// - needs_you: 0.5, above the slider's default (0.30), so a kept message
+///   reads as needing the owner and no language model is asked about it;
 /// - needs_action and reply_expected: 0.2, so the triage booleans come from
 ///   THIS fake (no) — a screen test that needs a triaged ask seeds the
 ///   columns, or overrides this with its own [FakeDecisionClient];

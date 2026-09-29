@@ -263,15 +263,8 @@ class GoldenItem {
   bool get directnessMatches =>
       buildDirectnessLine(message) == directnessLine;
 
-  /// Whether the deterministic needs-you floor already settles this item —
-  /// mirrors `needsYouFloor` in `lib/services/needs_you.dart`, which reads a
-  /// database row rather than an item.
-  bool get floorSaysYes =>
-      direction == 'inbound' && source == 'teams' && addressedMe;
-
-  /// How many thread messages triage and needs-you read: both take the LAST
-  /// three (`MessageTextTask._threadTailMax`, `NeedsYouTask._maxContextMessages`),
-  /// dropping from the oldest end.
+  /// How many thread messages the message-text stage reads: the LAST three
+  /// (`MessageTextTask._threadTailMax`), dropping from the oldest end.
   static const int _threadWindow = 3;
 
   /// The thread a stage is shown at [ctx].

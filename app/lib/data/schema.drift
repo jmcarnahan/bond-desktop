@@ -58,19 +58,14 @@ CREATE TABLE messages (
   addressed_me INTEGER NOT NULL DEFAULT 0,
   reply_expected INTEGER,
   deadline TEXT,
-  -- `needs_you_verdict` is the needs-you pass's answer to the only question
-  -- the rail exists to ask: does this one want the owner? NULL means the pass
-  -- has never judged this row, which is NOT the same as "no" — the unjudged
-  -- rows ARE the worklist, so nothing may read NULL as 0. 0 is a judgement
-  -- that the message does not need the owner; 1 is a judgement that it does.
+  -- `needs_you_verdict` is INERT since v21: the pre-probability needs-you
+  -- verdict (NULL never judged, 0 no, 1 yes). Nothing writes it any more;
+  -- v21 mapped it into `needs_you_p` below, which is what Needs You reads.
   --
-  -- Written by the `needs_you` work handler and by nobody else — the
-  -- deterministic floor or, later, the model. Ingest never touches it: what a
-  -- connector knows lands in `addressed_me`, which is a fact about the
-  -- message, while this is a verdict about it.
-  --
-  -- `needs_you_reason` says why: 'teams_direct' from the floor, or the
-  -- model's own evidence sentence.
+  -- `needs_you_reason` says why the message's probability is what it is: the
+  -- decision model's templated sentence. Rows from before v21 may still carry
+  -- 'teams_direct', the retired Teams floor's token, or a language model's
+  -- evidence line from the builds that asked one.
   needs_you_verdict INTEGER,
   needs_you_reason TEXT,
   -- `gate_override` is the owner's hand on the gates, and it is tri-state in
@@ -85,6 +80,12 @@ CREATE TABLE messages (
   -- `MessageStore.stampStorylineId`): the user is telling the app what the
   -- old messages were always about, and that word outlives the passes.
   gate_override TEXT,
+  -- `needs_you_p` is the decision model's calibrated p(needs_you = yes) for
+  -- this message, written by the triage pass (and by the needs-you handler
+  -- when it re-decides). It is the ONE number Needs You reads, against the
+  -- owner's slider (`needs_you_threshold`). NULL means not decided yet, which
+  -- is NOT a low probability: an undecided message needs nobody until it is.
+  needs_you_p REAL,
   PRIMARY KEY (source, source_message_id)
 ) STRICT;
 

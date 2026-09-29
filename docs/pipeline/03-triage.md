@@ -42,6 +42,7 @@ launch may lack it). Then:
 | `needs_action`, `reply_expected` | the decision heads' p(yes) ≥ `DecisionPolicy.booleanYes` / `replyYes` (both 0.50) |
 | `summary`, `action_items_json`, `deadline` | NOT written here — the message-text stage writes them (`MessageStore.writeMessageText`); `writeTriage` writes the classification only and never touches them, so they are NULL on a new row and a re-triaged message keeps the text it already had |
 | `label` | nothing writes it any more; NULL on every new row (old rows keep theirs, and the Why panel shows it only where present) |
+| `needs_you_p`, `needs_you_reason` | the decision's p(needs_you = yes) and its templated reason (`writeNeedsYouP`), only when the decision was made with the owner line; an ownerless decision leaves them NULL for the needs-you pass (see [11-needs-you.md](11-needs-you.md)) |
 
 The activity row carries `urgency`, `category`, `needs_action`,
 `reply_expected` (the decision's values) and `decision`: `gate=keep

@@ -224,12 +224,8 @@ void main() {
         (await scoreOf('tc-todd', source: 'teams'))!,
         closeTo(AttentionTuning.waitingBase * decay, 1e-9),
       );
-      expect(
-        (await scoreOf('tc-todd', source: 'teams'))!,
-        lessThan(AttentionTuning.defaultThreshold),
-      );
-      // And it is still in the inbox — the temper quiets the rail, it does not
-      // file anything into Later.
+      // And it is still in the inbox — the temper lowers the thread in the
+      // order, it does not file anything into Later.
       expect(await bucketOf('tc-todd', source: 'teams'), isNull);
     });
 
@@ -374,21 +370,16 @@ void main() {
         (await scoreOf('tc-answered-fyi', source: 'teams'))!,
         closeTo(AttentionTuning.waitingBase * decay, 1e-9),
       );
-      expect(
-        (await scoreOf('tc-answered-fyi', source: 'teams'))!,
-        lessThan(AttentionTuning.defaultThreshold),
-      );
     });
   });
 
-  group('the needs-you verdict reaches the score', () {
-    test('a 1:1 chat FYI the stage judged yes climbs back into Needs You',
-        () async {
-      // The complaint end to end. Both threads are the same shape — a chat
-      // message triage read as a quiet FYI on a thread nobody answered — and
-      // the only difference is that the needs-you stage read one of them whole
-      // and found a real ask in it. The tempered one stays out of Needs You;
-      // the judged one clears the default cut with no slider moved.
+  group('the needs-you probability reaches the score', () {
+    test('a 1:1 chat FYI that needs you climbs back up the order', () async {
+      // Both threads are the same shape — a chat message triage read as a
+      // quiet FYI on a thread nobody answered — and the only difference is
+      // that the decision model placed one of them over the owner's slider.
+      // The tempered one sits at the waiting base; the one that needs the
+      // owner scores from the full needs-reply base.
       await seed(
         'tc-judged',
         source: 'teams',
@@ -398,10 +389,10 @@ void main() {
         intent: 'fyi',
         importance: 'low',
       );
-      await store.writeNeedsYouVerdict(
+      await store.writeNeedsYouP(
         'teams',
         'tc-judged-m1',
-        verdict: true,
+        p: 0.9,
         reason: 'asks you to confirm the room before Thursday',
       );
       await seed(
@@ -421,24 +412,59 @@ void main() {
         closeTo(AttentionTuning.needsReplyBase * decay, 1e-9),
       );
       expect(
-        (await scoreOf('tc-judged', source: 'teams'))!,
-        greaterThan(AttentionTuning.defaultThreshold),
-      );
-      expect(
         (await scoreOf('tc-unjudged', source: 'teams'))!,
         closeTo(AttentionTuning.waitingBase * decay, 1e-9),
       );
+    });
+
+    test('a probability below the slider does not break the temper',
+        () async {
+      await seed(
+        'tc-low',
+        source: 'teams',
+        state: 'needs_reply',
+        from: 'teams:priya',
+        replyExpected: false,
+        intent: 'fyi',
+        importance: 'low',
+      );
+      await store.writeNeedsYouP('teams', 'tc-low-m1', p: 0.1);
+
+      await service.recomputeAll(sources: both, now: now);
+
       expect(
-        (await scoreOf('tc-unjudged', source: 'teams'))!,
-        lessThan(AttentionTuning.defaultThreshold),
+        (await scoreOf('tc-low', source: 'teams'))!,
+        closeTo(AttentionTuning.waitingBase * decay, 1e-9),
       );
     });
 
-    test('the meta row carries the NEWEST message\'s verdict, not the thread\'s',
-        () async {
-      // The verdict is per-message, and the scorer asks about one message: the
-      // newest inbound one. An older message judged yes says nothing about the
-      // heads-up that landed after it.
+    test("the owner's slider is the cut the sweep reads", () async {
+      await seed(
+        'tc-mid',
+        source: 'teams',
+        state: 'needs_reply',
+        from: 'teams:priya',
+        replyExpected: false,
+        intent: 'fyi',
+        importance: 'low',
+      );
+      await store.writeNeedsYouP('teams', 'tc-mid-m1', p: 0.4);
+      await store.setPref(needsYouThresholdKey, '0.5');
+
+      await service.recomputeAll(sources: both, now: now);
+
+      // 0.4 needs the owner at the default 0.30, and not at their 0.50.
+      expect(
+        (await scoreOf('tc-mid', source: 'teams'))!,
+        closeTo(AttentionTuning.waitingBase * decay, 1e-9),
+      );
+    });
+
+    test('the meta row carries the NEWEST message\'s probability, not the '
+        'thread\'s', () async {
+      // The probability is per-message, and the scorer asks about one message:
+      // the newest inbound one. An older message that needs the owner says
+      // nothing about the heads-up that landed after it.
       await store.upsertConversation({
         'conversation_key': 'c-two',
         'state': 'needs_reply',
@@ -459,18 +485,18 @@ void main() {
         'from_address': 'alex@example.com',
         'received_at': justNow,
       });
-      await store.writeNeedsYouVerdict('email', 'c-two-old', verdict: true);
+      await store.writeNeedsYouP('email', 'c-two-old', p: 0.9);
 
       final meta = await store.latestInboundMeta();
 
       expect(meta['c-two']!['source_message_id'], 'c-two-new');
-      expect(meta['c-two']!['needs_you_verdict'], isNull);
+      expect(meta['c-two']!['needs_you_p'], isNull);
 
       // And the column really does ride along once it is on that message.
-      await store.writeNeedsYouVerdict('email', 'c-two-new',
-          verdict: false, reason: 'nothing here to answer');
+      await store.writeNeedsYouP('email', 'c-two-new',
+          p: 0.1, reason: 'nothing here to answer');
 
-      expect((await store.latestInboundMeta())['c-two']!['needs_you_verdict'], 0);
+      expect((await store.latestInboundMeta())['c-two']!['needs_you_p'], 0.1);
     });
   });
 
@@ -613,11 +639,11 @@ void main() {
 
     test('an open ask keeps a quiet FYI thread in the inbox', () async {
       // The shape Later used to hide: the model read the newest message as a
-      // low-value FYI, but the needs-you stage judged it a real ask and nobody
-      // has answered it.
+      // low-value FYI, but its needs-you probability clears the slider and
+      // nobody has answered it.
       await seed('c1', intent: 'fyi', importance: 'low');
-      await store.writeNeedsYouVerdict('email', 'c1-m1',
-          verdict: true, reason: 'asks the owner to pick a date');
+      await store.writeNeedsYouP('email', 'c1-m1',
+          p: 0.9, reason: 'asks the owner to pick a date');
 
       await service.recomputeAll(now: now);
 
@@ -629,8 +655,8 @@ void main() {
       // The ask closes on the thread's last outbound message, whatever it was
       // a reply to. After that the thread is quiet again.
       await seed('c1', intent: 'fyi', importance: 'low');
-      await store.writeNeedsYouVerdict('email', 'c1-m1',
-          verdict: true, reason: 'asks the owner to pick a date');
+      await store.writeNeedsYouP('email', 'c1-m1',
+          p: 0.9, reason: 'asks the owner to pick a date');
       const answeredAt = '2026-08-29T11:30:00Z';
       await store.upsertMessage({
         'source_message_id': 'c1-out',
@@ -657,7 +683,8 @@ void main() {
     test('an older unanswered ask under a newer quiet FYI still holds',
         () async {
       // The thread-level case, and the reason the filing does not just read
-      // the newest message's own verdict: the question is two messages back.
+      // the newest message's own probability: the question is two messages
+      // back.
       await seed('c1', intent: 'fyi', importance: 'low');
       await store.upsertMessage({
         'source_message_id': 'c1-ask',
@@ -666,8 +693,8 @@ void main() {
         'from_address': 'eric@x.com',
         'received_at': '2026-08-28T09:00:00Z',
       });
-      await store.writeNeedsYouVerdict('email', 'c1-ask',
-          verdict: true, reason: 'asks the owner to approve the spend');
+      await store.writeNeedsYouP('email', 'c1-ask',
+          p: 0.9, reason: 'asks the owner to approve the spend');
 
       await service.recomputeAll(now: now);
 
@@ -678,8 +705,8 @@ void main() {
       // `user` is still the most specific instruction anyone gave. An ask does
       // not overrule someone who deferred this one thread on purpose.
       await seed('c1', intent: 'fyi', importance: 'low');
-      await store.writeNeedsYouVerdict('email', 'c1-m1',
-          verdict: true, reason: 'asks the owner to pick a date');
+      await store.writeNeedsYouP('email', 'c1-m1',
+          p: 0.9, reason: 'asks the owner to pick a date');
       await store.setConversationBucket('email', 'c1',
           bucket: 'later', reason: 'user');
 
@@ -689,10 +716,10 @@ void main() {
       expect(await reasonOf('c1'), 'user');
     });
 
-    test('a verdict on a gated message holds nothing open', () async {
-      // The ask the owner threw out by hand keeps its verdict on the row, and
-      // a thread must not be kept out of Later by a question its owner has
-      // already dismissed. Same admission as every other reader of a kept
+    test('a probability on a gated message holds nothing open', () async {
+      // The ask the owner threw out by hand keeps its probability on the row,
+      // and a thread must not be kept out of Later by a question its owner
+      // has already dismissed. Same admission as every other reader of a kept
       // message.
       await seed('c1', intent: 'fyi', importance: 'low');
       await store.upsertMessage({
@@ -704,8 +731,8 @@ void main() {
         'triage_status': 'skipped',
         'gate_reason': 'user',
       });
-      await store.writeNeedsYouVerdict('email', 'c1-ask',
-          verdict: true, reason: 'asks the owner to approve the spend');
+      await store.writeNeedsYouP('email', 'c1-ask',
+          p: 0.9, reason: 'asks the owner to approve the spend');
 
       await service.recomputeAll(now: now);
 

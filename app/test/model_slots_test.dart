@@ -8,7 +8,6 @@ import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
-import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -23,7 +22,6 @@ import 'package:flutter_test/flutter_test.dart';
 /// The `schemaName` of every task that makes a model call, built from real
 /// instances so a renamed schema fails this file rather than drifting.
 Set<String> taskSchemaNames() => {
-      const NeedsYouTask().schemaName,
       const MessageTextTask().schemaName,
       const AttachmentDigestTask().schemaName,
       const ContextDigestTask().schemaName,
@@ -94,7 +92,6 @@ void main() {
     // round (the fast and prose slots merged), and the decision model is a
     // role of its own.
     expect(idsOn(ModelSlot.generative), {
-      'needs_you',
       'message_text',
       'attachment_digest',
       'context_file_digest',
