@@ -198,10 +198,11 @@ class ModelServersForm extends StatefulWidget {
       'The address needs to be the chat completions endpoint, ending in '
       '/v1/chat/completions.';
 
-  /// The same for the decision model, which is an embeddings server.
+  /// The same for the decision model: an embeddings server (ModernBERT), or
+  /// a Kev server's systemone endpoint.
   static const String decisionEndpointRefusalText =
       'The address needs to be the embeddings endpoint, ending in '
-      '/v1/embeddings.';
+      '/v1/embeddings, or a Kev server\'s, ending in /v1/systemone.';
 
   /// A server that lists several models: the pick is the person's, and the
   /// press that discovered the list is not the press that connects.
@@ -599,7 +600,7 @@ class _ModelServersFormState extends State<ModelServersForm> {
     if (_isConverse(url)) return null;
     final path = Uri.parse(url).path;
     if (_role == ServerFormRole.decision) {
-      return path.endsWith('/embeddings')
+      return path.endsWith('/embeddings') || path.endsWith('/v1/systemone')
           ? null
           : ModelServersForm.decisionEndpointRefusalText;
     }

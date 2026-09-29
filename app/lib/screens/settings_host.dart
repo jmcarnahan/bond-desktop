@@ -17,11 +17,12 @@ import '../providers/recipient_search_provider.dart';
 import '../providers/setup_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/attachments/file_dialogs.dart';
+import '../services/decision/decision_client.dart' show DecisionServerKind;
 import '../services/llm/model_probe.dart';
 // [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
 // re-exports them; the placement enum is not re-exported.
 import '../services/llm/model_slots.dart'
-    show MachineTier, ModelPlacement, managedGenerativeIdFor;
+    show MachineTier, ModelPlacement, boxDecideId, managedGenerativeIdFor;
 import '../widgets/settings_screen.dart';
 
 /// The settings surface, and every mutator only settings calls.
@@ -116,6 +117,38 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
   /// handed in through [SettingsHost.probe] is the one that is used and the
   /// one that is closed.
   late final ModelServerProbe _probe = widget.probe ?? ModelServerProbe();
+
+  /// The decision remote whose kind this screen last asked for, as
+  /// `url|model`: asked once per address, so a server that does not say is
+  /// not asked again on every rebuild.
+  String? _kindAsked;
+
+  /// The Models page's kind line for Your server, from the decision client's
+  /// cache; when this run has not seen the address yet, one listing GET
+  /// ([DecisionClient.detectKind]) with the stored key, and a redraw when it
+  /// answers. Null until then, which the page reads as "not known yet".
+  DecisionServerKind? _decisionKind(AppPrefs prefs) {
+    if (prefs.decisionPlacement != ModelPlacement.box) return null;
+    final url = prefs.effectiveDecisionUrl;
+    final model = prefs.effectiveDecisionModel;
+    final client = ref.read(decisionClientProvider);
+    final known = client.kindOf(url: url, model: model);
+    if (known != null || url.isEmpty) return known;
+    final key = '$url|$model';
+    if (_kindAsked != key) {
+      _kindAsked = key;
+      unawaited(client
+          .detectKind(
+        url: url,
+        model: model,
+        bearer: ref.read(appPrefsProvider.notifier).bearerFor(boxDecideId),
+      )
+          .then((kind) {
+        if (kind != null && mounted) setState(() {});
+      }));
+    }
+    return null;
+  }
 
   @override
   void dispose() {
@@ -330,6 +363,11 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       decisionUrl: prefs.effectiveDecisionUrl,
       decisionModel: prefs.effectiveDecisionModel,
       decisionKeyStored: prefs.decisionKeyStored,
+      // The client's cache, filled by a Connect, a decision, or the one
+      // listing GET this screen asks when it opens on an address this run
+      // has not seen; read again on every rebuild, which a Connect's prefs
+      // write is.
+      decisionKind: _decisionKind(prefs),
       generativeUrl: prefs.effectiveGenerativeUrl,
       generativeModel: prefs.effectiveGenerativeModel,
       generativeKeyStored: prefs.boxBigKeyStored,

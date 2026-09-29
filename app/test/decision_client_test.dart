@@ -72,6 +72,20 @@ class _FakeDecide {
   /// Never answers, when true.
   bool hang = false;
 
+  /// Every `GET …/v1/models` (a kind check), in order. Not in [requests].
+  final List<http.Request> listings = [];
+
+  /// What the listing answers: llama-server's shape, no `qhash`.
+  Map<String, Object?> listing = const {
+    'models': [
+      {'name': 'bond-decide', 'model': 'bond-decide'},
+    ],
+    'object': 'list',
+    'data': [
+      {'id': 'bond-decide', 'object': 'model'},
+    ],
+  };
+
   List<http.Request> get embeds => [
         for (final r in requests)
           if (r.url.path.endsWith('/embeddings')) r,
@@ -114,6 +128,10 @@ class _FakeDecide {
       r.url.path.endsWith('/tokenize') && bodyOf(r)['add_special'] == true;
 
   MockClient get client => MockClient((request) async {
+        if (request.method == 'GET') {
+          listings.add(request);
+          return http.Response(jsonEncode(listing), 200);
+        }
         if (isProbe(request)) {
           probes.add(request);
           if (probeError != null) throw probeError!;

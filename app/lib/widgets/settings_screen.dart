@@ -16,6 +16,7 @@ import '../providers/prefs_provider.dart'
         defaultMcpServerUrl,
         mcpDeployedUrl;
 import '../screens/consent_screen.dart' show CloudDraftsConsentPane;
+import '../services/decision/decision_client.dart' show DecisionServerKind;
 import '../services/decision/needs_you_predicate.dart'
     show NeedsYouTuning, normalizeNeedsYouThreshold;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
@@ -224,6 +225,9 @@ class SettingsScreen extends StatefulWidget {
   final String decisionUrl;
   final String decisionModel;
   final bool decisionKeyStored;
+
+  /// What the decision remote turned out to be, or null while unknown.
+  final DecisionServerKind? decisionKind;
   final String generativeUrl;
   final String generativeModel;
   final bool generativeKeyStored;
@@ -544,6 +548,7 @@ class SettingsScreen extends StatefulWidget {
     this.decisionUrl = '',
     this.decisionModel = '',
     this.decisionKeyStored = false,
+    this.decisionKind,
     this.generativeUrl = '',
     this.generativeModel = '',
     this.generativeKeyStored = false,
@@ -1224,6 +1229,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     decisionUrl: widget.decisionUrl,
     decisionModel: widget.decisionModel,
     decisionKeyStored: widget.decisionKeyStored,
+    decisionKind: widget.decisionKind,
     generativeUrl: widget.generativeUrl,
     generativeModel: widget.generativeModel,
     generativeKeyStored: widget.generativeKeyStored,

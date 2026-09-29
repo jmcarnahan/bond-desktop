@@ -13,6 +13,8 @@ import 'package:bond_inbox/services/system/system_info.dart' show HardwareInfo;
 import 'package:bond_inbox/services/system/updater.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:bond_inbox/screens/settings_host.dart';
+import 'package:bond_inbox/services/decision/decision_client.dart'
+    show DecisionServerKind;
 import 'package:bond_inbox/services/attachments/file_dialogs.dart';
 import 'package:bond_inbox/services/llm/model_probe.dart';
 import 'package:bond_inbox/services/server/model_server_supervisor.dart';
@@ -425,6 +427,66 @@ void main() {
     expect(prefs.decisionSpec.url, url);
     expect(prefs.decisionSpec.model, 'bond-decide-x');
     expect(prefs.modelPlacement, ModelPlacement.local);
+  });
+
+  testWidgets('Connect to a Kev server says so under the form', (tester) async {
+    const url = 'https://box.example.com/decide/v1/systemone';
+    final probe = _ScriptedProbe(const {
+      url: ModelProbeResult(
+          reachable: true, modelIds: ['bond-decide-kev4b-fixture']),
+    });
+    final decision = FakeDecisionClient.fixed(fakeAnswers())
+      ..serverKind = DecisionServerKind.systemOne;
+    await pumpHost(tester, probe: probe, decision: decision);
+
+    await openHostSection(tester, 'Models');
+    await tapSegment(tester, SettingsModelsPage.decisionModeKey,
+        SettingsModelsPage.yourServerLabel);
+    await tester.enterText(
+      find.byKey(ModelServersForm.urlKey(ServerFormRole.decision)),
+      url,
+    );
+    await tester.pump();
+    await tapKey(tester, ModelServersForm.connectKey(ServerFormRole.decision));
+    await settle(tester);
+
+    expect(decision.checks, ['$url|bond-decide-kev4b-fixture']);
+    final prefs = container.read(appPrefsProvider);
+    expect(prefs.decisionSpec.id, boxDecideId);
+    expect(prefs.decisionSpec.url, url);
+    expect(
+      tester
+          .widget<Text>(find.byKey(SettingsModelsPage.decisionKindKey))
+          .data,
+      SettingsModelsPage.systemOneKindText,
+    );
+  });
+
+  testWidgets('Settings opened on a Kev server asks its kind once, says it, '
+      'and never asks for the heads file', (tester) async {
+    const url = 'http://127.0.0.1:18302/v1/systemone';
+    await store.setPref(decisionPlacementKey, ModelPlacement.box.name);
+    await store.setPref(decisionUrlKey, url);
+    await store.setPref(decisionModelKey, 'bond-decide-kev4b-fixture');
+    final decision = FakeDecisionClient.fixed(fakeAnswers())
+      ..detectedKind = DecisionServerKind.systemOne;
+    await pumpHost(tester, probe: _ScriptedProbe(const {}), decision: decision);
+
+    await openHostSection(tester, 'Models');
+    await settle(tester);
+
+    expect(decision.detects, ['$url|bond-decide-kev4b-fixture']);
+    expect(
+      tester
+          .widget<Text>(find.byKey(SettingsModelsPage.decisionKindKey))
+          .data,
+      SettingsModelsPage.systemOneKindText,
+    );
+    final status = tester
+        .widget<Text>(find.byKey(SettingsModelsPage.decisionStatusKey))
+        .data;
+    expect(status, isNot(contains('Not installed')));
+    expect(status, startsWith('Connected · bond-decide-kev4b-fixture'));
   });
 
   testWidgets('Connect refuses a server that is not the decision model, and '

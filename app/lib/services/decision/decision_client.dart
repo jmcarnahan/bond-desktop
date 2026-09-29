@@ -1,12 +1,30 @@
-/// The decision model's client: render a message's state, embed it, apply the
-/// heads — and the same for the storyline questions ([DecisionClient.ask]),
-/// over texts `storyline_state.dart` rendered.
+/// The decision model's client: render a message's state, have the decision
+/// server answer the nine fields over it — and the same for the storyline
+/// questions ([DecisionClient.ask]), over texts `storyline_state.dart`
+/// rendered.
 ///
-/// The server is a stock llama-server serving the fine-tuned encoder as a
-/// mean-pooled embedding model (`make decide` on :8083). It answers
-/// `/v1/embeddings` with the raw pooled vector, and the nine heads that turn
-/// the vector into answers run here (`decision_heads.dart`). Two wire details
-/// were measured in the model's parity spike and are load-bearing:
+/// The server is one of two KINDS ([DecisionServerKind]), and every caller
+/// uses the same public API whichever it is:
+///
+/// - **encoder-heads**: a stock llama-server serving the fine-tuned encoder
+///   as a mean-pooled embedding model (the managed router, `make decide` on
+///   :8083, or ModernBERT on the owner's server). It answers
+///   `/v1/embeddings` with the raw pooled vector, and the heads that turn the
+///   vector into answers run here (`decision_heads.dart`), off this Mac's
+///   heads file.
+/// - **systemone**: Kev 4B behind jev-prototype's wrapper on the owner's
+///   server (contract §3.4). It is asked the questions' plain text
+///   (`decision_questions.dart`) over the same rendered state at
+///   `<base>/v1/systemone` and answers CALIBRATED probabilities, so nothing
+///   is applied here and no file on this Mac is read.
+///
+/// A managed or hand-started target is always encoder-heads. A target on
+/// Your server ([DecisionClient]'s `isYourServer`) is asked `/v1/models`
+/// once: an entry carrying a `qhash` is a systemone server, checked against
+/// [decisionQhash] and the renderer; anything else is encoder-heads.
+///
+/// Two encoder wire details were measured in the model's parity spike and are
+/// load-bearing:
 ///
 /// - `embd_normalize: -1` on every request. llama-server L2-normalises by
 ///   default and the heads were trained on the RAW vector; a linear layer
@@ -38,12 +56,25 @@ import 'package:http/http.dart' as http;
 
 import '../llm/llm_client.dart';
 import '../llm/model_slots.dart'
-    show LlmTarget, decideModelDefault, decideUrlDefault;
+    show LlmTarget, decideModelDefault, decideUrlDefault, normalizeBoxBaseUrl;
 import 'decision_heads.dart';
 import 'decision_input.dart';
 import 'decision_questions.dart';
 import 'decision_state.dart';
 import 'storyline_state.dart' show renderStorylinePair;
+
+/// What the decision role's server is. Every [DecisionClient] call answers
+/// the same questions whichever it is; only the wire and where the heads run
+/// differ.
+enum DecisionServerKind {
+  /// ModernBERT on llama-server: raw vectors, this Mac's heads file applied
+  /// here.
+  encoderHeads,
+
+  /// Kev 4B behind the `systemone` wrapper: calibrated answers there, and no
+  /// file needed on this Mac.
+  systemOne,
+}
 
 /// One message's decision, and what produced it.
 @immutable
@@ -53,7 +84,7 @@ class DecisionResult {
   /// The exact text the model read — what the Why panel can show.
   final String state;
 
-  /// The heads file's model name.
+  /// The heads file's model name, or the systemone server's.
   final String model;
 
   /// Wall time of the whole call, rendering included. A result from
@@ -76,6 +107,12 @@ class DecisionResult {
 /// one to three HTTP requests a decision can take.
 class _CallFacts {
   int? statusCode;
+
+  /// The target is the owner's own server, whose sentences must not tell
+  /// anyone to `make decide`: that command starts a server on this Mac.
+  final bool yourServer;
+
+  _CallFacts({this.yourServer = false});
 }
 
 /// The first sentence of every "the server's vectors are not the decision
@@ -96,6 +133,20 @@ String notDecisionModelText(String origin) =>
 String noTokenizeText(String origin) =>
     'The server at $origin does not offer /tokenize, which the decision '
     'model needs. Check its address in Settings, Models.';
+
+/// A systemone server at [origin] trained on another question set: its
+/// answers would be to other questions, so none is used.
+String systemOneQhashText(String origin, Object? qhash) =>
+    'The decision server at $origin answers question set $qhash, not '
+    '$decisionQhash, so it is another version of the decision model. Check '
+    'its address in Settings, Models.';
+
+/// A systemone server at [origin] that reads another renderer's states: the
+/// states this build renders are not the ones it was trained on.
+String systemOneRendererText(String origin, Object? renderer) =>
+    'The decision server at $origin reads states rendered as $renderer, not '
+    '$decisionRendererVersion, so it does not match this build. Check its '
+    'address in Settings, Models.';
 
 class DecisionClient {
   /// Overridable at build time (`--dart-define=DECIDE_URL=…`), like
@@ -125,6 +176,11 @@ class DecisionClient {
   /// per-request [timeout] however long the backlog handed to [decideBatch].
   static const int batchChunk = 16;
 
+  /// At most this many systemone requests in flight at once. Each carries
+  /// one state, so a backlog is many requests, and the wrapper batches what
+  /// arrives together on the GPU.
+  static const int systemOneInFlight = 8;
+
   /// The phrase llama-server's refusal of an over-long input carries.
   static const String _tooLargePhrase = 'too large to process';
 
@@ -134,10 +190,20 @@ class DecisionClient {
   /// without anybody pressing anything.
   final Set<String> _verified = {};
 
+  /// Your server's kind, by `'<baseUrl>|<model>'`, on [_verified]'s rule:
+  /// only a success is kept, and it is forgotten whenever the server stops
+  /// answering or refuses the key.
+  final Map<String, _ServerKind> _kinds = {};
+
   final LlmTarget Function() _resolveTarget;
   final DecisionHeads Function() _heads;
   final http.Client _http;
   final void Function(LlmCallRecord record)? _onCall;
+
+  /// Whether a resolved target is the owner's own server, whose kind has to
+  /// be asked. A managed or hand-started target is always encoder-heads and
+  /// costs no extra request, and so is every target when this is null.
+  final bool Function(LlmTarget target)? _isYourServer;
 
   /// Per HTTP request, not per decision. A 395M encoder answers in tens of
   /// milliseconds; this ceiling is for a wedged server.
@@ -155,6 +221,7 @@ class DecisionClient {
     this._onCall,
     this.timeout = const Duration(seconds: 15),
     this._toLocal,
+    this._isYourServer,
   }) : _http = client ?? http.Client();
 
   /// Where the next request goes, resolved ONCE per call so its URL, model
@@ -177,30 +244,22 @@ class DecisionClient {
   /// or its heads are not on this Mac, [DecisionMisconfiguredException] when
   /// the heads or the server's answers fail every message alike),
   /// [DecisionUnauthorizedException] when it refused the key, and
-  /// [LlmFormatException] only when the server rejected this one request.
+  /// [LlmFormatException] only when the server rejected this one request or
+  /// a systemone server's answer to it did not validate.
   Future<DecisionResult> decide(DecisionInput input) async {
     final sw = Stopwatch()..start();
     final destination = target;
     return _instrumented(destination, sw, 'decision', (facts) async {
-      final heads = _heads();
-      await _verifyServer(destination, facts);
-      final state = renderDecisionState(input, toLocal: _toLocal);
-      final (vector, truncated) =
-          await _vectorFor(state, destination, heads, facts);
-      return DecisionResult(
-        answers: heads.apply(vector),
-        state: state,
-        model: heads.model,
-        latencyMs: sw.elapsedMilliseconds,
-        truncated: truncated,
-      );
+      final backend = await _backendFor(destination, facts);
+      return backend.one(renderDecisionState(input, toLocal: _toLocal), sw);
     });
   }
 
   /// Many messages' answers, in [inputs] order, in as few requests as the
   /// states allow: the short states in array requests of up to [batchChunk],
-  /// and each long one on its own token path. One [LlmCallRecord] for the
-  /// whole batch.
+  /// and each long one on its own token path (a systemone server: one
+  /// request per state, [systemOneInFlight] at a time). One [LlmCallRecord]
+  /// for the whole batch.
   Future<List<DecisionResult>> decideBatch(List<DecisionInput> inputs) =>
       decideStates([
         for (final input in inputs)
@@ -217,29 +276,20 @@ class DecisionClient {
     final sw = Stopwatch()..start();
     final destination = target;
     return _instrumented(destination, sw, 'decision', (facts) async {
-      final heads = _heads();
-      final (vectors, truncated) =
-          await _vectors(states, destination, heads, facts);
-      return [
-        for (var i = 0; i < states.length; i++)
-          DecisionResult(
-            answers: heads.apply(vectors[i]),
-            state: states[i],
-            model: heads.model,
-            latencyMs: sw.elapsedMilliseconds,
-            truncated: truncated[i],
-          ),
-      ];
+      final backend = await _backendFor(destination, facts);
+      return backend.message(states, sw);
     });
   }
 
   /// [question]'s calibrated p(yes) for each of [states], in order: texts
   /// already rendered by the question's renderer (`storyline_state.dart`).
   ///
-  /// The same transport as [decideStates] — the identity probe, the raw
-  /// vector checks, the too-large truncation, every exception and park — and
-  /// one [LlmCallRecord] labelled `decision:<question id>`, so the activity
-  /// pane tells a storyline question from a message decision.
+  /// The same transport as [decideStates] — the kind, the identity probe,
+  /// the raw vector checks, the too-large truncation, every exception and
+  /// park; for a systemone server one request per state carrying this one
+  /// question — and one [LlmCallRecord] labelled `decision:<question id>`,
+  /// so the activity pane tells a storyline question from a message
+  /// decision.
   Future<List<double>> ask(
     StorylineQuestion question,
     List<String> states,
@@ -249,9 +299,8 @@ class DecisionClient {
     final destination = target;
     return _instrumented(destination, sw, 'decision:${question.id}',
         (facts) async {
-      final heads = _heads();
-      final (vectors, _) = await _vectors(states, destination, heads, facts);
-      return [for (final v in vectors) heads.pYes(question, v)];
+      final backend = await _backendFor(destination, facts);
+      return backend.yes(question, states);
     });
   }
 
@@ -329,24 +378,269 @@ class DecisionClient {
   }
 
   /// For a Connect that must not write a server of the wrong kind: whether
-  /// the server at [url], asked for [model], is the decision model. The same
-  /// identity probe [decide] makes before its first request, and a pass here
-  /// spares that first request the probe. Null when it is; otherwise the
-  /// sentence to show under the form, which carries no key.
+  /// the server at [url], asked for [model], is the decision model. Its kind
+  /// is asked first (`/v1/models`); a systemone server is checked there, and
+  /// an encoder-heads server gets the same identity probe [decide] makes
+  /// before its first request. A pass here spares that first request both,
+  /// and [kindOf] then answers for the address. Null when it is; otherwise
+  /// the sentence to show under the form, which carries no key.
   Future<String?> checkServer({
     required String url,
     required String model,
     String? bearer,
   }) async {
+    final destination = LlmTarget(
+      baseUrl: normalizeBoxBaseUrl(url),
+      model: model,
+      bearer: bearer,
+    );
     try {
-      await _verifyServer(
-        LlmTarget(baseUrl: url, model: model, bearer: bearer),
-        _CallFacts(),
-      );
+      final facts = _CallFacts(yourServer: true);
+      final kind = await _resolveKind(destination, facts);
+      if (kind.kind == DecisionServerKind.encoderHeads) {
+        await _verifyServer(destination, facts);
+      }
       return null;
     } on LlmException catch (e) {
+      // A refused server has no kind worth showing, whichever step refused.
+      _kinds.remove(_keyOf(destination));
       return e.message;
     }
+  }
+
+  /// The kind of the server at [url] asked for [model], once a call or a
+  /// [checkServer] has found it and while it keeps answering; null before
+  /// then. What the Models page says under Your server's form.
+  DecisionServerKind? kindOf({required String url, required String model}) =>
+      _kinds[_keyOf(LlmTarget(baseUrl: url, model: model))]?.kind;
+
+  /// The ONE cache key [_verified] and [_kinds] share: the normalised
+  /// address and the model, so a Connect's check and the stored URL meet.
+  static String _keyOf(LlmTarget destination) =>
+      '${normalizeBoxBaseUrl(destination.baseUrl)}|${destination.model}';
+
+  /// Asks Your server's kind with one listing GET and fills the cache
+  /// [kindOf] reads: what the Models page does when it opens on a server
+  /// whose kind this run has not seen yet. Null when the server did not say
+  /// (down, the key refused, another question set); nothing is thrown.
+  Future<DecisionServerKind?> detectKind({
+    required String url,
+    required String model,
+    String? bearer,
+  }) async {
+    final destination = LlmTarget(
+      baseUrl: normalizeBoxBaseUrl(url),
+      model: model,
+      bearer: bearer,
+    );
+    try {
+      return (await _resolveKind(destination, _CallFacts(yourServer: true)))
+          .kind;
+    } on LlmException {
+      return null;
+    }
+  }
+
+  /// Whether [destination] is Your server, by the provider's predicate; no
+  /// predicate answers no.
+  bool _yours(LlmTarget destination) =>
+      _isYourServer?.call(destination) ?? false;
+
+  /// The backend that answers for [destination]: encoder-heads for a managed
+  /// or hand-started target without a request, else whatever [_resolveKind]
+  /// finds.
+  Future<_DecisionBackend> _backendFor(
+    LlmTarget destination,
+    _CallFacts facts,
+  ) async {
+    if (!facts.yourServer) {
+      return _EncoderHeadsBackend(this, destination, facts);
+    }
+    final kind = await _resolveKind(destination, facts);
+    return switch (kind.kind) {
+      DecisionServerKind.encoderHeads =>
+        _EncoderHeadsBackend(this, destination, facts),
+      DecisionServerKind.systemOne =>
+        _SystemOneBackend(this, destination, facts, kind.model),
+    };
+  }
+
+  /// Your server's kind, once per target: `GET <base>/v1/models`. A listed
+  /// model carrying a `qhash` is a systemone server, refused unless it is
+  /// [decisionQhash] over [decisionRendererVersion]. Anything else is
+  /// encoder-heads, whose own identity probe then decides whether it is the
+  /// decision model: a listing with no `qhash` entry (an empty one included),
+  /// and every answer that is not a listing at all — any other 4xx, a 200
+  /// that is not a JSON object. Only the server's condition keeps its
+  /// mapping: transport, 5xx and 429 park as unavailable, 401/403 as the key.
+  Future<_ServerKind> _resolveKind(
+    LlmTarget destination,
+    _CallFacts facts,
+  ) async {
+    final key = _keyOf(destination);
+    final known = _kinds[key];
+    if (known != null) return known;
+    final url = systemOneUrlFor(destination.baseUrl, 'models');
+    Map<String, Object?>? listing;
+    try {
+      listing = await _requestJson(url, destination, null, facts,
+          listingRequest: true);
+    } on _NoListing {
+      listing = null;
+    }
+    final entry =
+        listing == null ? null : _systemOneEntry(listing, destination);
+    final _ServerKind kind;
+    if (entry == null) {
+      kind = const _ServerKind(DecisionServerKind.encoderHeads, '');
+    } else {
+      final origin = _origin(url);
+      if (entry['qhash'] != decisionQhash) {
+        throw DecisionMisconfiguredException(
+            systemOneQhashText(origin, entry['qhash']));
+      }
+      if (entry['renderer'] != decisionRendererVersion) {
+        throw DecisionMisconfiguredException(
+            systemOneRendererText(origin, entry['renderer']));
+      }
+      final name = entry['name'] ?? entry['id'];
+      kind = _ServerKind(
+        DecisionServerKind.systemOne,
+        name is String && name.isNotEmpty ? name : destination.model,
+      );
+    }
+    _kinds[key] = kind;
+    return kind;
+  }
+
+  /// The listed model that marks [listing] a systemone server: an entry of
+  /// `models` (or the OpenAI-shaped `data`) carrying `qhash`, the one named
+  /// [destination]'s model first. Null when none carries one.
+  static Map<Object?, Object?>? _systemOneEntry(
+    Map<String, Object?> listing,
+    LlmTarget destination,
+  ) {
+    final marked = [
+      for (final list in [listing['models'], listing['data']])
+        if (list is List)
+          for (final entry in list)
+            if (entry is Map && entry.containsKey('qhash')) entry,
+    ];
+    if (marked.isEmpty) return null;
+    for (final entry in marked) {
+      if (entry['name'] == destination.model ||
+          entry['id'] == destination.model) {
+        return entry;
+      }
+    }
+    // None under the stored name: the wrapper serves one model, whatever it
+    // was renamed to, so the first marked entry is that model. Its qhash and
+    // renderer are still checked, and its own name is what answers record.
+    return marked.first;
+  }
+
+  /// One `POST <base>/v1/systemone` for one rendered [state] and
+  /// [questions], asked in the plain framing (the instructions verbatim,
+  /// null criteria in canonical option order), and each question's checked
+  /// probabilities. Calibrated there: nothing is applied here.
+  ///
+  /// The FULL state goes out, uncut: the wrapper owns Kev's context limit,
+  /// and a state it refuses (a 413 or 422) is that one message's format
+  /// failure, not a park.
+  Future<Map<String, Map<String, double>>> _systemOne(
+    LlmTarget destination,
+    String state,
+    List<SystemOneQuestion> questions,
+    _CallFacts facts,
+  ) async {
+    final decoded = await _requestJson(
+      systemOneUrlFor(destination.baseUrl, 'systemone'),
+      destination,
+      {
+        'state': state,
+        'questions': {
+          for (final q in questions)
+            q.id: {
+              'type': 'choice',
+              'instructions': q.instructions,
+              'criteria': {for (final o in q.options) o: null},
+            },
+        },
+      },
+      facts,
+      systemOneRequest: true,
+    );
+    return _checkedAnswers(decoded, questions);
+  }
+
+  /// [decoded]'s probabilities for every one of [questions], or a
+  /// [DecisionMisconfiguredException] saying what is wrong: an asked id
+  /// missing, an option set that is not the question's, a value outside
+  /// [0, 1], or a set that does not sum to 1 within 1e-3. A wrapper that
+  /// answers one state this way answers them all this way, so the role parks
+  /// rather than failing every message in turn.
+  static Map<String, Map<String, double>> _checkedAnswers(
+    Map<String, Object?> decoded,
+    List<SystemOneQuestion> questions,
+  ) {
+    Never refuse(String why) => throw DecisionMisconfiguredException(
+        'The decision server answered $why. Check its address in Settings, '
+        'Models.');
+    final answers = decoded['answers'];
+    if (answers is! Map) refuse('with no answers');
+    final out = <String, Map<String, double>>{};
+    for (final q in questions) {
+      final answer = answers[q.id];
+      final probabilities = answer is Map ? answer['probabilities'] : null;
+      if (probabilities is! Map) refuse('no probabilities for ${q.id}');
+      if (probabilities.length != q.options.length ||
+          !q.options.every(probabilities.containsKey)) {
+        refuse('${q.id} with options other than ${q.options.join(', ')}');
+      }
+      final ps = <String, double>{};
+      var sum = 0.0;
+      for (final option in q.options) {
+        final p = probabilities[option];
+        if (p is! num || !p.isFinite || p < 0 || p > 1) {
+          refuse('${q.id} with a probability outside 0 to 1');
+        }
+        ps[option] = p.toDouble();
+        sum += p;
+      }
+      if ((sum - 1).abs() > 1e-3) {
+        refuse('${q.id} with probabilities that do not sum to 1');
+      }
+      out[q.id] = ps;
+    }
+    return out;
+  }
+
+  /// [each] for every index below [count], [systemOneInFlight] at a time,
+  /// the results in index order. The first failure stops new requests and
+  /// is rethrown once the ones in flight finish.
+  static Future<List<T>> _pooled<T>(
+    int count,
+    Future<T> Function(int i) each,
+  ) async {
+    final out = List<T?>.filled(count, null);
+    var next = 0;
+    var failed = false;
+    Future<void> worker() async {
+      while (!failed && next < count) {
+        final i = next++;
+        try {
+          out[i] = await each(i);
+        } catch (_) {
+          failed = true;
+          rethrow;
+        }
+      }
+    }
+
+    await Future.wait([
+      for (var w = 0; w < math.min(systemOneInFlight, count); w++) worker(),
+    ]);
+    return [for (final v in out) v as T];
   }
 
   /// The identity probe, once per target: `/tokenize` with the specials
@@ -356,7 +650,7 @@ class DecisionClient {
   /// but the tokenizers differ, and a message decided on the wrong model's
   /// vectors can be learned-gated into Dropped with no error anywhere.
   Future<void> _verifyServer(LlmTarget destination, _CallFacts facts) async {
-    final key = '${destination.baseUrl}|${destination.model}';
+    final key = _keyOf(destination);
     if (_verified.contains(key)) return;
     final url = tokenizeUrlFor(destination.baseUrl);
     final decoded = await _postJson(
@@ -529,6 +823,32 @@ class DecisionClient {
     _CallFacts facts, {
     bool tooLargeIsSignal = false,
     bool tokenizeRequest = false,
+  }) =>
+      _requestJson(
+        url,
+        destination,
+        body,
+        facts,
+        tooLargeIsSignal: tooLargeIsSignal,
+        tokenizeRequest: tokenizeRequest,
+      );
+
+  /// [_postJson], or a GET when [body] is null. A [listingRequest] (the
+  /// kind's `/v1/models`) that is answered with anything but a JSON object —
+  /// a 4xx other than 401/403 and 429, or a 200 that does not parse —
+  /// throws [_NoListing]: a server with no listing is not a systemone server,
+  /// and the encoder-heads identity probe decides what it is. A
+  /// [systemOneRequest] answered 404 or 405 is a server with no systemone
+  /// endpoint, which parks as misconfigured.
+  Future<Map<String, Object?>> _requestJson(
+    Uri url,
+    LlmTarget destination,
+    Map<String, Object?>? body,
+    _CallFacts facts, {
+    bool tooLargeIsSignal = false,
+    bool tokenizeRequest = false,
+    bool listingRequest = false,
+    bool systemOneRequest = false,
   }) async {
     // A managed decision model the router is not serving (not installed):
     // refused before any request, so the pass parks on its own reason.
@@ -542,29 +862,30 @@ class DecisionClient {
     }
     final http.Response response;
     try {
-      response = await _http
-          .post(
-            url,
-            headers: {
-              'Content-Type': 'application/json',
-              if (bearer != null && bearer.isNotEmpty)
-                'Authorization': 'Bearer $bearer',
-            },
-            body: jsonEncode(body),
-          )
+      final auth = {
+        if (bearer != null && bearer.isNotEmpty)
+          'Authorization': 'Bearer $bearer',
+      };
+      response = await (body == null
+              ? _http.get(url, headers: {'Accept': 'application/json', ...auth})
+              : _http.post(
+                  url,
+                  headers: {'Content-Type': 'application/json', ...auth},
+                  body: jsonEncode(body),
+                ))
           .timeout(timeout);
     } on SocketException {
-      throw DecisionUnavailableException(_unreachable(url));
+      throw DecisionUnavailableException(_unreachable(url, facts));
     } on http.ClientException {
-      throw DecisionUnavailableException(_unreachable(url));
+      throw DecisionUnavailableException(_unreachable(url, facts));
     } on TlsException {
       // A handshake that failed (HandshakeException is a subclass) is a
       // server that cannot be reached safely, not a bad request: it parks.
-      throw DecisionUnavailableException(_unreachable(url));
+      throw DecisionUnavailableException(_unreachable(url, facts));
     } on TimeoutException {
       throw DecisionUnavailableException(
         'The decision model at $url did not answer within '
-        '${timeout.inSeconds} seconds — run: make decide',
+        '${timeout.inSeconds} seconds${_advice(facts, ' — ')}',
       );
     } on FormatException {
       // Raised while the request is built: a header dart:io refuses, which
@@ -591,19 +912,38 @@ class DecisionClient {
           (response.statusCode == 404 || response.statusCode == 405)) {
         throw DecisionMisconfiguredException(noTokenizeText(_origin(url)));
       }
-      _throwForStatus(url, response.statusCode, text, bearer);
+      final status = response.statusCode;
+      if (listingRequest &&
+          status >= 400 &&
+          status < 500 &&
+          status != 401 &&
+          status != 403 &&
+          status != 429) {
+        throw const _NoListing();
+      }
+      // The wrapper's route is gone, or the address was re-pointed at
+      // something that has none: the server, not this message, so it parks.
+      if (systemOneRequest && (status == 404 || status == 405)) {
+        throw DecisionMisconfiguredException(
+          'The decision server at ${_origin(url)} does not offer '
+          '/v1/systemone. Check its address in Settings, Models.',
+        );
+      }
+      _throwForStatus(url, status, text, bearer, facts);
     }
 
     final Object? decoded;
     try {
       decoded = jsonDecode(text);
     } on FormatException {
+      if (listingRequest) throw const _NoListing();
       throw const DecisionMisconfiguredException(
         'The decision server answered with something that is not JSON. Check '
         'its address in Settings, Models.',
       );
     }
     if (decoded is! Map) {
+      if (listingRequest) throw const _NoListing();
       throw const DecisionMisconfiguredException(
         'The decision server answered with something that is not a JSON '
         'object. Check its address in Settings, Models.',
@@ -616,7 +956,13 @@ class DecisionClient {
   /// is loading, or busy — so they park; a 401/403 is the key, which parks
   /// under its own reason; any other 4xx is this request (the one decision
   /// fault that stays a per-message [LlmFormatException]).
-  Never _throwForStatus(Uri url, int status, String body, String? bearer) {
+  Never _throwForStatus(
+    Uri url,
+    int status,
+    String body,
+    String? bearer,
+    _CallFacts facts,
+  ) {
     final snippet = _snippet(body, bearer);
     if (status == 401 || status == 403) {
       throw DecisionUnauthorizedException(
@@ -626,8 +972,8 @@ class DecisionClient {
     }
     if (status == 429 || status >= 500) {
       throw DecisionUnavailableException(
-        'The decision model at $url is not ready (HTTP $status) — run: make '
-        'decide. $snippet',
+        'The decision model at $url is not ready (HTTP '
+        '$status)${_advice(facts, ' — ')}. $snippet',
       );
     }
     throw LlmFormatException(
@@ -642,8 +988,14 @@ class DecisionClient {
   static String _origin(Uri url) =>
       '${url.scheme}://${url.host}${url.hasPort ? ':${url.port}' : ''}';
 
-  String _unreachable(Uri url) =>
-      'The decision model at $url is not answering — run: make decide';
+  String _unreachable(Uri url, _CallFacts facts) =>
+      'The decision model at $url is not answering${_advice(facts, ' — ')}';
+
+  /// `run: make decide` after [separator], for a target this Mac serves
+  /// (the managed router or a hand-started server); nothing for Your
+  /// server, which that command does not start.
+  static String _advice(_CallFacts facts, String separator) =>
+      facts.yourServer ? '' : '${separator}run: make decide';
 
   /// The start of a server's error body, for the sentence. With the key
   /// blanked out, in case a proxy ever echoes a header back.
@@ -683,16 +1035,42 @@ class DecisionClient {
         'is no tokenize endpoint beside it. Check it in Settings, Models.',
       );
     }
-    // Built afresh rather than `replace`d: `replace` keeps a query it is
-    // handed null for, and the tokenize endpoint takes none.
-    return Uri(
-      scheme: url.scheme,
-      userInfo: url.userInfo,
-      host: url.host,
-      port: url.hasPort ? url.port : null,
-      path: '$prefix/tokenize',
-    );
+    return _beside(url, '$prefix/tokenize');
   }
+
+  /// A systemone server's `[endpoint]` (`models` or `systemone`) beside
+  /// [url]: its path up to (not including) the last `/v1/` segment, then
+  /// `/v1/<endpoint>` — [tokenizeUrlFor]'s derivation, so a box serving
+  /// under `/decide/` is asked there too. A bare `…/embeddings` address
+  /// keeps the prefix before it, as [tokenizeUrlFor] does.
+  static Uri systemOneUrlFor(String url, String endpoint) {
+    final parsed = _parse(url);
+    final path = parsed.path;
+    final at = path.lastIndexOf('/v1/');
+    final String prefix;
+    if (at >= 0) {
+      prefix = path.substring(0, at);
+    } else if (path.endsWith('/embeddings')) {
+      prefix = path.substring(0, path.length - '/embeddings'.length);
+    } else {
+      throw const DecisionMisconfiguredException(
+        'The decision model address has no /v1/ in it to find the server '
+        'beside. Check it in Settings, Models.',
+      );
+    }
+    return _beside(parsed, '$prefix/v1/$endpoint');
+  }
+
+  /// [url]'s scheme, user info, host and port with [path] and nothing else.
+  /// Built afresh rather than `replace`d: `replace` keeps a query it is
+  /// handed null for, and none of these endpoints takes one.
+  static Uri _beside(Uri url, String path) => Uri(
+        scheme: url.scheme,
+        userInfo: url.userInfo,
+        host: url.host,
+        port: url.hasPort ? url.port : null,
+        path: path,
+      );
 
   /// Runs [body] and tells the observer about it exactly once, however many
   /// requests it made. The outcomes are `LlmClient._post`'s: an unauthorized
@@ -703,7 +1081,7 @@ class DecisionClient {
     String label,
     Future<T> Function(_CallFacts facts) body,
   ) async {
-    final facts = _CallFacts();
+    final facts = _CallFacts(yourServer: _yours(destination));
     try {
       final result = await body(facts);
       _report(destination, sw, facts, label, 'ok', null);
@@ -713,9 +1091,15 @@ class DecisionClient {
       // be the server that passed the probe when it answers again (a restart
       // can put another model behind the same address), so its pass is
       // forgotten and the next call asks /tokenize again.
+      // The same holds for its kind: a restart can put Kev where ModernBERT
+      // was. [DecisionMisconfiguredException] is a
+      // [DecisionUnavailableException], so a server answering as the wrong
+      // thing (a re-pointed route, a Kev still warming up behind a proxy) is
+      // asked afresh on the next call as well.
       if (e is DecisionUnavailableException ||
           e is DecisionUnauthorizedException) {
-        _verified.remove('${destination.baseUrl}|${destination.model}');
+        _verified.remove(_keyOf(destination));
+        _kinds.remove(_keyOf(destination));
       }
       _report(destination, sw, facts, label, 'unavailable', e.message);
       rethrow;
@@ -761,4 +1145,167 @@ class DecisionClient {
 /// made and never seen outside this file.
 class _TooLarge implements Exception {
   const _TooLarge();
+}
+
+/// A kind's `/v1/models` answered 404 or 405: the server lists nothing, so it
+/// is not a systemone server. Caught in [DecisionClient._resolveKind] and
+/// never seen outside this file.
+class _NoListing implements Exception {
+  const _NoListing();
+}
+
+/// A resolved kind, and for a systemone server the model name it listed,
+/// which is what its answers record.
+class _ServerKind {
+  final DecisionServerKind kind;
+  final String model;
+
+  const _ServerKind(this.kind, this.model);
+}
+
+/// What answers one call's questions: the message fields over message
+/// states, a storyline question's p(yes) over its rendered states. One per
+/// call, bound to the call's target and facts.
+abstract class _DecisionBackend {
+  /// One message state's answers.
+  Future<DecisionResult> one(String state, Stopwatch sw);
+
+  /// Many message states' answers, in order.
+  Future<List<DecisionResult>> message(List<String> states, Stopwatch sw);
+
+  /// [question]'s calibrated p(yes) for each of [states], in order.
+  Future<List<double>> yes(StorylineQuestion question, List<String> states);
+}
+
+/// ModernBERT on llama-server: the raw vectors, the identity probe, the
+/// too-large truncation and this Mac's heads — the path every call took
+/// before there was a second kind, unchanged.
+class _EncoderHeadsBackend implements _DecisionBackend {
+  final DecisionClient _client;
+  final LlmTarget _destination;
+  final _CallFacts _facts;
+
+  _EncoderHeadsBackend(this._client, this._destination, this._facts);
+
+  @override
+  Future<DecisionResult> one(String state, Stopwatch sw) async {
+    final heads = _client._heads();
+    await _client._verifyServer(_destination, _facts);
+    final (vector, truncated) =
+        await _client._vectorFor(state, _destination, heads, _facts);
+    return DecisionResult(
+      answers: heads.apply(vector),
+      state: state,
+      model: heads.model,
+      latencyMs: sw.elapsedMilliseconds,
+      truncated: truncated,
+    );
+  }
+
+  @override
+  Future<List<DecisionResult>> message(
+    List<String> states,
+    Stopwatch sw,
+  ) async {
+    final heads = _client._heads();
+    final (vectors, truncated) =
+        await _client._vectors(states, _destination, heads, _facts);
+    return [
+      for (var i = 0; i < states.length; i++)
+        DecisionResult(
+          answers: heads.apply(vectors[i]),
+          state: states[i],
+          model: heads.model,
+          latencyMs: sw.elapsedMilliseconds,
+          truncated: truncated[i],
+        ),
+    ];
+  }
+
+  @override
+  Future<List<double>> yes(
+    StorylineQuestion question,
+    List<String> states,
+  ) async {
+    final heads = _client._heads();
+    final (vectors, _) =
+        await _client._vectors(states, _destination, heads, _facts);
+    return [for (final v in vectors) heads.pYes(question, v)];
+  }
+}
+
+/// Kev 4B behind the systemone wrapper: one request per state, the nine
+/// message questions together or one storyline question alone, answers
+/// already calibrated. It never reads the heads, so a Mac with no heads
+/// file can use it.
+class _SystemOneBackend implements _DecisionBackend {
+  final DecisionClient _client;
+  final LlmTarget _destination;
+  final _CallFacts _facts;
+
+  /// The wrapper's own model name, from its listing.
+  final String _model;
+
+  _SystemOneBackend(
+    this._client,
+    this._destination,
+    this._facts,
+    this._model,
+  );
+
+  Future<DecisionAnswers> _answers(String state) async =>
+      DecisionAnswers.fromProbabilities(await _client._systemOne(
+        _destination,
+        state,
+        systemOneMessageQuestions,
+        _facts,
+      ));
+
+  @override
+  Future<DecisionResult> one(String state, Stopwatch sw) async {
+    final answers = await _answers(state);
+    return DecisionResult(
+      answers: answers,
+      state: state,
+      model: _model,
+      latencyMs: sw.elapsedMilliseconds,
+    );
+  }
+
+  @override
+  Future<List<DecisionResult>> message(
+    List<String> states,
+    Stopwatch sw,
+  ) async {
+    final answers =
+        await DecisionClient._pooled(states.length, (i) => _answers(states[i]));
+    return [
+      for (var i = 0; i < states.length; i++)
+        DecisionResult(
+          answers: answers[i],
+          state: states[i],
+          model: _model,
+          latencyMs: sw.elapsedMilliseconds,
+        ),
+    ];
+  }
+
+  @override
+  Future<List<double>> yes(
+    StorylineQuestion question,
+    List<String> states,
+  ) {
+    final asked = [
+      SystemOneQuestion(
+        question.id,
+        question.instructions,
+        StorylineQuestion.options,
+      ),
+    ];
+    return DecisionClient._pooled(states.length, (i) async {
+      final answers =
+          await _client._systemOne(_destination, states[i], asked, _facts);
+      return answers[question.id]!['yes']!;
+    });
+  }
 }

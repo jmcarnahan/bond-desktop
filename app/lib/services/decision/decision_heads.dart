@@ -87,6 +87,27 @@ class ChoiceAnswer {
     required this.probabilities,
   });
 
+  /// The answer a set of calibrated probabilities makes: the most probable of
+  /// [options], the first on a tie, as [DecisionHeads.apply] chooses. The
+  /// probabilities are kept in [options] order. For a server that answers
+  /// probabilities itself (the `systemone` kind), which calibrated them there.
+  factory ChoiceAnswer.fromProbabilities(
+    List<String> options,
+    Map<String, double> probabilities,
+  ) {
+    var best = options.first;
+    for (final option in options.skip(1)) {
+      if ((probabilities[option] ?? 0) > (probabilities[best] ?? 0)) {
+        best = option;
+      }
+    }
+    return ChoiceAnswer(
+      choice: best,
+      confidence: probabilities[best] ?? 0,
+      probabilities: {for (final o in options) o: probabilities[o] ?? 0},
+    );
+  }
+
   Map<String, Object?> toJson() => {
         'choice': choice,
         'confidence': confidence,
@@ -110,6 +131,20 @@ class DecisionAnswers {
   final Map<String, ChoiceAnswer> fields;
 
   const DecisionAnswers(this.fields);
+
+  /// All nine answers from each field's calibrated probabilities, keyed by
+  /// field and then option: [ChoiceAnswer.fromProbabilities] over
+  /// [decisionOptions], in [decisionFields] order.
+  factory DecisionAnswers.fromProbabilities(
+    Map<String, Map<String, double>> probabilities,
+  ) =>
+      DecisionAnswers({
+        for (final field in decisionFields)
+          field: ChoiceAnswer.fromProbabilities(
+            decisionOptions[field]!,
+            probabilities[field] ?? const {},
+          ),
+      });
 
   /// The answer for [field]. Throws [ArgumentError] for a field this model
   /// does not answer — a caller asking for one is a programming error.

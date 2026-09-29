@@ -264,10 +264,73 @@ plain POST.
 
 `DecisionClient` (`app/lib/services/decision/decision_client.dart`) renders a
 message's state (`decision_state.dart`, a byte-exact port of the training
-renderer), embeds it, and applies the heads (`decision_heads.dart`). The
-server is a stock llama-server serving the encoder as a mean-pooled embedding
-model: the managed router's `bond-decide`, `make decide` on `:8083`, or a
-box's `/decide/` slot.
+renderer) and has the decision server answer over it. The server is one of
+two KINDS (`DecisionServerKind`), and every caller uses the same API
+(`decide`, `decideBatch`, `decideStates`, `ask`, `askPairs`) whichever it is:
+
+- **encoder-heads** (`encoderHeads`): a stock llama-server serving the
+  ModernBERT encoder as a mean-pooled embedding model — the managed router's
+  `bond-decide`, `make decide` on `:8083`, or a box's `/decide/` slot. The
+  client embeds the state and applies this Mac's heads
+  (`decision_heads.dart`). Everything from **The identity probe** to **The
+  heads file** below is this kind.
+- **systemone** (`systemOne`): Kev 4B behind jev-prototype's wrapper
+  (`distill/serve_bond_kev.py`, contract §3.4 of
+  `PLAN-storyline-questions-training.md`) on the owner's server. It is asked
+  the questions' plain text and answers calibrated probabilities, so nothing
+  is applied in Dart and no file on this Mac is read.
+
+**How the kind is found.** A managed or hand-started target is always
+encoder-heads, with no extra request (the provider's `isYourServer` answers
+yes only for the decision spec's `box-decide` target at that address). A
+target on Your server is asked `GET <base>/v1/models` once, with the same
+key, where `<base>` is the configured URL up to its last `/v1/` segment
+(`systemOneUrlFor`, beside `tokenizeUrlFor`). A listed model carrying a
+`qhash` is a systemone server, and it is refused as `decision_misconfigured`
+unless the `qhash` is `decisionQhash` (`f495a7dc48aa34d5`) and the `renderer`
+is `bond-state/2`, each with a sentence naming the cause. Everything else is
+encoder-heads, and the identity probe then runs as before (and parks as
+before when `/tokenize` is missing too): a listing with no `qhash` entry, an
+empty `models: []` included, and any answer that is not a listing at all — a
+4xx other than 401/403/429, or a 200 that is not a JSON object. Only the
+server's condition keeps its mapping: transport, 5xx and 429 park as
+unavailable and 401/403 as the key. The kind is cached per client under the
+same normalised `baseUrl|model` key as the probe's pass, only on a success,
+and both are dropped whenever the server stops answering, refuses the key or
+answers as the wrong thing (`decision_misconfigured`, which is a kind of
+unavailable), so a restart or a re-pointed route that puts Kev where
+ModernBERT was, or a Kev still warming up, is asked afresh on the next call.
+**Connect** (`checkServer`) asks the kind first and the identity probe only
+for encoder-heads. When Settings opens with the decision role on Your server
+and the kind is not known yet, the host asks `detectKind` (one listing GET
+that fills the same cache) and redraws when it answers; `kindOf` answers the
+Models page's kind line from the cache. The unavailable sentences for Your
+server (either kind) name no `make decide`, which starts a server on this Mac;
+only the managed and hand-started targets keep that advice.
+
+**The systemone wire.** `POST <base>/v1/systemone` with `{"state": <rendered
+state>, "questions": {<id>: {"type": "choice", "instructions": <plain text>,
+"criteria": {<option>: null, …}}}}`: the texts are
+`systemOneMessageQuestions` and `StorylineQuestion.instructions`
+(`decision_questions.dart`), copied from the v5 handoff file and pinned by
+`decision_questions_test` against
+`test/fixtures/decision/systemone_questions_v5.json`, the criteria null in
+canonical option order. The FULL rendered state is sent, uncut: the wrapper
+owns Kev's context limit, and a state it refuses (a 413 or 422) is that one
+message's `LlmFormatException`. A message state carries all nine
+message questions in one request; a storyline state (pair, membership or
+charter) carries its one question, and `askPairs` asks both orders and
+averages as for the encoder. The answer is `{"answers": {<id>: {"type",
+"choice", "confidence", "probabilities": {<option>: p}}}}`; the probabilities
+are already calibrated, and the choice is re-derived here as their argmax in
+option order (`DecisionAnswers.fromProbabilities`). An answer missing an asked
+id, with option keys other than the question's, a value outside [0, 1] or a
+set that does not sum to 1 within 1e-3 is a `DecisionMisconfiguredException`
+(`decision_misconfigured`): a wrapper that answers one state that way answers
+them all that way, so the role parks. So does a 404/405 on `/v1/systemone`.
+Requests run at most 8 at once per call (`systemOneInFlight`), 15 s each, and one call is still
+one `onCall` record (`decision`, `decision:<id>`). A result's `model` is the
+name the wrapper listed; `truncated` is always false.
 
 - **The identity probe.** Before the first embedding a target gets, the
   client `POST`s `<prefix>/tokenize {"model", "content": "a", "add_special":
@@ -316,10 +379,15 @@ box's `/decide/` slot.
   `<models folder>/local_bond-decide/`, installed by `make decide-install`
   beside the GGUF. `decisionHeadsProvider` loads it through
   `DecisionHeadsFile`, cached and re-read when its mtime changes. **It is
-  needed even when the decision server is remote**, because the heads run
-  here. Missing, it throws `DecisionNotInstalledException` with "The
-  decision model is not installed. Run: make decide-install" (never cached,
-  so an install is seen at the next claim). A file this build refuses (not
+  needed even when an encoder-heads server is remote**, because the heads
+  run here; a systemone server never reads it. Missing, it throws
+  `DecisionNotInstalledException` with "The decision model is not installed.
+  Run: make decide-install" (never cached, so an install is seen at the next
+  claim). On Your server the kind is asked BEFORE the heads are read, so a
+  heads-less Mac whose ModernBERT server is down parks
+  `decision_unavailable` (the listing failed) rather than
+  `decision_not_installed`; the heads-file park follows once the server
+  answers. A file this build refuses (not
   JSON, another schema, question set or renderer set) throws
   `DecisionMisconfiguredException`. A schema-1 file (the first decision
   model) gets its own sentence, `DecisionHeads.olderModelText`, which says the
@@ -334,10 +402,10 @@ What goes wrong, and what the owner sees:
 | Failure | Exception | Park reason | Rail |
 |---------|-----------|-------------|------|
 | Connection refused, TLS failure, timeout, 5xx, 429 | `DecisionUnavailableException` | `decision_unavailable` | `Decision model unreachable · N waiting · retrying each minute` |
-| Heads file refused (not JSON, schema, question set); the identity probe finds another tokenizer, or `/tokenize` answers 404 or 405; the server answers a normalised or wrong-width vector, the wrong vector count or index, no token list, non-JSON, or refuses even the truncated ids; the address is not an embeddings URL | `DecisionMisconfiguredException` (a `DecisionUnavailableException`; its sentence names the cause and carries no key) | `decision_misconfigured` | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
+| Heads file refused (not JSON, schema, question set); a systemone server lists another `qhash` or renderer, answers `/v1/systemone` with 404/405, or answers outside the contract; the identity probe finds another tokenizer, or `/tokenize` answers 404 or 405; the server answers a normalised or wrong-width vector, the wrong vector count or index, no token list, non-JSON, or refuses even the truncated ids; the address is not an embeddings URL | `DecisionMisconfiguredException` (a `DecisionUnavailableException`; its sentence names the cause and carries no key) | `decision_misconfigured` | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
 | Heads file missing, or the managed decision model the router does not serve (`LlmTarget.unavailable`), refused before any request | `DecisionNotInstalledException` (a `DecisionUnavailableException`) | `decision_not_installed` | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
 | 401 / 403, or a key no header can carry (refused before sending) | `DecisionUnauthorizedException` (an `LlmUnauthorizedException`) | `decision_unauthorized` | `The decision server refused the access key · N waiting` |
-| Any other 4xx | `LlmFormatException` | none: counted against the item | none |
+| Any other 4xx (a systemone 413/422 included) | `LlmFormatException` | none: counted against the item | none |
 
 Every fault that would fail every message alike parks: counting it per
 message would error the backlog and let each row flow on to its text with no

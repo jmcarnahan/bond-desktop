@@ -6,13 +6,21 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
+import 'package:bond_inbox/services/decision/decision_client.dart'
+    show DecisionServerKind;
 import 'package:bond_inbox/services/decision/decision_heads.dart';
+import 'package:bond_inbox/services/decision/decision_input.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart';
+import 'package:bond_inbox/services/decision/decision_state.dart'
+    show decisionRendererVersion;
 import 'package:bond_inbox/services/decision/decision_heads_file.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:path/path.dart' as p;
 
 import 'fixtures/decision_heads_fixture.dart';
@@ -46,8 +54,14 @@ void main() {
   String headsPath() =>
       p.join(support.path, 'models', decide.headsRelativePath!);
 
-  ProviderContainer containerFor(AppPrefs prefs, {MemoryTokenStore? tokens}) {
+  ProviderContainer containerFor(
+    AppPrefs prefs, {
+    MemoryTokenStore? tokens,
+    http.Client? httpClient,
+  }) {
     final made = ProviderContainer(overrides: [
+      if (httpClient != null)
+        decisionHttpClientProvider.overrideWithValue(httpClient),
       dbProvider.overrideWithValue(db),
       appPathsProvider.overrideWithValue(AppPaths(support)),
       modelManifestProvider.overrideWithValue(manifest),
@@ -106,6 +120,104 @@ void main() {
     expect(target.model, boxDecideModel);
     expect(target.bearer, key);
     expect(target.toString(), isNot(contains('sk-fixture')));
+  });
+
+  group('which kind the wiring asks for', () {
+    const kevUrl = 'https://box.example.com/decide/v1/systemone';
+    late List<http.Request> seen;
+
+    /// A Kev wrapper: its listing carries the question hash, and every ask
+    /// is answered with each option's share.
+    MockClient kev() => MockClient((request) async {
+          seen.add(request);
+          if (request.method == 'GET') {
+            return http.Response(
+              jsonEncode({
+                'models': [
+                  {
+                    'name': 'bond-decide-kev4b-fixture',
+                    'qhash': decisionQhash,
+                    'renderer': decisionRendererVersion,
+                  },
+                ],
+              }),
+              200,
+            );
+          }
+          final questions = (jsonDecode(request.body)
+              as Map<String, dynamic>)['questions'] as Map<String, dynamic>;
+          return http.Response(
+            jsonEncode({
+              'answers': {
+                for (final MapEntry(:key, :value) in questions.entries)
+                  key: {
+                    'type': 'choice',
+                    'probabilities': {
+                      for (final o in ((value as Map)['criteria'] as Map).keys)
+                        o: 1 / (value['criteria'] as Map).length,
+                    },
+                  },
+              },
+            }),
+            200,
+          );
+        });
+
+    final input = DecisionInput(
+      owner: 'Rivera, Sam <sam.rivera@example.org>',
+      source: 'email',
+      fromName: 'Dana Whitfield',
+      fromAddress: 'dana@example.com',
+      subject: 'Venue list',
+      receivedAt: '2026-09-15T17:05:00Z',
+      bodyText: 'Could you send the list?',
+      addressedMe: true,
+      toCount: 1,
+    );
+
+    setUp(() => seen = []);
+
+    test('a box-decide spec on a Kev server asks the kind, then systemone, '
+        'with no heads file on this Mac', () async {
+      final container = containerFor(
+        const AppPrefs(
+          decisionPlacement: ModelPlacement.box,
+          decisionUrl: kevUrl,
+          decisionModel: 'bond-decide-kev4b-fixture',
+        ),
+        httpClient: kev(),
+      );
+      await container.read(appPrefsProvider.notifier).ready;
+      final client = container.read(decisionClientProvider);
+
+      final result = await client.decide(input);
+
+      expect(seen.map((r) => '${r.method} ${r.url.path}'), [
+        'GET /decide/v1/models',
+        'POST /decide/v1/systemone',
+      ]);
+      expect(result.model, 'bond-decide-kev4b-fixture');
+      expect(client.kindOf(url: kevUrl, model: 'bond-decide-kev4b-fixture'),
+          DecisionServerKind.systemOne);
+    });
+
+    test('a managed spec never asks /v1/models', () async {
+      final file = File(headsPath());
+      await file.parent.create(recursive: true);
+      await file.writeAsString(jsonEncode(syntheticHeadsJson()));
+      final container = containerFor(const AppPrefs(), httpClient: kev());
+      await container.read(appPrefsProvider.notifier).ready;
+
+      // Whether the router serves it or not, the managed target is the
+      // encoder, so no listing is ever asked for.
+      await container
+          .read(decisionClientProvider)
+          .decide(input)
+          .then<void>((_) {}, onError: (_) {});
+
+      expect(seen.where((r) => r.method == 'GET'), isEmpty);
+      expect(seen.where((r) => r.url.path.endsWith('/v1/systemone')), isEmpty);
+    });
   });
 
   test('a prefs write moves the client without rebuilding it', () async {

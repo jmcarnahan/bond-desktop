@@ -161,6 +161,34 @@ GGUF as mean-pooled embeddings with exactly the local arguments:
   so on stderr. On the box, `/opt/bond/serve.sh decide` restarts it by hand,
   with any extra llama-server flags appended.
 
+## Kev on the box
+
+The Decision role's **Your server** may also be Kev 4B, the decision model
+that answers the questions itself, rather than ModernBERT in the decide slot.
+The app tells the two apart on its own at Connect (Kev's `/v1/models` lists
+the question hash, `qhash`), says which one it found under the form, and
+sends Kev one `POST …/v1/systemone` per message or storyline state; how is in
+`docs/pipeline/10-model-routing.md`, "The decision client". Kev's answers
+come back calibrated, so no heads file is needed on the Mac.
+
+This round ships the APP side only. Serving Kev on the box is jev-prototype's
+wrapper, `distill/serve_bond_kev.py` (its J6), started by hand beside the 27B
+with vLLM's memory share lowered so both fit on the card. `tools/inference.sh`
+does not start it; automating that belongs to the model-bundles round. Point
+Decision → Your server at the wrapper's endpoint, for example:
+
+```
+https://box.example.com/decide/v1/systemone        Kev behind the box's front door
+http://127.0.0.1:18302/v1/systemone                Kev through an SSH tunnel
+```
+
+The first needs the front door's `/decide/` route pointed at the wrapper in
+place of the decide slot, by hand, for the same reason.
+
+The address must end in `/v1/systemone` (or `/v1/embeddings`); the app asks
+`/v1/models` and `/v1/systemone` beside it, under the same path prefix, with
+the same key.
+
 ## What the test checks
 
 `tools/inference.sh test` runs, in order, the four things `make bench-verify`
@@ -308,8 +336,9 @@ https://box.example.com/decide/v1/embeddings        model bond-decide-mbl-v2swap
 Each is a role's **Your server** address in Settings → Models. A build with
 `BOND_BOX_URL=https://box.example.com` in `.env` derives both itself
 (`/prose/v1/chat/completions` and `/decide/v1/embeddings`), so they need no
-typing. The Decision model's heads file stays on the Mac: run
-`make decide-install` there even when the decision server is the box. The
+typing. With ModernBERT in the decide slot, the Decision model's heads file
+stays on the Mac: run `make decide-install` there even when the decision
+server is the box. Kev on the box (below) needs no file on the Mac. The
 `/bulk/` slot is for the benches only. The key is typed into the app and kept
 in the keychain. From a terminal:
 

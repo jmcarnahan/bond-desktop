@@ -139,6 +139,23 @@ void main() {
       expect(result.error, isNull);
     });
 
+    test("a Kev decision server's listing is read by name", () async {
+      final probe = ModelServerProbe(
+        httpClient: MockClient((_) async => http.Response(
+              '{"models": [{"name": "bond-decide-kev4b-fixture", '
+              '"qhash": "f495a7dc48aa34d5", "renderer": "bond-state/2"}]}',
+              200,
+            )),
+      );
+
+      final result =
+          await probe.probe('http://h:18302/decide/v1/systemone');
+
+      expect(result.reachable, isTrue);
+      expect(result.modelIds, ['bond-decide-kev4b-fixture']);
+      expect(result.probedUrl.toString(), 'http://h:18302/decide/v1/models');
+    });
+
     test('a timeout is not reachable', () async {
       final probe = ModelServerProbe(
         timeout: const Duration(milliseconds: 50),

@@ -86,6 +86,10 @@ class FakeDecisionClient extends DecisionClient {
   /// The `url|model` of every [checkServer] asked.
   final List<String> checks = [];
 
+  /// What [kindOf] answers for every address: not yet known unless a test
+  /// says.
+  DecisionServerKind? serverKind;
+
   FakeDecisionClient(this.answer, {this.onDecide})
       : super(
           resolveTarget: () =>
@@ -118,6 +122,28 @@ class FakeDecisionClient extends DecisionClient {
   }) async {
     checks.add('$url|$model');
     return serverRefusal;
+  }
+
+  /// What [detectKind] finds, which [kindOf] answers from then on; null
+  /// leaves [kindOf] as it was.
+  DecisionServerKind? detectedKind;
+
+  /// The `url|model` of every [detectKind] asked.
+  final List<String> detects = [];
+
+  @override
+  DecisionServerKind? kindOf({required String url, required String model}) =>
+      serverKind;
+
+  @override
+  Future<DecisionServerKind?> detectKind({
+    required String url,
+    required String model,
+    String? bearer,
+  }) async {
+    detects.add('$url|$model');
+    serverKind = detectedKind ?? serverKind;
+    return detectedKind;
   }
 }
 

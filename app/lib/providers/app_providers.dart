@@ -3,6 +3,7 @@ import 'dart:io' show Directory, File;
 
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -1170,6 +1171,14 @@ final decisionHeadsProvider = Provider<DecisionHeadsFile>((ref) {
   });
 });
 
+/// The decision client's HTTP client: the one seam a test overrides with a
+/// `MockClient` to see which requests the app's own wiring makes.
+final decisionHttpClientProvider = Provider<http.Client>((ref) {
+  final client = http.Client();
+  ref.onDispose(client.close);
+  return client;
+});
+
 /// The decision model's client, on the triage path: [triageQueueProvider]
 /// runs one decision per kept inbound message before the text call.
 ///
@@ -1177,27 +1186,42 @@ final decisionHeadsProvider = Provider<DecisionHeadsFile>((ref) {
 /// through the NOTIFIER at the top of every call — the managed router's
 /// `/v1/embeddings` under `bond-decide`, the owner's decision server with its
 /// own key, or the hand-started `make decide` server — so a prefs write
-/// rebuilds nothing. The heads come off this Mac's disk whichever server
-/// embeds, and a missing heads file is a [DecisionUnavailableException],
-/// which parks the pass rather than failing it.
+/// rebuilds nothing. For an encoder-heads server the heads come off this
+/// Mac's disk, and a missing heads file is a [DecisionUnavailableException],
+/// which parks the pass rather than failing it. A target on Your server is
+/// asked its kind first, and a systemone server (Kev) never reads the heads.
 final decisionClientProvider = Provider<DecisionClient>((ref) {
   final heads = ref.watch(decisionHeadsProvider);
   return DecisionClient(
     resolveTarget: () =>
         ref.read(appPrefsProvider.notifier).targetForStage('decision'),
     heads: heads.current,
+    client: ref.watch(decisionHttpClientProvider),
     onCall: ref.watch(activityLogProvider).noteLlmCall,
+    // Your server is the decision spec's `box-decide` target at that same
+    // address. READ at the call, on the resolver's rule; a container torn
+    // down mid-drain answers no, and the call takes the encoder path it
+    // took before there was a second kind.
+    isYourServer: (target) {
+      try {
+        final spec = ref.read(appPrefsProvider).decisionSpec;
+        return spec.id == boxDecideId && spec.url == target.baseUrl;
+      } catch (_) {
+        return false;
+      }
+    },
   );
 });
 
 /// A decision Connect's last question before it writes: is the server at
-/// [url] the decision model? `/v1/models` cannot say — llama-server lists
-/// whatever name it was started with — so this is the client's own identity
-/// probe, with the key the write would store: the typed one, else the stored
-/// one unless the host changed ([clearKey]). Throws the sentence as an
-/// [ArgumentError], which the form draws under its field, and nothing is
-/// written. Settings and the wizard both call it, so neither says Connected
-/// over the embedding model's port.
+/// [url] the decision model? For llama-server `/v1/models` cannot say — it
+/// lists whatever name it was started with — so this is the client's own
+/// kind check and identity probe ([DecisionClient.checkServer]; a Kev server
+/// is told by the question hash it lists), with the key the write would
+/// store: the typed one, else the stored one unless the host changed
+/// ([clearKey]). Throws the sentence as an [ArgumentError], which the form
+/// draws under its field, and nothing is written. Settings and the wizard
+/// both call it, so neither says Connected over the embedding model's port.
 Future<void> refuseWrongDecisionServer(
   DecisionClient client,
   AppPrefsNotifier prefs, {

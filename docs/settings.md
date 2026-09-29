@@ -415,8 +415,12 @@ connect.`
 <size>`) and a status keyed `settings-decision-status`: `Installed · loaded`,
 `Installed · not loaded`, or `Not installed · run make decide-install`. The
 weights are installed by hand this round and never downloaded. Under Your server the same status still reads `Not installed · run make
-decide-install` while the heads file is missing from this Mac: the heads run
-here whichever server embeds. A **Check**
+decide-install` while the heads file is missing from this Mac when the
+server is ModernBERT (the heads run here). A Kev server answers there and
+needs no file on this Mac, so it reads `Connected · …` without one, and a
+`decision_not_installed` park left from before is treated as overtaken. While
+the kind is not known yet the status says `Connected · …` too and names no
+install: the host is asking. A **Check**
 button keyed `settings-role-check-decision` sits beside it: it re-reads the
 install state and asks the router for the placements' preset, which is how a
 `make decide-install` made while the app runs is picked up. The heads file is
@@ -466,8 +470,24 @@ Mac.`), the name-and-size line and a status keyed `settings-embed-status`.
 address that is not on this machine (a loopback address needs none), and
 `Connected · <model> at <host>` otherwise.
 
+**The decision server's kind** is a caption under the decision form, keyed
+`settings-decision-kind`, once the host knows it (`DecisionClient.kindOf`,
+filled by a Connect, by a decision against the address, or by the one
+listing GET the host asks, `detectKind` with the stored key, when Settings
+opens on an address this run has not seen, redrawing when it answers; and
+forgotten when the server stops answering):
+
+- `Kev 4B on your server (answers there; no files needed on this Mac)` for a
+  server whose `/v1/models` lists the question hash (the systemone kind);
+- `ModernBERT on your server (uses this Mac's heads file)` for a llama-server
+  embeddings endpoint (the encoder-heads kind).
+
+Before the kind is known, and under This Mac, there is no caption. How the kind is found is in
+`docs/pipeline/10-model-routing.md`, "The decision client".
+
 **The model name is DISCOVERED, never typed.** Connect probes the address's
-`/v1/models` with the key. One id: used. Several: a `DropdownButton` appears
+`/v1/models` with the key; an entry is named by its `id`, or by its `name`
+where it has no `id` (a Kev server's listing). One id: used. Several: a `DropdownButton` appears
 with the first id filled in, the caption says `This server lists several
 models. Choose one and press Connect again.`, and nothing is written until the
 second press. A decision server is never asked to pick: the decision model's
@@ -475,8 +495,9 @@ own name is taken where it is listed (`bond-decide`, the box's served
 `bond-decide-mbl-v2swap`, this build's `DECIDE_MODEL`, or the name already
 stored), and the first id only when none is, so a router that lists
 `bond-embed` first is not taken at its embedding model. Before it writes, the
-decision Connect asks the server's `/tokenize` whether it is the decision
-model at all (see the host's `onUseDecision` above); a server that is not is
+decision Connect asks the server's kind (`/v1/models`: a Kev server must list
+this build's question hash and renderer) and, for ModernBERT, its `/tokenize`
+whether it is the decision model at all (see the host's `onUseDecision` above); a server that is not is
 refused with that sentence under the form, and nothing is written. None, or a
 server that did not answer: the `ProbeStatus` line says so and nothing is
 written.
@@ -489,7 +510,8 @@ written.
   endpoint, ending in /v1/chat/completions.` when the path has no `/v1/`
   (a Converse address excepted).
 - Decision: `The address needs to be the embeddings endpoint, ending in
-  /v1/embeddings.` unless the path ends in `/embeddings`.
+  /v1/embeddings, or a Kev server's, ending in /v1/systemone.` unless the path
+  ends in `/embeddings` or `/v1/systemone`.
 - A third-party host (`isThirdPartyHost`: Bedrock, anthropic.com, openai.com,
   deepseek.com) or the Converse wire on a ROLE is refused outright, because
   both roles read every message: `The decision model reads every message, so

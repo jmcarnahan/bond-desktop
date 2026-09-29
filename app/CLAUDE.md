@@ -377,7 +377,10 @@ enforce the ones that are commands.
   third-party refusal) and refuses under the field rather than letting a host
   throw past a fire-and-forget press; the model name is DISCOVERED from
   `/v1/models`, and an origin change sends `clearKey`. A decision on Your
-  server still reads this Mac's heads file, so its status needs that file too.
+  server that is ModernBERT still reads this Mac's heads file, so its status
+  needs that file too; a Kev server does not, a kind not yet known names no
+  install, and the kind line `settings-decision-kind` says which (the host
+  asks `detectKind` once per address when it opens).
   `SettingsHost` wires `onUseDecision`, `onUseGenerative`, `onCheckDecision`
   and `onRemoveKey` (null takes a control off), and every role write is
   followed by `supervisor.ensurePreset()`, which restarts the router only when
@@ -555,9 +558,27 @@ enforce the ones that are commands.
   not whitespace); collapsing comes before the Re/Fw strip; and the people
   de-dup is `pyLower` (Python `str.lower()`: `İ` → `i̇`, final sigma), never
   `toLowerCase`.
+- The decision role has TWO server kinds (`DecisionServerKind`) behind one
+  `DecisionClient` API: `encoderHeads` (ModernBERT on llama-server, heads in
+  Dart) and `systemOne` (Kev 4B behind jev's wrapper, `POST
+  <base>/v1/systemone` with the plain question texts from
+  `decision_questions.dart`, answers calibrated THERE, nothing applied in
+  Dart). A managed or hand-started target is always encoder-heads and costs no
+  request; only a target the provider's `isYourServer` names is asked `GET
+  <base>/v1/models` once (a `qhash` entry → systemone, refused unless it is
+  `decisionQhash` over `bond-state/2`; anything else → encoder plus the
+  identity probe; a listing that is not a 2xx JSON object is "no listing"),
+  cached under the probe's key and dropped with it on any unavailable,
+  unauthorized or misconfigured throw. The systemone path never calls
+  `heads()`; a malformed answer or a 404 on `/v1/systemone` parks
+  `decision_misconfigured`. Your server's sentences never say `make decide`.
+  A test that points a real client at a `MockClient` with `isYourServer`
+  answering yes answers `GET …/v1/models` too; without it (every older test)
+  no listing is asked. The provider's HTTP client is
+  `decisionHttpClientProvider`, the seam a wiring test overrides.
 - The heads file (`decide-heads.json`, installed beside the GGUF under
   `<models>/local_bond-decide/` by `make decide-install`) is needed on THIS
-  Mac even when the decision server is remote: the heads, temperatures and
+  Mac for the encoder-heads kind even when its server is remote: the heads, temperatures and
   softmax run in Dart. It is SCHEMA 2 with 12 `questions`: the nine message
   fields (renderer `message`, `decisionFields` order), then `same_effort`
   (`pair`), `member_of` (`membership`) and `charter_specific` (`charter`),
